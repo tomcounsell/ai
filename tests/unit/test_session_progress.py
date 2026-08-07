@@ -1,0 +1,532 @@
+"""Tests for the read-only session-progress verb (issue #2663).
+
+The headline test is :func:`test_2662_scenario_fresh_tool_activity_quiet_transcript`,
+which reproduces the exact shape that was misdiagnosed as a deadlock on
+2026-08-07: a fresh hook-edge tool-activity marker alongside a parent
+transcript that has been silent for twenty minutes. The session was healthy
+and went on to open a 14-file PR. The verdict must be ``PROGRESSING``.
+
+Everything here is hermetic. No AgentSession is created, no Redis is touched:
+:func:`tools.session_progress.build_report` is duck-typed over the session
+object, and every filesystem root is injectable.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from tools.session_progress import (
+    VERDICT_NO_RECENT_ACTIVITY,
+    VERDICT_PROGRESSING,
+    VERDICT_UNKNOWN,
+    Signal,
+    build_report,
+    compute_verdict,
+    default_window_s,
+    format_age,
+    pid_alive,
+    pr_links,
+    task_output_signal,
+    tool_activity_signal,
+    transcript_path,
+    transcript_signal,
+)
+
+pytestmark = [pytest.mark.unit, pytest.mark.sessions]
+
+NOW = 1_800_000_000.0
+WINDOW = 1800.0
+
+
+def _session(**overrides):
+    """A duck-typed stand-in for an AgentSession row."""
+    base = dict(
+        session_id="test-progress-session",
+        agent_session_id="0123456789abcdef0123456789abcdef",
+        status="running",
+        session_type="eng",
+        claude_session_uuid="6f451ea2-687b-4258-967b-2caff5975fc0",
+        runner_cwd=None,
+        exec_pid=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        slug="sdlc-2663",
+        branch_name="session/sdlc-2663",
+        last_tool_use_at=None,
+        last_turn_at=None,
+        last_stdout_at=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _write_marker(root, session_id, ts, name="pm_hook_edges.toolactivity"):
+    d = root / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(str(ts))
+    return d
+
+
+def _write_transcript(projects_root, uuid, *, mtime, pr_entries=()):
+    d = projects_root / "-Users-tomcounsell-src-ai"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{uuid}.jsonl"
+    lines = [json.dumps({"type": "user", "message": "hello"})]
+    for entry in pr_entries:
+        lines.append(json.dumps(entry))
+    path.write_text("\n".join(lines) + "\n")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _write_task_output(tmp_root, uuid, *, mtime, task_id="a4567bb1ee449e919"):
+    d = tmp_root / "claude-501" / "-Users-tomcounsell-src-ai" / uuid / "tasks"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{task_id}.output"
+    path.write_text("running tests...\n")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+# ---------------------------------------------------------------------------
+# The acceptance-criterion regression test for #2662
+# ---------------------------------------------------------------------------
+
+
+def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path):
+    """Fresh tool activity + a 20-minute-quiet parent transcript = PROGRESSING.
+
+    This is the exact evidence shape of the 2026-08-07 misdiagnosis. The
+    parent transcript is silent because the PM is blocked in a long
+    synchronous ``Agent`` call — subagent steps are not written as sidechain
+    entries until the call returns — while the runner's hook-edge marker
+    keeps ticking on the subagent's every tool call.
+
+    A tool that reads the silence and reports a hang re-creates #2662. This
+    asserts it does not.
+    """
+    hook_root = tmp_path / "hook_edges"
+    projects_root = tmp_path / "projects"
+    tmp_root = tmp_path / "tmp"
+    uuid = "6f451ea2-687b-4258-967b-2caff5975fc0"
+
+    # Tool activity 4 seconds ago — the load-bearing signal.
+    _write_marker(hook_root, "tg_cyndra_-1003900483201_353", NOW - 4)
+    # Parent transcript silent for 20 minutes: the EXPECTED shape, not a hang.
+    _write_transcript(projects_root, uuid, mtime=NOW - 1200)
+
+    session = _session(
+        session_id="tg_cyndra_-1003900483201_353",
+        claude_session_uuid=uuid,
+        status="running",
+        # No ORM liveness fields at all: this session runs against a foreign
+        # repo that does not carry this repo's .claude/hooks.
+        last_tool_use_at=None,
+        last_turn_at=None,
+        last_stdout_at=None,
+    )
+
+    report = build_report(
+        session,
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(projects_root),
+        task_output_roots=[str(tmp_root)],
+    )
+
+    assert report.verdict == VERDICT_PROGRESSING
+    assert "tool_activity" in report.verdict_reason
+    assert report.verdict_line.startswith("PROGRESSING —")
+    # And it must not have invented a hang from the quiet transcript.
+    assert "wedged" not in report.render().lower()
+    assert "stuck" not in report.render().lower()
+
+
+def test_2662_scenario_reports_the_pr_it_went_on_to_open(tmp_path):
+    """The verdict line surfaces pr-link artifacts alongside the liveness read."""
+    hook_root = tmp_path / "hook_edges"
+    projects_root = tmp_path / "projects"
+    uuid = "6f451ea2-687b-4258-967b-2caff5975fc0"
+
+    _write_marker(hook_root, "s1", NOW - 4)
+    _write_transcript(
+        projects_root,
+        uuid,
+        mtime=NOW - 1200,
+        pr_entries=[
+            {
+                "type": "pr-link",
+                "sessionId": uuid,
+                "prNumber": 102,
+                "prUrl": "https://github.com/Cyndra-AI/cyndra-consulting/pull/102",
+                "prRepository": "Cyndra-AI/cyndra-consulting",
+                "timestamp": "2027-01-15T22:20:00.000Z",
+            }
+        ],
+    )
+
+    report = build_report(
+        _session(session_id="s1", claude_session_uuid=uuid),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(projects_root),
+        task_output_roots=[str(tmp_path / "tmp")],
+    )
+    assert report.verdict == VERDICT_PROGRESSING
+    assert "PR #102" in report.verdict_line
+    assert report.artifacts[0]["number"] == 102
+
+
+# ---------------------------------------------------------------------------
+# Verdict branches
+# ---------------------------------------------------------------------------
+
+
+def test_absence_of_all_evidence_is_unknown_not_wedged(tmp_path):
+    """No marker, no transcript, no task output, no ORM stamps → UNKNOWN."""
+    report = build_report(
+        _session(claude_session_uuid=None),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(tmp_path / "absent"),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_UNKNOWN
+    assert "absence of evidence" in report.verdict_reason
+
+
+def test_all_signals_stale_is_no_recent_activity(tmp_path):
+    hook_root = tmp_path / "hook_edges"
+    _write_marker(hook_root, "s1", NOW - 5000)
+    report = build_report(
+        _session(session_id="s1", claude_session_uuid=None),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_NO_RECENT_ACTIVITY
+    # Truthfulness: it must say why this is not proof of a hang.
+    assert "not proof of a hang" in report.verdict_reason
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "killed", "abandoned", "cancelled"])
+def test_terminal_status_is_unknown_even_with_fresh_signals(tmp_path, status):
+    """A finished session is neither progressing nor inactive — decline to guess."""
+    hook_root = tmp_path / "hook_edges"
+    _write_marker(hook_root, "s1", NOW - 2)
+    report = build_report(
+        _session(session_id="s1", status=status, claude_session_uuid=None),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_UNKNOWN
+    assert status in report.verdict_reason
+
+
+def test_task_output_alone_can_prove_progress(tmp_path):
+    """A fresh background-task output file is sufficient positive evidence."""
+    uuid = "abc00000-0000-0000-0000-000000000000"
+    tmp_root = tmp_path / "tmp"
+    _write_task_output(tmp_root, uuid, mtime=NOW - 30)
+    report = build_report(
+        _session(session_id="s-nomarker", claude_session_uuid=uuid),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(tmp_path / "absent"),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_root)],
+    )
+    assert report.verdict == VERDICT_PROGRESSING
+    assert "task_output" in report.verdict_reason
+
+
+def test_orm_liveness_fields_count_as_evidence(tmp_path):
+    report = build_report(
+        _session(claude_session_uuid=None, last_stdout_at=NOW - 10),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(tmp_path / "absent"),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_PROGRESSING
+    assert "last_stdout_at" in report.verdict_reason
+
+
+def test_pr_link_artifact_does_not_vote_on_the_verdict(tmp_path):
+    """A recent PR proves work HAPPENED, not that work is HAPPENING."""
+    projects_root = tmp_path / "projects"
+    uuid = "def00000-0000-0000-0000-000000000000"
+    # Transcript mtime is stale; only the pr-link timestamp is recent.
+    _write_transcript(
+        projects_root,
+        uuid,
+        mtime=NOW - 9000,
+        pr_entries=[
+            {
+                "type": "pr-link",
+                "prNumber": 7,
+                "prUrl": "https://github.com/o/r/pull/7",
+                "timestamp": "2027-01-15T22:39:00.000Z",
+            }
+        ],
+    )
+    report = build_report(
+        _session(session_id="s-pr", claude_session_uuid=uuid),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(tmp_path / "absent"),
+        projects_root=str(projects_root),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_NO_RECENT_ACTIVITY
+    assert report.artifacts and report.artifacts[0]["number"] == 7
+
+
+def test_window_boundary_is_inclusive():
+    sig = [Signal("tool_activity", NOW - WINDOW)]
+    verdict, _ = compute_verdict(sig, "running", window_s=WINDOW, now=NOW)
+    assert verdict == VERDICT_PROGRESSING
+
+    sig = [Signal("tool_activity", NOW - WINDOW - 1)]
+    verdict, _ = compute_verdict(sig, "running", window_s=WINDOW, now=NOW)
+    assert verdict == VERDICT_NO_RECENT_ACTIVITY
+
+
+def test_context_only_signals_cannot_produce_progressing():
+    sig = [Signal("something", NOW - 1, counts_as_evidence=False)]
+    verdict, _ = compute_verdict(sig, "running", window_s=WINDOW, now=NOW)
+    assert verdict == VERDICT_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Graceful degradation — every one of these must return, never raise
+# ---------------------------------------------------------------------------
+
+
+def test_missing_marker_dir_degrades_to_absent(tmp_path):
+    assert tool_activity_signal("nope", hook_edge_root=str(tmp_path / "gone")).ts is None
+
+
+def test_unreadable_marker_payload_degrades_to_absent(tmp_path):
+    root = tmp_path / "hook_edges"
+    d = root / "s1"
+    d.mkdir(parents=True)
+    (d / "pm_hook_edges.toolactivity").write_text("not-a-float")
+    assert tool_activity_signal("s1", hook_edge_root=str(root)).ts is None
+
+
+def test_multiple_marker_channels_take_the_max(tmp_path):
+    root = tmp_path / "hook_edges"
+    _write_marker(root, "s1", NOW - 900, name="pm_hook_edges.toolactivity")
+    _write_marker(root, "s1", NOW - 5, name="dev_hook_edges.toolactivity")
+    assert tool_activity_signal("s1", hook_edge_root=str(root)).ts == NOW - 5
+
+
+def test_missing_transcript_degrades_to_absent(tmp_path):
+    assert transcript_path("no-such-uuid", None, projects_root=str(tmp_path)) is None
+    assert transcript_signal(None).ts is None
+    assert pr_links(None) == []
+
+
+def test_unreadable_task_dir_degrades_to_absent(tmp_path):
+    assert task_output_signal("uuid", roots=[str(tmp_path / "gone")]).ts is None
+    assert task_output_signal(None).ts is None
+
+
+def test_malformed_transcript_lines_are_skipped(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text('{"type": "pr-link", broken\n{"type":"pr-link","prNumber":3}\n')
+    links = pr_links(str(path))
+    assert [entry["number"] for entry in links] == [3]
+
+
+def test_dead_pid_reads_false_and_does_not_raise():
+    # PID 1 always exists; a very high pid essentially never does.
+    assert pid_alive(None) is None
+    assert pid_alive(0) is None
+    assert pid_alive(os.getpid()) is True
+    assert pid_alive(4_000_000) in (False, None)
+
+
+def test_dead_pid_never_forces_a_negative_verdict(tmp_path):
+    """Process-table facts are reported, never inferred from."""
+    hook_root = tmp_path / "hook_edges"
+    _write_marker(hook_root, "s1", NOW - 3)
+    report = build_report(
+        _session(session_id="s1", claude_session_uuid=None, exec_pid=4_000_000),
+        now=NOW,
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    assert report.verdict == VERDICT_PROGRESSING
+    assert report.fields["exec_pid"] == 4_000_000
+
+
+def test_report_never_collects_cpu_or_child_counts():
+    """The two readings that caused #2662 must not exist in the output."""
+    import tools.session_progress as mod
+
+    source = open(mod.__file__, encoding="utf-8").read()
+    lowered = source.lower()
+    for banned in ("psutil", "cpu_percent", "num_threads", ".children(", "pgrep"):
+        # Docstrings explain WHY they are absent; code must not reference them.
+        code_lines = [
+            line
+            for line in lowered.splitlines()
+            if banned in line and not line.strip().startswith(("#", '"', "'"))
+        ]
+        assert not code_lines, f"{banned} leaked into session_progress code: {code_lines}"
+
+    report_keys = set(
+        build_report(_session(claude_session_uuid=None), now=NOW, window_s=WINDOW)
+        .to_dict()["fields"]
+        .keys()
+    )
+    assert not report_keys & {"cpu_percent", "child_count", "num_children"}
+
+
+# ---------------------------------------------------------------------------
+# Foreign-repo behavior and misc
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_repo_transcript_found_by_glob_without_runner_cwd(tmp_path):
+    """No runner_cwd recorded (foreign repo) still resolves the transcript."""
+    projects_root = tmp_path / "projects"
+    uuid = "aaa00000-0000-0000-0000-000000000000"
+    written = _write_transcript(projects_root, uuid, mtime=NOW - 10)
+    found = transcript_path(uuid, None, projects_root=str(projects_root))
+    assert found == str(written)
+
+
+def test_hook_marker_works_without_any_repo_hooks(tmp_path):
+    """The marker is repo-independent: no ORM stamps, no repo hooks, still fresh."""
+    hook_root = tmp_path / "hook_edges"
+    _write_marker(hook_root, "foreign-session", NOW - 1)
+    sig = tool_activity_signal("foreign-session", hook_edge_root=str(hook_root))
+    assert sig.age_s(NOW) == pytest.approx(1.0)
+
+
+def test_default_window_matches_the_watchdog_deadline():
+    from agent.agent_session_queue import SESSION_PROGRESS_DEADLINE_S
+
+    assert default_window_s() == int(SESSION_PROGRESS_DEADLINE_S)
+
+
+def test_format_age_shapes():
+    assert format_age(None) == "unknown"
+    assert format_age(4) == "4s"
+    assert format_age(300) == "5m"
+    assert format_age(7560) == "2h 6m"
+    assert format_age(7200) == "2h"
+
+
+def test_json_output_is_serializable(tmp_path):
+    hook_root = tmp_path / "hook_edges"
+    _write_marker(hook_root, "s1", time.time())
+    report = build_report(
+        _session(session_id="s1", claude_session_uuid=None),
+        window_s=WINDOW,
+        hook_edge_root=str(hook_root),
+        projects_root=str(tmp_path / "absent"),
+        task_output_roots=[str(tmp_path / "absent")],
+    )
+    payload = json.loads(json.dumps(report.to_dict(), default=str))
+    assert payload["verdict"] == VERDICT_PROGRESSING
+    assert any(s["name"] == "tool_activity" for s in payload["signals"])
+
+
+# ---------------------------------------------------------------------------
+# CLI surface
+# ---------------------------------------------------------------------------
+
+
+def test_valor_cli_registers_the_progress_verb():
+    from tools.valor_cli import KNOWN_SUBCOMMANDS, _build_parser
+
+    assert "progress" in KNOWN_SUBCOMMANDS
+    args = _build_parser().parse_args(["progress", "abc123", "--window", "60", "--json"])
+    assert args.command == "progress"
+    assert args.id == "abc123"
+    assert args.window == 60.0
+    assert args.json is True
+
+
+def test_valor_cli_dispatches_progress_to_valor_session(monkeypatch):
+    from tools import valor_cli, valor_session
+
+    seen = {}
+
+    def fake(args):
+        seen["id"] = args.id
+        seen["window"] = args.window
+        seen["json"] = args.json
+        return 0
+
+    monkeypatch.setattr(valor_session, "cmd_progress", fake)
+    assert valor_cli.main(["progress", "sess-x", "--window", "5"]) == 0
+    assert seen == {"id": "sess-x", "window": 5.0, "json": False}
+
+
+def test_valor_session_registers_progress_in_its_dispatch():
+    import inspect
+
+    from tools import valor_session
+
+    source = inspect.getsource(valor_session.main)
+    assert '"progress": cmd_progress' in source
+
+
+def test_cmd_progress_reports_missing_session(monkeypatch, capsys):
+    from tools import valor_session
+
+    monkeypatch.setattr(valor_session, "_load_env", lambda: None)
+    monkeypatch.setattr(valor_session, "_find_session", lambda _id: None)
+    rc = valor_session.cmd_progress(SimpleNamespace(id="nope", window=None, json=False))
+    assert rc == 1
+    assert "Session not found" in capsys.readouterr().err
+
+
+def test_cmd_progress_is_read_only(monkeypatch, capsys):
+    """The command must never call save()/delete() on the resolved session."""
+    from tools import valor_session
+
+    calls = []
+
+    class Tripwire(SimpleNamespace):
+        def save(self, *a, **k):
+            calls.append("save")
+
+        def delete(self, *a, **k):
+            calls.append("delete")
+
+    session = Tripwire(**{k: v for k, v in vars(_session(claude_session_uuid=None)).items()})
+    monkeypatch.setattr(valor_session, "_load_env", lambda: None)
+    monkeypatch.setattr(valor_session, "_find_session", lambda _id: session)
+
+    rc = valor_session.cmd_progress(SimpleNamespace(id="whatever", window=60.0, json=True))
+    assert rc == 0
+    assert calls == []
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] in {
+        VERDICT_PROGRESSING,
+        VERDICT_NO_RECENT_ACTIVITY,
+        VERDICT_UNKNOWN,
+    }
