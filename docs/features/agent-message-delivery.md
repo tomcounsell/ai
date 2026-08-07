@@ -119,6 +119,25 @@ Both the silent worker path and the CLI tool-call path (`tools/send_message.py`)
 
 For email sessions, suppression (RTR or redundancy) drops the payload entirely with no reaction — email has no equivalent reaction mechanism. The CLI tool's promise gate runs **before** the handler call (gate → linkify → handler-drafter → handler-filters → outbox) so a session with an outstanding promise short-circuits without paying the Haiku / Popoto / Redis cost.
 
+### Reaction delivery (`react()`)
+
+`TelegramRelayOutputHandler.react` resolves transport the same way `send()`
+does — via the shared `_resolve_transport(session, chat_id)` classmethod
+(step 0 above) — before touching the Redis outbox. A `system`-transport
+reaction (chatless sessions: reflections' placeholder `chat_id="0"`,
+`chat_id == session_id` synthetics) is **dropped**, not sunk into the
+system Room's inbox the way a `send()` payload is: the handler logs at
+DEBUG (`"Reaction dropped for system-transport session ..."`) and forwards
+to `FileOutputHandler.react` for the dual-write, then returns without
+touching `telegram:outbox:*`. This differs from `send()`'s durable-append
+behavior on purpose — a bare emoji carries no text and has no reader (there
+is no human on the other end of a chatless session), so writing it into the
+same durable Room inbox that Telegram intake shadow-writes to would pollute
+that inbox with content nobody will ever read. The debug log plus the
+`FileOutputHandler` dual-write is the audit trail instead. On the
+`telegram` path, behavior is unchanged: `react()` still derives
+`session_id = chat_id` and writes to `telegram:outbox:{chat_id}`.
+
 ### Validator-aware terminal flush (local-path → attachment conversion, #2211)
 
 When a `local_file_path_reference` violation lands on a session's **final** message, the self-draft steering is never consumed (the turn is over, and `_reenqueue_leftover_steering` drops drafter-fallback steering), so the terminal flush owns delivery. The flush is validator-aware: before building the outbox payload it runs `bridge.message_drafter.convert_local_paths_to_attachments` on the deferred text, and the conversion runs **before** the narration gate so a narration-only sentence carrying a real path still attaches the file.
