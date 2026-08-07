@@ -37,8 +37,11 @@ VALID_TAGS = ("[EXTERNAL]", "[ORDERED]", "[DESTRUCTIVE]", "[SEPARATE-SLUG")
 PUNT_PHRASES = [
     r"\bdeferred to (?:a )?follow-?up\b",
     r"\bfollow-?up (?:issue|pr|ticket)\b",
-    r"\boperator will\b",
-    r"\bhuman will\b",
+    # "operator/human will <do something>" is a punt. "operator will SEE the
+    # log line change" is a description of observable behavior, which every
+    # plan's impact section is made of (#2682). Only the action sense counts.
+    r"\b(?:operator|human)\s+will\s+"
+    r"(?!see\b|notice\b|observe\b|read\b|find\b|know\b|get\b|receive\b|experience\b|no longer\b)",
     r"\bin v2\b",
     r"\bdefer(?:red)? to v\d\b",
     r"\bpunt(?:ed)? to\b",
@@ -90,47 +93,92 @@ this rule blocks.
 """
 
 
-def find_newest_plan_file(directory: str = "docs/plans") -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", f"{directory}/"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        new_files = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            status = line[:2]
-            filepath = line[3:].strip()
-            if status in ("??", "A ", " A", "AM", " M", "M ", "MM") and filepath.endswith(".md"):
-                new_files.append(filepath)
-        if not new_files:
-            return None
-        newest = None
-        newest_mtime = 0.0
-        for filepath in new_files:
-            path = Path(filepath)
-            if path.exists():
-                mtime = path.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = str(path)
-        return newest
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+def target_from_hook_input(hook_input: dict) -> str | None:
+    """The path the triggering Write actually targeted, or None.
+
+    None means "nothing to validate", never "go find something to validate".
+    The predecessor resolved the target by scanning ``git status docs/plans/``
+    and taking the newest dirty file, which gated a lane on a plan it had never
+    touched: a Write to ``docs/features/foo.md`` in one worktree was blocked by
+    another lane's in-progress plan, and the git query ran against whatever
+    checkout the hook process started in (#2682).
+    """
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
         return None
+    # The `or` already collapses an empty string to the next candidate, and
+    # then to None — so an empty path can never reach the caller as a target.
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    return path if isinstance(path, str) else None
+
+
+NO_GOS_HEADING = re.compile(r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+FENCE = re.compile(r"^\s*(?:```|~~~)")
+
+# A leading pipe or angle bracket marks transcribed material rather than the
+# plan's own commitments: critique-findings tables, review verdict logs, and
+# "critic's suggested remedy, kept for the record" blocks all quote deferral
+# phrasing in order to discuss it. Scanning them means a plan gets *more*
+# likely to fail the more carefully it records its own review (#2682).
+QUOTED_CONTEXT_PREFIXES = ("|", ">")
 
 
 def extract_no_gos_section(content: str) -> str | None:
-    match = re.search(
-        r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)",
-        content,
-        re.MULTILINE | re.DOTALL,
-    )
+    match = NO_GOS_HEADING.search(content)
     return match.group(1).strip() if match else None
+
+
+def no_gos_line_span(content: str) -> tuple[int, int]:
+    """0-based ``[start, end)`` line indices of the No-Gos section body.
+
+    ``(-1, -1)`` when there is no such section.
+    """
+    match = NO_GOS_HEADING.search(content)
+    if not match:
+        return (-1, -1)
+    start = content.count("\n", 0, match.start(1))
+    end = content.count("\n", 0, match.end(1))
+    return (start, end + 1)
+
+
+def find_punt_lines(content: str) -> list[str]:
+    """Unjustified deferrals in the plan's own voice.
+
+    The whole body is scanned, not just No-Gos, because a punt hides in prose
+    anywhere. Two kinds of line are exempt outside the No-Gos section:
+    fenced code, and quoted/tabular context. Inside No-Gos nothing is exempt
+    but code fences — that section is where commitments are made, so a punt
+    written as a table row there must still fail.
+    """
+    lines = content.splitlines()
+    no_gos_start, no_gos_end = no_gos_line_span(content)
+    bad: list[str] = []
+    in_fence = False
+
+    for idx, raw_line in enumerate(lines):
+        if FENCE.match(raw_line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("<!--"):
+            continue
+
+        inside_no_gos = no_gos_start <= idx < no_gos_end
+        if not inside_no_gos and line.startswith(QUOTED_CONTEXT_PREFIXES):
+            continue
+
+        if not line_is_punt(line):
+            continue
+        if line_is_justified(line):
+            continue
+        if line_is_explicit_none(line):
+            continue
+        bad.append(f"  {raw_line.rstrip()}")
+
+    return bad
 
 
 def line_is_punt(line: str) -> bool:
@@ -182,21 +230,7 @@ def validate(filepath: str) -> tuple[bool, str]:
     if section is None:
         return False, MISSING_SECTION_ERROR.format(file=filepath)
 
-    # Walk every body line of the entire plan looking for punt phrases —
-    # punts hide outside the No-Gos section too.
-    bad: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("<!--"):
-            continue
-        if not line_is_punt(line):
-            continue
-        if line_is_justified(line):
-            continue
-        if line_is_explicit_none(line):
-            continue
-        bad.append(f"  {raw_line.rstrip()}")
-
+    bad = find_punt_lines(content)
     if bad:
         return False, UNJUSTIFIED_PUNT_ERROR.format(file=filepath, lines="\n".join(bad[:10]))
 
@@ -214,21 +248,37 @@ def main():
     parser.add_argument("plan_file", nargs="?", help="Path to plan file")
     args = parser.parse_args()
 
-    try:
-        json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        pass
+    # An explicit path (CLI / tests) wins; otherwise take the path the hook's
+    # own tool input names. Never guess.
+    plan_file = args.plan_file
+    if not plan_file:
+        hook_input: dict = {}
+        try:
+            raw = sys.stdin.read()
+            if raw.strip():
+                hook_input = json.loads(raw)
+        except (json.JSONDecodeError, OSError, EOFError):
+            hook_input = {}
+        plan_file = target_from_hook_input(hook_input)
 
-    plan_file = args.plan_file or find_newest_plan_file()
     if not plan_file:
         sys.exit(0)
 
-    if not Path(plan_file).exists():
-        print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
-        sys.exit(2)
-
-    # Only enforce on plan docs; pass through anything else
+    # Only enforce on plan docs; pass through anything else. This has to come
+    # before the existence check, or a Write to any non-plan path that the hook
+    # cannot stat (a relative path resolved against a different cwd, a file in
+    # another worktree) exits 2 and blocks a write it has no business judging.
     if "docs/plans" not in plan_file.replace("\\", "/"):
+        sys.exit(0)
+
+    path = Path(plan_file)
+    if not path.exists():
+        # An explicit CLI argument that names nothing is a user error worth
+        # reporting. A hook-derived path we cannot resolve is not: there is no
+        # content to judge, so there is no finding to make.
+        if args.plan_file:
+            print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
+            sys.exit(2)
         sys.exit(0)
 
     success, message = validate(plan_file)
