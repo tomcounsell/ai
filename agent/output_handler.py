@@ -453,7 +453,14 @@ class TelegramRelayOutputHandler:
         deliverable target.
         """
         raw = str(chat_id).strip() if chat_id is not None else ""
-        return bool(raw) and raw.lstrip("-").isdigit() and int(raw) != 0
+        if not raw or not raw.lstrip("-").isdigit():
+            return False
+        # lstrip strips ALL leading hyphens, so "--5" passes isdigit but is
+        # not an int — not a deliverable peer, never raise.
+        try:
+            return int(raw) != 0
+        except ValueError:
+            return False
 
     @classmethod
     def _resolve_transport(cls, session: Any, chat_id: Any = None) -> str:

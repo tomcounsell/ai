@@ -77,9 +77,16 @@ def addressee_for_session(session) -> str:
     if chat_id:
         raw = str(chat_id).strip()
         if raw.lstrip("-").isdigit():
-            if int(raw) == 0:
-                return SYSTEM_ADDRESSEE
-            return telegram_addressee(raw)
+            # lstrip strips ALL leading hyphens, so "--5" passes isdigit but
+            # is not an int — treat it as chatless garbage, never raise.
+            try:
+                numeric = int(raw)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                if numeric == 0:
+                    return SYSTEM_ADDRESSEE
+                return telegram_addressee(raw)
         if "@" in raw:
             return email_addressee(raw)
     return SYSTEM_ADDRESSEE

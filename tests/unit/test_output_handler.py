@@ -420,6 +420,16 @@ class TestSystemRoomSink:
         )
         assert transport == "telegram"
 
+    def test_deliverable_peer_multi_hyphen_pseudo_numeric_is_not_deliverable(self):
+        """ "--5" passes lstrip("-").isdigit() but is not an int — the guard
+        must return False, not raise ValueError on the send hot path."""
+        assert TelegramRelayOutputHandler._deliverable_telegram_peer("--5") is False
+        # And the derivation that consumes it must not crash either.
+        transport = TelegramRelayOutputHandler._resolve_transport(
+            self._ReflectionSession(), chat_id="--5"
+        )
+        assert transport == "system"
+
     # ── send() routing ───────────────────────────────────────────────────
 
     def test_send_records_to_system_room_not_telegram_outbox(self):
@@ -446,6 +456,51 @@ class TestSystemRoomSink:
         assert entry["text"] == "reflection findings"
         assert entry["session_id"] == "0_1234567890"
         assert entry["direction"] == "outbound"
+
+    def test_send_routes_chat_id_none_session_to_system_room(self):
+        """The chat_id=None chatless population also reaches the system sink."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        class NoChatSession:
+            session_id = "sess-nochat"
+            chat_id = None
+            project_key = "valor"
+            extra_context: dict = {}
+
+        mock_room = MagicMock()
+        mock_room.append_inbox = MagicMock(return_value=True)
+        with patch("models.room.Room.resolve", return_value=mock_room) as mock_resolve:
+            outcome = asyncio.run(handler.send("", "chatless output", 0, NoChatSession()))
+
+        assert outcome == DeliveryOutcome.sent
+        mock_r.rpush.assert_not_called()
+        mock_resolve.assert_called_once_with("valor", "system")
+        assert mock_room.append_inbox.call_args[0][0]["session_id"] == "sess-nochat"
+
+    def test_send_routes_chat_id_session_id_synthetic_to_system_room(self):
+        """The chat_id=session_id synthetic (e.g. sdlc-local-N) reaches the
+        system sink too — its non-numeric chat_id was always relay-dropped."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        class SyntheticSession:
+            session_id = "sdlc-local-42"
+            chat_id = "sdlc-local-42"
+            project_key = "valor"
+            extra_context: dict = {}
+
+        mock_room = MagicMock()
+        mock_room.append_inbox = MagicMock(return_value=True)
+        with patch("models.room.Room.resolve", return_value=mock_room) as mock_resolve:
+            outcome = asyncio.run(
+                handler.send("sdlc-local-42", "synthetic output", 0, SyntheticSession())
+            )
+
+        assert outcome == DeliveryOutcome.sent
+        mock_r.rpush.assert_not_called()
+        mock_resolve.assert_called_once_with("valor", "system")
+        assert mock_room.append_inbox.call_args[0][0]["text"] == "synthetic output"
 
     def test_send_system_sink_dual_writes_to_file_handler(self):
         """The file dual-write audit trail is preserved for system-sink sends."""

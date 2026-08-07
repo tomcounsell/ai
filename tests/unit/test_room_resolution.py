@@ -83,6 +83,11 @@ class TestAddresseeForSession:
         assert addressee_for_session(self._FakeSession("valor", "0")) == SYSTEM_ADDRESSEE
         assert room_id_for_session(self._FakeSession("valor", "0")) == "valor|system"
 
+    def test_multi_hyphen_pseudo_numeric_chat_id_is_system_not_valueerror(self):
+        # "--5".lstrip("-").isdigit() is True but int("--5") raises — the
+        # helper must treat it as chatless garbage, not crash a hot path.
+        assert addressee_for_session(self._FakeSession("valor", "--5")) == SYSTEM_ADDRESSEE
+
     def test_no_project_key_yields_no_room(self):
         assert room_id_for_session(self._FakeSession(None, "42")) is None
 
