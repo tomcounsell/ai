@@ -601,7 +601,7 @@ class TestReactTransportDerivation:
     Cases (a)-(f) from the plan's Success Criteria. (g) and (h) — the
     executor-level guard and the ``agent_session or session`` fallback —
     live in ``tests/unit/test_session_executor_runner_dispatch.py``'s
-    ``TestReactionTransportGuards`` (that file already owns the
+    ``TestReactTransportExecutorGuards`` (that file already owns the
     ``_execute_agent_session`` harness: ``FakeSessionRunner``, ``_make_session``,
     ``_patch_runner``/``_patch_worktree``, ``redis_test_db``).
 
@@ -646,8 +646,9 @@ class TestReactTransportDerivation:
 
         mock_r.rpush.assert_not_called()
         mock_r.expire.assert_not_called()
-        assert not any("telegram" in rec.message.lower() and rec.levelname == "ERROR"
-                        for rec in caplog.records)
+        assert not any(
+            "telegram" in rec.message.lower() and rec.levelname == "ERROR" for rec in caplog.records
+        )
 
     # ── (b) session=None -> unchanged telegram RPUSH (back-compat) ─────────
 
@@ -3257,145 +3258,3 @@ class TestDeliverSystemNotice:
 
         assert result is True
         assert captured["file_paths"] is None
-
-
-class TestReactTransportDerivation:
-    """react-transport-derivation plan (#2629): react() consults the same
-    transport resolver send() already uses, so a chatless session's
-    completion reaction never touches the Redis outbox.
-
-    Cases (a)-(f) of the plan's Success Criteria; (g)/(h) (the executor-level
-    guard + fallback regressions) live in
-    ``tests/unit/test_session_executor_runner_dispatch.py::TestReactTransportExecutorGuards``.
-    """
-
-    def _make_handler(self, mock_redis=None, file_handler=None):
-        handler = TelegramRelayOutputHandler(
-            redis_url="redis://localhost:6379/0",
-            file_handler=file_handler,
-        )
-        handler._redis = mock_redis if mock_redis is not None else MagicMock()
-        return handler
-
-    class _ChatlessSession:
-        """Reflection-scheduler shape: chat_id="0", no human addressee."""
-
-        session_id = "0_1234567890"
-        chat_id = "0"
-        project_key = "valor"
-        extra_context: dict = {}
-
-    def test_a_chatless_session_writes_no_outbox_key(self):
-        """(a) A chatless session's react() must not RPUSH to telegram:outbox:*."""
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        asyncio.run(handler.react("0", 0, "✅", self._ChatlessSession()))
-
-        mock_r.rpush.assert_not_called()
-
-    def test_b_session_none_preserves_telegram_rpush(self):
-        """(b) Back-compat: session=None still resolves to telegram and RPUSHes
-        exactly as before the signature widened."""
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        asyncio.run(handler.react("chat-1", 42, "\U0001f44d"))
-
-        mock_r.rpush.assert_called_once()
-        key = mock_r.rpush.call_args[0][0]
-        assert key == "telegram:outbox:chat-1"
-
-    def test_c_explicit_real_peer_wins_over_system_addressee(self):
-        """(c) A chatless session sending to an explicit real chat_id (e.g. a
-        CLI cross-chat send) still reaches telegram -- explicit-peer-wins,
-        mirroring _resolve_transport's own precedence."""
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        asyncio.run(handler.react("-100123", 42, "\U0001f44d", self._ChatlessSession()))
-
-        mock_r.rpush.assert_called_once()
-        key = mock_r.rpush.call_args[0][0]
-        assert key == "telegram:outbox:-100123"
-
-    def test_d_resolve_transport_raising_falls_back_to_telegram(self):
-        """(d) A descriptor-polluted extra_context makes _resolve_transport
-        raise AttributeError; react() must degrade to the telegram path, not
-        crash (Risk 3). Do NOT monkeypatch _resolve_transport itself -- use
-        the real reachable pollution shape."""
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        class PollutedSession:
-            session_id = "sess-polluted"
-            chat_id = "0"
-            project_key = "valor"
-            extra_context = "polluted"  # descriptor-polluted: truthy str, not a dict
-
-        asyncio.run(handler.react("0", 0, "\U0001f44d", PollutedSession()))
-
-        mock_r.rpush.assert_called_once()
-        key = mock_r.rpush.call_args[0][0]
-        assert key == "telegram:outbox:0"
-
-    def test_e_system_path_still_dual_writes_to_file_handler(self):
-        """(e) A dropped system-transport reaction is still observable: the
-        FileOutputHandler dual-write must occur even though the outbox write
-        does not."""
-        mock_r = MagicMock()
-        with tempfile.TemporaryDirectory() as tmp:
-            file_handler = FileOutputHandler(log_dir=Path(tmp))
-            handler = self._make_handler(mock_redis=mock_r, file_handler=file_handler)
-
-            asyncio.run(handler.react("0", 0, "\U0001f44d", self._ChatlessSession()))
-
-            mock_r.rpush.assert_not_called()
-            log_file = Path(tmp) / f"{self._ChatlessSession.session_id}.log"
-            assert log_file.exists()
-            assert "REACTION" in log_file.read_text()
-
-    def test_f_emoji_none_unchanged_on_telegram_no_op_on_system(self):
-        """(f) emoji=None (Teammate clear-reaction case) still RPUSHes
-        unchanged on the telegram path, and still no-ops on the system path."""
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        asyncio.run(handler.react("chat-1", 42, None))
-        mock_r.rpush.assert_called_once()
-
-        mock_r.reset_mock()
-        asyncio.run(handler.react("0", 0, None, self._ChatlessSession()))
-        mock_r.rpush.assert_not_called()
-
-    def test_system_path_does_not_emit_the_redis_error_log(self, caplog):
-        """The system branch returns before the outbox RPUSH, so the
-        ``except Exception`` logger.error around it must never fire."""
-        import logging
-
-        mock_r = MagicMock()
-        handler = self._make_handler(mock_redis=mock_r)
-
-        with caplog.at_level(logging.ERROR):
-            asyncio.run(handler.react("0", 0, "\U0001f44d", self._ChatlessSession()))
-
-        assert not any(
-            "Failed to write reaction to Redis outbox" in r.message for r in caplog.records
-        )
-
-    def test_stale_callback_rejecting_fourth_arg_degrades_not_crashes(self):
-        """Risk 1: a stale out-of-tree 3-arg reaction callback rejects the
-        widened call with TypeError. The executor's surrounding try/except
-        must degrade to a missing reaction, never a failed session."""
-
-        async def stale_three_arg_callback(chat_id, msg_id, emoji):
-            pass
-
-        async def _invoke():
-            try:
-                await stale_three_arg_callback("chat-1", 42, "\U0001f44d", MagicMock())
-            except TypeError:
-                return "degraded"
-            return "not-degraded"
-
-        assert asyncio.run(_invoke()) == "degraded"
