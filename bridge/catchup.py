@@ -202,8 +202,9 @@ async def scan_for_missed_messages(
             # FloodWaitError rate-limit backpressure when many chats are scanned
             # back-to-back; honor the requested wait and retry rather than treating
             # it as a hard error (issues #2353-#2355). A FloodWait mid-paging
-            # restarts the fetch from the newest message — dedup makes the
-            # re-collected pages harmless.
+            # restarts the fetch from the newest message — the partial
+            # collection is discarded before the caller sees it, so the retry
+            # cost is wasted API calls, never duplicates.
             messages = None
             for _attempt in range(CATCHUP_FLOODWAIT_MAX_RETRIES + 1):
                 try:
