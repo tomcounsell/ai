@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2647
 last_comment_id:
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-08-07T08:37:17Z
 ---
 
 # Job open-promise backfill must not clobber a concurrent promise write
@@ -454,12 +455,42 @@ entry.
 - [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex::test_backfill_is_idempotent` — UPDATE:
       keep as-is behaviorally (a settled population still writes nothing), but re-verify it holds
       once derivation moves to the re-fetched row.
-- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: a concurrency regression test.
-      Hydrate the backfill's view, mutate the promise set through a *second* instance of the same
-      Job (simulating the live writer), then let the backfill write, then re-read from Redis and
-      assert the second instance's promise is still present. This is the test that fails on
-      `main` and passes after the fix. Because the signature is unchanged (see Test Isolation),
-      it runs against `main` verbatim and can only fail on the promise-survival assertion.
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: **the concurrency regression
+      test (the red-state proof).** The enumeration must be forced stale by monkeypatch; a
+      strictly sequential "mutate, then call the method" test cannot reproduce the race, because
+      `QueryBuilder.__iter__` is `return iter(self.all())` (`popoto/models/query.py:1464`) — so
+      `cls.query.filter()` hydrates at call time and the backfill's own snapshot already contains
+      the committed promise. Required shape:
+
+      ```python
+      job = Job.mint(scratch_room_id, "owes a reply")
+      snap = Job.query.get(id=job.id, room_id=job.room_id)
+      snap.has_open_promises = True
+      snap.save()                       # creates the flag-vs-goal disagreement that makes the
+                                        # write fire at all; without it the test is vacuous
+      live = Job.query.get(id=job.id, room_id=job.room_id)
+      live.add_promise("promise A")
+      monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])
+      Job.backfill_open_promises_index()
+      # re-read from Redis and assert the promise survived
+      ```
+
+      Measured on this machine: `main` gives `promises_survived=0` (fails on the promise-survival
+      assertion, which is the correct reason); the fixed loop gives `promises_survived=1`. Note
+      the fixed loop passes by *declining to write* — the re-fetch makes flag and goal agree — so
+      this test proves promise survival but does **not** exercise the scoped write. That is what
+      the next bullet is for.
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: **a complementary write-scope
+      pin.** Hydrate `snap` *before* any promise exists, then `live.add_promise(...)`, then drift
+      the stored flag with a scoped write (`drift.has_open_promises = False;
+      drift.save(update_fields=["has_open_promises"])`), then run the backfill against the same
+      monkeypatched `[snap]` enumeration. Assert `stamped == 1` **and** the promise survived
+      **and** `last_active_at` is byte-identical. Measured: the fixed loop gives
+      `stamped=1, promises_survived=1, last_active_at` unchanged. On `main` this test fails on
+      `stamped == 1` (measured `stamped=0`: main derives from the stale `snap`, which agrees with
+      the drifted flag, so no write fires) — a *different* failure reason than the regression
+      test's, and one that proves nothing about promise loss. This is a scope pin, not a
+      regression proof; only the previous bullet is the Success Criterion 4 artifact.
 - [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: the two fail-open tests named
       in Failure Path Test Strategy (per-row raise, whole-loop raise).
 - [ ] `tests/unit/test_job_model.py:240`, `:250`, `:251` — NO CHANGE. The previous revision
@@ -681,10 +712,16 @@ paraphrasing to dodge a grep, the grep is being run wrong.
       `query.get` is caught by the per-row handler and never reaches the outer one.
 - [ ] `backfill_open_promises_index`'s signature is unchanged (`(cls) -> int`) — no `room_id`
       parameter was added, and no test call site was rewritten to pass one.
-- [ ] A regression test exercises the interleaving (backfill hydrates → second instance adds a
-      promise → backfill writes) and asserts the promise survives in Redis. It must fail on
-      `main` **on that assertion** (not on a `TypeError` or any signature mismatch) and pass on
-      the branch; the failure output is captured in the PR description.
+- [ ] A regression test exercises the interleaving with a **monkeypatched enumeration**
+      (`Job.query.filter` → `[snap]`, a snapshot held across a concurrent `add_promise`) and
+      asserts the promise survives in Redis. It must fail on `main` **on that assertion**
+      (measured `promises_survived=0`; not on a `TypeError`, a signature mismatch, or by not
+      failing at all) and pass on the branch; the failure output is captured in the PR
+      description.
+- [ ] A second, complementary test pins the **write scope**: snapshot hydrated before the promise
+      exists, stored flag drifted, backfill run against that snapshot → `stamped == 1`, the
+      promise survives, and `last_active_at` is byte-identical. It is a scope pin, not the
+      red-state proof, and the PR description says so.
 - [ ] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
 - [ ] No `_now()` and no timestamp assignment appears anywhere in the method's **executable
       code** (convergence across concurrent machines preserved). The docstring and comments are
@@ -783,17 +820,24 @@ it.
 - **Assigned To**: backfill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add the interleaving regression test to `TestOpenPromiseIndex`: mint a Job with a stale flag,
-  hold a second instance fetched independently, mutate promises through the second instance, run
-  `backfill_open_promises_index()`, then re-read from Redis and assert the promise survived and
-  the flag is correct.
-- **Confirm the red state, and confirm it fails for the right reason.** Because Task 1 leaves the
-  signature alone, the new test runs against `main` verbatim: `git stash` the `models/job.py`
-  change (or run the test on a `main` checkout) and confirm it fails **on the assertion that the
-  concurrently-added promise survived in Redis** — not on a `TypeError`, a missing keyword
-  argument, or any signature mismatch. Paste that assertion failure into the PR description. If
-  the failure is anything other than the promise-survival assertion, the test is not proving the
-  bug and must be rewritten.
+- Add the interleaving regression test to `TestOpenPromiseIndex` **using the monkeypatched-
+  enumeration shape given verbatim in Test Impact**. The `monkeypatch.setattr(Job.query, "filter",
+  lambda *a, **k: [snap])` line is load-bearing and not a convenience: it is the only way to hold
+  a stale snapshot across the mutation, because `QueryBuilder.__iter__` hydrates at call time
+  (`popoto/models/query.py:1464`). A sequential "mutate, then call the method" test passes green
+  on `main` and proves nothing.
+- Add the complementary **write-scope pin** test, also from Test Impact — `snap` hydrated before
+  the promise exists, the flag drifted by a scoped write, then the backfill against the same
+  monkeypatched `[snap]`. It asserts `stamped == 1`, promise survival, and an unchanged
+  `last_active_at`. It is a scope pin, not the regression proof; both tests are required.
+- **Confirm the red state, and confirm it fails for the right reason.** Run the regression test
+  against a `main` checkout of `models/job.py` and confirm it fails **on the assertion that the
+  concurrently-added promise survived in Redis** — measured `promises_survived=0` on `main`,
+  `promises_survived=1` on the fixed loop. Paste that assertion failure into the PR description.
+  If the failure is anything other than the promise-survival assertion — including *no failure at
+  all* — the test is not proving the bug and must be rewritten against the shape above before
+  proceeding. Do not record the scope-pin test's `stamped == 1` failure as the red-state proof;
+  it is a different assertion and does not demonstrate promise loss.
 - Add the two fail-open tests (per-row re-fetch raises → logged, skipped, siblings still stamped;
   `Job.query.filter` raises → returns `0`). The per-row test is what pins the re-fetch's placement
   inside the inner `try`: monkeypatch `Job.query.get` to raise for one job_id and assert the
@@ -840,8 +884,11 @@ it.
   stop and fix the pattern — every `== 0` row is void until it does. Then run every Verification
   row.
 - Confirm the red-state proof for the regression test is recorded in the PR description **and that
-  the recorded failure is the promise-survival assertion**, not a `TypeError` or signature
-  mismatch. A red state produced by an argument error does not prove the bug and fails this task.
+  the recorded failure is the promise-survival assertion**, not a `TypeError`, a signature
+  mismatch, or the scope-pin test's `stamped == 1`. A red state produced by an argument error, or
+  a regression test that does not fail on `main` at all, does not prove the bug and fails this
+  task. Also confirm the regression test contains the `monkeypatch.setattr(Job.query, "filter", ...)`
+  line — without it the test is green on `main` and the proof is void.
 - Verify each Success Criterion, including the two negative ones (no bare `save()`, no
   migrations entry).
 
@@ -929,6 +976,7 @@ command exits 0 and the *printed count* is the assertion.
 | Signature unchanged (no `room_id` added) | `.venv/bin/python -c "import inspect;from models.job import Job;print(str(inspect.signature(Job.backfill_open_promises_index)))"` | `() -> 'int'` — probed on main; the return annotation is a string because `models/job.py` carries `from __future__ import annotations`. Any `room_id` in the output fails the row. |
 | Production sweep call unchanged | `grep -n 'backfill_open_promises_index()' models/job.py` | matches the `repair_indexes()` call site at `:443` (no argument) |
 | Test call sites unchanged | `grep -c 'backfill_open_promises_index(room_id=' tests/unit/test_job_model.py \|\| true` | prints `0` (no test was rewritten to pass a room scope) |
+| Regression test forces a stale enumeration | `grep -cE 'monkeypatch\.setattr\(Job\.query, "filter"' tests/unit/test_job_model.py` | prints >= 2 (the pre-existing `test_backstop_never_raises_into_the_health_cycle` plus at least the new regression test; a regression test lacking this line is green on `main` and the red-state proof is void) |
 | Docstring rationale corrected | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('absent value indexes as nothing' in d)"` | `False` (probed: prints `True` on main's docstring, so the row has a live positive control) |
 | Docstring states the convergence rule | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('_now()' in d and 'last_active_at' in d)"` | `True` (probed: prints `False` on main's docstring) |
 | Anti-criterion: no migrations entry added | `git diff main --name-only -- scripts/update/migrations.py` | empty output (probed: prints the path when the file is modified) |
@@ -955,7 +1003,7 @@ already measured it: the plan's regression-test recipe cannot go red.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (unanimous 3/3) | The plan's mandated red-state proof does not go red. Task 2 says the new regression test "runs against `main` verbatim: `git stash` the `models/job.py` change (or run the test on a `main` checkout) and confirm it fails **on the assertion that the concurrently-added promise survived in Redis**", and Test Impact specifies the recipe as "hydrate the backfill's view, mutate the promise set through a *second* instance, then let the backfill write". The critique driver executed exactly that recipe against unmodified `main` and measured `stamped=0, promises_survived=1` — **the test passes GREEN on `main`**. The cause is structural, not incidental: `QueryBuilder.__iter__` is `return iter(self.all())` (`popoto/models/query.py:1464`), so `cls.query.filter()` hydrates at call time; a strictly sequential "mutate, then call the whole method" test lets the backfill's own hydration observe the committed promise, the derived value agrees with the stored flag, and no write fires at all. The race requires the mutation to land *between* the enumeration's hydration and the `save()`, which the method's public surface cannot expose. Task 2's contingency ("If the failure is anything other than the promise-survival assertion, the test is not proving the bug and must be rewritten") anticipates a wrong-reason failure but not *no failure at all*, so a builder following the instructions literally has no written path forward. Success Criterion 4 ("It must fail on `main` **on that assertion**") is therefore unsatisfiable as written — the same defect class as round 2's CONCERN 4, recurring in the place round 2's fix did not reach. The round-2 Critique Results table's own alternative for CONCERN 4 ("temporarily change `fresh.save(update_fields=[...])` to `fresh.save()`") does not rescue it either: with the re-fetch in place `fresh` is read immediately before the write, so a bare `save()` on the branch carries a current `goal` and clobbers nothing. | pending | The enumeration must be forced stale by monkeypatch — this is the only shape that reproduces. **Red-state regression test (the Success Criterion 4 artifact), driver-measured `stamped=1, promises_survived=0` on `main` and `stamped=0, promises_survived=1` on the fixed loop:** `job = Job.mint(scratch_room_id, "owes a reply")`; `snap = Job.query.get(id=job.id, room_id=job.room_id)`; `snap.has_open_promises = True; snap.save()` (this is what creates the flag-vs-goal disagreement that makes the write fire at all — without it nothing is written and the test is vacuous); `live = Job.query.get(id=job.id, room_id=job.room_id); live.add_promise("promise A")`; `monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])`; `Job.backfill_open_promises_index()`; then re-read from Redis and assert the promise survived. Delete the `git stash` / `main`-checkout instruction — do not merely supplement it; it is the specific instruction that produces the false green. Note the fixed loop passes this test by *declining to write* (the re-fetch makes flag and goal agree), so it proves promise survival but does NOT exercise the scoped write. **Add a second, complementary test that pins write scope**, driver-measured `stamped=1, promises_survived=1` on the fixed loop: hydrate `snap` BEFORE any promise exists, `live.add_promise(...)`, then drift the stored flag with a scoped write (`drift.has_open_promises = False; drift.save(update_fields=["has_open_promises"])`), then run the backfill against `[snap]`. Assert `stamped == 1` AND the promise survived AND `last_active_at` is unchanged. This second test is green on `main` too (`stamped=0`), so it is a scope pin, not a regression proof — the plan needs both, and must say which is which. |
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (unanimous 3/3) | The plan's mandated red-state proof does not go red. Task 2 says the new regression test "runs against `main` verbatim: `git stash` the `models/job.py` change (or run the test on a `main` checkout) and confirm it fails **on the assertion that the concurrently-added promise survived in Redis**", and Test Impact specifies the recipe as "hydrate the backfill's view, mutate the promise set through a *second* instance, then let the backfill write". The critique driver executed exactly that recipe against unmodified `main` and measured `stamped=0, promises_survived=1` — **the test passes GREEN on `main`**. The cause is structural, not incidental: `QueryBuilder.__iter__` is `return iter(self.all())` (`popoto/models/query.py:1464`), so `cls.query.filter()` hydrates at call time; a strictly sequential "mutate, then call the whole method" test lets the backfill's own hydration observe the committed promise, the derived value agrees with the stored flag, and no write fires at all. The race requires the mutation to land *between* the enumeration's hydration and the `save()`, which the method's public surface cannot expose. Task 2's contingency ("If the failure is anything other than the promise-survival assertion, the test is not proving the bug and must be rewritten") anticipates a wrong-reason failure but not *no failure at all*, so a builder following the instructions literally has no written path forward. Success Criterion 4 ("It must fail on `main` **on that assertion**") is therefore unsatisfiable as written — the same defect class as round 2's CONCERN 4, recurring in the place round 2's fix did not reach. The round-2 Critique Results table's own alternative for CONCERN 4 ("temporarily change `fresh.save(update_fields=[...])` to `fresh.save()`") does not rescue it either: with the re-fetch in place `fresh` is read immediately before the write, so a bare `save()` on the branch carries a current `goal` and clobbers nothing. | **Addressed (round-3 revision).** The `git stash` / `main`-checkout red-state instruction is **deleted**, not supplemented. Test Impact now carries the monkeypatched-enumeration recipe verbatim with the reason `QueryBuilder.__iter__` defeats the sequential shape; Task 2 mandates that shape and names *no failure at all* as a disqualifying outcome; Success Criterion 4 is restated against the new recipe and a fifth criterion adds the write-scope pin; the validator task and a new Verification row (`monkeypatch.setattr(Job.query, "filter"` count >= 2, live at 1 on `main`) both gate on the monkeypatch being present. **Re-measured independently before commit:** regression test → `promises_survived=0` on `main` (fails on the promise-survival assertion), `1` on the fixed loop; scope pin → `stamped=0` on `main`, `stamped=1, promises_survived=1, last_active_at` unchanged on the fixed loop. One correction to the critique's own note: the scope pin is *not* green on `main` — it fails there on `stamped == 1`, a different assertion that proves nothing about promise loss, which is why the plan now states explicitly which test is the red-state artifact. | The enumeration must be forced stale by monkeypatch — this is the only shape that reproduces. **Red-state regression test (the Success Criterion 4 artifact), driver-measured `stamped=1, promises_survived=0` on `main` and `stamped=0, promises_survived=1` on the fixed loop:** `job = Job.mint(scratch_room_id, "owes a reply")`; `snap = Job.query.get(id=job.id, room_id=job.room_id)`; `snap.has_open_promises = True; snap.save()` (this is what creates the flag-vs-goal disagreement that makes the write fire at all — without it nothing is written and the test is vacuous); `live = Job.query.get(id=job.id, room_id=job.room_id); live.add_promise("promise A")`; `monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])`; `Job.backfill_open_promises_index()`; then re-read from Redis and assert the promise survived. Delete the `git stash` / `main`-checkout instruction — do not merely supplement it; it is the specific instruction that produces the false green. Note the fixed loop passes this test by *declining to write* (the re-fetch makes flag and goal agree), so it proves promise survival but does NOT exercise the scoped write. **Add a second, complementary test that pins write scope**, driver-measured `stamped=1, promises_survived=1` on the fixed loop: hydrate `snap` BEFORE any promise exists, `live.add_promise(...)`, then drift the stored flag with a scoped write (`drift.has_open_promises = False; drift.save(update_fields=["has_open_promises"])`), then run the backfill against `[snap]`. Assert `stamped == 1` AND the promise survived AND `last_active_at` is unchanged. This second test is green on `main` too (`stamped=0`), so it is a scope pin, not a regression proof — the plan needs both, and must say which is which. |
 
 ---
 
