@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 # Writer budget: bounds the get_or_create() retry loop that guards the
 # "genuine miss vs. racing concurrent create" window (see get_or_create's
 # docstring for why this is NOT the #1720 class-set-index window). Mirrors
-# tools/sdlc_stage_query.py's _CLASS_SET_RETRY_ATTEMPTS / _BACKOFF_S in shape
-# but is a distinct budget for a distinct race -- provisional/tunable.
+# the class-set retry loop in tools/class_set_retry.py in shape but is a
+# distinct budget for a distinct race -- provisional/tunable.
 _CREATE_RACE_RETRY_ATTEMPTS = 5
 _CREATE_RACE_RETRY_BACKOFF_S = 0.20  # seconds between attempts; provisional/tunable
 
