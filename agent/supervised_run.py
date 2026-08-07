@@ -23,7 +23,16 @@ the single source of truth for "is this run still the owner."
 - Redis key ``session:supervisedrun:{issue_number}`` — the primary carrier,
   available to any process. Same non-Popoto raw-Redis idiom as the issue lock
   (``models/session_lifecycle.py``), given the same TTL and refreshed on every
-  acquire/renew so it never outlives the lease by more than the TTL.
+  acquire/renew so it never outlives the lease by more than the TTL. The three
+  writers are ``tools/sdlc_session_ensure.py`` (acquire),
+  ``tools/sdlc_lease_heartbeat.py`` (local-supervisor renew), and
+  ``agent/session_executor.py::_tick_issue_lock_renewal`` (worker renew). Both
+  renewers write only after confirming they still own the lease, so a signal is
+  never republished over a successor's. Issue #2659: the renew half was missing
+  for the first two years of this key's life, so the signal expired 1800s into
+  every pipeline while the lease was renewed indefinitely, and from that moment
+  every stage fork read a bare ``ISSUE_LOCKED`` from its own supervisor's lock
+  and stood down — a live lock, a live heartbeat, and no error anywhere.
 - File ``{worktree}/.sdlc-run`` — a human/skill-visible marker written into
   the slug worktree (``.worktrees/{slug}/.sdlc-run``) when the session's
   ``working_dir`` resolves to one. Read as a fallback when Redis is

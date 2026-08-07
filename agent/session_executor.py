@@ -255,6 +255,19 @@ def _tick_issue_lock_renewal(
                 result.owner_run_id,
                 result.owner_session_id,
             )
+        else:
+            # Renew the companion supervised-run signal on the same tick
+            # (issue #2659). It shares the lease TTL but was written only at
+            # acquire, so a worker-run pipeline outliving the TTL lost fork
+            # inheritance while the lease stayed live -- every later stage
+            # fork read a bare ISSUE_LOCKED from its own supervisor's lock.
+            # Renewing only under `acquired` keeps this strictly an
+            # extend-what-we-own operation: a foreign owner's signal is never
+            # overwritten. working_dir is omitted because the worktree file
+            # carrier has no TTL.
+            from agent.supervised_run import write_supervised_run_signal
+
+            write_supervised_run_signal(issue_number, run_id, session_id=session_id)
     except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
         logger.debug(
             "[%s] issue-lock renewal failed (non-fatal): %s",

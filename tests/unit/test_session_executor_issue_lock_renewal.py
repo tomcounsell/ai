@@ -324,3 +324,93 @@ class TestIssueLockRenewalFreshFetch:
             _tick_issue_lock_renewal(_make_session(), agent_session)
 
         mock_touch.assert_not_called()
+
+
+class TestSupervisedRunSignalRenewal:
+    """Issue #2659: the worker's 60s tick renews the lease, so it must renew
+    the companion supervised-run signal too.
+
+    ``session:supervisedrun:{N}`` shares the lease's 1800s TTL but was written
+    only on the acquire path in ``tools/sdlc_session_ensure.py``. A worker-run
+    pipeline outliving that TTL therefore lost fork inheritance while its lease
+    stayed live: every later stage fork read a bare ``ISSUE_LOCKED`` from its
+    own supervisor's lock and stood down.
+    """
+
+    def test_owned_renewal_refreshes_the_signal(self):
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 2659
+        agent_session.session_id = "sess-1"
+
+        from models.session_lifecycle import IssueLockResult
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("agent.session_executor._fetch_live_active_run_id", return_value="run-mine"),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            _tick_issue_lock_renewal(session, agent_session)
+
+        write_signal.assert_called_once()
+        args, kwargs = write_signal.call_args
+        assert args[0] == 2659
+        assert args[1] == "run-mine"
+
+    def test_not_owner_never_refreshes_the_signal(self):
+        """A foreign run owns the lease -> never republish our signal over
+        theirs, which would hand their forks our dead ``run_id``."""
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 2659
+        agent_session.session_id = "sess-1"
+
+        from models.session_lifecycle import IssueLockResult
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("agent.session_executor._fetch_live_active_run_id", return_value="run-mine"),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            _tick_issue_lock_renewal(session, agent_session)
+
+        write_signal.assert_not_called()
+
+    def test_signal_write_failure_never_crashes_the_tick(self):
+        """Best-effort: the signal write is inside the tick's exception
+        isolation, so a Redis hiccup cannot break the heartbeat loop."""
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 2659
+        agent_session.session_id = "sess-1"
+
+        from models.session_lifecycle import IssueLockResult
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("agent.session_executor._fetch_live_active_run_id", return_value="run-mine"),
+            patch(
+                "agent.supervised_run.write_supervised_run_signal",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            _tick_issue_lock_renewal(session, agent_session)  # must not raise
