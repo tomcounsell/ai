@@ -914,6 +914,62 @@ def _check_worker() -> CheckResult:
         )
 
 
+def _check_catchup_kill_switch() -> CheckResult:
+    """WARN when `data/catchup-disabled` has been set past its grace window (#2473).
+
+    The flag pauses ALL message-recovery scans (startup catchup, periodic
+    reconciler, `valor-catchup`) and is a deliberate operator control -- a
+    freshly set flag passes with a note. But a kill switch with no expiry and
+    no alarm once silently disabled the entire recovery layer for 7 days, so
+    beyond `settings.timeouts.catchup_disabled_warn_hours` this check fails
+    loudly. It never removes the flag itself; that stays an operator decision.
+    """
+    try:
+        from bridge.catchup import kill_switch_status
+
+        status = kill_switch_status()
+        warn_hours = status["warn_hours"]
+        if not status["disabled"]:
+            return CheckResult(
+                name="catchup_kill_switch",
+                category="Services",
+                passed=True,
+                message="not set — recovery scans enabled",
+            )
+        age = status["age_hours"]
+        if not status["stale"]:
+            return CheckResult(
+                name="catchup_kill_switch",
+                category="Services",
+                passed=True,
+                message=(
+                    f"set {age:.1f}h ago — recovery scans paused "
+                    f"(within {warn_hours:.0f}h grace window)"
+                ),
+            )
+        return CheckResult(
+            name="catchup_kill_switch",
+            category="Services",
+            passed=False,
+            message=(
+                f"WARN: data/catchup-disabled set {age:.1f}h ago "
+                f"(> {warn_hours:.0f}h) — ALL message-recovery scans are disabled"
+            ),
+            fix=(
+                "Re-enable recovery with `rm data/catchup-disabled` once the issue "
+                "it was set for is resolved, or re-`touch` it / raise "
+                "TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS if the pause is still deliberate."
+            ),
+        )
+    except Exception as e:
+        return CheckResult(
+            name="catchup_kill_switch",
+            category="Services",
+            passed=False,
+            message=f"Could not check catchup kill switch: {e}",
+        )
+
+
 def _check_telegram_session(*, quick: bool = False) -> CheckResult:
     """Check Telegram session auth."""
     if quick:
@@ -1392,6 +1448,7 @@ def get_checks(
         _check_knowledge_zero_chunk_documents,
         _check_bridge,
         _check_worker,
+        _check_catchup_kill_switch,
         # Auth
         lambda: _check_telegram_session(quick=quick),
         _check_api_keys,

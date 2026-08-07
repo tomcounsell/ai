@@ -430,6 +430,25 @@ class TimeoutSettings(BaseModel):
             "TIMEOUTS__DEDUP_RECORD_TTL_S."
         ),
     )
+    catchup_disabled_warn_hours: float = Field(
+        default=24.0,
+        ge=0.1,
+        le=336.0,
+        description=(
+            "Grace window (hours) before a present `data/catchup-disabled` "
+            "operator kill switch is surfaced as a WARN by `tools.doctor` and "
+            "`/dashboard.json` (issue #2473). The flag pauses ALL message-"
+            "recovery scans (startup catchup, periodic reconciler, agent "
+            "sweep); in the #2473 incident it sat forgotten for 7 days with "
+            "no alarm while a crash storm dropped recovery entirely. Within "
+            "the window a set flag is reported as a deliberate pause; beyond "
+            "it, doctor fails the `catchup_kill_switch` check and the "
+            "dashboard sets `catchup_disabled_stale`. GRAIN OF SALT: 24h is "
+            "provisional/tunable -- long enough for a deliberate overnight "
+            "pause, short enough that a forgotten flag is loud within a day. "
+            "Env: TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS."
+        ),
+    )
 
 
 class HybridEvalSettings(BaseModel):
