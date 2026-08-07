@@ -58,7 +58,9 @@ def _require_redis_and_dedup():
     try:
         import redis
 
-        redis.Redis(db=1).ping()
+        from tests.db_claim import claim_test_db
+
+        redis.Redis(db=claim_test_db()).ping()
     except Exception as e:  # pragma: no cover - environment dependent
         pytest.skip(f"Redis unavailable — skipping agent-catchup recovery integration test: {e}")
 

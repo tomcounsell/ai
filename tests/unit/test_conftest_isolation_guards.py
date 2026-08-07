@@ -61,6 +61,33 @@ import redis
 import tests.conftest as _conftest
 import tests.db_claim as _db_claim
 
+
+def _flush_probe_client(db: int, *, on_reach=None):
+    """A client-shaped stub carrying a db number, a pool, and no connection.
+
+    The flush guard reads only ``client.connection_pool.connection_kwargs``, so
+    both its deny and its permit branch can be exercised without a socket. That
+    is not fastidiousness: the pool is ``[1..15]`` and db 0 is production, so
+    there is no "safe" number to aim a real ``flushdb()`` at. Driving the guard
+    through a stub means no code path in these tests — on this branch, on
+    ``main``, or in any intermediate state — can flush a database this process
+    does not own (#2628, #2645).
+
+    ``on_reach`` fires if a flush gets past the guard to the client layer, which
+    is what makes the deny assertions independent of the guard's own reporting.
+    """
+
+    def _execute_command(*args, **kwargs):
+        if on_reach is not None:
+            on_reach()
+        return "REACHED"
+
+    return types.SimpleNamespace(
+        connection_pool=types.SimpleNamespace(connection_kwargs={"db": db}),
+        execute_command=_execute_command,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test A — agent-hooks guard repair (Fix 2)
 # ---------------------------------------------------------------------------
@@ -343,22 +370,20 @@ class TestPopotoSplitBrainRoundTrip:
     fixed re-point path and prove the identical round trip now succeeds.
     """
 
-    def test_create_then_filter_split_brain_and_fix(self, request):
+    def test_create_then_filter_split_brain_and_fix(self, request, scratch_test_db):
         from models.agent_session import AgentSession
 
         query_module = sys.modules["popoto.models.query"]
         original_query_binding = query_module.POPOTO_REDIS_DB
 
         base_test_db = _conftest._redis_test_db_num()
-        # Different test db than the one redis_test_db set up for this
-        # worker. Never db 0 / production. The local Redis server is
-        # configured with only 16 logical databases (0-15), and
-        # `-n auto` commonly claims dbs 1..N for N workers (bases run
-        # low-to-high), so reserve the top of the range as scratch space
-        # rather than a large offset that would overflow "DB index out of
-        # range". Falls back to 14 in the vanishingly unlikely case this
-        # worker's own base test db already IS 15.
-        divergent_db = 15 if base_test_db != 15 else 14
+        # A SECOND database this process owns, claimed from the same flock pool
+        # as the primary one. It used to be a hardcoded 15 called "scratch
+        # space" — but 15 is the top slot of the claim pool, so this test was
+        # flushing whichever concurrent pytest run happened to hold it (#2628).
+        # A db this process does not own is not scratch space; it is someone
+        # else's dataset.
+        divergent_db = scratch_test_db
         assert divergent_db != 0
         assert divergent_db != base_test_db
 
@@ -470,7 +495,13 @@ class TestPerProcessDbClaim:
         return proc
 
     @staticmethod
-    def _reset_claim_state(monkeypatch, tmp_path, *, pool_max: int | None = None):
+    def _reset_claim_state(
+        monkeypatch,
+        tmp_path,
+        *,
+        pool_max: int | None = None,
+        wait_s: int | None = None,
+    ):
         """Point the claim registry at ``tmp_path`` and start from an unclaimed
         state, tracking test-opened fds so ``finally`` can close only them.
 
@@ -478,15 +509,35 @@ class TestPerProcessDbClaim:
         deterministic master branch (db1) rather than whatever worker this file
         happens to land on under ``-n auto``. A test that wants a specific
         worker id sets it back explicitly.
+
+        Every mutable piece of claim state is REBOUND to a fresh object, not
+        merely reset: ``monkeypatch`` can undo a rebinding but not an in-place
+        ``.clear()``. A test that called ``release_test_db_claim()`` against the
+        live ``_CLAIMED_DB_NUMS`` would empty it permanently, and every later
+        test in that worker would then have its own autouse ``redis_test_db``
+        flush denied by the fail-closed ownership guard and error in setup.
+        Leaking the other way is just as bad: pushing ``tmp_path`` slot numbers
+        into the live set would make the guard PERMIT flushes on databases this
+        process does not own. Which worker got hit would vary per run, so
+        skipping this rebinding ships a rotating failure set of its own (#2628).
+
+        Returns ``(fds, nums)`` — the fresh fd list and the fresh claimed-number
+        set — so assertions can read them.
         """
         monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
         monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
         monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
+        monkeypatch.setattr(_db_claim, "_CLAIMED_SCRATCH_DB", None, raising=False)
+        monkeypatch.setattr(_db_claim, "_CLAIM_FAILURE", None, raising=False)
         fresh_fds: list[int] = []
+        fresh_nums: set[int] = set()
         monkeypatch.setattr(_db_claim, "_CLAIM_LOCK_FDS", fresh_fds, raising=False)
+        monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", fresh_nums, raising=False)
         if pool_max is not None:
             monkeypatch.setattr(_db_claim, "_TEST_DB_POOL_MAX", pool_max, raising=False)
-        return fresh_fds
+        if wait_s is not None:
+            monkeypatch.setattr(_db_claim, "_TEST_DB_CLAIM_WAIT_S", wait_s, raising=False)
+        return fresh_fds, fresh_nums
 
     @staticmethod
     def _close_fds(fds: list[int]) -> None:
@@ -504,7 +555,7 @@ class TestPerProcessDbClaim:
     def test_claim_is_in_pool_idempotent_and_releasable(self, monkeypatch, tmp_path):
         """A claim returns a db in the pool, is memoized, holds one lock, and
         ``release_test_db_claim`` frees it (criteria 1 + 5 groundwork)."""
-        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
         try:
             db = _db_claim.claim_test_db()
             assert 1 <= db <= _db_claim._TEST_DB_POOL_MAX
@@ -527,7 +578,7 @@ class TestPerProcessDbClaim:
         claim landed anywhere but ``worker_id + 1`` handed its own children a db
         owned — and flushed — by a different pytest run (#2605).
         """
-        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
         try:
             db = _db_claim.claim_test_db()
             assert _db_claim.claim_test_db() == db, "claim must be memoized"
@@ -544,7 +595,7 @@ class TestPerProcessDbClaim:
         subprocess must say which tree it means rather than rely on cwd
         precedence (#2605).
         """
-        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
         try:
             monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
             env = _db_claim.subprocess_env(project_root="/my/checkout")
@@ -556,7 +607,7 @@ class TestPerProcessDbClaim:
     def test_claim_skips_slot_held_by_live_process(self, monkeypatch, tmp_path):
         """A slot whose flock is held by another live process is NOT claimed —
         two live processes therefore never share a db (criterion 1, the fix)."""
-        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
         holder = self._spawn_flock_holder(str(tmp_path), [1])
         try:
             db = _db_claim.claim_test_db()
@@ -569,17 +620,20 @@ class TestPerProcessDbClaim:
 
     def test_dead_holder_slot_is_reclaimed(self, monkeypatch, tmp_path):
         """A slot whose holder process has DIED is reclaimable — the OS releases
-        the flock on death, so a crashed run never strands a db (criterion 2)."""
-        fds = self._reset_claim_state(monkeypatch, tmp_path, pool_max=1)
+        the flock on death, so a crashed run never strands a db (criterion 2).
+
+        The property under test is purely "the kernel frees a dead holder's
+        flock". This used to claim once while the pool was fully held and assert
+        a prompt legacy fallback; under the wait-then-fail policy (#2628) that
+        first call blocks for the whole window and then raises, so the pre-kill
+        claim is gone rather than re-asserted.
+        """
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path, pool_max=1, wait_s=0)
         holder = self._spawn_flock_holder(str(tmp_path), [1])
         try:
-            # Pool is [1..1] and slot 1 is held -> exhausted -> legacy fallback.
-            assert _db_claim.claim_test_db() == 1  # legacy master fallback
             # Kill the holder: the kernel releases its flock on reap.
             holder.terminate()
             holder.wait(timeout=10)
-            # Fresh process state -> slot 1 is now claimable.
-            monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
             reclaimed = _db_claim.claim_test_db()
             assert reclaimed == 1, "dead holder's slot must be reclaimable"
             assert len(_db_claim._CLAIM_LOCK_FDS) == 1
@@ -589,25 +643,213 @@ class TestPerProcessDbClaim:
                 holder.wait(timeout=10)
             self._close_fds(fds)
 
-    def test_pool_exhaustion_falls_back_with_warning(self, monkeypatch, tmp_path, caplog):
-        """When every slot is held by a live process, the claim falls back to the
-        legacy derivation and logs a WARNING — degraded, never silent, never
-        worse than pre-#2060 (criterion 4)."""
-        import logging
+    def test_pool_exhaustion_raises_rather_than_colliding(self, monkeypatch, tmp_path):
+        """An exhausted pool raises, naming the remedy — it never hands back a
+        database another live process owns (#2628).
 
-        fds = self._reset_claim_state(monkeypatch, tmp_path, pool_max=2)
+        The old behavior was to fall back to the legacy ``gw{N} -> db{N+1}``
+        derivation with a WARNING, which is precisely how one run's per-test
+        ``flushdb()`` came to wipe another's data mid-test. A blocked run is
+        recoverable; a corrupted baseline is not.
+        """
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path, pool_max=2, wait_s=0)
         holder = self._spawn_flock_holder(str(tmp_path), [1, 2])
         try:
             monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")  # legacy would be db4
-            with caplog.at_level(logging.WARNING, logger="tests.db_claim"):
-                db = _db_claim.claim_test_db()
-            assert db == 4, "exhausted pool must fall back to legacy gw3->db4"
-            assert any("falling back to legacy" in r.getMessage() for r in caplog.records), (
-                "fallback must log an observable WARNING"
-            )
+            with pytest.raises(RuntimeError) as excinfo:
+                _db_claim.claim_test_db()
+            message = str(excinfo.value)
+            assert "2 test-DB slots" in message, "must name the pool size"
+            assert "scripts/reap-xdist.sh --apply" in message, "must name the remedy"
+            assert _db_claim._CLAIMED_TEST_DB is None, "a failed claim owns nothing"
+            assert _db_claim.claimed_test_dbs() == frozenset()
         finally:
             holder.terminate()
             holder.wait(timeout=10)
+            self._close_fds(fds)
+
+    def test_exhaustion_is_paid_once_per_process(self, monkeypatch, tmp_path):
+        """The second claim against a held pool re-raises instantly (#2628).
+
+        ``_CLAIMED_TEST_DB`` is assigned only on success paths, so without the
+        sticky ``_CLAIM_FAILURE`` memo every later caller would re-enter the
+        poll and pay the wait again. Under the function-scoped autouse fixture
+        that is the wait times the number of tests in the worker — roughly ten
+        hours, and structurally invisible to ``--timeout=420`` because no single
+        test exceeds it.
+        """
+        import time
+
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path, pool_max=2, wait_s=2)
+        holder = self._spawn_flock_holder(str(tmp_path), [1, 2])
+        try:
+            with pytest.raises(RuntimeError) as first:
+                _db_claim.claim_test_db()
+            started = time.monotonic()
+            with pytest.raises(RuntimeError) as second:
+                _db_claim.claim_test_db()
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.5, f"second claim re-entered the poll ({elapsed:.2f}s)"
+            assert str(second.value) == str(first.value)
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+            self._close_fds(fds)
+
+    def test_wait_budget_is_read_at_call_time(self, monkeypatch, tmp_path):
+        """``_TEST_DB_CLAIM_WAIT_S`` is a module attribute, so tests can patch it.
+
+        Read as a default argument or an import-time local it would be
+        unpatchable, and every exhaustion test would not fail but HANG for the
+        full window — at which point the failure looks like a stuck suite rather
+        than a wrong constant.
+        """
+        import time
+
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path, pool_max=1, wait_s=0)
+        holder = self._spawn_flock_holder(str(tmp_path), [1])
+        try:
+            started = time.monotonic()
+            with pytest.raises(RuntimeError):
+                _db_claim.claim_test_db()
+            elapsed = time.monotonic() - started
+            assert elapsed < 1.0, f"wait_s=0 was not honored ({elapsed:.2f}s)"
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+            self._close_fds(fds)
+
+    # -- claimed-set accessor, scratch claim, and their isolation --------------
+
+    def test_claimed_set_is_empty_before_any_claim(self, monkeypatch, tmp_path):
+        """Nothing is owned until something is claimed — the guard's fail-closed
+        rule rests on this being literally true, not approximately."""
+        fds, nums = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            assert _db_claim.claimed_test_dbs() == frozenset()
+            db = _db_claim.claim_test_db()
+            assert _db_claim.claimed_test_dbs() == frozenset({db})
+            assert nums == {db}
+        finally:
+            self._close_fds(fds)
+
+    def test_scratch_claim_is_a_second_owned_db(self, monkeypatch, tmp_path):
+        """A scratch db is a real pool slot, owned and therefore flushable."""
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            primary = _db_claim.claim_test_db()
+            scratch = _db_claim.claim_scratch_test_db()
+            assert scratch is not None
+            assert scratch != primary
+            assert _db_claim.claimed_test_dbs() == frozenset({primary, scratch})
+            assert os.path.exists(os.path.join(str(tmp_path), f"{scratch}.lock"))
+        finally:
+            self._close_fds(fds)
+
+    def test_scratch_claim_is_memoized(self, monkeypatch, tmp_path):
+        """N scratch calls consume ONE slot, not N.
+
+        Without the memo, a function-scoped fixture handing out scratch dbs
+        would walk the 15-slot pool monotonically — with no release path — into
+        the fail-hard exhaustion error this same change introduces.
+        """
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            _db_claim.claim_test_db()
+            first = _db_claim.claim_scratch_test_db()
+            for _ in range(5):
+                assert _db_claim.claim_scratch_test_db() == first
+            assert len(_db_claim.claimed_test_dbs()) == 2
+        finally:
+            self._close_fds(fds)
+
+    def test_scratch_claim_returns_none_when_pool_is_exhausted(self, monkeypatch, tmp_path):
+        """An exhausted pool yields ``None``, never a borrowed number.
+
+        The fixture converts that into a skip. Silently borrowing an unowned db
+        and calling it "scratch space" is the exact defect (#2628).
+        """
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path, pool_max=1)
+        try:
+            primary = _db_claim.claim_test_db()
+            assert primary == 1
+            assert _db_claim.claim_scratch_test_db() is None
+        finally:
+            self._close_fds(fds)
+
+    def test_release_clears_the_claimed_set_with_the_fds(self, monkeypatch, tmp_path):
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            _db_claim.claim_test_db()
+            _db_claim.claim_scratch_test_db()
+            assert len(_db_claim.claimed_test_dbs()) == 2
+            _db_claim.release_test_db_claim()
+            assert _db_claim.claimed_test_dbs() == frozenset()
+            assert _db_claim._CLAIM_LOCK_FDS == []
+            assert _db_claim._CLAIMED_SCRATCH_DB is None
+        finally:
+            self._close_fds(fds)
+
+    def test_reset_helper_never_touches_the_live_claimed_set(self, monkeypatch, tmp_path):
+        """A claim/release cycle inside ``_reset_claim_state`` leaves the real
+        process-wide claimed set untouched.
+
+        ``monkeypatch`` can undo a rebinding but not an in-place ``.clear()``,
+        so a helper that reset the number set by clearing it would permanently
+        empty the live one. Every later test in that worker would then have its
+        own autouse ``redis_test_db`` flush denied by the fail-closed guard and
+        error in setup — a rotating failure set shipped inside the fix for the
+        rotating failure set (#2628).
+        """
+        live_before = set(_db_claim._CLAIMED_DB_NUMS)
+        assert live_before, "precondition: this process has claimed a db"
+        with pytest.MonkeyPatch.context() as inner:
+            fds, _nums = self._reset_claim_state(inner, tmp_path)
+            try:
+                _db_claim.claim_test_db()
+                _db_claim.claim_scratch_test_db()
+                _db_claim.release_test_db_claim()
+            finally:
+                self._close_fds(fds)
+        assert set(_db_claim._CLAIMED_DB_NUMS) == live_before
+
+    def test_registry_unreachable_fallback_is_owned_and_flushable(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """The retained legacy fallback returns a db that IS claimed.
+
+        No flock can be taken when the registry dir is unreachable, so this path
+        deliberately degrades rather than refusing to run. But the NUMBER it
+        returns must still land in the claimed set: skipping that composes with
+        the fail-closed flush guard into a whole-process setup outage, where a
+        documented graceful degradation errors every test in the worker.
+        """
+        import logging
+
+        fds, _nums = self._reset_claim_state(monkeypatch, tmp_path)
+
+        def _boom():
+            raise OSError("registry unreachable")
+
+        monkeypatch.setattr(_db_claim, "_test_db_claim_dir", _boom)
+        try:
+            with caplog.at_level(logging.WARNING, logger="tests.db_claim"):
+                db = _db_claim.claim_test_db()
+            assert db in _db_claim.claimed_test_dbs(), (
+                "the fallback number must be owned, or its own flush is denied"
+            )
+            assert any("falling back to legacy" in r.getMessage() for r in caplog.records), (
+                "the degraded path must stay observable"
+            )
+            # The permit is asserted through a client-layer stub rather than a
+            # real client: this path takes no flock, so the number may in fact
+            # belong to a live sibling run and flushing it for real would be the
+            # very wipe this file exists to prevent (#2628, #2645).
+            probe = _flush_probe_client(db)
+            assert redis.Redis.flushdb(probe) == "REACHED", (
+                "the guard must permit a flush on the fallback db"
+            )
+        finally:
             self._close_fds(fds)
 
 
@@ -644,7 +886,7 @@ class TestSharedExceptionIdentityGuard:
         import models.session_lifecycle as sl
 
         original = sl.StatusConflictError
-        _conftest._snapshot_shared_exceptions()
+        _conftest._snapshot_shared_identity()
         try:
             importlib.reload(sl)
 
@@ -659,7 +901,7 @@ class TestSharedExceptionIdentityGuard:
                 "precondition: the reload must have split the class in two"
             )
 
-            repairs = _conftest._repair_shared_exception_identity()
+            repairs = _conftest._repair_shared_identity()
 
             assert repairs.get("models.session_lifecycle") == ["StatusConflictError"]
             assert sl.StatusConflictError is original
@@ -675,7 +917,425 @@ class TestSharedExceptionIdentityGuard:
         import models.session_lifecycle as sl
 
         original = sl.StatusConflictError
-        _conftest._snapshot_shared_exceptions()
+        _conftest._snapshot_shared_identity()
 
-        assert _conftest._repair_shared_exception_identity() == {}
+        assert _conftest._repair_shared_identity() == {}
         assert sl.StatusConflictError is original
+
+
+# ---------------------------------------------------------------------------
+# Test E — flush ownership guard (writer 1 of the rotating failure set, #2628)
+# ---------------------------------------------------------------------------
+class TestFlushOwnershipGuard:
+    """Deterministic acceptance for the ownership-enforcing flush guard.
+
+    Root cause: db ownership was a convention every call site was trusted to
+    re-derive correctly, and re-deriving it wrong was silent. #2606 replaced the
+    ``gw{N} -> db{N+1}`` rule with an flock claim but two call sites never got
+    the memo, so they began flushing databases owned by other live pytest
+    processes. The victim was whichever process held that slot at that moment,
+    which is why the unit suite's failure set changed between identical runs.
+
+    The fix is enforcement at the point of damage: a flush against a db this
+    process has not claimed raises at its own line.
+    """
+
+    def test_guard_intercepts_a_flush_aimed_at_a_live_holders_slot(self, monkeypatch, tmp_path):
+        """THE binding measurement for writer 1, with a real competing owner.
+
+        A child process holds ``flock`` on slot 1, so slot 1 is demonstrably
+        another live process's — exactly the condition under which the old code
+        wiped a stranger's data. The flush is driven through a client stub with
+        no connection, so on **any** branch this test makes zero Redis contact.
+
+        Red on ``main`` is the ABSENCE of a ``RuntimeError``: the db-0-only
+        guard waves ``db=1`` through, the call falls into the real ``flushdb``
+        implementation, and the ``on_reach`` spy fires. Read the red output as
+        "the guard did not intercept", never as "a flush succeeded".
+        """
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        holder = TestPerProcessDbClaim._spawn_flock_holder(str(tmp_path), [1])
+        try:
+            mine = _db_claim.claim_test_db()
+            assert mine != 1, "precondition: the holder owns slot 1, not us"
+
+            def _reached():
+                pytest.fail("guard did not intercept: a flush reached the client layer")
+
+            # Deliberately the FIRST thing asserted, and phrased without any
+            # symbol this change introduces, so the red capture on `main` reports
+            # the defect itself rather than a missing import.
+            victim = _flush_probe_client(1, on_reach=_reached)
+            with pytest.raises(RuntimeError, match="has not claimed") as excinfo:
+                redis.Redis.flushdb(victim)
+
+            message = str(excinfo.value)
+            assert "db=1" in message, "the denial must name the attempted db"
+            assert "scratch_test_db" in message, "the denial must name the remedy"
+            assert 1 not in _db_claim.claimed_test_dbs()
+            assert str(sorted(_db_claim.claimed_test_dbs())) in message, (
+                "the denial must name the claimed set"
+            )
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+            self._close_all(fds)
+
+    @staticmethod
+    def _close_all(fds):
+        TestPerProcessDbClaim._close_fds(fds)
+
+    def test_guard_permits_a_flush_on_this_processs_own_db(self):
+        """The permitted half, against a REAL client on a genuinely owned db.
+
+        This is the flush the autouse ``redis_test_db`` fixture performs at
+        every test's setup and teardown, so denying it would error the whole
+        suite. The db comes from the claim API — the process holds an flock on
+        it, machine-wide.
+        """
+        client = redis.Redis(db=_db_claim.claim_test_db())
+        try:
+            assert client.flushdb() is True
+        finally:
+            client.close()
+
+    def test_flush_outside_the_pool_is_denied(self, monkeypatch, tmp_path):
+        """A db number outside ``[0..TEST_DB_POOL_MAX]`` is unowned like any other."""
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            _db_claim.claim_test_db()
+            with pytest.raises(RuntimeError, match="has not claimed"):
+                redis.Redis.flushdb(_flush_probe_client(99))
+        finally:
+            self._close_all(fds)
+
+    def test_db0_keeps_its_own_message(self):
+        """Ownership subsumes the db-0 rule, but db 0 keeps its 2026-06-03 message.
+
+        One wrapper, not two idioms: two independently-maintained flush guards
+        is how one of them drifts.
+        """
+        with pytest.raises(RuntimeError, match="db=0"):
+            redis.Redis.flushdb(_flush_probe_client(0))
+
+    def test_undeterminable_db_is_denied(self):
+        """A client whose ``connection_pool`` raises is treated as db 0 and denied.
+
+        Fail-closed: "I cannot tell which database this is" must never mean
+        "flush it".
+        """
+
+        class _Hostile:
+            @property
+            def connection_pool(self):
+                raise RuntimeError("no pool for you")
+
+            def execute_command(self, *args, **kwargs):
+                pytest.fail("guard did not intercept an undeterminable client")
+
+        with pytest.raises(RuntimeError, match="db=0"):
+            redis.Redis.flushdb(_Hostile())
+
+    def test_flushall_is_denied_regardless_of_ownership(self):
+        """``flushall`` ignores the selected db and wipes every one, including
+        production, so ownership cannot license it."""
+        with pytest.raises(RuntimeError, match="flushall"):
+            redis.Redis.flushall(_flush_probe_client(_db_claim.claim_test_db()))
+
+    def test_empty_claimed_set_denies_rather_than_permits(self, monkeypatch, tmp_path):
+        """Fail-closed on empty is the whole point.
+
+        After the session-start claim the only processes that can observe an
+        empty set are the xdist controller (which runs no tests) and the window
+        before ``pytest_configure``, so this denies nothing legitimate.
+        """
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            assert _db_claim.claimed_test_dbs() == frozenset()
+            with pytest.raises(RuntimeError, match="has not claimed"):
+                redis.Redis.flushdb(_flush_probe_client(3))
+        finally:
+            self._close_all(fds)
+
+
+# ---------------------------------------------------------------------------
+# Test F — session-start claim and the popoto repoint (writer 3, #2628)
+# ---------------------------------------------------------------------------
+class TestSessionClaimHook:
+    """``pytest_configure`` establishes the claim before any fixture runs.
+
+    Claiming lazily in the autouse ``redis_test_db`` fixture leaves a real
+    "owns nothing yet" state that a test can observe — and popoto's bundled
+    plugin does observe it, because its autouse ``_popoto_flush_db`` sets up
+    BEFORE ``redis_test_db`` and flushes on every test. The state is designed
+    out rather than excused.
+
+    Every case here drives the hook with a stub config. A nested real pytest run
+    would claim further flock slots from the same 15-slot machine-global pool
+    the outer suite is using, which under the fail-hard exhaustion policy makes
+    the test contention-dependent — a new source of run-to-run variation inside
+    the change that exists to remove it.
+    """
+
+    @staticmethod
+    def _stub_config(*, worker: bool, numprocesses):
+        config = types.SimpleNamespace(option=types.SimpleNamespace(numprocesses=numprocesses))
+        if worker:
+            config.workerinput = {"workerid": "gw0"}
+            config.workeroutput = {}
+        return config
+
+    def test_controller_claims_nothing(self, monkeypatch, tmp_path):
+        """The xdist controller runs no tests and must never burn a pool slot.
+
+        It would hold one of only 15 machine-global slots for the entire
+        session, raising a 10-worker run's demand to 11 in the same change that
+        makes exhaustion fatal.
+        """
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
+        try:
+            _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=2))
+            assert _db_claim._CLAIMED_TEST_DB is None
+            assert _db_claim.claimed_test_dbs() == frozenset()
+            assert "POPOTO_TEST_DB" not in os.environ
+        finally:
+            TestPerProcessDbClaim._close_fds(fds)
+
+    def test_worker_claims_and_exports_popoto_test_db(self, monkeypatch, tmp_path):
+        """A worker claims, and points popoto's plugin at the same db."""
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
+        try:
+            config = self._stub_config(worker=True, numprocesses=4)
+            _conftest.pytest_configure(config)
+            db = _db_claim._CLAIMED_TEST_DB
+            assert db is not None
+            assert os.environ["POPOTO_TEST_DB"] == str(db)
+            assert config.workeroutput["test_db"] == db
+        finally:
+            TestPerProcessDbClaim._close_fds(fds)
+
+    def test_n0_master_claims(self, monkeypatch, tmp_path):
+        """Under ``-n0`` the master runs the tests, so it must claim.
+
+        The ``numprocesses`` branch is load-bearing: without it a ``-n0`` run
+        claims nothing and the fail-closed guard denies every flush.
+        """
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
+        try:
+            _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=0))
+            assert _db_claim._CLAIMED_TEST_DB is not None
+            assert os.environ["POPOTO_TEST_DB"] == str(_db_claim._CLAIMED_TEST_DB)
+        finally:
+            TestPerProcessDbClaim._close_fds(fds)
+
+    def test_popoto_plugin_targets_this_processs_claimed_db(self):
+        """THE binding measurement for writer 3.
+
+        popoto ships a ``pytest11`` plugin that this repo loads on every run.
+        Left on its default it sits on db 15 — the top slot of the claim pool —
+        and its autouse ``_popoto_flush_db`` flushes that db before EVERY test
+        in EVERY pytest process on the machine. It is by a wide margin the
+        highest-frequency writer, and it lives in installed library code where
+        no review of ``tests/`` can see it.
+
+        Asserted on the environment rather than on ``POPOTO_REDIS_DB``: inside a
+        test body the autouse ``redis_test_db`` fixture has already replaced
+        that client with one on the claimed db, so reading it here would measure
+        this repo's own fixture and pass on ``main`` too. ``POPOTO_TEST_DB`` is
+        the plugin's own documented resolution input, and it is unset on
+        ``main`` — which is the red state.
+
+        The ``== claim_test_db()`` form is the drift detector: if a future
+        popoto changes its resolution order, this fails loudly instead of the
+        suite silently resuming its rotation.
+        """
+        assert os.environ.get("POPOTO_TEST_DB") == str(_db_claim.claim_test_db())
+
+    def test_client_ownership_check_skips_the_none_async_client(self, monkeypatch):
+        """``_POPOTO_ASYNC_REDIS_DB`` is ``None`` when a session fixture can see it.
+
+        ``None`` is its CORRECT state — the plugin nulls it at both setup and
+        teardown of every test so no client binds to a stale event loop.
+        Dereferencing it would raise ``AttributeError`` inside a session-scoped
+        autouse fixture, erroring every test in the process during setup.
+        """
+        import popoto.redis_db as rdb
+
+        monkeypatch.setattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None, raising=False)
+        gen = _conftest._popoto_client_ownership_check.__wrapped__(_popoto_test_db=None)
+        next(gen)
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    def test_every_live_popoto_client_sits_on_a_claimed_db(self):
+        """The plugin-agnostic half: whatever clients ``popoto.redis_db`` holds,
+        each points at a db this process owns.
+
+        This catches any future ``pytest11`` plugin that swaps the popoto
+        globals, not just this popoto version — a class no static review of
+        ``tests/`` can reach, because the code lives in site-packages.
+        """
+        import popoto.redis_db as rdb
+
+        claimed = _db_claim.claimed_test_dbs()
+        for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)):
+            if client is None:
+                continue
+            assert client.connection_pool.connection_kwargs.get("db", 0) in claimed
+
+    def test_subprocess_env_does_not_leak_popoto_test_db(self):
+        """A nested pytest child claims its OWN slot, so it must not inherit ours.
+
+        The mirror image of the ``REDIS_URL`` rule: that one is shared on
+        purpose so a child reads the parent's db, while ``POPOTO_TEST_DB`` is
+        read only by popoto's pytest plugin — i.e. only by a nested pytest run,
+        which would then point its per-test flush at the parent's database.
+        """
+        env = _db_claim.subprocess_env()
+        # Asserted on a precomputed boolean: a bare ``in env`` renders the whole
+        # child environment into the failure report, and that environment
+        # carries real credentials.
+        leaked = "POPOTO_TEST_DB" in env
+        assert not leaked, "a nested pytest child must claim its own db, not inherit ours"
+        assert env["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")
+        assert _db_claim.subprocess_env(POPOTO_TEST_DB="7")["POPOTO_TEST_DB"] == "7"
+
+
+# ---------------------------------------------------------------------------
+# Test G — run provenance (#2628)
+# ---------------------------------------------------------------------------
+class TestRunProvenance:
+    """Each process reports which db it owned, so the next investigation starts
+    from a log line instead of a fresh recon."""
+
+    def test_worker_writes_its_claim_to_workeroutput(self, monkeypatch, tmp_path):
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            config = TestSessionClaimHook._stub_config(worker=True, numprocesses=4)
+            _conftest.pytest_configure(config)
+            assert config.workeroutput["test_db"] == _db_claim._CLAIMED_TEST_DB
+        finally:
+            TestPerProcessDbClaim._close_fds(fds)
+
+    def test_controller_surfaces_every_workers_claim(self):
+        """xdist discards worker headers, so the controller renders the collected
+        values instead."""
+        line = _conftest._format_test_db_provenance(
+            [{"worker": "gw0", "test_db": 3}, {"worker": "gw1", "test_db": 7}]
+        )
+        assert "gw0=db3" in line
+        assert "gw1=db7" in line
+
+    def test_provenance_line_is_empty_when_nothing_was_collected(self):
+        assert _conftest._format_test_db_provenance([]) == ""
+
+    def test_report_header_never_claims(self, monkeypatch, tmp_path):
+        """The header hook reads the already-claimed value; it never claims.
+
+        ``pytest_report_header`` also runs in the controller, so calling
+        ``claim_test_db()`` here would burn a pool slot for a process that runs
+        no tests — the same rule as the ``pytest_configure`` controller branch,
+        because it is a property of the process, not of any one hook.
+        """
+        fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            header = _conftest.pytest_report_header(
+                TestSessionClaimHook._stub_config(worker=False, numprocesses=0)
+            )
+            assert "db=None" in header, "the header must not trigger a claim"
+            assert _db_claim._CLAIMED_TEST_DB is None
+            assert (
+                _conftest.pytest_report_header(
+                    TestSessionClaimHook._stub_config(worker=False, numprocesses=4)
+                )
+                is None
+            ), "the controller owns no db and reports none"
+        finally:
+            TestPerProcessDbClaim._close_fds(fds)
+
+
+# ---------------------------------------------------------------------------
+# Test H — module-reload registry leak (writer 2, #2628)
+# ---------------------------------------------------------------------------
+class TestReloadedRegistryIdentity:
+    """A reload orphans more than exception classes.
+
+    ``importlib.reload(agent.index_drift)`` rebinds ``DRIFT_COVERED_MODELS`` to
+    a brand-new dict and re-runs the registrations into it, while any module
+    that bound the name at import time keeps the old one. A restore fixture
+    holding the orphan then snapshots and restores the STALE dict while the test
+    writes into the LIVE one: the cleanup silently no-ops and a fake in-memory
+    model stays registered for the rest of that worker. ``--dist=loadfile``
+    decides whether the reloader and the victim share a worker, so the damage
+    lands only some runs — the same rotate-run-to-run signature as the flush
+    writer, on a path no db-ownership rule can touch.
+    """
+
+    def test_reload_leaves_the_registry_identity_intact(self):
+        """THE binding measurement for writer 2. Red on ``main``."""
+        import importlib
+
+        from agent import index_drift
+
+        original_registry = index_drift.DRIFT_COVERED_MODELS
+        before = set(index_drift.covered_model_names())
+        _conftest._snapshot_shared_identity()
+        try:
+            importlib.reload(index_drift)
+            assert index_drift.DRIFT_COVERED_MODELS is not original_registry, (
+                "precondition: the reload must have orphaned the registry"
+            )
+
+            repairs = _conftest._repair_shared_identity()
+
+            assert "DRIFT_COVERED_MODELS" in repairs.get("agent.index_drift", [])
+            assert index_drift.DRIFT_COVERED_MODELS is original_registry
+            assert set(index_drift.covered_model_names()) == before
+        finally:
+            index_drift.DRIFT_COVERED_MODELS = original_registry
+
+    def test_registry_restore_fixture_survives_a_reload(self):
+        """The victim's cleanup must not be defeated by someone else's reload.
+
+        Registering through the module object means the restore fixture and the
+        registration write to the same dict even when a reload has swapped it,
+        so no ``FakeCoveredModel`` is stranded for the rest of the worker.
+        """
+        import importlib
+
+        from agent import index_drift
+
+        original_registry = index_drift.DRIFT_COVERED_MODELS
+        before = set(index_drift.covered_model_names())
+        _conftest._snapshot_shared_identity()
+        try:
+            snapshot = dict(index_drift.DRIFT_COVERED_MODELS)  # what restore_registry captures
+            importlib.reload(index_drift)
+            index_drift.register_drift_model(
+                index_drift.ModelDriftSpec(
+                    name="FakeCoveredModel",
+                    model_loader=lambda: None,
+                )
+            )
+            # The restore, written the way the coverage test writes it: through
+            # the MODULE, so it reaches whichever dict is live.
+            index_drift.DRIFT_COVERED_MODELS.clear()
+            index_drift.DRIFT_COVERED_MODELS.update(snapshot)
+
+            _conftest._repair_shared_identity()
+
+            assert "FakeCoveredModel" not in index_drift.covered_model_names(), (
+                "a fake in-memory model was stranded in the live registry"
+            )
+            assert set(index_drift.covered_model_names()) == before
+        finally:
+            index_drift.DRIFT_COVERED_MODELS = original_registry
+            index_drift.DRIFT_COVERED_MODELS.clear()
+            index_drift.DRIFT_COVERED_MODELS.update(
+                {name: spec for name, spec in original_registry.items()}
+            )

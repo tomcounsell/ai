@@ -54,15 +54,20 @@ def _raw_client(popoto_client):
 
     Pub/sub is server-global, so the db number is irrelevant for delivery; we
     reuse the popoto client's host/port/auth so the probe listens on the exact
-    Redis server the publish targets.
+    Redis server the publish targets. The db number comes from the claim API
+    rather than from ``connection_kwargs``: since the db is irrelevant here, the
+    only thing the choice decides is whether this client is pointed at a
+    database this process owns (#2628).
     """
     import redis
+
+    from tests.db_claim import claim_test_db
 
     kw = popoto_client.connection_pool.connection_kwargs
     return redis.Redis(
         host=kw.get("host", "localhost"),
         port=kw.get("port", 6379),
-        db=int(kw.get("db", 0) or 0),
+        db=claim_test_db(),
         username=kw.get("username"),
         password=kw.get("password"),
         decode_responses=False,
