@@ -1197,7 +1197,11 @@ class TestSessionClaimHook:
         which would then point its per-test flush at the parent's database.
         """
         env = _db_claim.subprocess_env()
-        assert "POPOTO_TEST_DB" not in env
+        # Asserted on a precomputed boolean: a bare ``in env`` renders the whole
+        # child environment into the failure report, and that environment
+        # carries real credentials.
+        leaked = "POPOTO_TEST_DB" in env
+        assert not leaked, "a nested pytest child must claim its own db, not inherit ours"
         assert env["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")
         assert _db_claim.subprocess_env(POPOTO_TEST_DB="7")["POPOTO_TEST_DB"] == "7"
 
