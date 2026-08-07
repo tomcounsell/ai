@@ -2,7 +2,7 @@
 status: Ready
 type: bug
 revision_applied: true
-revision_applied_at: 2026-08-07T09:14:00Z
+revision_applied_at: 2026-08-07T08:44:52Z
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-07
@@ -68,7 +68,7 @@ time. Its `restore_registry` fixture (`:37-42`) then snapshots and restores the 
 no-ops and a fake in-memory model stays registered for the rest of the worker. `--dist=loadfile`
 assigns whole files to workers dynamically, so reloader and victim co-land only sometimes: the
 same rotate-run-to-run signature, on a path `flushdb` ownership cannot touch. The existing reload
-guard cannot see it — `tests/conftest.py:384` scopes `_SHARED_EXCEPTION_MODULES` to
+guard cannot see it — `tests/conftest.py:385` scopes `_SHARED_EXCEPTION_MODULES` to
 `("models.session_lifecycle",)` and `_snapshot_shared_exceptions` (`:391-401`) snapshots only
 `BaseException` subclasses; registry dicts, dataclasses, and enums fall outside it.
 
@@ -533,12 +533,24 @@ db allowlist.
   `tests/unit/test_conftest_isolation_guards.py:361`'s `divergent_db = 15 if base_test_db != 15
   else 14`, which is a bare literal that *invented* ownership rather than re-derived it. The
   primary leg is therefore an AST walk: visit every `ast.Call` whose func resolves to `Redis` or
-  `Redis.from_url` and inspect the `db=` keyword, flagging any value that is not a `Call` to
-  `claim_test_db`/`claim_scratch_test_db` or a `Name` bound from the `scratch_test_db`/
-  `redis_test_db` fixture, against an explicit `{path: reason}` allowlist. Scoping to the `db=`
+  `Redis.from_url` and inspect the `db=` keyword, flagging any value that is not (a) a `Call` to
+  `claim_test_db`/`claim_scratch_test_db`, (b) a `Name` whose nearest binding in the same function is
+  such a `Call` (one assignment hop), or (c) a fixture *parameter* named
+  `scratch_test_db`/`redis_test_db`. Scoping to the `db=`
   argument specifically keeps this inside the Rabbit Hole boundary — it is emphatically *not* the
   rejected blanket "no raw `redis.Redis()` in tests" lint, which would churn dozens of files. Keep
-  the `PYTEST_XDIST_WORKER`/`workerinput` grep as a cheaper second leg.
+  the `PYTEST_XDIST_WORKER`/`workerinput` grep as a cheaper second leg, and extend the walk to
+  `from_url` string literals (parse the trailing `/N`) so the `db=`-keyword scoping does not miss the
+  `redis://.../0` footgun `tests/conftest.py:97` names.
+- **The allowlist ships POPULATED, and the enforceable rule is a db bound, not a count**
+  (round-4 blocker 2). Five sites are structurally unconvertible because they test the db-0 guard
+  itself or assert nothing leaked into production db 0
+  (`tests/unit/test_redis_flush_guard.py`, `tests/integration/test_redis_models.py`,
+  `tests/_worker_guard.py`). The rule that protects the invariant is **"no allowlist entry may name
+  a db in `[1..TEST_DB_POOL_MAX]`"** — every entry must resolve to db 0, which is outside the claim
+  pool and already unconditionally denied by the flush guard. "The allowlist stays empty" was
+  unachievable and would have left Task 6 permanently red; this bound is enforceable and strictly
+  stronger where it matters.
 - **The guard must read the claimed set at call time.** `_install_redis_db0_flush_guard()` runs at
   conftest import (`tests/conftest.py:150`), long before any claim exists. The wrapper closure must
   call `db_claim.claimed_test_dbs()` on each invocation, never capture a snapshot.
@@ -591,6 +603,31 @@ db allowlist.
   `connection_pool.connection_kwargs["db"]` is in `claimed_test_dbs()`, failing with "a client is
   pointed at db N which this process has not claimed". Costs one assertion per session and catches
   any future plugin that swaps the popoto globals, not just this popoto version.
+  **Skip clients that do not exist — `_POPOTO_ASYNC_REDIS_DB` is `None` at every moment a
+  session-scoped fixture can observe it, and `None` is its correct state** (round-4 blocker 1).
+  `popoto/redis_db.py:97` initialises it to `None`; the plugin's `_popoto_reset_async` nulls it at
+  both setup and teardown of every test (`popoto/pytest_plugin.py:214,217`) precisely so a client is
+  never built in a sync setup context bound to the wrong event loop; `tests/conftest.py:612` captures
+  that `None` and `:639` restores it. Dereferencing it raises `AttributeError` inside a session-scoped
+  autouse fixture, which errors every test in the process in setup — the identical whole-suite-outage
+  shape as round-3 blocker 1. Write it as
+  `for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)):` with an
+  `if client is None: continue` guard before touching `connection_pool`. Never assert the async client
+  is non-`None`. Async coverage, if ever wanted, must be a *function*-scoped check running after the
+  test body where a lazily-built client may exist; the session-scoped fixture can only meaningfully
+  assert on `POPOTO_REDIS_DB`.
+- **The popoto fix must survive a popoto upgrade, and it does — by construction.** The `pytest11`
+  plugin discovery is this lane's highest-value finding, so the fix is deliberately sited at the
+  **connection/claim layer**, never at the installed plugin: (a) Task 2 exports `POPOTO_TEST_DB` from
+  this repo's own `pytest_configure`, which is a *public, documented* resolution input the plugin
+  reads (`popoto/pytest_plugin.py:138-150`, env > ini > default), not a monkeypatch of plugin
+  internals; (b) the plugin-agnostic session check above asserts on whatever clients
+  `popoto.redis_db` holds, whatever version put them there; (c) the Success Criterion
+  `POPOTO_REDIS_DB...["db"] == claim_test_db()` is a **drift detector**: if a future popoto changes
+  its resolution order or adds a client, that assertion fails loudly instead of the suite silently
+  resuming its rotation. Nothing in this plan patches, vendors, or edits installed popoto code, and
+  no task pins a popoto version. The upstream fix (making the plugin's flush honour an env-pinned db
+  by default) is recorded as an out-of-scope follow-up under No-Gos.
 
 ## Failure Path Test Strategy
 
@@ -607,7 +644,7 @@ db allowlist.
   into a whole-process setup outage under the fail-closed guard. Method: monkeypatch
   `_db_claim._test_db_claim_dir` to raise `OSError`, then assert
   `claim_test_db() in claimed_test_dbs()` and that `redis.Redis(db=that).flushdb()` does not raise.
-- [ ] `tests/conftest.py:110-113` `_db_of` — the `except Exception: return 0` that assumes the
+- [ ] `tests/conftest.py:113-115` `_db_of` — the `except Exception: return 0` that assumes the
   dangerous db when it cannot determine one. Under the new guard this must still deny, not allow:
   add a test with a client whose `connection_pool` raises, asserting `RuntimeError`.
 - [ ] No exception handlers are added by this change beyond those listed.
@@ -832,12 +869,22 @@ locking — but writing it as one step is what makes it true.
   gets its own issue rather than expanding this plan's scope. Three writers are in scope (unowned
   `flushdb`, unrestored module reload, popoto plugin's db-15 flush) and each has a deterministic
   proof; the soak is diagnostic, not a merge gate.
-- [ORDERED] Fixing the db-15 default **upstream in the popoto repo** (so no downstream consumer can
-  collide with a claim pool) is the more durable fix, but it needs a popoto release and a floor bump
-  here. This plan takes the downstream repoint (Task 7) because it lands in one commit and is fully
-  under this repo's control. File the upstream change separately if the collision recurs for another
-  consumer. Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s four `db == 15`
-  assertions belong to that upstream change, not to this one.
+- [SEPARATE-SLUG #2628] **Upstream popoto PR: make the bundled `pytest11` plugin's flush honour an
+  env-pinned db by default.** This is the more durable form of spike-4's fix — no downstream consumer
+  could then collide with a claim pool — and there is precedent for landing changes upstream (popoto
+  PR #518 is already in flight). It is deliberately **not built here**: it needs a popoto release plus
+  a floor bump in this repo, which is a different blast radius and a different merge cadence than a
+  pure-`tests/` PR. This plan takes the downstream repoint (Task 2), which lands in one commit, is
+  fully under this repo's control, and — critically — is **already popoto-upgrade-durable** on its
+  own: it drives the plugin through its documented `POPOTO_TEST_DB` resolution input and carries a
+  drift-detecting assertion, so a future popoto cannot silently re-open the hole. File the upstream
+  change as its own issue. Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s
+  four `db == 15` assertions belong to that upstream change, not to this one.
+- [SEPARATE-SLUG #2628] Consolidating the two owners of "which db popoto is on" — dropping
+  `redis_test_db`'s replace-and-repatch loop (`tests/conftest.py:616,626-628,640-641`) now that the
+  plugin's in-place `_swap_db` already covers submodule bindings. Deferred: `tests/conftest.py:631`
+  is what points `_POPOTO_ASYNC_REDIS_DB` at the test db in the sync setup phase, so removing the
+  fixture is a separate blast radius from this PR (round-4 concern 2).
 - [ORDERED] A general "no write on an unclaimed db" guard covering every mutating command rather
   than just `flushdb` (Resolved Question 2). Deferred: it costs a per-command wrapper on both sync
   and async clients paid by every test, and the AST recurrence guard already blocks *construction*
@@ -939,8 +986,11 @@ Not applicable — this repo has no external docs site.
   raises.
 - [ ] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
 - [ ] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
-  `flushdb()` on db 1 raises and `flushdb()` on the claimed db is permitted. ~1 s, deterministic,
-  red on `main`. Both outputs pasted into the PR body.
+  the guard **intercepts** a `flushdb` aimed at db 1 — proven against a `SimpleNamespace` client stub
+  carrying no connection, so no flush can reach an unowned db on any branch — and `flushdb()` on the
+  claimed db is permitted with a real client. ~1 s, deterministic. **Red on `main` means no
+  `RuntimeError` is raised** (the db-0-only guard does not intercept), never that a flush succeeded.
+  Both outputs pasted into the PR body.
 - [ ] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
   `covered_model_names()` unchanged and strands no `FakeCoveredModel`. Red on `main`. Output pasted
   into the PR body.
@@ -1046,7 +1096,7 @@ Not applicable — this repo has no external docs site.
   new `_CLAIMED_SCRATCH_DB` and `_CLAIM_FAILURE` — alongside the existing
   `fresh_fds` swap (`:486`), and return it beside `fresh_fds` so assertions can read it. Without
   this the claim tests mutate the live process-wide set: `test_claim_is_in_pool_idempotent_and_releasable`
-  (`:503-517`) calls `release_test_db_claim()` at `:513`, and `monkeypatch` cannot undo an in-place
+  (`:504-518`) calls `release_test_db_claim()` at `:514`, and `monkeypatch` cannot undo an in-place
   `.clear()` — so the real set is permanently emptied and every later test in that worker has its
   autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 3's fail-closed-on-empty
   rule, erroring in setup. The converse leak matters too: the other claim tests would otherwise
@@ -1128,6 +1178,33 @@ Not applicable — this repo has no external docs site.
   at db N which this process has not claimed". This catches *any* future `pytest11` plugin that swaps
   the popoto globals, not just this popoto version — the AST guard in Task 6 parses `tests/**/*.py`
   and is structurally blind to installed library code.
+- **Guard the `None` client — this is round-4 blocker 1 and it is a whole-suite outage if missed.**
+  `_POPOTO_ASYNC_REDIS_DB` is `None` at every moment a session-scoped fixture can observe it, and
+  `None` is its *correct* state: `popoto/redis_db.py:97` initialises it to `None`, the plugin's
+  `_popoto_reset_async` nulls it at both setup and teardown of every test
+  (`popoto/pytest_plugin.py:214,217`) so no client binds to the wrong event loop, and
+  `tests/conftest.py:612/639` captures and restores that `None`. Write the loop exactly as:
+  ```
+  import popoto.redis_db as rdb
+  for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)):
+      if client is None:
+          continue
+      db = client.connection_pool.connection_kwargs.get("db", 0)
+      assert db in claimed_test_dbs(), f"a client is pointed at db {db} which this process has not claimed"
+  ```
+  **Do NOT assert the async client is non-`None`.** An `AttributeError` here fires inside a
+  session-scoped autouse fixture and errors *every* test in the process during setup — the identical
+  shape as round-3 blocker 1. If async coverage is ever wanted it must be a **function**-scoped check
+  running after the test body, where a lazily-built client may exist; the session-scoped fixture can
+  only meaningfully assert on `POPOTO_REDIS_DB`.
+- **Add a regression test for the `None` case**: with `rdb._POPOTO_ASYNC_REDIS_DB` monkeypatched to
+  `None` (its normal state), the check passes rather than raising `AttributeError`.
+- **Durability across a popoto upgrade is a hard requirement, and this shape meets it.** The fix
+  lives at the connection/claim layer: `POPOTO_TEST_DB` is a public documented resolution input the
+  plugin already reads, the walk above asserts on whatever clients `popoto.redis_db` holds regardless
+  of version, and the `== claim_test_db()` criterion is the drift detector that fails loudly if a
+  future popoto changes its resolution order. **Never patch, vendor, or edit the installed plugin**,
+  and do not pin a popoto version to hold this behavior in place.
 - **Red-state proof, stated in ownership terms so it needs no unowned client** (round-3 concern 4):
   a test asserting
   `popoto.redis_db.POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] in claimed_test_dbs()`,
@@ -1186,10 +1263,50 @@ Not applicable — this repo has no external docs site.
   (`:445-470`) spawns a real child holding `flock(LOCK_EX|LOCK_NB)` on slot 1; `_reset_claim_state`
   (`:473-489`) redirects the registry at `tmp_path`; `_close_fds` (`:492-503`) is teardown;
   `test_claim_skips_slot_held_by_live_process` (`:556-568`) is the structural precedent. The case:
-  hold slot 1 → `claim_test_db()` (returns something != 1) → assert `redis.Redis(db=1).flushdb()`
-  raises → assert `redis.Redis(db=<mine>).flushdb()` is permitted. Runs in ~1 s; **red on `main`**
-  (the existing guard at `tests/conftest.py:117-129` rejects only `db == 0`), green on the branch.
-  This is the plan's pass condition — capture both outputs into the PR body.
+  hold slot 1 → `claim_test_db()` (returns something != 1) → **deny half** (see below) → **permit
+  half**: `redis.Redis(db=<mine>).flushdb()` succeeds, a real flush against a db this process
+  demonstrably owns. Runs in ~1 s. This is the plan's pass condition — capture both outputs into the
+  PR body.
+- **The deny half MUST NOT construct a client on db 1, and MUST NOT reach Redis — on any branch**
+  (round-4 blocker 3, the loudest finding of the round). An earlier draft asserted that
+  `redis.Redis(db=1).flushdb()` raises. On `main` the guard rejects only `db == 0`
+  (`tests/conftest.py:117-129`), so that call **does not raise — it executes**, and
+  `_reset_claim_state` redirects only the *lock registry* to `tmp_path` (`:483`); the Redis server
+  and its db numbering are untouched. Spike-3 records slots 1-10 routinely held by live siblings, so
+  capturing the red state would have performed the exact cross-process wipe this plan exists to
+  eliminate. Issue #2645 is this precise failure class. It is also the literal-unowned-db
+  construction that round-3 concern 4 deleted from the plan for three stated reasons — offender
+  shape, AST-guard rejection, writes to a db this process does not own — none of which had been
+  applied to the plan's own most load-bearing test.
+- **Adopted shape: assert the guard INTERCEPTS, driven through a client-layer stub.** The guard reads
+  only `_db_of(client)`, which touches `client.connection_pool.connection_kwargs`
+  (`tests/conftest.py:110-115`), so no real client is needed to exercise the deny path:
+  ```
+  victim = SimpleNamespace(
+      connection_pool=SimpleNamespace(connection_kwargs={"db": 1}),
+      execute_command=lambda *a, **k: pytest.fail(
+          "guard did not intercept: a flush reached the client layer"
+      ),
+  )
+  with pytest.raises(RuntimeError, match="has not claimed"):
+      redis.Redis.flushdb(victim)
+  ```
+  The stub carries **no socket and no connection**, so there is no code path — on `main`, on the
+  branch, or in any intermediate repo state — by which a flush can reach db 1 or any other database
+  this process does not own. The `execute_command` spy is a second, independent backstop: if a future
+  refactor made the guard fall through, the test fails loudly instead of flushing.
+- **Red-on-`main` is inverted accordingly: the failure is that NO `RuntimeError` is raised.** On
+  `main` the guard sees `db == 1`, waves it through, and the call falls into the real `flushdb`
+  implementation, which cannot operate on the stub — so `pytest.raises(RuntimeError)` fails (it sees
+  the spy's `pytest.fail`, or an `AttributeError`, not the guard's `RuntimeError`). That failure *is*
+  the red state, and it is the honest one: on `main` the guard does not intercept. State it that way
+  in the test's docstring and in the PR body, so nobody re-reads the red output as "a flush
+  succeeded" and re-introduces a real one.
+- **No throwaway-server or "safe db number" variant is needed or wanted.** The pool is `[1..15]` and
+  db 0 is production, so there is no safe number; the stub removes the question entirely rather than
+  answering it. (A `REDIS_PORT=6399` throwaway server keyed through the claim registry at
+  `tests/db_claim.py:70-71` was the alternative on record; it is rejected here as a second server to
+  operate for no additional coverage.)
 
 ### 4. Correct the two stale call sites, and move the live-network test out of the unit suite
 - **Task ID**: build-callsites
@@ -1265,11 +1382,46 @@ Not applicable — this repo has no external docs site.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - **Primary leg — AST walk.** Parse every `tests/**/*.py`; for each `ast.Call` whose func resolves
-  to `Redis` or `Redis.from_url`, inspect the `db=` keyword. Permit only: a `Call` to
-  `claim_test_db`/`claim_scratch_test_db`, or a `Name` bound from the `scratch_test_db`/
-  `redis_test_db` fixture. Everything else fails, against an explicit `{path: reason}` allowlist so
-  an addition is a conscious act. Scoping to the `db=` argument is what keeps this inside the
-  Rabbit Hole boundary — it is not the rejected blanket no-raw-client lint.
+  to `Redis` or `Redis.from_url`, inspect the `db=` keyword. Scoping to the `db=` argument is what
+  keeps this inside the Rabbit Hole boundary — it is not the rejected blanket no-raw-client lint.
+- **Permit list, stated precisely enough to be buildable** (round-4 blocker 2). A `db=` value passes
+  when it is:
+  - (a) a `Call` to `claim_test_db` / `claim_scratch_test_db`; **or**
+  - (b) a `Name` whose nearest binding **within the same function** is such a `Call` — resolve
+    exactly **one assignment hop**. This is what covers `tests/conftest.py:615,631` (`db=test_db`,
+    where `test_db = claim_test_db()` is bound at `:608`), which the round-3 wording ("a `Name` bound
+    from a fixture") did not; **or**
+  - (c) a fixture **parameter** named `scratch_test_db` / `redis_test_db`.
+
+  Everything else fails.
+- **Seed the allowlist — it is POPULATED in this PR, not empty.** The round-3 "starts empty and stays
+  empty" rule was unbuildable: five sites are structurally unconvertible because they are *testing the
+  db-0 guard itself* and must use a literal `0`. Ship an explicit `{path: reason}` map with these
+  entries and no others:
+
+  | Path | Reason |
+  |---|---|
+  | `tests/unit/test_redis_flush_guard.py` | `:28`, `:40`, `:62`, `:69` construct `redis.Redis(db=0)` / `aioredis.Redis(db=0)`; the db-0 guard's own tests must name db 0 literally |
+  | `tests/integration/test_redis_models.py` | `:695-697` opens `db=0` read-only to assert no test data leaked into production |
+  | `tests/_worker_guard.py` | `:91` reads worker registrations that intentionally live on production `db=0` |
+
+  `tests/unit/test_conftest_isolation_guards.py:298,398` and `tests/conftest.py:615,631` get **no**
+  entry — permit rule (b) covers them once one assignment hop is resolved, and Task 4 converts
+  `:361/365` to the `scratch_test_db` fixture (rule (c)).
+- **Replace "the allowlist stays empty" with an enforceable property.** The rule that actually
+  protects the invariant is: **no allowlist entry may name a db in `[1..TEST_DB_POOL_MAX]`.** Assert
+  it mechanically — every allowlisted site must resolve to db 0, which is outside the claim pool and
+  already covered by the unconditional db-0 branch of the flush guard. An entry for a pool slot is
+  the thing that would re-open the bug; an entry for db 0 cannot.
+- **Extend the walk to `from_url` string literals — the `db=` keyword alone is blind to the other
+  footgun.** `redis.Redis.from_url("redis://localhost:6379/0")` is live at
+  `tests/unit/test_redis_flush_guard.py:34` and `tests/unit/test_agent_session.py:690,782`, and
+  `tests/conftest.py:97` names it in the same breath as the `db=0` footgun. Cover `Redis.from_url`
+  and `ConnectionPool.from_url` string-literal arguments by parsing the trailing `/N` path segment
+  and applying the same rule. All three current sites resolve to db 0; `test_agent_session.py` joins
+  the allowlist with the same "asserts nothing leaks to production db 0" reason if the sites are not
+  otherwise converted. Non-literal `from_url` arguments (an f-string or a `Name`) are out of the
+  walk's reach — say so in the code comment rather than pretending coverage.
 - **Second leg — the cheap grep.** Keep the `PYTEST_XDIST_WORKER`/`workerinput` derivation check as
   a fast secondary assertion.
 - **Third derivation route.** Also reject `db=` values sourced from
@@ -1286,11 +1438,19 @@ Not applicable — this repo has no external docs site.
   client-ownership check is the runtime counterpart that covers that class; the two are a pair and
   the comment on each must name the other, so a future reader does not assume the AST walk is
   complete.
-- **The allowlist starts empty and stays empty in this PR.** No task in this plan writes a
-  `redis.Redis(db=<literal>)`; in particular Task 2's popoto proof is stated as an ownership
-  assertion precisely so it needs no allowlist entry (round-3 concern 4).
-- **Red-state proof**: it must fail on `main` on *both* offenders. Capture that output — a
-  recurrence guard that has never been seen red is not known to work.
+- **No task in this plan adds an allowlist entry for a pool slot.** The seeded entries are all db 0
+  (see the table above). Task 2's popoto proof remains stated as an ownership assertion precisely so
+  it needs no entry (round-3 concern 4), and Task 3's deny-path proof uses a `SimpleNamespace` with
+  no client at all (round-4 blocker 3), so neither adds one either.
+- **Red-state proof**: it must fail on `main` on *both* offenders (`_own_test_db`'s worker-id
+  derivation and `divergent_db = 15`) while the seeded allowlist is in place — i.e. the guard is red
+  on the real defects and green on the db-0 exemptions in the same run. Capture that output: a
+  recurrence guard that has never been seen red is not known to work, and one that is red on
+  everything is not known to be usable.
+- **Green-state gate.** Before this task is done, the guard must run clean over `tests/**/*.py` on
+  the branch with the seeded allowlist. A guard that cannot go green blocks the PR, so treat any
+  residual red site as either a Task 4 conversion or a reasoned db-0 allowlist entry — never as a
+  reason to widen the allowlist to a pool slot.
 
 ### 7. Close the second rotation writer: module-reload registry leak
 - **Task ID**: build-reload-restore
@@ -1308,7 +1468,7 @@ Not applicable — this repo has no external docs site.
   `register_drift_model` call sites to go through the *module* object, not the collection-time
   `from agent.index_drift import ...` names, so a fixture can never restore an orphaned dict while
   the test writes to the live one.
-- Widen the conftest reload guard: `tests/conftest.py:384` currently scopes
+- Widen the conftest reload guard: `tests/conftest.py:385` currently scopes
   `_SHARED_EXCEPTION_MODULES` to `("models.session_lifecycle",)` and `_snapshot_shared_exceptions`
   (`:391-401`) snapshots only `BaseException` subclasses. Extend it to snapshot module-level
   registry objects (dicts, classes, enums) for `agent.index_drift` and `monitoring.bridge_watchdog`.
@@ -1372,13 +1532,31 @@ Not applicable — this repo has no external docs site.
   rotation writer. Each runs in ~1 s and reproduces a real competing writer deterministically.
   Also confirm Task 2's controller/`-n0` stub-config tests and Task 5's second-call-returns-fast
   test, which are the round-3 blocker regressions.
-- **Record the accepted baseline failure set before asserting anything about the full suite.** Run
-  `tests/unit/` once on `main` at the branch point and once on the branch, and write **the failing
-  node ids** (names, never a count) into the PR body. The gate is "no failure on the branch outside
-  the recorded `main` baseline, **and zero setup-phase errors**" — not exit 0. Exit 0 is unachievable
-  by construction: issue #2628's premise is that `main`'s suite has a non-empty failure set, and
-  nothing in this plan claims to fix those underlying failures, only to stop the set rotating. A gate
-  that cannot pass is a gate that gets waived, and a waived gate certifies nothing.
+- **Capturing the red state must not flush a db this process does not own — verify this before
+  running anything on `main`** (round-4 blocker 3). Task 3's deny half is asserted against a
+  `SimpleNamespace` stub with no connection, so the `main`-side capture makes **zero** Redis contact
+  on the deny path; its red signal is the *absence* of a `RuntimeError`, not a successful flush.
+  Before capturing, grep the new tests for any `redis.Redis(db=` whose argument is not
+  `claim_test_db()`/`claim_scratch_test_db()` — there must be none. No throwaway server, and no
+  "safe db number", is required or permitted: the pool is `[1..15]` and db 0 is production.
+- **The `main` baseline is RECORDED — do not re-derive it.** Full `tests/unit/` on `main` at commit
+  `d5539cb7f`, via `scripts/pytest-clean.sh`, run **without** quiescence:
+
+  > **12075 passed, 1 skipped, 0 failed, 0 errors, 699.19s** — 15:15–15:27 local, 2026-08-07.
+
+  **Caveat, non-optional, and it travels with the number wherever the number goes:** a green run does
+  **not** show the rotation is fixed. It shows the failure set was *empty on that run*. The popoto
+  writer needs a second live pytest process holding the victim slot **at the moment of the flush** to
+  do damage, and the degree of genuine concurrent load inside that 12-minute window is
+  **UNVERIFIED**. Do not cite this run as evidence of a fix, before or after the branch lands. The
+  binding evidence is and remains the ~1 s adversarial flock-holder tests, red on `main` and green on
+  the branch.
+- **Because the recorded baseline failure set is EMPTY, the gate simplifies to "zero failures and
+  zero setup-phase errors"** on the branch run. This is strictly stronger than the round-2
+  "every branch failure appears in the recorded `main` baseline" formulation *and* it is now
+  achievable, so it removes the waiver risk that motivated the weaker wording. Still record the
+  branch run's failing node ids (names, never counts) in the PR body — if the count is non-zero the
+  names are what triage starts from.
 - The absence of setup-phase errors is the specific signal that matters for Risk 1: a legitimate flush
   denied by the new guard surfaces as an *error in setup*, not as an assertion failure, so it is
   cleanly separable from the pre-existing baseline. Verify
@@ -1397,7 +1575,8 @@ gone, gave 12075 passed / 0 failed. **These runs were mostly quiesced and are th
 consistent with the bug still being present**: every mechanism in this plan requires a *second live
 pytest process* holding the victim slot, and under quiescence no such process exists. Clean quiesced
 runs are exactly what Risk 4 predicts and are **not** evidence that the rotation is fixed. They are
-recorded here only as a useful `main` baseline candidate for the comparison above. This plan does not
+superseded as the baseline of record by the `d5539cb7f` run above and are kept only as corroboration
+that a clean `main` run is unremarkable rather than surprising. This plan does not
 touch `tests/unit/test_recovery_respawn_safety.py` and neither duplicates nor contradicts
 `358da4fb5`.
 
@@ -1424,7 +1603,7 @@ touch `tests/unit/test_recovery_respawn_safety.py` and neither duplicates nor co
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| No regression against the recorded baseline | `scripts/pytest-clean.sh tests/unit/ -q` on `main` at the branch point, then on the branch; diff the failing node ids | Every branch failure appears in the recorded `main` baseline, **and zero setup-phase errors**. NOT exit 0 — #2628's premise is that `main`'s suite already fails, so an exit-0 gate is unachievable and would be waived (see Task 9) |
+| No regression against the recorded baseline | `scripts/pytest-clean.sh tests/unit/ -q` on the branch (the `main` baseline is already recorded — do NOT re-run it) | **Zero failures and zero setup-phase errors.** The recorded `main` baseline at `d5539cb7f` is 12075 passed / 1 skipped / 0 failed / 0 errors / 699.19s, so the failure set to match is empty and the gate is achievable as stated. Record the branch run's failing node ids (names, never counts) in the PR body. A green run does **not** prove the rotation is fixed — see the caveat in Task 9 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Flush guard denies unclaimed db | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
@@ -1467,7 +1646,7 @@ via `config.workeroutput` — are sound. Round 2 found one new blocker.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | **Task 1 extends `release_test_db_claim()` to clear `_CLAIMED_DB_NUMS` but does not rebind that set in `_reset_claim_state`, so the claim tests corrupt the real process-wide set.** `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) deliberately swaps in a *fresh list* for `_CLAIM_LOCK_FDS` (`:486`) precisely so tests cannot mutate the live one; Task 1 adds only a `wait_s` parameter alongside `pool_max` and leaves the new number set bound to the live module object. `monkeypatch` cannot undo an in-place `.clear()`. Certain failure: `test_claim_is_in_pool_idempotent_and_releasable` (`:503-517`) calls `release_test_db_claim()` at `:513`, permanently emptying the real `_CLAIMED_DB_NUMS`; every subsequent test in that worker then has its autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty rule and errors in setup. Conversely the other claim tests leak `tmp_path` slot numbers into the real set, making the guard *permit* flushes on unowned dbs. Under `--dist=loadfile` which worker is hit varies per run — the fix would ship with a rotating failure set of its own, reintroducing the exact bug this plan exists to kill. | ✅ RESOLVED | Task 1 now carries a dedicated bullet: `_reset_claim_state` must `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)` (and the same for the new `_CLAIMED_SCRATCH_DB`), mirroring the `fresh_fds` treatment of `_CLAIM_LOCK_FDS` at `:486`, and return the fresh set beside `fresh_fds` so assertions can read it. A Task 1 test asserts that a claim/release cycle performed inside `_reset_claim_state` leaves the real process-wide `_CLAIMED_DB_NUMS` untouched. |
+| BLOCKER | Risk & Robustness | **Task 1 extends `release_test_db_claim()` to clear `_CLAIMED_DB_NUMS` but does not rebind that set in `_reset_claim_state`, so the claim tests corrupt the real process-wide set.** `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) deliberately swaps in a *fresh list* for `_CLAIM_LOCK_FDS` (`:486`) precisely so tests cannot mutate the live one; Task 1 adds only a `wait_s` parameter alongside `pool_max` and leaves the new number set bound to the live module object. `monkeypatch` cannot undo an in-place `.clear()`. Certain failure: `test_claim_is_in_pool_idempotent_and_releasable` (`:504-518`) calls `release_test_db_claim()` at `:514`, permanently emptying the real `_CLAIMED_DB_NUMS`; every subsequent test in that worker then has its autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty rule and errors in setup. Conversely the other claim tests leak `tmp_path` slot numbers into the real set, making the guard *permit* flushes on unowned dbs. Under `--dist=loadfile` which worker is hit varies per run — the fix would ship with a rotating failure set of its own, reintroducing the exact bug this plan exists to kill. | ✅ RESOLVED | Task 1 now carries a dedicated bullet: `_reset_claim_state` must `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)` (and the same for the new `_CLAIMED_SCRATCH_DB`), mirroring the `fresh_fds` treatment of `_CLAIM_LOCK_FDS` at `:486`, and return the fresh set beside `fresh_fds` so assertions can read it. A Task 1 test asserts that a claim/release cycle performed inside `_reset_claim_state` leaves the real process-wide `_CLAIMED_DB_NUMS` untouched. |
 | CONCERN | Scope & Value | Task 2's `scratch_test_db` fixture has no declared scope or memoization, while `claim_scratch_test_db()` claims an *additional* pool slot per call and Task 1 gives it no release path. A function-scoped, non-memoized fixture therefore consumes a fresh slot for every test that requests it and never returns any, walking a 15-slot pool monotonically toward Task 4's new fail-hard `RuntimeError`. | ✅ RESOLVED | `scratch_test_db` is now declared `scope="session"` in Task 2, and Task 1 memoizes `claim_scratch_test_db()` behind a `_CLAIMED_SCRATCH_DB` module global mirroring `_CLAIMED_TEST_DB`. One scratch slot per process, held for the session, released by `release_test_db_claim()` at session end. A Task 1 test asserts N sequential `claim_scratch_test_db()` calls consume one slot, not N. The rationale is also recorded in Technical Approach. |
 | CONCERN | Scope & Value | Verification row 1 asserts `scripts/pytest-clean.sh tests/unit/ -q` exits 0, but the premise of issue #2628 is that `tests/unit/` on `main` has a non-empty (and rotating) failure set. Nothing in this plan claims to fix the underlying test failures — only to stop them rotating — so an exit-0 gate is unachievable and will be waived under pressure at validation time, which is how a gate stops meaning anything. | ✅ RESOLVED | Verification row 1 is restated as a baseline diff: run `tests/unit/` on `main` at the branch point and on the branch, record the failing **node ids** (never a count) in the PR body, and gate on "every branch failure appears in the recorded `main` baseline, and zero setup-phase errors." The row explicitly says NOT exit 0, with the reason, so it cannot be quietly reinterpreted. Task 9 carries the matching instruction and notes that a denied legitimate flush surfaces as a *setup error*, which is what makes it separable from the pre-existing baseline. |
 | NIT | History & Consistency | Two Verification rows expect "match count == 0" from `grep -c`, which exits 1 on zero matches. As written a mechanical runner reads the row as a failure. | ✅ RESOLVED | Both rows (and the `xfail` row, which had the same defect) now append `\|\| true` and state that the printed count, not the exit code, is what is judged. |
@@ -1583,13 +1762,13 @@ performs the very cross-process wipe the plan exists to prevent when it is captu
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | **Task 2's plugin-agnostic client-ownership check dereferences `_POPOTO_ASYNC_REDIS_DB`, which is `None` at every moment a session-scoped fixture can observe it.** `popoto/redis_db.py:97` initialises it to `None`; the plugin's `_popoto_reset_async` sets it to `None` at every test's setup AND teardown (`popoto/pytest_plugin.py:214,217`) and its docstring (`:208-212`) states the client is deliberately NOT pre-created because a client built in the sync setup context binds to the wrong event loop; `tests/conftest.py:612` captures that `None` as `original_async` and restores it at `:639`. Asserting `client.connection_pool.connection_kwargs["db"]` on `None` raises `AttributeError` inside a session-scoped autouse fixture, erroring EVERY test in the process in setup — the identical whole-suite-outage shape as round-3 blocker 1. | pending | Iterate only over clients that exist: `for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)): if client is None: continue` before touching `connection_pool`. Do NOT assert the async client is non-`None` — `None` is its normal state. If async coverage is genuinely wanted it must be a *function*-scoped check running after the test body (where a lazily built client may exist); the session-scoped fixture can only meaningfully assert on `POPOTO_REDIS_DB`. |
-| BLOCKER | History & Consistency | **Task 6's AST guard, with the mandated-empty allowlist, is red on ten unenumerated call sites — several of which cannot be converted — and its `db=`-keyword scoping is blind to the other db-0 footgun.** Unconvertible: `tests/unit/test_redis_flush_guard.py:28,40,62,69` (`redis.Redis(db=0)` / `aioredis.Redis(db=0)` — the db-0 guard's OWN tests, which must use a literal `0`) and `tests/integration/test_redis_models.py:696`. Not covered by the permit list as written: `tests/conftest.py:615,631` (`db=test_db`, a `Name` bound from a *Call* to `claim_test_db()` at `:608`, not "from a fixture"), `tests/unit/test_conftest_isolation_guards.py:298,398`, `tests/_worker_guard.py:91`. Blind spot: scoping to the `db=` keyword misses `Redis.from_url(".../0")` — live at `tests/unit/test_redis_flush_guard.py:34` and `tests/unit/test_agent_session.py:690,782` — which `tests/conftest.py:97` names in the same breath as the `db=0` footgun. Task 9's "every new test passes on the branch" is unreachable as specified. | pending | Permit a `db=` value when it is (a) a `Call` to `claim_test_db`/`claim_scratch_test_db`, (b) a `Name` whose nearest binding **in the same function** is such a Call (resolve one assignment hop — this is what covers `tests/conftest.py:608→615,631`), or (c) a fixture *parameter* named `scratch_test_db`/`redis_test_db`. Seed a reasoned `{path: reason}` allowlist in this PR with `tests/unit/test_redis_flush_guard.py`, `tests/integration/test_redis_models.py` and `tests/_worker_guard.py`; restate "the allowlist stays empty" as the enforceable property **"no allowlist entry may name a db in `[1..TEST_DB_POOL_MAX]`"**. Extend the walk to `Redis.from_url`/`ConnectionPool.from_url` string literals, parsing the trailing `/N` path segment. |
-| BLOCKER | Risk & Robustness + History & Consistency | **Task 3's binding red-state proof issues a REAL `flushdb()` on db 1 when Task 9 captures it on `main`, wiping whichever sibling pytest process holds slot 1.** On `main` the guard rejects only `db == 0` (`tests/conftest.py:117-129`), so `redis.Redis(db=1).flushdb()` does not raise — it executes. `_reset_claim_state` redirects only the *lock registry* to `tmp_path` (`tests/unit/test_conftest_isolation_guards.py:483`); the Redis server and its db numbering are untouched, and spike-3 records slots 1-10 routinely held by live siblings. Capturing the red state therefore performs the exact cross-process wipe this plan exists to eliminate. It is also the literal-unowned-db construction round-3 concern 4 deleted from the plan (the db-15 sentinel) for three stated reasons — offender shape, AST-guard rejection, writes to a db this process does not own — none of which were applied to the plan's own most load-bearing test. | pending | Two independent fixes, take both. (a) Capture the `main`-side red state against a throwaway server: `tests/db_claim.py:70-71` keys the claim registry off `REDIS_PORT` (`/tmp/valor-pytest-db-claims-{port}`), so `redis-server --port 6399 --databases 16 --daemonize yes` then `REDIS_PORT=6399 scripts/pytest-clean.sh <holder test> -n0` isolates BOTH the Redis data and the claim pool. Add this to Task 9's pass condition, not just Task 3. Do not try to pick a "safe" db number — the pool is `[1..15]` and db 0 is production. (b) Remove the construction entirely from the deny-path assertion: the guard reads only `_db_of(client)` (`tests/conftest.py:110-115`), so a `SimpleNamespace` whose `connection_pool.connection_kwargs == {"db": 1}` reproduces the deny path with no client, no server contact, and no allowlist entry. Keep the real client only for the *permitted* half (`flushdb()` on the claimed db). |
-| CONCERN | Risk & Robustness | **Worker-side `pytest.exit` on exhaustion is defeated by xdist worker replacement, so the 30 s wait is re-paid ~41 times, not once.** xdist treats a worker dying during startup as a crashed node and **clones a replacement** (`xdist/dsession.py:263-266`) up to `--max-worker-restart`, whose default this repo inherits as `numprocesses * 4` (`xdist/dsession.py:555-568`) — 40 at `-n auto` on a 10-core box. Each replacement is a FRESH process, so Task 1's `_CLAIM_FAILURE` module global is `None` in it. The run costs ~41 × 30 s plus 41 conftest imports, emits 41 "replacing crashed worker" lines, and stops only on `maximum crashed workers reached: 40`. Risk 2's "the abort is once per process" and the matching Success Criterion are unachievable while `pyproject.toml:190-194` declines `--max-worker-restart=0`. | pending | Detect exhaustion in the **controller**, where `pytest.exit` genuinely aborts before any worker forks. In Task 2's controller branch, before the `return`, run a non-destructive free-slot probe: for each `n` in `range(1, _TEST_DB_POOL_MAX + 1)` open `{claim_dir}/{n}.lock`, try `fcntl.flock(fd, LOCK_EX \| LOCK_NB)`, and on success immediately `LOCK_UN` + `close` **without** appending to `_CLAIM_LOCK_FDS` (so the `not-applicable-controller` rule still holds — the controller burns no slot). If `free < config.option.numprocesses`, `pytest.exit(msg, returncode=3)` there. Keep the worker-side raise + sticky memo for slots taken between probe and fork, and restate the criterion as "the run aborts before workers fork". |
-| CONCERN | Scope & Value | **After Task 2 there are two independently-maintained owners of "which db popoto is on", and the plan never picks one.** popoto's `_popoto_test_db` swaps the pool **in place** on the single `POPOTO_REDIS_DB` object (`popoto/pytest_plugin.py:108-126`), so every `from ..redis_db import POPOTO_REDIS_DB` binding follows automatically; `redis_test_db` instead **replaces** the object (`tests/conftest.py:616`), which is the only reason it needs the submodule re-patch loop at `:626-628` and the restore loop at `:640-641`. Per-test cost is three `flushdb()` round-trips (`popoto/pytest_plugin.py:194`, `tests/conftest.py:617`, `:636`) plus two client constructions, across ~12,000 tests. The plan applies exactly this anti-drift argument to #2645 ("Two independently-maintained flush guards is how one of them drifts") but not to the duplication it is creating. | pending | Do NOT delete `redis_test_db` in this PR — `tests/conftest.py:631` is what points `_POPOTO_ASYNC_REDIS_DB` at the test db in the sync setup phase, and removing it is a separate blast radius. Add one Technical Approach bullet naming the split: the plugin owns the *sync* binding via in-place `_swap_db`, `redis_test_db` owns per-test truncation and the async binding, both read the same `claim_test_db()`, and the existing Success Criterion `POPOTO_REDIS_DB...["db"] == claim_test_db()` is the drift detector between them. File the consolidation (drop the replace-and-patch loop, since in-place swap already covers submodule bindings) as a `[SEPARATE-SLUG]` No-Go. |
-| CONCERN | Scope & Value | **The new `connection_kwargs` AST leg is justified by a hazard the same PR removes, and it bans a pattern this repo's own conftest recommends.** Task 6's third leg and Task 4's `test_email_bridge.py:1399-1406` conversion are justified as "it reads a value the popoto plugin can and does mutate (Task 2), so it is unsound" — but after Task 2 the value the plugin mutates it to IS this process's claimed db, so the derivation becomes correct by construction. Meanwhile `tests/conftest.py:511-513` still documents that exact derivation as the sanctioned way a subprocess inherits the claimed db, and that comment is doubly stale: the site it names (`_run_cli_hook` in `tests/unit/test_tool_budget_enforcement.py`) no longer contains the pattern at all. The PR therefore bans in `tests/` a pattern its own conftest recommends, without touching the recommendation — the "convention each call site re-derives" failure the plan diagnoses as its root-cause pattern. | pending | If the leg is kept, restate its justification as single-source/readability, not soundness: "`claim_test_db()` is the single answer to 'which db do I own'; deriving it from a live client's pool is correct but makes the authority non-obvious" — the soundness claim is falsified by Task 2. In the same change fix `tests/conftest.py:511-513`: delete the stale `test_tool_budget_enforcement.py` reference (grep confirms no `connection_kwargs` derivation remains there) and replace it with "subprocesses inherit the claimed db via `tests/db_claim.py::subprocess_env`, which routes through `claim_test_db()`". Otherwise the AST guard and the conftest comment give a future author opposite instructions. |
-| NIT | History & Consistency | Anchor and cross-reference drift survived round 3's renumbering sweep. Resolved Question 2 still calls the AST recurrence guard "(Task 5)" — it is Task 6 after the round-3 restructure. Three line anchors are off by one to three: `_SHARED_EXCEPTION_MODULES` is at `tests/conftest.py:385` (plan says `:384`); `_db_of`'s `except Exception: return 0` is at `tests/conftest.py:113-115` (plan says `:110-113`); `test_claim_is_in_pool_idempotent_and_releasable` spans `tests/unit/test_conftest_isolation_guards.py:504-518` (plan says `:503-517`). Identifications are correct; only the pointers are stale. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | **Task 2's plugin-agnostic client-ownership check dereferences `_POPOTO_ASYNC_REDIS_DB`, which is `None` at every moment a session-scoped fixture can observe it.** `popoto/redis_db.py:97` initialises it to `None`; the plugin's `_popoto_reset_async` sets it to `None` at every test's setup AND teardown (`popoto/pytest_plugin.py:214,217`) and its docstring (`:208-212`) states the client is deliberately NOT pre-created because a client built in the sync setup context binds to the wrong event loop; `tests/conftest.py:612` captures that `None` as `original_async` and restores it at `:639`. Asserting `client.connection_pool.connection_kwargs["db"]` on `None` raises `AttributeError` inside a session-scoped autouse fixture, erroring EVERY test in the process in setup — the identical whole-suite-outage shape as round-3 blocker 1. | ✅ RESOLVED | **Fixed in Task 2's body and in Technical Approach.** The walk is now written as `for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)):` with an explicit `if client is None: continue` before `connection_pool` is touched, and the task states that `None` is the async client's *correct* state (`popoto/redis_db.py:97`; `_popoto_reset_async` nulls it at `popoto/pytest_plugin.py:214,217`; `tests/conftest.py:612/639` captures and restores it). The task forbids asserting the async client is non-`None` and records that async coverage, if ever wanted, must be a **function**-scoped check after the test body. A regression test is added: with `_POPOTO_ASYNC_REDIS_DB` at `None`, the check passes rather than raising `AttributeError`. |
+| BLOCKER | History & Consistency | **Task 6's AST guard, with the mandated-empty allowlist, is red on ten unenumerated call sites — several of which cannot be converted — and its `db=`-keyword scoping is blind to the other db-0 footgun.** Unconvertible: `tests/unit/test_redis_flush_guard.py:28,40,62,69` (`redis.Redis(db=0)` / `aioredis.Redis(db=0)` — the db-0 guard's OWN tests, which must use a literal `0`) and `tests/integration/test_redis_models.py:696`. Not covered by the permit list as written: `tests/conftest.py:615,631` (`db=test_db`, a `Name` bound from a *Call* to `claim_test_db()` at `:608`, not "from a fixture"), `tests/unit/test_conftest_isolation_guards.py:298,398`, `tests/_worker_guard.py:91`. Blind spot: scoping to the `db=` keyword misses `Redis.from_url(".../0")` — live at `tests/unit/test_redis_flush_guard.py:34` and `tests/unit/test_agent_session.py:690,782` — which `tests/conftest.py:97` names in the same breath as the `db=0` footgun. Task 9's "every new test passes on the branch" is unreachable as specified. | ✅ RESOLVED | **The allowlist ships POPULATED and the permit list resolves one assignment hop.** Task 6 now permits a `db=` value that is (a) a `Call` to `claim_test_db`/`claim_scratch_test_db`, (b) a `Name` whose nearest binding in the same function is such a `Call` — which is what covers `tests/conftest.py:608→615,631` — or (c) a fixture *parameter* named `scratch_test_db`/`redis_test_db`. A seeded `{path: reason}` table ships with exactly three entries, all db 0 and all verified against source: `tests/unit/test_redis_flush_guard.py` (`:28,40,62,69` — the db-0 guard's own tests), `tests/integration/test_redis_models.py` (`:695-697` — asserts nothing leaked into production), `tests/_worker_guard.py` (`:91` — registrations intentionally live on db 0). "The allowlist stays empty" is replaced by the enforceable property **"no allowlist entry may name a db in `[1..TEST_DB_POOL_MAX]`"**. The walk is extended to `Redis.from_url`/`ConnectionPool.from_url` string literals (parsing the trailing `/N`), covering `test_redis_flush_guard.py:34` and `test_agent_session.py:690,782`; non-literal `from_url` arguments are named as an acknowledged blind spot in the code comment rather than claimed. Task 6 gains an explicit green-state gate. |
+| BLOCKER | Risk & Robustness + History & Consistency | **Task 3's binding red-state proof issues a REAL `flushdb()` on db 1 when Task 9 captures it on `main`, wiping whichever sibling pytest process holds slot 1.** On `main` the guard rejects only `db == 0` (`tests/conftest.py:117-129`), so `redis.Redis(db=1).flushdb()` does not raise — it executes. `_reset_claim_state` redirects only the *lock registry* to `tmp_path` (`tests/unit/test_conftest_isolation_guards.py:483`); the Redis server and its db numbering are untouched, and spike-3 records slots 1-10 routinely held by live siblings. Capturing the red state therefore performs the exact cross-process wipe this plan exists to eliminate. It is also the literal-unowned-db construction round-3 concern 4 deleted from the plan (the db-15 sentinel) for three stated reasons — offender shape, AST-guard rejection, writes to a db this process does not own — none of which were applied to the plan's own most load-bearing test. | ✅ RESOLVED | **Deny half redesigned to the guard-intercepts shape; no code path in this plan flushes an unowned db on any branch.** The `redis.Redis(db=1)` construction is deleted. The deny path is asserted against a `SimpleNamespace` whose `connection_pool.connection_kwargs == {"db": 1}` — the guard reads only `_db_of(client)` (`tests/conftest.py:110-115`), so the stub carries no socket and no connection and cannot reach Redis on `main`, on the branch, or in between. An `execute_command` spy that calls `pytest.fail("guard did not intercept")` is a second independent backstop. The red-on-`main` leg is **inverted**: the failure is that NO `RuntimeError` is raised (the db-0-only guard does not intercept), never that a flush succeeded — stated in the test docstring and in the PR body so the output cannot be misread. The permitted half keeps a real client, on this process's own claimed db. Task 9 gains a pre-capture check for stray `redis.Redis(db=` constructions. The `REDIS_PORT=6399` throwaway-server variant is recorded and rejected: a second server to operate for no additional coverage. No "safe db number" is sought — the pool is `[1..15]` and db 0 is production (#2645). |
+| CONCERN | Risk & Robustness | **Worker-side `pytest.exit` on exhaustion is defeated by xdist worker replacement, so the 30 s wait is re-paid ~41 times, not once.** xdist treats a worker dying during startup as a crashed node and **clones a replacement** (`xdist/dsession.py:263-266`) up to `--max-worker-restart`, whose default this repo inherits as `numprocesses * 4` (`xdist/dsession.py:555-568`) — 40 at `-n auto` on a 10-core box. Each replacement is a FRESH process, so Task 1's `_CLAIM_FAILURE` module global is `None` in it. The run costs ~41 × 30 s plus 41 conftest imports, emits 41 "replacing crashed worker" lines, and stops only on `maximum crashed workers reached: 40`. Risk 2's "the abort is once per process" and the matching Success Criterion are unachievable while `pyproject.toml:190-194` declines `--max-worker-restart=0`. | ⏸ DEFERRED | Stays deferred: it degrades the *exhaustion* path's ergonomics (a slow, noisy abort instead of a fast one), not the correctness of the ownership invariant this plan ships, and the controller-side free-slot probe is a new hook behavior that would need its own proof. Revisit if an exhaustion abort is actually observed in the wild. |
+| CONCERN | Scope & Value | **After Task 2 there are two independently-maintained owners of "which db popoto is on", and the plan never picks one.** popoto's `_popoto_test_db` swaps the pool **in place** on the single `POPOTO_REDIS_DB` object (`popoto/pytest_plugin.py:108-126`), so every `from ..redis_db import POPOTO_REDIS_DB` binding follows automatically; `redis_test_db` instead **replaces** the object (`tests/conftest.py:616`), which is the only reason it needs the submodule re-patch loop at `:626-628` and the restore loop at `:640-641`. Per-test cost is three `flushdb()` round-trips (`popoto/pytest_plugin.py:194`, `tests/conftest.py:617`, `:636`) plus two client constructions, across ~12,000 tests. The plan applies exactly this anti-drift argument to #2645 ("Two independently-maintained flush guards is how one of them drifts") but not to the duplication it is creating. | ⏸ DEFERRED | Stays deferred: `tests/conftest.py:631` is what points `_POPOTO_ASYNC_REDIS_DB` at the test db in the sync setup phase, so removing `redis_test_db`'s replace-and-repatch loop is a separate blast radius; the existing Success Criterion `POPOTO_REDIS_DB...["db"] == claim_test_db()` is already the drift detector between the two owners. Filed as a `[SEPARATE-SLUG]` No-Go. |
+| CONCERN | Scope & Value | **The new `connection_kwargs` AST leg is justified by a hazard the same PR removes, and it bans a pattern this repo's own conftest recommends.** Task 6's third leg and Task 4's `test_email_bridge.py:1399-1406` conversion are justified as "it reads a value the popoto plugin can and does mutate (Task 2), so it is unsound" — but after Task 2 the value the plugin mutates it to IS this process's claimed db, so the derivation becomes correct by construction. Meanwhile `tests/conftest.py:511-513` still documents that exact derivation as the sanctioned way a subprocess inherits the claimed db, and that comment is doubly stale: the site it names (`_run_cli_hook` in `tests/unit/test_tool_budget_enforcement.py`) no longer contains the pattern at all. The PR therefore bans in `tests/` a pattern its own conftest recommends, without touching the recommendation — the "convention each call site re-derives" failure the plan diagnoses as its root-cause pattern. | ⏸ DEFERRED | Stays deferred: the leg's *effect* (one authority for "which db do I own") is right even though its stated soundness rationale is weakened by Task 2, and re-justifying it plus fixing the stale `tests/conftest.py:511-513` comment is editorial work that does not change what gets built. Revisit at docs time. |
+| NIT | History & Consistency | Anchor and cross-reference drift survived round 3's renumbering sweep. Resolved Question 2 still calls the AST recurrence guard "(Task 5)" — it is Task 6 after the round-3 restructure. Three line anchors are off by one to three: `_SHARED_EXCEPTION_MODULES` is at `tests/conftest.py:385` (plan says `:384`); `_db_of`'s `except Exception: return 0` is at `tests/conftest.py:113-115` (plan says `:110-113`); `test_claim_is_in_pool_idempotent_and_releasable` spans `tests/unit/test_conftest_isolation_guards.py:504-518` (plan says `:503-517`). Identifications are correct; only the pointers are stale. | ✅ RESOLVED | Fixed in the task bodies (free, so taken): Resolved Question 2 now says Task 6; `_SHARED_EXCEPTION_MODULES` corrected to `tests/conftest.py:385`; `_db_of`'s `except Exception: return 0` to `tests/conftest.py:113-115`; `test_claim_is_in_pool_idempotent_and_releasable` to `tests/unit/test_conftest_isolation_guards.py:504-518` with its `release_test_db_claim()` call at `:514`. All four re-verified against source this round. Historical finding text in earlier critique tables is left verbatim as the record of what was found. |
 
 **Round-4 structural check:** all four repo-mandated sections present and substantive; 11 tasks, no
 numbering gaps; every `Depends On` id resolves (`build-claim-api`, `build-session-claim`,
@@ -1602,6 +1781,51 @@ round: `tests/conftest.py` still has no `pytest_configure` (hooks at `:38`, `:85
 `workerinput` idiom at `:1082` sits inside `pytest_unconfigure`), popoto 1.8.0 ships `pytest11` and
 resolves `POPOTO_TEST_DB` at fixture setup (`popoto/pytest_plugin.py:138-150`), and `pyproject.toml:195`
 addopts carry `-p no:postgresql` only.
+
+### Round-4 revision: three blockers fixed, three concerns held deferred, plan settled
+
+All three round-4 blockers sat in the plan's **proof and enforcement machinery**, not in the
+claim-lifecycle substrate — which round 4 re-verified as sound. The substrate is unchanged by this
+revision; the task graph is unchanged at 11 tasks; no scope was added.
+
+- **Blocker 1 (`None` async client)** — one `if client is None: continue` guard, plus the rule that
+  `None` is that client's *correct* state and must never be asserted against. Task 2.
+- **Blocker 2 (unbuildable empty allowlist)** — the allowlist ships **populated** with three
+  reasoned db-0 entries, the permit list resolves one assignment hop, the walk covers `from_url`
+  string literals, and "stays empty" is replaced by the enforceable bound **"no entry may name a db
+  in `[1..TEST_DB_POOL_MAX]`"**. Task 6 can now go green, which it structurally could not before.
+- **Blocker 3 (the proof performed the wipe)** — the deny half is asserted against a
+  `SimpleNamespace` with no connection and an `execute_command` spy, and the red-on-`main` leg is
+  inverted to "no `RuntimeError` is raised". **No code path in this plan flushes a db the test
+  process does not own, on any branch, in any repo state.** Task 3, with a pre-capture check in
+  Task 9.
+
+**Held deferred, with justification, not re-opened:** xdist worker-replacement defeating the
+`_CLAIM_FAILURE` memo (exhaustion-path ergonomics, not invariant correctness); the two owners of
+"which db popoto is on" (removing `redis_test_db` is a separate blast radius — filed as a No-Go); the
+`connection_kwargs` AST leg's weakened soundness rationale (the leg's effect is still right; revisit
+at docs time). The anchor/naming NIT was fixed because it was free.
+
+**Folded in beyond the findings.** (a) Popoto-upgrade durability is now a stated hard requirement and
+the design is shown to meet it: the fix sits at the connection/claim layer, drives the plugin through
+its public `POPOTO_TEST_DB` input, never patches installed code, pins no version, and carries a drift
+detector. The upstream popoto PR is filed as a No-Go follow-up. (b) The `main` baseline is **recorded**
+(`d5539cb7f`: 12075 passed / 1 skipped / 0 failed / 0 errors / 699.19s, non-quiesced), which lets
+Verification row 1 tighten from "every branch failure appears in the baseline" to **"zero failures and
+zero setup-phase errors"** — and the run's caveat travels with the number: a green run shows the
+failure set was empty *on that run*, the concurrent load in that window is UNVERIFIED, and the binding
+evidence remains the ~1 s adversarial tests.
+
+**Final sweep performed.** Every RESOLVED row in every round's table was re-checked against the task
+body it points at, because BUILD reads task bodies and not this table. Confirmed present as concrete
+instructions: `_CLAIMED_DB_NUMS.add` on the fallback path (Task 1), the `raising=False` rebinds in
+`_reset_claim_state` (Task 1), `_CLAIM_FAILURE` as `claim_test_db()`'s first statement (Tasks 1+5),
+`scope="session"` on `scratch_test_db` (Tasks 1+3), the `numprocesses` controller branch (Tasks 2+8),
+`config.workeroutput` provenance (Task 8), the `SimpleNamespace` deny proof (Task 3), the seeded
+allowlist and `from_url` leg (Task 6), the widened reload guard (Task 7), `tests/README.md:9`
+(Documentation), and the `\|\| true` exit-code caveat on every `grep -c` Verification row. The
+`-p no:randomly` flag survives only inside the historical round-1 finding text and appears in no
+Verification row.
 
 ---
 
@@ -1621,7 +1845,7 @@ All three open questions are decided; none blocks the build.
    "no write on an unclaimed db" guard would wrap every mutating command on both the sync and async
    clients — a per-command hot-path cost paid by every test in the suite, plus a far larger surface
    of legitimate call sites to audit, for a class of bug never observed here. The AST recurrence
-   guard (Task 5) closes the same hole one layer earlier, at *construction* time, for zero runtime
+   guard (Task 6) closes the same hole one layer earlier, at *construction* time, for zero runtime
    cost. Revisit only if a cross-db non-flush write is actually observed.
 3. **Verification quiescence — DECIDED: no quiescence, and no double-run gate.** A quiesced
    double-run is the one configuration in which this bug provably cannot fire (the root cause needs
