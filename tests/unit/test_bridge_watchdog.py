@@ -393,8 +393,22 @@ class TestHealthStatus:
 
 
 class TestCheckBridgeHealthZombieIntegration:
-    """Tests that check_bridge_health populates zombie fields."""
+    """Tests that check_bridge_health populates zombie fields.
 
+    Two collaborators here reach off the process and must stay mocked:
+
+    ``assess_update_flow`` runs against the real watchdog Redis, so its verdict
+    is a property of whichever machine happens to run the suite. On a host with
+    no bridge it reports the update loop wedged, which appends an issue and makes
+    ``healthy`` False for a reason unrelated to zombies.
+
+    ``kill_zombie_processes`` calls ``os.kill`` for real. The fixtures below name
+    pid 200, so leaving it unmocked sends SIGTERM to whatever process holds that
+    pid on the machine running the suite.
+    """
+
+    @patch("monitoring.bridge_watchdog.assess_update_flow")
+    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
     @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
@@ -407,6 +421,8 @@ class TestCheckBridgeHealthZombieIntegration:
         mock_crash,
         mock_crashes,
         mock_enumerate,
+        mock_kill,
+        mock_update_flow,
     ):
         from monitoring.bridge_watchdog import check_bridge_health
 
@@ -414,6 +430,8 @@ class TestCheckBridgeHealthZombieIntegration:
         mock_logs.return_value = True
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
+        mock_update_flow.return_value = (True, "")
+        mock_kill.return_value = 1
         mock_enumerate.return_value = [
             {"pid": 100, "etime_seconds": 100, "rss_mb": 50.0, "command": "claude"},
             {"pid": 200, "etime_seconds": 10000, "rss_mb": 600.0, "command": "claude"},
@@ -424,7 +442,12 @@ class TestCheckBridgeHealthZombieIntegration:
         assert status.zombie_pids == [200]
         assert status.zombie_memory_mb == 600.0
         assert status.active_claude_count == 1
+        # The zombie is routed to the killer rather than merely counted, and no
+        # real signal leaves the test.
+        assert [z["pid"] for z in mock_kill.call_args.args[0]] == [200]
 
+    @patch("monitoring.bridge_watchdog.assess_update_flow")
+    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
     @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
@@ -437,6 +460,8 @@ class TestCheckBridgeHealthZombieIntegration:
         mock_crash,
         mock_crashes,
         mock_enumerate,
+        mock_kill,
+        mock_update_flow,
     ):
         from monitoring.bridge_watchdog import check_bridge_health
 
@@ -444,13 +469,50 @@ class TestCheckBridgeHealthZombieIntegration:
         mock_logs.return_value = True
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
+        mock_update_flow.return_value = (True, "")
         mock_enumerate.return_value = []
 
         status = check_bridge_health()
         assert status.zombie_count == 0
         assert status.zombie_pids == []
         assert status.active_claude_count == 0
-        assert status.healthy is True
+        # Every issue-producing check is now stubbed to its healthy answer, so
+        # `healthy` is a statement about this input rather than about the host.
+        assert status.healthy is True, f"unexpected issues: {status.issues}"
+        mock_kill.assert_not_called()
+
+    @patch("monitoring.bridge_watchdog.assess_update_flow")
+    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    def test_a_wedged_update_flow_makes_the_bridge_unhealthy(
+        self,
+        mock_running,
+        mock_logs,
+        mock_crash,
+        mock_crashes,
+        mock_enumerate,
+        mock_kill,
+        mock_update_flow,
+    ):
+        """The complement of the test above, so stubbing `assess_update_flow`
+        cannot pass by making the wedge check unreachable. Same healthy input,
+        only the update-flow verdict flipped."""
+        from monitoring.bridge_watchdog import check_bridge_health
+
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        mock_crashes.return_value = []
+        mock_enumerate.return_value = []
+        mock_update_flow.return_value = (False, "update loop wedged: test")
+
+        status = check_bridge_health()
+        assert status.healthy is False
+        assert "update loop wedged: test" in status.issues
 
 
 # --- --check-only output format ---
