@@ -14,7 +14,8 @@ indistinguishable from a wedged update loop, and because nothing ever seeds
 verdict on the first tick past the startup grace window — a SIGKILL every ~6
 minutes until real traffic arrived.
 
-Two rules now hold:
+Three rules now hold, all of them forms of "bound the verdict to the process it
+accuses":
 
 * Silence is measured from the later of ``last_update_received`` and the bridge
   process's own start time, so a restart clears the accusation.
@@ -23,6 +24,10 @@ Two rules now hold:
   comes from an independent API path, so unlike ``last_update_received`` and
   ``bridge:last_event:*`` (both written by the very handler under suspicion) it
   can distinguish "wedged" from "idle".
+* That evidence must postdate the process's startup grace. A restart creates a
+  gap which catchup and the reconciler then recover, so every restart stamps the
+  evidence key on its way back up; admitting that stamp would let four quiet
+  hours after any restart produce one spurious verdict.
 """
 
 import logging
@@ -151,6 +156,61 @@ def test_absent_beacon_on_fresh_redis_is_not_wedged():
 
     assert is_live is True
     assert issue == ""
+
+
+def test_recovery_stamped_during_startup_grace_does_not_corroborate():
+    """A restart's own backfill is not evidence that the restarted process is wedged.
+
+    Every restart creates a gap, and catchup plus the reconciler recover that gap
+    on the way back up — so a routine restart reliably stamps
+    ``bridge:last_missed_recovery`` inside its own grace window. The evidence
+    window and the silence window are the same length, so without a floor that
+    stamp stays admissible for a full ceiling, and four quiet hours after any
+    restart would produce a spurious verdict.
+
+    Constructed to isolate exactly that: the stamp is inside the grace window
+    (290s < 300s after start) yet still inside the ceiling window
+    (~3.9h < 4h), so the window check alone would admit it.
+    """
+    now = time.time()
+    start_ts = now - (UPDATE_STALENESS_CEILING + 60)
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 60
+    last_missed = start_ts + (STARTUP_GRACE_SECONDS - 10)
+
+    # Guard the construction itself: if these stop holding, the test has drifted
+    # off the case it exists to cover and would pass for the wrong reason.
+    assert (now - start_ts) >= UPDATE_STALENESS_CEILING, "silence must clear the ceiling"
+    assert (now - last_missed) < UPDATE_STALENESS_CEILING, (
+        "stamp must be inside the evidence window"
+    )
+    assert (last_missed - start_ts) < STARTUP_GRACE_SECONDS, "stamp must be inside the grace window"
+
+    r = _make_redis(last_update, last_probe, last_missed)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is True, (
+        "A recovery stamped during startup grace describes the restart, not a wedge "
+        "in the process that came back"
+    )
+    assert issue == ""
+
+
+def test_recovery_stamped_just_after_grace_does_corroborate():
+    """The floor is a floor, not a blanket suppression of post-restart evidence."""
+    now = time.time()
+    start_ts = now - (UPDATE_STALENESS_CEILING + 60)
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 60
+    last_missed = start_ts + (STARTUP_GRACE_SECONDS + 10)
+
+    r = _make_redis(last_update, last_probe, last_missed)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is False
+    assert "wedged" in issue.lower()
 
 
 def test_stale_recovery_evidence_does_not_corroborate():

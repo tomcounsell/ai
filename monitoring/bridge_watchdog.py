@@ -217,7 +217,11 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
        36-crash storm in #2475.
     3. **Something was actually missed** — the reconciler stamped
        ``bridge:last_missed_recovery`` within the same window, meaning it found
-       messages on Telegram that the live path never delivered.
+       messages on Telegram that the live path never delivered. The stamp must
+       also postdate this process's startup grace: a restart creates a gap that
+       catchup and the reconciler then recover, so every restart stamps this key
+       on the way back up, and that stamp describes the restart rather than the
+       process which came back.
 
     Point 3 is the one that distinguishes "wedged" from "quiet", and it has to
     come from outside the ``NewMessage`` handler. Both ``last_update_received``
@@ -314,7 +318,17 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
 
     # Positive evidence that something was missed, from outside the handler under
     # suspicion.  Without it, silence is just a quiet account.
-    missed_age = None if last_missed is None else now - last_missed
+    #
+    # The evidence must also postdate this process's startup grace, for the same
+    # reason the silence clock starts at process start.  Every restart creates a
+    # gap, and catchup plus the reconciler recover that gap on the way back up —
+    # so a routine restart reliably stamps this key within its own grace window.
+    # That recovery is an artifact of the restart, not evidence that the process
+    # which came back is wedged.  Without this floor the two windows are the same
+    # length, so such a stamp stays admissible for a full ceiling and four quiet
+    # hours after any restart could still produce one spurious verdict.
+    evidence_floor = start_ts + STARTUP_GRACE_SECONDS
+    missed_age = None if last_missed is None or last_missed <= evidence_floor else now - last_missed
 
     def _wedge_issue(label: str, window: float) -> str:
         seen = "never" if last_update is None else f"{(now - last_update) / 60:.0f}m ago"
