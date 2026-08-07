@@ -190,6 +190,52 @@ class TestGuardedRepair:
             POPOTO_REDIS_DB.delete(phantom_key)
             POPOTO_REDIS_DB.srem(status_index_key, phantom_key)
 
+    def test_stale_member_scan_is_pipelined_across_batch_boundary(
+        self, scratch_room_id, monkeypatch, caplog
+    ):
+        """Leg 2's existence checks must be pipelined, not one round trip per
+        member: a bloated index (this repo has seen millions of stale
+        pointers) turns the daily maintenance path into a multi-hour hang.
+
+        Mirrors ``AgentSession.repair_indexes``' batching. The member count
+        straddles the 5000 batch boundary so the multi-batch loop is exercised,
+        and every member is stale (no backing hash) so the count is exact.
+        """
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        status_index_key = "$IndexF:Job:status:active"
+        Job.mint(scratch_room_id, "real job")
+        member_count = 5001  # one past a single batch
+        stale_members = [f"Job:test-stale-{uuid.uuid4().hex[:8]}-{i}" for i in range(member_count)]
+        POPOTO_REDIS_DB.sadd(status_index_key, *stale_members)
+
+        direct_exists_calls = 0
+        real_exists = POPOTO_REDIS_DB.exists
+
+        def counting_exists(*args, **kwargs):
+            nonlocal direct_exists_calls
+            direct_exists_calls += 1
+            return real_exists(*args, **kwargs)
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "exists", counting_exists)
+        try:
+            with caplog.at_level(logging.WARNING, logger="models.job"):
+                Job.repair_indexes()
+
+            # Behavior is identical to the unbatched scan: every stale member
+            # is counted, and the whole index key is cleared and rebuilt.
+            assert f"cleared {member_count} stale $IndexF member(s)" in caplog.text
+            for member in stale_members[:3]:
+                assert not POPOTO_REDIS_DB.sismember(status_index_key, member)
+            # ...but no per-member round trip: the scan issues zero direct
+            # exists() calls, it batches them into pipelines instead.
+            assert direct_exists_calls < member_count // 10
+        finally:
+            monkeypatch.setattr(POPOTO_REDIS_DB, "exists", real_exists)
+            POPOTO_REDIS_DB.srem(status_index_key, *stale_members)
+
 
 class TestDriftCoverage:
     """Risk 3: drift detection must not silently narrow — Job registers."""

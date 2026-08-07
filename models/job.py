@@ -384,11 +384,22 @@ class Job(Model):
             # SREM). Count stale members first so drift is observable, then
             # delete the whole key — rebuild_indexes() reconstructs it from
             # the surviving healthy hashes.
+            #
+            # Existence checks are pipelined in batches — a bloated index
+            # (hundreds of thousands to millions of stale pointers) turns a
+            # one-round-trip-per-member scan into a multi-hour hang, and this
+            # runs on the daily maintenance path. Mirrors
+            # ``AgentSession.repair_indexes``' batching.
             stale_members = 0
+            batch_size = 5000
             for index_key in POPOTO_REDIS_DB.keys("$IndexF:Job:*"):
-                for member in POPOTO_REDIS_DB.smembers(index_key):
-                    if not POPOTO_REDIS_DB.exists(member):
-                        stale_members += 1
+                members = list(POPOTO_REDIS_DB.smembers(index_key))
+                for i in range(0, len(members), batch_size):
+                    batch = members[i : i + batch_size]
+                    pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+                    for member in batch:
+                        pipe.exists(member)
+                    stale_members += sum(1 for exists in pipe.execute() if not exists)
                 POPOTO_REDIS_DB.delete(index_key)
             if stale_members:
                 logger.warning(
