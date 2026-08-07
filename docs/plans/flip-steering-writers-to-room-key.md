@@ -6,8 +6,7 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2642
 last_comment_id: none
-revision_applied: true
-revision_applied_at: 2026-08-07T08:00:11Z
+revision_applied: false
 ---
 
 # Flip Steering Writers to the Room Key
