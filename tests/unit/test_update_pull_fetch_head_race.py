@@ -629,3 +629,80 @@ class TestStashIdentityIsNeverInferredFromTheStackTop:
         assert first.sha and second.sha and first.sha != second.sha
         subjects = _git(repo, "stash", "list", "--format=%gs").stdout
         assert subjects.count("remote-update auto-stash") == 2
+
+
+class TestStashListFailureFailsClosed:
+    """A failed `git stash list` must not read as "nothing was stashed".
+
+    `_stash_entries` returning `[]` for both an empty stack and a failed read
+    would run downhill: no token match, `StashResult(ok=True, sha=None)`,
+    `git_pull` sets `stashed=False`, skips the restore, and reports success.
+    If the push *did* create an entry, the user's work is stranded in the stack
+    under a token nobody will look up, and the pull proceeds over the tree it
+    came from.
+
+    This module exists because that class of fail-open guess loses other lanes'
+    work, so the read failure fails closed and `git_pull` aborts through its
+    existing error path.
+    """
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        r = tmp_path / "repo"
+        _git(tmp_path, "init", "-b", "main", str(r))
+        _git(r, "config", "user.email", "t@example.com")
+        _git(r, "config", "user.name", "T")
+        (r / "tracked.txt").write_text("committed\n")
+        _git(r, "add", "tracked.txt")
+        _git(r, "commit", "-m", "base")
+        return r
+
+    @staticmethod
+    def _break_stash_list(monkeypatch):
+        """Fail only `git stash list`; every other git call runs for real."""
+        import scripts.update.git as gitmod
+
+        real = gitmod.run_cmd
+
+        def failing(cmd, cwd=None, check=True):
+            if len(cmd) >= 3 and cmd[:3] == ["git", "stash", "list"]:
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: cannot read stash\n")
+            return real(cmd, cwd=cwd, check=check)
+
+        monkeypatch.setattr(gitmod, "run_cmd", failing)
+
+    def test_empty_stack_and_failed_read_are_distinguishable(self, repo: Path, monkeypatch):
+        """The distinction the fix rests on, asserted directly."""
+        from scripts.update.git import _stash_entries
+
+        assert _stash_entries(repo) == []  # empty stack: a real answer
+        self._break_stash_list(monkeypatch)
+        assert _stash_entries(repo) is None  # failed read: not an answer
+
+    def test_stash_changes_reports_failure_not_nothing_to_stash(self, repo: Path, monkeypatch):
+        from scripts.update.git import stash_changes
+
+        (repo / "tracked.txt").write_text("OURS\n")
+        self._break_stash_list(monkeypatch)
+
+        result = stash_changes(repo)
+
+        assert result.ok is False, "a failed listing must not read as ok"
+        assert result.sha is None
+
+    def test_git_pull_aborts_rather_than_pulling_over_stranded_work(
+        self, clone_with_divergent_remote_branches: Path, monkeypatch
+    ):
+        """The consequence that matters: the pull must not proceed."""
+        from scripts.update.git import git_pull
+
+        clone = clone_with_divergent_remote_branches
+        (clone / "a.txt").write_text("uncommitted local work\n")
+        before = _sha(clone, "HEAD")
+        self._break_stash_list(monkeypatch)
+
+        result = git_pull(clone)
+
+        assert result.success is False
+        assert result.error and "stash" in result.error.lower()
+        assert _sha(clone, "HEAD") == before  # did not move

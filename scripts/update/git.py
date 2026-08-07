@@ -124,35 +124,42 @@ def stash_changes(project_dir: Path) -> StashResult:
     if result.returncode != 0:
         return StashResult(ok=False)
 
-    sha = _find_stash_by_token(project_dir, token)
+    entries = _stash_entries(project_dir)
+    if entries is None:
+        # The listing failed, so we cannot tell whether the push created an
+        # entry. FAIL CLOSED. Reporting "nothing to stash" here would strand
+        # real work in the stack under a token nobody will look up, and let
+        # the pull proceed over the tree it came from.
+        return StashResult(ok=False)
+
+    sha = next((s for s, _ref, subject in entries if token in subject), None)
     if sha is None:
-        # Exit 0 with no matching entry == "No local changes to save". Not a
-        # failure, and emphatically not licence to adopt whatever is on top.
+        # Exit 0, listing read cleanly, no entry carrying our token ==
+        # "No local changes to save". Not a failure, and emphatically not
+        # licence to adopt whatever is on top.
         return StashResult(ok=True, sha=None)
     return StashResult(ok=True, sha=sha)
 
 
-def _stash_entries(project_dir: Path) -> list[tuple[str, str, str]]:
-    """Return ``(sha, stack_ref, subject)`` for every entry, newest first."""
+def _stash_entries(project_dir: Path) -> list[tuple[str, str, str]] | None:
+    """``(sha, stack_ref, subject)`` per entry, newest first. ``None`` on error.
+
+    ``None`` (read failed) is deliberately distinct from ``[]`` (stack is
+    empty). Collapsing the two is how a failed read becomes a confident
+    "nothing is stashed" answer, and this module exists because that class of
+    fail-open guess loses other lanes' work.
+    """
     listing = run_cmd(
         ["git", "stash", "list", "--format=%H%x00%gd%x00%gs"], cwd=project_dir, check=False
     )
     if listing.returncode != 0:
-        return []
+        return None
     entries = []
     for line in listing.stdout.splitlines():
         parts = line.split("\x00")
         if len(parts) == 3 and parts[0]:
             entries.append((parts[0], parts[1], parts[2]))
     return entries
-
-
-def _find_stash_by_token(project_dir: Path, token: str) -> str | None:
-    """The sha of the entry whose message carries ``token``, or ``None``."""
-    for sha, _ref, subject in _stash_entries(project_dir):
-        if token in subject:
-            return sha
-    return None
 
 
 def _resolve_stash_ref(project_dir: Path, stash_sha: str) -> str | None:
@@ -162,7 +169,7 @@ def _resolve_stash_ref(project_dir: Path, stash_sha: str) -> str | None:
     stash, so a position is only valid at the instant it is read. Needed only
     for ``git stash drop``, which has no by-sha form.
     """
-    for sha, ref, _subject in _stash_entries(project_dir):
+    for sha, ref, _subject in _stash_entries(project_dir) or []:
         if sha == stash_sha and ref:
             return ref
     return None
