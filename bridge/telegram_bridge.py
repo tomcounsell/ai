@@ -29,7 +29,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bridge.utc import utc_iso, utc_now
+from bridge.utc import to_unix_ts, utc_iso, utc_now
 from config.machine import get_machine_name
 from config.settings import settings
 
@@ -151,6 +151,22 @@ from config.enums import PersonaType, SessionType  # noqa: E402
 # Messages arriving within this window attach to the pending session via the
 # steering queue instead of spawning a competing session. See issue #619.
 PENDING_MERGE_WINDOW_SECONDS = 8
+
+
+def _pending_session_age_seconds(created_at, now_ts: float) -> float:
+    """Age in seconds of a session's created_at relative to now_ts.
+
+    ``AgentSession.created_at`` is a datetime (Popoto SortedField, naive on
+    read); raw ``now_ts - created_at`` raises TypeError (#2458 D2). Coerce
+    through ``bridge.utc.to_unix_ts`` (naive treated as UTC). A missing or
+    uncoercible created_at returns +inf so the session falls outside any
+    merge window instead of crashing the intake classifier.
+    """
+    ts = to_unix_ts(created_at)
+    if ts is None:
+        return float("inf")
+    return now_ts - ts
+
 
 # Guard timeout (seconds) for fetch_reply_chain() reply-chain hydration —
 # a Telethon API walk, not a subprocess/HTTP/Redis client call, so it stays
@@ -1857,14 +1873,7 @@ async def main():
                     )
                     if pending_sessions:
                         pending_session = pending_sessions[0]
-                        _ct = pending_session.created_at
-                        if isinstance(_ct, datetime):
-                            _ct = (
-                                _ct.timestamp()
-                                if _ct.tzinfo
-                                else _ct.replace(tzinfo=UTC).timestamp()
-                            )
-                        age = time.time() - (_ct or 0)
+                        age = _pending_session_age_seconds(pending_session.created_at, time.time())
                         await _ack_steering_routed(
                             client,
                             event,
@@ -2144,22 +2153,32 @@ async def main():
                     if sessions:
                         active_sessions.extend(sessions)
 
-                # Also include recent pending sessions within the merge window (#619)
-                pending_sessions = AgentSession.query.filter(
-                    chat_id=telegram_chat_id, status="pending"
-                )
-                if pending_sessions:
-                    now_ts = time.time()
-                    for ps in pending_sessions:
-                        age = now_ts - (ps.created_at or 0)
-                        if age <= PENDING_MERGE_WINDOW_SECONDS:
-                            active_sessions.append(ps)
+                # Also include recent pending sessions within the merge window (#619).
+                # Narrow try: a failure in the pending-coalescing arm must never
+                # suppress the running/dormant interjection arm below (#2458 D2).
+                try:
+                    pending_sessions = AgentSession.query.filter(
+                        chat_id=telegram_chat_id, status="pending"
+                    )
+                    if pending_sessions:
+                        now_ts = time.time()
+                        for ps in pending_sessions:
+                            age = _pending_session_age_seconds(ps.created_at, now_ts)
+                            if age <= PENDING_MERGE_WINDOW_SECONDS:
+                                active_sessions.append(ps)
+                except Exception as _pend_err:
+                    logger.warning(
+                        f"[{project_name}] Pending-session merge-window check "
+                        f"failed (non-fatal): {_pend_err}"
+                    )
 
                 if active_sessions:
-                    # Pick the most recent session (by updated_at or created_at)
+                    # Pick the most recent session (by updated_at or created_at).
+                    # Coerce to unix floats: mixing datetimes with the 0 fallback
+                    # in max() raises TypeError (#2458 D2).
                     target_session = max(
                         active_sessions,
-                        key=lambda s: s.updated_at or s.created_at or 0,
+                        key=lambda s: to_unix_ts(s.updated_at) or to_unix_ts(s.created_at) or 0,
                     )
 
                     # Classify message intent with Haiku
