@@ -386,7 +386,7 @@ sdlc-tool stage-marker --stage DOCS --status completed
 sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number 941 --run-id <hex>
 ```
 
-`--status skipped` (#2577) is accepted only for PLAN and CRITIQUE, and only when the tool can verify the issue has no plan document and the stage left behind no verdict and no dispatch record. `--stage REVIEW/DOCS/MERGE --status skipped` is refused with `STAGE_NOT_SKIPPABLE`. See [`docs/features/off-pipeline-merge-path.md`](features/off-pipeline-merge-path.md).
+`--status skipped` (#2577) is accepted only for PLAN and CRITIQUE, and only when the tool can verify the issue has no plan document and the stage left behind no verdict and no dispatch record. `--stage REVIEW/DOCS/MERGE --status skipped` is refused with `STAGE_NOT_SKIPPABLE`. You rarely need this call: the predecessor backfill records the same skip through the same predicate when a marker write would otherwise refuse. See [`docs/features/off-pipeline-merge-path.md`](features/off-pipeline-merge-path.md).
 
 Session resolution order: `--session-id` > `VALOR_SESSION_ID` > `AGENT_SESSION_ID` > `--issue-number`. Always exits 0 and returns `{}` on error.
 

@@ -111,22 +111,23 @@ persistence before returning 0.
 ### PRs with no plan document
 
 Reviewing a hand-authored fix, a review-derived follow-up, or a dependabot bump
-means the issue has no plan, so PLAN and CRITIQUE were never dispatched. On the
-APPROVED path `finalize` writes the REVIEW marker, whose predecessor backfill
-walks CRITIQUE and refuses with `STATE_MACHINE_REJECTED: ... CRITIQUE ...
-carries no finalized verdict`. That refusal is correct — there is no honest
-CRITIQUE verdict to record. Record the true disposition **before** calling
-`finalize`:
+means the issue has no plan, so PLAN and CRITIQUE were never dispatched and no
+honest CRITIQUE verdict can ever exist. **Call `finalize` exactly as above** —
+its REVIEW marker's predecessor backfill verifies those two stages never ran and
+records them `skipped`, rather than refusing with `STATE_MACHINE_REJECTED` as it
+did before #2577.
 
-```bash
-sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
-sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
-```
+Two things still hold, and both are the point:
 
-The tool verifies the claim (no plan document, no recorded verdict, no recorded
-dispatch) and refuses otherwise; `--stage REVIEW --status skipped` is refused
-unconditionally. Do NOT invent a CRITIQUE verdict to unblock the chain — that is
-the forgery the invariant exists to prevent. See
+- **Post the review artifact first.** `finalize` refuses with
+  `REVIEW_ARTIFACT_MISSING` when the PR carries no formal GitHub review and no
+  `## Review:` comment. Nothing about the no-plan path relaxes that.
+- **Never invent a CRITIQUE verdict to unblock the chain.** That is the forgery
+  the invariant exists to prevent, and it is now also unnecessary.
+
+To state the disposition up front instead, `sdlc-tool stage-marker --stage
+CRITIQUE --status skipped --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"`
+(and the same for PLAN) runs the identical verified predicate. See
 [`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md).
 
 **Cross-vendor judge (opt-in, default OFF).** After collecting the Claude judge

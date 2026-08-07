@@ -85,7 +85,7 @@ sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partia
 
 Only `PLAN` and `CRITIQUE` can ever hold it (`SKIPPABLE_STAGES`), only via the explicit `skip_stage(stage, reason)` call, and the reason is persisted under the `_stage_skips` metadata key. REVIEW, DOCS and MERGE are permanently excluded: each is a gate `tools/merge_predicate.py` reads, so a skippable one would be a way to merge without the guarantee that stage provides. `skip_stage()` also refuses a stage whose status is anything other than `pending`/`ready` — a stage that actually ran is never retroactively skippable.
 
-The sanctioned writer is `sdlc-tool stage-marker --stage CRITIQUE --status skipped`, which verifies the disposition (no plan document for the issue, no recorded verdict, no recorded dispatch) before calling through. See [`off-pipeline-merge-path.md`](off-pipeline-merge-path.md).
+Two writers reach it, both through the same verified predicate (`tools/sdlc_stage_marker.py::_skip_precondition_error`): the explicit `sdlc-tool stage-marker --stage CRITIQUE --status skipped`, and `_backfill_predecessors`, which records the skip at the moment it would otherwise refuse. The predicate confirms no plan document for the issue, no recorded verdict, and no recorded dispatch. See [`off-pipeline-merge-path.md`](off-pipeline-merge-path.md).
 
 ## Ordering Enforcement
 
@@ -109,7 +109,7 @@ Promotes the ISSUE-rooted success spine behind `stage` to `completed`, using `_r
 
 - **Spine-only walk**: only predecessors whose transitive success-predecessor set contains ISSUE are considered. PATCH is excluded — it has no success in-edge (it's reached only via TEST's fail/partial edges), so a backfill never force-completes it.
 - **Scan-then-mutate**: the walk first collects every not-yet-settled on-spine predecessor without mutating any state. A `completed` or `skipped` predecessor is already behind us and is left exactly as it is. If any collected predecessor is `failed`, it raises `ValueError` before touching state, so a genuine failure is never silently erased and no partial promotion is left behind.
-- **Verdict invariant wins**: a collected REVIEW or CRITIQUE with no recorded verdict raises `ValueError` during the scan (#2305 defect 4, #2554). The backfill never writes `skipped` itself — only the explicit, precondition-verified `skip_stage()` does — so no downstream `start_stage(..., backfill_predecessors=True)` call can conjure a skip past this refusal.
+- **Verdict invariant wins**: a collected REVIEW or CRITIQUE with no recorded verdict raises `ValueError` during the scan (#2305 defect 4, #2554). For REVIEW that is absolute — it is outside `SKIPPABLE_STAGES`, so no `start_stage(..., backfill_predecessors=True)` call can route around it, and `verdict_invariant_satisfied("REVIEW", ...)` demands a readable verdict, a `head_sha` trailer, and a posted review artifact. A collected PLAN/CRITIQUE is routed to `skipped` instead of raising only when the verified never-dispatched predicate confirms it (#2577).
 - **Single save**: all promotions from one call are persisted with one `_save()`, not one write per stage.
 - **Distinct metric**: each promoted stage emits `sdlc.stage_backfilled` (not `sdlc.stage_started`), so synthetic promotions are observable and distinguishable from real stage-start events.
 

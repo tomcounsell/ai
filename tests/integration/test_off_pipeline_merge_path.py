@@ -242,29 +242,10 @@ class TestOffPipelinePRReachesTheGate:
         run_id = _mint_run_id(issue_number, monkeypatch)
         body = f"Bump uv. Closes #{issue_number}"
 
-        # Before the skips, the gate is unsatisfiable: the REVIEW marker's
-        # backfill walks CRITIQUE, which has no verdict and never will. This is
-        # the #2577 repro, permanently encoded.
-        with (
-            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
-            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
-        ):
-            blocked, code = _finalize(pr_number, issue_number, run_id)
-        assert code == 1
-        assert blocked["reason"] == "STATE_MACHINE_REJECTED", blocked
-
-        # The sanctioned remedy: record the true disposition of the two stages
-        # the pipeline never dispatched.
-        for result, code in _record_skips(issue_number, run_id):
-            assert code == 0, result
-            assert result["status"] == "skipped"
-
-        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
-        assert sm.states["PLAN"] == "skipped"
-        assert sm.states["CRITIQUE"] == "skipped"
-        assert "no plan document" in sm.stage_skips["CRITIQUE"]["reason"]
-
-        # A real review, recorded through the ordinary atomic path.
+        # THE ACCEPTANCE CASE: session-ensure, then finalize. Nothing in between.
+        # This is what an agent actually types when it finishes reviewing a bug
+        # fix filed while verifying main, and on main today it returns
+        # STATE_MACHINE_REJECTED.
         with (
             patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
             patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
@@ -273,12 +254,55 @@ class TestOffPipelinePRReachesTheGate:
         assert code == 0, reviewed
         assert reviewed["ok"]
 
+        # The planning stages the pipeline never dispatched are recorded as
+        # skipped, with their justification — not force-completed, not forged.
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["PLAN"] == "skipped"
+        assert sm.states["CRITIQUE"] == "skipped"
+        assert sm.states["REVIEW"] == "completed"
+        assert "never dispatched" in sm.stage_skips["CRITIQUE"]["reason"]
+
         # DOCS completion — the marker group (b) reads — now backfills cleanly.
         result, code = _marker("DOCS", "completed", issue_number, run_id)
         assert code == 0, result
 
         verdict = _evaluate(pr_number, issue_number, run_id, body)
         assert verdict.allowed is True, f"{shape}: {verdict.failed_checks}"
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+    def test_explicit_skip_up_front_reaches_the_same_state(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """The disposition is also recordable deliberately, before REVIEW runs.
+
+        Same verified predicate, same resulting ledger — the auto-path heals at
+        the point of refusal, this one states the fact up front.
+        """
+        from agent.pipeline_state import PipelineStateMachine
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+        for result, code in _record_skips(issue_number, run_id):
+            assert code == 0, result
+            assert result["status"] == "skipped"
+
+        with (
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
+        ):
+            reviewed, code = _finalize(925_773, issue_number, run_id)
+        assert code == 0, reviewed
+
+        result, code = _marker("DOCS", "completed", issue_number, run_id)
+        assert code == 0, result
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["PLAN"] == "skipped"
+        assert sm.states["CRITIQUE"] == "skipped"
+        assert sm.states["DOCS"] == "completed"
+        assert "no plan document" in sm.stage_skips["CRITIQUE"]["reason"]
 
         from models.session_lifecycle import release_issue_lock
 
@@ -304,6 +328,49 @@ class TestNoReviewStillCannotMerge:
         legs = " | ".join(verdict.failed_checks)
         assert "DOCS" in legs
         assert "no recorded REVIEW verdict" in legs
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+
+class TestNoPostedReviewArtifactStillFails:
+    """The posted-artifact leg is not replaced by any of this — it is preserved.
+
+    ``_review_artifact_posted`` (WS-D, #2124) is what catches a run that exited
+    with its judge subagents still in flight: a recorded verdict but no
+    ``## Review:`` comment and no formal GitHub review. The auto-skip clears the
+    planning stages off REVIEW's spine and nothing else, so this leg is reached
+    now where it previously sat behind the CRITIQUE refusal.
+    """
+
+    def test_finalize_refuses_when_no_review_artifact_exists(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        from agent.pipeline_state import PipelineStateMachine
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+
+        with (
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=False),
+        ):
+            result, code = _finalize(925_774, issue_number, run_id)
+
+        assert code == 1
+        assert result["reason"] == "REVIEW_ARTIFACT_MISSING", result
+
+        # REVIEW is not completed, and the merge gate is unreachable.
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["REVIEW"] != "completed"
+
+        docs_result, docs_code = _marker("DOCS", "completed", issue_number, run_id)
+        assert docs_code == 1
+        assert docs_result["reason"] == "STATE_MACHINE_REJECTED"
+
+        verdict = _evaluate(925_774, issue_number, run_id, f"Closes #{issue_number}")
+        assert verdict.allowed is False
+        assert "DOCS" in " | ".join(verdict.failed_checks)
 
         from models.session_lifecycle import release_issue_lock
 

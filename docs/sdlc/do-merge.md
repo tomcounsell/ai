@@ -103,26 +103,29 @@ generic steps as follows:
 The global skill defers the *not applicable* recording command to here. For a
 hand-authored fix, a review-derived follow-up, or a dependabot bump there is no
 plan document, so PLAN and CRITIQUE were never dispatched and no truthful
-CRITIQUE verdict can exist. Record that once, before the REVIEW stage runs:
+CRITIQUE verdict can exist.
+
+**There is nothing extra to run.** `sdlc-tool verdict finalize` writes the REVIEW
+completion marker, and that marker's predecessor backfill records the two stages
+as `skipped` when it verifies they never ran and do not apply. The ordinary
+review-then-merge sequence works unchanged on these PRs.
+
+To state the disposition deliberately instead, before REVIEW runs:
 
 ```bash
 sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number {issue_number} --run-id {run_id}
 sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number {issue_number} --run-id {run_id}
 ```
 
-Order matters: `sdlc-tool verdict finalize` writes the REVIEW completion marker,
-whose predecessor backfill walks CRITIQUE. Run the skips first and the backfill
-finds CRITIQUE settled; run them after and finalize fails with
-`STATE_MACHINE_REJECTED`.
-
-The tool verifies the skip rather than accepting the claim: it refuses
-(`PLAN_EXISTS_NOT_SKIPPABLE`) when a plan document resolves for the issue, and
-refuses (`STAGE_RAN_NOT_SKIPPABLE`) when the stage already carries a verdict, a
-recorded dispatch, or a non-`pending`/`ready` status. `--stage REVIEW --status
-skipped` is refused unconditionally with `STAGE_NOT_SKIPPABLE` — REVIEW, DOCS
-and MERGE are the stages the predicate reads, so none of them is ever skippable.
-Everything after this point is the ordinary gate: a posted review, a finalized
-APPROVED verdict, a DOCS completion marker, `Closes #N` in the body. See
+Both paths run the same verified predicate and reach the same ledger state. It
+verifies rather than accepts the claim: refused with `PLAN_EXISTS_NOT_SKIPPABLE`
+when a plan document resolves for the issue, and with `STAGE_RAN_NOT_SKIPPABLE`
+when the stage already carries a verdict, a recorded dispatch, or a
+non-`pending`/`ready` status. `--stage REVIEW --status skipped` is refused
+unconditionally with `STAGE_NOT_SKIPPABLE` — REVIEW, DOCS and MERGE are the
+stages the predicate reads, so none of them is ever skippable. Everything else
+is the ordinary gate: a posted review artifact, a finalized APPROVED verdict, a
+DOCS completion marker, `Closes #N` in the body. See
 [`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md).
 
 ## Documentation Gate

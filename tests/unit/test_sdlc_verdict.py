@@ -654,12 +654,13 @@ class TestVerdictInvariantSatisfied:
     tools.sdlc_stage_marker delegating helpers) and the
     PipelineStateMachine._backfill_predecessors scan-phase gate."""
 
-    def test_review_true_when_verdict_readable_and_trailer_present(self):
+    def test_review_true_when_verdict_trailer_and_artifact_all_present(self):
         from tools.sdlc_verdict import verdict_invariant_satisfied
 
         with (
             patch("tools.sdlc_verdict._review_verdict_readable", return_value=True),
             patch("tools.sdlc_verdict._review_trailer_present", return_value=True),
+            patch("tools.sdlc_verdict._review_artifact_readable", return_value=True),
         ):
             assert verdict_invariant_satisfied("REVIEW", 2062) is True
 
@@ -669,6 +670,7 @@ class TestVerdictInvariantSatisfied:
         with (
             patch("tools.sdlc_verdict._review_verdict_readable", return_value=False),
             patch("tools.sdlc_verdict._review_trailer_present", return_value=True),
+            patch("tools.sdlc_verdict._review_artifact_readable", return_value=True),
         ):
             assert verdict_invariant_satisfied("REVIEW", 2062) is False
 
@@ -679,8 +681,50 @@ class TestVerdictInvariantSatisfied:
         with (
             patch("tools.sdlc_verdict._review_verdict_readable", return_value=True),
             patch("tools.sdlc_verdict._review_trailer_present", return_value=False),
+            patch("tools.sdlc_verdict._review_artifact_readable", return_value=True),
         ):
             assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+    def test_review_false_when_no_posted_artifact(self):
+        """Issue #2577: the third conjunct. `finalize` records the verdict and
+        trailer BEFORE it checks for a posted artifact, so a run that refused on
+        REVIEW_ARTIFACT_MISSING leaves a verdict+trailer behind. Without this
+        the backfill behind a later `--stage DOCS --status completed` read that
+        as a satisfied invariant and force-completed a REVIEW nobody wrote."""
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with (
+            patch("tools.sdlc_verdict._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_verdict._review_trailer_present", return_value=True),
+            patch("tools.sdlc_verdict._review_artifact_readable", return_value=False),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+    def test_artifact_conjunct_delegates_to_the_marker_probe(self):
+        """One implementation, two call sites — the backfill gate and
+        write_marker's direct completed-path cannot disagree about the artifact."""
+        from tools.sdlc_verdict import _review_artifact_readable
+
+        with (
+            patch("tools._sdlc_utils.resolve_target_repo_for_read", return_value="o/r"),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True) as probe,
+        ):
+            assert _review_artifact_readable(2577) is True
+        probe.assert_called_once_with(2577, "o/r")
+
+    def test_artifact_conjunct_fails_closed_on_error(self):
+        from tools.sdlc_verdict import _review_artifact_readable
+
+        with patch(
+            "tools.sdlc_stage_marker._review_artifact_posted",
+            side_effect=RuntimeError("gh exploded"),
+        ):
+            assert _review_artifact_readable(2577) is False
+
+    def test_artifact_conjunct_false_without_an_issue_number(self):
+        from tools.sdlc_verdict import _review_artifact_readable
+
+        assert _review_artifact_readable(None) is False
 
     def test_critique_true_when_verdict_readable(self):
         from tools.sdlc_verdict import verdict_invariant_satisfied
@@ -728,6 +772,9 @@ class TestVerdictInvariantSatisfied:
                 "tools.sdlc_verdict.get_verdict",
                 return_value={"verdict": trailer_text},
             ),
+            # The artifact probe needs a real PR on github.com; stub that seam
+            # only. The verdict/trailer helpers still run for real.
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
         ):
             assert verdict_invariant_satisfied("REVIEW", 2062) is True
 

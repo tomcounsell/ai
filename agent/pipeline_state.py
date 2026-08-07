@@ -405,6 +405,7 @@ class PipelineStateMachine:
         # Defaults first so every construction path (including callers that
         # build the instance via __new__) lands with the full attribute set.
         self.stage_skips = {}
+        self._skip_precondition_cache: dict[str, tuple[str, str] | None] = {}
 
         def _apply(data: dict) -> None:
             self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
@@ -652,16 +653,34 @@ class PipelineStateMachine:
         with the failed-predecessor raise above -- leaving REVIEW/CRITIQUE at
         their real state.
 
-        Skipped predecessors (issue #2577): a CRITIQUE (or PLAN) already recorded
-        `skipped` is settled, so it never enters ``to_promote`` and the verdict
-        invariant never applies to it -- there is no verdict because the stage was
-        never dispatched, which is exactly what `skipped` records. This backfill
-        never WRITES `skipped` itself; only the explicit, precondition-verified
-        :meth:`skip_stage` does. That asymmetry is what keeps the refusal above
-        load-bearing: no downstream ``start_stage(..., backfill_predecessors=True)``
-        call can conjure a skip, so a verdict-less REVIEW still blocks every path.
+        Skipped predecessors (issue #2577): a spine member that is `skipped`, or
+        that VERIFIABLY qualifies to be, is settled rather than force-completed.
+        The scan routes a PLAN/CRITIQUE in :data:`SKIPPABLE_STAGES` into
+        ``to_skip`` when ``tools.sdlc_stage_marker._skip_precondition_error``
+        confirms the stage was never dispatched and does not apply -- the SAME
+        predicate the explicit ``stage-marker --status skipped`` call runs, so
+        the two entry points cannot drift. This is what makes the ordinary
+        review path work for a PR that never entered the pipeline: an agent that
+        reaches ``sdlc-tool verdict finalize`` on a hand-authored fix, a
+        review-derived follow-up, or a dependabot bump gets a truthful ledger
+        instead of an unsatisfiable refusal, without having to know in advance
+        that this issue has no plan.
+
+        What that does NOT open (this is the whole security argument):
+
+        - The auto-skip fires only for :data:`SKIPPABLE_STAGES`. REVIEW is not
+          in it, so a verdict-less REVIEW still raises here, exactly as before,
+          on every path -- including the `--stage DOCS --status completed` call
+          that would otherwise be a way to forge an approval.
+        - It fires only where the explicit call would also have been accepted:
+          no plan document, no recorded verdict, no recorded dispatch, and a
+          `pending`/`ready` status. A CRITIQUE that ran, or one whose plan
+          exists, fails the precondition and still raises with its remedy.
+        - Every probe inside the precondition fails CLOSED, so an unreadable
+          ledger refuses the skip and falls through to the refusal.
         """
         to_promote: list[str] = []
+        to_skip: list[str] = []
         seen: set[str] = set()
         # Seed and extend the frontier with ON-SPINE predecessors only — PATCH,
         # being off-spine, is excluded here and never force-completed.
@@ -675,7 +694,10 @@ class PipelineStateMachine:
             if st == "failed":
                 raise ValueError(f"Cannot backfill predecessors of {stage}: {pred} is failed")
             if st not in SETTLED_STATUSES:
-                to_promote.append(pred)
+                if pred in SKIPPABLE_STAGES and self._qualifies_as_never_dispatched(pred):
+                    to_skip.append(pred)
+                else:
+                    to_promote.append(pred)
             frontier.extend(p for p in self._get_predecessors(pred) if self._reaches_issue(p))
 
         verdict_gated = [p for p in to_promote if p in ("REVIEW", "CRITIQUE")]
@@ -705,13 +727,12 @@ class PipelineStateMachine:
                         # exist and the remedy above is unsatisfiable. Name the
                         # sanctioned alternative rather than leaving break-glass
                         # as the only way through.
+                        # The auto-skip above already handled the genuinely
+                        # never-dispatched case, so reaching here means the
+                        # precondition REFUSED. Name which fact refused it.
+                        refusal = self._never_dispatched_refusal(pred)
                         remedy += (
-                            f" If {pred} was never dispatched because this issue has no"
-                            " plan document (a hand-authored, review-derived or"
-                            " dependabot PR), record that instead: `sdlc-tool"
-                            f" stage-marker --stage {pred} --status skipped"
-                            f" --issue-number {issue_number} --run-id <run_id>`, which"
-                            " verifies the absence of a plan before writing."
+                            f" This {pred} is not recordable as never-dispatched either: {refusal}"
                         )
                     raise ValueError(
                         f"Cannot backfill predecessors of {stage}: {pred} would be "
@@ -721,11 +742,63 @@ class PipelineStateMachine:
 
         for pred in to_promote:  # MUTATE — only after a clean scan
             self.states[pred] = "completed"
-        if to_promote:
+        for pred in to_skip:
+            self.states[pred] = "skipped"
+            self.stage_skips[pred] = {
+                "reason": (
+                    f"no plan document for this issue; {pred} was never dispatched and "
+                    "does not apply to this work (recorded during predecessor backfill)"
+                ),
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+        if to_promote or to_skip:
             self._save()  # single persist for the whole chain
             for pred in to_promote:
                 _record_stage_metric("sdlc.stage_backfilled", pred)
+            for pred in to_skip:
+                _record_stage_metric("sdlc.stage_skipped", pred)
         return to_promote
+
+    def _never_dispatched_refusal(self, stage: str) -> str:
+        """Human-readable reason the never-dispatched precondition refused ``stage``."""
+        refusal = self._skip_precondition(stage)
+        return refusal[1] if refusal else "(precondition now satisfied; retry)"
+
+    def _skip_precondition(self, stage: str):
+        """Delegate to the marker tool's verified never-dispatched predicate.
+
+        Single implementation, two call sites (issue #2577), mirroring how the
+        REVIEW verdict/trailer probes are shared between ``write_marker``'s
+        direct completed-path and this backfill (#2305 defect 4): the explicit
+        ``sdlc-tool stage-marker --status skipped`` call and the auto-skip in
+        :meth:`_backfill_predecessors` cannot come to different conclusions
+        about the same stage.
+
+        Returns ``None`` when the stage genuinely qualifies as never-dispatched,
+        or a ``(reason, message)`` tuple naming what refused it. Fails CLOSED:
+        any import or evaluation error refuses.
+
+        Memoized per instance: the probe walks ``docs/plans/`` and re-reads the
+        ledger, and the backfill consults it for both PLAN and CRITIQUE plus
+        again on the refusal path. A state-machine instance is constructed per
+        operation, so the cache never outlives the decision it informs.
+        """
+        if stage in self._skip_precondition_cache:
+            return self._skip_precondition_cache[stage]
+        try:
+            from tools.sdlc_stage_marker import _skip_precondition_error
+
+            issue_number = getattr(self._ledger, "issue_number", None) if self._ledger else None
+            result = _skip_precondition_error(stage, issue_number, ledger=self._ledger)
+        except Exception as e:
+            logger.debug(f"_skip_precondition({stage!r}) failed: {e} — refusing the skip")
+            result = ("STAGE_RAN_NOT_SKIPPABLE", f"the precondition probe failed ({e})")
+        self._skip_precondition_cache[stage] = result
+        return result
+
+    def _qualifies_as_never_dispatched(self, stage: str) -> bool:
+        """True iff ``stage`` verifiably never ran and does not apply to this issue."""
+        return self._skip_precondition(stage) is None
 
     def skip_stage(self, stage: str, reason: str) -> None:
         """Record ``stage`` as ``skipped`` — never dispatched, not applicable here.

@@ -50,18 +50,33 @@ asserts the stage ran and succeeded, `skipped` asserts it never ran.
 
 ### Recording a skip
 
+Nothing extra to run. The predecessor backfill records it, at the moment it
+would otherwise refuse:
+
+```bash
+sdlc-tool session-ensure --issue-number N
+sdlc-tool verdict finalize --pr P --issue-number N --verdict APPROVED --run-id X
+```
+
+`finalize` writes the REVIEW completion marker on the APPROVED path, whose
+backfill walks CRITIQUE. Finding a CRITIQUE that verifiably never ran and does
+not apply, it records `skipped` instead of raising. An agent reviewing a bug
+fix filed while verifying `main` does not have to know in advance that this
+issue has no plan.
+
+The disposition is also recordable **deliberately, up front**:
+
 ```bash
 sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number N --run-id X
 sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number N --run-id X
 ```
 
-Both calls persist a `_stage_skips` metadata record on the `PipelineLedger`
-carrying the reason and the timestamp, so the disposition survives with its
-justification rather than being inferable only from the absence of a verdict.
-
-Run the skips **before** `sdlc-tool verdict finalize`. Finalize writes the
-REVIEW completion marker on the APPROVED path, and that marker's predecessor
-backfill is what walks CRITIQUE.
+Both entry points run the same predicate
+(`tools/sdlc_stage_marker.py::_skip_precondition_error`) and reach the same
+ledger state, so they cannot disagree about a stage. Either way a `_stage_skips`
+record persists on the `PipelineLedger` with the reason and timestamp, so the
+disposition survives with its justification rather than being inferable only
+from the absence of a verdict.
 
 ## Why this is not a way to forge an approval
 
@@ -83,17 +98,22 @@ caller's good intentions. Five properties hold together:
    carries a recorded verdict, carries a recorded `_sdlc_dispatches` entry for
    its skill, or holds any status other than `pending`/`ready`. A CRITIQUE that
    actually ran keeps its verdict requirement.
-4. **The backfill never conjures a skip.** `_backfill_predecessors` treats an
-   already-recorded `skipped` as settled but never writes one. Every skip is an
-   explicit, lease-gated call. This is what keeps the verdict invariant
-   load-bearing: no `--stage DOCS --status completed` call can produce a skip as
-   a side effect.
-5. **REVIEW's invariant is untouched.** `verdict_invariant_satisfied("REVIEW",
-   n)` still requires a readable verdict plus a well-formed `REVIEW_CONTEXT
-   head_sha=` trailer, `write_marker` still requires a posted GitHub review
-   artifact, and merge-predicate group (c) still independently requires a
-   recorded, APPROVED, head-fresh verdict. A PR with no review fails at the DOCS
-   marker (its backfill walks REVIEW) and again at group (c).
+4. **The backfill's auto-skip is bounded by the same closed set.** It fires only
+   for `SKIPPABLE_STAGES` and only where the explicit call would also have been
+   accepted. A verdict-less REVIEW still raises there on every path, so
+   `--stage DOCS --status completed` cannot produce a REVIEW completion as a
+   side effect — which is the specific forgery this design has to refuse.
+5. **REVIEW's invariant got stronger, not weaker.**
+   `verdict_invariant_satisfied("REVIEW", n)` requires a readable verdict, a
+   well-formed `REVIEW_CONTEXT head_sha=` trailer, **and** a posted GitHub
+   review artifact. The artifact conjunct is new (#2577): `finalize` records the
+   verdict and trailer *before* it checks for the artifact, so a run that
+   refused with `REVIEW_ARTIFACT_MISSING` left a verdict+trailer behind that the
+   backfill read as a satisfied invariant. It was unreachable while CRITIQUE
+   blocked first; clearing CRITIQUE exposed it. Both call sites — the backfill
+   and `write_marker`'s direct completed-path — now enforce the same three
+   facts. Merge-predicate group (c) still independently requires a recorded,
+   APPROVED, head-fresh verdict on top.
 
 Every probe fails closed. An unreadable ledger, an errored plan lookup, or a
 malformed dispatch history refuses the skip — "cannot confirm the stage never
@@ -103,13 +123,16 @@ ran" is never read as "the stage never ran".
 
 ```bash
 sdlc-tool session-ensure --issue-number N          # run_id + issue lease
-sdlc-tool stage-marker --stage PLAN     --status skipped   --issue-number N --run-id X
-sdlc-tool stage-marker --stage CRITIQUE --status skipped   --issue-number N --run-id X
-# /do-pr-review: post the review, then
+# /do-pr-review: post the review artifact, then
 sdlc-tool verdict finalize --pr P --issue-number N --verdict APPROVED --run-id X
-sdlc-tool stage-marker --stage DOCS     --status completed --issue-number N --run-id X
+sdlc-tool stage-marker --stage DOCS --status completed --issue-number N --run-id X
 python -m tools.merge_predicate --pr-number P --run-id X --json   # allowed: true
 ```
+
+The `finalize` call records the PLAN/CRITIQUE skips on its way through. Posting
+the review artifact first is not optional: `finalize` refuses with
+`REVIEW_ARTIFACT_MISSING` when no formal GitHub review and no `## Review:`
+comment exist, and the DOCS marker then refuses too.
 
 The PR body still needs a `Closes/Fixes/Resolves #N` line for group (a).
 Dependabot rewrites its own PR body on every rebase, so an issue link added by
