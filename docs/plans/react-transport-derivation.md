@@ -561,8 +561,8 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 
 ## Success Criteria
 
-- [ ] `ReactionCallback` in `agent/session_state.py` takes four positional parameters.
-- [ ] `TelegramRelayOutputHandler.react` calls `_resolve_transport` and returns before any
+- [x] `ReactionCallback` in `agent/session_state.py` takes four positional parameters.
+- [x] `TelegramRelayOutputHandler.react` calls `_resolve_transport` and returns before any
   Redis write when it yields `"system"`.
 - [ ] Red-first proof: `TestReactTransportDerivation` fails on `main` before the fix and passes
   after, covering — (a) chatless session → no `telegram:outbox:*` write, (b) `session=None` →
@@ -574,26 +574,26 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   `telegram_message_id=0` is skipped by the executor guard while a truthy id still reacts,
   (h) `agent_session = None` at the call site still yields zero `telegram:outbox:*` writes for a
   `chat_id="0"` session (the `agent_session or session` fallback).
-- [ ] Integration: a chatless session driven through `session_executor`'s reaction step creates
+- [x] Integration: a chatless session driven through `session_executor`'s reaction step creates
   **zero** `telegram:outbox:*` keys. The fixture sets `telegram_message_id=0` **explicitly**
   (not omitted, not `None`) and `chat_id="0"`, so it reproduces the exact shape
   `agent/reflection_scheduler.py:621` builds rather than an idealized one.
-- [ ] The reaction dual-write forwards the session: a **telegram**-transport reaction whose
+- [x] The reaction dual-write forwards the session: a **telegram**-transport reaction whose
   `session.session_id` differs from `chat_id` writes its line to `logs/worker/{session_id}.log`,
   not `logs/worker/{chat_id}.log`. This is the only criterion that catches the three-arg
   `self._file_handler.react(...)` call at `agent/output_handler.py:1475` being left unchanged —
   criterion (e) below passes with `session=None` and cannot see it.
-- [ ] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
+- [x] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
   stub-client test proves `set_reaction` is not awaited for a system-transport session.
 - [ ] Live symptom cleared: after restart and one reflection cycle, `logs/bridge.log` gains no
   new `"skipping malformed reaction payload"` lines and no `telegram:outbox:0` key exists.
-- [ ] `tools/react_with_emoji.py` `react()` and `--standalone` both no-op and exit 0 when
+- [x] `tools/react_with_emoji.py` `react()` and `--standalone` both no-op and exit 0 when
   `TELEGRAM_CHAT_ID` is not a deliverable peer.
-- [ ] `agent/output_handler.py` contains no second copy of the peer-parsing logic — it
+- [x] `agent/output_handler.py` contains no second copy of the peer-parsing logic — it
   delegates to `models/room.py`.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions needed — the recon scan found zero xfail markers in `tests/`.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions needed — the recon scan found zero xfail markers in `tests/`.
 
 ## Team Orchestration
 
