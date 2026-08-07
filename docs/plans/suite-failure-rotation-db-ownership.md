@@ -2,7 +2,7 @@
 status: Ready
 type: bug
 revision_applied: true
-revision_applied_at: 2026-08-07T08:44:52Z
+revision_applied_at: 2026-08-07T09:09:01Z
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-07
@@ -1208,7 +1208,11 @@ Not applicable — this repo has no external docs site.
 - **Red-state proof, stated in ownership terms so it needs no unowned client** (round-3 concern 4):
   a test asserting
   `popoto.redis_db.POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] in claimed_test_dbs()`,
-  and the stronger `== claim_test_db()`. **Red on `main`** — the plugin sits on 15 while the process
+  and the stronger `== claim_test_db()`. **Both are assertion statements in that shipped test, not
+  plan prose** — the `== claim_test_db()` line is the entire mechanical basis for the claim that this
+  fix survives a popoto upgrade (bullet above), so if a future popoto changes its resolution order
+  that assertion is the only thing that fails loudly. A build that lands the `in claimed_test_dbs()`
+  half and leaves the equality as a comment has not landed the drift detector. **Red on `main`** — the plugin sits on 15 while the process
   claims elsewhere, which is the same fact the current `PROBE sentinel_survived=False` observation
   reports — and green on the branch. Paste both outputs into the PR body. **Do not** write the
   literal-`redis.Redis(db=15)` sentinel an earlier draft proposed: it is exactly the second
@@ -1384,16 +1388,43 @@ Not applicable — this repo has no external docs site.
 - **Primary leg — AST walk.** Parse every `tests/**/*.py`; for each `ast.Call` whose func resolves
   to `Redis` or `Redis.from_url`, inspect the `db=` keyword. Scoping to the `db=` argument is what
   keeps this inside the Rabbit Hole boundary — it is not the rejected blanket no-raw-client lint.
+- **Match on the TERMINAL NAME of a call, across both `ast.Name` and `ast.Attribute` func nodes —
+  this applies to the callee match AND to the permit match** (round-5 blocker 2). Implement one
+  helper, `_callee_name(node: ast.Call) -> str | None`, returning `node.func.id` when
+  `node.func` is an `ast.Name` and `node.func.attr` when it is an `ast.Attribute`, and route every
+  name comparison in the walk through it. Both directions are broken without this:
+  - **Callee side.** Every real construction site is attribute-qualified — `redis.Redis(...)`
+    (`tests/conftest.py:615`, `tests/unit/test_conftest_isolation_guards.py:298,365,398`,
+    `tests/unit/test_redis_flush_guard.py:28,40,48,56`, `tests/integration/test_redis_models.py:696`,
+    `tests/integration/test_email_bridge.py:81`), `aioredis.Redis(...)` (`tests/conftest.py:631`,
+    `tests/unit/test_redis_flush_guard.py:62,69`), `_redis.Redis(...)` (`tests/_worker_guard.py:91`),
+    `redis_mod.Redis.from_url(...)` (`tests/unit/test_agent_session.py:690,782`). A matcher keyed on
+    `node.func.id` sees **zero** of them, so the guard would be vacuously green and could never go
+    red — the failure mode that hides itself.
+  - **Permit side.** The permitted call may likewise be written `_db_claim.claim_test_db()` (the form
+    used throughout `tests/unit/test_conftest_isolation_guards.py`, e.g. `:509,511,532,533,562,577,583,603`),
+    so rules (a) and (b) below must compare the terminal name, not `node.func.id`.
 - **Permit list, stated precisely enough to be buildable** (round-4 blocker 2). A `db=` value passes
   when it is:
-  - (a) a `Call` to `claim_test_db` / `claim_scratch_test_db`; **or**
+  - (a) a `Call` whose **terminal name** is `claim_test_db` / `claim_scratch_test_db` /
+    `_redis_test_db_num`; **or**
   - (b) a `Name` whose nearest binding **within the same function** is such a `Call` — resolve
-    exactly **one assignment hop**. This is what covers `tests/conftest.py:615,631` (`db=test_db`,
-    where `test_db = claim_test_db()` is bound at `:608`), which the round-3 wording ("a `Name` bound
-    from a fixture") did not; **or**
+    exactly **one assignment hop**, comparing the bound call's terminal name. This is what covers
+    `tests/conftest.py:615,631` (`db=test_db`, where `test_db = claim_test_db()` is bound at `:608`),
+    which the round-3 wording ("a `Name` bound from a fixture") did not, **and**
+    `tests/unit/test_conftest_isolation_guards.py:298` (`db=test_db_num`, bound at `:296` to
+    `_conftest._redis_test_db_num()`) and `:398` (`db=base_test_db`, bound at `:352` to the same
+    call), which the round-4 wording did not; **or**
   - (c) a fixture **parameter** named `scratch_test_db` / `redis_test_db`.
 
   Everything else fails.
+- **Why `_redis_test_db_num` is a permitted alias rather than a call-site conversion** (round-5
+  blocker 2, second half). `tests/conftest.py:658` is `return claim_test_db()` — the accessor is a
+  pure delegation, so permitting it widens nothing. Converting `:296` and `:352` to call
+  `claim_test_db()` directly would be *worse*: both tests exist to prove that conftest's own
+  resolution path lands on a real test client, so replacing the accessor under test with the thing it
+  delegates to deletes the assertion's subject. Add the alias; do not convert the call sites. Name
+  the delegation in the code comment so a future author who breaks it knows to drop the alias.
 - **Seed the allowlist — it is POPULATED in this PR, not empty.** The round-3 "starts empty and stays
   empty" rule was unbuildable: five sites are structurally unconvertible because they are *testing the
   db-0 guard itself* and must use a literal `0`. Ship an explicit `{path: reason}` map with these
@@ -1404,6 +1435,12 @@ Not applicable — this repo has no external docs site.
   | `tests/unit/test_redis_flush_guard.py` | `:28`, `:40`, `:62`, `:69` construct `redis.Redis(db=0)` / `aioredis.Redis(db=0)`; the db-0 guard's own tests must name db 0 literally |
   | `tests/integration/test_redis_models.py` | `:695-697` opens `db=0` read-only to assert no test data leaked into production |
   | `tests/_worker_guard.py` | `:91` reads worker registrations that intentionally live on production `db=0` |
+  | `tests/unit/test_agent_session.py` | `:690`, `:782` call `Redis.from_url("redis://localhost:6379/0")` to assert nothing leaked into production db 0 |
+
+  The `test_agent_session.py` row is **unconditional**, not the round-4 "joins the allowlist if the
+  sites are not otherwise converted" hedge: no task in this plan converts those two sites, and a
+  conditional entry against a table that says "and no others" is precisely the unsatisfiable pass
+  condition this round exists to remove. All four rows resolve to db 0.
 
   `tests/unit/test_conftest_isolation_guards.py:298,398` and `tests/conftest.py:615,631` get **no**
   entry — permit rule (b) covers them once one assignment hop is resolved, and Task 4 converts
@@ -1418,10 +1455,14 @@ Not applicable — this repo has no external docs site.
   `tests/unit/test_redis_flush_guard.py:34` and `tests/unit/test_agent_session.py:690,782`, and
   `tests/conftest.py:97` names it in the same breath as the `db=0` footgun. Cover `Redis.from_url`
   and `ConnectionPool.from_url` string-literal arguments by parsing the trailing `/N` path segment
-  and applying the same rule. All three current sites resolve to db 0; `test_agent_session.py` joins
-  the allowlist with the same "asserts nothing leaks to production db 0" reason if the sites are not
-  otherwise converted. Non-literal `from_url` arguments (an f-string or a `Name`) are out of the
-  walk's reach — say so in the code comment rather than pretending coverage.
+  and applying the same rule. All three current sites resolve to db 0; `test_agent_session.py` is an
+  **unconditional** allowlist row (see the table above), and `test_redis_flush_guard.py` is already
+  one. Non-literal `from_url` arguments are out of the walk's reach — they are a `Name` at
+  `tests/unit/test_valor_email.py:47`, `tests/unit/test_email_history.py:29`,
+  `tests/unit/test_email_bridge.py:1154`, `tests/unit/test_email_relay.py:34`,
+  `tests/unit/test_send_message.py:29`, and `tests/integration/test_valor_email.py:30` (all
+  `redis_test_url`-derived, all correct by construction). Say so in the code comment rather than
+  pretending coverage.
 - **Second leg — the cheap grep.** Keep the `PYTEST_XDIST_WORKER`/`workerinput` derivation check as
   a fast secondary assertion.
 - **Third derivation route.** Also reject `db=` values sourced from
@@ -1447,10 +1488,29 @@ Not applicable — this repo has no external docs site.
   on the real defects and green on the db-0 exemptions in the same run. Capture that output: a
   recurrence guard that has never been seen red is not known to work, and one that is red on
   everything is not known to be usable.
-- **Green-state gate.** Before this task is done, the guard must run clean over `tests/**/*.py` on
-  the branch with the seeded allowlist. A guard that cannot go green blocks the PR, so treat any
-  residual red site as either a Task 4 conversion or a reasoned db-0 allowlist entry — never as a
-  reason to widen the allowlist to a pool slot.
+- **Green-state gate, with the satisfiability inventory that makes it reachable.** Before this task
+  is done, the guard must run clean over `tests/**/*.py` on the branch with the seeded allowlist. The
+  full set of `db=` / `from_url` construction sites in `tests/` was swept against this permit list;
+  every one is accounted for, so the gate is reachable:
+
+  | Site | Disposition |
+  |---|---|
+  | `tests/conftest.py:615,631` | rule (b) — `test_db = claim_test_db()` at `:608` |
+  | `tests/unit/test_conftest_isolation_guards.py:298,398` | rule (b) via the `_redis_test_db_num` alias |
+  | `tests/integration/test_email_bridge.py:81` | rule (a) — `db=claim_test_db()` |
+  | `tests/unit/test_redis_flush_guard.py:28,34,40,62,69` | allowlist (db 0) |
+  | `tests/integration/test_redis_models.py:696` | allowlist (db 0) |
+  | `tests/_worker_guard.py:91` | allowlist (db 0) |
+  | `tests/unit/test_agent_session.py:690,782` | allowlist (db 0) |
+  | `tests/unit/test_redis_flush_guard.py:48,56` | Task 4 converts (`_own_test_db` deleted) |
+  | `tests/unit/test_conftest_isolation_guards.py:365` | Task 4 converts to `scratch_test_db` |
+  | `tests/integration/test_agent_catchup_recovery.py:61` | Task 4 converts (`db=1` → `claim_test_db()`) — a pool slot, so an allowlist entry is forbidden by the invariant above |
+  | `tests/unit/test_email_bridge.py:1406` | Task 4 converts (`connection_kwargs` → `claim_test_db()`) |
+  | 6 `from_url(redis_test_url)` sites | out of the walk's reach (non-literal), documented blind spot |
+
+  A guard that cannot go green blocks the PR, so treat any residual red site as either a Task 4
+  conversion or a reasoned db-0 allowlist entry — never as a reason to widen the allowlist to a pool
+  slot.
 
 ### 7. Close the second rotation writer: module-reload registry leak
 - **Task ID**: build-reload-restore
@@ -1841,10 +1901,11 @@ unbuildable for the third round running.
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Risk & Robustness | **The writer-3 binding proof is already GREEN on `main` at the observation point the plan names, so it cannot go red and certifies nothing.** Inside a test body, `tests/conftest.py:615-616` has replaced `rdb.POPOTO_REDIS_DB` with `redis.Redis(db=claim_test_db())`, so `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` holds on `main` today. Verified by probe on current `main`: an in-test read printed `db=2, claim_test_db()=2` (PASS), while the same read taken from a session-scoped autouse fixture printed `db=15, claim=1` (the real red state) with `POPOTO_TEST_DB=None`. The plugin's db-15 client is observable only BEFORE `redis_test_db` setup and AFTER its teardown — which the plan's own `--setup-plan` trace documents and then contradicts by siting the proof "inside a test". Affects the Success Criterion, Task 2's red-state proof, and Task 9's pass condition. | pending | Delete the "inside any test" wording from the Success Criterion and from Tasks 2 and 9. Site the writer-3 proof at (a) the session-scoped client-ownership check Task 2 already adds — verified red on `main` (`db=15` vs `claim=1`), green after the repoint — and (b) `assert os.environ["POPOTO_TEST_DB"] == str(claim_test_db())`, red on `main` because the var is unset. Never read `rdb.POPOTO_REDIS_DB` from a function-scoped test body for this proof: `tests/conftest.py:615-616` (restored at `:639-641`) makes that read a measurement of this repo's own fixture, not of the plugin. |
 | BLOCKER | History & Consistency | **Task 6's permit list still cannot go green, and the plan states the opposite as settled fact.** Task 6 asserts `tests/unit/test_conftest_isolation_guards.py:298,398` "get **no** entry — permit rule (b) covers them". Verified against source: the bindings are `test_db_num = _conftest._redis_test_db_num()` (`:296`) and `base_test_db = _conftest._redis_test_db_num()` (`:352`) — a Call to `_redis_test_db_num`, which is NOT in the permitted callee set, so rule (b) resolves the hop and then rejects the callee. Second leg: the permitted calls in that same file are attribute-qualified (`_db_claim.claim_test_db()` at `:509,511,532,533,562,577,583,603`), so a matcher inspecting `node.func.id` misses all eight. Task 6's green-state gate and Task 9's pass condition are unreachable as specified. This is the third recurrence of one defect (round-3 concern, round-4 blocker 2, both marked RESOLVED) — the plan's own root-cause pattern applied to its own enforcement mechanism. | pending | State the permitted callee set as `{"claim_test_db", "claim_scratch_test_db", "_redis_test_db_num"}` matched on the *terminal name*: `func.id` for `ast.Name` AND `func.attr` for `ast.Attribute`. `tests/conftest.py:656-658` is `def _redis_test_db_num(request=None): return claim_test_db()`, a pure alias, so permitting it is sound. Preferred alternative (removes the alias rather than blessing it): Task 4 converts `tests/unit/test_conftest_isolation_guards.py:296,352` to `claim_test_db()` and deletes `_redis_test_db_num`, repointing its only other caller `tests/conftest.py:669`. Either way the matcher MUST resolve `ast.Attribute` funcs, or the guard is red on eight sites in the file it must go green on. |
+| | | *(round-5 revision)* | ✅ RESOLVED | **Terminal-name matching, applied to the callee match AND the permit match.** Task 6 now mandates one helper, `_callee_name(node)`, returning `func.id` for `ast.Name` and `func.attr` for `ast.Attribute`, through which every name comparison in the walk is routed. Re-verified against source this round that the callee side was the larger hole: *every* construction site in `tests/` is attribute-qualified (`redis.Redis`, `aioredis.Redis`, `_redis.Redis`, `redis_mod.Redis.from_url`), so a `node.func.id` matcher would have found zero and been vacuously green — never red. `_redis_test_db_num` is added to the permitted callee set as an alias rather than converting `:296`/`:352`: `tests/conftest.py:658` is `return claim_test_db()`, a pure delegation, and both tests exist to prove conftest's own resolution path lands on a real test client, so substituting the delegate would delete the assertion's subject. `tests/unit/test_agent_session.py` is promoted to an unconditional fourth allowlist row (db 0), removing the round-4 "joins the allowlist if not otherwise converted" hedge that contradicted the table's "and no others". Task 6's green-state gate now carries a full satisfiability inventory of every `db=`/`from_url` site in `tests/`, each marked permit-rule / allowlist / Task-4-conversion / out-of-reach. The `[1..TEST_DB_POOL_MAX]` allowlist invariant and the green-state gate are unchanged. |
 | CONCERN | Risk & Robustness | **Task 2's session-scoped client-ownership check declares no dependency on the fixture that makes it true.** It asserts `POPOTO_REDIS_DB`'s db is in `claimed_test_dbs()`, but popoto's session-scoped `_popoto_test_db` is what swaps the client onto that db, and the ordering between two same-scope autouse fixtures is decided by fixture-collection nodeid order (plugin `""` before conftest `"tests"`), not by anything the plan states. If that order inverts, the check runs while `POPOTO_REDIS_DB` is still on its pre-swap db, the assertion fires inside a session-scoped autouse fixture, and every test in the process errors in setup — the identical shape as round-3 blocker 1 and round-4 blocker 1. | pending | Write the fixture as `def _client_ownership_check(_popoto_test_db):` so pytest orders it after the swap by dependency rather than by nodeid accident; `_popoto_test_db` is a session-scoped autouse fixture at `popoto/pytest_plugin.py:138` and is requestable by name. Keep the `if client is None: continue` guard — re-verified this round that `_POPOTO_ASYNC_REDIS_DB` is `None` at session-fixture setup, though it is a live `db=N` client inside a test body (`tests/conftest.py:631`). |
 | CONCERN | Risk & Robustness | **Exhaustion becomes fatal in what spike-3 calls this machine's normal state, while the one-line mitigation is deferred out of a file the PR already edits.** Two concurrent `-n auto` runs demand 20 of 15 slots and the probe already found slots 1-10 held. Round 4 established that xdist clones a replacement for a worker dying during startup up to `numprocesses * 4` (40 at `-n auto`), each a fresh process where `_CLAIM_FAILURE` is `None` — so the "once per process" abort is ~41 x 30 s of retries before the run dies. The mitigation is a single flag in `pyproject.toml:195`, which this PR already touches for addopts hygiene, so "separate blast radius" does not apply. | pending | Append `--max-worker-restart=0` to `pyproject.toml:195` addopts (currently `--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread`; the flag is absent). Record the trade in the PR body: it also converts a worker that dies mid-run for unrelated reasons into a run-level abort, which is the correct posture for a PR whose thesis is that a partially-completed suite is a broken instrument. If it is NOT shipped, reword Risk 2's "the abort is once per process" and the matching Success Criterion to "once per worker process, up to `--max-worker-restart` replacements". |
 | CONCERN | Scope & Value | **The plan ships two pieces of build work whose stated justification it has already withdrawn.** Round 4 established that after Task 2 the `connection_kwargs` value the popoto plugin mutates IS this process's claimed db, so `test_email_bridge.py:1399-1406`'s derivation becomes correct by construction — yet Task 6 still adds a third AST leg to ban it and Task 4 still converts the site, with the withdrawal parked at "revisit at docs time". Meanwhile `tests/conftest.py:511-513` still documents that exact derivation as the sanctioned subprocess pattern (naming a call site that no longer contains it), so the PR bans in `tests/` a pattern its own conftest recommends and leaves the recommendation standing. | pending | Keep the leg but restate its rationale as "one authority, not soundness" (the value is that `claim_test_db()` is the single source, not that `connection_kwargs` is wrong post-Task-2), and delete the now-false `tests/conftest.py:511-513` comment in Task 4 — both files are already in the PR. Or drop the leg: remove it from Task 6's bullet list and remove `tests/unit/test_email_bridge.py:1399-1406` from Test Impact, so the green-state gate is not carrying a rule with no stated basis. |
-| NIT | History & Consistency | Anchor drift survived the round-4 sweep again: the plan cites `tests/unit/test_conftest_isolation_guards.py:298,398` as the sites rule (b) covers, but those are the `redis.Redis(db=...)` *construction* lines; the assignments rule (b) must resolve are at `:296` and `:352`. | pending | n/a (NIT) |
+| NIT | History & Consistency | Anchor drift survived the round-4 sweep again: the plan cites `tests/unit/test_conftest_isolation_guards.py:298,398` as the sites rule (b) covers, but those are the `redis.Redis(db=...)` *construction* lines; the assignments rule (b) must resolve are at `:296` and `:352`. | ✅ RESOLVED | Task 6's rule (b) now cites both pairs explicitly: the constructions at `:298`/`:398` and the `_conftest._redis_test_db_num()` bindings they resolve to at `:296`/`:352`. Verified against source. |
 | NIT | Scope & Value | Verification row 1 gates on a full `tests/unit/` run (~12 minutes by the plan's own recorded baseline) while the plan states twice that a green run does not prove the rotation is fixed. Its actual value is narrower: a Risk-1 regression check for legitimate flushes newly denied by the fail-closed guard, which surface as setup-phase errors. | pending | n/a (NIT) |
 
 **Round-5 structural check:** all four repo-mandated sections present and substantive (Documentation,
