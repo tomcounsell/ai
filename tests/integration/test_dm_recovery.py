@@ -272,6 +272,50 @@ class TestCatchupDMCoverage:
         assert kwargs["chat_title"] is None
 
     @pytest.mark.asyncio
+    async def test_24h_override_never_reaches_before_epoch(
+        self, dm_project, fresh_user_id, monkeypatch
+    ):
+        """Catchup's 24h lookback_override is clamped to the DM coverage epoch:
+        a pre-coverage message inside the 24h window is never replayed."""
+        from bridge.catchup import scan_for_missed_messages
+
+        monkeypatch.setitem(routing.DM_USER_TO_PROJECT, fresh_user_id, dm_project)
+        dialog = _make_dm_dialog(fresh_user_id)
+        # Inside the 24h override window, but BEFORE the coverage epoch.
+        pre_coverage = _make_message(5, minutes_ago=60, sender_id=fresh_user_id)
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+
+        epoch = datetime.now(UTC) - timedelta(minutes=10)
+        enqueue = AsyncMock()
+        fetch = AsyncMock(return_value=[pre_coverage])
+
+        with (
+            patch("bridge.catchup.catchup_disabled", return_value=False),
+            patch("bridge.dedup.is_duplicate_message", new=AsyncMock(return_value=False)),
+            patch(
+                "bridge.catchup.get_or_init_dm_coverage_epoch",
+                new=AsyncMock(return_value=(epoch, False)),
+            ),
+            patch("bridge.catchup.fetch_messages_back_to", new=fetch),
+        ):
+            queued = await scan_for_missed_messages(
+                client=client,
+                monitored_groups=[],
+                projects_config={},
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue,
+                find_project_fn=MagicMock(return_value=None),
+                lookback_override=timedelta(hours=24),
+            )
+
+        assert queued == 0
+        enqueue.assert_not_called()
+        # The paged fetch was asked to reach back only to the epoch, not 24h.
+        fetch_cutoff = fetch.call_args.args[2]
+        assert fetch_cutoff >= epoch
+
+    @pytest.mark.asyncio
     async def test_startup_catchup_first_dm_scan_skips(
         self, dm_project, fresh_user_id, monkeypatch
     ):
@@ -336,6 +380,39 @@ class TestAgentCatchupDMCoverage:
 
         owned = await resolve_owned_chats(client, [], MagicMock(return_value=None))
         assert owned == []  # first pass: epoch just initialized, nothing to sweep
+
+    @pytest.mark.asyncio
+    async def test_sweep_clamps_fail_closed_on_epoch_read_blip(self, dm_project, fresh_user_id):
+        """A Redis blip during the sweep's epoch read must clamp the DM sweep
+        to ~zero lookback (get_or_init's fail-safe (now, True) shape) — never
+        fall open to the full LOOKBACK_HOURS (PR #2622 review note)."""
+        from bridge.agent_catchup import OwnedChat, sweep_chat
+
+        chat = OwnedChat(
+            chat_id=fresh_user_id,
+            chat_title=None,
+            project=dm_project,
+            entity=MagicMock(),
+            is_dm=True,
+        )
+        captured = {}
+
+        async def fake_read_thread(client, entity, lookback=None):
+            captured["lookback"] = lookback
+            return []
+
+        with (
+            patch("bridge.agent_catchup.read_thread", new=fake_read_thread),
+            patch(
+                "bridge.agent_catchup.get_or_init_dm_coverage_epoch",
+                new=AsyncMock(return_value=(datetime.now(UTC), True)),
+            ),
+        ):
+            result = await sweep_chat(AsyncMock(), chat, enqueue_fn=AsyncMock())
+
+        assert result.enqueued == 0
+        assert captured["lookback"] is not None
+        assert captured["lookback"] <= timedelta(seconds=5)
 
 
 class TestNoChatTitleFilterRemains:

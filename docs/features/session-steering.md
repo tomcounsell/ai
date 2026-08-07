@@ -306,6 +306,13 @@ steering via `valor-session steer` needs no special-casing for mid-turn vs.
 turn-boundary delivery — the runner's preempt watcher makes turn-boundary
 delivery the only shape steering ever needs to reason about.
 
+Transitional note (durability plan #2494, Milestone 2): consumers additionally
+drain a Room-scoped key (`steering:room:{room_id}`, `room_id` =
+`{project_key}|{addressee}`) after the legacy session key. This is a
+**drain-only dual-read leg — no writer targets it yet**; the writer flip to
+the Room key ships as a separate release once every machine runs the
+dual-read consumer.
+
 ## Parent-Child Steering (parent Eng session to child Eng session)
 
 In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering**. Parent and child sessions are both Eng sessions (`session_type="eng"`); a parent created its child via `AgentSession.create_child()` for parallel work, and steers it while it runs.

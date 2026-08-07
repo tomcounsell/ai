@@ -201,12 +201,18 @@ class Room(Model):
         so the generic raw ``rebuild_indexes()`` sweep never touches it; this
         method is what the daily cleanup reflection invokes instead.
 
-        Guard: quarantine (delete) identity-less ``Room:*`` hashes — records
-        missing either KeyField — BEFORE calling ``rebuild_indexes()``, so a
-        phantom hash can never be re-indexed into the class set on every
-        rebuild (the #2207 flood mechanism, adapted to a model with zero
-        IndexedFields: Room has no ``$IndexF`` surface, the class-set/KeyField
-        leg is the only one to guard).
+        Guard: **DELETES** identity-less ``Room:*`` hashes — records missing
+        either KeyField — BEFORE calling ``rebuild_indexes()``, so a phantom
+        hash can never be re-indexed into the class set on every rebuild (the
+        #2207 flood mechanism, adapted to a model with zero IndexedFields:
+        Room has no ``$IndexF`` surface, the class-set/KeyField leg is the
+        only one to guard). Note the blast-radius difference from
+        ``AgentSession.repair_indexes()``: that guard merely *skips* the
+        re-SADD for identity-less records and leaves the hash in place; this
+        one removes the hash itself. Safe here because a Room hash without
+        both KeyFields is unreachable through the ORM by construction (the
+        KeyField pair IS the primary key) and Room carries no other payload
+        worth preserving forensically.
 
         Returns ``(quarantined_count, rebuilt_count)`` — same arity as
         ``AgentSession.repair_indexes()``.

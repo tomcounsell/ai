@@ -57,7 +57,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from agent.llm import run_typed
-from bridge.dedup import get_dm_coverage_epoch, get_or_init_dm_coverage_epoch
+from bridge.dedup import get_or_init_dm_coverage_epoch
 from bridge.routing import (
     find_project_for_dm_dialog,
     persona_to_session_type,
@@ -537,10 +537,12 @@ async def sweep_chat(
         # Clamp the DM sweep to the coverage epoch: recovery reaches back to
         # the configured lookback, but never before coverage began (Task 10 —
         # pre-coverage DM history must never be swept as "unanswered").
-        epoch = await get_dm_coverage_epoch(chat.chat_id)
-        if epoch is not None:
-            base = lookback if lookback is not None else timedelta(hours=LOOKBACK_HOURS)
-            lookback = min(base, datetime.now(UTC) - epoch)
+        # Fail-closed (PR #2622 review): get_or_init never returns None — on a
+        # Redis blip it returns (now, newly_initialized=True), clamping this
+        # sweep to ~zero instead of falling open to the full LOOKBACK_HOURS.
+        epoch, _newly_initialized = await get_or_init_dm_coverage_epoch(chat.chat_id)
+        base = lookback if lookback is not None else timedelta(hours=LOOKBACK_HOURS)
+        lookback = min(base, datetime.now(UTC) - epoch)
 
     thread = await read_thread(client, chat.entity, lookback=lookback)
     result.messages_scanned = len(thread)
