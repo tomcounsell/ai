@@ -121,3 +121,11 @@ narrows). `Job` carries two IndexedFields, both low-cardinality: `status`
 Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp. The reply index
 is a plain string KV — no hash, no class set, no secondary index — so the
 identity-less-hash flood mechanism structurally cannot occur for it.
+
+The daily `has_open_promises` backfill (`Job.backfill_open_promises_index()`,
+run from `repair_indexes()` while the bridge and workers are live) writes
+*only* that field via `save(update_fields=["has_open_promises"])`. Popoto
+excludes IndexedFields from the plain HSET mapping and maintains them through
+an atomic Lua EVAL instead, so a save whose entire field list is IndexedFields
+sends no `goal` bytes at all — a maintenance pass on this path can never
+overwrite a concurrently-written `goal` (#2647).

@@ -447,14 +447,43 @@ class Job(Model):
 
     @classmethod
     def backfill_open_promises_index(cls) -> int:
-        """Stamp ``has_open_promises`` on Jobs written before the field existed.
+        """Stamp ``has_open_promises`` on Jobs whose stored flag disagrees with ``goal``.
 
-        ``rebuild_indexes()`` reconstructs index sets from what the hashes
-        already hold, so it cannot help here: a legacy hash has no
-        ``has_open_promises`` field at all, and an absent value indexes as
-        nothing rather than as ``False``. Until a Job is stamped, it is
-        invisible to ``at_rest_with_open_promises``, which is a silent wrong
-        answer rather than a slow one.
+        This is a daily re-derivation, not a one-shot legacy migration:
+        ``rebuild_indexes()`` runs immediately before this method on the same
+        maintenance path (see :meth:`repair_indexes`) and already stamps every
+        hash — including legacy rows with no ``has_open_promises`` attribute —
+        via ``model_class(**model_attrs)``, which fills the missing field from
+        ``default=False`` and calls ``on_save`` for every field. So by the time
+        this loop runs, every row already has a flag; what this loop catches is
+        any row whose flag has since drifted from its ``goal`` for any reason,
+        making a wrongly-``True`` or wrongly-``False`` flag self-heal within a
+        day.
+
+        The write is scoped to ``update_fields=["has_open_promises"]``, which
+        popoto sends as an EVAL-only Lua call touching just that field and its
+        index sets — no ``goal`` bytes are ever transmitted. This means a
+        concurrent promise write (``add_promise`` / ``remove_promise`` /
+        ``append_goal_version``, landing between this loop's re-fetch and its
+        save) can never be clobbered by this method, structurally rather than
+        by a narrowed timing window.
+
+        Each row is re-fetched by both KeyFields immediately before deriving,
+        so the derivation reads fresh ``goal`` data rather than a snapshot that
+        may have gone stale during the enumeration. That re-fetch lives inside
+        the per-row ``try`` on purpose: a raising ``query.get`` must cost only
+        that one row, never abort the whole daily sweep. The residual staleness
+        this leaves — the gap between the re-fetch and the save — can only ever
+        produce a wrong flag, never lost data: every consumer
+        (``at_rest_with_open_promises``) re-verifies against ``open_promises()``
+        before surfacing anything, so a stale flag costs at most one wasted
+        hydration or one delayed operator-surface signal.
+
+        The loop assigns no ``_now()`` anywhere and never writes
+        ``last_active_at``. That is deliberate: two machines running the daily
+        tick concurrently against shared Redis must derive and write the same
+        value for the same row, and any timestamp in the write would break
+        that convergence.
 
         Idempotent, and writes only where the derived value disagrees with
         what is stored, so steady-state passes cost reads alone. Runs on the
@@ -466,13 +495,20 @@ class Job(Model):
         try:
             for job in cls.query.filter():
                 try:
+                    fresh = cls.query.get(id=job.id, room_id=job.room_id)
+                    if fresh is None:
+                        continue
                     derived = any(
                         entry.get("removed_ts") is None
-                        for entry in job._goal_data().get("promises", [])
+                        for entry in fresh._goal_data().get("promises", [])
                     )
-                    if job.has_open_promises is not derived:
-                        job.has_open_promises = derived
-                        job.save()
+                    if fresh.has_open_promises is not derived:
+                        fresh.has_open_promises = derived
+                        # Field-scoped on purpose: see the docstring's write-scope
+                        # invariant. Widening this list (e.g. adding
+                        # last_active_at) would both reintroduce clobber risk and
+                        # break cross-machine convergence.
+                        fresh.save(update_fields=["has_open_promises"])
                         stamped += 1
                 except Exception as e:  # noqa: BLE001 — one bad row never stops the backfill
                     logger.warning(

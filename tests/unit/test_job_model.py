@@ -231,6 +231,7 @@ class TestOpenPromiseIndex:
         job = Job.mint(scratch_room_id, "owes a reply")
         job.add_promise("I'll report back")
         job.mark_at_rest()
+        goal_before = job.goal
 
         # Simulate the legacy shape: promise in the goal, flag never derived.
         job.has_open_promises = False
@@ -241,6 +242,9 @@ class TestOpenPromiseIndex:
 
         assert stamped >= 1
         assert job.job_id in {j.job_id for j in Job.at_rest_with_open_promises()}
+        # Write scope: the backfill's write must never touch goal.
+        reloaded = Job.query.get(id=job.id, room_id=job.room_id)
+        assert reloaded.goal == goal_before
 
     def test_backfill_is_idempotent(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "owes a reply")
@@ -251,6 +255,111 @@ class TestOpenPromiseIndex:
         second = Job.backfill_open_promises_index()
 
         assert second == 0, "a settled population must need no rewrites"
+
+    def test_backfill_does_not_clobber_a_concurrent_promise(self, scratch_room_id, monkeypatch):
+        """Red-state proof (#2647): a bare save() in the backfill loop clobbers a
+        concurrent promise write. This must fail on main with promises_survived=0
+        and pass on the fix with promises_survived=1.
+
+        A sequential "mutate, then call the method" test cannot reproduce the
+        race, because QueryBuilder.__iter__ hydrates at call time — so the
+        enumeration must be forced stale via monkeypatch to hold a snapshot
+        across the concurrent mutation.
+        """
+        job = Job.mint(scratch_room_id, "owes a reply")
+        snap = Job.query.get(id=job.id, room_id=job.room_id)
+        snap.has_open_promises = True
+        snap.save()  # creates the flag-vs-goal disagreement that makes the write fire
+
+        live = Job.query.get(id=job.id, room_id=job.room_id)
+        live.add_promise("promise A")
+
+        monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])
+        Job.backfill_open_promises_index()
+
+        reloaded = Job.query.get(id=job.id, room_id=job.room_id)
+        promises_survived = 1 if reloaded.open_promises() else 0
+        assert promises_survived == 1, "the concurrent promise must survive the backfill"
+
+    def test_backfill_write_is_scoped_to_the_flag(self, scratch_room_id, monkeypatch):
+        """Write-scope pin: the backfill's save() must list only
+        ``has_open_promises``, never a bare save(). Pinned directly with a
+        save-spy rather than inferred from side effects, so a future edit that
+        drops update_fields= or widens the list is caught here rather than only
+        by a one-shot manual Verification grep.
+        """
+        snap = Job.mint(scratch_room_id, "owes a reply")  # hydrated before any promise exists
+        live = Job.query.get(id=snap.id, room_id=snap.room_id)
+        live.add_promise("promise A")
+
+        # Drift the stored flag with a scoped write so the backfill's write fires.
+        drift = Job.query.get(id=snap.id, room_id=snap.room_id)
+        drift.has_open_promises = False
+        drift.save(update_fields=["has_open_promises"])
+
+        last_active_before = Job.query.get(id=snap.id, room_id=snap.room_id).last_active_at
+
+        calls = []
+        orig_save = Job.save
+
+        def spy(self, *args, **kwargs):
+            calls.append(kwargs.get("update_fields"))
+            return orig_save(self, *args, **kwargs)
+
+        monkeypatch.setattr(Job, "save", spy)
+        monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])
+        stamped = Job.backfill_open_promises_index()
+
+        assert stamped == 1
+        assert calls == [["has_open_promises"]]
+        reloaded = Job.query.get(id=snap.id, room_id=snap.room_id)
+        assert reloaded.open_promises()
+        assert reloaded.last_active_at == last_active_before
+
+    def test_backfill_per_row_failure_is_logged_and_siblings_still_stamped(
+        self, scratch_room_id, monkeypatch
+    ):
+        """Fail-open contract: a re-fetch that raises for one row must not stop
+        the sweep from stamping its siblings, and must not raise into the
+        maintenance path. This pins the re-fetch's placement inside the
+        per-row try.
+        """
+        j1 = Job.mint(scratch_room_id, "first")
+        j1.add_promise("promise A")
+        j2 = Job.mint(scratch_room_id, "second")
+        j2.add_promise("promise B")
+
+        # Drift both rows into flag-vs-goal disagreement so the write fires.
+        for j in (j1, j2):
+            d = Job.query.get(id=j.id, room_id=j.room_id)
+            d.has_open_promises = False
+            d.save(update_fields=["has_open_promises"])
+
+        real_get = Job.query.get
+
+        def boom(*args, **kwargs):
+            if kwargs.get("id") == j1.id:
+                raise RuntimeError("boom")
+            return real_get(*args, **kwargs)
+
+        monkeypatch.setattr(Job.query, "get", boom)
+        monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [j1, j2])
+
+        stamped = Job.backfill_open_promises_index()
+
+        assert stamped == 1
+        assert Job.query.get(id=j2.id, room_id=j2.room_id).has_open_promises is True
+
+    def test_backfill_whole_loop_failure_returns_zero(self, scratch_room_id, monkeypatch):
+        """Fail-open contract: a broken enumeration returns 0 rather than
+        raising into repair_indexes()."""
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("redis is unhappy")
+
+        monkeypatch.setattr(Job.query, "filter", boom)
+
+        assert Job.backfill_open_promises_index() == 0
 
     def test_backstop_never_raises_into_the_health_cycle(self, scratch_room_id, monkeypatch):
         """Fail-open contract: a broken query returns [] rather than raising."""

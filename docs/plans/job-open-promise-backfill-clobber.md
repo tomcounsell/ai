@@ -705,43 +705,43 @@ paraphrasing to dodge a grep, the grep is being run wrong.
 
 ## Success Criteria
 
-- [ ] `models/job.py::backfill_open_promises_index` writes via
+- [x] `models/job.py::backfill_open_promises_index` writes via
       `save(update_fields=["has_open_promises"])` and nowhere calls a bare `save()`.
-- [ ] The loop re-fetches each row by both KeyFields before deriving, and skips rows whose
+- [x] The loop re-fetches each row by both KeyFields before deriving, and skips rows whose
       re-fetch returns `None`. The re-fetch sits **inside** the per-row `try`, so a raising
       `query.get` is caught by the per-row handler and never reaches the outer one.
-- [ ] `backfill_open_promises_index`'s signature is unchanged (`(cls) -> int`) — no `room_id`
+- [x] `backfill_open_promises_index`'s signature is unchanged (`(cls) -> int`) — no `room_id`
       parameter was added, and no test call site was rewritten to pass one.
-- [ ] A regression test exercises the interleaving with a **monkeypatched enumeration**
+- [x] A regression test exercises the interleaving with a **monkeypatched enumeration**
       (`Job.query.filter` → `[snap]`, a snapshot held across a concurrent `add_promise`) and
       asserts the promise survives in Redis. It must fail on `main` **on that assertion**
       (measured `promises_survived=0`; not on a `TypeError`, a signature mismatch, or by not
       failing at all) and pass on the branch; the failure output is captured in the PR
       description.
-- [ ] A second, complementary test pins the **write scope**: snapshot hydrated before the promise
+- [x] A second, complementary test pins the **write scope**: snapshot hydrated before the promise
       exists, stored flag drifted, backfill run against that snapshot → `stamped == 1`, the
       promise survives, and `last_active_at` is byte-identical. It is a scope pin, not the
       red-state proof, and the PR description says so.
-- [ ] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
-- [ ] No `_now()` and no timestamp assignment appears anywhere in the method's **executable
+- [x] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
+- [x] No `_now()` and no timestamp assignment appears anywhere in the method's **executable
       code** (convergence across concurrent machines preserved). The docstring and comments are
       exempt and are in fact *required* to name both identifiers when explaining the rule — the
       Verification row strips prose before grepping.
-- [ ] Both fail-open layers keep their contract: a per-row failure is logged and skipped, a
+- [x] Both fail-open layers keep their contract: a per-row failure is logged and skipped, a
       whole-loop failure returns `0`, neither raises into `repair_indexes()`.
-- [ ] `docs/features/README.md:67` Durability Model row names the indexed at-rest promise
+- [x] `docs/features/README.md:67` Durability Model row names the indexed at-rest promise
       backstop.
-- [ ] `docs/features/durability-model.md`'s Index safety (#2207 discipline) paragraph states that
+- [x] `docs/features/durability-model.md`'s Index safety (#2207 discipline) paragraph states that
       the daily `has_open_promises` backfill writes only that field via
       `save(update_fields=[...])`, so a maintenance pass cannot overwrite a concurrently-written
       `goal`. The IndexedField enumeration at `:119` is untouched (already correct per
       `0cee84389`).
-- [ ] The backfill's docstring no longer contains the disproven `rebuild_indexes()` claim ("an
+- [x] The backfill's docstring no longer contains the disproven `rebuild_indexes()` claim ("an
       absent value indexes as nothing rather than as `False`"); it states the daily
       re-derivation / self-healing rationale instead.
-- [ ] No `scripts/update/migrations.py` entry was added (there is no schema delta).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] No `scripts/update/migrations.py` entry was added (there is no schema delta).
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
