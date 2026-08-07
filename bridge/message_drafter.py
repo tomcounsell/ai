@@ -616,22 +616,60 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _detect_empty_promise(text_lower: str) -> bool:
-    """Detect if the agent acknowledged feedback without concrete evidence.
+def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
+    """Shared drafter promise gate: evaluate + audit the exact text about to ship.
 
-    Backward-compat shim — the actual heuristic logic now lives in
-    :mod:`bridge.promise_gate`. This wrapper preserves the old contract
-    (returns True when the text looks like an empty promise) so existing
-    call sites continue to work without structural changes.
+    Single chokepoint for BOTH ``draft_message`` return paths (issue #2421):
+    the short-output early return gates the verbatim ``raw_response`` bytes it
+    would deliver, and the full path gates the narration-stripped text. Runs the
+    regex-only heuristic (``_evaluate_promise_heuristic`` — no LLM call, so the
+    short path's latency guarantee holds) and writes a best-effort audit record
+    to ``logs/classification_audit.jsonl`` with ``source="promise_gate_drafter"``
+    so drafter-path decisions are observable (previously only the CLI path
+    audited).
 
-    The new heuristic in ``bridge.promise_gate`` covers BOTH the legacy
-    behavioral-change class ("got it / will do / going forward") AND the
-    new forward-deferral class ("I'll come back with X / will follow up /
-    stay tuned / more soon / I'll report back").
+    Honors the ``PROMISE_GATE_ENABLED`` kill switch: when disabled, an
+    ``action="allow" / reason="gate_disabled"`` audit entry is still written
+    (matching ``evaluate_promise``'s disabled-path observability) and the text
+    is never blocked.
+
+    The heuristic covers BOTH the behavioral-change class ("got it / will do /
+    going forward") AND the forward-deferral class ("I'll follow up / stay
+    tuned / I'll report back" without a verifiable scheduled delivery).
+
+    Returns True when the text is a blocked empty promise (caller promotes to
+    ``needs_self_draft=True``). Never raises: the audit writer swallows its own
+    exceptions and the heuristic is pure regex.
     """
-    from bridge.promise_gate import _detect_empty_promise as _impl
+    from bridge.promise_gate import (
+        PromiseVerdict,
+        _evaluate_promise_heuristic,
+        _gate_enabled,
+        _write_promise_audit,
+    )
 
-    return _impl(text_lower)
+    session_id = getattr(session, "session_id", None) if session is not None else None
+
+    if not _gate_enabled():
+        verdict = PromiseVerdict(action="allow", reason="gate_disabled")
+        _write_promise_audit(
+            text,
+            verdict,
+            transport=medium,
+            session_id=session_id,
+            source="promise_gate_drafter",
+        )
+        return False
+
+    verdict = _evaluate_promise_heuristic(text)
+    _write_promise_audit(
+        text,
+        verdict,
+        transport=medium,
+        session_id=session_id,
+        source="promise_gate_drafter",
+    )
+    return verdict.action == "block"
 
 
 def _derive_context_summary(raw_text: str) -> str | None:
@@ -959,15 +997,18 @@ async def draft_message(
     3. Run _validate_for_medium on the composed text
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
-    5. If _detect_empty_promise fires (empty promise: agent acknowledged feedback
-       without substance — "will do", "going forward" etc.) OR _validate_for_medium
+    5. If _gate_empty_promise fires (empty promise: agent acknowledged feedback
+       without substance — "will do", "I'll follow up" etc.) OR _validate_for_medium
        returns any non-empty violations list (markdown table, local file-path
        reference, etc.):
        return MessageDraft(text="", needs_self_draft=True, violations=[...])
        — caller injects a self-draft steering nudge back to the agent
-       (PRIMARY flag-handling path, not a failure fallback). This promotion
-       happens on BOTH return paths that can carry a violations list: the
-       short-output early return and this main-path return. All promoted
+       (PRIMARY flag-handling path, not a failure fallback). BOTH the
+       wire-format-violation promotion AND the empty-promise promotion happen
+       on BOTH return paths: the short-output early return (which gates the
+       verbatim raw_response bytes it ships — issue #2421) and this main-path
+       return (which gates the narration-stripped text). Every gate decision
+       writes a source="promise_gate_drafter" audit entry. All promoted
        drafts route through the self-draft steering path
        (agent/output_handler.py:429-441), where a local_file_path_reference
        violation adds an attach-via-`--file` instruction telling the agent to
@@ -1020,12 +1061,22 @@ async def draft_message(
         and "```" not in raw_response
     ):
         short_violations = _validate_for_medium(raw_response, medium)
-        if short_violations:
-            logger.info(
-                "Wire-format violation(s) detected in short-output reply — "
-                "requesting self-draft via steering: %s",
-                [v.rule for v in short_violations],
-            )
+        # Gate the exact verbatim bytes the short path would ship (issue #2421
+        # — this branch previously returned before the promise check, making
+        # the gate structurally unreachable for replies under the threshold).
+        short_is_empty_promise = _gate_empty_promise(raw_response, medium=medium, session=session)
+        if short_is_empty_promise or short_violations:
+            if short_is_empty_promise:
+                logger.info(
+                    "Empty promise detected in short-output reply — "
+                    "requesting self-draft via steering"
+                )
+            else:
+                logger.info(
+                    "Wire-format violation(s) detected in short-output reply — "
+                    "requesting self-draft via steering: %s",
+                    [v.rule for v in short_violations],
+                )
             return MessageDraft(
                 text="",
                 needs_self_draft=True,
@@ -1060,7 +1111,7 @@ async def draft_message(
     # etc.) was flagged by the validator. Either condition promotes to
     # needs_self_draft=True so the agent rewrites via the self-draft
     # steering path instead of a violation shipping verbatim.
-    is_empty_promise = _detect_empty_promise(stripped_text.lower())
+    is_empty_promise = _gate_empty_promise(stripped_text, medium=medium, session=session)
     if is_empty_promise or violations:
         if is_empty_promise:
             logger.info("Empty promise detected — requesting self-draft via steering")

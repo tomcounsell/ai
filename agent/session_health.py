@@ -2379,6 +2379,76 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     )
 
 
+# Honest substitution delivered in place of a promise-flagged deferred draft on
+# terminal paths (issue #2423). At terminal-flush time there is no live agent to
+# self-draft a rewrite, so the flush substitutes rather than suppresses (suppression
+# would reintroduce the #1796 swallowed-reply class). This text must itself pass
+# the promise heuristic — it states a fact and asks, promising nothing.
+TERMINAL_PROMISE_FALLBACK_MESSAGE = (
+    "I couldn't complete that follow-up before this session ended — "
+    "please send the request again if you still need it."
+)
+
+
+def _gate_terminal_promise(message: str, *, transport: str, session_id: str | None) -> str:
+    """Promise-gate the exact text a terminal flush is about to deliver (#2423).
+
+    Runs the regex-only promise heuristic on ``message`` and, when it blocks
+    (forward-deferral / behavioral-change promise with nothing to fulfill it),
+    returns ``TERMINAL_PROMISE_FALLBACK_MESSAGE`` in place of the false promise.
+    Every gate decision writes a best-effort ``source="terminal_flush"`` audit
+    entry to ``logs/classification_audit.jsonl``.
+
+    Honors the ``PROMISE_GATE_ENABLED`` kill switch (disabled → deliver as-is,
+    with an ``allow / gate_disabled`` audit entry for observability). Never
+    raises: any evaluation failure degrades to delivering the original message
+    (fail-open for delivery — a gate crash must not swallow the reply).
+    """
+    try:
+        from bridge.promise_gate import (  # noqa: PLC0415
+            PromiseVerdict,
+            _evaluate_promise_heuristic,
+            _gate_enabled,
+            _write_promise_audit,
+        )
+
+        if not _gate_enabled():
+            _write_promise_audit(
+                message,
+                PromiseVerdict(action="allow", reason="gate_disabled"),
+                transport=transport,
+                session_id=session_id,
+                source="terminal_flush",
+            )
+            return message
+
+        verdict = _evaluate_promise_heuristic(message)
+        _write_promise_audit(
+            message,
+            verdict,
+            transport=transport,
+            session_id=session_id,
+            source="terminal_flush",
+        )
+        if verdict.action == "block":
+            logger.info(
+                "[session-health] promise-flagged deferred draft gated at terminal "
+                "flush for %s (%s) — substituting honest fallback",
+                session_id,
+                verdict.class_,
+            )
+            return TERMINAL_PROMISE_FALLBACK_MESSAGE
+        return message
+    except Exception as _gate_err:
+        logger.warning(
+            "[session-health] terminal-flush promise gate failed for %s: %s; "
+            "delivering ungated text",
+            session_id,
+            _gate_err,
+        )
+        return message
+
+
 def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
     """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
 
@@ -2556,6 +2626,14 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                     message = ", ".join(os.path.basename(p) for p in attached)
                 else:
                     message = "(the referenced file is no longer available)"
+
+            # Promise-gate the exact text about to ship (issue #2423): a
+            # promise-flagged draft that lost the self-draft race must not be
+            # delivered verbatim on terminal paths — substitute the honest
+            # fallback instead (no live agent exists to self-draft a rewrite).
+            message = _gate_terminal_promise(
+                message, transport=transport or "telegram", session_id=session_id
+            )
         else:
             message = "I couldn't finish responding to that — please try again."
 
@@ -2740,6 +2818,11 @@ async def _deliver_deferred_self_draft_fallback(
         # to avoid a double-send; the sync flush owns telegram delivery.
         if transport in (None, "telegram"):
             return
+
+        # Promise-gate the exact text about to ship (issue #2423) — same hole
+        # as the sync flush: a promise-flagged deferred draft must not reach
+        # the recipient verbatim on a terminal path.
+        message = _gate_terminal_promise(message, transport=transport, session_id=session_id)
 
         # Delegate delivery (callback resolution + FileOutputHandler fallback +
         # never-raises swallow) to the single sanctioned system-notice seam. The

@@ -49,18 +49,37 @@ outbox:
 
 | Send path | Gate state before #1219 | Gate state after #1219 |
 |---|---|---|
-| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_detect_empty_promise` in the drafter; `needs_self_draft=True` triggers self-draft steering instead of delivery |
+| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_gate_empty_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path (#2421 closed the short-output reachability hole); `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
+| Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | Bypassed | **Gated** via `_gate_terminal_promise` (#2423): a promise-flagged deferred draft is substituted with an honest fallback (never suppressed, never delivered verbatim); audits with `source="terminal_flush"` |
 | `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
 | `tools/valor_telegram.py send` | Bypassed | **Gated** |
 | `tools/valor_email.py cmd_send` | Bypassed | **Gated** |
 
 The gate is implemented in [`bridge/promise_gate.py`](../../bridge/promise_gate.py).
 Each CLI tool calls `cli_check_or_exit(text, transport, session_id)`
-immediately before its Redis `rpush`. The drafter calls `_detect_empty_promise`
-(a shim that delegates to `bridge.promise_gate._detect_empty_promise`) as part
-of the pass-through validation flow — no Haiku call, no double-charge.
+immediately before its Redis `rpush`. The drafter calls `_gate_empty_promise`
+(a shared helper in `bridge/message_drafter.py` that runs
+`bridge.promise_gate._evaluate_promise_heuristic` on the exact text about to
+ship — the verbatim `raw_response` on the short path, the narration-stripped
+text on the full path — honors `PROMISE_GATE_ENABLED`, and writes a
+`source="promise_gate_drafter"` audit entry) as part of the pass-through
+validation flow — no Haiku call, no double-charge.
 `evaluate_promise` still accepts an optional `classifier_verdict` parameter
 (kept for backward compatibility) but the drafter no longer populates it.
+
+### Terminal flush (#2423)
+
+`flush_deferred_self_draft_sync` (and its async email sibling
+`_deliver_deferred_self_draft_fallback`) deliver a deferred self-draft when a
+session ends before self-draft steering was consumed. At that moment there is
+no live agent to self-draft a rewrite, so `needs_self_draft=True` is not an
+option. `agent/session_health._gate_terminal_promise` therefore evaluates the
+exact text about to ship and, on a block, **substitutes** the honest fallback
+`TERMINAL_PROMISE_FALLBACK_MESSAGE` ("I couldn't complete that follow-up
+before this session ended — please send the request again if you still need
+it."). Suppression was rejected because it reintroduces the #1796
+swallowed-reply class. The gate is fail-open for delivery: an evaluation error
+delivers the original text rather than swallowing the reply.
 
 ## Architectural posture
 
@@ -198,6 +217,8 @@ The `source` discriminator takes one of:
 | `promise_gate_timeout` | LLM SDK 3-second timeout fired |
 | `promise_gate_disabled` | Kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter no longer populates this) |
+| `promise_gate_drafter` | Drafter-path decision (`_gate_empty_promise`, both length regimes); on the kill-switch it records `action="allow" / reason="gate_disabled"` under this same source |
+| `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
 Empty-input calls (empty / whitespace-only / `None` text) write **no**
@@ -286,7 +307,16 @@ returning `None`. Behavior is unchanged: in production there is no running loop 
   recovery template anti-leak, and `cli_check_or_exit`
   exception-swallow semantics.
 * [`tests/unit/test_promise_gate_audit.py`](../../tests/unit/test_promise_gate_audit.py) — covers the
-  forked `_write_promise_audit` helper (cycle-2 C-NEW-2).
+  forked `_write_promise_audit` helper (cycle-2 C-NEW-2) and the drafter-path
+  `source="promise_gate_drafter"` audit entries (#2421).
+* [`tests/unit/test_message_drafter.py`](../../tests/unit/test_message_drafter.py) —
+  `TestShortOutputPromiseGate` covers the short-output reachability fix with the
+  exact 172-char incident text, the benign false-positive guard, and the
+  kill-switch contract (#2421).
+* [`tests/unit/test_deferred_self_draft_completed.py`](../../tests/unit/test_deferred_self_draft_completed.py) —
+  `TestTerminalFlushPromiseGate` covers the terminal-flush substitution,
+  `source="terminal_flush"` audit, kill switch, and the guard that the
+  substitute itself passes the heuristic (#2423).
 * [`tests/unit/test_promise_gate_session_events.py`](../../tests/unit/test_promise_gate_session_events.py) — covers
   conditional session_events emission with real and synthetic
   session_ids (cycle-2 C-NEW-1, C-NEW-4).
@@ -326,7 +356,7 @@ sed -i '' '/^PROMISE_GATE_ENABLED=/d' ~/Desktop/Valor/.env
 The forward-deferral and behavioral-change few-shot examples live in
 `bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter no longer
 has its own classifier system prompt — empty-promise detection runs via
-`_detect_empty_promise` (a regex/heuristic shim), not a Haiku call.
+`_gate_empty_promise` (a regex/heuristic helper), not a Haiku call.
 If telemetry shows a class of false-positives the LLM cannot catch from
 text alone, the `PROMISE_GATE_SYSTEM_PROMPT` in `bridge/promise_gate.py`
 is the right knob to turn (for the CLI send paths that call `evaluate_promise`).

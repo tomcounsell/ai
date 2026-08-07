@@ -1114,3 +1114,116 @@ def test_re_finalize_already_completed_does_not_reflush(cleanup):
     finalize_session(fresh, "completed", reason="second re-finalize")
 
     assert _outbox_count(sid) == 1, "re-finalize must not produce a second outbox write"
+
+
+# ---------------------------------------------------------------------------
+# 8. Terminal-flush promise gate (issue #2423)
+# ---------------------------------------------------------------------------
+
+# A forward-deferral reply held as a deferred self-draft: at terminal-flush time
+# there is no live agent to self-draft, so the flush must SUBSTITUTE an honest
+# fallback rather than deliver the false promise (or swallow the reply, #1796).
+PROMISE_REPLY = "On it — I'll follow up with the results once it's ready."
+
+
+class TestTerminalFlushPromiseGate:
+    def test_promise_flagged_deferred_draft_substituted_not_delivered(self, cleanup):
+        """A promise-flagged deferred draft reaching the terminal flush is NOT
+        delivered verbatim; the honest-fallback substitution ships instead."""
+        from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE
+
+        sid = f"{SID_PREFIX}promise-sub"
+        cleanup.append(sid)
+        session = _make_session(sid, text=PROMISE_REPLY)
+
+        finalize_session(session, "completed", reason="test completed")
+
+        payloads = _outbox_payloads(sid)
+        assert len(payloads) == 1, "substitution must never swallow the reply (#1796)"
+        assert payloads[0]["text"] == TERMINAL_PROMISE_FALLBACK_MESSAGE
+        assert "follow up with" not in payloads[0]["text"].lower()
+
+    def test_terminal_flush_block_writes_audit(self, cleanup, tmp_path, monkeypatch):
+        """A gated terminal flush writes a ``source="terminal_flush"`` audit
+        entry to the classification audit log."""
+        import bridge.promise_gate as promise_gate
+
+        log_path = tmp_path / "audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        sid = f"{SID_PREFIX}promise-audit"
+        cleanup.append(sid)
+        session = _make_session(sid, text=PROMISE_REPLY)
+
+        finalize_session(session, "completed", reason="test completed")
+
+        entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+        blocks = [e for e in entries if e["source"] == "terminal_flush"]
+        assert len(blocks) == 1
+        assert blocks[0]["kind"] == "promise_gate"
+        assert blocks[0]["action"] == "block"
+
+    def test_kill_switch_delivers_verbatim(self, cleanup, monkeypatch):
+        """PROMISE_GATE_ENABLED=false disables the terminal-flush gate: the held
+        text is delivered verbatim (kill-switch contract)."""
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        sid = f"{SID_PREFIX}promise-kill"
+        cleanup.append(sid)
+        session = _make_session(sid, text=PROMISE_REPLY)
+
+        finalize_session(session, "completed", reason="test completed")
+
+        payloads = _outbox_payloads(sid)
+        assert len(payloads) == 1
+        assert payloads[0]["text"] == PROMISE_REPLY
+
+    def test_non_promise_text_still_delivered_verbatim(self, cleanup):
+        """False-positive guard: a substantive non-promise deferred reply is
+        unaffected by the gate."""
+        sid = f"{SID_PREFIX}promise-benign"
+        cleanup.append(sid)
+        session = _make_session(sid, text=ORIGINAL_REPLY)
+
+        finalize_session(session, "completed", reason="test completed")
+
+        payloads = _outbox_payloads(sid)
+        assert len(payloads) == 1
+        assert payloads[0]["text"] == ORIGINAL_REPLY
+
+    def test_substitute_message_passes_the_heuristic(self):
+        """The honest fallback must itself pass the promise heuristic — the
+        substitution may never be a new empty promise."""
+        from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE
+        from bridge.promise_gate import _evaluate_promise_heuristic
+
+        assert _evaluate_promise_heuristic(TERMINAL_PROMISE_FALLBACK_MESSAGE).action == "allow"
+
+    @pytest.mark.asyncio
+    async def test_async_email_fallback_promise_substituted(self, cleanup):
+        """The async email fallback (_deliver_deferred_self_draft_fallback) has
+        the identical hole and is gated by the same helper."""
+        from agent.session_health import (
+            TERMINAL_PROMISE_FALLBACK_MESSAGE,
+            _deliver_deferred_self_draft_fallback,
+        )
+
+        sid = f"{SID_PREFIX}promise-async-email"
+        cleanup.append(sid)
+        session = _make_session(
+            sid,
+            text=PROMISE_REPLY,
+            transport="email",
+            chat_id="sender@example.com",
+        )
+
+        with patch(
+            "agent.output_handler.deliver_system_notice",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_notice:
+            await _deliver_deferred_self_draft_fallback(session)
+
+        mock_notice.assert_awaited_once()
+        args, _kwargs = mock_notice.call_args
+        assert args[1] == TERMINAL_PROMISE_FALLBACK_MESSAGE
