@@ -1,7 +1,7 @@
 """Tests for the Telegram history tool (Redis/Popoto backend).
 
 All tests use the redis_test_db fixture (autouse, a unique per-process db
-claimed from the pool — see conftest _claim_test_db, #2060) for isolation.
+claimed from the pool — see tests/db_claim.py::claim_test_db, #2060) for isolation.
 The db_path parameter is ignored by the new Redis-backed implementation;
 it is kept in function signatures for backward-compatibility only.
 """
