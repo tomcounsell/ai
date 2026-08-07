@@ -80,8 +80,21 @@ bare `Path.is_dir()` probe reads that leftover as a live skill. Such a directory
 **husk**.
 
 `tests/unit/test_update_hardlinks.py::test_no_husk_directories_in_skill_roots` fails
-the build whenever a husk exists under `.claude/skills-global/` or `.claude/skills/`.
-All liveness checks in that file (`_skill_exists_in_any_root`, `test_renamed_removals_entries_are_not_stale`)
+the build whenever an *actionable* husk exists under `.claude/skills-global/` or
+`.claude/skills/` — one a commit can do something about. A husk whose only contents
+are build artifacts (`__pycache__`, `.DS_Store`, the gitignored
+`references/metadata.json` sync cache — the same artifact predicate
+`rule_19_husk_directories` in `audit_skills.py` uses, pinned equivalent by
+`test_husk_artifact_predicate_matches_audit_skills`) *and* whose name carries a
+`("skills", name)` `RENAMED_REMOVALS` entry is excluded from the assertion: git can
+never remove ignored residue, so `/update`'s `cleanup_repo_skill_husks` sweep in
+`scripts/update/hardlinks.py` clears it on the machine that has it instead
+(issues #2597, #2598). An artifact-only husk *without* a removal entry still fails —
+committing the entry is the fix — and a husk holding real files always fails, needing
+a human delete-or-restore decision (or
+`python .claude/skills-global/audit-skills/scripts/audit_skills.py --fix --no-sync`
+for the prunable ones). All liveness checks in that file
+(`_skill_exists_in_any_root`, `test_renamed_removals_entries_are_not_stale`)
 route through the same `_skill_is_live` helper, so a directory-existence check cannot
 silently reappear at a second call site.
 

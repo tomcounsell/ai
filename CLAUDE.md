@@ -73,7 +73,7 @@ This repo is the canonical source for skills that ship to every machine.
 
 **Terminology:** "make this a **global skill**" or "**general-purpose skill**" means *put it in `.claude/skills-global/`*. It does not mean editing a CLAUDE.md note. A skill is known to every machine precisely when it lives there.
 
-Sync wiring is `scripts/update/hardlinks.py`. Adding a directory with a `SKILL.md` under `skills-global/` is the entire registration step. **When you move a skill between the two directories, add a `RENAMED_REMOVALS` entry** so the stale hardlink is cleaned up on every machine.
+Sync wiring is `scripts/update/hardlinks.py`. Adding a directory with a `SKILL.md` under `skills-global/` is the entire registration step. **When you move a skill between the two directories, add a `RENAMED_REMOVALS` entry** so the stale hardlink is cleaned up on every machine — the same entry also sweeps repo-local rename residue (a gitignored `__pycache__` keeping the old skill directory alive in this checkout) from both skill roots.
 
 Global skill bodies stay generic; repo-specific behavior layers in via `.claude/skill-context/{skill}.md` (non-SDLC) or `docs/sdlc/{skill}.md` (SDLC stages). Coupled bodies carry the probe sentence "If <context-path> exists, read it and honor its declarations; otherwise use the generic defaults described below." See [`docs/features/skill-context-convention.md`](docs/features/skill-context-convention.md).
 
