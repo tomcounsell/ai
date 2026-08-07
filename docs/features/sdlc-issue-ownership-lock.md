@@ -304,6 +304,16 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 | `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `active_run_id` re-fetched from Redis each tick via `_fetch_live_active_run_id()` (read-back only; skips the tick if absent or fetch fails). Warns at WARNING on a not-owner result. |
 | `sdlc-tool stage-marker` write | `tools/sdlc_stage_marker.py` (via `tools/_sdlc_utils.py::renew_issue_lock_for_session()`) | Every stage-marker write (BUILD/TEST/REVIEW stage transitions) | The CLI's `--run-id`, falling back to `session.active_run_id`. Fires after the ownership guard and before the state-machine write; best-effort, never blocks or alters the write outcome on failure. |
 
+### The supervised-run signal renews with the lease (issue #2659)
+
+The companion key `session:supervisedrun:{N}` (`agent/supervised_run.py`) is what a stage fork reads to inherit its supervisor's `run_id` instead of contesting the lock. It carries the lease's TTL, so it must be re-stamped wherever the lease is.
+
+Both renewers above do so, each after confirming it still owns the lease: `tools/sdlc_lease_heartbeat.py` on its peek-confirmed renew tick, and `agent/session_executor.py::_tick_issue_lock_renewal` only under an `acquired` result. Ownership-first ordering is the safety property -- writing the signal before the ownership check would republish a dead run's inheritance token over a live successor's and hand the successor's forks the wrong `run_id`.
+
+Before #2659 the signal was written only on acquire, so it expired 1800s into every pipeline while the lease was renewed indefinitely. From minute 30 onward every stage fork the supervisor dispatched got a bare `ISSUE_LOCKED` from its own supervisor's lock and stood down -- correctly, per the substrate-probe rule, since only `SUPERVISED_RUN_ACTIVE` means inherit-and-continue. The pipeline wedged with a live lock, a live heartbeat, and no error anywhere. Both carriers now share the renewers' lifetime: the signal cannot outlive the lease, and the lease cannot outlive the signal by more than one renewal interval.
+
+The worktree `.sdlc-run` file carrier is deliberately not refreshed on renew -- it has no TTL, and is cleared by `clear_supervised_run_signal` on the run's terminal transition.
+
 ### Gated but not renewed: `verdict record`, `meta-set`
 
 `sdlc-tool verdict record` and `sdlc-tool meta-set` both **require** `--run-id` (a missing flag is `RUN_ID_REQUIRED`) and both **gate** their writes through `tools/_sdlc_utils.py::check_run_ownership()` -- a peek-only check that refuses the write with an `ISSUE_LOCKED` diagnostic when a foreign run holds the issue. Neither, however, **renews** the lock's TTL. Both fire during PLAN/CRITIQUE-stage bookkeeping or ad hoc metadata writes with no established recurrence path through an in-progress BUILD/TEST/REVIEW stage -- renewing there would be speculative rather than load-bearing. If operational experience later surfaces a concrete long-running gap through one of these two, add renewal there as a follow-up rather than pre-wiring it speculatively now.

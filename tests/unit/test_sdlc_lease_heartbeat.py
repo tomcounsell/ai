@@ -198,3 +198,133 @@ class TestPeekFirstRenewOnly:
             )
         assert rc == 0
         assert state["n"] >= 2  # survived the raising tick, ran again
+
+
+class TestSupervisedRunSignalRenewal:
+    """Issue #2659: the signal must renew with the lease, not just at acquire.
+
+    ``write_supervised_run_signal`` had a single call site -- the acquire path
+    in ``tools/sdlc_session_ensure.py`` -- while this heartbeat renewed the
+    lease forever. So 1800s (the shared TTL) into every pipeline the signal
+    expired under a live lease, and from that moment each stage fork the
+    supervisor dispatched read a bare ``ISSUE_LOCKED`` from its own
+    supervisor's lock and correctly stood down. The pipeline wedged with a live
+    lock, a live heartbeat, and no error anywhere.
+    """
+
+    def test_self_owned_renew_also_refreshes_the_signal(self):
+        """The renewing tick refreshes the signal under the same identity."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
+            if peek:
+                return _peek_result("mine")  # self still owns
+            return MagicMock()
+
+        ticks = iter([0.0, 1.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            rc = run_heartbeat(
+                issue_number=2659,
+                run_id="mine",
+                session_id="sdlc-local-2659",
+                interval=1,
+                max_lifetime=2,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert write_signal.call_count >= 1
+        args, kwargs = write_signal.call_args
+        assert args[0] == 2659
+        assert args[1] == "mine"
+        assert kwargs.get("session_id") == "sdlc-local-2659"
+        # The worktree file carrier has no TTL, so the renewal deliberately
+        # refreshes only the Redis carrier.
+        assert kwargs.get("working_dir") is None
+
+    def test_foreign_owner_never_writes_the_signal(self):
+        """A successor owns the lease -> exit without resurrecting our signal.
+
+        The mutation that matters: writing the signal before (or regardless of)
+        the ownership peek would republish a dead run's inheritance token over a
+        live successor's, handing the successor's forks the wrong ``run_id``.
+        """
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
+            return _peek_result("successor-run")
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            rc = run_heartbeat(
+                issue_number=2659,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                _sleep=lambda s: None,
+            )
+
+        assert rc == 0
+        write_signal.assert_not_called()
+
+    def test_absent_lease_never_writes_the_signal(self):
+        """Lease absent/lapsed -> exit 0 without publishing a signal for a
+        lease we no longer hold (the signal must never outlive the lock)."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
+            return _peek_result(None)
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            rc = run_heartbeat(
+                issue_number=2659,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                _sleep=lambda s: None,
+            )
+
+        assert rc == 0
+        write_signal.assert_not_called()
+
+    def test_signal_write_failure_does_not_break_lease_renewal(self):
+        """The signal is best-effort: a failing write must not stop the loop
+        or the lease renewal that keeps the pipeline alive."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        renews = []
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
+            if peek:
+                return _peek_result("mine")
+            renews.append(run_id)
+            return MagicMock()
+
+        ticks = iter([0.0, 1.0, 2.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch(
+                "agent.supervised_run.write_supervised_run_signal",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            rc = run_heartbeat(
+                issue_number=2659,
+                run_id="mine",
+                interval=1,
+                max_lifetime=5,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert len(renews) >= 2  # the raising write did not end the loop
