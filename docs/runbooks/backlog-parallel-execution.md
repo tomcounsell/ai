@@ -111,13 +111,18 @@ The snapshot found **96 registered worktrees**, most of them dead (`sdlc-1249`,
 long tail of `dev-*` / `agent-*` orphans).
 
 ```bash
-scripts/worktree-gc.sh            # dry-run by default
-scripts/worktree-gc.sh --apply    # only after reading the dry-run output
-scripts/reap-xdist.sh             # same dry-run/--apply convention
+python -m tools.disk_reclaim                        # dry-run by default
+DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply
+scripts/reap-xdist.sh                               # same dry-run/--apply convention
 ```
 
-Read the dry-run output before applying. A worktree with uncommitted work in it
-is someone's in-flight lane.
+The reclaim sweep refuses on its own to touch a lane with uncommitted work, a
+live session, a live process, an open PR, or an unmerged branch, and it skips
+everything if it cannot reach `gh` to ask. It also honors a 14-day floor, so a
+lane created this week is never a candidate no matter how idle it looks.
+
+Read the dry-run output anyway. The guards decide what is *safe* to remove; only
+you know what is *wanted*.
 
 ---
 
