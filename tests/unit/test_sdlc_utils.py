@@ -1105,3 +1105,100 @@ class TestRenewIssueLockForSession:
         ):
             # Must not raise -- best-effort side effect only.
             renew_issue_lock_for_session(session)
+
+
+class TestRevalidateLedgerLeaseRefreshesSignal:
+    """Issue #2659: a path that extends the lease must extend the signal.
+
+    ``revalidate_ledger_lease`` issues a NON-peek ``touch_issue_lock``, so
+    every stage-marker write (``tools/sdlc_stage_marker.py``) and every
+    dispatch record (``tools/sdlc_dispatch.py``) keeps the lease alive on its
+    own. ``session:supervisedrun:{N}`` shares that TTL.
+
+    Without the refresh the lease could outlive the signal, which is the
+    #2659 wedge: every stage fork reads a bare ``ISSUE_LOCKED`` from its own
+    supervisor's lock and stands down. It is reachable rather than
+    theoretical -- the local heartbeat self-exits at 4h
+    (``SDLC_LEASE_HEARTBEAT_MAX_LIFETIME_SECONDS``), after which these writes
+    are the only renewer left, and the signal lapses 30 minutes later. The
+    observed #2659 incidents were at roughly 3.5h.
+    """
+
+    def test_confirmed_ownership_refreshes_the_signal(self):
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None, session_id="s") is True
+
+        write_signal.assert_called_once()
+        args, kwargs = write_signal.call_args
+        assert args[0] == 2659
+        assert args[1] == "run-mine"
+        assert kwargs.get("session_id") == "s"
+
+    def test_foreign_owner_never_refreshes_the_signal(self):
+        """A foreign run holds the lease -> the gate refuses AND we publish
+        nothing. Writing here would overwrite the true owner's signal, denying
+        their forks the inheritance signal and re-creating the #2659 wedge."""
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False, owner_session_id="other", owner_run_id="foreign-run"
+            )
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None, session_id="s") is False
+
+        write_signal.assert_not_called()
+
+    def test_touch_failure_refuses_and_writes_nothing(self):
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                side_effect=RuntimeError("redis down"),
+            ),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None) is False
+
+        write_signal.assert_not_called()
+
+    def test_signal_failure_never_turns_a_valid_gate_into_a_refusal(self):
+        """The signal is an optimization. A failing refresh must not block a
+        ledger write whose lease ownership was just confirmed."""
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch(
+                "agent.supervised_run.write_supervised_run_signal",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None) is True
+
+    def test_missing_identifiers_write_nothing(self):
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        with patch("agent.supervised_run.write_supervised_run_signal") as write_signal:
+            assert revalidate_ledger_lease(0, "run-mine", None) is False
+            assert revalidate_ledger_lease(2659, "", None) is False
+        write_signal.assert_not_called()

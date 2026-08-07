@@ -308,7 +308,19 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 
 The companion key `session:supervisedrun:{N}` (`agent/supervised_run.py`) is what a stage fork reads to inherit its supervisor's `run_id` instead of contesting the lock. It carries the lease's TTL, so it must be re-stamped wherever the lease is.
 
-Both renewers above do so, each after confirming it still owns the lease: `tools/sdlc_lease_heartbeat.py` on its peek-confirmed renew tick, and `agent/session_executor.py::_tick_issue_lock_renewal` only under an `acquired` result. Ownership-first ordering is the safety property -- writing the signal before the ownership check would republish a dead run's inheritance token over a live successor's and hand the successor's forks the wrong `run_id`.
+Three paths extend the lease, and all three refresh the signal, each only after confirming it still owns the lease:
+
+| Renewer | Ownership proof before the signal write |
+|---|---|
+| `tools/sdlc_lease_heartbeat.py` (local supervisor, not in the table above) | its peek-confirmed `owner_run_id == run_id` match |
+| `agent/session_executor.py::_tick_issue_lock_renewal` (worker, 60s) | an `acquired` result |
+| `tools/_sdlc_utils.py::revalidate_ledger_lease` (every stage-marker and dispatch write) | an `acquired` result |
+
+The third matters more than it looks. `revalidate_ledger_lease` is non-peek, so `sdlc-tool stage-marker` and `dispatch record` renew the lease on their own -- and the local heartbeat self-exits at `MAX_LIFETIME_SECONDS` (4h), after which they are the only renewer left. Without the refresh there, a pipeline past ~4.5h would lose its signal under a lease those writes were holding up, reproducing the #2659 wedge exactly. The observed incidents were at roughly 3.5h, so that window is reachable rather than theoretical.
+
+Ownership-first ordering is the safety property. Writing the signal before the ownership check would republish a non-owner's `run_id` over a live successor's, which **denies the successor's forks their inheritance signal and re-creates the #2659 wedge**. It does not hand anyone the wrong `run_id`: `supervised_run_status` reports `live=True` only when the signal's `run_id` equals the lock peek's `owner_run_id`, so a mis-owned signal reads not-live and is never inherited. That liveness anchor is what bounds the damage to a stand-down rather than a takeover.
+
+`acquired` is a strong but not absolute ownership signal on the two non-peek paths: `touch_issue_lock` fails **open**, returning `acquired=True` from its outer `except`, so a Redis exception mid-call can let a non-owner tick through. Per the liveness anchor above the result is a not-live signal rather than a stolen one, and the true owner's next tick (60s worker, 600s local) overwrites it. The heartbeat path does not share this: its peek compares `owner_run_id != run_id` and exits, and the fail-open peek returns `owner_run_id=None`, which also exits.
 
 Before #2659 the signal was written only on acquire, so it expired 1800s into every pipeline while the lease was renewed indefinitely. From minute 30 onward every stage fork the supervisor dispatched got a bare `ISSUE_LOCKED` from its own supervisor's lock and stood down -- correctly, per the substrate-probe rule, since only `SUPERVISED_RUN_ACTIVE` means inherit-and-continue. The pipeline wedged with a live lock, a live heartbeat, and no error anywhere. Both carriers now share the renewers' lifetime: the signal cannot outlive the lease, and the lease cannot outlive the signal by more than one renewal interval.
 
