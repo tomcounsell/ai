@@ -1843,6 +1843,26 @@ async def _execute_agent_session(session: AgentSession) -> None:
         except Exception as _inj_err:
             logger.debug(f"[{session.project_key}] injection banner prepend skipped: {_inj_err}")
 
+        # #2694: the context-recall advisory goes BEFORE the injection banner,
+        # and the order is load-bearing. build_risk_banner (see the contract
+        # comment in bridge/injection_inspection.py, "SCREEN DELIMITER
+        # (untrusted content follows)") is an OPEN-ENDED prefix with no closing
+        # delimiter, so the untrusted zone runs to the end of the prompt.
+        # Prepending here — after the banner has already been prepended above —
+        # puts this bridge-authored trusted line ahead of the banner, keeping
+        # the banner's "precedes all untrusted content" contract intact. Placed
+        # after the banner it would sit inside the zone the banner just declared
+        # untrusted, and an attacker could forge an identical line.
+        # NEVER reorder these two blocks.
+        try:
+            _ctx_advisory = (getattr(session, "extra_context", None) or {}).get(
+                "context_recall_advisory"
+            )
+            if _ctx_advisory:
+                enriched_text = f"{_ctx_advisory}\n\n{enriched_text}"
+        except Exception as _adv_err:
+            logger.debug(f"[{session.project_key}] context-recall prepend skipped: {_adv_err}")
+
         # Set back-reference: TelegramMessage.agent_session_id -> this session's agent_session_id
         if session.telegram_message_key:
             try:

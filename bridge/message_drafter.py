@@ -891,6 +891,19 @@ SELF_DRAFT_INSTRUCTION = (
     "If your work produced no substantive results, say so plainly."
 )
 
+# Preamble used instead of SELF_DRAFT_INSTRUCTION when the bounce was raised
+# solely by the context-recall gate (#2694). The base instruction asserts the
+# delivery validator found a wire-format violation or an unsubstantiated
+# promise; on a context-recall bounce the draft was clean and that assertion
+# would be false, so the PM would go looking for a defect that isn't there.
+CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION = (
+    "Your message was held because it asks for context that is probably "
+    "already in the recent conversation. Read the history with the command "
+    "below, then resend a real answer. If you read it and still genuinely need "
+    "the human to decide something, resend your question as-is and it will go "
+    "through."
+)
+
 # Sentinel returned by drafter callers when self-draft steering was injected.
 # Distinguishes "message deferred to agent self-draft" from "send failed" so the
 # bridge callback does not log a spurious error. Retained as a module symbol for

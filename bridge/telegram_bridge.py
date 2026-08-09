@@ -910,6 +910,7 @@ async def _ack_steering_routed(
     sender_name: str,
     text: str,
     log_context: str,
+    context_advisory: str | None = None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
 
@@ -932,6 +933,11 @@ async def _ack_steering_routed(
     ``_background_tasks`` to keep the GC from collecting it mid-flight.
     Text-only steering (the common case) bypasses every new operation —
     the existing reaction-after-push order is preserved byte-identical.
+
+    ``context_advisory`` (#2694) is passed ONLY by the intake-classifier call
+    site; the other callers reach this helper on paths that never run the
+    classifier and have no verdict in scope, so they leave it ``None`` and push
+    exactly one steering message as before.
     """
     if message.media:
         # User-facing reaction fires FIRST on the media branch so the
@@ -977,6 +983,32 @@ async def _ack_steering_routed(
 
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
+
+    # #2694: the context-recall advisory rides as its own steering message,
+    # never appended to the human's text — abort detection matches the human's
+    # string EXACTLY (agent/steering.py), so concatenating an advisory onto a
+    # bare "stop" would silently destroy abort. `is_abort=False` declines to
+    # assert abort on the advisory; push_steering_message still auto-upgrades
+    # if the text itself is an abort keyword, so it cannot mask one.
+    #
+    # front=False is load-bearing: the cold-path drain in
+    # agent/session_executor.py consumes only steering_msgs[0] and re-queues the
+    # rest, so a front-pushed advisory would DISPLACE the human's own message
+    # for that turn. At the back, the human's message is always consumed first
+    # and the advisory is at worst one turn late.
+    if context_advisory:
+        try:
+            push_steering_message(
+                session_id,
+                context_advisory,
+                "intake-classifier",
+                is_abort=False,
+                front=False,
+            )
+        except Exception as _adv_err:
+            # Advisory is a hint; its failure must never affect the human's
+            # message, which is already pushed above.
+            logger.warning(f"[context-recall] advisory steering push failed: {_adv_err}")
 
     if not message.media:
         # Text-only path: existing reaction-after-push order preserved.
@@ -2101,6 +2133,11 @@ async def main():
         # the durable Room-inbox append above already made the message safe,
         # so classifier latency is a UX cost, not a durability cost).
         # This catches follow-up messages sent WITHOUT using Telegram's reply feature.
+        #
+        # #2694: the context-recall advisory is produced inside the classifier
+        # branch below but consumed at the enqueue seam far outside it, so it is
+        # declared here — the widest scope both sites share.
+        _ctx_recall_advisory: str | None = None
         if not (is_reply_to_valor and message.reply_to_msg_id):
             try:
                 from models.agent_session import AgentSession
@@ -2161,6 +2198,25 @@ async def main():
                         f"target_session={target_session.session_id}"
                     )
 
+                    # #2694: the classifier's context-recall judgment now
+                    # reaches the session instead of dying in the log line
+                    # above. Fail-quiet — an advisory that cannot be built is
+                    # simply not attached.
+                    if intent_result.get("context_recall_advised"):
+                        try:
+                            from bridge.context_recall import build_context_recall_advisory
+
+                            _ctx_recall_advisory = build_context_recall_advisory(
+                                chat_id=telegram_chat_id,
+                                medium="telegram",
+                                reason=intent_result.get("context_recall_reason") or None,
+                            )
+                        except Exception as _adv_err:
+                            logger.warning(
+                                f"[{project_name}] context-recall advisory build "
+                                f"failed (non-fatal): {_adv_err}"
+                            )
+
                     if intent == "interjection":
                         # Re-check session status (Race 1 mitigation: session may
                         # have completed during classification)
@@ -2187,6 +2243,8 @@ async def main():
                                     f"interjection to session "
                                     f"{fresh_session.session_id}"
                                 ),
+                                # #2694: ONLY this call site passes an advisory.
+                                context_advisory=_ctx_recall_advisory,
                             )
                             return
                         else:
@@ -2403,6 +2461,17 @@ async def main():
         # #1630: seed with the injection banner (if flagged); the reply-chain
         # flag below merges additively.
         extra_overrides: dict | None = dict(_injection_ctx) or None
+        # #2694: attach the context-recall advisory for the new_work branch (a
+        # running session never re-reads extra_context, which is why the
+        # interjection branch uses steering instead). Guarded on truthiness so
+        # extra_overrides stays None in the no-advisory case, preserving
+        # today's behavior byte-for-byte. `or {}` is required — the seed above
+        # is None whenever there is no injection context.
+        if _ctx_recall_advisory:
+            extra_overrides = {
+                **(extra_overrides or {}),
+                "context_recall_advisory": _ctx_recall_advisory,
+            }
         if message.reply_to_msg_id and not is_reply_to_valor and not _prehydration_disabled:
             reply_chain_context: str | None = None
             try:
