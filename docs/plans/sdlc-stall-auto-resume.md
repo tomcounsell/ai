@@ -204,7 +204,7 @@ per open SDLC PR:
   gate 6': this machine owns the project?                       [NEW]
       not owner -> skip silently
   action ladder, keyed on (slug, head-sha):
-      attempts >= MAX          -> escalate once, stop
+      _attempts_count() >= MAX -> escalate once, stop        [read-only GET, never INCR]
       action cooldown live     -> skip this tick
       pick rung:
           rung 1  live non-ledger eng session for project -> steer_session(...)
@@ -246,7 +246,7 @@ def _lock_says_live(issue_number: int) -> bool | None:
         from models.session_lifecycle import _lock_owner_is_live
         from popoto.redis_db import POPOTO_REDIS_DB as _R
 
-        raw = _R.get(f"session:issuelock:{issue_number}")
+        raw = _R.get(_LOCK_KEY.format(issue_number=issue_number))
         if raw is None:
             return False                       # no lock -> nobody owns the lane
         return _lock_owner_is_live(json.loads(raw))
@@ -372,6 +372,7 @@ plan described `cmd_create`'s real work as "only two steps — `get_or_create_wo
 | Step | Location | Moves into `create_session`? |
 |---|---|---|
 | argparse attribute reads, `--json` flag | `:423-504` | **No** — stays in `cmd_create` |
+| **#1633 child-session stopgap** — `parent_id` truthy → `child_sessions_allowed()` → `return 2` | `:481-497` | **No** — stays in `cmd_create` (already inside the `:423-504` range above; called out explicitly so it is not lost) |
 | slug auto-derive-or-reject (`_derive_slug_from_message`; eng requires a slug, #1109/#1272) | `:511-536` | **Yes** |
 | three-tier `project_key` resolution (explicit > `--parent` inheritance > cwd) | `:538-568` | **Yes** |
 | `_resolve_project_working_directory(project_key)` → `repo_root`, `project_config` | `:577` | **Yes** |
@@ -381,7 +382,27 @@ plan described `cmd_create`'s real work as "only two steps — `get_or_create_wo
 | `_check_worker_health()` | `:612` | **Yes** — returned in the result, not printed by the core |
 | `print` / JSON emission / exit codes | `:614-645` | **No** — stays in `cmd_create` |
 
-`cmd_create` keeps **only** argparse reads, printing, and exit codes. Everything else is the core.
+`cmd_create` keeps **only** argparse reads, the #1633 parent gate, printing, and exit codes.
+Everything else is the core.
+
+**Close the `parent_id` bypass in the core.** `create_session` accepts `parent_id`, so without an
+equivalent check the new programmatic core would be an ungated way around an active stopgap — a
+caller passing `parent_id` would skip a refusal the CLI enforces. The reflection never passes
+`parent_id`, so the hole is latent rather than live, which is exactly when it is cheap to close.
+Before any slug or `project_key` resolution:
+
+```python
+if parent_id:
+    from models.child_session_gate import (
+        CHILD_SESSIONS_DISABLED_MESSAGE,
+        child_sessions_allowed,
+    )
+    if not child_sessions_allowed():
+        return CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)
+```
+
+The CLI's `BYPASS_WARNING` print and `--json` refusal payload stay in `cmd_create` — they are
+presentation, and the core signals the same refusal through `error`.
 
 Signature, naming the full payload explicitly so nothing is dropped:
 
@@ -404,7 +425,7 @@ def create_session(
     project_key: str | None = None,   # None -> parent inheritance, then cwd match
     parent_id: str | None = None,
     session_type: str = "eng",
-    chat_id: int = 0,
+    chat_id: str = "0",
     model: str | None = None,
     requires_real_chrome: bool = False,
 ) -> CreateResult: ...
@@ -508,10 +529,14 @@ classification is recorded in `findings` (`"benign-race: resume"`) so a persiste
 reflections is visible rather than silent.
 
 **The steer rung has no benign-race branch, deliberately.** An earlier draft gave it one ("re-read row
-is non-terminal with a fresher `updated_at`"). Verified against `main`, that branch is unreachable:
-`steer_session`'s only `success=False` returns are empty message, session not found, terminal status
-(`agent/session_executor.py:827-832`), and `is_ledger` (`:841-849`). A live non-ledger target simply
-**succeeds** — being actively driven by someone else does not make a steer fail, it just queues
+is non-terminal with a fresher `updated_at`"). Verified against `main`, that branch is unreachable.
+`steer_session` has **five** `success=False` paths: empty message, session not found, terminal status
+(`agent/session_executor.py:827-832`), `is_ledger` (`:841-849`), and an outer `except Exception`
+(`:884-886`) wrapping both the `AgentSession.query.filter` at `:836` and `push_steering_message` at
+`:873`. That fifth path *can* fire against a target that stays live and non-terminal — a Redis flap
+during the push — and it is still classified **non-benign**: a query or push error is a real failure,
+not "another actor got there first". What does not happen is a steer failing *because* someone else
+is driving the target; a live non-ledger target simply **succeeds** — being actively driven by someone else does not make a steer fail, it just queues
 another message. Every real steer failure means the target is gone, terminal, or was never
 steerable, all of which are genuine dead ends that should charge an attempt. The classifier therefore
 covers the resume and create rungs only, and no test may mock `steer_session` into a
@@ -550,7 +575,7 @@ exception `_DEDUP_PREFIX` already claims (`sdlc_progress.py:33-36`).
 | Key | Purpose | Lifetime |
 |---|---|---|
 | `sdlc:stall:resume:cooldown:{slug}:{sha}` | Action cooldown — retrying an action is cheap, so this is short | `SDLC_STALL_RESUME_COOLDOWN_HOURS`, default **1** |
-| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget — `INCR`, TTL refreshed on each bump | `SDLC_STALL_ATTEMPTS_TTL_HOURS`, default **24** |
+| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget. **Two distinct operations:** `_attempts_count()` is a bare `GET` (absent key = 0) used by the pre-action gate; `_bump_attempts()` is the `INCR` + TTL refresh that charges an attempt after an action is classified | `SDLC_STALL_ATTEMPTS_TTL_HOURS`, default **24** |
 | `sdlc:stall:escalated:{slug}:{sha}` | Human escalation, `SET NX` — the anti-ladder key | `SDLC_STALL_ESCALATION_TTL_DAYS`, default **30** |
 
 Separating the action cooldown from the human-escalation key is the whole fix for defect 2. The old
@@ -591,6 +616,14 @@ knob no code enforces is worse than no knob.
 `SDLC_STALL_CREATE_MAX_PER_TICK` is enforceable precisely because it is scoped to one project:
 `_check_project_stalls` loops over that project's stalled PRs within a single call, so a plain local
 counter is real shared state. It brakes the one rung whose blast radius justifies a brake.
+
+**Reading the budget and charging it are different operations, and conflating them breaks the
+feature.** The pre-action gate `_attempts_count() >= MAX` runs *before* a rung is picked and must be
+a bare `GET`. If that gate were itself an `INCR`, a lane sitting in the action cooldown would charge
+an attempt every single tick and exhaust the budget from cooldown-skips alone — escalating to a human
+without the ladder ever having dispatched a single real action, which is precisely the
+"paged for nothing" outcome this plan exists to delete. `_bump_attempts` is invoked from exactly one
+place: the post-classification charge step.
 
 **An attempt is charged on success as well as failure** — except for benign races, which charge
 nothing (see "Benign races are not attempts"). This is the direct lesson of
@@ -749,10 +782,12 @@ boundary is the direct `_R.get` on `session:issuelock:{N}`, which does raise.
 | `resume_session` | returns `success=False`, row re-reads terminal | attempt charged; escalation fires once |
 | `resume_session` | returns `success=False`, row re-reads **non-terminal** (the `crash_recovery` race) | benign race: no attempt, no escalation, `findings` marker |
 | `create_session` | raises / returns `success=False` | attempt charged; escalation fires once |
+| `create_session` called with a truthy `parent_id` while child sessions are disabled | — | returns `CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)` **before** any slug/project_key resolution, worktree, or enqueue — the core must not be an ungated bypass of the #1633 stopgap |
 | Issue lock re-read before create | live owner returned | benign race: no create, no attempt, no escalation |
 | Issue lock re-read before create | read raises (`None`) | no create, no attempt, no escalation; `findings` marker |
 | `get_or_create_worktree` | raises | surfaced as `create_session` failure; no partial session enqueued |
-| Redis `INCR` (attempts) | raises | no action this tick (fail-safe: cannot prove we are under budget); `findings` marker |
+| Redis `GET` (`_attempts_count`, pre-action gate) | raises | no action this tick — cannot prove we are under budget; `findings` marker; **no escalation** |
+| Redis `INCR` (`_bump_attempts`, post-action charge) | raises | the action already dispatched and cannot be un-dispatched: log a `findings` marker and continue. **Must not itself trigger an escalation** |
 | Redis `SET NX` (escalation) | raises / returns falsey | no Telegram send |
 | `valor-telegram` | `FileNotFoundError` | swallowed and logged; reflection still returns `ok` |
 | `machine_owns_project` | raises | treated as not-owner; no action |
@@ -815,6 +850,11 @@ New coverage to add:
       equivalent; assert instead that a `steer_session` failure always charges an attempt.
 - [ ] Attempt-budget exhaustion: attempts reach the cap → one escalation, then silence across
       further ticks.
+- [ ] Attempt budget is **not** charged by a cooldown skip: N ticks landing in the action cooldown
+      leave `_attempts_count()` unchanged and produce no escalation. This is the read-vs-charge
+      regression guard.
+- [ ] `create_session(parent_id=...)` with child sessions disabled → refused with
+      `CHILD_SESSIONS_DISABLED_MESSAGE`, no worktree provisioned, nothing enqueued.
 - [ ] Machine-ownership gate: non-owner machine takes no action.
 - [ ] Create brake: two stalled lanes in one project both falling to create → only
       `SDLC_STALL_CREATE_MAX_PER_TICK` creations in that tick.
@@ -875,7 +915,8 @@ New coverage to add:
    Gate 5'. A failing row query contributes `False`, never `None`.
 3. **Add gate 6.** Call `machine_owns_project(project["slug"])` in `_check_project_stalls`; skip
    silently when not the owner.
-4. **Add the Redis key helpers.** `_action_cooldown_set`, `_bump_attempts`, `_escalation_set` —
+4. **Add the Redis key helpers.** `_action_cooldown_set`, `_attempts_count`, `_bump_attempts`,
+   `_escalation_set` —
    named module constants with env overrides and provisional-tunable comments. Delete
    `_dedup_set`, `_DEDUP_PREFIX`'s 6-hour alert key, `_cooldown_seconds`, and
    `_DEFAULT_COOLDOWN_HOURS`.
@@ -1027,11 +1068,11 @@ concrete Implementation Note the builder applies in place.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (filed BLOCKER; downgraded on verification — see note below the table) | The create-rung boundary table presents itself as an exhaustive read of `cmd_create` but never mentions the **#1633 child-session stopgap** at `tools/valor_session.py:481-497`: when `parent_id` is truthy it calls `child_sessions_allowed()` and `return 2`s, firing *before* slug resolution. Two consequences. (a) The prose rule "`cmd_create` keeps **only** argparse reads, printing, and exit codes" is factually wrong — a policy gate also remains. (b) `create_session`'s signature accepts `parent_id`, so the new programmatic core is an **ungated bypass** of an active stopgap: a caller passing `parent_id` skips a refusal the CLI enforces. The reflection itself never passes `parent_id`, so the live blast radius is zero today; the hole is latent. | pending | Add a row to the boundary table for `tools/valor_session.py:481-497` classified **stays in `cmd_create`** (it is already inside the table's existing `:423-504` "stays" range — the CLI path is NOT broken, which is why this is not a blocker), and amend the prose rule to "argparse reads, the #1633 parent gate, printing, and exit codes". Then close the bypass: in `create_session`, when `parent_id` is truthy, re-run `from models.child_session_gate import child_sessions_allowed, CHILD_SESSIONS_DISABLED_MESSAGE` and return `CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)` before any slug or project_key resolution. Add one Failure Path row asserting that. |
-| CONCERN | Risk & Robustness | The attempts budget specifies exactly one helper — `_bump_attempts`, an `INCR` (Redis-state table; Step 4) — but the ladder's pre-action gate `attempts >= MAX -> escalate once, stop` runs **before** a rung is picked and must therefore read the counter **without** incrementing it. No read-only helper is specified anywhere (Redis-state table, Step 4, Step 9), and the single Failure Path row calls the check itself an `INCR`. Built literally, a lane sitting in cooldown charges an attempt every tick and exhausts `SDLC_STALL_RESUME_MAX_ATTEMPTS` from cooldown-skips alone, forcing a false escalation without the ladder ever dispatching a real action — the exact "escalate to a human for nothing" outcome this plan exists to delete. | pending | Split the two operations explicitly. `_attempts_count(slug, sha) -> int` is a bare `GET` on `sdlc:stall:resume:attempts:{slug}:{sha}` (absent key = 0), consulted only by the pre-action gate; `_bump_attempts(slug, sha)` stays the `INCR` + TTL-refresh charge, invoked only from the post-classification "charge an attempt" step. The two have different failure semantics and need separate Failure Path rows: a **read** failure maps to "cannot prove we are under budget -> decline to act this tick"; a **charge** failure cannot un-dispatch an action already taken, so it logs a `findings` marker and must NOT itself trigger an escalation. |
-| CONCERN | History & Consistency | Under "The steer rung has no benign-race branch, deliberately", the plan asserts as a round-3-verified fact that "`steer_session`'s **only** `success=False` returns are empty message, session not found, terminal status, and `is_ledger`". Verified against `main`: there is a fifth. `agent/session_executor.py:884-886` is an outer `except Exception` wrapping both the `AgentSession.query.filter` at `:836` and `push_steering_message` at `:873`, and it returns `success=False` for a target that can remain **live and non-terminal** (e.g. a Redis flap during the push). The design conclusion is unaffected — that branch is correctly non-benign — but an inaccurate "only" enumeration is precisely the class of unverified-API assertion that produced both round-2 BLOCKERs on this plan, and a builder trusting it could assert unreachability in a test. | pending | Amend the sentence to enumerate five `success=False` paths, adding the outer `except Exception` at `agent/session_executor.py:884-886`, and state that it is still classified **non-benign** (a query or push error is a real failure, not "another actor got there first"). The existing Failure Path row "`steer_session` returns `success=False` (any cause) -> attempt charged" and the Test Impact assertion both stand unchanged — fold the fifth branch into that row rather than treating it as a gap. No test may assert this branch is unreachable. |
-| NIT | Scope & Value, History & Consistency (both) | The `create_session` signature declares `chat_id: int = 0`, but `cmd_create` always carries a **string** (`chat_id = args.chat_id or "0"`, `tools/valor_session.py:472`) and `_push_agent_session` types the parameter `chat_id: str` (`agent/agent_session_queue.py:281`). This contradicts the plan's own boundary claim that the payload is "passed to `_push_agent_session` exactly as `cmd_create` passes them today". Harmless at the reflection's default call site (`0` and `"0"` format identically into `session_id = f"{chat_id}_{ts_suffix}"`), but a caller passing a real chat id as an int diverges from the CLI's always-string type. | pending | One-line signature change: `chat_id: str = "0"`. |
-| NIT | Scope & Value | Gate 5' defines `_LOCK_KEY = "session:issuelock:{issue_number}"` as a module constant, then never uses it — the code sample directly below hardcodes the same pattern inline, and Data Flow, Risks, and Step 2 all repeat the literal string. The constant is dead illustrative code that visually promises to be the single source of truth for the key format while nothing references it. | pending | Either delete `_LOCK_KEY` from the sample and keep the single inline f-string, or make the sample use it: `_R.get(_LOCK_KEY.format(issue_number=issue_number))`. No other section needs to change either way, since every other mention already uses the literal rather than the constant name. |
+| CONCERN | Risk & Robustness (filed BLOCKER; downgraded on verification — see note below the table) | The create-rung boundary table presents itself as an exhaustive read of `cmd_create` but never mentions the **#1633 child-session stopgap** at `tools/valor_session.py:481-497`: when `parent_id` is truthy it calls `child_sessions_allowed()` and `return 2`s, firing *before* slug resolution. Two consequences. (a) The prose rule "`cmd_create` keeps **only** argparse reads, printing, and exit codes" is factually wrong — a policy gate also remains. (b) `create_session`'s signature accepts `parent_id`, so the new programmatic core is an **ungated bypass** of an active stopgap: a caller passing `parent_id` skips a refusal the CLI enforces. The reflection itself never passes `parent_id`, so the live blast radius is zero today; the hole is latent. | **Round 3 revision (applied pre-build)** — adopted in full. Boundary table gains an explicit row for `tools/valor_session.py:481-497` classified *stays in `cmd_create`*; the prose rule now reads "argparse reads, the #1633 parent gate, printing, and exit codes". The latent bypass is closed: `create_session` re-runs `child_sessions_allowed()` when `parent_id` is truthy and returns `CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)` before any slug/project_key resolution, worktree, or enqueue. One Failure Path row and one Test Impact bullet added. | Add a row to the boundary table for `tools/valor_session.py:481-497` classified **stays in `cmd_create`** (it is already inside the table's existing `:423-504` "stays" range — the CLI path is NOT broken, which is why this is not a blocker), and amend the prose rule to "argparse reads, the #1633 parent gate, printing, and exit codes". Then close the bypass: in `create_session`, when `parent_id` is truthy, re-run `from models.child_session_gate import child_sessions_allowed, CHILD_SESSIONS_DISABLED_MESSAGE` and return `CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)` before any slug or project_key resolution. Add one Failure Path row asserting that. |
+| CONCERN | Risk & Robustness | The attempts budget specifies exactly one helper — `_bump_attempts`, an `INCR` (Redis-state table; Step 4) — but the ladder's pre-action gate `attempts >= MAX -> escalate once, stop` runs **before** a rung is picked and must therefore read the counter **without** incrementing it. No read-only helper is specified anywhere (Redis-state table, Step 4, Step 9), and the single Failure Path row calls the check itself an `INCR`. Built literally, a lane sitting in cooldown charges an attempt every tick and exhausts `SDLC_STALL_RESUME_MAX_ATTEMPTS` from cooldown-skips alone, forcing a false escalation without the ladder ever dispatching a real action — the exact "escalate to a human for nothing" outcome this plan exists to delete. | **Round 3 revision (applied pre-build)** — adopted in full, and this was the sharpest catch of the round. `_attempts_count(slug, sha)` (bare `GET`, absent key = 0) is now specified separately from `_bump_attempts(slug, sha)` (`INCR` + TTL refresh) in the Redis-state table, the ladder pseudocode, Step 4, and Budgets, with prose naming the exact failure the conflation would cause: cooldown-skips charging attempts and escalating to a human without ever dispatching an action. Two Failure Path rows replace the single old one, with the asymmetric semantics spelled out — a read failure declines to act, a charge failure logs and must never itself escalate. A read-vs-charge regression test was added to Test Impact. | Split the two operations explicitly. `_attempts_count(slug, sha) -> int` is a bare `GET` on `sdlc:stall:resume:attempts:{slug}:{sha}` (absent key = 0), consulted only by the pre-action gate; `_bump_attempts(slug, sha)` stays the `INCR` + TTL-refresh charge, invoked only from the post-classification "charge an attempt" step. The two have different failure semantics and need separate Failure Path rows: a **read** failure maps to "cannot prove we are under budget -> decline to act this tick"; a **charge** failure cannot un-dispatch an action already taken, so it logs a `findings` marker and must NOT itself trigger an escalation. |
+| CONCERN | History & Consistency | Under "The steer rung has no benign-race branch, deliberately", the plan asserts as a round-3-verified fact that "`steer_session`'s **only** `success=False` returns are empty message, session not found, terminal status, and `is_ledger`". Verified against `main`: there is a fifth. `agent/session_executor.py:884-886` is an outer `except Exception` wrapping both the `AgentSession.query.filter` at `:836` and `push_steering_message` at `:873`, and it returns `success=False` for a target that can remain **live and non-terminal** (e.g. a Redis flap during the push). The design conclusion is unaffected — that branch is correctly non-benign — but an inaccurate "only" enumeration is precisely the class of unverified-API assertion that produced both round-2 BLOCKERs on this plan, and a builder trusting it could assert unreachability in a test. | **Round 3 revision (applied pre-build)** — adopted. The sentence now enumerates **five** `success=False` paths, adding the outer `except Exception` at `agent/session_executor.py:884-886` (wrapping the query at `:836` and the push at `:873`), explicitly classified **non-benign**. The design conclusion is unchanged and the existing Failure Path row absorbs the fifth branch; the plan states that no test may assert this branch is unreachable. | Amend the sentence to enumerate five `success=False` paths, adding the outer `except Exception` at `agent/session_executor.py:884-886`, and state that it is still classified **non-benign** (a query or push error is a real failure, not "another actor got there first"). The existing Failure Path row "`steer_session` returns `success=False` (any cause) -> attempt charged" and the Test Impact assertion both stand unchanged — fold the fifth branch into that row rather than treating it as a gap. No test may assert this branch is unreachable. |
+| NIT | Scope & Value, History & Consistency (both) | The `create_session` signature declares `chat_id: int = 0`, but `cmd_create` always carries a **string** (`chat_id = args.chat_id or "0"`, `tools/valor_session.py:472`) and `_push_agent_session` types the parameter `chat_id: str` (`agent/agent_session_queue.py:281`). This contradicts the plan's own boundary claim that the payload is "passed to `_push_agent_session` exactly as `cmd_create` passes them today". Harmless at the reflection's default call site (`0` and `"0"` format identically into `session_id = f"{chat_id}_{ts_suffix}"`), but a caller passing a real chat id as an int diverges from the CLI's always-string type. | **Round 3 revision (applied pre-build)** — adopted. Signature changed to `chat_id: str = "0"`, matching `cmd_create`'s `args.chat_id or "0"` and `_push_agent_session`'s `chat_id: str`. | One-line signature change: `chat_id: str = "0"`. |
+| NIT | Scope & Value | Gate 5' defines `_LOCK_KEY = "session:issuelock:{issue_number}"` as a module constant, then never uses it — the code sample directly below hardcodes the same pattern inline, and Data Flow, Risks, and Step 2 all repeat the literal string. The constant is dead illustrative code that visually promises to be the single source of truth for the key format while nothing references it. | **Round 3 revision (applied pre-build)** — adopted, second option: the code sample now reads `_R.get(_LOCK_KEY.format(issue_number=issue_number))`, so the constant is load-bearing rather than decorative. | Either delete `_LOCK_KEY` from the sample and keep the single inline f-string, or make the sample use it: `_R.get(_LOCK_KEY.format(issue_number=issue_number))`. No other section needs to change either way, since every other mention already uses the literal rather than the constant name. |
 
 **One severity deviation, named rather than applied silently.** Risk & Robustness filed the #1633
 child-session gate as a BLOCKER on the reasoning that "nothing tells the builder to move it into the
