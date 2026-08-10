@@ -126,6 +126,41 @@ last line"*) and the user-memory record `feedback_llm_drafter_over_regex`
 (*"strengthen the LLM classifier prompt before adding heuristic regex
 patterns to anti-pattern gates"*).
 
+### What the gate actually keys on (#2664)
+
+Measured directly against the live LLM layer on 2026-08-08, 8 samples
+per phrasing. The discriminator is **the presence of a forward-looking
+clause, not the presence of evidence.** Adding a file count, a commit
+hash, or a bare `#102` does not rescue "still running", "is on it", or
+"I'll report back"; only a URL-shaped autonomous-delivery reference does.
+
+| Phrasing | LLM verdict |
+|---|---|
+| Present fact, no forward clause ("what read as one config line is 14 files across `tools/` and `config/`") | allow 8/8 |
+| Past-tense work plus a bare PR number, no forward clause | allow 8/8 |
+| Ongoing clause plus a full `https://github.com/.../pull/N` URL | allow 8/8 |
+| Ongoing clause plus a bare `#102` | allow 6/8 (**unreliable**) |
+| Real evidence but no artifact yet ("dev is on it; no PR yet") | block 8/8 |
+| "Still working on this." | block 8/8 |
+| Evidence plus an explicit "I'll report back" tail | block 8/8 |
+
+Two consequences worth knowing before you touch either layer:
+
+- **A sender cannot make a mid-flight report pass by piling on
+  evidence.** The supported shapes are (a) state only what is already
+  true, with no forward clause, or (b) cite a full PR URL. Callers that
+  legitimately need to defer record the promise on the bound Job
+  instead (see the advisory flow above). `.claude/commands/roles/prime-pm-role.md`
+  teaches this to the PM.
+- **The two layers genuinely disagree, and that is by design.**
+  "Still working on this." is blocked 8/8 by the LLM but *allowed* by
+  the heuristic, because no regex covers it. The heuristic is a narrow
+  fail-closed backstop for the phrases it does match, never a
+  reimplementation of the LLM's judgment. Do not write a test that
+  asserts LLM-equivalent behavior from `_evaluate_promise_heuristic`,
+  and do not write one that asserts an LLM verdict for a phrasing that
+  measured below 8/8.
+
 ### Why the heuristic is fail-closed (vs. RTR's fail-open)
 
 `bridge/read_the_room.py` is heavily cited as the architectural

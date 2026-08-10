@@ -214,6 +214,7 @@ tests/
 | unit | `test_continuation_pm.py` | 8 | Continuation PM creation, depth cap, dedup, steer failure fallback |
 | unit | `test_do_plan_critique_barrier.py` | — | Roster membership gate: terminal-fence detection, missing-critic gap surfacing, incomplete-roster STOP verdict (#1690) |
 | integration | `test_parent_child_round_trip.py` | 11 | Parent-child linkage, dev session completion steering, continuation PM round-trip |
+| unit | `test_pm_progress_updates.py` | 12 | Locks the PM role doc's evidence-bearing progress-update guidance (prompt-text anchors) and characterizes which taught phrasings clear `bridge/promise_gate.py::_evaluate_promise_heuristic` on the deterministic fallback branch (#2664) |
 
 ### `sessions` — Session lifecycle and health
 
