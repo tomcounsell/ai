@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -331,9 +331,9 @@ its skill-context file.
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Telethon >= 1.42 with poll TL types | `.venv/bin/python -c "from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities, UpdateMessagePoll, PollResults"` | Poll construction and vote observation |
-| Authenticated bridge Telegram session | `test -f "$HOME/Desktop/Valor/valor_session.session" -o -f valor_session.session` | Task 1 probe needs a real user-account session |
+| Authenticated bridge Telegram session | `test -f "$HOME/Desktop/Valor/telegram_session.session"` | Task 1 probe needs a real user-account session |
 | Redis reachable | `.venv/bin/python -c "from popoto.redis_db import POPOTO_REDIS_DB as r; r.ping()"` | Outbox, steering, and the poll registry |
-| A real operator DM peer in `projects.json` | `.venv/bin/python -c "import json,os; d=json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json'))); assert any('telegram_chat_id' in str(v) for v in d.get('projects',{}).values())"` | Task 1 must target a real user DM, not Saved Messages |
+| A real operator DM peer in projects.json | `.venv/bin/python -c "import json,os; d=json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json'))); assert d.get('dms')"` | Task 1 must target a real user DM, not Saved Messages |
 
 Run via `python scripts/check_prerequisites.py docs/plans/ask-me-telegram-polls.md`.
 
@@ -447,9 +447,10 @@ rendering plus vote→steering translation only); the final option is always the
 - [ ] Poll send failure surfaces to the human as the plain-text fallback question rather than
   silence: on a terminal relay failure for a `"poll"` payload, the question is re-enqueued as text.
   This is the user-visible error path and is explicitly tested.
-- [ ] `_dead_letter_message` (`telegram_relay.py:780`, ephemeral discard list at `:804-808`) must
-  **not** treat `"poll"` as ephemeral — a dropped question is a stuck agent. Test asserts a poll
-  payload dead-letters loudly instead of being discarded.
+- [ ] `_dead_letter_message` (`telegram_relay.py:803`) must **not** treat `"poll"` as ephemeral
+  (`:827`) — a dropped question is a stuck agent. Test asserts a poll payload dead-letters loudly
+  instead of being discarded, **and separately** that it survives the `if chat_id and text` gate
+  (`:837`), which a text-less payload would otherwise fall straight through.
 
 ## Test Impact
 
@@ -536,9 +537,12 @@ closing the poll on first translation so a re-vote is impossible at the source.
 ### Risk 5: the poll question is dropped on relay failure and the agent stalls forever
 **Impact:** A blocked agent with no visible question — the exact failure the feature exists to
 prevent, made worse because the human sees nothing at all.
-**Mitigation:** `"poll"` is excluded from the ephemeral-discard list in `_dead_letter_message`
-(`telegram_relay.py:804-808`) and a terminal poll failure re-enqueues the question as plain text.
-Tested as an error-rendering path.
+**Mitigation:** Two guards must both be handled, and missing the second is the likely mistake:
+`"poll"` stays out of the ephemeral-discard tuple in `_dead_letter_message`
+(`telegram_relay.py:827`), **and** the persistence branch's `if chat_id and text` gate (`:837`)
+must receive the question as `text`, since a poll payload carries no `text` key and would
+otherwise fall through both branches into silence. A terminal poll failure re-enqueues the
+question as plain text. Tested as an error-rendering path.
 
 ### Risk 6: registry growth or reconciliation flood
 **Impact:** Unbounded `telegram:poll:*` keys, or `GetPollResultsRequest` calls tripping FloodWait.
@@ -824,8 +828,13 @@ The lead agent orchestrates and never builds directly.
   `_compose_structured_draft` (`:952`) so no emoji prefix / stage line / link footer is prepended.
 - Add `"poll"` to `KNOWN_MESSAGE_TYPES` (`bridge/telegram_relay.py:56`) and a dispatch branch after
   `:903` calling a new `_send_queued_poll`.
-- Ensure `_dead_letter_message` (`:780`) does **not** list `"poll"` as ephemeral (`:804-808`), and
-  that a terminal failure re-enqueues the question as plain text.
+- Fix the dead-letter path for text-less payloads, which has **two** guards, not one:
+  (a) `_dead_letter_message` (`:803`) must not add `"poll"` to the ephemeral discard tuple
+  `if msg_type in ("reaction", "custom_emoji_message")` (`:827`); and (b) the persistence branch
+  immediately below is gated on `if chat_id and text` (`:837`) — a poll payload has no `text` key,
+  so simply keeping it out of the ephemeral tuple still drops it silently. The poll branch must
+  supply the question as the dead-letter `text` (or persist the poll payload explicitly). A
+  terminal failure then re-enqueues the question as plain text.
 - On success, run the existing post-send bookkeeping (`_record_sent_message` `:959`,
   `_append_outbound_chat_log` `:964`, `_bind_outbound_message_to_job` `:969`) and add a history
   row with `message_type="poll"`, modelled on `_record_sent_reaction` (`:182-212`).
@@ -991,8 +1000,8 @@ The lead agent orchestrates and never builds directly.
 | Hard one-at-a-time prohibition removed | `grep -c 'Never batch your whole blocker list' .claude/skills-global/ask-me/SKILL.md` | match count == 0 |
 | No blocking primitive introduced (anti-criterion) | `grep -rn 'await.*wait_for_vote\|block_until_answer\|poll_answer_future' tools/ bridge/ agent/ \| wc -l` | match count == 0 |
 | No Popoto migration added (anti-criterion) | `git diff main --stat -- scripts/update/migrations.py \| wc -l` | match count == 0 |
-| No raw steering-key write (anti-criterion) | `grep -rn 'steering:' bridge/ --include=*.py \| grep -v 'push_steering_message' \| wc -l` | match count == 0 |
-| Poll not treated as ephemeral on dead-letter (anti-criterion) | `grep -n '_EPHEMERAL' bridge/telegram_relay.py \| grep -c 'poll'` | match count == 0 |
+| No raw steering-key write (anti-criterion) | `grep -rn 'steering:' bridge/ --include='*.py' \| grep -v 'push_steering_message' \| wc -l` | match count == 0 |
+| Poll not treated as ephemeral on dead-letter (anti-criterion) | `grep -n 'if msg_type in (' bridge/telegram_relay.py \| grep -c 'poll'` | match count == 0 |
 | Feature doc exists | `test -f docs/features/telegram-poll-questions.md` | exit code 0 |
 | Feature doc indexed | `grep -c 'telegram-poll-questions' docs/features/README.md` | output > 0 |
 
@@ -1007,11 +1016,12 @@ The lead agent orchestrates and never builds directly.
 
 ## Open Questions
 
-The three questions this feature would normally raise — blocking vs non-blocking, the escape-hatch
-wording, and the one-at-a-time rule — are **already settled by owner decision** and are recorded in
-the Technical Approach. They are not reopened.
+**None blocking.** The three questions this feature would normally raise — blocking vs
+non-blocking, the escape-hatch wording, and the one-at-a-time rule — are **already settled by
+owner decision** and are recorded in the Technical Approach. They are not reopened.
 
-Two remain:
+Two judgment calls remain, and each has a chosen default recorded below so the build can proceed
+without waiting on a human. They are listed for the critique stage to challenge, not as a gate:
 
 1. **Poll registry TTL.** How long should an unanswered question stay live and reconcilable? A
    short TTL (hours) keeps the registry tiny but abandons a question the human gets to the next
