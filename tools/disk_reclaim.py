@@ -5,6 +5,13 @@ What it does: sweeps three categories of unbounded on-disk state — merged
     ``~/.claude/projects/``, and session snapshots under ``logs/sessions/`` —
     reporting what it would remove and, only when explicitly armed, removing it.
 
+The transcript sweep works at file granularity *inside* each project directory
+and never removes the project directory itself. ``<project>/memory/`` is the
+durable per-project memory store and is never touched; only session transcripts
+(``<uuid>.jsonl``) and their sibling ``<uuid>/`` session directories are
+candidates, each judged on its own mtime. Anything else (``.timelines/``,
+``sessions-index.json``, unrecognized names) is preserved.
+
 Dry-run is the default and the only mode reachable without operator intent.
 Applying requires the ``DISK_RECLAIM_APPLY=true`` environment variable, read
 here and nowhere else. It is deliberately NOT wired to the reflection's
@@ -30,6 +37,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,7 +57,29 @@ DEFAULT_WORKTREE_MIN_AGE_DAYS = 14
 # realistically wanted -- the branch has merged or the work was abandoned, and
 # the surviving record is the PR. Chosen to sit well clear of the 14-day
 # worktree window so a lane's transcript outlives its worktree.
+#
+# The window applies to each transcript's OWN mtime, not to the project
+# directory's. Judging by the directory would couple two unrelated lifetimes:
+# a project's `memory/` store is curated and permanent while its transcripts
+# are disposable, and the directory's recency is driven almost entirely by
+# transcript writes. Whichever way that coupling is resolved it is wrong --
+# either a live project's month-old transcripts are kept forever, or a quiet
+# project's memory is deleted along with them. So the project directory is
+# never removed and each transcript ages out alone.
 DEFAULT_TRANSCRIPT_MAX_AGE_DAYS = 30
+
+# Session transcripts are named for their session UUID: `<uuid>.jsonl` plus, for
+# some sessions, a sibling `<uuid>/` directory of session-scoped scratch files.
+# Matching the shape (rather than deleting whatever is not `memory/`) is what
+# makes the sweep fail closed: a name Claude Code starts writing tomorrow is
+# preserved by default instead of reaped by default.
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+# Never a candidate, at any age. The per-project memory store (MEMORY.md plus
+# one file per memory) is durable curated state, not a transcript.
+PRESERVED_PROJECT_ENTRIES = frozenset({"memory"})
 
 # Matches cleanup_old_snapshots' own long-standing default (7 days).
 DEFAULT_SNAPSHOT_MAX_AGE_HOURS = 168
@@ -89,34 +119,30 @@ def apply_armed() -> bool:
     return os.environ.get(APPLY_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
-def _dir_size(path: Path) -> int:
-    """Apparent size of a tree in bytes; 0 if it cannot be walked.
+def _tree_stats(path: Path) -> tuple[int, float]:
+    """One walk of ``path``, returning ``(apparent_bytes, newest_mtime)``.
 
-    Apparent, not physical. On APFS a worktree `.venv` is copy-on-write cloned
-    from uv's global cache, so this over-reports the reclaimable bytes by
+    Size is apparent, not physical. On APFS a worktree `.venv` is copy-on-write
+    cloned from uv's global cache, so this over-reports the reclaimable bytes by
     roughly 60x for that subtree (measured: 541 MB apparent, 9 MB actual `df`
     delta). Treated as an upper bound in reporting and never as a justification.
+
+    ``newest_mtime`` falls back to the directory's own mtime when the tree is
+    empty, and to *now* when nothing can be read at all -- unreadable means
+    never reaped, which is the fail-closed direction.
+
+    Both figures come from a single ``rglob`` because every caller wants both
+    and a lane carrying a `.venv` is tens of thousands of entries.
     """
     total = 0
-    try:
-        for entry in path.rglob("*"):
-            try:
-                if entry.is_file() and not entry.is_symlink():
-                    total += entry.stat().st_size
-            except OSError:
-                continue
-    except OSError:
-        return 0
-    return total
-
-
-def _newest_mtime(path: Path) -> float:
-    """Most recent mtime anywhere under ``path``, or the dir's own if empty."""
     newest = 0.0
     try:
         for entry in path.rglob("*"):
             try:
-                newest = max(newest, entry.stat().st_mtime)
+                stat = entry.stat()
+                newest = max(newest, stat.st_mtime)
+                if entry.is_file() and not entry.is_symlink():
+                    total += stat.st_size
             except OSError:
                 continue
     except OSError:
@@ -125,8 +151,37 @@ def _newest_mtime(path: Path) -> float:
         try:
             newest = path.stat().st_mtime
         except OSError:
-            newest = time.time()  # unreadable: treat as brand new, never reap
-    return newest
+            newest = time.time()
+    return total, newest
+
+
+def _entry_stats(path: Path) -> tuple[int, float]:
+    """``(apparent_bytes, newest_mtime)`` for a file or a directory."""
+    if path.is_dir() and not path.is_symlink():
+        return _tree_stats(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return 0, time.time()  # unreadable: treat as brand new, never reap
+    return stat.st_size, stat.st_mtime
+
+
+def _is_transcript_entry(entry: Path) -> bool:
+    """Whether ``entry`` inside a project dir is a disposable session transcript.
+
+    Allow-list, not a deny-list: ``<uuid>.jsonl`` and ``<uuid>/`` only. Every
+    other name -- ``memory/`` above all, but also ``.timelines/``,
+    ``sessions-index.json``, symlinks, and anything Claude Code adds in a future
+    release -- is preserved. A sweep that reaped "everything except a hardcoded
+    keep-list" would delete tomorrow's durable state by default.
+    """
+    if entry.is_symlink():
+        return False
+    if entry.name in PRESERVED_PROJECT_ENTRIES:
+        return False
+    if entry.is_dir():
+        return bool(_SESSION_ID_RE.match(entry.name))
+    return entry.suffix == ".jsonl" and bool(_SESSION_ID_RE.match(entry.stem))
 
 
 def _git(repo_root: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -139,8 +194,16 @@ def _git(repo_root: Path, *args: str, cwd: Path | None = None) -> subprocess.Com
     )
 
 
-def open_pr_branches() -> set[str] | None:
-    """Branch names with an open PR, or None when the query fails.
+def open_pr_branches(repo_root: Path) -> set[str] | None:
+    """Branch names with an open PR **in ``repo_root``**, or None on failure.
+
+    ``cwd=repo_root`` is load-bearing, not tidiness. ``gh`` resolves the target
+    repository from the git remote of its working directory, so a bare call
+    under a forced cwd answers *successfully* about the wrong repository -- and
+    a successful wrong answer cannot be caught by the None fail-closed branch
+    below. Every ``session/*`` lane would then read "no open PR" because none of
+    them appear among another repo's branch names, silently voiding this guard.
+    Same hazard, same remedy as ``tools/pr_head_resolver.py::_origin_matches_repo``.
 
     None is not an empty set. The predecessor script (`scripts/worktree-gc.sh`)
     collapsed a failed `gh` call into an empty string, so an auth failure or a
@@ -150,6 +213,7 @@ def open_pr_branches() -> set[str] | None:
     try:
         proc = subprocess.run(
             ["gh", "pr", "list", "--state", "open", "--limit", "500", "--json", "headRefName"],
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=120,
@@ -207,7 +271,7 @@ def sweep_worktrees(
     if not worktrees_root.is_dir():
         return sweep
 
-    open_branches = open_pr_branches()
+    open_branches = open_pr_branches(repo_root)
     if open_branches is None:
         # Fail closed across the whole category: without PR state we cannot
         # distinguish an abandoned lane from one under active review.
@@ -223,7 +287,8 @@ def sweep_worktrees(
             continue
         slug = child.name
 
-        if _newest_mtime(child) > cutoff:
+        size, newest = _tree_stats(child)
+        if newest > cutoff:
             sweep.skip(slug, "too_young")
             continue
 
@@ -266,7 +331,6 @@ def sweep_worktrees(
             sweep.skip(slug, "unmerged")
             continue
 
-        size = _dir_size(child)
         if not apply:
             sweep.removed.append(slug)
             sweep.freed_bytes += size
@@ -293,10 +357,22 @@ def sweep_transcripts(
     apply: bool = False,
     projects_dir: Path | None = None,
 ) -> Sweep:
-    """Age out Claude CLI transcript directories under ``~/.claude/projects/``.
+    """Age out Claude CLI session transcripts under ``~/.claude/projects/``.
 
     A transcript is the only thing backing ``claude --resume`` for its session,
     so the window is the answer to "past what point is resuming not wanted".
+
+    Scope is deliberately narrow. Each project directory holds disposable
+    transcripts (``<uuid>.jsonl`` and their sibling ``<uuid>/`` directories)
+    alongside durable state: ``memory/`` (the per-project memory store),
+    ``.timelines/``, ``sessions-index.json``. Only the transcripts are
+    candidates, each judged on its own mtime, and the project directory itself
+    is never removed -- so a quiet project keeps its curated memory while its
+    dead transcripts still age out, and a busy project's month-old transcripts
+    are not kept alive by a fresh sibling.
+
+    Anything that does not match the transcript shape is preserved, counted in
+    the skip reason, and never deleted.
     """
     sweep = Sweep(category="transcripts")
     root = projects_dir if projects_dir is not None else CLAUDE_PROJECTS_DIR
@@ -305,26 +381,55 @@ def sweep_transcripts(
 
     cutoff = time.time() - (max_age_days * 86400)
 
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        if _newest_mtime(child) > cutoff:
-            sweep.skip(child.name, "too_young")
+    for project in sorted(root.iterdir()):
+        if not project.is_dir() or project.is_symlink():
             continue
 
-        size = _dir_size(child)
-        if not apply:
-            sweep.removed.append(child.name)
-            sweep.freed_bytes += size
-            continue
-
+        preserved = 0
+        too_young = 0
         try:
-            shutil.rmtree(child)
+            entries = sorted(project.iterdir())
         except OSError as e:
-            sweep.errors.append(f"{child.name}: {e}")
+            sweep.skip(project.name, f"unreadable:{type(e).__name__}")
             continue
-        sweep.removed.append(child.name)
-        sweep.freed_bytes += size
+
+        for entry in entries:
+            if not _is_transcript_entry(entry):
+                preserved += 1
+                continue
+
+            size, newest = _entry_stats(entry)
+            if newest > cutoff:
+                too_young += 1
+                continue
+
+            name = f"{project.name}/{entry.name}"
+            if not apply:
+                sweep.removed.append(name)
+                sweep.freed_bytes += size
+                continue
+
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            except OSError as e:
+                sweep.errors.append(f"{name}: {e}")
+                continue
+            sweep.removed.append(name)
+            sweep.freed_bytes += size
+
+        reason = ", ".join(
+            part
+            for part in (
+                f"too_young:{too_young}" if too_young else "",
+                f"preserved:{preserved}" if preserved else "",
+            )
+            if part
+        )
+        if reason:
+            sweep.skip(project.name, reason)
 
     return sweep
 
@@ -335,7 +440,14 @@ def sweep_session_snapshots(
     apply: bool = False,
 ) -> Sweep:
     """Wire up ``cleanup_old_snapshots``, which has had no caller since the
-    reflections monolith was deleted."""
+    reflections monolith was deleted.
+
+    Not parameterized by ``repo_root``: ``cleanup_old_snapshots`` takes no
+    directory argument and resolves ``agent/session_logs.py``'s module-relative
+    ``SESSION_LOGS_DIR``, so this sweep always targets the checkout the code was
+    imported from. ``--repo-root`` therefore applies to the worktree sweep only,
+    which its argparse help says.
+    """
     from agent.session_logs import cleanup_old_snapshots
 
     sweep = Sweep(category="session_snapshots")
@@ -409,16 +521,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="disk-reclaim",
         description=(
-            "Age out merged worktree lanes, old Claude transcripts, and session "
-            "snapshots. Dry-run unless DISK_RECLAIM_APPLY=true is set."
+            "Age out merged worktree lanes, old Claude session transcripts, and "
+            "session snapshots. Dry-run unless DISK_RECLAIM_APPLY=true is set."
         ),
         epilog=(
             "Worktree removal goes through cleanup_after_merge, so a lane with "
             "uncommitted changes, a live session, or an unmerged branch is never "
-            "removed. Replaces the unguarded scripts/worktree-gc.sh."
+            "removed. The transcript sweep never removes a project directory and "
+            "never touches its memory/ store. Replaces the unguarded "
+            "scripts/worktree-gc.sh."
         ),
     )
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            "Checkout whose .worktrees/ lanes to sweep, and whose open PRs are "
+            "queried. Applies to the worktree sweep only: the transcript sweep "
+            "reads ~/.claude/projects/ and the snapshot sweep reads the "
+            "SESSION_LOGS_DIR of the installed agent package."
+        ),
+    )
     parser.add_argument("--worktree-min-age-days", type=int, default=DEFAULT_WORKTREE_MIN_AGE_DAYS)
     parser.add_argument(
         "--transcript-max-age-days", type=int, default=DEFAULT_TRANSCRIPT_MAX_AGE_DAYS

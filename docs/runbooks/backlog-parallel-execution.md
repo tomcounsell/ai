@@ -112,9 +112,13 @@ long tail of `dev-*` / `agent-*` orphans).
 
 ```bash
 python -m tools.disk_reclaim                        # dry-run by default
-DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply
 scripts/reap-xdist.sh                               # same dry-run/--apply convention
 ```
+
+Arming removal is deliberately not a copy-pasteable line in this runbook — this
+is the section describing the machine at its fullest of live lanes. See
+[Scheduled Disk Reclaim](../features/scheduled-disk-reclaim.md) for the arming
+gate if you decide you want it.
 
 The reclaim sweep refuses on its own to touch a lane with uncommitted work, a
 live session, a live process, an open PR, or an unmerged branch, and it skips

@@ -65,7 +65,7 @@ def all_clear(monkeypatch):
     monkeypatch.setattr(wm, "worktree_busy_probe", lambda _r, _s: ("clear", ""))
     monkeypatch.setattr(wm, "merged_via_tree", lambda *_a, **_k: True)
     monkeypatch.setattr(wm, "cleanup_after_merge", fake_cleanup)
-    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda: set())
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: set())
     monkeypatch.setattr(disk_reclaim, "_worktree_is_dirty", lambda _p: False)
     return calls
 
@@ -211,7 +211,7 @@ def test_busy_check_error_also_blocks_removal(repo, all_clear, monkeypatch):
 
 
 def test_skips_lane_with_open_pr(repo, all_clear, monkeypatch):
-    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda: {"session/lane"})
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: {"session/lane"})
     sweep = sweep_worktrees(repo, apply=True)
     assert _reasons(sweep)["lane"] == "open_pr"
     assert all_clear == []
@@ -232,7 +232,7 @@ def test_gh_failure_skips_every_lane(repo, all_clear, monkeypatch):
     The predecessor script collapsed a failed `gh` call into an empty string,
     which made every worktree a prune candidate on an auth blip.
     """
-    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda: None)
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", lambda _root: None)
     sweep = sweep_worktrees(repo, apply=True)
     assert sweep.removed == []
     assert _reasons(sweep)["lane"] == "pr_state_unavailable"
@@ -260,31 +260,66 @@ def test_missing_worktrees_dir_is_not_an_error(tmp_path, all_clear):
 # --- open_pr_branches fails closed ------------------------------------------
 
 
-def test_open_pr_branches_returns_none_on_nonzero_exit(monkeypatch):
+def test_open_pr_branches_returns_none_on_nonzero_exit(monkeypatch, tmp_path):
     monkeypatch.setattr(
         disk_reclaim.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "gh: auth required"),
     )
-    assert disk_reclaim.open_pr_branches() is None
+    assert disk_reclaim.open_pr_branches(tmp_path) is None
 
 
-def test_open_pr_branches_returns_none_when_gh_missing(monkeypatch):
+def test_open_pr_branches_returns_none_when_gh_missing(monkeypatch, tmp_path):
     def boom(*_a, **_k):
         raise FileNotFoundError("gh")
 
     monkeypatch.setattr(disk_reclaim.subprocess, "run", boom)
-    assert disk_reclaim.open_pr_branches() is None
+    assert disk_reclaim.open_pr_branches(tmp_path) is None
 
 
-def test_open_pr_branches_parses_names(monkeypatch):
+def test_open_pr_branches_parses_names(monkeypatch, tmp_path):
     payload = '[{"headRefName": "session/a"}, {"headRefName": "session/b"}]'
     monkeypatch.setattr(
         disk_reclaim.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess([], 0, payload, ""),
     )
-    assert disk_reclaim.open_pr_branches() == {"session/a", "session/b"}
+    assert disk_reclaim.open_pr_branches(tmp_path) == {"session/a", "session/b"}
+
+
+def test_open_pr_branches_is_pinned_to_repo_root(monkeypatch, tmp_path):
+    """The guard is void if `gh` answers about whatever repo the cwd happens to be.
+
+    `gh` resolves its target repository from the git remote of its working
+    directory. Without `cwd=repo_root` the call *succeeds* while describing a
+    different repository, no `session/*` lane matches, every lane reads "no open
+    PR", and the fail-closed None branch never fires because nothing failed.
+    """
+    seen: dict = {}
+
+    def capture(argv, **kwargs):
+        seen["argv"], seen["kwargs"] = argv, kwargs
+        return subprocess.CompletedProcess(argv, 0, "[]", "")
+
+    monkeypatch.setattr(disk_reclaim.subprocess, "run", capture)
+    other = tmp_path / "some" / "other" / "checkout"
+    other.mkdir(parents=True)
+
+    assert disk_reclaim.open_pr_branches(other) == set()
+    assert seen["kwargs"].get("cwd") == str(other)
+
+
+def test_sweep_worktrees_passes_repo_root_to_pr_query(repo, all_clear, monkeypatch):
+    """And the caller must actually thread it through."""
+    seen: list = []
+
+    def spy(repo_root):
+        seen.append(repo_root)
+        return set()
+
+    monkeypatch.setattr(disk_reclaim, "open_pr_branches", spy)
+    sweep_worktrees(repo, apply=False)
+    assert seen == [repo]
 
 
 # --- dirty detection against a real git repo --------------------------------
@@ -314,31 +349,132 @@ def test_worktree_is_dirty_returns_none_outside_a_repo(tmp_path):
 # --- transcripts ------------------------------------------------------------
 
 
+SESSION_A = "007b53a9-3481-495a-bf84-59aeb5c6bdb1"
+SESSION_B = "01a48c67-ec38-4dbe-ae33-46bdcb7d9b63"
+
+
+def _project(root, name):
+    d = root / name
+    d.mkdir(parents=True)
+    return d
+
+
 def test_transcripts_keeps_recent_and_reaps_old(tmp_path):
     root = tmp_path / "projects"
-    old, new = root / "old-proj", root / "new-proj"
+    old, new = _project(root, "old-proj"), _project(root, "new-proj")
     for d in (old, new):
-        d.mkdir(parents=True)
-        (d / "t.jsonl").write_text("{}")
+        (d / f"{SESSION_A}.jsonl").write_text("{}")
     _age(old)
 
     sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
-    assert sweep.removed == ["old-proj"]
-    assert _reasons(sweep)["new-proj"] == "too_young"
-    assert not old.exists()
-    assert new.exists()
+    assert sweep.removed == [f"old-proj/{SESSION_A}.jsonl"]
+    assert _reasons(sweep)["new-proj"] == "too_young:1"
+    assert not (old / f"{SESSION_A}.jsonl").exists()
+    assert (new / f"{SESSION_A}.jsonl").exists()
+
+
+def test_transcripts_never_remove_the_project_directory(tmp_path):
+    """Blocker: the project dir is the container, not the garbage.
+
+    rmtree'ing it takes memory/, .timelines/ and sessions-index.json with it.
+    """
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    (proj / f"{SESSION_A}.jsonl").write_text("{}")
+    _age(proj)
+
+    sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+    assert proj.is_dir(), "the project directory itself must survive"
+
+
+def test_transcripts_preserve_the_memory_store(tmp_path):
+    """The whole reason for file-granular sweeping.
+
+    `memory/` is durable curated state whose own mtimes are older than the
+    transcripts beside it, so a whole-directory age check selects precisely the
+    projects whose memory is most valuable and deletes it.
+    """
+    root = tmp_path / "projects"
+    proj = _project(root, "quiet-proj")
+    memory = proj / "memory"
+    memory.mkdir()
+    (memory / "MEMORY.md").write_text("# Memory Index")
+    (memory / "feedback_something.md").write_text("body")
+    (proj / f"{SESSION_A}.jsonl").write_text("{}")
+    _age(proj)
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sweep.removed == [f"quiet-proj/{SESSION_A}.jsonl"]
+    assert (memory / "MEMORY.md").read_text() == "# Memory Index"
+    assert (memory / "feedback_something.md").exists()
+    assert "preserved:1" in _reasons(sweep)["quiet-proj"]
+
+
+def test_transcripts_age_each_entry_on_its_own_mtime(tmp_path):
+    """A live session must not keep its dead siblings alive, or vice versa."""
+    root = tmp_path / "projects"
+    proj = _project(root, "busy-proj")
+    stale_file = proj / f"{SESSION_A}.jsonl"
+    stale_dir = proj / SESSION_A
+    stale_dir.mkdir()
+    (stale_dir / "scratch.txt").write_text("x")
+    stale_file.write_text("{}")
+    _age(proj)
+    fresh = proj / f"{SESSION_B}.jsonl"
+    fresh.write_text("{}")  # written now, after the backdating
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sorted(sweep.removed) == [f"busy-proj/{SESSION_A}", f"busy-proj/{SESSION_A}.jsonl"]
+    assert not stale_file.exists() and not stale_dir.exists()
+    assert fresh.exists(), "a fresh transcript must survive"
+    assert "too_young:1" in _reasons(sweep)["busy-proj"]
+
+
+def test_transcripts_preserve_unrecognized_entries(tmp_path):
+    """Fail closed on anything outside the `<uuid>[.jsonl]` shape."""
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    timelines = proj / ".timelines"
+    timelines.mkdir()
+    (timelines / "t.json").write_text("{}")
+    (proj / "sessions-index.json").write_text("{}")
+    (proj / "notes.jsonl").write_text("{}")  # .jsonl but not a session id
+    (proj / f"{SESSION_A}.jsonl").write_text("{}")
+    _age(proj)
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sweep.removed == [f"proj/{SESSION_A}.jsonl"]
+    assert timelines.is_dir()
+    assert (proj / "sessions-index.json").exists()
+    assert (proj / "notes.jsonl").exists()
+    assert "preserved:3" in _reasons(sweep)["proj"]
+
+
+def test_transcripts_freed_bytes_sums_removed_entries_only(tmp_path):
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    (proj / f"{SESSION_A}.jsonl").write_text("x" * 500)
+    memory = proj / "memory"
+    memory.mkdir()
+    (memory / "MEMORY.md").write_text("y" * 4000)
+    _age(proj)
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+    assert sweep.freed_bytes == 500
 
 
 def test_transcripts_dry_run_deletes_nothing(tmp_path):
     root = tmp_path / "projects"
-    old = root / "old-proj"
-    old.mkdir(parents=True)
-    (old / "t.jsonl").write_text("{}")
+    old = _project(root, "old-proj")
+    (old / f"{SESSION_A}.jsonl").write_text("{}")
     _age(old)
 
     sweep = sweep_transcripts(max_age_days=30, apply=False, projects_dir=root)
-    assert sweep.removed == ["old-proj"]
-    assert old.exists(), "dry-run must not delete a transcript"
+    assert sweep.removed == [f"old-proj/{SESSION_A}.jsonl"]
+    assert (old / f"{SESSION_A}.jsonl").exists(), "dry-run must not delete a transcript"
 
 
 def test_transcripts_missing_dir_is_not_an_error(tmp_path):
