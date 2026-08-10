@@ -128,7 +128,6 @@ def _flushall_message() -> str:
 def _install_on_class(cls: type, *, is_async: bool) -> None:
     if cls in _INSTALLED:
         return
-    _INSTALLED.add(cls)
 
     orig_flushdb = cls.flushdb
     orig_flushall = cls.flushall
@@ -167,6 +166,14 @@ def _install_on_class(cls: type, *, is_async: bool) -> None:
 
     cls.flushdb = _guarded_flushdb
     cls.flushall = _guarded_flushall
+
+    # Registered as installed only after BOTH assignments succeed. Doing it up
+    # front made a class that failed to patch look installed forever: the early
+    # return above meant install() never retried it, and is_installed() said
+    # True for an unpatched class. Not reachable with real redis-py classes,
+    # but "the guard reports itself healthy while inert" is the one lie this
+    # module must never tell.
+    _INSTALLED.add(cls)
 
 
 def install() -> bool:

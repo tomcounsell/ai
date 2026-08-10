@@ -2,8 +2,12 @@
 
 Two production Redis flushes, six weeks apart, both from a script that believed it was targeting a
 test database. Issue #2645 closes the gap between "believed" and "was" with four independent layers,
-each guarding a different boundary the offending code has to cross. Any one of the four would have
-stopped both incidents.
+each guarding a different boundary the offending code has to cross.
+
+Two of them enforce as shipped. Layer 1 alone would have stopped both incidents, and Layer 3 would
+have stopped the command that started the second one. Layer 2 ships as a planner and a runbook, so it
+stops nothing until an operator applies it per machine; Layer 4 is a knowledge layer, not an
+enforcement one. The table below is precise about which is which.
 
 ## The Two Incidents
 

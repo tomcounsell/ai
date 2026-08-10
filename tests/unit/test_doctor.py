@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tools.doctor import (
@@ -682,3 +684,136 @@ class TestCheckAgentSessionIndexDrift:
 
         names = [getattr(fn, "__name__", "") for fn in get_checks()]
         assert "_check_agentsession_index_drift" in names
+
+
+# ---------------------------------------------------------------------------
+# Redis flush guard + ACL checks (#2645)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRedisFlushGuard:
+    """The compensating control for Layer 1's named primary hazard.
+
+    The boot shim swallows every exception, so a broken install is
+    indistinguishable from a working one on the filesystem. This check is the
+    only thing that can see the difference — which makes "the check itself is
+    silently inert" the recursive version of the incident it guards against.
+    These cases exist so that hardcoding the liveness probe, or dropping the
+    check from `get_checks()`, cannot pass.
+    """
+
+    def _run(self, venvs, live_by_path):
+        """Drive the check over fake venvs with a scripted liveness probe."""
+        from tools.doctor import _check_redis_flush_guard
+
+        def fake_subprocess_run(argv, **kwargs):
+            python_bin = argv[0]
+            venv = str(Path(python_bin).parent.parent)
+            return SimpleNamespace(
+                returncode=0,
+                stdout="True\n" if live_by_path[venv] else "False\n",
+                stderr="",
+            )
+
+        with (
+            patch("scripts.update.redis_flush_guard_pth.discover_venvs", return_value=venvs),
+            patch("agent.worktree_manager.main_checkout_venv", return_value=None),
+            patch("tools.doctor.subprocess.run", side_effect=fake_subprocess_run),
+        ):
+            return _check_redis_flush_guard()
+
+    @staticmethod
+    def _fake_venv(root, name):
+        venv = root / name
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("#!/bin/sh\n")
+        return venv
+
+    def test_fails_and_names_the_unguarded_venv(self, tmp_path):
+        guarded = self._fake_venv(tmp_path, "guarded-venv")
+        unguarded = self._fake_venv(tmp_path, "unguarded-venv")
+        result = self._run(
+            [guarded, unguarded],
+            {str(guarded): True, str(unguarded): False},
+        )
+        assert result.passed is False
+        assert str(unguarded) in result.message
+        assert "1/2" in result.message
+        # Per-venv remediation: an operator holding one unhealed harness
+        # worktree must be able to heal just that one.
+        assert "--venv" in result.fix
+        assert str(unguarded) in result.fix
+        assert str(guarded) not in result.fix
+
+    def test_passes_when_every_venv_is_live(self, tmp_path):
+        a = self._fake_venv(tmp_path, "a")
+        b = self._fake_venv(tmp_path, "b")
+        result = self._run([a, b], {str(a): True, str(b): True})
+        assert result.passed is True, result.message
+        assert "2 venv(s) guarded" in result.message
+
+    def test_a_nonzero_probe_exit_counts_as_unguarded(self, tmp_path):
+        """`returncode == 0 AND stdout == "True"` — not either half alone."""
+        from tools.doctor import _check_redis_flush_guard
+
+        venv = self._fake_venv(tmp_path, "crashy")
+        with (
+            patch("scripts.update.redis_flush_guard_pth.discover_venvs", return_value=[venv]),
+            patch("agent.worktree_manager.main_checkout_venv", return_value=None),
+            patch(
+                "tools.doctor.subprocess.run",
+                return_value=SimpleNamespace(returncode=1, stdout="True\n", stderr="boom"),
+            ),
+        ):
+            result = _check_redis_flush_guard()
+        assert result.passed is False
+        assert str(venv) in result.message
+
+
+class TestCheckRedisAcl:
+    def _run(self, acl_result):
+        from tools.doctor import _check_redis_acl
+
+        with patch("scripts.update.redis_acl.apply_redis_acl", return_value=acl_result):
+            return _check_redis_acl()
+
+    def test_fails_on_drift_and_points_at_the_runbook_not_update(self):
+        result = self._run(
+            SimpleNamespace(success=True, drift=True, planned_commands=["a", "b"], error=None)
+        )
+        assert result.passed is False
+        assert "2 command(s) planned" in result.message
+        # /update cannot fix ACL drift by design; the apply is human-signed.
+        assert "runbook" in result.fix
+        assert "/update" not in result.fix
+
+    def test_passes_when_there_is_no_drift(self):
+        result = self._run(
+            SimpleNamespace(success=True, drift=False, planned_commands=[], error=None)
+        )
+        assert result.passed is True, result.message
+        assert "no drift" in result.message
+
+    def test_an_unreachable_redis_is_a_skip_not_a_failure(self):
+        result = self._run(
+            SimpleNamespace(
+                success=False, drift=False, planned_commands=[], error="connection refused"
+            )
+        )
+        assert result.passed is True, result.message
+        assert "skipped" in result.message
+
+
+class TestRedisChecksAreRegistered:
+    """Both checks correct in isolation is worth nothing if neither runs.
+
+    Deleting them from `get_checks()` left the whole doctor suite green before
+    this case existed.
+    """
+
+    def test_both_redis_checks_are_in_get_checks(self):
+        from tools.doctor import _check_redis_acl, _check_redis_flush_guard
+
+        registered = get_checks()
+        assert _check_redis_flush_guard in registered
+        assert _check_redis_acl in registered

@@ -617,3 +617,108 @@ def test_startup_budget():
         f"(best of {len(samples)}, budget {rfg._STARTUP_BUDGET_MS} ms)"
     )
     assert measured_ms < rfg._STARTUP_BUDGET_MS
+
+
+# ---------------------------------------------------------------------------
+# D2b-i: the `import tools` self-heal trigger (#2645 round-1 review, blocker 1)
+# ---------------------------------------------------------------------------
+def test_import_tools_heals_an_unguarded_venv(tmp_path):
+    """`tools/__init__.py`'s `arm()` call must actually reach an unhealed venv.
+
+    This is the ONLY Layer 1 propagation path into harness-created
+    `.claude/worktrees/{agent}/` checkouts. Those reach neither `/update`
+    Step 3.05 nor the worktree-venv bootstrap, and they are the checkout class
+    the 2026-08-07 incident script ran from.
+
+    The negative half is already covered by
+    `test_import_tools_succeeds_when_redis_flush_guard_unimportable`, which
+    passes just as happily with the trigger deleted. This is the positive half:
+    replace the import and `arm()` in `tools/__init__.py` with `pass` and this
+    goes red. Without it a future "no import side effects in `__init__`"
+    cleanup silently disarms Layer 1 for the riskiest checkouts, with a green
+    suite.
+
+    Uses a REAL venv rather than a monkeypatched `sys.prefix`: the self-heal
+    resolves site-packages through `sysconfig.get_paths()` in the running
+    interpreter, so only a genuinely separate interpreter exercises the path
+    end to end. `--without-pip` keeps it fast, and `import tools` needs nothing
+    beyond the stdlib.
+    """
+    venv_dir = tmp_path / "unhealed-venv"
+    subprocess.run(
+        [PYTHON, "-m", "venv", "--without-pip", str(venv_dir)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+    site_packages = list(venv_dir.glob("lib/python*/site-packages"))
+    assert len(site_packages) == 1, f"expected one site-packages, got {site_packages}"
+    pth = site_packages[0] / "zzz_redis_flush_guard.pth"
+    shim = site_packages[0] / "_redis_flush_guard_boot.py"
+
+    # Precondition: a fresh venv is unguarded. If this ever fails the test
+    # below proves nothing, so assert it rather than assume it.
+    assert not pth.exists()
+    assert not shim.exists()
+
+    venv_python = venv_dir / "bin" / "python"
+    proc = subprocess.run(
+        [str(venv_python), "-c", "import tools"],
+        cwd=REPO_ROOT,
+        env={**_subprocess_env(), "VIRTUAL_ENV": str(venv_dir)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, f"`import tools` failed: {proc.stderr}"
+    assert pth.exists(), (
+        "`import tools` did not install the .pth into an unguarded venv — the "
+        "D2b-i self-heal trigger in tools/__init__.py is not reaching arm(). "
+        f"stderr: {proc.stderr}"
+    )
+    assert shim.exists(), "the .pth landed without its boot shim"
+
+
+def test_a_class_that_fails_to_patch_is_not_recorded_as_installed():
+    """`_INSTALLED.add()` runs only after both assignments succeed.
+
+    Registering up front meant a class that failed to patch looked installed
+    forever: the early return in `_install_on_class` stopped `install()` ever
+    retrying it, and `is_installed()` answered True for an unpatched class.
+    Not reachable with real redis-py classes, but "the guard reports itself
+    healthy while inert" is the one lie this module must never tell, so it is
+    pinned rather than left to inspection.
+    """
+
+    class _Frozen:
+        """Refuses attribute assignment, so patching it raises."""
+
+        def flushdb(self):  # pragma: no cover - never invoked
+            raise AssertionError("real flushdb must never run")
+
+        def flushall(self):  # pragma: no cover - never invoked
+            raise AssertionError("real flushall must never run")
+
+        def __init_subclass__(cls):  # pragma: no cover - defensive
+            raise AssertionError("not subclassed")
+
+    class _FrozenMeta(type):
+        def __setattr__(cls, name, value):
+            raise TypeError(f"{cls.__name__} refuses attribute assignment: {name}")
+
+    # noqa N806: this is a class, built dynamically so the metaclass applies;
+    # a lowercase name would misrepresent what it is.
+    Frozen = _FrozenMeta("Frozen", (), dict(vars(_Frozen)))  # noqa: N806
+
+    assert rfg.is_installed(Frozen) is False
+
+    with pytest.raises(TypeError):
+        rfg._install_on_class(Frozen, is_async=False)
+
+    assert rfg.is_installed(Frozen) is False, (
+        "a class that failed to patch was recorded as installed — install() "
+        "will never retry it and is_installed() now lies about it"
+    )
+    assert getattr(Frozen.flushdb, "_prod_flush_guarded", False) is False
