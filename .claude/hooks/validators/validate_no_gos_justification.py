@@ -113,7 +113,17 @@ def target_from_hook_input(hook_input: dict) -> str | None:
 
 
 NO_GOS_HEADING = re.compile(r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-FENCE = re.compile(r"^\s*(?:```|~~~)")
+# The full run of fence characters is captured, not just its first three,
+# because a fence closes only on a marker of the SAME character at least as
+# long as the one that opened it — CommonMark's rule, and the only way to write
+# a fenced block that itself contains a fence. A bare open/close toggle treats
+# the inner ``` of a ````-wrapped example as a closer and stays inverted for the
+# rest of the document, so the code exemption evaporates and a punt phrase
+# quoted inside that example blocks an unrelated agent's write (#2682). The
+# false-positive direction is the dangerous one, hence the strict rule.
+# The ``^\s*`` allowance (rather than CommonMark's three-space cap) is
+# deliberate: plans nest fences inside list items at arbitrary depth.
+FENCE = re.compile(r"^\s*(?P<marker>`{3,}|~{3,})")
 
 # A leading pipe or angle bracket marks transcribed material rather than the
 # plan's own commitments: critique-findings tables, review verdict logs, and
@@ -153,13 +163,21 @@ def find_punt_lines(content: str) -> list[str]:
     lines = content.splitlines()
     no_gos_start, no_gos_end = no_gos_line_span(content)
     bad: list[str] = []
-    in_fence = False
+    open_marker: str | None = None
 
     for idx, raw_line in enumerate(lines):
-        if FENCE.match(raw_line):
-            in_fence = not in_fence
+        fence = FENCE.match(raw_line)
+        if fence:
+            marker = fence.group("marker")
+            if open_marker is None:
+                open_marker = marker
+                continue
+            # A shorter marker, or one of the other character, is fence
+            # content — an example block being quoted, not a closer.
+            if marker[0] == open_marker[0] and len(marker) >= len(open_marker):
+                open_marker = None
             continue
-        if in_fence:
+        if open_marker is not None:
             continue
 
         line = raw_line.strip()

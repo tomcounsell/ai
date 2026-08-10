@@ -332,6 +332,103 @@ Nothing deferred — every relevant item is in scope for this plan.
         assert ok, message
 
 
+class TestFenceMarkersFollowCommonMark:
+    """A fence closes only on a same-type marker at least as long (#2682).
+
+    A bare open/close toggle desyncs on the first nested marker and stays
+    desynced for the rest of the document, in the dangerous direction: the
+    exemption evaporates and an unrelated agent's write gets blocked.
+    """
+
+    def test_four_backtick_wrapper_around_three_backtick_block_passes(self, tmp_path):
+        """Documenting markdown-in-markdown must not leak its content."""
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n\n"
+            "## Notes\n\n"
+            "Documenting how to write a fenced block:\n\n"
+            "````\n"
+            "```\n"
+            "- Rate limiting deferred to a follow-up issue\n"
+            "```\n"
+            "````\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert ok, message
+
+    def test_backtick_fence_nested_in_tilde_fence_does_not_desync(self, tmp_path):
+        """A different-type marker inside a fence is content, not a delimiter."""
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n\n"
+            "## Notes\n\n"
+            "~~~\n"
+            "```\n"
+            "- Rate limiting deferred to a follow-up issue\n"
+            "```\n"
+            "~~~\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert ok, message
+
+    def test_ordinary_fence_still_closes_and_later_punts_still_fail(self, tmp_path):
+        """The fix must not turn every fence into an open-ended exemption."""
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            "```\n"
+            "punted to the next sprint\n"
+            "```\n\n"
+            "The retry backoff will be done post-merge.\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert not ok
+        assert "will be done post-merge" in message
+
+    def test_indented_fence_still_opens(self, tmp_path):
+        """The ``^\\s*`` allowance is deliberate; list-nested fences count."""
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            "- Example:\n\n"
+            "      ```\n"
+            "      punted to the next sprint\n"
+            "      ```\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert ok, message
+
+    def test_inline_backticks_do_not_open_a_fence(self, tmp_path):
+        """Only line-initial markers delimit; inline code spans must not."""
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            "Call ```foo``` then ```bar```.\n\n"
+            "The retry backoff will be done post-merge.\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert not ok
+        assert "will be done post-merge" in message
+
+
 class TestOperatorWillIsActionSenseOnly:
     """#2682: 'operator will see X' describes impact; it defers nothing."""
 
