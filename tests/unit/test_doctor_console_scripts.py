@@ -198,6 +198,64 @@ class TestDeclaredButNotInstalled:
         assert result.fix and "uv sync" not in result.fix
 
 
+class TestShimmedAndNeverInstalled:
+    """The sub-state where both problems land on the same name.
+
+    Every other fixture shims a name that `_fake_checkout` also installs, so
+    "resolves to a stale shim AND was never built into the venv" was never
+    constructed — and the not-installed tagging on that branch could be
+    stripped with the suite still green.
+
+    It is not exotic: pull a branch that adds a `[project.scripts]` entry, skip
+    the sync, and if a stale user-site directory happens to carry that name you
+    are in exactly this state. Telling the operator only to reorder PATH would
+    leave them with a name that still does not exist.
+    """
+
+    def _checkout_with_a_declared_but_unbuilt_name(self, tmp_path):
+        root = _fake_checkout(tmp_path)
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'never-installed = "tools.never:main"\n'
+        )
+        return root
+
+    def test_shimmed_absent_name_is_tagged_not_installed(self, tmp_path, monkeypatch):
+        root = self._checkout_with_a_declared_but_unbuilt_name(tmp_path)
+        # The shim carries the one name the venv does NOT have.
+        shims = _stale_shim_dir(tmp_path, ("never-installed",))
+        result = _run(root, [shims, root / ".venv" / "bin"], monkeypatch)
+
+        assert result.passed is False
+        assert "1/4" in result.message
+        assert "never-installed" in result.message
+        assert "not installed in the repo venv" in result.message, (
+            "resolving to a shim does not make the name present in the venv"
+        )
+        assert str(shims) in result.message, "the operator still needs to know what won"
+
+    def test_fix_names_uv_sync_for_a_shimmed_absent_name(self, tmp_path, monkeypatch):
+        root = self._checkout_with_a_declared_but_unbuilt_name(tmp_path)
+        shims = _stale_shim_dir(tmp_path, ("never-installed",))
+        result = _run(root, [shims, root / ".venv" / "bin"], monkeypatch)
+
+        assert result.fix
+        assert "uv sync" in result.fix, "PATH advice alone leaves the name non-existent"
+        assert "never-installed" in result.fix
+
+    def test_mixed_host_aggregate_suffix_counts_the_absent_names(self, tmp_path, monkeypatch):
+        """One genuinely shadowed name plus one shimmed-and-absent name."""
+        root = self._checkout_with_a_declared_but_unbuilt_name(tmp_path)
+        shims = _stale_shim_dir(tmp_path, ("critique-roster-check", "never-installed"))
+        result = _run(root, [shims, root / ".venv" / "bin"], monkeypatch)
+
+        assert "2/4" in result.message
+        assert "shadowed" in result.message
+        assert "1 also not installed in the venv" in result.message, (
+            "the aggregate suffix must count the absent names, not just mention them"
+        )
+        assert result.fix and "export PATH" in result.fix and "uv sync" in result.fix
+
+
 class TestRegisteredInDoctor:
     def test_check_is_registered_before_system_tools(self):
         """`_check_system_tools` imports verify.py, which prepends the stale dir."""
