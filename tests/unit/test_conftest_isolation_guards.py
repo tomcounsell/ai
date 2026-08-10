@@ -1276,6 +1276,26 @@ class TestReloadedRegistryIdentity:
     writer, on a path no db-ownership rule can touch.
     """
 
+    @pytest.fixture(autouse=True)
+    def _registry_left_intact(self):
+        """Fail the offending test, not a stranger, if the registry is not restored.
+
+        These tests deliberately reload the module they are about to assert on,
+        so a slip in their own teardown strands exactly the damage they exist to
+        detect — and it lands in whatever file `--dist=loadfile` happens to put
+        next on this worker. Ordered before the conftest identity guard's repair,
+        so it grades the test's own cleanup rather than the repair's.
+        """
+        from agent import index_drift
+
+        before = set(index_drift.DRIFT_COVERED_MODELS)
+        assert before, "precondition: the registry is populated at test start"
+        yield
+        assert set(index_drift.DRIFT_COVERED_MODELS) == before, (
+            "this test left agent.index_drift's registry altered; every later test "
+            "on this worker that reads it now sees the wrong thing"
+        )
+
     def test_reload_leaves_the_registry_identity_intact(self):
         """THE binding measurement for writer 2. Red on ``main``."""
         import importlib
@@ -1311,6 +1331,11 @@ class TestReloadedRegistryIdentity:
         from agent import index_drift
 
         original_registry = index_drift.DRIFT_COVERED_MODELS
+        # Captured BEFORE anything clears, and into a separate dict. Rebuilding
+        # the contents from ``original_registry`` after clearing it reads back an
+        # empty dict and strands the registry empty for the rest of the worker --
+        # which is this very file's subject, committed by its own teardown.
+        original_contents = dict(original_registry)
         before = set(index_drift.covered_model_names())
         _conftest._snapshot_shared_identity()
         try:
@@ -1335,7 +1360,5 @@ class TestReloadedRegistryIdentity:
             assert set(index_drift.covered_model_names()) == before
         finally:
             index_drift.DRIFT_COVERED_MODELS = original_registry
-            index_drift.DRIFT_COVERED_MODELS.clear()
-            index_drift.DRIFT_COVERED_MODELS.update(
-                {name: spec for name, spec in original_registry.items()}
-            )
+            original_registry.clear()
+            original_registry.update(original_contents)
