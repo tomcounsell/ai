@@ -260,17 +260,38 @@ def test_missing_worktrees_dir_is_not_an_error(tmp_path, all_clear):
 # --- open_pr_branches fails closed ------------------------------------------
 
 
+def _fake_run_with_origin(origin_url: str, gh_response: subprocess.CompletedProcess):
+    """A `subprocess.run` fake that answers both the origin lookup and `gh`.
+
+    `open_pr_branches` now makes two subprocess calls: `git remote get-url
+    origin` (to derive the `--repo` slug) and `gh pr list --repo <slug>`.
+    Dispatch on argv[0] so both are answered realistically.
+    """
+
+    def fake_run(argv, **_kwargs):
+        if argv[:2] == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, origin_url + "\n", "")
+        return gh_response
+
+    return fake_run
+
+
 def test_open_pr_branches_returns_none_on_nonzero_exit(monkeypatch, tmp_path):
     monkeypatch.setattr(
         disk_reclaim.subprocess,
         "run",
-        lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "gh: auth required"),
+        _fake_run_with_origin(
+            "git@github.com:tomcounsell/ai.git",
+            subprocess.CompletedProcess([], 1, "", "gh: auth required"),
+        ),
     )
     assert disk_reclaim.open_pr_branches(tmp_path) is None
 
 
 def test_open_pr_branches_returns_none_when_gh_missing(monkeypatch, tmp_path):
-    def boom(*_a, **_k):
+    def boom(argv, **_kwargs):
+        if argv[:2] == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, "git@github.com:tomcounsell/ai.git\n", "")
         raise FileNotFoundError("gh")
 
     monkeypatch.setattr(disk_reclaim.subprocess, "run", boom)
@@ -282,23 +303,32 @@ def test_open_pr_branches_parses_names(monkeypatch, tmp_path):
     monkeypatch.setattr(
         disk_reclaim.subprocess,
         "run",
-        lambda *_a, **_k: subprocess.CompletedProcess([], 0, payload, ""),
+        _fake_run_with_origin(
+            "git@github.com:tomcounsell/ai.git",
+            subprocess.CompletedProcess([], 0, payload, ""),
+        ),
     )
     assert disk_reclaim.open_pr_branches(tmp_path) == {"session/a", "session/b"}
 
 
 def test_open_pr_branches_is_pinned_to_repo_root(monkeypatch, tmp_path):
-    """The guard is void if `gh` answers about whatever repo the cwd happens to be.
+    """The guard is void if `gh` answers about whatever repo `GH_REPO` names.
 
-    `gh` resolves its target repository from the git remote of its working
-    directory. Without `cwd=repo_root` the call *succeeds* while describing a
-    different repository, no `session/*` lane matches, every lane reads "no open
-    PR", and the fail-closed None branch never fires because nothing failed.
+    `GH_REPO` outranks the working directory in `gh`'s repo-resolution chain,
+    so a bare call under a forced cwd can *succeed* while describing a
+    different repository: no `session/*` lane matches, every lane reads "no
+    open PR", and the fail-closed None branch never fires because nothing
+    failed. The remedy is an explicit `--repo <slug>` derived from
+    `repo_root`'s own `origin` remote, plus scrubbing `GH_REPO` from the
+    child's environment as defense in depth.
     """
-    seen: dict = {}
+    monkeypatch.setenv("GH_REPO", "cli/cli")
+    calls: list[tuple] = []
 
     def capture(argv, **kwargs):
-        seen["argv"], seen["kwargs"] = argv, kwargs
+        calls.append((argv, kwargs))
+        if argv[:2] == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, "git@github.com:tomcounsell/ai.git\n", "")
         return subprocess.CompletedProcess(argv, 0, "[]", "")
 
     monkeypatch.setattr(disk_reclaim.subprocess, "run", capture)
@@ -306,7 +336,23 @@ def test_open_pr_branches_is_pinned_to_repo_root(monkeypatch, tmp_path):
     other.mkdir(parents=True)
 
     assert disk_reclaim.open_pr_branches(other) == set()
-    assert seen["kwargs"].get("cwd") == str(other)
+
+    gh_argv, gh_kwargs = next(c for c in calls if c[0][0] == "gh")
+    assert "--repo" in gh_argv
+    assert gh_argv[gh_argv.index("--repo") + 1] == "tomcounsell/ai"
+    assert "GH_REPO" not in gh_kwargs.get("env", {})
+
+
+def test_open_pr_branches_fails_closed_when_origin_cannot_be_derived(monkeypatch, tmp_path):
+    """No origin remote (or an unparseable one) must skip `gh` entirely."""
+
+    def fake_run(argv, **_kwargs):
+        if argv[:2] == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 1, "", "fatal: no such remote 'origin'")
+        raise AssertionError(f"gh must never be invoked when origin cannot be derived: {argv}")
+
+    monkeypatch.setattr(disk_reclaim.subprocess, "run", fake_run)
+    assert disk_reclaim.open_pr_branches(tmp_path) is None
 
 
 def test_sweep_worktrees_passes_repo_root_to_pr_query(repo, all_clear, monkeypatch):

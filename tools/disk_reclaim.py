@@ -127,9 +127,13 @@ def _tree_stats(path: Path) -> tuple[int, float]:
     roughly 60x for that subtree (measured: 541 MB apparent, 9 MB actual `df`
     delta). Treated as an upper bound in reporting and never as a justification.
 
-    ``newest_mtime`` falls back to the directory's own mtime when the tree is
-    empty, and to *now* when nothing can be read at all -- unreadable means
-    never reaped, which is the fail-closed direction.
+    ``newest_mtime`` falls back to the directory's own mtime -- via a plain
+    ``stat()``, which needs no read permission and so succeeds even for a
+    tree the walk could not read -- when the tree is empty or unreadable, and
+    only reaches *now* when ``stat()`` on the directory itself also fails.
+    An unreadable lane is not caught by this fallback; it is caught
+    downstream (``git_status_unavailable`` for worktrees, ``sweep.errors``
+    for transcripts).
 
     Both figures come from a single ``rglob`` because every caller wants both
     and a lane carrying a `.venv` is tens of thousands of entries.
@@ -194,29 +198,97 @@ def _git(repo_root: Path, *args: str, cwd: Path | None = None) -> subprocess.Com
     )
 
 
+def _origin_repo_slug(repo_root: Path) -> str | None:
+    """``owner/name`` parsed from ``repo_root``'s ``origin`` remote, or None.
+
+    Handles both ssh (``git@host:owner/name.git``) and https
+    (``https://host/owner/name.git``) remote URL forms, same shape as
+    ``tools/pr_head_resolver.py::_origin_matches_repo``. Returns None on any
+    failure -- no remote, an unparseable URL, or a subprocess error -- so the
+    caller can fail closed instead of guessing.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    url = (proc.stdout or "").strip().removesuffix(".git")
+    if not url:
+        return None
+    # Split on both ':' (ssh scp-like form) and '/' (path separators) and take
+    # the last two non-empty components as owner/name.
+    parts = [p for p in re.split(r"[:/]", url) if p]
+    if len(parts) < 2:
+        return None
+    owner, name = parts[-2], parts[-1]
+    return f"{owner}/{name}"
+
+
 def open_pr_branches(repo_root: Path) -> set[str] | None:
     """Branch names with an open PR **in ``repo_root``**, or None on failure.
 
-    ``cwd=repo_root`` is load-bearing, not tidiness. ``gh`` resolves the target
-    repository from the git remote of its working directory, so a bare call
-    under a forced cwd answers *successfully* about the wrong repository -- and
-    a successful wrong answer cannot be caught by the None fail-closed branch
-    below. Every ``session/*`` lane would then read "no open PR" because none of
-    them appear among another repo's branch names, silently voiding this guard.
-    Same hazard, same remedy as ``tools/pr_head_resolver.py::_origin_matches_repo``.
+    ``gh`` resolves its target repository through a chain that a forced
+    ``cwd`` does not control: ``GH_REPO`` outranks the working directory, so a
+    bare call under a forced cwd can answer *successfully* about the wrong
+    repository -- and a successful wrong answer cannot be caught by the None
+    fail-closed branch below. Every ``session/*`` lane would then read "no
+    open PR" because none of them appear among another repo's branch names,
+    silently voiding this guard. ``GH_REPO`` is not a hypothetical: it is set
+    automatically for cross-repo SDLC work (``agent/session_executor.py``,
+    ``agent/sdk_client.py``), exactly the context this reflection runs in.
+
+    The remedy is explicit, not positional: derive ``owner/name`` from
+    ``repo_root``'s own ``origin`` remote (``_origin_repo_slug``) and pass it
+    as ``--repo``, and scrub ``GH_REPO`` from the child's environment as
+    defense in depth. If the slug cannot be derived -- no git repo, no
+    ``origin`` remote, an unparseable URL -- this returns None rather than
+    falling back to a bare, repo-ambiguous ``gh pr list``. Same hazard, same
+    remedy as ``tools/pr_head_resolver.py::_origin_matches_repo``.
 
     None is not an empty set. The predecessor script (`scripts/worktree-gc.sh`)
     collapsed a failed `gh` call into an empty string, so an auth failure or a
     network blip read as "no branch has an open PR" and made every worktree a
     prune candidate. Callers must treat None as "cannot tell" and skip.
     """
+    slug = _origin_repo_slug(repo_root)
+    if slug is None:
+        logger.warning(
+            "disk_reclaim: could not derive owner/name from %s's origin remote; "
+            "worktree sweep will skip all",
+            repo_root,
+        )
+        return None
+
+    env = dict(os.environ)
+    env.pop("GH_REPO", None)
+
     try:
         proc = subprocess.run(
-            ["gh", "pr", "list", "--state", "open", "--limit", "500", "--json", "headRefName"],
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                slug,
+                "--state",
+                "open",
+                "--limit",
+                "500",
+                "--json",
+                "headRefName",
+            ],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning("disk_reclaim: gh pr list failed (%s); worktree sweep will skip all", e)

@@ -63,11 +63,15 @@ DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply  # remove
 ```
 
 `--repo-root` scopes the **worktree sweep only** — it selects the checkout whose
-`.worktrees/` lanes are considered and whose open PRs `gh` is asked about (the
-query runs with `cwd=repo_root`, so it can never answer about a different
-repository). The transcript sweep always reads `~/.claude/projects/`, and the
-snapshot sweep always reads the module-relative `SESSION_LOGS_DIR` of the
-`agent` package that was imported.
+`.worktrees/` lanes are considered and whose open PRs `gh` is asked about. The
+`owner/name` slug is derived from that checkout's own `origin` remote and
+passed as an explicit `gh pr list --repo <slug>`, and `GH_REPO` is scrubbed
+from the child process's environment — `cwd` alone is not sufficient, because
+`GH_REPO` outranks the working directory in `gh`'s repo-resolution chain and
+would otherwise let the query answer successfully about the wrong repository.
+The transcript sweep always reads `~/.claude/projects/`, and the snapshot
+sweep always reads the module-relative `SESSION_LOGS_DIR` of the `agent`
+package that was imported.
 
 `--apply` alone is refused with exit 2. Both the flag and the environment
 variable are required, so a destructive sweep cannot happen from shell history
