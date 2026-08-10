@@ -51,14 +51,20 @@ from datetime import date
 from pathlib import Path
 
 # Single source of truth for the pool ceiling. Imported rather than re-declared
-# so the invariant below can never drift from the claim it protects. (#2628 may
-# promote this to a public name; update the import if it does.)
+# so the invariant below can never drift from the claim it protects. #2628 keeps
+# this name private and its semantics unchanged, confirmed against that branch,
+# so the import stays valid as written.
 from tests.db_claim import _TEST_DB_POOL_MAX as TEST_DB_POOL_MAX
 
 TESTS_ROOT = Path(__file__).resolve().parent
 
 # The ONLY sanctioned sources of a db number. Matched on the terminal name, so
 # both ``claim_test_db()`` and ``_db_claim.claim_test_db()`` qualify.
+#
+# ``claim_scratch_test_db`` has no call sites yet: #2628 adds it to
+# tests/db_claim.py, and the deferred `divergent_db` site is waiting on it. The
+# entry is inert until then and becomes live the moment that lands. Do not
+# garbage-collect it as dead code in the meantime.
 CLAIM_FUNCS = frozenset({"claim_test_db", "claim_scratch_test_db"})
 
 # The sanctioned source of a Redis URL: ``tests.db_claim.redis_test_url()`` and
