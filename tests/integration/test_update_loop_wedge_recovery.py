@@ -1,22 +1,33 @@
 """Integration tests for the update-loop wedged detector.
 
-Tests the assess_update_flow() function and related helpers in
-monitoring/bridge_watchdog.py, covering the full wedged-vs-quiet
-decision matrix from the plan.
+Tests ``assess_update_flow()`` and related helpers in
+``monitoring/bridge_watchdog.py``.
 
 These tests mock Redis to avoid requiring a live server, but the logic
 under test is real production code.
 
-Test matrix (labelled a–g per the task spec):
-  (a) Account-wide silence past ceiling + healthy probe, no recently-active chat
-      → wedged verdict, restart authorised (B1 incident shape)
-  (b) Silence BELOW the ceiling → no restart
-  (c) Stale last_update but failing last_probe (disconnect) → NOT wedged
-  (d) Redis raises exception → inconclusive (not wedged) + WARNING logged
-  (e) Reconciler-only activity (probe fresh, update stale past ceiling)
-      → still wedged (B2: reconciler activity does NOT re-green update signal)
-  (f) get_process_start_ts returns None → no restart authorised (B3)
-  (g) Within startup grace window → healthy, no restart
+The contract these tests pin changed in #2475. The detector used to declare a
+wedge on *silence alone*: fresh ``last_probe_ok`` plus a stale
+``last_update_received`` was sufficient. That made a quiet night
+indistinguishable from a wedged update loop, and because nothing ever seeds
+``bridge:last_update_received`` on restart, each restart re-armed the same
+verdict on the first tick past the startup grace window — a SIGKILL every ~6
+minutes until real traffic arrived.
+
+Three rules now hold, all of them forms of "bound the verdict to the process it
+accuses":
+
+* Silence is measured from the later of ``last_update_received`` and the bridge
+  process's own start time, so a restart clears the accusation.
+* A verdict requires ``bridge:last_missed_recovery`` — the reconciler having
+  actually recovered a message the live path never delivered. That evidence
+  comes from an independent API path, so unlike ``last_update_received`` and
+  ``bridge:last_event:*`` (both written by the very handler under suspicion) it
+  can distinguish "wedged" from "idle".
+* That evidence must postdate the process's startup grace. A restart creates a
+  gap which catchup and the reconciler then recover, so every restart stamps the
+  evidence key on its way back up; admitting that stamp would let four quiet
+  hours after any restart produce one spurious verdict.
 """
 
 import logging
@@ -37,7 +48,11 @@ from monitoring.bridge_watchdog import (
 # ---------------------------------------------------------------------------
 
 
-def _make_redis(last_update: float | None, last_probe: float | None):
+def _make_redis(
+    last_update: float | None,
+    last_probe: float | None,
+    last_missed: float | None = None,
+):
     """Build a minimal mock Redis client that returns fixed liveness values."""
     r = MagicMock()
 
@@ -46,102 +61,306 @@ def _make_redis(last_update: float | None, last_probe: float | None):
             return str(last_update) if last_update is not None else None
         if key == "bridge:last_probe_ok":
             return str(last_probe) if last_probe is not None else None
+        if key == "bridge:last_missed_recovery":
+            return str(last_missed) if last_missed is not None else None
         return None
 
     r.get.side_effect = _get
     return r
 
 
-# ---------------------------------------------------------------------------
-# (a) B1 incident shape: long silence past ceiling, probe fresh → wedged
-# ---------------------------------------------------------------------------
-
-
-def test_a_wedged_past_ceiling(caplog):
-    """Account-wide silence > ceiling with healthy probe → wedged verdict."""
-    now = time.time()
-    # last_update 5 hours ago (> 4h ceiling)
-    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
-    # probe was 10 minutes ago (fresh)
-    last_probe = now - 600
-
-    r = _make_redis(last_update, last_probe)
-
-    # Bridge started well past the grace window
-    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
+def _assess(r, start_ts):
+    """Run the detector with a pinned process start time."""
     with patch(
         "monitoring.bridge_watchdog.get_process_start_ts",
         return_value=start_ts,
     ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
+        return assess_update_flow(r, bridge_pid=12345)
+
+
+# ---------------------------------------------------------------------------
+# Wedge verdicts: silence past the ceiling WITH recovery evidence
+# ---------------------------------------------------------------------------
+
+
+def test_wedged_past_ceiling_with_recovery_evidence():
+    """Silence past the ceiling + fresh probe + a recovered message → wedged."""
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 600
+    last_missed = now - 300  # reconciler found a missed message 5 minutes ago
+
+    r = _make_redis(last_update, last_probe, last_missed)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 7200)
+
+    is_live, issue = _assess(r, start_ts)
 
     assert is_live is False, "Should be NOT live (wedged)"
     assert "wedged" in issue.lower()
-    assert "last_update_received" in issue
+    assert "reconciler" in issue.lower(), "The verdict must name its corroborating evidence"
 
 
-# ---------------------------------------------------------------------------
-# (b) Silence below ceiling → no restart
-# ---------------------------------------------------------------------------
+def test_never_received_an_update_but_reconciler_recovered_is_wedged():
+    """A bridge that has never stamped the beacon can still be wedged.
 
-
-def test_b_quiet_below_warn_threshold():
-    """Silence shorter than the warn threshold (30m) is not a wedge — no restart."""
+    ``last_update_received`` absent is not by itself a verdict (see the quiet
+    tests below); it becomes one when the reconciler proves messages existed.
+    """
     now = time.time()
-    # last_update 10 minutes ago (< 30m warn threshold)
-    last_update = now - 600
+    r = _make_redis(None, now - 600, now - 300)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 7200)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is False
+    assert "never" in issue
+
+
+# ---------------------------------------------------------------------------
+# The #2475 false positives: silence WITHOUT recovery evidence
+# ---------------------------------------------------------------------------
+
+
+def test_quiet_account_past_ceiling_is_not_wedged():
+    """Four hours with nobody sending anything is not a wedge.
+
+    This is the #2475 storm shape: probe fresh (the reconciler runs every 180s,
+    so it always is), beacon stale, and nothing whatsoever missed. The old rule
+    declared a wedge here.
+    """
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
     last_probe = now - 300
 
-    r = _make_redis(last_update, last_probe)
+    r = _make_redis(last_update, last_probe, last_missed=None)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 7200)
 
-    start_ts = now - (STARTUP_GRACE_SECONDS + 600)
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
+    is_live, issue = _assess(r, start_ts)
 
-    assert is_live is True, "Should be live — silence is below the warn threshold"
+    assert is_live is True, "A quiet account must not be accused of a wedge"
+    assert issue == ""
+
+
+def test_absent_beacon_on_fresh_redis_is_not_wedged():
+    """Fresh/flushed Redis: no beacon, fresh probe, nothing missed → not wedged.
+
+    The cold-start exemption only covers *both* keys being absent, and the
+    reconciler stamps the probe within 180s of any connect. Under the old rule
+    this shape produced a permanent restart loop on a newly provisioned host.
+    """
+    now = time.time()
+    r = _make_redis(None, now - 60, last_missed=None)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 7200)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is True
+    assert issue == ""
+
+
+def test_recovery_stamped_during_startup_grace_does_not_corroborate():
+    """A restart's own backfill is not evidence that the restarted process is wedged.
+
+    Every restart creates a gap, and catchup plus the reconciler recover that gap
+    on the way back up — so a routine restart reliably stamps
+    ``bridge:last_missed_recovery`` inside its own grace window. The evidence
+    window and the silence window are the same length, so without a floor that
+    stamp stays admissible for a full ceiling, and four quiet hours after any
+    restart would produce a spurious verdict.
+
+    Constructed to isolate exactly that: the stamp is inside the grace window
+    (290s < 300s after start) yet still inside the ceiling window
+    (~3.9h < 4h), so the window check alone would admit it.
+    """
+    now = time.time()
+    start_ts = now - (UPDATE_STALENESS_CEILING + 60)
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 60
+    last_missed = start_ts + (STARTUP_GRACE_SECONDS - 10)
+
+    # Guard the construction itself: if these stop holding, the test has drifted
+    # off the case it exists to cover and would pass for the wrong reason.
+    assert (now - start_ts) >= UPDATE_STALENESS_CEILING, "silence must clear the ceiling"
+    assert (now - last_missed) < UPDATE_STALENESS_CEILING, (
+        "stamp must be inside the evidence window"
+    )
+    assert (last_missed - start_ts) < STARTUP_GRACE_SECONDS, "stamp must be inside the grace window"
+
+    r = _make_redis(last_update, last_probe, last_missed)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is True, (
+        "A recovery stamped during startup grace describes the restart, not a wedge "
+        "in the process that came back"
+    )
+    assert issue == ""
+
+
+def test_recovery_stamped_just_after_grace_does_corroborate():
+    """The floor is a floor, not a blanket suppression of post-restart evidence."""
+    now = time.time()
+    start_ts = now - (UPDATE_STALENESS_CEILING + 60)
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 60
+    last_missed = start_ts + (STARTUP_GRACE_SECONDS + 10)
+
+    r = _make_redis(last_update, last_probe, last_missed)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is False
+    assert "wedged" in issue.lower()
+
+
+def test_stale_recovery_evidence_does_not_corroborate():
+    """Evidence older than the window is not evidence for this window."""
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - 300
+    last_missed = now - (UPDATE_STALENESS_CEILING + 60)  # just outside the window
+
+    r = _make_redis(last_update, last_probe, last_missed)
+    start_ts = now - (UPDATE_STALENESS_CEILING * 2)
+
+    is_live, _ = _assess(r, start_ts)
+
+    assert is_live is True
+
+
+# ---------------------------------------------------------------------------
+# A restart clears the accusation
+# ---------------------------------------------------------------------------
+
+
+def test_restart_resets_the_silence_clock():
+    """After a restart the beacon is still hours old — that must not re-fire.
+
+    Nothing seeds ``bridge:last_update_received`` on restart, so the pre-restart
+    timestamp survives. Measuring silence from process start is what stops the
+    verdict from outliving the restart meant to cure it. Recovery evidence is
+    present here, so the *only* thing keeping this healthy is the reset.
+    """
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING + 7200)  # hours stale
+    last_probe = now - 60
+    last_missed = now - 120
+
+    r = _make_redis(last_update, last_probe, last_missed)
+    # Restarted 10 minutes ago: past the 5-minute grace, but only 10 minutes of
+    # its own silence.
+    start_ts = now - 600
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is True, (
+        "A freshly restarted bridge must not inherit the verdict that restarted it"
+    )
+    assert issue == ""
+
+
+def test_wedge_re_fires_once_the_new_process_has_been_silent_long_enough():
+    """The reset delays the verdict; it does not suppress a real recurrence."""
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING * 3)
+    last_probe = now - 60
+    last_missed = now - 120
+    # This process has now itself been silent past the ceiling.
+    start_ts = now - (UPDATE_STALENESS_CEILING + 600)
+
+    r = _make_redis(last_update, last_probe, last_missed)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is False
+    assert "wedged" in issue.lower()
+
+
+# ---------------------------------------------------------------------------
+# Probe / disconnect boundary
+# ---------------------------------------------------------------------------
+
+
+def test_stale_probe_is_a_disconnect_not_a_wedge():
+    """A stale probe means the API layer may be down — the reconnect ladder owns it."""
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
+    last_probe = now - (PROBE_FRESHNESS_SECONDS + 3600)
+    last_missed = now - 300  # even with evidence, a disconnect is not a wedge
+
+    r = _make_redis(last_update, last_probe, last_missed)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 7200)
+
+    is_live, _ = _assess(r, start_ts)
+
+    assert is_live is True
+
+
+def test_silence_below_thresholds_is_not_wedged():
+    """Ten minutes of quiet is not a wedge even with recovery evidence."""
+    now = time.time()
+    r = _make_redis(now - 600, now - 300, now - 60)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 600)
+
+    is_live, issue = _assess(r, start_ts)
+
+    assert is_live is True
     assert issue == ""
 
 
 # ---------------------------------------------------------------------------
-# (c) Stale update + failing probe (disconnect) → NOT wedged
+# Secondary accelerator
 # ---------------------------------------------------------------------------
 
 
-def test_c_stale_update_stale_probe_not_wedged():
-    """When last_probe_ok is also stale, the API layer itself is down.
-
-    This should NOT trigger the wedge detector — the existing reconnect
-    ladder owns disconnection recovery.
-    """
+def test_secondary_accelerator_fires_with_recent_recovery():
+    """Past the warn threshold with equally recent evidence → early warning."""
     now = time.time()
-    # Both signals are stale
-    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
-    last_probe = now - (PROBE_FRESHNESS_SECONDS + 3600)  # probe is old/stale
+    last_update = now - (UPDATE_STALENESS_WARN + 300)
+    last_probe = now - 60
+    last_missed = now - 120  # inside the warn window
 
-    r = _make_redis(last_update, last_probe)
+    r = _make_redis(last_update, last_probe, last_missed)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 3600)
 
-    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
+    is_live, issue = _assess(r, start_ts)
 
-    assert is_live is True, (
-        "Should be live from wedge perspective — probe stale means "
-        "disconnect, not a wedge (reconnect ladder owns it)"
-    )
+    assert is_live is False
+    assert "early warning" in issue.lower()
+
+
+def test_secondary_accelerator_needs_recent_evidence():
+    """A recovery from an hour ago does not accelerate a 35-minute silence."""
+    now = time.time()
+    last_update = now - (UPDATE_STALENESS_WARN + 300)
+    last_probe = now - 60
+    last_missed = now - (UPDATE_STALENESS_WARN + 900)  # older than the warn window
+
+    r = _make_redis(last_update, last_probe, last_missed)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 3600)
+
+    is_live, _ = _assess(r, start_ts)
+
+    assert is_live is True
+
+
+def test_secondary_accelerator_does_not_fire_without_evidence():
+    """A 35-minute lull with nothing missed is a lull."""
+    now = time.time()
+    r = _make_redis(now - (UPDATE_STALENESS_WARN + 300), now - 60, last_missed=None)
+    start_ts = now - (UPDATE_STALENESS_CEILING + 3600)
+
+    is_live, _ = _assess(r, start_ts)
+
+    assert is_live is True
 
 
 # ---------------------------------------------------------------------------
-# (d) Redis raises exception → inconclusive, not wedged, WARNING logged
+# Fail-safes
 # ---------------------------------------------------------------------------
 
 
-def test_d_redis_exception_inconclusive(caplog):
+def test_redis_exception_is_inconclusive(caplog):
     """Redis error → inconclusive → NOT flagged as wedged + WARNING logged."""
     r = MagicMock()
     r.get.side_effect = ConnectionError("Redis connection refused")
@@ -149,202 +368,75 @@ def test_d_redis_exception_inconclusive(caplog):
     now = time.time()
     start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
 
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
-            is_live, issue = assess_update_flow(r, bridge_pid=12345)
+    with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
+        is_live, issue = _assess(r, start_ts)
 
     assert is_live is True, "Redis error must be treated as inconclusive (not wedged)"
     assert issue == ""
-    # A WARNING containing the signal-unreadable marker must be emitted
-    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    warning_messages = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
     assert any(
         "bridge_update_flow_signal_unreadable" in m or "Redis error" in m for m in warning_messages
     ), f"Expected bridge_update_flow_signal_unreadable WARNING, got: {warning_messages}"
 
 
-# ---------------------------------------------------------------------------
-# (e) B2 regression: reconciler-only activity does NOT re-green update signal
-# ---------------------------------------------------------------------------
-
-
-def test_e_reconciler_only_still_wedged():
-    """Reconciler activity (probe fresh) does not excuse stale last_update_received.
-
-    This is the B2 regression: the PRIMARY rule fires on account-wide silence
-    regardless of how recently last_probe_ok was written.  The update signal
-    and the probe signal are independent — probe being fresh just confirms the
-    API layer is healthy, making the update silence MORE suspicious.
-    """
+def test_unreadable_process_start_suppresses_verdict(caplog):
+    """If process start time is unreadable, the verdict is suppressed (C3)."""
     now = time.time()
-    # last_update stale past ceiling
-    last_update = now - (UPDATE_STALENESS_CEILING + 1800)
-    # Reconciler ran 5 minutes ago (very fresh probe)
-    last_probe = now - 300
+    r = _make_redis(now - (UPDATE_STALENESS_CEILING + 3600), now - 300, now - 60)
 
-    r = _make_redis(last_update, last_probe)
-
-    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
-
-    assert is_live is False, (
-        "B2: fresh last_probe_ok must NOT excuse stale last_update_received "
-        "— reconciler activity does not re-green the update signal"
-    )
-    assert "wedged" in issue.lower()
-
-
-# ---------------------------------------------------------------------------
-# (f) B3 fail-safe: get_process_start_ts returns None → no restart
-# ---------------------------------------------------------------------------
-
-
-def test_f_start_ts_none_suppresses_wedge(caplog):
-    """If process start time is unreadable, wedge verdict is suppressed (C3)."""
-    now = time.time()
-    # Signals show a wedge condition
-    last_update = now - (UPDATE_STALENESS_CEILING + 3600)
-    last_probe = now - 300
-
-    r = _make_redis(last_update, last_probe)
-
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=None,
-    ):
-        with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
-            is_live, issue = assess_update_flow(r, bridge_pid=12345)
+    with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
+        is_live, issue = _assess(r, start_ts=None)
 
     assert is_live is True, (
-        "B3 fail-safe: None start_ts must suppress wedge verdict — "
-        "never authorise a restart when process age is unreadable"
+        "None start_ts must suppress the verdict — process age is the floor for "
+        "the silence measurement, not just the grace window"
     )
     assert issue == ""
-    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("fail-safe" in m.lower() or "None" in m for m in warning_messages), (
+    warning_messages = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("fail-safe" in m.lower() for m in warning_messages), (
         f"Expected fail-safe WARNING, got: {warning_messages}"
     )
 
 
-# ---------------------------------------------------------------------------
-# (g) Within startup grace window → healthy, no restart
-# ---------------------------------------------------------------------------
-
-
-def test_g_within_startup_grace_no_restart():
-    """Stale signals within the grace window are not a wedge (cold start)."""
+def test_missing_pid_suppresses_verdict():
+    """No pid → no process age → inconclusive, same fail-safe."""
     now = time.time()
-    # Signals look stale / absent
-    last_update = None
-    last_probe = None
+    r = _make_redis(now - (UPDATE_STALENESS_CEILING + 3600), now - 300, now - 60)
 
-    r = _make_redis(last_update, last_probe)
+    is_live, issue = assess_update_flow(r, bridge_pid=None)
 
-    # Bridge started only 2 minutes ago (within 5-minute grace)
-    start_ts = now - 120
-
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
-
-    assert is_live is True, "Within grace window — cold start is healthy"
+    assert is_live is True
     assert issue == ""
 
 
-def test_g_within_grace_stale_signals_no_restart():
-    """Stale signals (not None) within grace window are still healthy."""
-    now = time.time()
-    # Signals from a previous bridge run
-    last_update = now - (UPDATE_STALENESS_CEILING + 7200)
-    last_probe = now - (PROBE_FRESHNESS_SECONDS + 1)
-
-    r = _make_redis(last_update, last_probe)
-
-    # Bridge just started 1 minute ago
-    start_ts = now - 60
-
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
-
-    assert is_live is True, (
-        "Stale signals from previous bridge run within grace window are not wedged"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Secondary accelerator: per-chat-gated warn window
+# Startup grace window
 # ---------------------------------------------------------------------------
 
 
-def test_secondary_accelerator_no_per_chat_corroboration():
-    """Secondary accelerator does NOT fire without per-chat bridge:last_event corroboration."""
+def test_within_startup_grace_no_verdict():
+    """Absent signals within the grace window are a cold start, not a wedge."""
     now = time.time()
-    last_update = now - (UPDATE_STALENESS_WARN + 300)  # 35 minutes — in warn window
-    last_probe = now - 60  # very fresh
+    r = _make_redis(None, None)
 
-    r = _make_redis(last_update, last_probe)
-    # No bridge:last_event:* keys — scan_iter returns empty iterator
-    r.scan_iter.return_value = iter([])
+    is_live, issue = _assess(r, start_ts=now - 120)
 
-    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
+    assert is_live is True
+    assert issue == ""
 
-    # Without per-chat corroboration, secondary accelerator must NOT fire
-    # (below the ceiling, no per-chat evidence of a wedged handler)
-    assert is_live is True, (
-        f"Secondary accelerator must NOT fire without per-chat corroboration (issue={issue!r})"
+
+def test_within_grace_stale_signals_no_verdict():
+    """Signals left over from the previous run do not accuse the new process."""
+    now = time.time()
+    r = _make_redis(
+        now - (UPDATE_STALENESS_CEILING + 7200),
+        now - (PROBE_FRESHNESS_SECONDS + 1),
+        now - 60,
     )
 
+    is_live, _ = _assess(r, start_ts=now - 60)
 
-def test_secondary_accelerator_with_per_chat_corroboration():
-    """Secondary accelerator fires when per-chat bridge:last_event shows a chat went quiet.
-
-    A bridge:last_event:{chat_id} key within the warn window is required for
-    the secondary accelerator to trip.
-    """
-    now = time.time()
-    last_update = now - (UPDATE_STALENESS_WARN + 300)  # 35 minutes — in warn window
-    last_probe = now - 60  # very fresh
-
-    chat_key = "bridge:last_event:12345678"
-    chat_last_event_ts = now - (UPDATE_STALENESS_WARN + 300)  # same age as last_update
-
-    r = _make_redis(last_update, last_probe)
-    # Inject a per-chat key showing a chat that went quiet ~35 min ago
-    r.scan_iter.return_value = iter([chat_key])
-    original_get = r.get.side_effect
-
-    def _get_with_chat(key):
-        if key == chat_key:
-            return str(int(chat_last_event_ts))
-        return original_get(key)
-
-    r.get.side_effect = _get_with_chat
-
-    start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
-    with patch(
-        "monitoring.bridge_watchdog.get_process_start_ts",
-        return_value=start_ts,
-    ):
-        is_live, issue = assess_update_flow(r, bridge_pid=12345)
-
-    assert is_live is False, "Secondary accelerator should fire with per-chat corroboration"
-    assert "early warning" in issue.lower() or "possibly wedged" in issue.lower()
+    assert is_live is True
 
 
 # ---------------------------------------------------------------------------

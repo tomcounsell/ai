@@ -9,11 +9,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from bridge.liveness import (
+    _MISSED_RECOVERY_KEY,
     _PROBE_KEY,
     _TTL_SECONDS,
     _UPDATE_KEY,
+    get_last_missed_recovery,
     get_last_probe_ok,
     get_last_update_received,
+    record_missed_recovery,
     record_probe_ok,
     record_update_received,
 )
@@ -183,3 +186,46 @@ def test_record_update_received_before_is_duplicate_message_in_bridge():
         f"record_update_received (line {update_line + 1}) must come BEFORE "
         f"is_duplicate_message (line {dedup_line + 1}) in telegram_bridge.py"
     )
+
+
+# ---------------------------------------------------------------------------
+# record_missed_recovery / get_last_missed_recovery (#2475)
+# ---------------------------------------------------------------------------
+
+
+def test_record_missed_recovery_writes_correct_key():
+    r = _mock_redis()
+    record_missed_recovery(redis_client=r)
+    r.set.assert_called_once()
+    args, kwargs = r.set.call_args
+    assert args[0] == _MISSED_RECOVERY_KEY
+    float(args[1])
+    assert kwargs.get("ex") == _TTL_SECONDS
+
+
+def test_record_missed_recovery_does_not_raise_on_redis_failure(caplog):
+    r = _mock_redis()
+    r.set.side_effect = ConnectionError("redis down")
+    with caplog.at_level(logging.WARNING, logger="bridge.liveness"):
+        record_missed_recovery(redis_client=r)
+    assert any("record_missed_recovery failed" in rec.message for rec in caplog.records)
+
+
+def test_get_last_missed_recovery_returns_none_when_key_missing():
+    """No recovery has ever been needed — the healthy case, and not a wedge."""
+    assert get_last_missed_recovery(redis_client=_mock_redis(None)) is None
+
+
+def test_get_last_missed_recovery_returns_none_on_corrupt_value():
+    assert get_last_missed_recovery(redis_client=_mock_redis("not-a-float")) is None
+
+
+def test_get_last_missed_recovery_returns_float_on_valid_value():
+    assert get_last_missed_recovery(redis_client=_mock_redis("1786000000.5")) == 1786000000.5
+
+
+def test_get_last_missed_recovery_returns_none_on_redis_failure(caplog):
+    r = _mock_redis()
+    r.get.side_effect = ConnectionError("redis down")
+    with caplog.at_level(logging.WARNING, logger="bridge.liveness"):
+        assert get_last_missed_recovery(redis_client=r) is None
