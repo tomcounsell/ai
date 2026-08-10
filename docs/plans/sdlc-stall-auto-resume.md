@@ -204,6 +204,7 @@ per open SDLC PR:
   gate 6': this machine owns the project?                       [NEW]
       not owner -> skip silently
   action ladder, keyed on (slug, head-sha):
+      escalation key exists    -> stop acting entirely       [read-only GET; unknown declines]
       _attempts_count() >= MAX -> escalate once, stop        [read-only GET, never INCR]
       action cooldown live     -> skip this tick
       pick rung:
@@ -283,48 +284,19 @@ This also produces a happy coincidence that the design leans on: by the time the
 through, the stalled lane's lock is free or self-freeing, so the eng session we steer will not hit
 `ISSUE_LOCKED` when it runs `/sdlc`.
 
-A secondary, cheap sanity check is retained, and its tiebreak is stated explicitly because the two
-signals can disagree.
+**One signal, not two.** An earlier revision of this plan OR-ed in a secondary
+`_nonledger_row_live(issue_number)` check, freshness-bounded by
+`SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES`. It was **deleted during the review patch**: the branch
+is structurally dead. `AgentSession.issue_number` is populated by no non-ledger creation path —
+`_push_agent_session` (`agent/agent_session_queue.py`) has no `issue_number` parameter, so even the
+create rung's own sessions never carry one — and a live production query found the only rows with
+an `issue_number` were `sdlc-local-*` ledger anchors, which `_is_ledger` skips. The same gap is
+already documented at `tools/merge_predicate.py:44-47`.
 
-**Tiebreak rule: the two signals are OR-ed for "live", never AND-ed.** A lane is live if the lock
-read says live **OR** a fresh non-ledger non-terminal `AgentSession` carries this `issue_number`. The
-row check can only ever *add* liveness; it must never turn a lock-says-dead result into "not live".
-That inversion is the permanent-false-negative mode spike-2 already ruled out for ledger anchors, and
-it is the single way this secondary check could make the detector worse.
-
-Stated as code, so the builder cannot get the polarity wrong:
-
-```python
-lock_live = _lock_says_live(issue_number)
-if lock_live is None:
-    return None            # unknown -> caller skips
-if lock_live:
-    return True            # lock is authoritative for "live"
-return _nonledger_row_live(issue_number) or False   # row can only add liveness
-```
-
-Note the ordering consequence: because an unknown lock read short-circuits to `None`, the secondary
-row check is never consulted during a Redis outage. That is intentional. The row query goes through
-the same Redis; a degraded backend cannot be its own second opinion.
-
-The row check costs one indexed query and catches a lane running without a lock (a Redis flap
-during acquire). Ledger rows are excluded via `agent.session_health._is_ledger`, exactly as
-`stall_advisory.py:130-139` does. If the row query itself raises, it contributes nothing (`False`)
-rather than `None` — a failed *secondary* signal must not veto a successful primary one.
-
-**The row check must be freshness-bounded, because hollow sessions are real.** Observed live during
-round-3 recon: four `sdlc-local-*` rows reporting `status=running` with no heartbeat and no fence,
-their `updated_at` refreshed only by a bulk liveness probe. Those particular rows are `is_ledger` and
-so already excluded — but the general hazard is not, and this feature *creates* non-ledger eng
-sessions that could become hollow the same way. A frozen non-terminal row would otherwise add false
-liveness forever and re-create the permanent-false-negative mode spike-2 ruled out, this time through
-the side door of a session the reflection itself minted.
-
-So `_nonledger_row_live` requires **both** a non-terminal status **and** an `updated_at` newer than
-`SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` (default 30 — provisional, tunable; deliberately aligned
-with `ISSUE_LOCK_TTL_SECONDS` so the two liveness horizons expire together). A row older than that
-contributes `False`: it is not evidence of life, it is evidence of a row nobody has touched. This
-keeps the secondary signal's failure mode "stops adding liveness", never "suppresses forever".
+So `_lane_is_live(issue_number)` **is** `_lock_says_live(issue_number)`: one signal, unknown
+declines, absent key is free. Reintroducing a row signal requires first plumbing `issue_number`
+through the creation path — a wider blast radius than this feature carries, and one that would
+re-import the liveness mirage the lock was adopted to kill.
 
 ### Gate 6' — machine ownership
 
@@ -575,7 +547,7 @@ exception `_DEDUP_PREFIX` already claims (`sdlc_progress.py:33-36`).
 | Key | Purpose | Lifetime |
 |---|---|---|
 | `sdlc:stall:resume:cooldown:{slug}:{sha}` | Action cooldown — retrying an action is cheap, so this is short | `SDLC_STALL_RESUME_COOLDOWN_HOURS`, default **1** |
-| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget. **Two distinct operations:** `_attempts_count()` is a bare `GET` (absent key = 0) used by the pre-action gate; `_bump_attempts()` is the `INCR` + TTL refresh that charges an attempt after an action is classified | `SDLC_STALL_ATTEMPTS_TTL_HOURS`, default **24** |
+| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget. **Two distinct operations:** `_attempts_count()` is a bare `GET` (absent key = 0, non-integer payload = unknown) used by the pre-action gate; `_bump_attempts()` is the `INCR` + TTL refresh that charges an attempt after an action is classified | `SDLC_STALL_ATTEMPTS_TTL_DAYS`, default **30**, floored at the escalation TTL |
 | `sdlc:stall:escalated:{slug}:{sha}` | Human escalation, `SET NX` — the anti-ladder key | `SDLC_STALL_ESCALATION_TTL_DAYS`, default **30** |
 
 Separating the action cooldown from the human-escalation key is the whole fix for defect 2. The old
@@ -596,8 +568,7 @@ env override and a comment marking it tunable.
 | `SDLC_STALL_RESUME_MAX_ATTEMPTS` | 3 | Per `(slug, sha)` action attempts before escalate-once-and-stop |
 | `SDLC_STALL_CREATE_MAX_PER_TICK` | 1 | Max **creations** per project per tick — a burst brake on the widest rung |
 | `SDLC_STALL_RESUME_ENABLED` | `true` | Break-glass; `false` restores notification-only, still with the anti-ladder escalation key |
-| `SDLC_STALL_ATTEMPTS_TTL_HOURS` | 24 | TTL on the attempts key, refreshed on each bump. Bounds how long an exhausted budget stays exhausted for an unchanged head sha |
-| `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` | 30 | Freshness bound on Gate 5's secondary row check, so a hollow non-terminal row cannot add liveness forever |
+| `SDLC_STALL_ATTEMPTS_TTL_DAYS` | 30 | TTL on the attempts key, refreshed on each bump, and **floored at `SDLC_STALL_ESCALATION_TTL_DAYS`**. Invariant: attempts TTL >= escalation TTL, or the budget re-arms while the escalation key still suppresses the page |
 
 Every one of these is a named module constant read through an `os.environ.get(...)` override with a
 comment marking it provisional and tunable, mirroring the existing `_threshold_seconds()`
@@ -644,7 +615,10 @@ It never fires merely because no existing session was steerable — that case is
 escalation — and never on a benign race.
 
 Guarded by `SET NX` on `sdlc:stall:escalated:{slug}:{sha}`; if the `SET NX` returns false, the human
-was already told and nothing is sent. Redis unavailable for the escalation write → **do not send**,
+was already told and nothing is sent. The same key is **read** at the top of the ladder, before the
+action window is claimed: an existing escalation stops the lane acting at all (`already-escalated`
+finding), which is what makes "escalate once and stop acting" literal instead of "page once and keep
+acting silently". An unreadable key is unknown and also declines. Redis unavailable for the escalation write → **do not send**,
 preserving the existing "under-alert during a flap beats spam during one" posture
 (`sdlc_progress.py:229-242`).
 
@@ -776,7 +750,6 @@ boundary is the direct `_R.get` on `session:issuelock:{N}`, which does raise.
 |---|---|---|
 | Lock key read (`_R.get`) | raises | gate returns `None`; no steer, no create, no alert; reflection returns `status="ok"`; `findings` marker |
 | Lock key read | returns malformed (non-JSON) payload | gate returns `None` — **unknown, not free**; no action |
-| `AgentSession.query` (secondary row check) | raises | contributes `False`, never `None`; a lock-says-live result still suppresses |
 | `AgentSession.query` (target selection) | raises | no steer, no alert |
 | `steer_session` | returns `success=False` (any cause) | attempt charged; escalation fires once. **No benign-race branch exists for this rung** — see "Benign races are not attempts" |
 | `resume_session` | returns `success=False`, row re-reads terminal | attempt charged; escalation fires once |
@@ -828,16 +801,16 @@ behavior this plan reverses and must change rather than be added around.
 New coverage to add:
 
 - [ ] Live-local-lane suppression: the lock read reports a live owner → no steer, no alert.
-- [ ] Gate 5' tiebreak polarity: lock says dead + a fresh live non-ledger row for the issue →
-      **live** (suppressed). Lock says live + no row → **live**. Row query raises + lock says live →
-      still live. This is the inversion guard; it is the most important new unit test.
+- [ ] Gate 5' is a one-signal gate: `_lane_is_live` consults the lock and **no** session rows at
+      all (assert the session query is never called).
 - [ ] Gate 5' unknown-vs-free discrimination: `_R.get` raising → `None` → no action; `_R.get`
       returning malformed JSON → `None` → no action; `_R.get` returning `None` (key absent) → not
       live → continue. These three outcomes must be distinguishable — that is the whole point of the
       round-2 BLOCKER, and a test suite that cannot tell them apart has not fixed it.
-- [ ] Gate 5' secondary-row freshness: a non-terminal non-ledger row whose `updated_at` is older than
-      `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` contributes **no** liveness (the hollow-session
-      guard); an equivalent fresh row does.
+- [ ] Steer/resume target selection prefers a session whose `slug` matches the stalled lane over a
+      merely-more-recent one, in both the live and the resumable bucket.
+- [ ] An existing escalation key stops the ladder acting (no steer/resume/create, no attempt), and a
+      lapsed attempts key cannot re-arm the budget while the escalation key is still live.
 - [ ] Steer-target selection order: live eng session preferred over resumable, resumable preferred
       over create; ledger anchors never selected; sessions from another `project_key` never
       selected.
@@ -869,9 +842,10 @@ New coverage to add:
 
 - **Making a session query the *primary* liveness authority.** Every variant of this (match `slug`,
   match `issue_number`, match `session_id` prefix) re-derives liveness from a row's existence, which
-  is exactly the mirage spike-2 documents. The lock is the authority; the `issue_number` row query
-  survives only as an OR-ed secondary signal that can add liveness and never remove it (see Gate
-  5'). Do not promote it, do not add a second row query, and do not let a row result veto the lock.
+  is exactly the mirage spike-2 documents. The lock is the sole authority; the `issue_number` row
+  query was deleted outright, because `AgentSession.issue_number` is never populated on a non-ledger
+  path (see Gate 5'). Do not reintroduce it without first plumbing `issue_number` through session
+  creation, and never let a row result veto the lock.
   Time-box: if the lock read proves insufficient, escalate as an Open Question rather than
   reintroducing row inference as the authority.
 - **Making the steer conversational.** The steer is one message with a `/sdlc` instruction. It does
@@ -896,6 +870,9 @@ New coverage to add:
 | The create rung spawns a lane on top of a live one | **High** | Three independent guards: gate 5' lock read, a second lock read immediately before create, and `/sdlc`'s own `ISSUE_LOCKED` short-circuit inside the created session. All three fail closed — and the first two are non-fail-open by construction (direct `_R.get`, not `touch_issue_lock`), which is what makes the claim true rather than aspirational. |
 | `create_session` extraction regresses `valor-session create` | Medium | The extraction moves two calls (`get_or_create_worktree`, `_push_agent_session`) behind a core and leaves argparse/printing in `cmd_create`; existing `cmd_create` tests are re-run unchanged as the regression check. |
 | A created session burns tokens on an already-finished lane | Low | The lane is only reached after gates 1-4 confirm an open issue, an open non-draft PR, and a commit older than the threshold. A finished lane fails gate 1 or 3. |
+| Rung 2 resumes an eng session belonging to a *different* lane | Medium | `_pick_steer_target` prefers a session whose `slug` matches the stalled lane inside BOTH the live and the resumable bucket, falling back to recency only when no same-lane candidate exists. Without it, `resume_session` transitions the row in place and the worker runs it in that row's own `working_dir`, landing issue A's work as commits on lane B's branch. |
+| `SDLC_STALL_CREATE_MAX_PER_TICK` is per-call state, not atomic across ticks | Low | **Accepted, not mitigated.** `creates_this_tick` is a local counter in `_check_project_stalls`, so two overlapping ticks racing on different lanes of one project can each mint a session. Accepted at a 30-minute cadence; the per-`(slug, sha)` attempt budget bounds the total regardless, and moving the counter to Redis would buy a cross-tick lock this feature does not need. |
+| The ladder re-arms after escalation and creates in a loop | **Closed by construction** | Two properties make "escalate once and stop" literal rather than aspirational: the escalation key is **read** before the action window is claimed (an existing escalation skips the lane entirely), and the attempts TTL is floored at the escalation TTL so a lapsed budget can never re-arm behind a still-suppressing escalation key. |
 | Two machines both act despite the gate | Low | `projects.<key>.machine` is the repo's declared source of truth and is validated by `bridge/config_validation.py`. |
 
 ## Step by Step Tasks
@@ -909,10 +886,9 @@ New coverage to add:
    **direct `_R.get("session:issuelock:{N}")` read** classified by
    `models.session_lifecycle._lock_owner_is_live`, under the caller's own `except Exception -> None`
    — do **not** route this through `touch_issue_lock`, which fails open and cannot express
-   "unknown". Then add `_lane_is_live(issue_number)` layering the secondary non-ledger
-   `issue_number` session check **OR-ed for liveness only**, freshness-bounded by
-   `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` — implement the polarity exactly as the code block in
-   Gate 5'. A failing row query contributes `False`, never `None`.
+   "unknown". `_lane_is_live(issue_number)` is that read and nothing else — a one-signal gate. Do
+   NOT add a secondary `issue_number` session-row check: `AgentSession.issue_number` is never
+   populated on a non-ledger creation path, so the branch cannot fire. See Gate 5'.
 3. **Add gate 6.** Call `machine_owns_project(project["slug"])` in `_check_project_stalls`; skip
    silently when not the owner.
 4. **Add the Redis key helpers.** `_action_cooldown_set`, `_attempts_count`, `_bump_attempts`,
@@ -969,9 +945,9 @@ New coverage to add:
 - [ ] Replace the Tunables table with the full new knob set (`SDLC_STALL_THRESHOLD_HOURS`,
       `SDLC_STALL_RESUME_ENABLED`, `SDLC_STALL_RESUME_MAX_ATTEMPTS`,
       `SDLC_STALL_CREATE_MAX_PER_TICK`, `SDLC_STALL_RESUME_COOLDOWN_HOURS`,
-      `SDLC_STALL_ESCALATION_TTL_DAYS`, `SDLC_STALL_ATTEMPTS_TTL_HOURS`,
-      `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES`), and drop the removed `SDLC_STALL_COOLDOWN_HOURS`.
-      All eight must appear; the round-2 critique caught the tunables list enumerating a subset.
+      `SDLC_STALL_ESCALATION_TTL_DAYS`, `SDLC_STALL_ATTEMPTS_TTL_DAYS`), and drop the removed
+      `SDLC_STALL_COOLDOWN_HOURS`. All seven must appear; the round-2 critique caught the tunables
+      list enumerating a subset.
 - [ ] Document the create rung explicitly, including its guards — it is the one capability an
       operator needs to know the reflection has.
 - [ ] `docs/tools-reference.md`: **no change required.** Verified during the round-3 revision —
