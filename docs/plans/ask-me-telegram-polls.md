@@ -5,17 +5,54 @@ appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2701
-last_comment_id: none
+last_comment_id: 5237014662
 revision_applied: true
-revision_applied_at: 2026-08-10T05:56:03Z
+revision_applied_at: 2026-08-10T07:17:53Z
 ---
 
-# Render /ask-me questions as native Telegram polls
+# Render /ask-me questions as native Telegram polls (group chats, eng sessions)
+
+## Scope (settled after the Task 1 capability probes — read this first)
+
+The original plan targeted 1:1 DMs. **That premise is dead.** The capability matrix was
+settled by live probes on 2026-08-10 and is recorded on
+[#2701](https://github.com/tomcounsell/ai/issues/2701#issuecomment-5237014662):
+
+| Sender | Chat type | Polls | Inline keyboard buttons |
+|--------|-----------|-------|-------------------------|
+| User account (the bridge, Telethon/MTProto) | 1:1 DM | ❌ `MediaInvalidError` | ❌ bot-only primitive |
+| User account | Group | ✅ verified live in `Eng: Valor` (`-1003449100931`) | ❌ bot-only primitive |
+| Bot account (Bot API) | 1:1 DM | ✅ verified | ✅ verified |
+
+**These are settled facts, not open questions. Do not re-probe them, and do not send test polls
+into any chat to re-confirm them.**
+
+The bot path was rejected on **identity**, not capability: a bot cannot post into a user-to-user
+chat, so its question would land in a separate `@bot` conversation and break the thread scoping
+sessions depend on. It would also add a second Telegram identity, a new inbound transport, and
+`projects.json` contact-ownership churn.
+
+**Owner decisions (Valor), not reopened by this plan or by critique:**
+
+1. **Group chats only, via the existing user account.** DMs keep today's prose behavior.
+2. **Engineering sessions only.** Delivery requires the destination chat to be a group **AND**
+   `session_type == "eng"`. Either condition failing falls back to prose. `teammate` never gets a
+   poll.
+3. **No mid-turn blocking.** Turn-boundary rendering plus vote→steering translation only.
+4. The final poll option is always the literal `Other: wait for followup message`, answered by a
+   plain-text followup the human replies to.
+5. `/ask-me`'s one-question-at-a-time rule becomes a **preference**; the hard prohibition is removed.
+6. **Reaction-based answering is dropped.** Do not revive it. Telethon exposes no high-level
+   reaction event, the bridge only ever sends reactions and never listens, and confirming push
+   delivery would require a second client sharing the bridge's auth key.
+
+**Anti-scope:** no bot identity; no new inbound transport (votes become steering messages on the
+existing path); email and local-session surfaces keep today's prose behavior.
 
 ## Problem
 
-When work happens over Telegram rather than a local terminal, a blocked agent asks its
-question as prose. The human has to read a paragraph on a phone and compose a written
+When engineering work happens in a Telegram **group** rather than a local terminal, a blocked agent
+asks its question as prose. The human has to read a paragraph on a phone and compose a written
 answer. The interaction `/ask-me` was designed around — glance, tap, done — is lost, so
 questions get answered slowly, partially, or not at all, and the agent stays blocked.
 
@@ -30,20 +67,43 @@ questions get answered slowly, partially, or not at all, and the agent stays blo
   `events.MessageEdited` (`:2523`). There are zero `events.Raw` handlers in the repo, so the
   bridge has no concept of a structured answer.
 - There is zero Telegram-poll code anywhere in `bridge/` or `tools/`.
+- Nothing on the outbound relay path knows a session's `session_type`.
+  `bridge/telegram_relay.py` works from `session_id` and `chat_id`; the persona → `session_type`
+  mapping lives at `bridge/routing.py:568 persona_to_session_type`, which only the inbound handler
+  and the catchup scanners call.
 
 **Desired outcome:**
 
-A question the agent poses at turn end is delivered to the chat as a native Telegram poll
-with the recommended option first and `Other: wait for followup message` last. One tap
-records the answer, the bridge converts the vote into a steering message, and the session
+A question an **eng** session poses via `/ask-me` in a **group** chat is delivered as a native
+Telegram poll with the recommended option first and `Other: wait for followup message` last. One
+tap records the answer, the bridge converts the vote into a steering message, and the session
 resumes on its next turn with the choice in hand. No new blocking primitive, no new inbound
-message path, and every non-Telegram surface degrades to today's text behavior.
+message path, and **every ineligible surface — DMs, `teammate` sessions, email, local sessions —
+degrades to today's prose behavior at a single decision point.**
 
 ## Freshness Check
 
-**Baseline commit:** `e051e95da` (Plan revision (sdlc-stall-auto-resume): address critique findings)
+**Verification baseline:** `95aba8187` — the single commit every `file:line` and symbol reference in
+this document was last re-verified against. Where an older sha appears anywhere else in this plan's
+history, this line supersedes it.
 **Issue filed at:** 2026-08-10T04:47:24Z
-**Disposition:** Unchanged
+**Disposition (revision cycle 4):** **Major drift — resolved by re-scope.** The plan's core premise
+(polls into 1:1 DMs) was disproved by its own Task 1 gate and the issue was re-scoped by the owner
+(see **Scope** above and issue comments `5236653597` / `5237014662`). This revision replaces the
+dead premise rather than closing the issue: the feature remains buildable and worth building on the
+group-chat surface, which is where eng sessions actually run.
+
+**What the gate FAIL invalidated:** Risk 1 (now a settled constraint, see **Risks**), the old Task 1
+DM-capability gate, the DM-only voter-disambiguation assumption in Research finding 5, and every
+"1:1 DM" framing in Rabbit Holes and Success Criteria. All are rewritten below.
+
+**What survived unchanged and is deliberately kept:** the outbound outbox → relay seam analysis
+(spike-3), the catchup transcript-rendering finding (spike-4), the plain-Redis registry precedent
+(spike-5), the `UpdateMessagePoll` cannot-self-route finding (spike-2), the dedup/idempotency
+design, the message-drafter validate-only split, the handled-detection analysis, and the
+`bridge/answer_routing.py` extraction. None of that work depended on the chat type.
+
+**Original freshness evidence (still valid, verified at first planning):**
 
 The issue was filed roughly six minutes before planning began and no commits landed on main
 in that window. The `## Recon Summary` gate passes
@@ -159,17 +219,38 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
    `GetPollResultsRequest` before acting.
 
 5. **Individual-vote updates (`updateMessagePollVote`) are bots-only.** A user account observes
-   aggregate counts. In a 1:1 DM where the sender never votes, any option with `voters >= 1` is
-   unambiguously the human's choice.
-   *Informs:* the translator's option-selection rule, and why the feature's semantics are
-   cleanest in DMs. Group chats work but "who voted" is only available via
-   `GetPollVotesRequest` / `recent_voters`.
+   aggregate counts. **In a group — the only surface this plan targets — several options can each
+   carry `voters >= 1`, and `PollResults` gives no ordering, so "the first vote" is not derivable
+   from the aggregate.** The one accessible route to per-voter detail is
+   `messages.GetPollVotesRequest`, which is **user-account-only** (a rare case where the
+   user-account posture is an advantage) and returns `MessageUserVote` entries carrying the voting
+   peer and their chosen option.
+   *Informs:* the translator's option-selection rule must be **deterministic under multiple
+   voters** (see Technical Approach: "Option selection in a group"), and `GetPollVotesRequest` is
+   used **best-effort for attribution only** — to name the voter in the steer text — never as the
+   correctness path, so a failure degrades to the aggregate rule plus a generic sender name.
 
 6. **Closing a poll is an edit re-sending the same poll with `closed=True`.** The 2019 Telethon
    bug report about `EditMessageRequest.random_id` is long fixed on 1.42.
    Source: <https://github.com/LonamiWebs/Telethon/issues/1355>.
    *Informs:* closing the poll on first translation is the natural idempotency and
-   "already answered" visual marker.
+   "already answered" visual marker. **In a group this is also the first-voter-wins boundary** —
+   see Technical Approach.
+
+7. **`session_type` is reachable on the relay path for one query.** `bridge/telegram_relay.py`
+   already runs `AgentSession.query.filter(session_id=session_id)` in `_record_sent_message`
+   (`:655`), `_record_relay_sent_draft` (`:679`) and `_bind_outbound_message_to_job` (`:258`), and
+   `session_type` is a first-class `KeyField` on the model (`models/agent_session.py:156`). So the
+   eng-only gate costs one existing-shaped lookup, not a new plumbing path.
+   *Informs:* Task 3 (`bridge/poll_gating.py`) rather than threading `session_type` through the
+   outbox payload, which would let a stale payload outlive a session's real type.
+
+8. **Group-vs-DM is already discriminated by the sign of `chat_id` in this repo.**
+   `bridge/read_the_room.py:126 _is_group_chat` documents the rule (Telegram assigns negative ids
+   to groups/supergroups/channels, positive to user peers) and is conservative on ambiguity —
+   an unparseable or `None` id returns `False`.
+   *Informs:* the group half of the eligibility gate reuses that exact predicate, promoted to a
+   public shared home, rather than a second copy that could drift.
 
 ## Spike Results
 
@@ -191,7 +272,7 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
   `msg_id`. The issue's Solution Sketch is therefore incomplete as written.
 - **Confidence**: high
 - **Impact on plan**: Adds a mandatory component the issue did not name — the poll registry
-  (Task 4) — and makes `GetPollResultsRequest` reconciliation (Task 6) the durable mechanism
+  (Task 6) — and makes `GetPollResultsRequest` reconciliation (Task 10) the durable mechanism
   rather than an optional extra.
 
 ### spike-3: the outbound seam has three hard blockers for a text-less payload
@@ -218,7 +299,7 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
   `sweep_chat` (`:560-562`) skips empty-text messages before judging. So the LLM judge sees a
   blank utterance where the question should be.
 - **Confidence**: high
-- **Impact on plan**: Task 7 is narrow and surgical (render `MessageMediaPoll` into the
+- **Impact on plan**: Task 11 is narrow and surgical (render `MessageMediaPoll` into the
   transcript) rather than a rework of handled-detection.
 
 ### spike-5: there is a settled precedent for a non-Popoto message→identity registry
@@ -232,6 +313,36 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
 - **Impact on plan**: No Popoto model, therefore **no `scripts/update/migrations.py` entry**.
   The poll registry follows `bridge/job_router.py` naming with a TTL.
 
+### spike-6: the surface question, answered by live probe (SETTLED — do not re-run)
+- **Assumption**: "The bridge's user account can render a poll where `/ask-me` conversations happen."
+- **Method**: prototype (live MTProto sends from a temp copy of the bridge session, updates
+  disabled), run 2026-08-10 during the aborted build.
+- **Finding**: **Half invalidated, half confirmed.** Into a real user DM (Tom, `179144806`,
+  resolved from `projects.json` `dms.whitelist` — not Saved Messages) the identical
+  `Poll`/`PollAnswer`/`InputMediaPoll`/`SendMediaRequest` construction was rejected verbatim with
+  `MediaInvalidError('Media invalid (caused by SendMediaRequest)')`. The same construction into the
+  `Eng: Valor` group (`-1003449100931`) **succeeded**, returned server-assigned
+  `poll id 6325451705529927015` at `msg id 1318`, and was deleted. A follow-up bot-account probe
+  confirmed a bot can send both polls and inline keyboard buttons into a private chat.
+- **Confidence**: high (reproducible, verbatim MTProto errors on both sides)
+- **Impact on plan**: the whole re-scope. Group-only via the user account; DMs keep prose; the bot
+  path rejected on identity grounds; **Risk 1 has fired and is now a constraint, not a risk**; the
+  old Task 1 DM-capability gate is deleted and replaced by the vote-readback gate.
+
+### spike-7: `session_type` is not on the outbound relay path today
+- **Assumption**: "The relay can already tell an eng session from a teammate session."
+- **Method**: code-read
+- **Finding**: **Invalidated.** `bridge/telegram_relay.py` carries only `session_id` and `chat_id`
+  through the outbox; the persona → `session_type` mapping (`bridge/routing.py:568
+  persona_to_session_type`) is called only from the inbound handler and the catchup/reconciler
+  scanners. The relay *can* reach it cheaply — it already queries `AgentSession` by `session_id`
+  in three places — but nothing does so today.
+- **Confidence**: high
+- **Impact on plan**: adds Task 3 (`bridge/poll_gating.py`), a shared eligibility predicate read at
+  ask time by the CLI and re-read at send time by the relay. Rejects the alternative of stamping
+  `session_type` into the outbox payload, which would let a queued payload outlive a session's real
+  type.
+
 ## Data Flow
 
 **Outbound (question → poll on screen):**
@@ -244,15 +355,25 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
 3. **`tools/ask_poll.py`** — resolves transport with the same precedence as
    `tools/send_message.py:63 _resolve_transport()` (`VALOR_TRANSPORT` → `EMAIL_REPLY_TO` →
    `TELEGRAM_CHAT_ID` → `"telegram"`). Non-telegram transport → renders question + numbered
-   options as plain text and hands off to the existing `send_message` path. **Degradation happens
-   here, once.**
+   options as plain text and hands off to the existing `send_message` path.
+3a. **Eligibility gate — `bridge/poll_gating.py::poll_eligible(chat_id, session_id)`.** Telegram
+   transport is necessary but not sufficient. A poll ships only when the chat is a **group**
+   (`is_group_chat(chat_id)`, the negative-id discriminator) **and** the session's
+   `session_type == "eng"`. Anything else — a DM, a `teammate` session, a missing session record,
+   an unparseable chat id, or any exception — returns ineligible with a named reason and the CLI
+   renders prose through the ordinary `send_message` path. **Degradation happens here, once**, and
+   the reason is logged so a question that "should have been a poll" is diagnosable.
 4. **`TelegramRelayOutputHandler.send_poll(...)`** (new sibling of `send`, `agent/output_handler.py:611`)
    — validates via a new drafter medium, records the outstanding-question expectation, builds the
    payload with a new `build_telegram_poll_outbox_payload(...)` next to
    `build_telegram_outbox_payload` (`:270`), rpushes to `telegram:outbox:{session_id}` with the
    same `OUTBOX_TTL` (`:431`).
 5. **`bridge/telegram_relay.py::process_outbox`** (`:850`) — `"poll"` added to
-   `KNOWN_MESSAGE_TYPES` (`:58`); new dispatch branch inside the `:917-931` if/elif chain calls `_send_queued_poll`.
+   `KNOWN_MESSAGE_TYPES` (`:58`); new dispatch branch inside the `:917-931` if/elif chain calls
+   `_send_queued_poll`, which **re-checks `poll_eligible(chat_id, session_id)` before the wire**
+   (defense in depth: the CLI decided at ask time, the relay is the last writer before the send,
+   and a payload can sit in the outbox across a session-type change). Ineligible → convert to the
+   same plain-text payload the terminal-failure path uses and deliver that instead of dropping.
 6. **`bridge/response.py::send_poll`** — raw MTProto `InputMediaPoll`; returns
    `(msg_id, server_poll_id)`.
 7. **Registry write** — a provisional `telegram:poll:pending:{outbox_payload_id}` row is written
@@ -277,8 +398,12 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
 4. **`translate_poll_vote(poll_id)`** — idempotent. Claims `SET telegram:poll:answered:{poll_id}
    1 NX EX <ttl>`; a lost claim returns immediately. Confirms results with
    `messages.GetPollResultsRequest(peer=chat_id, msg_id=msg_id)` rather than trusting a possibly
-   `min=True` update. Selects the chosen option (`voters >= 1`, sender never votes). Closes the
-   poll by editing it with `closed=True`.
+   `min=True` update. Selects the chosen option under the **deterministic group rule** (see
+   Technical Approach: exactly one `voters >= 1` → use it; several → highest `voters`, ties broken
+   by lowest decoded option index, with a warning). Attributes the voter best-effort via
+   `GetPollVotesRequest`. Closes the poll by editing it with `closed=True` — in a group this is the
+   **first-voter-wins** boundary, and it is deliberate: the poll exists to unblock one agent, not to
+   take a vote of the room.
 5. **`resolve_answer_target(session_id)` + branch** (new `bridge/answer_routing.py`) — the
    side-effect-free status ladder factored out of `bridge/telegram_bridge.py:1799-1866`, returning
    `LIVE` / `PENDING` / `LIVE_GUARD` / `COMPLETED` / `NONE`. Steer kinds →
@@ -309,6 +434,9 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
     `_validate_for_medium` signature is unchanged).
   - New module `bridge/answer_routing.py` holding `resolve_answer_target` and
     `resume_completed_session`, both factored out of the existing reply-to ladder.
+  - New module `bridge/poll_gating.py` holding the public `is_group_chat(chat_id)` (**moved** from
+    `bridge/read_the_room.py:126 _is_group_chat`, which now imports it — one predicate, no copy)
+    and `poll_eligible(chat_id, session_id) -> PollEligibility(ok, reason)`.
   - New CLI entry point `valor-ask-poll` in `pyproject.toml [project.scripts]`.
 - **Coupling**: adds one new coupling — the bridge now holds inbound state (the poll registry)
   keyed on a Telegram-server-assigned id. Contained to two plain Redis keys with TTL, matching
@@ -327,23 +455,25 @@ No prior fix failed, so there is no **Why Previous Fixes Failed** section.
 **Team:** Solo dev, PM, code reviewer
 
 **Interactions:**
-- PM check-ins: 2-3 — one is mandatory at the **Task 1 gate** (real-DM poll capability), because
-  a negative result forces a scope revision to group-chats-only.
+- PM check-ins: 2-3 — one is mandatory at **Task 2** (`gate-poll-human-tap`), which needs a human
+  to tap a probe poll in the `Eng: Valor` group. That gate blocks **only the two inbound tasks**;
+  an unavailable operator does not stall the outbound half.
 - Review rounds: 2+ — a new inbound Telethon handler and a new outbox payload variant both touch
   load-bearing delivery paths.
 
-The size is driven by breadth, not depth: eight touched subsystems (CLI, output handler, drafter,
-relay, response, bridge handler, reconciliation loop, catchup transcript) plus a global skill and
-its skill-context file.
+The size is driven by breadth, not depth: nine touched subsystems (CLI, eligibility gate, output
+handler, drafter, relay, response, bridge handler, reconciliation loop, catchup transcript) plus a
+global skill and its skill-context file. The re-scope to group-only removed no subsystems — it
+added the eligibility gate.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Telethon >= 1.42 with poll TL types | `.venv/bin/python -c "from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities, UpdateMessagePoll, PollResults"` | Poll construction and vote observation |
-| Authenticated bridge Telegram session | `test -f "$HOME/Desktop/Valor/telegram_session.session"` | Task 1 probe needs a real user-account session |
+| Authenticated bridge Telegram session | `test -f "$HOME/Desktop/Valor/telegram_session.session"` | Tasks 1-2 probe from a **temp copy** of this session, never the live file |
 | Redis reachable | `.venv/bin/python -c "from popoto.redis_db import POPOTO_REDIS_DB as r; r.ping()"` | Outbox, steering, and the poll registry |
-| A real operator DM peer in projects.json | `.venv/bin/python -c "import json,os; d=json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json'))); assert d.get('dms')"` | Task 1 must target a real user DM, not Saved Messages |
+| A machine-owned eng **group** in projects.json | `.venv/bin/python -c "import json,os; d=json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json'))); assert any((p.get('telegram') or {}).get('groups') for p in d.get('projects',{}).values())"` | Tasks 1-2 probe a group. **DMs are out of scope and must not be probed** (spike-6 settled it) |
 
 Run via `python scripts/check_prerequisites.py docs/plans/ask-me-telegram-polls.md`.
 
@@ -351,10 +481,16 @@ Run via `python scripts/check_prerequisites.py docs/plans/ask-me-telegram-polls.
 
 ### Key Elements
 
-- **Task-1 capability gate**: a one-shot probe that sends a poll from the bridge account into a
-  **real user DM** (not Saved Messages) and deletes it. Everything downstream is conditional on it.
+- **Vote-readback gate (Tasks 1-2)**: the send capability is settled (spike-6); the remaining
+  gate-worthy unknown is whether a vote in a group poll is **readable back** by the sending user
+  account. Task 1 answers it with no human (the probe account votes on its own probe poll and reads
+  the result). Task 2 confirms a *different* human's tap is readable and attributable. Only the two
+  inbound tasks depend on these.
+- **`bridge/poll_gating.py`**: the single eligibility predicate — group chat **AND**
+  `session_type == "eng"` — read by the CLI at ask time and re-read by the relay at send time.
+  Everything ineligible degrades to prose.
 - **`tools/ask_poll.py` + `valor-ask-poll` CLI**: the single transport-aware entry point the agent
-  calls. Owns degradation to text for email, local, and system surfaces.
+  calls. Owns degradation to text for DMs, teammate sessions, email, local, and system surfaces.
 - **`send_poll` on the output handler + a `"poll"` outbox variant**: extends the proven
   outbox → relay seam rather than inventing a second outbound path.
 - **`bridge/response.py::send_poll`**: raw MTProto `InputMediaPoll`, returning both the message id
@@ -374,31 +510,95 @@ Run via `python scripts/check_prerequisites.py docs/plans/ask-me-telegram-polls.
 ### Flow
 
 Agent is blocked → runs `/ask-me` → detects headless Telegram surface → calls `valor-ask-poll` →
-**poll appears in chat** (recommended option first, `Other: wait for followup message` last) →
+**eligibility gate: group chat AND eng session** (else prose, done) →
+**poll appears in the group** (recommended option first, `Other: wait for followup message` last) →
 human taps → **poll closes** → vote translated to a steering message → **agent resumes next turn**
 with the choice in hand → (if `Other`) agent sends a narrowed plain-text followup → human replies
 by reply-to → **same session continues**.
 
 ### Technical Approach
 
-**Owner decisions are settled and are not reopened here:** no mid-turn blocking (turn-boundary
-rendering plus vote→steering translation only); the final option is always the literal string
-`Other: wait for followup message`; one-question-at-a-time becomes a stated preference.
+**Owner decisions are settled and are not reopened here:** group chats only via the existing user
+account; eng sessions only (`session_type == "eng"`, never `teammate`); no mid-turn blocking
+(turn-boundary rendering plus vote→steering translation only); the final option is always the
+literal string `Other: wait for followup message`; one-question-at-a-time becomes a stated
+preference; reaction-based answering is dropped and not revived. See **Scope** at the top.
 
 > **Every `file:line` in this plan is approximate — locate by symbol.** All symbol *names* were
-> re-verified against `5d9729ad8`, but offsets drift under refactors. Builders must find their edit
+> re-verified against the **verification baseline** named in the Freshness Check, but offsets drift under refactors. Builders must find their edit
 > site with `grep -n '<symbol>' <file>` and treat the cited line as a hint only. Offsets below were
 > re-verified at revision time; the ones that had drifted are corrected in place.
 
-- **Gate first.** Task 1 runs before any production code. The only evidence so far is a self-DM
-  (Saved Messages) probe, which does not prove the general case. If MTProto rejects a poll into
-  another user's DM, the build **stops** and the issue is re-scoped to group chats. No downstream
-  task may assume the capability.
+- **Eligibility is one predicate, evaluated twice, and it fails closed.** `bridge/poll_gating.py`
+  owns `poll_eligible(chat_id, session_id) -> PollEligibility(ok: bool, reason: str)`:
+
+  1. `is_group_chat(chat_id)` — the negative-id discriminator, **moved** out of
+     `bridge/read_the_room.py:126 _is_group_chat` into this module and imported back there, so there
+     is exactly one copy. A positive id (DM), a zero, an unparseable value, or `None` → ineligible,
+     reason `not_a_group`.
+  2. `session_type == SessionType.ENG` read off the `AgentSession` record found by
+     `AgentSession.query.filter(session_id=session_id)`. **Exact match only.** A `teammate` record →
+     `not_eng_session`. A missing record or a `null`/unknown `session_type` → `unknown_session_type`,
+     which is **ineligible** — the field is `null=True` (`models/agent_session.py:156`), and a
+     question rendered as prose to an eng session is a cosmetic loss while a poll rendered into a
+     teammate chat is a scope violation. Fail closed.
+  3. Any exception → ineligible, reason `eligibility_error`, logged at warning. Never raises.
+
+  The predicate is read **twice on purpose**: at ask time in `tools/ask_poll.py` (so degradation
+  happens once, at the single decision point, and the prose path is taken before a poll payload
+  ever exists) and again at send time in the relay's poll branch (the relay is the last writer
+  before the wire, and an outbox payload can sit across a session-type change). The relay's
+  ineligible branch does **not** drop — it converts to the same plain-text payload the
+  terminal-failure path builds, so the question still reaches the human.
+
+- **Gate the unknown that is actually still unknown.** The *send* capability is settled by spike-6
+  and must not be re-probed. What is not settled is the **inbound** half in a group:
+  - **Task 1 (`gate-poll-vote-readback`, hard, no human required).** Can the sending user account
+    read a vote back at all? The probe sends a poll into the machine-owned eng group, casts a vote
+    **from the probe account itself** via `messages.SendVoteRequest`, then reads
+    `messages.GetPollResultsRequest(peer, msg_id)` and asserts the chosen option is recoverable
+    from `PollAnswerVoters` with the correlation-id option encoding intact. A FAIL here means the
+    inbound half is impossible on this surface and the build **stops** — reconciliation is the
+    primary mechanism, so there is no fallback behind it. Self-voting is a probe-only affordance;
+    **production never calls `SendVoteRequest`**, which is what keeps "the sender never votes" true.
+  - **Task 2 (`gate-poll-human-tap`, hard for the inbound tasks, UNRESOLVED permitted).** Is a
+    *different* human's tap readable and attributable? Confirms `GetPollResultsRequest` after a real
+    tap and whether `GetPollVotesRequest` names the voter.
+  - **The `updateMessagePoll` push question is deliberately NOT gated, and here is why that is safe
+    and how it avoids the production risk named in the scope decision.** Observing the push requires
+    a client with **updates enabled** on the bridge's auth key; a second such client can consume
+    updates the live bridge needs, which is a production hazard that outweighs the answer. Both
+    probes therefore run on a **temp copy** of the session file with `receive_updates=False` and no
+    writeback to the live `.session` — the same shape the settled spike-6 probes used. Correctness
+    never depended on the push: `GetPollResultsRequest` reconciliation is primary and works with
+    zero update delivery. The push question is answered **in production, after ship**, by a
+    `poll_update_observed` log line inside the `events.Raw` handler itself (Task 10). If that signal
+    never appears, the Raw handler is dead weight and is deleted in a follow-up — a scope reduction,
+    never a correctness failure.
 - **Reconciliation is primary, `events.Raw` is the fast path.** Spike-2 proved the update is not
-  self-routing, and it is unverified whether a user account even receives `updateMessagePoll` for a
-  poll it sent. Making `GetPollResultsRequest` reconciliation the guaranteed mechanism de-risks
-  that unknown, and gives restart-survivability for free. Both paths call the same idempotent
-  `translate_poll_vote(poll_id)`, so adding the fast path cannot introduce a second behavior.
+  self-routing. Making `GetPollResultsRequest` reconciliation the guaranteed mechanism de-risks the
+  un-gated push unknown above, and gives restart-survivability for free. Both paths call the same
+  idempotent `translate_poll_vote(poll_id)`, so adding the fast path cannot introduce a second
+  behavior.
+- **Option selection in a group is deterministic, and first-voter-wins is a stated semantic.** The
+  old DM rule ("any option with `voters >= 1` is unambiguously the human's choice") is dead: a group
+  can produce several options each carrying `voters >= 1`, and `PollResults` gives no ordering, so
+  "the first vote" is not derivable from the aggregate. The rule is therefore:
+  1. Filter `results.results` to entries with `voters >= 1`.
+  2. Exactly one → use it.
+  3. More than one → log a warning naming the poll id and the tied options, then take the highest
+     `voters`, breaking ties by **lowest decoded option index**. Deterministic and greppable.
+  4. Zero → return **without claiming** (a spurious update must not consume the one-shot claim).
+
+  Closing the poll on first translation makes this a **first-voter-wins** race in practice, and that
+  is the intent: the poll exists to unblock one agent, not to take a vote of the room. The steer
+  text names the voter when `GetPollVotesRequest` resolves them, so a human who disagrees can
+  correct it with an ordinary reply-to message through the existing path.
+- **Attribution is best-effort and never load-bearing.** `messages.GetPollVotesRequest` is
+  user-account-only and returns the voting peer. Use it to fill `sender_name` in the steer.
+  On any failure, fall back to the target session's
+  `initial_telegram_message["sender_name"]`, then to the literal `"Telegram poll"`. A failure here
+  never blocks translation.
 - **Split the routing ladder at the seam that is actually shared; do not pretend it is one
   function.** The reply-to ladder is an inline block inside `handler(event)`
   (`bridge/telegram_bridge.py:1787-2012`), and most of it consumes objects a poll vote does not
@@ -411,11 +611,24 @@ rendering plus vote→steering translation only); the final option is always the
   extraction is **two functions in a new `bridge/answer_routing.py`**, not one:
 
   1. **`resolve_answer_target(session_id) -> AnswerTarget`** — a *pure state read*, no I/O beyond
-     the `AgentSession.query.filter` calls, lifted verbatim from `:1799-1866`. Returns
-     `AnswerTarget(kind, session)` where `kind` is `LIVE` (running/active), `PENDING`, `LIVE_GUARD`
-     (a completed record exists but a pending/running/active one appeared concurrently), `COMPLETED`,
-     or `NONE`. This is the genuinely shared part and behavior-preservation is trivially checkable
-     because it has no side effects.
+     the `AgentSession.query.filter` calls. Returns
+     `AnswerTarget(kind, session, matched_status, pending_age_s)` where `kind` is `LIVE`
+     (running/active), `PENDING`, `LIVE_GUARD` (a completed record exists but a
+     pending/running/active one appeared concurrently), `COMPLETED`, or `NONE`.
+
+     **This is a restructure, not a verbatim lift, and the plan says so.** The source range
+     `:1799-1866` interleaves the `query.filter` ladder with `await _ack_steering_routed(...)` +
+     `return` at every branch, so the side effects must be pulled out to the caller. Its
+     behavior-preservation checklist is four concrete items, not a hand-wave:
+     - `matched_status` is carried because the LIVE log embeds `matching_session.status` and the
+       LIVE_GUARD log embeds `live_guard.status`.
+     - `pending_age_s` is carried because the PENDING log embeds `age=%.1f` computed by
+       `_pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`).
+     - `COMPLETED` returns the record chosen by the **existing most-recent-`created_at` sort**
+       (`_completed_created_at`, `:1898`), **not** `completed_sessions[0]` — the wrong record
+       silently degrades `_build_completed_resume_text`'s `context_summary`.
+     - `_steering_session_enqueued = True` (`:2006`) stays **caller-side**;
+       `resume_completed_session` returns `None` and does not own that flag.
   2. **`resume_completed_session(*, completed, text, sender_name, telegram_chat_id,
      telegram_message_id, chat_title=None, sender_id=None, project=None, project_key=None,
      working_dir=None, telegram_message_key=None, reply_chain_context=None,
@@ -454,17 +667,34 @@ rendering plus vote→steering translation only); the final option is always the
   `claim_poll_answer(poll_id)` (`SET NX`) upstream plus `claim_message` inside
   `dispatch_telegram_session`. Two independent claims, both atomic.
 
-  `sender_name` for a vote is taken from the completed/target session's
-  `initial_telegram_message["sender_name"]` when present, falling back to the literal
-  `"Telegram poll"`.
+- **The one-shot claim must not become a permanent swallow (cycle-3 concern, adopted).** The claim
+  is taken *before* closing the poll and *before* steering. If the bridge dies, `EditMessageRequest`
+  raises, or the steering write throws after the claim, the claim survives its TTL and **both**
+  recovery mechanisms are defeated: `iter_unanswered_polls()` skips a claimed row, so the
+  reconciliation loop never retries; and Risk 7's `poll_expired_unanswered` signal — if defined as
+  "no claim" — never fires. That is exactly the invisible permanently-blocked agent this feature
+  exists to prevent. Two changes, both required:
+  1. Everything after `claim_poll_answer(poll_id)` runs inside `try/except Exception`, and the
+     handler **deletes the claim key** before logging, so the next reconciliation tick retries.
+  2. Completion is recorded **separately from the claim**: write `steered_at` onto the
+     `telegram:poll:{poll_id}` row only after `push_steering_message` / `resume_completed_session`
+     returns. `iter_unanswered_polls()` treats "claim present, no `steered_at`, claim older than one
+     reconcile interval" as **still unanswered**, and `poll_expired_unanswered` keys on **missing
+     `steered_at`**, never on a missing claim — otherwise the operator signal is blind to precisely
+     this state.
+
+  `sender_name` for a vote is the `GetPollVotesRequest`-resolved voter when available, else the
+  target session's `initial_telegram_message["sender_name"]`, else the literal `"Telegram poll"`.
 - **Steering text carries the question, not just the option.** The steer reads as
   `Poll answer to your question "<question>": <chosen option>` so the resumed turn has the
   binding without needing to re-derive it. For the escape hatch the steer explicitly instructs a
   narrowed plain-text followup.
 - **Degrade once, at the CLI.** `_resolve_transport()` precedence is already the repo's single
-  answer to "which surface am I on". Non-telegram → numbered-list text through the normal
-  `send_message` path. `EmailOutputHandler` gets no `send_poll` and the capability probe
-  (`hasattr`, mirroring `adapter.py:61`) keeps it valid.
+  answer to "which surface am I on"; `poll_eligible(...)` is the single answer to "does this surface
+  take a poll". Non-telegram transport, non-group chat, or non-eng session → numbered-list text
+  through the normal `send_message` path, with the ineligibility reason logged.
+  `EmailOutputHandler` gets no `send_poll` and the capability probe (`hasattr`, mirroring
+  `adapter.py:61`) keeps it valid.
 - **The plain-text fallback is an explicit re-enqueue, not the dead-letter queue.** Dead-lettering
   is durability, not delivery: `_dead_letter_message` (`bridge/telegram_relay.py:803`) calls
   `persist_failed_delivery` into the `DeadLetter` model, and its only consumer,
@@ -487,10 +717,20 @@ rendering plus vote→steering translation only); the final option is always the
   there is no `.claude/skills-global/roles/`) and `config/personas/` returns **zero** references to
   `ask-me`. Without wiring, the only trigger is an agent that happens to invoke the skill, while the
   ordinary path — a bare `AskUserQuestion` or prose at turn end firing the `needs_human` edge —
-  delivers text exactly as today. Task 8 therefore adds one generic line to each of the three role
+  delivers text exactly as today. Task 12 therefore adds one generic line to each of the three role
   primes directing a blocked headless session to invoke `/ask-me` rather than posing a judgment call
   in prose. The line stays surface-agnostic (no poll, no Telegram, no CLI) — the poll rendering is
-  `/ask-me`'s business via `.claude/skill-context/ask-me.md`. The `needs_human` turn-end path itself
+  `/ask-me`'s business via `.claude/skill-context/ask-me.md`.
+
+  **The line must be a conditional phrased against the existing pause threshold, not a bare
+  directive** (cycle-3 concern, adopted). These primes govern every eng and teammate session on
+  every machine and surface, so a loose "when blocked, ask" would introduce a second, looser
+  definition of "blocked" alongside the auto-continue doctrine's "legitimate open question" bar and
+  could raise pause frequency for local, email, and non-blocked sessions. Required phrasing shape:
+  *"when you have a legitimate open question that only the human can answer (the same bar the
+  auto-continue nudge loop uses), invoke `/ask-me` rather than posing it in prose."* Two Success
+  Criteria enforce it: the line contains the open-question precondition, and ineligible surfaces
+  still degrade to text through the CLI. The `needs_human` turn-end path itself
   is **not** taught to auto-render polls; that is a named No-Go, and the Success Criteria are worded
   to match the build rather than to the broader ambition.
 - **Drafter: validate, don't compose — and validation has two homes, decided explicitly.**
@@ -575,6 +815,46 @@ rendering plus vote→steering translation only); the final option is always the
 - [ ] `translate_poll_vote` where the registry entry's session no longer exists logs and returns;
   it must not create a session.
 
+### Eligibility Gate (group-only + eng-only)
+
+- [ ] `poll_eligible` returns ineligible with reason `not_a_group` for a positive `chat_id` (DM),
+  `chat_id == 0`, an unparseable string, and `None`. Tested per case.
+- [ ] `poll_eligible` returns ineligible `not_eng_session` for `session_type == "teammate"`, and
+  `unknown_session_type` for a missing `AgentSession` record and for a `null` `session_type`.
+  Fail-closed in every case.
+- [ ] `poll_eligible` returns ineligible `eligibility_error` (never raises) when the
+  `AgentSession.query.filter` call throws.
+- [ ] `valor-ask-poll` in an ineligible chat/session sends the question as numbered prose through
+  the ordinary `send_message` path and **queues no poll payload**. Tested for the DM case and the
+  teammate case separately.
+- [ ] The relay's poll branch re-checks eligibility and, when it fails, delivers the plain-text
+  payload rather than dropping the message. Tested by queueing a poll payload whose session has
+  since flipped to `teammate`.
+- [ ] `is_group_chat` has exactly one definition in the repo — `bridge/read_the_room.py` imports it
+  from `bridge/poll_gating.py` and its existing RTR behavior is unchanged
+  (`tests/unit/` RTR suite is the regression net).
+
+### Vote Selection Under Multiple Voters (group)
+
+- [ ] Exactly one option with `voters >= 1` → that option is chosen.
+- [ ] Two options each with `voters >= 1` → the higher-`voters` option is chosen and a warning
+  naming the poll id and the tied options is emitted.
+- [ ] Two options with **equal** `voters` → the lowest decoded option index wins, deterministically,
+  on repeated runs.
+- [ ] `GetPollVotesRequest` raising does not block translation; `sender_name` falls back through the
+  session's `initial_telegram_message["sender_name"]` to `"Telegram poll"`.
+
+### Claim Durability (the claim must not permanently swallow a question)
+
+- [ ] An exception raised after `claim_poll_answer` (from the poll close, from
+  `push_steering_message`, or from `resume_completed_session`) causes the claim key to be **deleted**
+  and the next reconciliation tick to retry successfully.
+- [ ] `steered_at` is written only after the steer/re-enqueue returns, and
+  `iter_unanswered_polls()` re-yields a row with a claim but no `steered_at` once the claim is older
+  than one reconcile interval.
+- [ ] `poll_expired_unanswered` fires for a row with a claim but no `steered_at` — i.e. it keys on
+  missing `steered_at`, not on a missing claim.
+
 ### Error State Rendering
 
 - [ ] Poll send failure surfaces to the human as the plain-text fallback question rather than
@@ -620,11 +900,15 @@ rendering plus vote→steering translation only); the final option is always the
 - [ ] `tests/unit/test_react_with_emoji.py::test_react_queues_reaction_payload` (`:61`) — no change;
   cited as the payload-shape assertion pattern the new poll payload test copies.
 
+- [ ] The `bridge/read_the_room.py` test suite (`grep -rln 'read_the_room' tests/`) — UPDATE only if
+  moving `_is_group_chat` to `bridge/poll_gating.py::is_group_chat` changes an import a test
+  patches; RTR behavior itself must be unchanged and those tests are the regression net.
+
 New test files (greenfield, no prior coverage — grep of `tests/` for `poll` returns only
 `test_poll_interval_is_100ms`, an unrelated relay constant):
 `tests/unit/test_ask_poll_cli.py`, `tests/unit/test_poll_payload.py`,
 `tests/unit/test_poll_vote_translation.py`, `tests/unit/test_poll_registry.py`,
-`tests/unit/test_agent_catchup_poll_transcript.py`.
+`tests/unit/test_poll_gating.py`, `tests/unit/test_agent_catchup_poll_transcript.py`.
 
 Additional coverage required by this revision: Race 6 (provisional row survives a simulated restart
 and is adopted) in `tests/unit/test_poll_registry.py`, and the `poll_expired_unanswered` warning
@@ -646,6 +930,12 @@ Additional coverage required by **revision cycle 2**, all in
 - `encode_option` / `decode_option` round-trip, including an option index recovered from a poll
   read back off the wire (`tests/unit/test_poll_payload.py`).
 
+Additional coverage required by **revision cycle 4** (the group-only + eng-only re-scope): every
+bullet under **Eligibility Gate**, **Vote Selection Under Multiple Voters**, and **Claim
+Durability** in the Failure Path Test Strategy above, in `tests/unit/test_poll_gating.py`,
+`tests/unit/test_ask_poll_cli.py`, `tests/unit/test_bridge_relay.py`, and
+`tests/unit/test_poll_vote_translation.py` respectively.
+
 ## Rabbit Holes
 
 - **Making the poll a blocking primitive.** Owner-settled: it is not one. Do not attempt to hold a
@@ -657,9 +947,21 @@ Additional coverage required by **revision cycle 2**, all in
   None of them serve an `/ask-me` question. Single-choice, non-quiz, always.
 - **Free-text capture inside the poll.** Telegram polls have fixed options. The issue already
   dropped this; the escape hatch is the followup message.
-- **Identifying *which* human voted in a group.** `GetPollVotesRequest` and `recent_voters` exist,
-  but the 1:1 DM case is the target and is unambiguous. In a group, translate the first vote and
-  move on.
+- **Re-probing the capability matrix.** spike-6 settled it with verbatim MTProto results. Do not
+  send test polls into any chat to re-confirm what a DM or a bot can do, and do not re-open the bot
+  path — it was rejected on identity, which no probe can change.
+- **Building a bot identity, a `getUpdates`/webhook transport, or inline keyboard buttons.**
+  Technically superior for DMs and firmly out of scope: a bot cannot post into a user-to-user chat,
+  so it breaks the thread scoping sessions depend on.
+- **Reaction-based answering.** Evaluated and dropped by owner decision. Telethon exposes no
+  high-level reaction event, the bridge only ever sends reactions and never listens, and confirming
+  push delivery would require a second client on the bridge's auth key.
+- **Turning the group poll into a consensus mechanism.** Several members can vote; the poll closes
+  on the first translation and the agent acts on one answer. Do not add quorum, weighting, vote
+  windows, or an "authorized voter" allowlist. The room is already trusted to steer by typing.
+- **Per-voter identification as a correctness mechanism.** `GetPollVotesRequest` is used
+  **best-effort for attribution only** (naming the voter in the steer text). Do not make
+  translation depend on it.
 - **A general "structured outbound message" abstraction.** One concrete payload variant, following
   the `reaction` / `custom_emoji_message` precedent. Do not build a framework for the second one
   before it exists.
@@ -670,19 +972,45 @@ Additional coverage required by **revision cycle 2**, all in
 
 ## Risks
 
-### Risk 1: a poll into a real user DM is rejected by MTProto
-**Impact:** The entire feature collapses to group chats only, which is not where `/ask-me`
-conversations happen. Every downstream task is wasted work.
-**Mitigation:** Task 1 is the first executable step and is a hard gate with an explicit STOP.
-No downstream task may assume the capability. A negative result triggers a scope revision on
-#2701 before any production code is written.
+### ~~Risk 1: a poll into a real user DM is rejected by MTProto~~ — **FIRED. Now a constraint.**
+**This is no longer a risk.** It happened, exactly as written, on 2026-08-10: the Task 1 gate
+returned `MediaInvalidError('Media invalid (caused by SendMediaRequest)')` for a poll from the
+bridge's user account into a real user DM, while the identical construction into a group succeeded
+(spike-6). The gate did its job — the build stopped with zero production code written.
 
-### Risk 2: `updateMessagePoll` never reaches the user account for its own poll
-**Impact:** The `events.Raw` fast path silently never fires and votes are never observed.
-**Mitigation:** Architected around it. The `GetPollResultsRequest` reconciliation loop (Task 6) is
-the **primary** mechanism and works with zero update delivery; the Raw handler is a latency
-optimization layered on the same idempotent translator. Task 1's probe records whether the update
-arrives, and the answer only affects observed latency, not correctness.
+**The settled constraint that replaces it:** *a user account cannot send a poll into a 1:1 DM.*
+It is a fact of MTProto, not a condition to mitigate, monitor, or retry. It is enforced in code by
+the `not_a_group` branch of `poll_eligible` and by the prose fallback, and it is the reason the
+feature targets group chats only. Do not re-probe it and do not write retry logic against it.
+
+### Risk 1 (new): a poll is rendered into a chat or session type that should not receive one
+**Impact:** A `teammate` session or a DM gets a poll — a scope violation, and in the DM case a hard
+MTProto rejection that consumes retries and delays a blocked agent's question.
+**Mitigation:** One predicate, `poll_eligible(chat_id, session_id)`, evaluated at two points (CLI at
+ask time, relay at send time) and **failing closed** on every ambiguity — a missing session record,
+a `null` `session_type`, an unparseable chat id, or any exception all resolve to prose. The relay's
+ineligible branch converts to plain text rather than dropping, so the worst case is a prose question
+rather than a lost one. Covered by the **Eligibility Gate** test block.
+
+### Risk 2: a vote cast in a group cannot be read back by the sending user account
+**Impact:** The inbound half is impossible. Reconciliation is the primary mechanism and there is
+nothing behind it, so every question would go unanswered.
+**Mitigation:** This is the **only remaining gate-worthy unknown** and it is Task 1
+(`gate-poll-vote-readback`) — a self-vote probe that needs no human, run on a temp copy of the
+session with updates disabled. A FAIL stops the build. Task 2 then confirms a *different* human's
+tap is readable. The separate `updateMessagePoll` push question is deliberately **not** gated: it
+would require a second client with updates enabled on the bridge's auth key (a production hazard),
+correctness never depended on it, and it is answered after ship by the `poll_update_observed` log
+line in the Raw handler — a negative there deletes the handler as dead weight and changes nothing
+else.
+
+### Risk 2b: the wrong group member answers the agent's question
+**Impact:** In a group, anyone can tap. The first vote wins and the agent proceeds on it.
+**Mitigation:** Accepted, deliberately, and bounded. The polls only go into machine-owned eng group
+chats, whose members can *already* steer a session by typing — a tap grants no authority a message
+does not. The steer text names the voter when `GetPollVotesRequest` resolves them, so a disagreement
+is visible and correctable by an ordinary reply-to message on the existing path. Quorum, weighting,
+and voter allowlists are named Rabbit Holes.
 
 ### Risk 3: an answered poll never reaches its session because the session finished
 **Impact:** The human taps, sees the poll close, and nothing happens. Worst-case UX: the affordance
@@ -735,8 +1063,10 @@ Raw handler is never registered, the reconciliation loop dies, or `GetPollResult
 stale results, every question simply goes unanswered and every asking agent stays blocked. Today
 nothing in the plan reads registry state at expiry time, so this failure is invisible.
 **Mitigation:** The reconciliation loop's own `iter_unanswered_polls()` scan is the hook point
-(Task 6). When it observes a registry row at or past `POLL_EXPIRY_WARN_AGE_S` with no matching
-`telegram:poll:answered:{poll_id}` claim, it emits a single
+(Task 10). When it observes a registry row at or past `POLL_EXPIRY_WARN_AGE_S` with **no
+`steered_at`** — deliberately keyed on the completion marker, not on a missing
+`telegram:poll:answered:{poll_id}` claim, or the signal would be blind to the Risk 9 swallow — it
+emits a single
 `logger.warning("poll_expired_unanswered ...")` carrying poll id, chat id, session id, and age —
 one warning per poll, marked on the row so it is not re-emitted. The loop additionally logs a
 warning on consecutive `GetPollResultsRequest` failures. `poll_expired_unanswered` is the named,
@@ -748,6 +1078,19 @@ once, which is exactly the anti-pattern the skill was written against.
 **Mitigation:** The rule becomes a *stated preference* with the "Questionnaire mode" anti-pattern
 retained and reworded, and the skill's step-6 adapt-as-you-go guidance kept intact. The relaxation
 is narrowly worded: separate polls are permitted only for genuinely independent questions.
+
+### Risk 9: the one-shot claim permanently swallows a question
+**Impact:** `claim_poll_answer` is taken before the poll close and before the steer. Any failure
+after it — bridge death, a raising `EditMessageRequest`, a throwing steering write — leaves the
+claim alive for its TTL. `iter_unanswered_polls()` skips claimed rows, so reconciliation never
+retries, and if `poll_expired_unanswered` keyed on the missing claim it would never fire either. The
+result is a silently, permanently blocked agent — the exact failure this feature exists to prevent.
+**Mitigation:** two independent changes, both mandatory (Technical Approach, Task 9): everything
+after the claim runs in `try/except Exception` with the handler **deleting the claim key** before
+logging; and completion is recorded as a separate `steered_at` field written only after the steer
+returns, with `iter_unanswered_polls()` re-yielding "claim present, no `steered_at`, older than one
+reconcile interval" and `poll_expired_unanswered` keying on **missing `steered_at`**. Covered by the
+**Claim Durability** test block.
 
 ## Race Conditions
 
@@ -820,7 +1163,7 @@ complete registry row genuinely cannot precede the send.
    created_at}` with `SET NX EX <POLL_REGISTRY_TTL_S>`. After the send returns, write the real
    `telegram:poll:{server_poll_id}` row and delete the provisional one. A restart in the window
    leaves the provisional row behind as evidence that a send may have landed.
-2. **Orphan adoption in the reconciliation loop (Task 6), matched on an exact embedded key — not
+2. **Orphan adoption in the reconciliation loop (Task 10), matched on an exact embedded key — not
    on question text.** Question text is not a unique key: an agent re-asking after a first poll
    expired unanswered, or two sessions in the same chat asking the same standard question, produce
    two candidates with no tie-break. So the correlation id is **carried inside the poll itself**.
@@ -841,24 +1184,34 @@ complete registry row genuinely cannot precede the send.
 
 ## No-Gos (Out of Scope)
 
-- `[EXTERNAL]` **The owner's physical tap in Task 1 Part B.** This is no longer deferred out of
-  scope — it is a gate step and a Success Criterion. What remains external is only the human action
-  itself: someone must tap. If the owner is unavailable, the build **waits** at the gate rather than
-  proceeding, because Part B is what proves the tap is readable at all.
+- **1:1 DMs.** Settled by spike-6: a user account cannot send a poll into a DM, and the bot path
+  that could was rejected on identity. `/ask-me` in a DM keeps today's prose behavior, permanently.
+  Not deferred — **not being built**.
+- **`teammate` sessions.** Owner decision: polls are an engineering affordance. A `teammate` session
+  in an eligible group still gets prose. Not deferred — not being built.
+- **A bot identity, a `getUpdates`/webhook inbound transport, and inline keyboard buttons.**
+  Rejected on identity grounds, not capability. Not deferred — not being built.
+- **Reaction-based answering.** Dropped by owner decision. Not deferred — not being built.
+- `[EXTERNAL]` **The human's physical tap in Task 2 (`gate-poll-human-tap`).** It is a gate step and
+  a Success Criterion; what remains external is only the human action itself. Because it gates
+  **only the two inbound tasks**, an unavailable operator pauses those two and nothing else — the
+  outbound path, eligibility gate, catchup rendering, and skill work all proceed.
 - `[EXTERNAL]` **Rolling the change out to other bridge machines.** Requires `/update` on each
   machine (see **Update System**).
 - **The `needs_human` / bare-`AskUserQuestion` turn-end path deliberately still delivers text.**
   `/ask-me` is the only poll trigger this plan builds. A question surfaced through the
   `needs_human` edge (`agent/session_runner/role_driver.py::_reconcile_turn_end`,
-  `runner.py:1526-1531`) is not inspected for options and is not rendered as a poll. Task 8's role-
+  `runner.py:1526-1531`) is not inspected for options and is not rendered as a poll. Task 12's role-
   prime wiring makes agents *reach* `/ask-me` rather than teaching that path to render polls; the
   Success Criteria are worded to match. Auto-detecting a question-with-options at turn end is Open
   Question 2 and is out of scope here.
-- `[SEPARATE-SLUG #2701]` Nothing else is deferred to a follow-up. Group-chat voter attribution,
+- `[SEPARATE-SLUG #2701]` Nothing else is deferred to a follow-up. Voter quorum/authorization,
   quiz/multiple-choice polls, and free-text capture are **rabbit holes deliberately not built**
   (see **Rabbit Holes**), not deferred promises.
 
-Everything else the issue's acceptance criteria name is in scope for this plan.
+**The issue body predates the re-scope.** Where the issue body and the scope-decision comment
+(`5237014662`) conflict, **the comment wins** and this plan follows the comment. Acceptance criteria
+in the issue body that assume DM delivery are superseded by the Success Criteria below.
 
 ## Update System
 
@@ -886,6 +1239,8 @@ Everything else the issue's acceptance criteria name is in scope for this plan.
 - **New CLI entry point: required.** `valor-ask-poll = "tools.ask_poll:main"` in
   `pyproject.toml [project.scripts]`. This is the surface the agent reaches through Bash; a
   function in `tools/` alone would be invisible to it.
+- **No new inbound transport.** Votes become steering messages on the existing path; the bridge
+  gains a handler on its existing Telethon client, not a second identity or a second connection.
 - **`/ask-me` must be taught to call it.** The global body
   (`.claude/skills-global/ask-me/SKILL.md`) gains the skill-context probe sentence and the
   relaxed one-at-a-time wording; `allowed-tools` already includes `Bash`. The repo-specific
@@ -907,7 +1262,20 @@ Everything else the issue's acceptance criteria name is in scope for this plan.
 - [ ] Create `docs/features/telegram-poll-questions.md` — the outbound payload variant, the poll
   registry keys and TTLs, the reconciliation-primary / Raw-fast-path design and why
   `UpdateMessagePoll` cannot self-route, the `Other: wait for followup message` escape hatch, and
-  the degradation matrix (telegram → poll; email/local/system → numbered text).
+  the degradation matrix (**telegram group + eng session → poll; telegram DM, teammate session,
+  email, local, system → numbered text**).
+- [ ] The feature doc must state the settled capability matrix (user account: DM ❌ / group ✅; bot:
+  DM ✅ but rejected on identity) as a **constraint**, so a future reader does not re-probe it, and
+  must document `bridge/poll_gating.py` as the single eligibility predicate read at two points.
+- [ ] The feature doc must document the group semantics: anyone in the room can tap, first vote
+  wins, the deterministic tie-break rule, and that attribution via `GetPollVotesRequest` is
+  best-effort only.
+- [ ] The feature doc must document `poll_update_observed` as the post-ship signal answering whether
+  `updateMessagePoll` reaches a user account, and state that its permanent absence means deleting the
+  Raw handler as dead weight — not a bug.
+- [ ] The feature doc must document the Risk 9 separation: `claim` is the one-shot lock, `steered_at`
+  is the completion marker, and both `iter_unanswered_polls()` and `poll_expired_unanswered` key on
+  `steered_at`.
 - [ ] Add an entry to `docs/features/README.md` index table.
 - [ ] Update `docs/features/session-steering.md` to name the poll vote as a steering producer.
 - [ ] The feature doc must name `poll_expired_unanswered` as *the* operator signal for a failing
@@ -923,6 +1291,9 @@ Everything else the issue's acceptance criteria name is in scope for this plan.
   handler and the vote translator now share it.
 - [ ] Update `docs/features/bridge-worker-architecture.md` to list the new bridge handler and
   background loop.
+- [ ] Update `docs/features/read-the-room.md` (or wherever `_is_group_chat` is described) to point at
+  the new shared `bridge/poll_gating.py::is_group_chat` home. If no such doc exists, note the move in
+  the feature doc instead.
 - [ ] Update `docs/tools-reference.md` with `valor-ask-poll`.
 - [ ] Create `.claude/skill-context/ask-me.md` and add it to the table in
   `.claude/skill-context/README.md`.
@@ -939,25 +1310,43 @@ Everything else the issue's acceptance criteria name is in scope for this plan.
 
 ## Success Criteria
 
-- [ ] **Gate:** a poll sent from the bridge account into a real user DM is confirmed to work, with
-  the probe output recorded in the PR description — or the limitation is documented and #2701 is
-  re-scoped before further work.
-- [ ] A question posed **via `/ask-me`** in a headless Telegram session is delivered as a native
-  Telegram poll with the recommended option first and `Other: wait for followup message` last.
-  (Deliberately narrower than "any question posed at turn end" — see the No-Go below and Open
-  Question 2. The build only wires the `/ask-me` trigger.)
+- [ ] **Gate (Task 1):** a vote cast on a poll the bridge account sent into a machine-owned eng
+  **group** is read back by that same account through `messages.GetPollResultsRequest`, with the
+  chosen option recovered from `PollAnswerVoters` and the correlation-id option encoding intact.
+  Probe output verbatim in the PR description. A FAIL stops the build.
+- [ ] **Gate (Task 2):** a real human tap in that group is read back and, best-effort, attributed via
+  `GetPollVotesRequest`. Output in the PR description. UNRESOLVED (no tap within
+  `POLL_PROBE_TAP_WAIT_S`) pauses **only** Tasks 9-10 and is recorded on #2701.
+- [ ] **Neither gate opens a client with updates enabled on the bridge's auth key.** Both probes run
+  against a temp copy of the session file with `receive_updates=False` and no writeback, and neither
+  probes a DM. Asserted by reading the probe script, and stated in the PR description.
+- [ ] A question posed **via `/ask-me`** by an **eng** session in a **group** chat is delivered as a
+  native Telegram poll with the recommended option first and `Other: wait for followup message` last.
+  (Deliberately narrower than "any question posed at turn end" — see the No-Gos and Open Question 2.
+  The build only wires the `/ask-me` trigger.)
+- [ ] **The same question in a 1:1 DM is delivered as prose and queues no poll payload.** Verified by
+  test, not by sending a poll into a DM.
+- [ ] **The same question from a `teammate` session — even in an eligible group — is delivered as
+  prose and queues no poll payload.**
+- [ ] Eligibility fails closed: a missing `AgentSession` record, a `null` `session_type`, an
+  unparseable or zero `chat_id`, and an exception inside the predicate all produce prose with a
+  logged reason, never a poll and never a raise.
+- [ ] `is_group_chat` exists in exactly one place; `bridge/read_the_room.py` imports it and its RTR
+  behavior is unchanged.
 - [ ] All three role primes (`.claude/commands/roles/prime-{dev,pm,teammate}-role.md`) direct a
   blocked headless session to invoke `/ask-me` instead of posing a judgment call in prose, so the
   trigger is reachable on the ordinary path and not only when an agent happens to remember the skill.
+- [ ] **Each prime's added line is a conditional carrying the open-question precondition** (the same
+  bar the auto-continue nudge loop uses), not a bare directive to pause when blocked.
 - [ ] Tapping an option produces a steering message the worker consumes on its next turn, with the
   chosen option text present in the session's input.
 - [ ] Voting `Other: wait for followup message` produces a plain-text followup question the human
   answers by reply-to, resuming the same session.
-- [ ] **A real human tap is observed end-to-end at least once** (Task 1 Part B): the tap is read
-  back through `GetPollResultsRequest`, the output is in the PR description, and it records whether
-  `updateMessagePoll` reached the account and which path surfaced the vote first. If no tap arrives
-  within `POLL_PROBE_TAP_WAIT_S`, the gate reports **UNRESOLVED** and the build stops rather than
-  waiting indefinitely.
+- [ ] With several group members having voted, option selection is deterministic: exactly one
+  `voters >= 1` is used directly; ties resolve to highest `voters` then lowest decoded option index,
+  with a warning naming the poll id and the tied options.
+- [ ] A failure after `claim_poll_answer` deletes the claim so the next reconciliation tick retries,
+  and `poll_expired_unanswered` keys on missing `steered_at` rather than on a missing claim.
 - [ ] A vote is translated exactly once even when both the Raw handler and the reconciliation loop
   observe it, and even across a bridge restart.
 - [ ] A poll that reached the screen but lost its registry row to a restart between send and write
@@ -975,7 +1364,9 @@ Everything else the issue's acceptance criteria name is in scope for this plan.
 - [ ] Catchup transcripts render an outbound poll as its question text rather than a blank line,
   so the judge never re-asks a question already on screen.
 - [ ] Email, local, and system surfaces produce today's text behavior via the CLI's degradation
-  path; `EmailOutputHandler` remains valid without `send_poll`.
+  path; `EmailOutputHandler` remains valid without `send_poll`. This holds for **non-Telegram
+  sessions specifically**, so the role-prime change cannot strand a question on a surface with no
+  poll rendering.
 - [ ] `/ask-me` states one-question-at-a-time as a preference with the hard prohibition removed,
   and the questionnaire-mode anti-pattern retained.
 - [ ] Tests cover poll payload construction, vote → steering translation, and the `Other` fallback.
@@ -991,16 +1382,18 @@ The lead agent orchestrates and never builds directly.
 
 ### Team Members
 
-- **Probe runner (capability gate)**
+- **Probe runner (vote-readback gates)**
   - Name: `poll-probe`
-  - Role: Run the real-DM poll probe and report a binary gate result with verbatim MTProto output.
+  - Role: Run the group vote-readback probe (Task 1) and the human-tap probe (Task 2), reporting
+    PASS / FAIL / UNRESOLVED with verbatim MTProto output. **Never probes a DM, never opens a client
+    with updates enabled on the bridge's auth key, always works from a temp session copy.**
   - Agent Type: builder
   - Resume: true
 
 - **Builder (outbound path)**
   - Name: `poll-outbound-builder`
-  - Role: CLI, payload builder, `send_poll` handler method, drafter medium, relay dispatch branch,
-    `bridge/response.py::send_poll`, registry write.
+  - Role: Eligibility gate (`bridge/poll_gating.py`), `bridge/response.py::send_poll`, payload
+    builder, `send_poll` handler method, drafter medium, registry, relay dispatch branch, CLI.
   - Agent Type: builder
   - Resume: true
 
@@ -1038,71 +1431,114 @@ The lead agent orchestrates and never builds directly.
 
 ## Step by Step Tasks
 
-### 1. TASK ZERO — real-DM poll capability gate (HARD GATE)
-- **Task ID**: gate-real-dm-poll
+**Gate topology (changed in revision cycle 4).** The *send* capability is settled by spike-6 and is
+not gated. Two gates remain and they block **only the inbound tasks**: an unavailable operator no
+longer stalls eleven tasks. Tasks 3-8 and 11-12 depend on neither gate.
+
+### 1. GATE — vote readback in a group (HARD GATE, no human required)
+- **Task ID**: gate-poll-vote-readback
 - **Depends On**: none
 - **Validates**: manual probe; output pasted verbatim into the PR description
-- **Informed By**: spike-1 (Telethon 1.42 types verified), Research finding 1 and 2
+- **Informed By**: spike-6 (send settled), Research findings 1, 2, 4, 5
 - **Assigned To**: `poll-probe`
 - **Agent Type**: builder
 - **Domain**: MCP-tool/API integration
-- **Parallel**: false
-- **This runs before any production code. Nothing downstream may assume the capability.**
-- Write a one-shot probe script under `scripts/` (deleted before the PR, or kept only if it is
-  genuinely reusable) that opens a **copy** of the bridge Telethon session with updates disabled,
-  exactly as the prior Saved-Messages probe did.
-- Resolve a **real operator user DM peer** from `~/Desktop/Valor/projects.json`. Saved Messages
-  does **not** count and must not be used — that is the whole point of this task.
-- Send `InputMediaPoll(Poll(id=<random int>, question=TextWithEntities("probe"),
-  answers=[PollAnswer(TextWithEntities("A"), b"0"), PollAnswer(TextWithEntities("B"), b"1")]))`.
-- Read back the sent message and assert `MessageMediaPoll`; record the **server-assigned
-  `poll.id`** and confirm it differs from the id supplied — this validates the registry design.
-- Additionally record whether an `updateMessagePoll` is observed for the account's own poll (best
-  effort; a negative here is acceptable and does not block, because reconciliation is primary).
-- Delete the probe message.
-- **Part B — human-tap observation (also part of this gate).** Send a *second* probe poll into the
-  same real DM and **leave it open**.
-  **How the tap is requested, and what happens if it never comes** (this must not become an
-  indefinite headless stall):
-  1. The probe poll is sent with an explanatory caption in the same chat naming exactly what the
-     operator must do and by when: e.g. *"Build gate for #2701 — please tap either option on the
-     poll above. If no tap arrives within 30 minutes the build stops and reports the gate as
-     unresolved."*
-  2. The gate agent then **surfaces a legitimate open question through the normal pause path** —
-     a real question, not a status update. A bare "waiting for tap" note is auto-continued past by
-     the nudge loop (see CLAUDE.md, Auto-continue) and would produce exactly the silent stall this
-     nit is about.
-  3. **Bounded wait:** poll `messages.GetPollResultsRequest(peer, msg_id)` on a fixed interval for
-     at most `POLL_PROBE_TAP_WAIT_S` (named constant, default **1800 s / 30 min**, grain-of-salt).
-  4. **On timeout:** close and delete the probe poll, report the gate **UNRESOLVED** (distinct from
-     PASS and from FAIL), record that state on #2701, and **stop** — do not start Tasks 2-11 and do
-     not silently keep waiting. An UNRESOLVED gate is resumed by re-running Task 1 Part B when the
-     operator is available; nothing downstream is invalidated by the pause.
-  With the probe client still connected, record:
-  (a) whether an `updateMessagePoll` for the account's own poll is observed at all (this is Risk 2's
-  open question — answer it here rather than "best effort");
-  (b) the `messages.GetPollResultsRequest(peer, msg_id)` response after the tap, proving the
-  reconciliation path can read the choice;
-  (c) which of the two paths surfaced the vote first.
-  Then close and delete the probe poll. A negative on (a) is **not** a failure — it only confirms
-  reconciliation-primary was the right call and that the Raw fast path is dead weight on this
-  account. A negative on (b) **is** a gate failure: without it the inbound half cannot work at all,
-  and the build stops the same way a Part A failure stops it.
-- **PASS** → paste both probe outputs (Part A and Part B) into the PR description and proceed to
-  Task 2.
-- **FAIL (MTProto rejects a poll into another user's DM)** → **STOP the build.** Do not write any
-  production code. Report the verbatim error, record it on #2701, and hand back for a scope
-  revision to group-chats-only. This is the documented alternative in the issue's Pre-requisites
-  bucket.
+- **Parallel**: true (with Tasks 3, 4, 12)
+- **This is the only remaining gate-worthy unknown.** Reconciliation is the primary inbound
+  mechanism and there is nothing behind it, so if a vote cannot be read back the inbound half is
+  impossible.
+- **Do NOT re-probe the send capability and do NOT send any poll into a 1:1 DM.** spike-6 settled
+  both with verbatim MTProto results.
+- **Production-safety constraints on the probe (mandatory, and the reason the push question is not
+  gated):**
+  - Open a **copy** of the bridge Telethon session file, never the live one, and do not write the
+    session back.
+  - Construct the client with `receive_updates=False`. A second client with updates *enabled* on the
+    bridge's auth key can consume updates the live bridge needs — that is a production hazard, and
+    it is precisely why "is `updateMessagePoll` pushed to a user account?" is **not** a gate here.
+    That question is answered after ship by the `poll_update_observed` log line inside the Raw
+    handler (Task 10); a negative there deletes the handler as dead weight and changes nothing else.
+  - Everything the probe sends is deleted before the task reports.
+- Resolve a **machine-owned eng group** peer from `~/Desktop/Valor/projects.json` (the verified
+  reference group is `Eng: Valor`, `-1003449100931`).
+- Send a two-option probe poll with options encoded as `encode_option(index, correlation_id)`
+  (Task 4's encoding) rather than bare `bytes([i])`, so the gate exercises the real encoding.
+- **Cast a vote from the probe account itself** via `messages.SendVoteRequest`. This is a
+  probe-only affordance: production never votes, which is what keeps "the sender never votes" true.
+- Read back `messages.GetPollResultsRequest(peer, msg_id)` and assert: the chosen option is
+  recoverable from `PollAnswerVoters`, `total_voters >= 1`, and `decode_option(...)` recovers both
+  the index and the correlation id from the option bytes echoed by the server.
+- Record the **server-assigned `poll.id`** and confirm it differs from the id supplied — this
+  re-validates the registry design against the group surface.
+- Also exercise closing the poll by editing it with `closed=True`, then delete the message.
+- **PASS** → paste the probe output into the PR description; Tasks 9-10 are unblocked.
+- **FAIL** → **STOP the build.** Report the verbatim error, record it on #2701, and hand back for
+  a design revision — without readback there is no inbound half on this surface.
 
-### 2. Poll primitive in `bridge/response.py`
-- **Task ID**: build-send-poll
-- **Depends On**: gate-real-dm-poll
-- **Validates**: `tests/unit/test_poll_payload.py` (create)
-- **Informed By**: spike-1, gate-real-dm-poll (exact working construction)
-- **Assigned To**: `poll-outbound-builder`
+### 2. GATE — human tap readback and attribution (bounded; UNRESOLVED permitted)
+- **Task ID**: gate-poll-human-tap
+- **Depends On**: gate-poll-vote-readback
+- **Validates**: manual probe; output pasted verbatim into the PR description
+- **Informed By**: Research finding 5, Risk 2b
+- **Assigned To**: `poll-probe`
 - **Agent Type**: builder
 - **Parallel**: false
+- Under the same production-safety constraints as Task 1 (session copy, `receive_updates=False`,
+  no writeback, group only, cleanup after).
+- Send a probe poll into the same eng group and **leave it open**, with a caption naming exactly
+  what is being asked and the deadline: *"Build gate for #2701 — please tap either option on the
+  poll above. If no tap arrives within 30 minutes the build reports this gate unresolved and
+  continues with the outbound half."*
+- Then **surface a legitimate open question through the normal pause path** — a real question, not
+  a status update. A bare "waiting for tap" note is auto-continued past by the nudge loop (CLAUDE.md,
+  Auto-continue) and would produce exactly the silent stall this guards against.
+- **Bounded wait:** poll `messages.GetPollResultsRequest(peer, msg_id)` on a fixed interval for at
+  most `POLL_PROBE_TAP_WAIT_S` (named constant, default **1800 s / 30 min**, grain-of-salt).
+- On a tap, record: (a) the `GetPollResultsRequest` response, proving another user's vote is
+  readable; (b) whether `messages.GetPollVotesRequest` resolves the voting peer, which decides
+  whether the steer text can name the voter or must fall back.
+- A negative on (b) is **not** a failure — attribution is best-effort by design. A negative on (a)
+  **is** a gate failure for the inbound half.
+- **On timeout:** close and delete the probe poll, report the gate **UNRESOLVED** (distinct from
+  PASS and FAIL), record it on #2701, and **pause Tasks 9-10 only**. Every other task proceeds.
+  Resume by re-running this task when the operator is available.
+- Close and delete the probe poll before reporting, in every outcome.
+
+### 3. Poll eligibility gate — `bridge/poll_gating.py`
+- **Task ID**: build-poll-eligibility
+- **Depends On**: none
+- **Validates**: `tests/unit/test_poll_gating.py` (create)
+- **Informed By**: spike-7, Research findings 7 and 8, owner decisions 1 and 2
+- **Assigned To**: `poll-outbound-builder`
+- **Agent Type**: builder
+- **Parallel**: true (with Tasks 1, 4, 12)
+- Create `bridge/poll_gating.py` as the single home for "does this surface take a poll".
+- **Move** `_is_group_chat` out of `bridge/read_the_room.py:126` into this module as the public
+  `is_group_chat(chat_id)`, keeping its documented semantics verbatim (negative id → group;
+  `None`, unparseable, or non-negative → `False`). Re-point `bridge/read_the_room.py` to import it.
+  **One definition, no copy** — a second copy would silently drift from the RTR suppression rule.
+- Add `PollEligibility(ok: bool, reason: str)` and
+  `poll_eligible(chat_id, session_id) -> PollEligibility`:
+  - not a group → `not_a_group`
+  - `AgentSession.query.filter(session_id=session_id)` finds a record with
+    `session_type == SessionType.ENG` → `ok=True`, reason `eligible`
+  - record with `session_type == SessionType.TEAMMATE` → `not_eng_session`
+  - no record, or a `null`/unrecognized `session_type` → `unknown_session_type` (**ineligible** —
+    the field is `null=True`, `models/agent_session.py:156`, and prose to an eng session is a
+    cosmetic loss while a poll to a teammate chat is a scope violation)
+  - any exception → `eligibility_error`, logged at warning
+- **Never raises.** Fail closed on every ambiguity.
+- Compare against `SessionType` from `config/enums.py` — do not string-compare a bare literal in two
+  places.
+
+### 4. Poll primitive in `bridge/response.py`
+- **Task ID**: build-send-poll
+- **Depends On**: none
+- **Validates**: `tests/unit/test_poll_payload.py` (create)
+- **Informed By**: spike-1, spike-6 (the exact construction verified working in a group)
+- **Assigned To**: `poll-outbound-builder`
+- **Agent Type**: builder
+- **Parallel**: true (with Tasks 1, 3, 12)
 - Add `send_poll(client, chat_id, question, options, *, reply_to=None, correlation_id=None)
   -> tuple[int, int] | None` after `set_reaction` (`bridge/response.py:384`), returning
   `(msg_id, server_poll_id)`.
@@ -1110,25 +1546,28 @@ The lead agent orchestrates and never builds directly.
 - **Option bytes carry the correlation id (Race 6 exact-match key).**
   `option = f"{index}:{correlation_id}".encode()` when `correlation_id` is given, else
   `f"{index}".encode()`. Provide `encode_option(index, correlation_id)` / `decode_option(raw)`
-  helpers next to it so the translator and the orphan-adoption scan parse the same encoding in one
-  place. Uniqueness per option (Telegram's only constraint on `option`) is preserved by the index
-  prefix.
+  helpers next to it so the translator, the orphan-adoption scan, **and the Task 1 gate probe** parse
+  the same encoding in one place. Uniqueness per option (Telegram's only constraint on `option`) is
+  preserved by the index prefix.
 - Follow the local error idiom (log, return `None`, never raise) but keep the `None` return
   distinguishable so the relay retries rather than silently dropping.
-- Docstring records the placeholder-id / server-assigned-id asymmetry.
+- Docstring records the placeholder-id / server-assigned-id asymmetry **and** that this primitive is
+  group-only in practice (a DM send is rejected with `MediaInvalidError` — spike-6), pointing at
+  `bridge/poll_gating.py` as the enforcement point.
 
-### 3. Outbound payload, handler method, drafter medium, relay dispatch
-- **Task ID**: build-outbound-path
-- **Depends On**: build-send-poll
-- **Validates**: `tests/unit/test_poll_payload.py`, `tests/unit/test_ask_poll_cli.py` (create),
-  `tests/unit/test_bridge_relay.py` (update)
+### 5. Outbound payload, handler method, drafter medium
+- **Task ID**: build-outbound-payload
+- **Depends On**: build-send-poll, build-poll-eligibility
+- **Validates**: `tests/unit/test_poll_payload.py`, `tests/unit/test_medium_validators.py` (update)
 - **Informed By**: spike-3 (the three text-less guards), Prior Art #1802 template
 - **Assigned To**: `poll-outbound-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `build_telegram_poll_outbox_payload(chat_id, question, options, reply_to, session_id)`
-  beside `build_telegram_outbox_payload` (`agent/output_handler.py:270`), emitting
+- Add `build_telegram_poll_outbox_payload(chat_id, question, options, reply_to, session_id)` beside
+  `build_telegram_outbox_payload` (`agent/output_handler.py:270`), emitting
   `{"type": "poll", chat_id, reply_to, question, options, session_id, timestamp}`.
+  **Do not stamp `session_type` into the payload** — a queued payload would outlive a session's real
+  type; the relay re-reads eligibility instead (Task 7).
 - Add `TelegramRelayOutputHandler.send_poll(...)` as a sibling of `send` (`:611`): validate via the
   drafter, record the outstanding-question expectation, rpush with the existing `OUTBOX_TTL`
   (`:431`). It must not hit the `if not text` early return at `:673-674`.
@@ -1136,233 +1575,294 @@ The lead agent orchestrates and never builds directly.
   **validate only, question text only**: `<= 300` chars and non-empty. **Do not change the
   signature** (`(text: str, medium: str)`) — it cannot see options, and widening it ripples to
   `:1100`, `:1148`, and `tests/unit/test_medium_validators.py`. Option-count and option-length
-  validation lives in `tools/ask_poll.py` (see the Technical Approach split).
+  validation lives in `tools/ask_poll.py` (Task 8).
 - Add the public wrapper `validate_poll_question(question: str) -> list[Violation]` in
   `bridge/message_drafter.py` (`return _validate_for_medium(question, "telegram_poll")`) and call
   **that** from `send_poll`. Do **not** call `draft_message` — it runs `_compose_structured_draft`
   at `:1145` before validating at `:1148`, so it would return the question with the emoji prefix /
   stage line / link footer attached. `_compose_structured_draft` is never reached on the poll path.
+
+### 6. Poll registry
+- **Task ID**: build-poll-registry
+- **Depends On**: build-outbound-payload
+- **Validates**: `tests/unit/test_poll_registry.py` (create)
+- **Informed By**: spike-2 (update cannot self-route), spike-5 (plain-Redis precedent), Risk 9
+- **Assigned To**: `poll-outbound-builder`
+- **Agent Type**: builder
+- **Domain**: Redis/Popoto data
+- **Parallel**: false
+- Write `telegram:poll:{poll_id}` →
+  `{chat_id, msg_id, session_id, question, options, created_at, steered_at}` with
+  `SET ... NX EX <POLL_REGISTRY_TTL_S>`, following `bridge/job_router.py:85-96` and
+  `bridge/context.py:513-529`. `steered_at` starts absent.
+- Plain Redis string keys. **No Popoto model, no `scripts/update/migrations.py` entry.** Comment the
+  rationale pointing at `bridge/job_router.py:6-18`.
+- Provide the Race-6 provisional row `telegram:poll:pending:{outbox_payload_id}`, written **before**
+  `send_poll` and promoted to the real row (then deleted) once the server poll id is known. This
+  write belongs **here and only here** — it is not duplicated in the relay task.
+- Provide `register_poll(...)`, `lookup_poll(poll_id)`, `claim_poll_answer(poll_id)` (`SET NX EX`),
+  `release_poll_claim(poll_id)`, `mark_poll_steered(poll_id)`, `register_pending_poll(...)`,
+  `iter_pending_polls()`, `promote_pending_poll(...)`, and `iter_unanswered_polls()`.
+- **`iter_unanswered_polls()` treats a row as unanswered when it has no `steered_at`** — including a
+  row whose claim exists but is older than one reconcile interval (Risk 9). It must not treat "claim
+  present" alone as answered.
+- All TTLs are named env-overridable constants with grain-of-salt comments.
+
+### 7. Relay dispatch branch, eligibility re-check, dead-letter and fallback
+- **Task ID**: build-relay-dispatch
+- **Depends On**: build-poll-registry
+- **Validates**: `tests/unit/test_bridge_relay.py` (update),
+  `tests/unit/test_telegram_relay_chat_log.py` (update), `tests/unit/test_relay_job_record.py`
+  (update)
+- **Informed By**: spike-3, spike-7, Risk 5
+- **Assigned To**: `poll-outbound-builder`
+- **Agent Type**: builder
+- **Parallel**: false
 - Add `"poll"` to `KNOWN_MESSAGE_TYPES` (`bridge/telegram_relay.py:58`) and a dispatch branch in the
-  `msg_type` if/elif chain (`:917-931`) calling a new `_send_queued_poll`. Locate by symbol, not line.
+  `msg_type` if/elif chain (`:917-931`) calling a new `_send_queued_poll`. Locate by symbol.
+- **Re-check `poll_eligible(chat_id, session_id)` at the top of `_send_queued_poll`** (defense in
+  depth: the CLI decided at ask time, the relay is the last writer before the wire, and a payload can
+  sit in the outbox across a session-type change). Ineligible → **convert to the plain-text payload
+  and deliver it**, log the reason, and do not send a poll. Never drop.
 - Fix the dead-letter path for text-less payloads, which has **two** guards, not one:
   (a) `_dead_letter_message` (`:803`) must not add `"poll"` to the ephemeral discard tuple
   `if msg_type in ("reaction", "custom_emoji_message")` (`:827`); and (b) the persistence branch
-  immediately below is gated on `if chat_id and text` (`:836`) — a poll payload has no `text` key,
-  so simply keeping it out of the ephemeral tuple still drops it silently. The poll branch must
-  supply the question as the dead-letter `text` (or persist the poll payload explicitly). This is
-  the **durability backstop only** — `replay_dead_letters` runs from one site in the bridge connect
-  sequence (`bridge/telegram_bridge.py:2842`), i.e. next restart.
+  immediately below is gated on `if chat_id and text` (`:836`) — a poll payload has no `text` key, so
+  keeping it out of the ephemeral tuple alone still drops it silently. The poll branch must supply
+  the question as the dead-letter `text`. This is the **durability backstop only** —
+  `replay_dead_letters` runs from one site in the bridge connect sequence
+  (`bridge/telegram_bridge.py:2842`), i.e. next restart.
 - **Prompt user-visible fallback (the actual delivery path).** In the terminal-failure branch
-  (`telegram_relay.py:1029-1034`, `attempts >= MAX_RELAY_RETRIES`) for a `"poll"` payload, rpush a
-  plain payload back onto the same `telegram:outbox:{session_id}` key:
+  (`:1029-1034`, `attempts >= MAX_RELAY_RETRIES`) for a `"poll"` payload, rpush a plain payload back
+  onto the same `telegram:outbox:{session_id}` key:
   `{"type": None, "chat_id": chat_id, "text": <question + numbered options>, "reply_to": reply_to,
-  "session_id": session_id}` with `_relay_attempts` **reset to 0** so the text send gets its own
-  retry budget. Safe against looping: the loop is `while processed < RELAY_BATCH_SIZE` over
-  `r.lpop` of the same key (`:895-897`), so the rpush is consumed on a later cycle, and the payload
-  is plain text which never re-enters the poll branch.
-- Write the Race-6 provisional registry row **before** calling `send_poll`, and promote it to the
-  real `telegram:poll:{server_poll_id}` row immediately after the send returns.
+  "session_id": session_id}` with `_relay_attempts` **reset to 0**. Safe against looping: the loop is
+  `while processed < RELAY_BATCH_SIZE` over `r.lpop` of the same key (`:895-897`), so the rpush is
+  consumed on a later cycle, and the payload is plain text which never re-enters the poll branch.
+  **The ineligibility branch above reuses this same text-payload builder** — one plain-text
+  rendering of a question, not two.
+- Call `register_pending_poll(...)` before `send_poll` and `promote_pending_poll(...)` after it
+  (functions from Task 6; this task calls them, it does not define them).
 - On success, run the existing post-send bookkeeping (`_record_sent_message` `:984`,
-  `_append_outbound_chat_log` `:988`, `_bind_outbound_message_to_job` `:994`) and add a history
-  row with `message_type="poll"`, modelled on `_record_sent_reaction` (`:182-212`).
+  `_append_outbound_chat_log` `:988`, `_bind_outbound_message_to_job` `:994`) and add a history row
+  with `message_type="poll"`, modelled on `_record_sent_reaction` (`:182-212`).
+
+### 8. `valor-ask-poll` CLI
+- **Task ID**: build-ask-poll-cli
+- **Depends On**: build-poll-eligibility, build-outbound-payload
+- **Validates**: `tests/unit/test_ask_poll_cli.py` (create), `tests/unit/test_send_message.py`
+  (update)
+- **Informed By**: owner decisions 1, 2, 4; Data Flow step 3a
+- **Assigned To**: `poll-outbound-builder`
+- **Agent Type**: builder
+- **Parallel**: false
 - Create `tools/ask_poll.py` with `main()`, reusing `_resolve_transport()` precedence
-  (`tools/send_message.py:63`). Telegram → `send_poll`; every other transport → numbered-list text
-  through the existing `send_message` path. Probe the handler with `hasattr(..., "send_poll")`
-  mirroring `adapter.py:61` so `EmailOutputHandler` stays valid.
+  (`tools/send_message.py:63`).
+- **Degradation happens here, once.** Non-telegram transport → numbered-list text through the
+  existing `send_message` path. Telegram transport → call `poll_eligible(chat_id, session_id)`;
+  ineligible → the same numbered-list text path, with the reason logged so a question that "should
+  have been a poll" is diagnosable; eligible → `send_poll`. Probe the handler with
+  `hasattr(..., "send_poll")` mirroring `adapter.py:61` so `EmailOutputHandler` stays valid.
 - Own **all option validation** here: 2..10 options, each non-empty and `<= 100` chars, exiting
   non-zero on violation. Append / de-duplicate the mandatory literal final option
   `Other: wait for followup message`.
 - Register `valor-ask-poll = "tools.ask_poll:main"` in `pyproject.toml [project.scripts]`.
 
-### 4. Poll registry
-- **Task ID**: build-poll-registry
-- **Depends On**: build-outbound-path
-- **Validates**: `tests/unit/test_poll_registry.py` (create)
-- **Informed By**: spike-2 (update cannot self-route), spike-5 (plain-Redis precedent)
-- **Assigned To**: `poll-outbound-builder`
-- **Agent Type**: builder
-- **Domain**: Redis/Popoto data
-- **Parallel**: false
-- Write `telegram:poll:{poll_id}` → `{chat_id, msg_id, session_id, question, options, created_at}`
-  with `SET ... NX EX <POLL_REGISTRY_TTL_S>`, following `bridge/job_router.py:85-96` and
-  `bridge/context.py:513-529`.
-- Plain Redis string keys. **No Popoto model, no `scripts/update/migrations.py` entry.** Comment
-  the rationale pointing at `bridge/job_router.py:6-18`.
-- Also provide the Race-6 provisional row: `telegram:poll:pending:{outbox_payload_id}` written
-  **before** `send_poll`, promoted to the real row (and deleted) after the server poll id is known.
-- Provide `register_poll(...)`, `lookup_poll(poll_id)`, `claim_poll_answer(poll_id)` (`SET NX EX`),
-  `register_pending_poll(...)`, `iter_pending_polls()`, `promote_pending_poll(...)`, and
-  `iter_unanswered_polls()`.
-- All TTLs are named env-overridable constants with grain-of-salt comments.
-
-### 5. Extract `bridge/answer_routing.py` and add `translate_poll_vote`
+### 9. Extract `bridge/answer_routing.py` and add `translate_poll_vote`
 - **Task ID**: build-vote-translation
-- **Depends On**: build-poll-registry
+- **Depends On**: build-relay-dispatch, gate-poll-human-tap
 - **Validates**: `tests/unit/test_poll_vote_translation.py` (create),
   `tests/integration/test_steering.py` (update)
-- **Informed By**: spike-2, Research findings 4 and 5, Race 2 / Race 3
+- **Informed By**: spike-2, Research findings 4 and 5, Races 2 and 3, Risks 3 and 9
 - **Assigned To**: `poll-inbound-builder`
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
-**5a. Create `bridge/answer_routing.py` with two extractions — not one function.** The reply-to
-ladder is an inline block in `handler(event)` and cannot be lifted at a
-`(session_id, text, sender)` signature; every branch consumes `event`/`message`/`project`. Extract
-only the parts that are genuinely shared, and leave caller-specific side effects in the caller:
 
-- `resolve_answer_target(session_id) -> AnswerTarget` — **pure state read**, lifted verbatim from
-  `bridge/telegram_bridge.py:1799-1866`. `AnswerTarget` is a small dataclass
-  `(kind: AnswerTargetKind, session: AgentSession | None)`; `AnswerTargetKind` is
-  `LIVE | PENDING | LIVE_GUARD | COMPLETED | NONE`. No I/O beyond `AgentSession.query.filter`. The
-  `LIVE_GUARD` kind is the existing belt-and-suspenders re-check at `:1856-1866`.
+**9a. Create `bridge/answer_routing.py` with two extractions — not one function.** The reply-to
+ladder is an inline block in `handler(event)` and cannot be lifted at a `(session_id, text, sender)`
+signature; every branch consumes `event`/`message`/`project`. Extract only the genuinely shared
+parts and leave caller-specific side effects in the caller:
+
+- `resolve_answer_target(session_id) -> AnswerTarget` — a state read over
+  `bridge/telegram_bridge.py:1799-1866`. `AnswerTarget` is
+  `(kind: AnswerTargetKind, session: AgentSession | None, matched_status: str | None,
+  pending_age_s: float | None)`; `AnswerTargetKind` is `LIVE | PENDING | LIVE_GUARD | COMPLETED |
+  NONE`. **This is a restructure, not a verbatim lift** — the source interleaves the ladder with
+  `await _ack_steering_routed(...)` + `return` at every branch. Behavior-preservation checklist,
+  all four mandatory:
+  1. `matched_status` carried because the LIVE log embeds `matching_session.status` and the
+     LIVE_GUARD log embeds `live_guard.status`.
+  2. `pending_age_s` carried because the PENDING log embeds `age=%.1f` from
+     `_pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`).
+  3. `COMPLETED` returns the record chosen by the existing most-recent-`created_at` sort
+     (`_completed_created_at`, `:1898`), **not** `completed_sessions[0]` — the wrong record silently
+     degrades `_build_completed_resume_text`'s `context_summary`.
+  4. `_steering_session_enqueued = True` (`:2006`) stays caller-side; `resume_completed_session`
+     returns `None`.
+  The `LIVE_GUARD` kind is the existing belt-and-suspenders re-check at `:1856-1866`.
 - `resume_completed_session(*, completed, text, sender_name, telegram_chat_id,
   telegram_message_id, chat_title=None, sender_id=None, project=None, project_key=None,
   working_dir=None, telegram_message_key=None, reply_chain_context=None,
   extra_context_overrides=None) -> None` — lifted from `:1951-2005`:
   `_build_completed_resume_text(completed, text, reply_chain_context=...)` then
   `dispatch_telegram_session(...)`. Any of `project` / `project_key` / `working_dir` /
-  `session_type` left `None` falls back to the corresponding field on the `completed` record
-  (`project_config`, `project_key`, `working_dir`, `session_type` are all AgentSession fields).
+  `session_type` left `None` falls back to the corresponding field on the `completed` record.
   `react_if_worker_down` stays in the message handler — it needs the inbound `message.id`.
 
 Repoint the existing message handler at both: it keeps its `_ack_steering_routed` calls, its
-`is_duplicate_message` short-circuit, its reply-chain hydration, and its `react_if_worker_down`,
-and only replaces the inlined `query.filter` ladders and the inlined dispatch. **Behavior must not
-change**; existing steering tests plus
-`tests/integration/test_steering.py::test_reply_to_completed_session_reenqueues_with_context` are
-the regression net.
+`is_duplicate_message` short-circuit, its reply-chain hydration, and its `react_if_worker_down`, and
+only replaces the inlined `query.filter` ladders and the inlined dispatch. **Behavior must not
+change**; the existing steering tests plus
+`tests/integration/test_steering.py::test_reply_to_completed_session_reenqueues_with_context` are the
+regression net.
 
-**5b. Add `translate_poll_vote(client, poll_id)`:**
-  - `lookup_poll`; unknown → return quietly.
-  - Confirm with `messages.GetPollResultsRequest(peer=chat_id, msg_id=msg_id)` rather than trusting
-    a possibly `min=True` update. `total_voters == 0` → return **without** claiming.
-  - Select the option with `voters >= 1` (the sender never votes), recovering the option index via
-    `decode_option(...)` (Task 2) since option bytes now carry the correlation id.
-  - `claim_poll_answer(poll_id)`; lost claim → return.
-  - Close the poll by editing with `closed=True`.
-  - Build the steer text: `Poll answer to your question "<question>": <chosen option>`; for the
-    escape hatch, instruct a narrowed plain-text followup the human answers by reply-to.
-  - Branch on `resolve_answer_target(session_id)`, and state the outcome for **every** kind:
-    - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text,
-      sender_name)`. No `_ack_steering_routed` (no inbound message to react to; closing the poll is
-      the acknowledgment) and deliberately no abort-keyword detection (a poll option is never an
-      abort).
-    - `COMPLETED` → `resume_completed_session(completed=target.session, text=steer_text,
-      sender_name=..., telegram_chat_id=<registry chat_id>,
-      telegram_message_id=<the poll's own msg_id from the registry row>,
-      reply_chain_context=None)`. A vote has no reply chain, so the summary-only preamble is the
-      correct output. The poll's `msg_id` is a safe dedup key: `dispatch_telegram_session` claims
-      `(chat_id, telegram_message_id)` via `bridge/dedup.py:171 claim_message` (keyspace
-      `bridge:msgclaim:`), which is inbound-only and therefore never already claimed for an
-      outbound poll. **This branch is mandatory — silently dropping it re-opens Risk 3.**
-    - `NONE` → log at info and return. Never create a session.
-  - `sender_name` comes from the target session's `initial_telegram_message["sender_name"]` when
-    present, else the literal `"Telegram poll"`.
-  - `is_duplicate_message` is **not** called on the vote path — idempotency is
-    `claim_poll_answer` (`SET NX`) plus `claim_message` inside `dispatch_telegram_session`.
-  - **Never write a steering key directly** — always via `agent/steering.py:85
-    push_steering_message` (coordination note with
-    `docs/plans/flip-steering-writers-to-room-key.md`).
+**9b. Add `translate_poll_vote(client, poll_id)`:**
+- `lookup_poll`; unknown → return quietly.
+- Confirm with `messages.GetPollResultsRequest(peer=chat_id, msg_id=msg_id)` rather than trusting a
+  possibly `min=True` update.
+- **Deterministic group selection rule** (the DM rule is dead — several members can vote):
+  filter `results.results` to `voters >= 1`; zero → return **without claiming**; exactly one → use
+  it; more than one → log a warning naming the poll id and the tied options, then take the highest
+  `voters`, breaking ties by **lowest decoded option index** (`decode_option`, Task 4).
+- `claim_poll_answer(poll_id)`; lost claim → return.
+- **Everything after the claim runs inside `try/except Exception`; the handler calls
+  `release_poll_claim(poll_id)` before logging** so the next reconciliation tick retries (Risk 9).
+- Close the poll by editing with `closed=True`. In a group this is the first-voter-wins boundary and
+  is intentional.
+- Resolve `sender_name`: `messages.GetPollVotesRequest` best-effort → target session's
+  `initial_telegram_message["sender_name"]` → the literal `"Telegram poll"`. A failure here never
+  blocks translation.
+- Build the steer text: `Poll answer to your question "<question>": <chosen option>`; for the escape
+  hatch, instruct a narrowed plain-text followup the human answers by reply-to.
+- Branch on `resolve_answer_target(session_id)`, with a stated outcome for **every** kind:
+  - `LIVE` / `PENDING` / `LIVE_GUARD` → `push_steering_message(session_id, steer_text, sender_name)`.
+    No `_ack_steering_routed` (no inbound message to react to; closing the poll is the
+    acknowledgment) and deliberately no abort-keyword detection (a poll option is never an abort).
+  - `COMPLETED` → `resume_completed_session(completed=target.session, text=steer_text,
+    sender_name=..., telegram_chat_id=<registry chat_id>,
+    telegram_message_id=<the poll's own msg_id from the registry row>, reply_chain_context=None)`.
+    A vote has no reply chain, so the summary-only preamble is the correct output. The poll's
+    `msg_id` is a safe dedup key: `dispatch_telegram_session` claims `(chat_id,
+    telegram_message_id)` via `bridge/dedup.py:171 claim_message` (keyspace `bridge:msgclaim:`),
+    which is inbound-only and therefore never already claimed for an outbound poll.
+    **This branch is mandatory — silently dropping it re-opens Risk 3.**
+  - `NONE` → log at info and return. Never create a session.
+- **`mark_poll_steered(poll_id)` runs only after the steer / re-enqueue returns** (Risk 9), and is
+  the field `iter_unanswered_polls()` and `poll_expired_unanswered` key on.
+- `is_duplicate_message` is **not** called on the vote path — idempotency is `claim_poll_answer`
+  (`SET NX`) plus `claim_message` inside `dispatch_telegram_session`.
+- **Never write a steering key directly** — always via `agent/steering.py:85 push_steering_message`
+  (coordination note with `docs/plans/flip-steering-writers-to-room-key.md`).
 
-### 6. `events.Raw` fast path + reconciliation loop
+### 10. Reconciliation loop (primary) + `events.Raw` fast path
 - **Task ID**: build-vote-observation
 - **Depends On**: build-vote-translation
 - **Validates**: `tests/unit/test_poll_vote_translation.py`, `tests/unit/test_poll_registry.py`
-- **Informed By**: Risk 2 (update delivery unverified), Race 1 / Race 5
+- **Informed By**: Risk 2 (push unverified by design), Risk 7, Risk 9, Races 1, 5, 6
 - **Assigned To**: `poll-inbound-builder`
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
-- Register the repo's **first** `@client.on(events.Raw)` handler in `bridge/telegram_bridge.py`
-  near `:1165`, filtering `UpdateMessagePoll` and calling `translate_poll_vote(client, poll_id)`.
-  It must never raise into Telethon's update loop.
 - Add the reconciliation loop started alongside `relay_loop` (`:3231-3233`): iterate
-  `iter_unanswered_polls()` only, call `translate_poll_vote` on each, adaptive interval
-  (fast for `POLL_RECONCILE_FAST_WINDOW_S` after send, then slow), FloodWait backoff mirroring
-  `telegram_relay.py:918-945`.
-- This loop is the **primary** mechanism; the Raw handler is a latency optimization. Both call the
-  same idempotent translator, so enabling either alone is correct.
+  `iter_unanswered_polls()` only, call `translate_poll_vote` on each, adaptive interval (fast for
+  `POLL_RECONCILE_FAST_WINDOW_S` after send, then slow), FloodWait backoff mirroring
+  `telegram_relay.py:918-945`. **This loop is the primary mechanism** and is correct on its own.
+- Register the repo's **first** `@client.on(events.Raw)` handler in `bridge/telegram_bridge.py` near
+  `:1165`, filtering `UpdateMessagePoll` and calling `translate_poll_vote(client, poll_id)`. It must
+  never raise into Telethon's update loop.
+- **Emit `poll_update_observed` at info from inside that handler on every `UpdateMessagePoll`.**
+  This is how the un-gated push question gets answered in production rather than by a second client
+  on the bridge's auth key. Document in the feature doc that if the signal never appears, the Raw
+  handler is dead weight and should be deleted in a follow-up — a scope reduction, not a bug.
 - **Emit the inbound-half operator signal (Risk 7).** During the same scan, any registry row at or
-  past `POLL_EXPIRY_WARN_AGE_S` with no `telegram:poll:answered:{poll_id}` claim emits exactly one
-  `logger.warning("poll_expired_unanswered ...")` with poll id, chat id, session id, and age, and is
-  marked so it is not re-emitted. Also warn on consecutive `GetPollResultsRequest` failures.
+  past `POLL_EXPIRY_WARN_AGE_S` **with no `steered_at`** emits exactly one
+  `logger.warning("poll_expired_unanswered ...")` with poll id, chat id, session id, and age, marked
+  so it is not re-emitted. **Key on missing `steered_at`, never on a missing claim** — otherwise the
+  signal is blind to the Risk 9 swallow. Also warn on consecutive `GetPollResultsRequest` failures.
 - **Adopt orphaned provisional rows (Race 6), matched exactly — never on question text.** For each
-  surviving `telegram:poll:pending:{outbox_payload_id}` row, scan a bounded window of recent
-  outbound history in that chat for a `MessageMediaPoll` whose `poll.answers[0].option` decodes
-  (via `decode_option`, Task 2) to the same `outbox_payload_id` and which has no
-  `telegram:poll:{poll.id}` row. Write the real row from the provisional data plus the discovered
-  `msg_id`/`poll.id`, then delete the provisional. **If more than one candidate matches, log a
-  warning and adopt nothing** — an ambiguous adoption steers a session with someone else's answer.
-  A provisional row that reaches TTL with no match is dropped with a warning.
-- Every interval, TTL, and warn-age is a named env-overridable constant with a grain-of-salt
-  comment.
+  surviving `telegram:poll:pending:{outbox_payload_id}` row, scan a bounded window of recent outbound
+  history in that chat for a `MessageMediaPoll` whose `poll.answers[0].option` decodes (via
+  `decode_option`, Task 4) to the same `outbox_payload_id` and which has no `telegram:poll:{poll.id}`
+  row. Write the real row from the provisional data plus the discovered `msg_id`/`poll.id`, then
+  delete the provisional. **If more than one candidate matches, log a warning and adopt nothing** —
+  an ambiguous adoption steers a session with someone else's answer. A provisional row that reaches
+  TTL with no match is dropped with a warning.
+- Every interval, TTL, and warn-age is a named env-overridable constant with a grain-of-salt comment.
 
-### 7. Catchup transcript rendering
+### 11. Catchup transcript rendering
 - **Task ID**: build-catchup-transcript
-- **Depends On**: build-outbound-path
+- **Depends On**: build-relay-dispatch
 - **Validates**: `tests/unit/test_agent_catchup_poll_transcript.py` (create)
 - **Informed By**: spike-4 (blank-line finding)
 - **Assigned To**: `poll-surfaces-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- In `bridge/agent_catchup.py::read_thread` (text extraction at `:371`; locate by symbol), render a message
-  whose media is `MessageMediaPoll` as its question text plus options rather than `""`, so
-  `_render_transcript` (`:419`) no longer emits a bare `"Valor: "` and `sweep_chat`'s empty-text
-  skip (`:560-562`) no longer drops it.
-- Leave `_has_valor_reply_after` (`:436-452`) and `_valor_reacted` (`:321`) alone — spike-4
-  confirmed they already behave correctly for a text-less outbound message.
+- In `bridge/agent_catchup.py::read_thread` (text extraction at `:371`; locate by symbol), render a
+  message whose media is `MessageMediaPoll` as its question text plus options rather than `""`, so
+  `_render_transcript` (`:419`) no longer emits a bare `"Valor: "` and `sweep_chat`'s empty-text skip
+  (`:560-562`) no longer drops it.
+- Leave `_has_valor_reply_after` (`:436-452`) and `_valor_reacted` (`:321`) alone — spike-4 confirmed
+  they already behave correctly for a text-less outbound message.
 - Leave `bridge/catchup.py:333-337` alone; document in the feature doc that a vote is not a message
   and the reconciliation loop is the catchup story for polls.
 
-### 8. `/ask-me` relaxation and skill-context
+### 12. `/ask-me` relaxation and skill-context
 - **Task ID**: build-ask-me-skill
 - **Depends On**: none
 - **Validates**: manual read; `.claude/skill-context/README.md` table entry present
-- **Informed By**: owner decisions 2 and 3
+- **Informed By**: owner decisions 1, 2, 4, 5
 - **Assigned To**: `poll-surfaces-builder`
 - **Agent Type**: builder
-- **Parallel**: true
-- In `.claude/skills-global/ask-me/SKILL.md` step 5: change "Ask one question at a time" from a
-  hard rule to a stated preference and remove "Never batch your whole blocker list into one
+- **Parallel**: true (with Tasks 1, 3, 4)
+- In `.claude/skills-global/ask-me/SKILL.md` step 5: change "Ask one question at a time" from a hard
+  rule to a stated preference and remove "Never batch your whole blocker list into one
   multi-question call", replacing it with guidance that separate questions are acceptable only when
   genuinely independent. **Keep** the "Questionnaire mode" anti-pattern, reworded to match.
 - Add the skill-context probe sentence: "If `.claude/skill-context/ask-me.md` exists, read it and
   honor its declarations; otherwise use the generic defaults described below."
 - Keep the global body generic — no `valor-ask-poll`, no Telegram specifics in it.
 - Create `.claude/skill-context/ask-me.md` declaring: the `valor-ask-poll` invocation, the
-  local-interactive vs headless-bridge branch, recommended-option-first ordering, and the mandatory
-  literal final option `Other: wait for followup message`.
+  local-interactive vs headless-bridge branch, **the group-only + eng-only eligibility rule and that
+  DMs and teammate sessions get prose**, recommended-option-first ordering, and the mandatory literal
+  final option `Other: wait for followup message`.
 - Add the row to the `.claude/skill-context/README.md` table.
 - **Wire the role primes to reach `/ask-me` at all.** `grep` confirms zero `ask-me` references in
   `.claude/commands/roles/` or `config/personas/` today, so without this the feature only fires when
   an agent happens to invoke the skill. Add **one generic, surface-agnostic line** to each of
-  `.claude/commands/roles/prime-dev-role.md`, `prime-pm-role.md`, and `prime-teammate-role.md`
-  (the three primes `agent/session_runner/role_driver.py:65-72` dispatches): when blocked on a
-  judgment call only the human can make, invoke `/ask-me` rather than posing the question in prose.
-  No mention of polls, Telegram, or `valor-ask-poll` in the primes — that is
-  `.claude/skill-context/ask-me.md`'s job.
+  `.claude/commands/roles/prime-dev-role.md`, `prime-pm-role.md`, and `prime-teammate-role.md` (the
+  three primes `agent/session_runner/role_driver.py:65-72` dispatches).
+- **The added line must be a conditional phrased against the existing pause threshold**, e.g. *"when
+  you have a legitimate open question that only the human can answer (the same bar the auto-continue
+  nudge loop uses), invoke `/ask-me` rather than posing it in prose."* A bare "when blocked, ask"
+  introduces a second, looser definition of blocked across every session on every machine and can
+  raise pause frequency for local, email, and non-blocked sessions. No mention of polls, Telegram, or
+  `valor-ask-poll` in the primes — that is `.claude/skill-context/ask-me.md`'s job.
 - Do **not** touch the `needs_human` / bare-`AskUserQuestion` turn-end path
   (`agent/session_runner/role_driver.py::_reconcile_turn_end`, `runner.py:1526-1531`). It keeps
   delivering text; that is a named No-Go.
 
-### 9. Tests
+### 13. Tests
 - **Task ID**: build-tests
-- **Depends On**: build-vote-observation, build-catchup-transcript, build-ask-me-skill
+- **Depends On**: build-vote-observation, build-catchup-transcript, build-ask-me-skill,
+  build-ask-poll-cli
 - **Validates**: all new and updated test files
 - **Informed By**: Test Impact and Failure Path Test Strategy sections
 - **Assigned To**: `poll-tester`
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Create `tests/unit/test_ask_poll_cli.py`, `test_poll_payload.py`, `test_poll_vote_translation.py`,
-  `test_poll_registry.py`, `test_agent_catchup_poll_transcript.py`.
+  `test_poll_registry.py`, `test_poll_gating.py`, `test_agent_catchup_poll_transcript.py`.
 - Apply every UPDATE listed in **Test Impact**.
-- Cover every bullet in **Failure Path Test Strategy**, including the poll-is-not-ephemeral
-  dead-letter assertion and the text-fallback error rendering.
+- Cover every bullet in **Failure Path Test Strategy**, including the whole **Eligibility Gate**,
+  **Vote Selection Under Multiple Voters**, and **Claim Durability** blocks.
 - Cover Races 2, 3, 5, and 6 explicitly (double translation, completed-session re-enqueue,
-  registry-survives-restart, and provisional-row orphan adoption).
+  registry-survives-restart, provisional-row orphan adoption).
+- **No test may send a poll into a DM or otherwise re-probe the settled capability matrix.** DM
+  behavior is asserted by testing that the CLI queues prose, not by hitting Telegram.
 - Run with `scripts/pytest-clean.sh`, never bare `pytest`.
 
-### 10. Documentation
+### 14. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-tests
 - **Validates**: the Documentation section checklist
@@ -1371,7 +1871,7 @@ the regression net.
 - **Parallel**: false
 - Complete every item in the **Documentation** section.
 
-### 11. Final validation
+### 15. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Validates**: the Verification table
@@ -1379,8 +1879,7 @@ the regression net.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the **Verification** table.
-- Confirm every **Success Criteria** box, including that the Task 1 gate output is in the PR
-  description.
+- Confirm every **Success Criteria** box, including that both gate outputs are in the PR description.
 - Report pass/fail.
 
 ## Verification
@@ -1405,23 +1904,42 @@ the regression net.
 | Feature doc indexed | `grep -c 'telegram-poll-questions' docs/features/README.md` | output > 0 |
 | Poll expiry warning wired (inbound-half signal) | `grep -c 'poll_expired_unanswered' bridge/*.py` | output > 0 |
 | Answer-routing seam extracted | `test -f bridge/answer_routing.py && grep -c 'def resolve_answer_target\|def resume_completed_session' bridge/answer_routing.py` | output == 2 |
-| Completed branch reachable from the vote path (anti-criterion) | `grep -c 'resume_completed_session' bridge/telegram_bridge.py bridge/answer_routing.py` | every file > 0 |
+| Completed branch reachable from the vote path (anti-criterion) | `grep -lc 'resume_completed_session' bridge/telegram_bridge.py bridge/answer_routing.py \| wc -l` | output == 2 |
+| Eligibility gate exists | `test -f bridge/poll_gating.py && grep -c 'def poll_eligible\|def is_group_chat' bridge/poll_gating.py` | output == 2 |
+| Eligibility read at both points | `grep -lc 'poll_eligible' tools/ask_poll.py bridge/telegram_relay.py \| wc -l` | output == 2 |
+| One `is_group_chat` definition (anti-criterion) | `grep -rn 'def is_group_chat\|def _is_group_chat' bridge/ \| wc -l` | output == 1 |
+| RTR imports the shared predicate | `grep -c 'poll_gating' bridge/read_the_room.py` | output > 0 |
+| Eng-only gate compares the enum, not a literal (anti-criterion) | `grep -c "session_type == .eng." bridge/poll_gating.py` | match count == 0 |
+| Claim released on failure (Risk 9) | `grep -c 'release_poll_claim' bridge/*.py` | output > 0 |
+| Steered marker separate from the claim (Risk 9) | `grep -c 'steered_at' bridge/*.py` | output > 0 |
+| Push question answerable in production, not by a second client | `grep -c 'poll_update_observed' bridge/telegram_bridge.py` | output > 0 |
 | Public drafter seam used, not `draft_message` | `grep -c 'validate_poll_question' bridge/message_drafter.py agent/output_handler.py` | every file > 0 |
 | Poll path never calls `draft_message` (anti-criterion) | `grep -n 'draft_message' agent/output_handler.py \| grep -ci poll` | match count == 0 |
 | Text fallback re-enqueue exists (not dead-letter-only) | `grep -c '_relay_attempts' bridge/telegram_relay.py` | output > 0 (and the poll terminal branch rpushes a `type: None` payload — assert by test, not grep) |
 | Role primes reach `/ask-me` | `grep -lc 'ask-me' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
-| Role primes stay surface-agnostic (anti-criterion) | `grep -c 'valor-ask-poll\|Telegram poll' .claude/commands/roles/prime-*-role.md` | match count == 0 |
+| Role primes stay surface-agnostic (anti-criterion) | `grep -rn 'valor-ask-poll\|Telegram poll' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 0 |
+| Prime line is a conditional, not a bare directive | `grep -rn 'legitimate open question' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` | output == 3 |
 
 **Note on the steering anti-criterion.** The grep is deliberately narrowed to *key construction*
 (`rpush`/`lpush`/`set` applied to a `steering:` literal). The bare-token form returns **2** on a
 clean `main` — `bridge/message_drafter.py` contains the log string
 `"requesting self-draft via steering: %s"` twice, which is unrelated prose. **Do not "fix" that by
-editing those log lines.** Verified: the narrowed grep returns `0` on `5d9729ad8` with a clean tree.
+editing those log lines.** Verified: the narrowed grep returns `0` on the verification baseline with a clean tree.
 
 ## Critique Results
 
 **Column semantics:** *Implementation Note* is the critic's suggestion at the time the finding was
 raised; *Addressed By* records what was actually adopted and supersedes it where the two differ.
+
+**Revision cycle 4, 2026-08-10 — the re-scope revision.** Triggered not by a critique but by the
+Task 1 gate FAIL and the owner's scope decision (issue comments `5236653597`, `5237014662`). The
+dead DM premise was replaced with group-only + eng-only; the DM-capability gate was deleted and
+replaced with the vote-readback gates; Risk 1 was retired as a fired risk and restated as a
+constraint; the eligibility gate (`bridge/poll_gating.py`) was added along with the multi-voter
+selection rule and Risk 9. **All nine cycle-3 findings were dispositioned in the same pass** — see
+the *Addressed By* column. Work that did not depend on chat type (spikes 2-5, the outbox/relay seam,
+catchup rendering, dedup/idempotency, the drafter split, the `answer_routing` extraction) was kept
+deliberately, not rewritten.
 
 **Critique cycle 3, 2026-08-10.** Verified against `ecd5d1972` with a clean tree. Cycles 1 and 2 are
 closed: all 9 cycle-1 findings and all 7 cycle-2 findings were dispositioned and their fixes re-verified
@@ -1434,15 +1952,15 @@ Findings: 9 total (0 blockers, 5 concerns, 4 nits). Roster gate: 3/3 complete, a
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Task 5a claims `resolve_answer_target` is "lifted verbatim" from `bridge/telegram_bridge.py:1799-1866` and that behavior preservation is "trivially checkable because it has no side effects". That range is not a state read: it interleaves the `AgentSession.query.filter` ladder with `await _ack_steering_routed(...)` + `return` at every branch, computes `age = _pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`) only to build the PENDING log string, and picks the completed record via a local most-recent-`created_at` sort (`_completed_created_at`, `:1898`) rather than `completed_sessions[0]`. As written the extraction is a restructure, and the claim that it is checkable is not earned. | pending | `AnswerTarget` must be `(kind, session, matched_status: str \| None, pending_age_s: float \| None)` — `matched_status` because the LIVE log embeds `matching_session.status` and LIVE_GUARD embeds `live_guard.status`; `pending_age_s` because the PENDING log embeds `age=%.1f`. COMPLETED must return the record chosen by the existing most-recent-`created_at` sort, not `completed_sessions[0]` — the wrong record silently degrades `_build_completed_resume_text`'s `context_summary`. The handler sets `_steering_session_enqueued = True` after dispatch (`:2006`); `resume_completed_session` returns `None`, so that flag stays caller-side. Restate Task 5a as a restructure with these four items as its behavior-preservation checklist. |
-| CONCERN | Risk & Robustness | `translate_poll_vote` takes the one-shot claim (`SET telegram:poll:answered:{poll_id} 1 NX EX`) before closing the poll and before `push_steering_message` / `resume_completed_session`. If the bridge dies, `EditMessageRequest` raises, or the steering write throws after the claim, the claim survives its TTL and both recovery mechanisms are defeated: `iter_unanswered_polls()` skips a claimed row so the reconciliation loop never retries, and Risk 7's `poll_expired_unanswered` signal — defined as a row with no matching claim — never fires. The result is the invisible permanently-blocked agent this feature exists to prevent, and no Race in the plan covers it. | pending | Wrap everything after `claim_poll_answer(poll_id)` in `try/except Exception` and, in the handler, delete the claim key before logging so the next reconciliation tick retries. Separately, record completion apart from the claim: write `steered_at` onto the `telegram:poll:{poll_id}` row only after `push_steering_message` / `resume_completed_session` returns, and have `iter_unanswered_polls()` treat "claim present, no `steered_at`, claim older than one reconcile interval" as still unanswered. `poll_expired_unanswered` must key on missing `steered_at`, not on the missing claim, or the operator signal is blind to exactly this state. |
-| CONCERN | Scope & Value | Every task depends transitively on the single Task ID `gate-real-dm-poll`, which now bundles two independent capability questions: Part A (can this account send a poll into a real user DM) and Part B (can a human tap be read back). Part B's UNRESOLVED outcome says "do not start Tasks 2-11", so an unavailable operator blocks Tasks 2, 3, 4, 7 and 8 — the whole outbound path, catchup rendering, and skill work — none of which consume the tap result. | pending | Split into `gate-real-dm-poll-send` (Part A) and `gate-real-dm-poll-tap` (Part B, `Depends On: gate-real-dm-poll-send`). Repoint Tasks 2, 3, 4, 7, 8 at `gate-real-dm-poll-send`; only Tasks 5 and 6 (`build-vote-translation`, `build-vote-observation`) depend on `gate-real-dm-poll-tap`. UNRESOLVED then pauses two inbound tasks instead of eleven, while a Part A FAIL still stops everything. Task 9's `Depends On: build-vote-observation` keeps tests correctly gated behind whichever half built. |
-| CONCERN | Scope & Value | Task 8 adds a "when blocked on a judgment call only the human can make, invoke `/ask-me`" line to all three role primes, which govern every eng and teammate session on every machine and surface — not just headless Telegram sessions posing poll-able questions. It introduces a second, looser definition of "blocked" alongside the auto-continue doctrine's "legitimate open question" bar, and the only validation is a grep that the string is present; nothing checks that pause frequency did not rise for local, email, or non-blocked sessions. | pending | Phrase the added prime line against the existing threshold verbatim: "when you have a legitimate open question that only the human can answer (the same bar the auto-continue nudge loop uses), invoke `/ask-me` rather than posing it in prose" — so the primes cannot be read as licensing a pause on a status update the nudge loop would auto-continue past. Add one Success Criterion asserting the line is a conditional (it must contain the open-question precondition, not a bare directive) and one asserting non-Telegram sessions still degrade to text through the CLI. |
-| CONCERN | History & Consistency | In the previous `## Critique Results` table, cycle 2's BLOCKER row was marked RESOLVED with the adopted design in "Addressed By", but its "Implementation Note" cell still spelled out the rejected design in imperative voice (`route_answer_to_session(session_id, text, sender, *, chat_id, source_msg_id=None, ...)`, `is_duplicate_message(chat_id, source_msg_id)`). The Implementation Note column is the implementable guidance a builder reads, while Task 5 deletes `route_answer_to_session` and states `is_duplicate_message` is not called on the vote path — a builder reading the table instead of Task 5 builds the rejected design. | pending | Add one line directly under the `## Critique Results` heading, before the table: "**Column semantics:** *Implementation Note* is the critic's original suggestion at the time the finding was raised; *Addressed By* records what was actually adopted and supersedes it where the two differ." Cheaper and less lossy than editing historical notes, and it protects future cycles. Do not silently rewrite an Implementation Note cell to match its disposition — that destroys the audit trail the table exists to keep. |
-| NIT | Risk & Robustness | Task 5b's selection rule is "Select the option with `voters >= 1` (the sender never votes)", stated as if it always identifies exactly one option. In any chat with more than one voter — which the plan permits ("In a group, translate the first vote and move on") — several options can each carry `voters >= 1`, and `PollResults` gives no ordering, so "the first vote" is not derivable from the aggregate a user account can see. | pending | State the rule in Task 5b: filter `results.results` to `voters >= 1`; exactly one → use it; more than one → log a warning naming the poll id and the tied options and steer with the highest-`voters` option, breaking ties by lowest decoded option index, so the behavior is deterministic and greppable. |
-| NIT | Scope & Value | Task 3 bundles ten distinct edits across five files under one `Validates` field and one assignee: payload builder, `send_poll` handler method, drafter medium, `validate_poll_question`, `KNOWN_MESSAGE_TYPES`, relay dispatch branch, both dead-letter guards, the terminal-failure text re-enqueue, the Race-6 provisional row, post-send bookkeeping, the CLI, and the `pyproject.toml` entry. A partial completion is indistinguishable from a complete one. | pending | Split along the seam the plan already draws: `build-outbound-payload` (payload builder + `send_poll` handler method + `validate_poll_question` + drafter medium; validated by `test_poll_payload.py`), `build-relay-dispatch` (`KNOWN_MESSAGE_TYPES`, dispatch branch, the `:827`/`:836` dead-letter guards, the `:1029-1034` re-enqueue, post-send bookkeeping; validated by `test_bridge_relay.py`), and `build-ask-poll-cli` (`tools/ask_poll.py`, option validation, `pyproject.toml`; validated by `test_ask_poll_cli.py`). The provisional-row write belongs to Task 4, not duplicated across two tasks. |
-| NIT | History & Consistency | The Verification row "Role primes stay surface-agnostic (anti-criterion)" runs `grep -c '...' .claude/commands/roles/prime-*-role.md` expecting "match count == 0", but with multiple file arguments `grep -c` prints one `path:count` line per file. Verified on a clean tree it emits three lines, so Task 11's validator has no scalar to compare — the same class of unevaluable anti-criterion that was cycle 1's BLOCKER for the steering grep. | pending | Replace with `grep -rn 'valor-ask-poll\\|Telegram poll' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` expecting `0`. Apply the same treatment to the "Completed branch reachable from the vote path" row, whose "every file > 0" is likewise per-file: `grep -lc 'resume_completed_session' bridge/telegram_bridge.py bridge/answer_routing.py \| wc -l` expecting `2`. |
-| NIT | History & Consistency | The document cites three different baselines for its own verification: the Freshness Check says "Baseline commit: `e051e95da`", the Technical Approach says symbols were "re-verified against `5d9729ad8`", and the previous Critique Results said "Verified against `9de184a3e`". Since the plan is line-number-approximate by its own admission, a builder cannot tell which tree the cited offsets belong to. | pending | Set a single `**Verification baseline:**` line in the Freshness Check to the current plan-revision commit and change the other three mentions to "the verification baseline above". Symbol names themselves were re-confirmed present on `ecd5d1972`. |
+| CONCERN | Risk & Robustness | Task 5a claims `resolve_answer_target` is "lifted verbatim" from `bridge/telegram_bridge.py:1799-1866` and that behavior preservation is "trivially checkable because it has no side effects". That range is not a state read: it interleaves the `AgentSession.query.filter` ladder with `await _ack_steering_routed(...)` + `return` at every branch, computes `age = _pending_session_age_seconds(pending_session.created_at, time.time())` (`:1834`) only to build the PENDING log string, and picks the completed record via a local most-recent-`created_at` sort (`_completed_created_at`, `:1898`) rather than `completed_sessions[0]`. As written the extraction is a restructure, and the claim that it is checkable is not earned. | ADOPTED (cycle 4) — Task 9a now states the extraction is a **restructure, not a verbatim lift**, and carries the four-item behavior-preservation checklist verbatim: `matched_status`, `pending_age_s`, the most-recent-`created_at` COMPLETED pick, and `_steering_session_enqueued` staying caller-side. `AnswerTarget` widened to 4 fields in the Technical Approach and in Task 9a. | `AnswerTarget` must be `(kind, session, matched_status: str \| None, pending_age_s: float \| None)` — `matched_status` because the LIVE log embeds `matching_session.status` and LIVE_GUARD embeds `live_guard.status`; `pending_age_s` because the PENDING log embeds `age=%.1f`. COMPLETED must return the record chosen by the existing most-recent-`created_at` sort, not `completed_sessions[0]` — the wrong record silently degrades `_build_completed_resume_text`'s `context_summary`. The handler sets `_steering_session_enqueued = True` after dispatch (`:2006`); `resume_completed_session` returns `None`, so that flag stays caller-side. Restate Task 5a as a restructure with these four items as its behavior-preservation checklist. |
+| CONCERN | Risk & Robustness | `translate_poll_vote` takes the one-shot claim (`SET telegram:poll:answered:{poll_id} 1 NX EX`) before closing the poll and before `push_steering_message` / `resume_completed_session`. If the bridge dies, `EditMessageRequest` raises, or the steering write throws after the claim, the claim survives its TTL and both recovery mechanisms are defeated: `iter_unanswered_polls()` skips a claimed row so the reconciliation loop never retries, and Risk 7's `poll_expired_unanswered` signal — defined as a row with no matching claim — never fires. The result is the invisible permanently-blocked agent this feature exists to prevent, and no Race in the plan covers it. | ADOPTED (cycle 4) — promoted to **Risk 9** with its own Failure Path test block (**Claim Durability**). `release_poll_claim` + `try/except` around everything after the claim (Task 9b), a separate `steered_at` completion marker written by `mark_poll_steered` (Task 6), `iter_unanswered_polls()` re-yielding claim-without-`steered_at`, and `poll_expired_unanswered` keying on missing `steered_at` (Task 10). | Wrap everything after `claim_poll_answer(poll_id)` in `try/except Exception` and, in the handler, delete the claim key before logging so the next reconciliation tick retries. Separately, record completion apart from the claim: write `steered_at` onto the `telegram:poll:{poll_id}` row only after `push_steering_message` / `resume_completed_session` returns, and have `iter_unanswered_polls()` treat "claim present, no `steered_at`, claim older than one reconcile interval" as still unanswered. `poll_expired_unanswered` must key on missing `steered_at`, not on the missing claim, or the operator signal is blind to exactly this state. |
+| CONCERN | Scope & Value | Every task depends transitively on the single Task ID `gate-real-dm-poll`, which now bundles two independent capability questions: Part A (can this account send a poll into a real user DM) and Part B (can a human tap be read back). Part B's UNRESOLVED outcome says "do not start Tasks 2-11", so an unavailable operator blocks Tasks 2, 3, 4, 7 and 8 — the whole outbound path, catchup rendering, and skill work — none of which consume the tap result. | ADOPTED (cycle 4), and superseded in scope by the re-scope. The gate is split into `gate-poll-vote-readback` (Task 1, automated self-vote, no human) and `gate-poll-human-tap` (Task 2). **Both gate only Tasks 9-10.** Tasks 3-8 and 11-12 depend on neither, so an unavailable operator pauses two tasks instead of eleven. The old real-DM send gate is deleted outright — spike-6 answered it FAIL. | Split into `gate-real-dm-poll-send` (Part A) and `gate-real-dm-poll-tap` (Part B, `Depends On: gate-real-dm-poll-send`). Repoint Tasks 2, 3, 4, 7, 8 at `gate-real-dm-poll-send`; only Tasks 5 and 6 (`build-vote-translation`, `build-vote-observation`) depend on `gate-real-dm-poll-tap`. UNRESOLVED then pauses two inbound tasks instead of eleven, while a Part A FAIL still stops everything. Task 9's `Depends On: build-vote-observation` keeps tests correctly gated behind whichever half built. |
+| CONCERN | Scope & Value | Task 8 adds a "when blocked on a judgment call only the human can make, invoke `/ask-me`" line to all three role primes, which govern every eng and teammate session on every machine and surface — not just headless Telegram sessions posing poll-able questions. It introduces a second, looser definition of "blocked" alongside the auto-continue doctrine's "legitimate open question" bar, and the only validation is a grep that the string is present; nothing checks that pause frequency did not rise for local, email, or non-blocked sessions. | ADOPTED (cycle 4) — the required phrasing is now spelled out in the Technical Approach and in Task 12 (*"a legitimate open question that only the human can answer (the same bar the auto-continue nudge loop uses)"*), with two new Success Criteria (the line is a conditional; non-Telegram surfaces still degrade to text) and a Verification row asserting the precondition string is present in all three primes. | Phrase the added prime line against the existing threshold verbatim: "when you have a legitimate open question that only the human can answer (the same bar the auto-continue nudge loop uses), invoke `/ask-me` rather than posing it in prose" — so the primes cannot be read as licensing a pause on a status update the nudge loop would auto-continue past. Add one Success Criterion asserting the line is a conditional (it must contain the open-question precondition, not a bare directive) and one asserting non-Telegram sessions still degrade to text through the CLI. |
+| CONCERN | History & Consistency | In the previous `## Critique Results` table, cycle 2's BLOCKER row was marked RESOLVED with the adopted design in "Addressed By", but its "Implementation Note" cell still spelled out the rejected design in imperative voice (`route_answer_to_session(session_id, text, sender, *, chat_id, source_msg_id=None, ...)`, `is_duplicate_message(chat_id, source_msg_id)`). The Implementation Note column is the implementable guidance a builder reads, while Task 5 deletes `route_answer_to_session` and states `is_duplicate_message` is not called on the vote path — a builder reading the table instead of Task 5 builds the rejected design. | ADOPTED (cycle 3) — the column-semantics line is present directly under this heading and is retained. Historical Implementation Notes are left intact on purpose; the audit trail is the point. | Add one line directly under the `## Critique Results` heading, before the table: "**Column semantics:** *Implementation Note* is the critic's original suggestion at the time the finding was raised; *Addressed By* records what was actually adopted and supersedes it where the two differ." Cheaper and less lossy than editing historical notes, and it protects future cycles. Do not silently rewrite an Implementation Note cell to match its disposition — that destroys the audit trail the table exists to keep. |
+| NIT | Risk & Robustness | Task 5b's selection rule is "Select the option with `voters >= 1` (the sender never votes)", stated as if it always identifies exactly one option. In any chat with more than one voter — which the plan permits ("In a group, translate the first vote and move on") — several options can each carry `voters >= 1`, and `PollResults` gives no ordering, so "the first vote" is not derivable from the aggregate a user account can see. | ADOPTED and PROMOTED (cycle 4) — no longer a nit. The re-scope makes groups the *only* surface, so multi-voter ambiguity is the normal case. The deterministic rule (filter `voters >= 1`; exactly one → use; several → warn, highest `voters`, tie-break lowest decoded index; zero → return without claiming) is stated in the Technical Approach, in Task 9b, and in a dedicated **Vote Selection Under Multiple Voters** test block. | State the rule in Task 5b: filter `results.results` to `voters >= 1`; exactly one → use it; more than one → log a warning naming the poll id and the tied options and steer with the highest-`voters` option, breaking ties by lowest decoded option index, so the behavior is deterministic and greppable. |
+| NIT | Scope & Value | Task 3 bundles ten distinct edits across five files under one `Validates` field and one assignee: payload builder, `send_poll` handler method, drafter medium, `validate_poll_question`, `KNOWN_MESSAGE_TYPES`, relay dispatch branch, both dead-letter guards, the terminal-failure text re-enqueue, the Race-6 provisional row, post-send bookkeeping, the CLI, and the `pyproject.toml` entry. A partial completion is indistinguishable from a complete one. | ADOPTED (cycle 4) — old Task 3 split three ways along the seam the critic named: Task 5 `build-outbound-payload`, Task 7 `build-relay-dispatch`, Task 8 `build-ask-poll-cli`, each with its own `Validates`. The Race-6 provisional-row write is owned solely by Task 6 (`build-poll-registry`) and only *called* from Task 7. | Split along the seam the plan already draws: `build-outbound-payload` (payload builder + `send_poll` handler method + `validate_poll_question` + drafter medium; validated by `test_poll_payload.py`), `build-relay-dispatch` (`KNOWN_MESSAGE_TYPES`, dispatch branch, the `:827`/`:836` dead-letter guards, the `:1029-1034` re-enqueue, post-send bookkeeping; validated by `test_bridge_relay.py`), and `build-ask-poll-cli` (`tools/ask_poll.py`, option validation, `pyproject.toml`; validated by `test_ask_poll_cli.py`). The provisional-row write belongs to Task 4, not duplicated across two tasks. |
+| NIT | History & Consistency | The Verification row "Role primes stay surface-agnostic (anti-criterion)" runs `grep -c '...' .claude/commands/roles/prime-*-role.md` expecting "match count == 0", but with multiple file arguments `grep -c` prints one `path:count` line per file. Verified on a clean tree it emits three lines, so Task 11's validator has no scalar to compare — the same class of unevaluable anti-criterion that was cycle 1's BLOCKER for the steering grep. | ADOPTED (cycle 3/4) — both rows rewritten to `grep -rn ... \| wc -l` scalar form, and every Verification row added in cycle 4 uses the same scalar shape. | Replace with `grep -rn 'valor-ask-poll\\|Telegram poll' .claude/commands/roles/prime-dev-role.md .claude/commands/roles/prime-pm-role.md .claude/commands/roles/prime-teammate-role.md \| wc -l` expecting `0`. Apply the same treatment to the "Completed branch reachable from the vote path" row, whose "every file > 0" is likewise per-file: `grep -lc 'resume_completed_session' bridge/telegram_bridge.py bridge/answer_routing.py \| wc -l` expecting `2`. |
+| NIT | History & Consistency | The document cites three different baselines for its own verification: the Freshness Check says "Baseline commit: `e051e95da`", the Technical Approach says symbols were "re-verified against `5d9729ad8`", and the previous Critique Results said "Verified against `9de184a3e`". Since the plan is line-number-approximate by its own admission, a builder cannot tell which tree the cited offsets belong to. | ADOPTED (cycle 4) — the Freshness Check now carries a single `**Verification baseline:** 95aba8187` line that explicitly supersedes any other sha mentioned in this document's history. | Set a single `**Verification baseline:**` line in the Freshness Check to the current plan-revision commit and change the other three mentions to "the verification baseline above". Symbol names themselves were re-confirmed present on `ecd5d1972`. |
 
 ### Structural checks (cycle 3, re-run on `ecd5d1972`)
 
@@ -1464,6 +1982,10 @@ as a NIT above, which emit per-file output rather than a scalar.
 non-blocking, the escape-hatch wording, and the one-at-a-time rule — are **already settled by
 owner decision** and are recorded in the Technical Approach. They are not reopened.
 
+The **surface** question that broke the original plan is also settled: group chats only, eng sessions
+only, DMs and teammate sessions keep prose, no bot identity, no reactions. Recorded in **Scope** at
+the top of this document, sourced from issue comment `5237014662`, and **not reopened by critique**.
+
 Two judgment calls remain, and each has a chosen default recorded below so the build can proceed
 without waiting on a human. They are listed for the critique stage to challenge, not as a gate:
 
@@ -1475,7 +1997,7 @@ without waiting on a human. They are listed for the critique stage to challenge,
    reconciliation interval, but this is a judgment call about how patient the system should be.
 
 2. **Auto-rendering a prose question at turn end.** Polls are wired to `/ask-me` only, and this
-   revision closes the *reachability* half of the gap: Task 8 adds one line to each of the three
+   revision closes the *reachability* half of the gap: Task 12 adds one line to each of the three
    role primes so a blocked headless session is directed to `/ask-me` rather than posing a judgment
    call in prose. What remains genuinely open is whether a later pass should teach the turn-end
    delivery path itself (the `needs_human` edge at `runner.py:1526-1531`) to *detect* a
