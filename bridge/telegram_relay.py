@@ -33,6 +33,8 @@ import os
 import redis
 from telethon.errors import FloodWaitError
 
+from utils.peer import numeric_peer
+
 logger = logging.getLogger(__name__)
 
 # Poll interval for checking outbox queues (100ms for low latency)
@@ -126,10 +128,16 @@ def _deliverable_peer(chat_id, kind: str, message: dict) -> bool:
     ``kind`` names the payload for the log line ("message", "reaction",
     "custom emoji message"). Every send path routes through here so the three
     cannot drift apart again.
+
+    The parse itself belongs to ``utils.peer``, which is the single home for
+    "is this a Telegram peer" across the source side too. Re-deriving it with a
+    bare ``int()`` here — as the old message-path check did — recreated the
+    drift this helper exists to prevent: ``int()`` accepts ``"+5"``, ``5.9``,
+    and ``True``, all of which ``utils.peer`` rejects, so the relay and the
+    source side disagreed about the same payload.
     """
-    try:
-        chat_id_int = int(chat_id)
-    except (ValueError, TypeError):
+    chat_id_int = numeric_peer(chat_id)
+    if chat_id_int is None:
         logger.debug(f"Relay: dropping {kind} for non-Telegram chat_id '{chat_id}' (local session)")
         return False
 
@@ -826,10 +834,12 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     text = message.get("text", "")
     reply_to = message.get("reply_to")
     if chat_id and text:
-        # Skip dead-lettering for non-Telegram (local) session IDs
-        try:
-            chat_id_int = int(chat_id)
-        except (ValueError, TypeError):
+        # Same parse as the send paths (one predicate, `utils.peer`), but not
+        # `_deliverable_peer`: this is about discarding a stored record rather
+        # than dropping a send, so the log text differs, and the zero case here
+        # deliberately logs only the chat_id rather than the whole payload.
+        chat_id_int = numeric_peer(chat_id)
+        if chat_id_int is None:
             logger.debug(f"Relay: discarding dead letter for non-Telegram chat_id '{chat_id}'")
             return
 

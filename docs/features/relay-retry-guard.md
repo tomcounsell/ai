@@ -25,7 +25,21 @@ The `_dead_letter_message()` helper routes exhausted messages based on type:
 
 #### Group/supergroup-safe guard
 
-Both the persist side (`_dead_letter_message` in `telegram_relay.py`) and the replay side (`replay_dead_letters` in `dead_letters.py`) guard against invalid peers by checking `chat_id_int == 0`. Group and supergroup chat IDs are legitimately negative integers (e.g. `-1003900483201`); only `chat_id == 0` is an invalid Telegram peer that causes `PeerIdInvalidError` in a loop. The two guards must stay in lockstep — narrowing only one side is a no-op because a negative-chat_id record persisted by the relay side will be deleted by the replay side on the next bridge startup.
+Group and supergroup chat IDs are legitimately negative integers (e.g. `-1003900483201`); only `chat_id == 0` is an invalid Telegram peer, and it causes `PeerIdInvalidError` in a loop. Five sites guard against it:
+
+| Site | Function | Behavior on `chat_id == 0` |
+|------|----------|----------------------------|
+| Send — text/files | `_send_queued_message` | dropped, WARNING |
+| Send — reactions | `_send_queued_reaction` | dropped, WARNING |
+| Send — custom emoji messages | `_send_custom_emoji_message` | dropped, WARNING |
+| Persist | `_dead_letter_message` | discarded, WARNING |
+| Replay | `replay_dead_letters` (`dead_letters.py`) | deleted on next bridge startup |
+
+The three send paths share one helper, `_deliverable_peer(chat_id, kind, message)`, which also separates the two drop reasons by log level: a local session id (`local-<uuid>`) is routine and logs at DEBUG, while a zero peer is the chatless-session placeholder leaking into an outbound payload and logs at WARNING. Before #2644 only the text/file path was guarded; the other two reached Telethon and raised (#2644).
+
+All five derive the peer from `utils.peer.numeric_peer`, which is the single home for this parse across the source side too. It is deliberately stricter than a bare `int()` — it rejects `"+5"`, `5.9`, and `True` — so re-deriving the check locally makes the relay and the source side disagree about the same payload. `_dead_letter_message` keeps its own log wording (it discards a stored record rather than dropping a send, and logs only the chat_id rather than the whole payload) but shares that parse.
+
+The persist and replay guards must stay in lockstep — narrowing only one side is a no-op, because a negative-chat_id record persisted by the relay side will be deleted by the replay side on the next bridge startup.
 
 #### `cleanup_file` honoring at DLQ placement
 
