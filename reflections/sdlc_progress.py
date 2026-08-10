@@ -13,19 +13,24 @@ Gates, in order, per open non-draft SDLC PR:
          ``session:issuelock:{N}`` is read directly and classified by
          ``models.session_lifecycle._lock_owner_is_live``. Key absent → free.
          Malformed payload, Redis error, or any exception → *unknown*, and
-         unknown always declines to act. A fresh non-ledger non-terminal
-         ``AgentSession`` carrying the issue number is an OR-ed secondary
-         signal that can only ADD liveness, never remove it.
+         unknown always declines to act. This is a **one-signal gate**: the
+         lock is the sole liveness authority.
     6    this machine owns the project (``projects.<key>.machine``).
 
 Then the action ladder, keyed on ``(slug, head-sha)``:
 
+    escalation key already set                 -> stop acting entirely
     attempts >= SDLC_STALL_RESUME_MAX_ATTEMPTS -> escalate once, stop
     action cooldown live                       -> skip this tick
     rung 1  live non-ledger eng session        -> steer_session(...)
     rung 2  most recent resumable eng session  -> resume_session(...)
     rung 3  no target                          -> create_session(slug=sdlc-N)
     rung 4  action failed (non-benign)         -> escalate once, stop
+
+"Escalate once and **stop acting**" is literal: once the escalation key exists
+for a ``(slug, head-sha)``, every later tick skips the lane before it can claim
+an action window. That, plus the invariant that the attempts TTL is never
+shorter than the escalation TTL, is what makes a create-loop impossible.
 
 **Benign races are not attempts.** Another actor (typically
 ``reflections.crash_recovery``, or the lane re-taking its own issue lock) can
@@ -47,10 +52,9 @@ Configuration (all optional, all provisional and tunable):
     SDLC_STALL_RESUME_MAX_ATTEMPTS          default 3    attempts per (slug, sha)
     SDLC_STALL_CREATE_MAX_PER_TICK          default 1    creations per project per tick
     SDLC_STALL_RESUME_COOLDOWN_HOURS        default 1    action cooldown per (slug, sha)
-    SDLC_STALL_ATTEMPTS_TTL_HOURS           default 24   TTL on the attempts key
+    SDLC_STALL_ATTEMPTS_TTL_DAYS            default 30   TTL on the attempts key; floored
+                                                         at the escalation TTL
     SDLC_STALL_ESCALATION_TTL_DAYS          default 30   TTL on the escalation key
-    SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES default 30   freshness bound on gate 5's
-                                                         secondary row signal
 
 See ``docs/features/pm-session-liveness.md`` for the full state-layer rationale.
 """
@@ -101,11 +105,14 @@ _DEFAULT_RESUME_ENABLED = True
 _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_CREATE_MAX_PER_TICK = 1
 _DEFAULT_RESUME_COOLDOWN_HOURS = 1
-_DEFAULT_ATTEMPTS_TTL_HOURS = 24
+# INVARIANT: attempts TTL >= escalation TTL. If the attempts key lapsed first,
+# the budget would re-arm while the escalation key still suppressed the page —
+# the ladder would dispatch a fresh MAX_ATTEMPTS actions per attempts-TTL
+# window, silently, for the whole escalation window. Both keys are sha-scoped,
+# so a short attempts TTL buys nothing anyway: a new commit mints fresh keys.
+# Enforced at read time by _attempts_ttl_seconds().
+_DEFAULT_ATTEMPTS_TTL_DAYS = 30
 _DEFAULT_ESCALATION_TTL_DAYS = 30
-# Deliberately aligned with ISSUE_LOCK_TTL_SECONDS (30 min) so the two liveness
-# horizons expire together.
-_DEFAULT_ROW_LIVENESS_MAX_AGE_MINUTES = 30
 
 
 def _get_redis():
@@ -134,7 +141,15 @@ def _action_cooldown_seconds() -> int:
 
 
 def _attempts_ttl_seconds() -> int:
-    return int(_env_float("SDLC_STALL_ATTEMPTS_TTL_HOURS", _DEFAULT_ATTEMPTS_TTL_HOURS) * 3600)
+    """TTL on the attempts key, floored at the escalation TTL.
+
+    The floor enforces the module invariant "attempts TTL >= escalation TTL":
+    an attempts key that expires first re-arms the budget while the escalation
+    key still suppresses the page, which turns "escalate once and stop" into
+    "act forever, silently".
+    """
+    configured = int(_env_float("SDLC_STALL_ATTEMPTS_TTL_DAYS", _DEFAULT_ATTEMPTS_TTL_DAYS) * 86400)
+    return max(configured, _escalation_ttl_seconds())
 
 
 def _escalation_ttl_seconds() -> int:
@@ -147,13 +162,6 @@ def _max_attempts() -> int:
 
 def _create_max_per_tick() -> int:
     return int(_env_float("SDLC_STALL_CREATE_MAX_PER_TICK", _DEFAULT_CREATE_MAX_PER_TICK))
-
-
-def _row_liveness_max_age_seconds() -> int:
-    return int(
-        _env_float("SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES", _DEFAULT_ROW_LIVENESS_MAX_AGE_MINUTES)
-        * 60
-    )
 
 
 def _resume_enabled() -> bool:
@@ -316,67 +324,20 @@ def _lock_says_live(issue_number: int) -> bool | None:
         return None  # unknown -> caller declines to act
 
 
-def _nonledger_row_live(issue_number: int) -> bool:
-    """Secondary liveness signal: a *fresh* non-ledger non-terminal session row.
-
-    Catches a lane running without a lock (a Redis flap during acquire). It can
-    only ever ADD liveness — a failure here contributes ``False``, never
-    ``None``, because a failed secondary signal must not veto a successful
-    primary one.
-
-    Freshness-bounded by ``SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES``: hollow
-    sessions (non-terminal forever, no heartbeat, frozen worktree) are real, and
-    an unbounded check would let one suppress the detector permanently.
-    """
-    try:
-        from agent.session_health import _is_ledger
-        from bridge.utc import to_unix_ts
-        from models.agent_session import AgentSession
-        from models.session_lifecycle import NON_TERMINAL_STATUSES
-
-        rows = list(AgentSession.query.filter(issue_number=issue_number))
-    except Exception as exc:
-        logger.warning(
-            "sdlc_progress: secondary row check failed for issue #%s: %s", issue_number, exc
-        )
-        return False
-
-    max_age = _row_liveness_max_age_seconds()
-    now = time.time()
-    for row in rows:
-        try:
-            if _is_ledger(row):
-                continue
-            if getattr(row, "status", None) not in NON_TERMINAL_STATUSES:
-                continue
-            ts = to_unix_ts(getattr(row, "updated_at", None))
-            if ts is None:
-                continue
-            if now - ts <= max_age:
-                return True
-        except Exception as exc:  # pragma: no cover — defensive per-row guard
-            logger.debug("sdlc_progress: row liveness check skipped a row: %r", exc)
-    return False
-
-
 def _lane_is_live(issue_number: int) -> bool | None:
     """True = a live lane owns this issue, False = free, None = unknown.
 
-    Polarity is load-bearing: the two signals are OR-ed for "live", never
-    AND-ed. The row check can only add liveness; letting it turn a
-    lock-says-dead result into "not live" is the permanent-false-negative mode
-    that ledger anchors already demonstrated.
-
-    An unknown lock read short-circuits before the row check on purpose: the
-    row query goes through the same Redis, so a degraded backend cannot be its
-    own second opinion.
+    A deliberately **one-signal** gate: the issue lock is the sole liveness
+    authority. An earlier design OR-ed in a secondary ``AgentSession`` row
+    check keyed on ``issue_number``; that branch was structurally dead, because
+    no non-ledger creation path populates ``AgentSession.issue_number`` (the
+    same gap documented at ``tools/merge_predicate.py``), and every row that
+    does carry one is a ledger anchor the check skips. Inferring liveness from
+    a row's existence is also the mirage the lock was adopted to kill. Do not
+    reintroduce it without first plumbing ``issue_number`` through the
+    creation path.
     """
-    lock_live = _lock_says_live(issue_number)
-    if lock_live is None:
-        return None
-    if lock_live:
-        return True
-    return _nonledger_row_live(issue_number) or False
+    return _lock_says_live(issue_number)
 
 
 # --- Redis bookkeeping ------------------------------------------------------
@@ -416,12 +377,16 @@ def _action_cooldown_release(slug: str, sha: str) -> None:
 
 
 def _attempts_count(slug: str, sha: str) -> int | None:
-    """Read the attempt counter WITHOUT charging it. None = read failed.
+    """Read the attempt counter WITHOUT charging it. None = unknown.
 
     This is a bare ``GET`` (absent key = 0), consulted only by the pre-action
     budget gate. It must never be an ``INCR``: a lane sitting in the action
     cooldown would then charge an attempt every tick and escalate to a human
     without the ladder ever dispatching a real action.
+
+    A read failure OR a non-integer payload both read as *unknown*, matching
+    every other unknown in this module. Treating a corrupt payload as 0 would
+    say "under budget, act" on the strength of data we cannot parse.
     """
     key = _ATTEMPTS_KEY.format(slug=slug, sha=sha)
     try:
@@ -436,7 +401,8 @@ def _attempts_count(slug: str, sha: str) -> int | None:
             raw = raw.decode("utf-8")
         return int(raw)
     except (TypeError, ValueError):
-        return 0
+        logger.warning("sdlc_progress: attempts payload not an integer for %s: %r", key, raw)
+        return None
 
 
 def _bump_attempts(slug: str, sha: str) -> bool:
@@ -456,6 +422,25 @@ def _bump_attempts(slug: str, sha: str) -> bool:
     except Exception as exc:
         logger.warning("sdlc_progress: attempts bump failed for %s: %s", key, exc)
         return False
+
+
+def _escalation_exists(slug: str, sha: str) -> bool | None:
+    """Has a human already been paged about this ``(slug, sha)``? None = unknown.
+
+    Read-only companion to ``_escalation_set``, consulted before the lane
+    claims an action window. "Escalate once and stop acting" is only literal if
+    a later tick can *see* the escalation: without this read the ladder would
+    keep dispatching actions while ``_escalation_set``'s ``SET NX`` silently
+    swallowed every further page.
+
+    Unknown declines to act, consistent with every other unknown here.
+    """
+    key = _ESCALATED_KEY.format(slug=slug, sha=sha)
+    try:
+        return _get_redis().get(key) is not None
+    except Exception as exc:
+        logger.warning("sdlc_progress: escalation read failed for %s: %s", key, exc)
+        return None
 
 
 def _escalation_set(slug: str, sha: str) -> bool:
@@ -567,13 +552,20 @@ def _send_alert(message: str) -> None:
 # --- The steer-target ladder ------------------------------------------------
 
 
-def _pick_steer_target(project_key: str) -> tuple[str, Any]:
+def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[str, Any]:
     """Return ``(kind, session)`` with kind in steer | resume | create | unknown.
 
     Rung 1 prefers a live (non-terminal, non-ledger) eng session for the
-    project, most recently updated. Rung 2 falls back to the most recently
-    updated resumable eng session that carries a ``claude_session_uuid``
-    (required by ``resume_session``). Otherwise the caller creates one.
+    project. Rung 2 falls back to a resumable eng session that carries a
+    ``claude_session_uuid`` (required by ``resume_session``). Otherwise the
+    caller creates one.
+
+    Within BOTH buckets, a session whose ``slug`` matches ``lane_slug`` wins
+    over a merely-more-recent one. This is not cosmetic: ``resume_session``
+    transitions the row in place and the worker runs it in that row's own
+    ``working_dir``, so resuming a session belonging to another lane makes work
+    for issue A land as commits on lane B's branch. Only when no
+    same-lane candidate exists does most-recently-updated decide.
 
     ``("unknown", None)`` means the session query itself failed — the caller
     declines to act rather than guessing.
@@ -589,8 +581,10 @@ def _pick_steer_target(project_key: str) -> tuple[str, Any]:
         logger.warning("sdlc_progress: target query failed for %s: %s", project_key, exc)
         return ("unknown", None)
 
-    def _recency(row) -> float:
-        return to_unix_ts(getattr(row, "updated_at", None)) or 0.0
+    def _rank(row) -> tuple[int, float]:
+        """Same-lane first, then most recently updated."""
+        same_lane = 1 if (lane_slug and getattr(row, "slug", None) == lane_slug) else 0
+        return (same_lane, to_unix_ts(getattr(row, "updated_at", None)) or 0.0)
 
     live: list[Any] = []
     resumable: list[Any] = []
@@ -607,9 +601,9 @@ def _pick_steer_target(project_key: str) -> tuple[str, Any]:
             logger.debug("sdlc_progress: target selection skipped a row: %r", exc)
 
     if live:
-        return ("steer", max(live, key=_recency))
+        return ("steer", max(live, key=_rank))
     if resumable:
-        return ("resume", max(resumable, key=_recency))
+        return ("resume", max(resumable, key=_rank))
     return ("create", None)
 
 
@@ -764,6 +758,11 @@ def _check_project_stalls(project: dict) -> dict:
     project_key = project.get("slug", "?")
     findings: list[str] = []
     counts = {"steered": 0, "resumed": 0, "created": 0, "escalated": 0}
+    # Per-call state, deliberately not in Redis: it brakes creations WITHIN one
+    # project tick. It is therefore NOT atomic across overlapping ticks — two
+    # ticks racing on different lanes of the same project can each mint one
+    # session. Accepted at a 30-minute cadence; the per-(slug, sha) attempt
+    # budget bounds the total regardless. See the plan's Risks table.
     creates_this_tick = 0
 
     if not wd or not Path(wd).is_dir():
@@ -831,6 +830,18 @@ def _check_project_stalls(project: dict) -> dict:
         if live:
             continue
 
+        # "Escalate once and stop acting", enforced literally. Without this
+        # read the ladder keeps dispatching actions after the page (the
+        # SET NX in _escalation_set silently swallows the extra escalations),
+        # so the human sees one message while the system acts forever.
+        escalated = _escalation_exists(slug, sha)
+        if escalated is None:
+            findings.append(f"gate-unknown: escalation-read {slug}")
+            continue
+        if escalated:
+            findings.append(f"already-escalated: {slug}")
+            continue
+
         def _escalate(reason: str, attempts: int) -> None:
             msg = _escalate_once(
                 project=project_key,
@@ -864,7 +875,7 @@ def _check_project_stalls(project: dict) -> dict:
             logger.info("sdlc_progress: action cooldown live for %s@%s", slug, sha[:8])
             continue
 
-        kind, target = _pick_steer_target(project_key)
+        kind, target = _pick_steer_target(project_key, lane_slug=slug)
         if kind == "unknown":
             findings.append(f"gate-unknown: target-query {slug}")
             _action_cooldown_release(slug, sha)
@@ -896,6 +907,12 @@ def _check_project_stalls(project: dict) -> dict:
 
         if outcome.benign:
             findings.append(f"benign-race: {kind} {slug}")
+            if not outcome.dispatched:
+                # A benign race caught BEFORE dispatch (the create rung's
+                # pre-create lock re-read) sent nothing, so the lane owes no
+                # cooldown. A benign race after a dispatch (the resume rung)
+                # keeps the window: a message really did land.
+                _action_cooldown_release(slug, sha)
             continue
         if outcome.declined:
             # Declined means the rung never dispatched — nothing happened, so

@@ -2,7 +2,7 @@
 
 **Issue:** [#1172](https://github.com/tomcounsell/ai/issues/1172) (extended by [#1226](https://github.com/tomcounsell/ai/issues/1226))
 **Status:** Active
-**Last updated:** 2026-04-30
+**Last updated:** 2026-08-10
 
 This feature replaces inferred-from-staleness session kills with two
 complementary changes: the detector kills only on **evidence** of failure
@@ -275,19 +275,22 @@ The reflection iterates every local project and applies a **6-gate stall heurist
 
    This is deliberately a bare `GET`, never a call to `touch_issue_lock`. `touch_issue_lock` fails **open**: every Redis exception it swallows comes back as `IssueLockResult(acquired=True)`, which this gate would read as "lock unheld, not live, act" (exactly backwards during a Redis flap), and it also cannot express "unknown" at all. A bare `GET` can only read, never claim or renew a lease, which is the stronger read-only guarantee this gate needs.
 
-   A secondary signal, `_nonledger_row_live`, ORs in "live" for a *fresh* (within `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES`) non-ledger `AgentSession` row in a `NON_TERMINAL_STATUSES` state for the issue. It can only ADD liveness, never remove it: a failed row check contributes `False`, never `None`, so a degraded secondary signal can never veto a healthy primary one. This catches a lane running without a lock (a Redis flap during acquire).
+   The lock is the **sole** liveness signal here. An earlier design OR-ed in a secondary `AgentSession` row check keyed on `issue_number`; it was deleted because it was structurally dead — no non-ledger creation path populates `AgentSession.issue_number` (the same gap documented at `tools/merge_predicate.py`), so the only rows that carry one are `sdlc-local-*` ledger anchors the check already skips. Reintroducing it means first plumbing `issue_number` through the session-creation path, and inferring liveness from a row's existence is the mirage the lock was adopted to kill.
 6. **This machine owns the project.** `reflections.utilities.machine_owns_project(project_key)` against `projects.<key>.machine`. Two machines sharing a checkout must never both act on the same lane; a non-owning machine skips the whole project.
 
 ### The action ladder
 
 A PR that fails all six gates is genuinely stalled. The reflection then acts on it, keyed on `(slug, head-sha)`:
 
-1. **Attempt budget check.** If the `(slug, sha)` attempt counter (`sdlc:stall:resume:attempts:{slug}:{sha}`, TTL `SDLC_STALL_ATTEMPTS_TTL_HOURS`) is at or over `SDLC_STALL_RESUME_MAX_ATTEMPTS`, escalate once and stop: no rung fires.
-2. **Action cooldown.** A `SET NX EX` claim on `sdlc:stall:resume:cooldown:{slug}:{sha}` (TTL `SDLC_STALL_RESUME_COOLDOWN_HOURS`) both throttles retries and guards against two overlapping ticks acting on the same lane. Cooldown live means skip this tick, no attempt charged. The claim is deliberately made *before* the rung is picked (that is what makes it the overlapping-tick guard), so any path that then bails without dispatching anything — target query unknown, create brake, a declined rung — releases the key (`DELETE`) before moving on. A tick that took no action must not consume the action window; releasing is safe because there is no action for a concurrent tick to duplicate.
-3. **Rung 1: steer.** A live (non-terminal, non-ledger) eng session for the project already exists, so `steer_session(...)` fires with an instruction to invoke `/sdlc` for the issue and route one stage.
-4. **Rung 2: resume.** No live session, but the most recently updated eng session in a resumable status carries a `claude_session_uuid`, so `resume_session(...)` fires with the same instruction.
-5. **Rung 3: create.** No steerable or resumable target, so `create_session(role="eng", slug="sdlc-{N}", session_type="eng")` fires, subject to the create rung's own guards (below).
-6. **Rung 4: escalate.** The dispatched action failed for a non-benign reason, so escalate once and stop.
+1. **Already-escalated check.** A read of `sdlc:stall:escalated:{slug}:{sha}` runs *before* the lane can claim an action window. If the key exists, a human has already been paged about this head sha and the lane is skipped entirely (`already-escalated` finding) — no rung fires, nothing is sent. This is what makes "escalate once and stop acting" literal rather than "page once while acting forever": `_escalation_set`'s `SET NX` would silently swallow the extra pages while the ladder kept dispatching. An unreadable key is unknown and also declines (`gate-unknown: escalation-read`).
+2. **Attempt budget check.** If the `(slug, sha)` attempt counter (`sdlc:stall:resume:attempts:{slug}:{sha}`, TTL `SDLC_STALL_ATTEMPTS_TTL_DAYS`, floored at the escalation TTL) is at or over `SDLC_STALL_RESUME_MAX_ATTEMPTS`, escalate once and stop: no rung fires. A counter payload that is not an integer reads as *unknown*, not as zero.
+3. **Action cooldown.** A `SET NX EX` claim on `sdlc:stall:resume:cooldown:{slug}:{sha}` (TTL `SDLC_STALL_RESUME_COOLDOWN_HOURS`) both throttles retries and guards against two overlapping ticks acting on the same lane. Cooldown live means skip this tick, no attempt charged. The claim is deliberately made *before* the rung is picked (that is what makes it the overlapping-tick guard), so any path that then bails without dispatching anything — target query unknown, create brake, a declined rung — releases the key (`DELETE`) before moving on. A tick that took no action must not consume the action window; releasing is safe because there is no action for a concurrent tick to duplicate.
+4. **Rung 1: steer.** A live (non-terminal, non-ledger) eng session for the project already exists, so `steer_session(...)` fires with an instruction to invoke `/sdlc` for the issue and route one stage.
+5. **Rung 2: resume.** No live session, but an eng session in a resumable status carries a `claude_session_uuid`, so `resume_session(...)` fires with the same instruction.
+
+   Both rungs prefer a session whose `slug` **matches the stalled lane** over a merely-more-recent one, falling back to most-recently-updated only when no same-lane candidate exists. `resume_session` transitions the row in place and the worker runs it in that row's own `working_dir`, so resuming another lane's session would make this issue's work land as commits on that lane's branch.
+6. **Rung 3: create.** No steerable or resumable target, so `create_session(role="eng", slug="sdlc-{N}", session_type="eng")` fires, subject to the create rung's own guards (below).
+7. **Rung 4: escalate.** The dispatched action failed for a non-benign reason, so escalate once and stop.
 
 Escalation sends a single Telegram alert to `Eng: Valor` (`_send_alert`, via the `valor-telegram` CLI) and writes the Redis dedup key `sdlc:stall:escalated:{slug}:{sha}` (`SET NX`, TTL `SDLC_STALL_ESCALATION_TTL_DAYS`) so a human hears about a given head sha at most once, no matter how many ticks keep hitting the exhausted-budget or action-failed rung.
 
@@ -308,7 +311,7 @@ Create is the one capability an operator needs to know this reflection has: it c
 Every external boundary (gh CLI, git, `valor-telegram`, Redis, Popoto query, `steer_session`, `resume_session`, `create_session`) is wrapped in a narrow try/except that **logs a warning and continues**; the reflection never raises. Stricter failure semantics:
 
 - **Redis unavailable for the cooldown, attempts, or escalation keys.** The reflection declines to act (skip this tick). Better to under-act during a Redis flap than to double-act or spam during one.
-- **`AgentSession` query fails** (gate 5's secondary signal, or the ladder's target query). Reads as `None`/"unknown", logged as a `gate-unknown` finding, no action taken.
+- **`AgentSession` query fails** (the ladder's target query). Reads as `None`/"unknown", logged as a `gate-unknown` finding, no action taken; the claimed action window is released so the lane is actionable again on the next tick.
 - **Branch not present locally.** Silently skipped (debug-logged). Common during transient worktree state.
 
 ### Tunables
@@ -321,8 +324,7 @@ Every external boundary (gh CLI, git, `valor-telegram`, Redis, Popoto query, `st
 | `SDLC_STALL_CREATE_MAX_PER_TICK` | `1` | Cap on new sessions the create rung may mint per project per tick. |
 | `SDLC_STALL_RESUME_COOLDOWN_HOURS` | `1` | Action cooldown per `(slug, sha)`: also the overlapping-tick guard. |
 | `SDLC_STALL_ESCALATION_TTL_DAYS` | `30` | TTL on the escalation dedup key; bounds how long "already told a human about this sha" is remembered. |
-| `SDLC_STALL_ATTEMPTS_TTL_HOURS` | `24` | TTL on the attempt counter. |
-| `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` | `30` | Freshness bound on gate 5's secondary (non-ledger row) liveness signal. Aligned with the issue lock's own TTL so the two liveness horizons expire together. |
+| `SDLC_STALL_ATTEMPTS_TTL_DAYS` | `30` | TTL on the attempt counter. Read through a floor at `SDLC_STALL_ESCALATION_TTL_DAYS`: **attempts TTL >= escalation TTL** is an invariant, because a budget that re-arms while the escalation key still suppresses the page turns "escalate once and stop" into "act forever, silently". Both keys are sha-scoped, so a new commit re-arms everything anyway. |
 
 Disable the whole reflection by setting `enabled: false` on the `sdlc-progress-check` entry in `~/Desktop/Valor/reflections.yaml`.
 

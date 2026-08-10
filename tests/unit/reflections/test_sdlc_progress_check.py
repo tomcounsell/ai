@@ -122,7 +122,6 @@ class _FakeQuery:
     """``AgentSession.query`` stand-in routed by the filter kwargs used."""
 
     def __init__(self):
-        self.by_issue: list = []
         self.by_project: list = []
         self.by_session_id: list = []
         self.raise_on: set[str] = set()
@@ -131,7 +130,6 @@ class _FakeQuery:
     def filter(self, **kw):
         self.calls.append(dict(kw))
         for field, rows in (
-            ("issue_number", self.by_issue),
             ("project_key", self.by_project),
             ("session_id", self.by_session_id),
         ):
@@ -154,7 +152,7 @@ class _Row:
         claude_session_uuid=None,
         updated_at=None,
         project_key="valor",
-        issue_number=None,
+        slug=None,
     ):
         self.session_id = session_id
         self.status = status
@@ -164,7 +162,7 @@ class _Row:
         self.claude_session_uuid = claude_session_uuid
         self.updated_at = time.time() if updated_at is None else updated_at
         self.project_key = project_key
-        self.issue_number = issue_number
+        self.slug = slug
 
 
 class _Result:
@@ -245,19 +243,20 @@ def fake_query(monkeypatch):
     return q
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def owns_project(monkeypatch):
-    """Gate 6' passes by default.
+    """Gate 6' passes.
 
-    Every ladder test needs it, and the fixture project is not owned by this
-    machine — without this the reflection returns ``skipped`` before any ``gh``
-    call and even the cwd-threading test has nothing to assert.
+    Deliberately NOT autouse: it is pulled in by ``lab``, which is what every
+    ladder test uses. A test that reaches ``_check_project_stalls`` without the
+    ``lab`` fence therefore still hits the real gate 6' and stops there, rather
+    than scanning real projects and dispatching real actions.
     """
     monkeypatch.setattr(sdlc_progress, "machine_owns_project", lambda key: True)
 
 
 @pytest.fixture
-def lab(fake_redis, fake_query, monkeypatch):
+def lab(fake_redis, fake_query, owns_project, monkeypatch):
     """Wire every external boundary the ladder can reach to a recorder."""
     lab = _Lab(fake_redis, fake_query)
 
@@ -350,75 +349,34 @@ def test_lock_read_decodes_bytes_payload(fake_redis):
 
 
 # ---------------------------------------------------------------------------
-# Gate 5' — the secondary row signal and its freshness bound
+# Gate 5' — _lane_is_live is the lock signal and nothing else
+#
+# An earlier design OR-ed in a secondary AgentSession row check keyed on
+# issue_number. That branch was structurally dead — no non-ledger creation path
+# populates AgentSession.issue_number — so it, its freshness knob, and its tests
+# are gone. What survives is the lock polarity.
 # ---------------------------------------------------------------------------
 
 
-def test_secondary_row_fresh_nonterminal_adds_liveness(fake_query):
-    fake_query.by_issue = [_Row(status="running", updated_at=time.time())]
-    assert sdlc_progress._nonledger_row_live(1395) is True
-
-
-def test_secondary_row_stale_nonterminal_adds_nothing(fake_query, monkeypatch):
-    """The hollow-session guard: a frozen non-terminal row is not evidence of life."""
-    monkeypatch.setenv("SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES", "30")
-    fake_query.by_issue = [_Row(status="running", updated_at=time.time() - 31 * 60)]
-    assert sdlc_progress._nonledger_row_live(1395) is False
-
-
-def test_secondary_row_ledger_anchor_never_counts(fake_query):
-    """sdlc-local-{N} anchors sit at running for the whole stall (spike-2)."""
-    fake_query.by_issue = [_Row(status="running", is_ledger=True)]
-    assert sdlc_progress._nonledger_row_live(1395) is False
-
-
-def test_secondary_row_terminal_never_counts(fake_query):
-    fake_query.by_issue = [_Row(status="completed")]
-    assert sdlc_progress._nonledger_row_live(1395) is False
-
-
-def test_secondary_row_query_failure_contributes_false_not_none(fake_query):
-    """A failed *secondary* signal must not veto a successful primary one."""
-    fake_query.raise_on.add("issue_number")
-    assert sdlc_progress._nonledger_row_live(1395) is False
-
-
-# ---------------------------------------------------------------------------
-# Gate 5' — tiebreak polarity (the inversion guard)
-# ---------------------------------------------------------------------------
-
-
-def test_tiebreak_lock_dead_plus_fresh_row_is_live(fake_redis, fake_query):
-    """The row can only ADD liveness: dead lock + fresh row → live (suppressed)."""
-    fake_query.by_issue = [_Row(status="running", updated_at=time.time())]
-    assert sdlc_progress._lock_says_live(1395) is False
-    assert sdlc_progress._lane_is_live(1395) is True
-
-
-def test_tiebreak_lock_live_and_no_row_is_live(fake_redis, fake_query):
-    fake_redis.set(_lock_key(1395), _live_lock_payload())
-    fake_query.by_issue = []
-    assert sdlc_progress._lane_is_live(1395) is True
-
-
-def test_tiebreak_row_query_raises_with_lock_live_stays_live(fake_redis, fake_query):
-    fake_redis.set(_lock_key(1395), _live_lock_payload())
-    fake_query.raise_on.add("issue_number")
-    assert sdlc_progress._lane_is_live(1395) is True
-
-
-def test_tiebreak_row_query_raises_with_lock_dead_is_not_live(fake_redis, fake_query):
-    """A row failure never turns lock-says-dead into unknown — that would be an inversion."""
-    fake_query.raise_on.add("issue_number")
+def test_lane_is_live_absent_lock_is_free(fake_redis, fake_query):
     assert sdlc_progress._lane_is_live(1395) is False
 
 
-def test_tiebreak_unknown_lock_short_circuits_before_row_check(fake_redis, fake_query):
-    """A degraded backend cannot be its own second opinion."""
+def test_lane_is_live_live_lock_is_live(fake_redis, fake_query):
+    fake_redis.set(_lock_key(1395), _live_lock_payload())
+    assert sdlc_progress._lane_is_live(1395) is True
+
+
+def test_lane_is_live_unknown_lock_is_unknown_and_queries_nothing(fake_redis, fake_query):
+    """A degraded backend declines to act; it never falls back to a row query."""
     fake_redis.raise_get = lambda key: True
-    fake_query.by_issue = [_Row(status="running")]
     assert sdlc_progress._lane_is_live(1395) is None
-    assert fake_query.calls == [], "row check must not be consulted on an unknown lock read"
+    assert fake_query.calls == [], "the gate must consult no session rows at all"
+
+
+def test_lane_is_live_malformed_payload_is_unknown(fake_redis, fake_query):
+    fake_redis.set(_lock_key(1395), "}{ not json")
+    assert sdlc_progress._lane_is_live(1395) is None
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +442,62 @@ def test_target_query_failure_is_unknown(fake_query):
     assert sdlc_progress._pick_steer_target("valor") == ("unknown", None)
 
 
+def test_target_prefers_the_stalled_lanes_own_session_over_a_newer_one(fake_query):
+    """Resuming another lane's session lands this issue's commits on that lane's branch."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("other-lane", status="running", slug="sdlc-999", updated_at=now),
+        _Row("this-lane", status="running", slug="sdlc-1395", updated_at=now - 3600),
+    ]
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
+    assert (kind, session.session_id) == ("steer", "this-lane")
+
+
+def test_resume_target_also_prefers_the_stalled_lanes_own_session(fake_query):
+    """The preference applies inside the resumable bucket too, not just the live one."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row(
+            "other-lane",
+            status="completed",
+            claude_session_uuid="u1",
+            slug="sdlc-999",
+            updated_at=now,
+        ),
+        _Row(
+            "this-lane",
+            status="completed",
+            claude_session_uuid="u2",
+            slug="sdlc-1395",
+            updated_at=now - 3600,
+        ),
+    ]
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
+    assert (kind, session.session_id) == ("resume", "this-lane")
+
+
+def test_target_falls_back_to_recency_when_no_session_matches_the_lane(fake_query):
+    now = time.time()
+    fake_query.by_project = [
+        _Row("old", status="running", slug="sdlc-1", updated_at=now - 900),
+        _Row("newest", status="running", slug=None, updated_at=now),
+    ]
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
+    assert (kind, session.session_id) == ("steer", "newest")
+
+
+def test_ladder_threads_the_stalled_lanes_slug_into_target_selection(lab, stub_workdir, stalled_pr):
+    now = time.time()
+    lab.query.by_project = [
+        _Row("other-lane", status="running", slug="sdlc-999", updated_at=now),
+        _Row("this-lane", status="running", slug="sdlc-1395", updated_at=now - 3600),
+    ]
+
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert [sid for sid, _ in lab.steers] == ["this-lane"]
+
+
 # ---------------------------------------------------------------------------
 # Happy path — a steer, and NO Telegram message
 # ---------------------------------------------------------------------------
@@ -516,15 +530,6 @@ def test_live_lane_is_suppressed_entirely(lab, stub_workdir, stalled_pr):
     assert (lab.steers, lab.creates, lab.alerts) == ([], [], [])
     assert result["status"] == "ok"
     assert result["findings"] == []
-
-
-def test_live_local_lane_suppression_survives_a_row_query_failure(lab, stub_workdir, stalled_pr):
-    lab.redis.set(_lock_key(1395), _live_lock_payload())
-    lab.query.raise_on.add("issue_number")
-
-    sdlc_progress._check_project_stalls(_PROJECT)
-
-    assert (lab.steers, lab.creates, lab.alerts) == ([], [], [])
 
 
 def test_terminal_sessions_are_a_resume_target_not_an_alert(lab, stub_workdir, stalled_pr):
@@ -606,6 +611,77 @@ def test_escalation_redis_unavailable_sends_nothing(lab, stub_workdir, stalled_p
     sdlc_progress._check_project_stalls(_PROJECT)
 
     assert lab.alerts == []
+
+
+def test_existing_escalation_key_stops_the_ladder_acting(lab, stub_workdir, stalled_pr):
+    """ "Escalate once and STOP ACTING" is literal, not just "page once"."""
+    lab.redis.set(sdlc_progress._ESCALATED_KEY.format(slug="sdlc-1395", sha="abc123def456"), "1")
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+    assert lab.attempts() == 0
+    assert "already-escalated: sdlc-1395" in result["findings"]
+
+
+def test_lapsed_attempts_key_cannot_re_arm_the_budget_under_a_live_escalation(
+    lab, stub_workdir, stalled_pr
+):
+    """The regression that made the ladder non-convergent.
+
+    The attempts key used to carry a 24h TTL while the escalation key carried
+    30 days, so once the budget lapsed the ladder dispatched a fresh
+    MAX_ATTEMPTS actions per day for a month behind one silent SET NX.
+    """
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    for _ in range(4):  # exhaust the budget and escalate
+        sdlc_progress._check_project_stalls(_PROJECT)
+        lab.redis.advance(3600)
+
+    assert len(lab.alerts) == 1
+    dispatched_before = len(lab.steers)
+
+    lab.redis.advance(48 * 3600)  # past the OLD 24h attempts TTL
+    for _ in range(3):
+        sdlc_progress._check_project_stalls(_PROJECT)
+        lab.redis.advance(3600)
+
+    assert len(lab.steers) == dispatched_before, "the ladder must not re-arm"
+    assert len(lab.alerts) == 1
+
+
+def test_attempts_ttl_is_never_shorter_than_the_escalation_ttl(monkeypatch):
+    """The invariant, asserted directly rather than only through behavior."""
+    monkeypatch.setenv("SDLC_STALL_ATTEMPTS_TTL_DAYS", "0.5")
+    assert sdlc_progress._attempts_ttl_seconds() >= sdlc_progress._escalation_ttl_seconds()
+
+
+def test_escalation_read_failure_declines_without_acting(lab, stub_workdir, stalled_pr):
+    """Blind on the anti-ladder key means do not act."""
+    esc_key = sdlc_progress._ESCALATED_KEY.format(slug="sdlc-1395", sha="abc123def456")
+    lab.redis.raise_get = lambda key: key == esc_key
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert (lab.steers, lab.creates, lab.alerts) == ([], [], [])
+    assert "gate-unknown: escalation-read sdlc-1395" in result["findings"]
+
+
+def test_corrupt_attempts_payload_is_unknown_not_under_budget(lab, stub_workdir, stalled_pr):
+    """A payload we cannot parse must not read as "0 attempts, go ahead"."""
+    lab.redis.set(
+        sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"), "not-a-number"
+    )
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert sdlc_progress._attempts_count("sdlc-1395", "abc123def456") is None
+    assert (lab.steers, lab.creates, lab.alerts) == ([], [], [])
+    assert "gate-unknown: attempts-read sdlc-1395" in result["findings"]
 
 
 def test_cooldown_skip_never_charges_an_attempt(lab, stub_workdir, stalled_pr):
@@ -847,6 +923,29 @@ def test_declined_create_lock_reread_releases_the_action_window(lab, stub_workdi
 
     assert lab.creates == []
     assert _cooldown_key("sdlc-1395", "abc123def456") not in lab.redis.keys_present()
+
+
+def test_predispatch_benign_race_releases_the_action_window(lab, stub_workdir, stalled_pr):
+    """The create rung's pre-create race sent nothing, so it owes the hour back."""
+    _lock_becomes_live_after_first_read(lab.redis, 1395)
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert lab.creates == []
+    assert "benign-race: create sdlc-1395" in result["findings"]
+    assert _cooldown_key("sdlc-1395", "abc123def456") not in lab.redis.keys_present()
+
+
+def test_dispatched_benign_race_keeps_the_action_window(lab, stub_workdir, stalled_pr):
+    """A resume race DID push a steering message — that hour is legitimately spent."""
+    lab.query.by_project = [_Row("eng-done", status="completed", claude_session_uuid="u1")]
+    lab.query.by_session_id = [_Row("eng-done", status="running")]
+    lab.resume_result = _Result(False, "already pending")
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert "benign-race: resume sdlc-1395" in result["findings"]
+    assert _cooldown_key("sdlc-1395", "abc123def456") in lab.redis.keys_present()
 
 
 @pytest.mark.parametrize("succeeds", [True, False])
@@ -1142,8 +1241,18 @@ def test_no_working_directory_returns_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_run_sdlc_progress_check_uses_per_project_helper(monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "load_local_projects", lambda: [], raising=False)
+def test_run_sdlc_progress_check_uses_per_project_helper(lab, monkeypatch):
+    """Fenced: patch the name ``run_per_project_audit`` really resolves.
+
+    ``sdlc_progress`` imports ``run_per_project_audit``, not
+    ``load_local_projects`` — patching the latter on this module with
+    ``raising=False`` would silently no-op and let the entrypoint scan every
+    real project with live dispatch functions attached.
+    """
+    monkeypatch.setattr("reflections.utilities.load_local_projects", lambda: [])
+
     out = sdlc_progress.run_sdlc_progress_check()
+
     assert out["status"] in {"ok", "disabled"}
     assert "summary" in out
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
