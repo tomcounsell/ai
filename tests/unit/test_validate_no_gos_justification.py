@@ -413,7 +413,13 @@ class TestFenceMarkersFollowCommonMark:
         assert ok, message
 
     def test_inline_backticks_do_not_open_a_fence(self, tmp_path):
-        """Only line-initial markers delimit; inline code spans must not."""
+        """A mid-line code span does not open a fence (the ``^`` anchor).
+
+        Scope note: this pins the mid-line case only. A *line-initial* span
+        (a line beginning ```foo```) does open a fence that never closes,
+        swallowing later punts. That is pre-existing, in the fail-open
+        direction, and out of scope here.
+        """
         mod = import_validator()
         plan = tmp_path / "p.md"
         plan.write_text(
@@ -427,6 +433,53 @@ class TestFenceMarkersFollowCommonMark:
         ok, message = mod.validate(str(plan))
         assert not ok
         assert "will be done post-merge" in message
+
+    def test_longer_closing_marker_still_closes_the_fence(self, tmp_path):
+        """CommonMark: a ``` fence closes on a marker at least as long.
+
+        Pins the ``>=`` in the close comparison. Tightened to ``==``, the
+        fence would never close and the punt below it would be swallowed.
+        """
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            "```\n"
+            "example\n"
+            "````\n\n"
+            "The retry backoff will be done post-merge.\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert not ok
+        assert "will be done post-merge" in message
+
+    def test_mismatched_fence_markers_fail_open_into_no_gos(self, tmp_path):
+        """Decision on the record: mismatched markers exempt to EOF.
+
+        A ````-opened block "closed" by a shorter ``` marker stays open for
+        the rest of the document, and that reach extends into ``## No-Gos``,
+        where the quoted-context exemption deliberately does not apply — so an
+        unjustified punt there goes uncaught. This is the ACCEPTED fail-open
+        direction, taken knowingly: fail-open can never block a lane, and
+        CommonMark correctness is worth more than catching a malformed
+        document. Asserting PASS documents the trade rather than endorsing it.
+        """
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            "````\n"
+            "example\n"
+            "```\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "- Rate limiting deferred to a follow-up issue.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert ok, message
 
 
 class TestOperatorWillIsActionSenseOnly:

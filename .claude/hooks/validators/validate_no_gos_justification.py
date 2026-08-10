@@ -121,6 +121,16 @@ NO_GOS_HEADING = re.compile(r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)", re.MULTILINE |
 # rest of the document, so the code exemption evaporates and a punt phrase
 # quoted inside that example blocks an unrelated agent's write (#2682). The
 # false-positive direction is the dangerous one, hence the strict rule.
+#
+# Accepted cost: the strict rule widens the fail-open surface from *unterminated*
+# fences to ANY mismatched marker — a ````-opened block "closed" by ``` now
+# exempts everything to EOF, and that reach extends into ``## No-Gos``, the one
+# section where the quoted-context exemption deliberately does not apply. So a
+# typo'd fence anywhere above No-Gos silently disarms the gate for that document.
+# We take that trade knowingly: fail-open can never block a lane, and CommonMark
+# correctness is worth more than catching a malformed document. Pinned by
+# ``test_mismatched_fence_markers_fail_open_into_no_gos``.
+#
 # The ``^\s*`` allowance (rather than CommonMark's three-space cap) is
 # deliberate: plans nest fences inside list items at arbitrary depth.
 FENCE = re.compile(r"^\s*(?P<marker>`{3,}|~{3,})")
@@ -171,10 +181,11 @@ def find_punt_lines(content: str) -> list[str]:
             marker = fence.group("marker")
             if open_marker is None:
                 open_marker = marker
-                continue
             # A shorter marker, or one of the other character, is fence
-            # content — an example block being quoted, not a closer.
-            if marker[0] == open_marker[0] and len(marker) >= len(open_marker):
+            # content — an example block being quoted, not a closer. The
+            # ``elif`` is structural: an opener must never be tested against
+            # itself, or every fence would close on the line that opened it.
+            elif marker[0] == open_marker[0] and len(marker) >= len(open_marker):
                 open_marker = None
             continue
         if open_marker is not None:
