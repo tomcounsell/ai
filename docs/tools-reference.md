@@ -371,8 +371,12 @@ See `docs/features/session-steering.md` for full documentation.
 
 Ages out three categories of on-disk state whose teardown code previously had no
 scheduled caller: merged/idle `.worktrees/{slug}/` lanes, `~/.claude/projects/`
-transcripts, and `logs/sessions/` snapshots. Also runs daily as the
-`disk-reclaim` reflection (`reflections.housekeeping.disk_reclaim.run`).
+transcripts, and `logs/sessions/` snapshots. Also registered as the daily
+`disk-reclaim` reflection (`reflections.housekeeping.disk_reclaim.run`) —
+registration is per-host, since `config/reflections.yaml` is gitignored and
+vault-synced, so a machine that has not added the entry never runs the sweep on
+a schedule. See the registration block in
+[`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md).
 
 ```bash
 # Report only — this is the default, and the only mode reachable without operator intent
