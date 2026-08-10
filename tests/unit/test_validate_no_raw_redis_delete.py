@@ -41,7 +41,12 @@ def py(snippet: str) -> str:
 
 
 class TestRepoScopeGate:
-    """#2638 manifestation 1: an ai-repo rule enforced outside the ai repo."""
+    """#2638 manifestation 1: an ai-repo rule enforced outside the ai repo.
+
+    The exemption is "inside a different git repository", not "outside this
+    one". The Redis these keys live in is machine-global, so an arbitrary
+    non-repo cwd is not a reason to stand down.
+    """
 
     def test_blocks_when_cwd_is_this_repo(self):
         cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
@@ -56,15 +61,48 @@ class TestRepoScopeGate:
     def test_allows_when_cwd_is_another_repo(self, tmp_path):
         """The popoto case: raw Redis there is the library's own test seeding."""
         other = tmp_path / "popoto"
-        (other / "popoto").mkdir(parents=True)
+        other.mkdir()
+        (other / ".git").mkdir()
         cmd = py(f"import popoto; {DELETE_CALL}'k')")
         assert validator.find_violation(cmd, str(other)) is None
 
-    def test_unknown_cwd_fails_closed(self):
-        """An unresolvable cwd keeps the guard armed, never disarms it."""
+    def test_allows_in_a_subdirectory_of_another_repo(self, tmp_path):
+        other = tmp_path / "popoto"
+        (other / "tests").mkdir(parents=True)
+        (other / ".git").mkdir()
+        cmd = py(f"import popoto; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(other / "tests")) is None
+
+    def test_allows_in_a_worktree_of_another_repo(self, tmp_path):
+        """A worktree's `.git` is a FILE, and it is still another repo."""
+        other = tmp_path / "popoto-wt"
+        other.mkdir()
+        (other / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+        cmd = py(f"import popoto; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(other)) is None
+
+    @pytest.mark.parametrize(
+        "cwd",
+        [
+            "/tmp",
+            str(Path.home()),
+            "/nonexistent/path/xyz",
+            "",
+            "\x00not-a-path",
+        ],
+    )
+    def test_a_cwd_in_no_repo_at_all_keeps_the_guard_armed(self, cwd):
+        """Fail closed, and mean it.
+
+        `Path.resolve()` is non-strict on macOS, so a missing path resolves
+        happily and then finds no marker. Treating "found nothing" as "not our
+        problem" let `cd /tmp && python -c '<raw delete>'` reach production
+        keys unblocked — the same machine-global Redis, just a cwd with no
+        bearing on the popoto rationale. All five of these were measured
+        allowing before this case existed.
+        """
         cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
-        for unknown in ("", "\x00not-a-path"):
-            assert validator.find_violation(cmd, unknown) is not None
+        assert validator.find_violation(cmd, cwd) is not None
 
     def test_cwd_defaults_to_armed(self):
         """A caller passing only the command behaves as it did before #2638."""
@@ -96,6 +134,18 @@ class TestExecutableContextGate:
             f"uv run python -c \"import popoto; {DELETE_CALL}'k')\"",
             f"./scripts/cleanup.py --popoto  # calls {DELETE_CALL})",
             "redis-cli -n 0 DEL 'AgentSession:abc'",
+            # Interpreter invoked BY PATH. This is the house idiom — CLAUDE.md
+            # documents the `.venv/bin/valor-*` form — and it is the primary
+            # vector, not an edge. The first version of this gate required a
+            # whitespace or shell metacharacter before `python` and did not
+            # include `/` in the class, so all four of these blocked on main
+            # and passed here: a regression the suite was green for, because
+            # every row above happens to start its interpreter at a word
+            # boundary. The test matrix was narrower than the claim it backed.
+            f".venv/bin/python -c \"import popoto; {DELETE_CALL}'k')\"",
+            f"/usr/local/bin/python3 -c \"import popoto; {DELETE_CALL}'k')\"",
+            f"./.venv/bin/python -c \"import popoto; {DELETE_CALL}'k')\"",
+            f"~/src/ai/.venv/bin/python -c \"import popoto; {DELETE_CALL}'k')\"",
         ],
     )
     def test_executable_context_still_blocks(self, command):
@@ -212,9 +262,17 @@ class TestDispatcherIntegration:
     def test_dispatcher_passes_cwd_through(self, tmp_path):
         """Registration is what carries the fix; the predicate alone is not enough."""
         other = tmp_path / "popoto"
-        (other / "popoto").mkdir(parents=True)
+        other.mkdir()
+        (other / ".git").mkdir()
         cmd = py(f"import popoto; {DELETE_CALL}'k')")
         assert self._dispatch(cmd, str(other)) is None
+
+    def test_dispatcher_blocks_a_path_invoked_interpreter(self):
+        """The regression the review caught, pinned end to end, not just in the predicate."""
+        cmd = f".venv/bin/python -c \"from models import AgentSession; {DELETE_CALL}'k')\""
+        reason = self._dispatch(cmd, str(REPO_ROOT))
+        assert reason is not None
+        assert "Popoto" in reason
 
     def test_dispatcher_still_blocks_in_this_repo(self):
         cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")

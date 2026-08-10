@@ -23,13 +23,18 @@ UnicodeDecodeError on hashes containing binary fields like EmbeddingField
 
 Two gates run before any pattern matching (#2638):
 
-1. **Repo scope.** This is an ai-repo rule -- raw Redis on Popoto-managed keys
-   is wrong *here* because Popoto is this repo's ORM. It is meaningless in
-   ``~/src/popoto``, where Popoto *is* the library under development and its
-   own tests legitimately need raw Redis to construct states the ORM cannot
-   produce. The hook is registered project-scoped, but the dispatcher still
-   fires it for a Bash call an ai-repo session makes with a cwd inside another
-   repo, which is exactly how it blocked popoto work for #2636.
+1. **Other-repo exemption.** Raw Redis on Popoto-managed keys is wrong *here*
+   because Popoto is this repo's ORM. It is meaningless in ``~/src/popoto``,
+   where Popoto *is* the library under development and its own tests
+   legitimately need raw Redis to construct states the ORM cannot produce. The
+   hook is registered project-scoped, but the dispatcher still fires it for a
+   Bash call an ai-repo session makes with a cwd inside another repo, which is
+   exactly how it blocked popoto work for #2636.
+
+   The exemption is being inside a *different git repository*, not merely
+   being outside this one. The Redis these keys live in is machine-global, so
+   a cwd like ``/tmp`` is not a reason to stand down -- it has nothing to do
+   with the popoto rationale and everything to do with production keys.
 2. **Executable context.** Matching on command text means prose describing the
    rule trips the rule -- filing #2638 was itself blocked because the issue
    body quoted the offending call. A command with no interpreter in it cannot
@@ -56,19 +61,45 @@ _REPO_MARKER = Path(".claude") / "hooks" / "validators" / "validate_no_raw_redis
 # Tokens that mean the command can actually run code. `redis-cli` counts: the
 # CLI forms below are real execution. A bare `.py` path counts because
 # `./scripts/thing.py` executes without the word "python" appearing.
+#
+# The leading class must include `/`, `~` and `.`: the house idiom invokes the
+# interpreter by path (`.venv/bin/python -c ...`, and CLAUDE.md documents the
+# `.venv/bin/valor-*` form), so a class of only whitespace and shell
+# metacharacters left the primary vector unmatched -- it blocked on main and
+# passed here. The class exists to stop `python` matching inside a longer word
+# like `mypython`; a path separator before it is exactly the case it must
+# admit.
 _EXECUTABLE_CONTEXT = re.compile(
-    r"(?:^|[\s;|&(<`$'\"])"
+    r"(?:^|[\s;|&(<`$'\"/~.])"
     r"(?:python[\d.]*|ipython|pytest|redis-cli|uvx|uv\s+run|[\w./~-]+\.py)"
     r"(?:\b|$)"
 )
 
 
-def _is_ai_repo_cwd(cwd: str) -> bool:
-    """True when `cwd` sits inside a checkout of this repo.
+def _guard_applies(cwd: str) -> bool:
+    """True unless `cwd` is demonstrably inside a *different* git repository.
 
-    Fails CLOSED on anything it cannot resolve (empty, missing, unreadable):
-    an unknown cwd keeps the guard on, because the cost of a false block is a
-    retry and the cost of a false allow is index corruption.
+    The rule this validator enforces is scoped to a repo, but the Redis it
+    protects is machine-global: a raw delete run from anywhere on this machine
+    reaches the same production keys. So the exemption has to be as narrow as
+    its rationale, which is specifically "popoto is its own repo and raw Redis
+    is legitimate there" (#2638). Being merely *outside* this checkout is not
+    that rationale -- `cd /tmp && python -c '<raw delete>'` has nothing to do
+    with popoto and every bit to do with production keys.
+
+    Walking up from `cwd`, whichever comes first decides:
+
+    - this repo's marker  -> in an ai checkout, guard applies
+    - a `.git`            -> a different repo, guard is exempt
+    - neither, to the root, or the path cannot be resolved -> guard applies
+
+    That last clause is what makes the fail-closed claim true. A missing path
+    resolves happily on macOS (`Path.resolve()` is non-strict), so "walked to
+    the root without finding anything" covers `/nonexistent/...`, `/tmp` and
+    `$HOME` alike, and all three now keep the guard armed.
+
+    `.git` is checked with `exists()`, not `is_dir()`: a worktree's `.git` is a
+    file, and a worktree of another repo is still another repo.
     """
     if not cwd:
         return True
@@ -80,12 +111,14 @@ def _is_ai_repo_cwd(cwd: str) -> bool:
         try:
             if (current / _REPO_MARKER).is_file():
                 return True
+            if (current / ".git").exists():
+                return False
         except OSError:
             return True
         if current.parent == current:
-            return False
+            return True
         current = current.parent
-    return False
+    return True
 
 
 _BLOCK_PATTERNS = [
@@ -176,6 +209,10 @@ _POPOTO_CONTEXT = [
     "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",
+    # Redundant: the "Reflection" entry above already matches this as a
+    # substring, so adding it changed no behavior. Listed anyway so the set
+    # reads as the model roster rather than as a puzzle, and so the
+    # completeness test below is satisfied by name rather than by coincidence.
     "ReflectionRun",
     "Room",
     # Not a popoto.Model (it is a pydantic BaseModel), so the completeness test
@@ -202,8 +239,8 @@ def find_violation(command: str, cwd: str = "") -> str | None:
     if not command:
         return None
 
-    # Gate 1: an ai-repo rule, enforced only in an ai-repo checkout (#2638).
-    if not _is_ai_repo_cwd(cwd):
+    # Gate 1: exempt only inside a different git repo -- the popoto case (#2638).
+    if not _guard_applies(cwd):
         return None
 
     # Gate 2: text that cannot execute is prose about the rule, not a
