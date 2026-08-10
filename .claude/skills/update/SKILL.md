@@ -13,8 +13,10 @@ Bring this machine to latest main: deps synced, environment verified, services r
 **PREREQUISITE: Must be on latest main branch before running.**
 
 ```bash
-cd ~/src/ai && git checkout main && git pull
+cd ~/src/ai && git checkout main && git fetch origin main && git merge --ff-only origin/main
 ```
+
+Fetch-then-merge-a-named-ref rather than `git pull` (#2650): `.git/FETCH_HEAD` is shared by every worktree of the repo, so with concurrent lanes on this machine a peer's fetch can retarget a bare pull's merge.
 
 If there are local changes, stash them first: `git stash`. The update orchestrator also handles this, but being on main is required.
 

@@ -75,8 +75,12 @@ Before deploying, verify the environment is ready:
 # Adapt DEPLOY_TARGET_REPO to your repo's target-path env var (see Cross-Repo Resolution)
 REPO="${DEPLOY_TARGET_REPO:-.}"
 
-# 1. Confirm local repo is on the merge target branch and up to date
-git -C "$REPO" checkout main && git -C "$REPO" pull
+# 1. Confirm local repo is on the merge target branch and up to date.
+# Fetch + ff-merge a named ref rather than `git pull`: `.git/FETCH_HEAD` is
+# shared by every worktree of a repo, so in a multi-worktree checkout a
+# concurrent fetch can retarget a bare pull's merge.
+git -C "$REPO" checkout main && git -C "$REPO" fetch origin main \
+  && git -C "$REPO" merge --ff-only origin/main
 
 # 2. Verify the merge commit exists locally
 git -C "$REPO" log --oneline -1 $MERGE_COMMIT

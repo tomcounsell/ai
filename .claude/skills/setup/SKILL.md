@@ -13,7 +13,7 @@ Configure this machine to run the Valor Telegram bridge. You do everything excep
 **PREREQUISITE: Must be on latest main branch before running.**
 
 ```bash
-cd ~/src/ai && git checkout main && git pull
+cd ~/src/ai && git checkout main && git fetch origin main && git merge --ff-only origin/main
 ```
 
 Before starting, confirm the user has:
