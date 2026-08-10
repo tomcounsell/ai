@@ -56,6 +56,7 @@ class _FakeRedis:
         self.raise_get = None  # callable(key) -> bool
         self.raise_set = False
         self.raise_incr = False
+        self.raise_delete = False
         self.get_hook = None  # callable(key) -> value | _PASS
 
     # -- test helpers -------------------------------------------------------
@@ -95,6 +96,14 @@ class _FakeRedis:
         cur = int(self._vals.get(key, 0)) + 1
         self._vals[key] = str(cur)
         return cur
+
+    def delete(self, key):
+        if self.raise_delete:
+            raise RuntimeError("redis down")
+        existed = key in self._vals
+        self._vals.pop(key, None)
+        self._exp.pop(key, None)
+        return 1 if existed else 0
 
     def expire(self, key, seconds):
         if key in self._vals:
@@ -763,6 +772,105 @@ def test_create_brake_caps_creations_per_project_per_tick(lab, stub_workdir, mon
     assert lab.creates[0]["slug"] == "sdlc-100"
     assert any("create-brake" in f for f in result["findings"])
     assert lab.alerts == [], "a deferred create is not an escalation"
+
+
+# ---------------------------------------------------------------------------
+# Action-window release — a tick that dispatched nothing must not burn the hour
+#
+# The cooldown is claimed BEFORE rung selection because it doubles as the
+# overlapping-tick guard. Paths that then bail without dispatching anything
+# have to hand the window back, or a lane the plan says "waits for the next
+# tick" actually waits a full SDLC_STALL_RESUME_COOLDOWN_HOURS.
+# ---------------------------------------------------------------------------
+
+
+def _cooldown_key(slug: str, sha: str) -> str:
+    return sdlc_progress._COOLDOWN_KEY.format(slug=slug, sha=sha)
+
+
+def test_create_brake_releases_the_deferred_lanes_action_window(lab, stub_workdir, monkeypatch):
+    """The braked lane must be actionable on the very next tick, not an hour later."""
+    now = int(time.time())
+    monkeypatch.setattr(
+        sdlc_progress,
+        "_list_open_sdlc_prs",
+        lambda cwd: [
+            _pr(number=1, branch="session/sdlc-100"),
+            _pr(number=2, branch="session/sdlc-200"),
+        ],
+    )
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(
+        sdlc_progress,
+        "_last_commit",
+        lambda cwd, branch: (f"sha-{branch[-3:]}", now - 9 * 3600),
+    )
+
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert [c["slug"] for c in lab.creates] == ["sdlc-100"]
+    assert _cooldown_key("sdlc-100", "sha-100") in lab.redis.keys_present()
+    assert _cooldown_key("sdlc-200", "sha-200") not in lab.redis.keys_present()
+
+    # Next tick, clock untouched: lane 1 is still on cooldown (so it does not
+    # eat the create budget), lane 2 acts.
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert [c["slug"] for c in lab.creates] == ["sdlc-100", "sdlc-200"]
+
+
+def test_target_query_failure_releases_the_action_window(lab, stub_workdir, stalled_pr):
+    """Unknown target → no action, no escalation, marker kept, window handed back."""
+    lab.query.raise_on.add("project_key")
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+    assert "gate-unknown: target-query sdlc-1395" in result["findings"]
+    assert _cooldown_key("sdlc-1395", "abc123def456") not in lab.redis.keys_present()
+
+
+def test_declined_create_lock_reread_releases_the_action_window(lab, stub_workdir, stalled_pr):
+    """A declined rung dispatched nothing, so it owes the window back too."""
+    key = _lock_key(1395)
+    state = {"reads": 0}
+
+    def raise_get(k):
+        if k != key:
+            return False
+        state["reads"] += 1
+        return state["reads"] > 1
+
+    lab.redis.raise_get = raise_get
+
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert lab.creates == []
+    assert _cooldown_key("sdlc-1395", "abc123def456") not in lab.redis.keys_present()
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_dispatched_action_keeps_the_action_window(lab, stub_workdir, stalled_pr, succeeds):
+    """Success or real failure, something happened — the hour is legitimately spent."""
+    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_session_id = [_Row("eng-live", status="running")]
+    lab.steer_result = {"success": succeeds, "session_id": "eng-live", "error": None}
+
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert len(lab.steers) == 1
+    assert _cooldown_key("sdlc-1395", "abc123def456") in lab.redis.keys_present()
+
+
+def test_release_failure_is_swallowed(lab, stub_workdir, stalled_pr):
+    """Redis dying on the DELETE degrades to "window stays claimed", never a raise."""
+    lab.query.raise_on.add("project_key")
+    lab.redis.raise_delete = True
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert result["status"] == "ok"
+    assert "gate-unknown: target-query sdlc-1395" in result["findings"]
 
 
 # ---------------------------------------------------------------------------

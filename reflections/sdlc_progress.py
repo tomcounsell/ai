@@ -397,6 +397,24 @@ def _action_cooldown_set(slug: str, sha: str) -> bool:
         return False
 
 
+def _action_cooldown_release(slug: str, sha: str) -> None:
+    """Hand the action window back after a tick that dispatched nothing.
+
+    The claim in ``_action_cooldown_set`` happens before rung selection so it
+    can double as the overlapping-tick guard. Paths that then bail without
+    acting (target query unknown, create brake, a declined rung) would
+    otherwise burn a full cooldown on a no-op tick — the plan says a braked
+    lane waits for the *next tick*, not the next hour. Releasing is safe
+    precisely because the releasing tick did nothing: there is no action for a
+    concurrent tick to duplicate.
+    """
+    key = _COOLDOWN_KEY.format(slug=slug, sha=sha)
+    try:
+        _get_redis().delete(key)
+    except Exception as exc:
+        logger.warning("sdlc_progress: cooldown release failed for %s: %s", key, exc)
+
+
 def _attempts_count(slug: str, sha: str) -> int | None:
     """Read the attempt counter WITHOUT charging it. None = read failed.
 
@@ -849,9 +867,11 @@ def _check_project_stalls(project: dict) -> dict:
         kind, target = _pick_steer_target(project_key)
         if kind == "unknown":
             findings.append(f"gate-unknown: target-query {slug}")
+            _action_cooldown_release(slug, sha)
             continue
         if kind == "create" and creates_this_tick >= create_budget:
             findings.append(f"create-brake: {slug} deferred to next tick")
+            _action_cooldown_release(slug, sha)
             continue
 
         message = _steer_message(
@@ -878,7 +898,10 @@ def _check_project_stalls(project: dict) -> dict:
             findings.append(f"benign-race: {kind} {slug}")
             continue
         if outcome.declined:
+            # Declined means the rung never dispatched — nothing happened, so
+            # the action window is returned for the next tick.
             findings.append(f"{outcome.error} {slug}")
+            _action_cooldown_release(slug, sha)
             continue
 
         if outcome.success:
