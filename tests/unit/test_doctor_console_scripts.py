@@ -137,6 +137,67 @@ class TestConsoleScriptsResolve:
         assert "no [project.scripts]" in result.message
 
 
+class TestDeclaredButNotInstalled:
+    """The third state: venv on PATH, nothing shadowing, name simply absent.
+
+    This is the routine one — a teammate pulls a new `[project.scripts]` entry
+    and has not re-synced — and it used to be reported as "shadowed" with a
+    remediation (reorder PATH) that was already satisfied.
+    """
+
+    def test_absent_name_is_not_called_shadowed(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path)
+        # Declared in pyproject but never built into .venv/bin.
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'never-installed = "tools.never:main"\n'
+        )
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+
+        assert result.passed is False
+        assert "1/4" in result.message
+        assert "not installed" in result.message
+        assert "shadowed" not in result.message, "PATH is already correct; nothing shadows it"
+        assert "never-installed" in result.message
+
+    def test_fix_points_at_uv_sync_not_at_path(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path)
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'never-installed = "tools.never:main"\n'
+        )
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+
+        assert result.fix
+        assert "uv sync" in result.fix
+        assert "export PATH" not in result.fix, "advising a PATH reorder that is already done"
+        assert "never-installed" in result.fix
+
+    def test_mixed_shadowed_and_absent_reports_both_remedies(self, tmp_path, monkeypatch):
+        """A host can have both problems; the fix must not name only one."""
+        root = _fake_checkout(tmp_path)
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'never-installed = "tools.never:main"\n'
+        )
+        shims = _stale_shim_dir(tmp_path, ("critique-roster-check",))
+        result = _run(root, [shims, root / ".venv" / "bin"], monkeypatch)
+
+        assert result.passed is False
+        assert "2/4" in result.message
+        assert "shadowed" in result.message
+        assert "not installed" in result.message
+        assert result.fix
+        assert "export PATH" in result.fix and "uv sync" in result.fix
+
+    def test_a_shadowed_name_still_reads_as_shadowed(self, tmp_path, monkeypatch):
+        """Control: the not-installed branch must not swallow the real thing."""
+        root = _fake_checkout(tmp_path)
+        shims = _stale_shim_dir(tmp_path, ("critique-roster-check",))
+        result = _run(root, [shims, root / ".venv" / "bin"], monkeypatch)
+
+        assert "shadowed" in result.message
+        assert "not installed" not in result.message
+        assert result.fix and "uv sync" not in result.fix
+
+
 class TestRegisteredInDoctor:
     def test_check_is_registered_before_system_tools(self):
         """`_check_system_tools` imports verify.py, which prepends the stale dir."""
