@@ -713,6 +713,17 @@ def revalidate_ledger_lease(
     ``False``, fail SAFE for a write gate (the inverse of
     ``touch_issue_lock``'s own fail-open contract, which is correct for
     read-side/renewal-side callers but wrong for a pre-write gate).
+
+    **This extends the lease, so it also refreshes the supervised-run signal**
+    (issue #2659). The call is non-peek, so a stage-marker or dispatch write
+    keeps ``session:issuelock:{N}`` alive on its own. The companion
+    ``session:supervisedrun:{N}`` shares that TTL, so without this the signal
+    would lapse under a lease these writes were holding up -- and every stage
+    fork would then read a bare ``ISSUE_LOCKED`` from its own supervisor's
+    lock and stand down. That is reachable rather than theoretical: the local
+    heartbeat self-exits at ``MAX_LIFETIME_SECONDS`` (4h), after which these
+    writes are the only thing renewing the lease, and the signal would lapse
+    30 minutes later. The #2659 incidents were at roughly 3.5h.
     """
     if not issue_number or not run_id:
         return False
@@ -730,6 +741,25 @@ def revalidate_ledger_lease(
             e,
         )
         return False
+
+    if result.acquired:
+        # Ownership-first, matching the other two renewers: only refresh the
+        # signal on a path that just confirmed (or re-acquired) the lease.
+        # Best-effort -- the signal is an optimization and a failure here must
+        # never turn a valid write gate into a refusal.
+        try:
+            from agent.supervised_run import write_supervised_run_signal
+
+            write_supervised_run_signal(issue_number, run_id, session_id=session_id)
+        except Exception as e:  # noqa: BLE001 - best-effort; never fail the gate
+            logger.debug(
+                "revalidate_ledger_lease: supervised-run signal refresh failed for "
+                "issue #%s (%s: %s) -- lease renewal stands",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
+
     return bool(result.acquired)
 
 
