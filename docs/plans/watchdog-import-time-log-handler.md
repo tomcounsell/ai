@@ -1840,3 +1840,43 @@ supersedes as described above; blockers 2 and 3 stand exactly as written.**
 | NIT | Scope & Value | TC2's predicate "no handler whose `baseFilename` ends `watchdog.log`" also matches `worker_watchdog.log`, so TC2 and TC4 overlap and TC2 would misattribute a worker-side leak to the bridge. | **Revision 2** — TC2, TC4 | `pathlib.Path(h.baseFilename).name == "watchdog.log"` / `== "worker_watchdog.log"`.  *Critic's suggested remedy, kept for the record:* Compare the basename exactly: `pathlib.Path(h.baseFilename).name == "watchdog.log"` in TC2 and `== "worker_watchdog.log"` in TC4, rather than `str.endswith`. |
 | NIT | History & Consistency | The Freshness Check states the scope-aware AST scan "reports module-scope hits at exactly `78 logging.basicConfig`, `86 LOGS_DIR.mkdir`, `93 logger.addHandler` and nowhere else in the package", but TC5's walk also looks for module-scope `_configure_logger` / `_configure_logging` calls, so the walk as specified additionally reports `monitoring/worker_watchdog.py:162`. Independently re-run and confirmed: the scan returns exactly those four hits across all thirteen `monitoring/*.py` files. Harmless (the fix deletes `:162` too, so TC5 still goes green) but the two sections describe different scans. | **Revision 2** — Freshness Check AST bullet; TC5 row | All four hits enumerated in both places, across 13 `monitoring/*.py` files; re-run at revision time.  *Critic's suggested remedy, kept for the record:* Add `monitoring/worker_watchdog.py:162 _configure_logger` to the Freshness Check bullet's enumerated hits so it matches TC5's stated predicate. |
 
+
+### Round 5 (narrow verification pass — two gates only)
+
+Scope: verify the two fixes revision 4 (`bfbcfe1fa`) claims, nothing else. Verdict: **READY TO BUILD
+WITH CONCERNS**.
+
+**GATE 1 — TC5's AST walk. CONFIRMED.** The walk was implemented exactly as the plan now specifies
+(entry-point-guard exemption in the `ast.If` branch, before the recursive descent) and run over the
+14-file list against today's source and against byte-for-byte copies carrying only this plan's edits.
+Measured, matching the plan's table in all four cells:
+
+| Configuration | Source | Hits |
+|---|---|---|
+| with exemption | today | **5** (`bridge_watchdog.py:78` basicConfig, `:86` mkdir, `:93` addHandler, `worker_watchdog.py:162` `_configure_logger`, `log_rotate.py:62` basicConfig) |
+| with exemption | fixed | **0** |
+| without exemption | today | 5 (identical set) |
+| without exemption | fixed | **3** (the three relocated guard calls) |
+
+Task 4's "zero hits" is therefore reachable. TC5b, run as a separate walker without the exemption,
+passes on all three fixed modules and goes red on all three under the "move the configure call to the
+top of `main()`" mutation (`total_outside_functions` drops to `[]`, `PASS=False`).
+
+**GATE 2 — TC15. CONFIRMED.** TC15 is a genuine fresh-subprocess probe, it appears in the plan's
+subprocess-probe list, the `tempfile.mkdtemp()` copy is made inside the CHILD, and the in-process
+alternative is documented as barred. Rehearsed against the fixed source with the parent's root
+deliberately dirtied first: child exit 0, exactly one `StreamHandler` with `stream is sys.stderr`,
+`root.level == 20`, `_fmt == "%(asctime)s %(levelname)s %(message)s"`, `propagate is True`, both INFO
+lines on the child's stderr with the `done: rotated=0 skipped=0` line matching, the parent's root
+handler list unchanged, and the child's temp dir outside the repo. Red direction re-measured on both
+named mutations: `logger.propagate = False` yields empty stderr with root state otherwise identical;
+deleting `basicConfig` yields no handler, `root.level == 30`, no `_fmt`, empty stderr.
+
+Both cheap concerns landed: Task 1's authoring bullet reads **TC1-TC15**, and Task 5's full-suite step
+now runs the repo default (`-n auto --dist=loadfile`) with the ~20-minute figure, keeping `-n0` only
+for the narrowly scoped files.
+
+**Concerns to fold in at BUILD (neither blocks):**
+
+| CONCERN | The exemption's bare `continue` also skips `node.orelse`, contradicting the plan's own prose ("the skip covers `node.body` only — `orelse` bodies and every other module-level `if` are still walked"). Measured: a forbidden call in the `else:` of the entry-point guard, or in an `elif` chained off it, returns **0 hits** where it should return 1. Every other module-level `if`, and module-level `try`/`with`/`except`, are still walked correctly, and `def`/`class` bodies are still never entered, so the 5/0 result on real source is unaffected. Fix at build is one line: walk `node.orelse` before the `continue`. |
+| CONCERN | `fd52fc648` (#2475/#2670) landed on `main` after the plan's baseline and moved every `bridge_watchdog.py` citation below ~line 200. The fixed-source line numbers in the "without exemption / fixed" row are consequently stale (measured `bridge_watchdog.py:1089`, `worker_watchdog.py:876`, `log_rotate.py:187` against the plan's `:1049`, `:874`, `:189`), and Task 2's caplog conversion targets moved. Citation drift only; the design is untouched. Reconcile line numbers at build rather than trusting them. |
