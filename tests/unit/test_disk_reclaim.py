@@ -340,7 +340,11 @@ def test_open_pr_branches_is_pinned_to_repo_root(monkeypatch, tmp_path):
     gh_argv, gh_kwargs = next(c for c in calls if c[0][0] == "gh")
     assert "--repo" in gh_argv
     assert gh_argv[gh_argv.index("--repo") + 1] == "tomcounsell/ai"
-    assert "GH_REPO" not in gh_kwargs.get("env", {})
+    # `.get("env", {})` would pass vacuously if `env=` were dropped entirely,
+    # so demand the kwarg is present and carries a real environment.
+    gh_env = gh_kwargs["env"]
+    assert "GH_REPO" not in gh_env
+    assert "PATH" in gh_env
 
 
 def test_open_pr_branches_fails_closed_when_origin_cannot_be_derived(monkeypatch, tmp_path):
