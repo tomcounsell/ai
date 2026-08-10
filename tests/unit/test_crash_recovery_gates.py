@@ -6,8 +6,9 @@ the auto-resume feature:
 - ``_is_transient_clean_kill_to_failed`` — inline derivation of the known-transient
   tool-wedge shape (confirmed-dead clean kill to ``failed``) that the deterministic
   first-retry floor acts on (Gap 3a, critique C4).
-- ``_machine_owns_project`` — the single-machine ownership gate (Gap 3b): only the
-  machine that owns a session's project resumes it; everyone else proposes.
+- ``reflections.utilities.machine_owns_project`` — the single-machine ownership gate
+  (Gap 3b): only the machine that owns a session's project resumes it; everyone
+  else proposes. Shared by ``crash_recovery`` and ``sdlc_progress`` (#2696).
 
 Both helpers are fail-soft: any malformed input or lookup error resolves to the
 safe default (no floor / not-owned), never an exception.
@@ -19,10 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
-from reflections.crash_recovery import (
-    _is_transient_clean_kill_to_failed,
-    _machine_owns_project,
-)
+from reflections.crash_recovery import _is_transient_clean_kill_to_failed
+from reflections.utilities import machine_owns_project
 
 pytestmark = pytest.mark.sdlc
 
@@ -87,16 +86,16 @@ class TestIsTransientCleanKillToFailed:
 
 
 # ---------------------------------------------------------------------------
-# _machine_owns_project
+# machine_owns_project
 # ---------------------------------------------------------------------------
 
 
 class TestMachineOwnsProject:
     def test_none_project_key_is_not_owned(self):
-        assert _machine_owns_project(None) is False
+        assert machine_owns_project(None) is False
 
     def test_empty_project_key_is_not_owned(self):
-        assert _machine_owns_project("") is False
+        assert machine_owns_project("") is False
 
     def test_owned_project_returns_true(self):
         with (
@@ -106,7 +105,7 @@ class TestMachineOwnsProject:
                 return_value={"myproj": "my-machine"},
             ),
         ):
-            assert _machine_owns_project("myproj") is True
+            assert machine_owns_project("myproj") is True
 
     def test_project_owned_by_other_machine_returns_false(self):
         with (
@@ -116,7 +115,7 @@ class TestMachineOwnsProject:
                 return_value={"myproj": "some-other-box"},
             ),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
 
     def test_unknown_project_key_is_not_owned(self):
         with (
@@ -126,7 +125,7 @@ class TestMachineOwnsProject:
                 return_value={"otherproj": "my-machine"},
             ),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
 
     def test_lookup_error_is_fail_soft_not_owned(self):
         """Any lookup exception resolves to not-owned (propose), never propagates."""
@@ -134,7 +133,7 @@ class TestMachineOwnsProject:
             "tools.reflection_machine_filter._load_project_machines",
             side_effect=RuntimeError("boom"),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
 
 
 # ---------------------------------------------------------------------------
