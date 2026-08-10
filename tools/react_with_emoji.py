@@ -30,20 +30,33 @@ import sys
 import time
 
 
+def _telegram_or_system() -> str:
+    """``"telegram"`` when ``TELEGRAM_CHAT_ID`` is a deliverable peer, else ``"system"``.
+
+    An unset ``TELEGRAM_CHAT_ID`` stays ``"telegram"`` so the callers keep
+    producing their "must be set" error rather than silently no-opping.
+    """
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not telegram_chat_id:
+        return "telegram"
+
+    from utils.peer import deliverable_telegram_peer
+
+    return "telegram" if deliverable_telegram_peer(telegram_chat_id) else "system"
+
+
 def _resolve_transport() -> str:
     override = os.environ.get("VALOR_TRANSPORT")
     if override:
-        return override.strip().lower()
+        transport = override.strip().lower()
+        # The override forces the *transport*; it does not assert the peer is
+        # reachable. Returning it bare let VALOR_TRANSPORT=telegram with
+        # TELEGRAM_CHAT_ID=0 skip the peer check entirely and enqueue a payload
+        # aimed at peer 0 — the one source-side path #2651 left open (#2644).
+        return _telegram_or_system() if transport == "telegram" else transport
     if os.environ.get("EMAIL_REPLY_TO"):
         return "email"
-    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if telegram_chat_id:
-        from utils.peer import deliverable_telegram_peer
-
-        if not deliverable_telegram_peer(telegram_chat_id):
-            return "system"
-        return "telegram"
-    return "telegram"
+    return _telegram_or_system()
 
 
 def _get_redis():

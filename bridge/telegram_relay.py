@@ -33,6 +33,8 @@ import os
 import redis
 from telethon.errors import FloodWaitError
 
+from utils.peer import numeric_peer
+
 logger = logging.getLogger(__name__)
 
 # Poll interval for checking outbox queues (100ms for low latency)
@@ -114,6 +116,40 @@ def _get_redis_connection() -> redis.Redis:
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+def _deliverable_peer(chat_id, kind: str, message: dict) -> bool:
+    """True when ``chat_id`` is a peer Telethon can send to; log the drop otherwise.
+
+    Two distinct drops, kept at different levels because they mean different
+    things: a local session id (``local-<uuid>``) is routine — its output was
+    already written by ``FileOutputHandler`` — while ``chat_id=0`` is the
+    chatless-session placeholder leaking into an outbound payload, which would
+    raise ``PeerIdInvalidError`` at send time (#2644).
+
+    ``kind`` names the payload for the log line ("message", "reaction",
+    "custom emoji message"). Every send path routes through here so the three
+    cannot drift apart again.
+
+    The parse itself belongs to ``utils.peer``, which is the single home for
+    "is this a Telegram peer" across the source side too. Re-deriving it with a
+    bare ``int()`` here — as the old message-path check did — recreated the
+    drift this helper exists to prevent: ``int()`` accepts ``"+5"``, ``5.9``,
+    and ``True``, all of which ``utils.peer`` rejects, so the relay and the
+    source side disagreed about the same payload.
+    """
+    chat_id_int = numeric_peer(chat_id)
+    if chat_id_int is None:
+        logger.debug(f"Relay: dropping {kind} for non-Telegram chat_id '{chat_id}' (local session)")
+        return False
+
+    if chat_id_int == 0:
+        logger.warning(
+            f"Relay: dropping {kind} with zero chat_id (invalid Telegram peer): {message}"
+        )
+        return False
+
+    return True
+
+
 async def _send_queued_reaction(
     telegram_client,
     message: dict,
@@ -141,11 +177,7 @@ async def _send_queued_reaction(
         logger.warning(f"Relay: skipping malformed reaction payload: {message}")
         return False
 
-    # Drop reactions for non-Telegram (local) session IDs
-    try:
-        int(chat_id)
-    except (ValueError, TypeError):
-        logger.debug(f"Relay: dropping reaction for non-Telegram chat_id '{chat_id}'")
+    if not _deliverable_peer(chat_id, "reaction", message):
         return False
 
     try:
@@ -271,6 +303,9 @@ async def _send_custom_emoji_message(
 
     if not chat_id or not emoji_char:
         logger.warning(f"Relay: skipping malformed custom emoji message: {message}")
+        return None
+
+    if not _deliverable_peer(chat_id, "custom emoji message", message):
         return None
 
     reply_to_id = int(reply_to) if reply_to else None
@@ -442,19 +477,7 @@ async def _send_queued_message(
         logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
         return None
 
-    # Local session IDs (e.g. "local-<uuid>") are not Telegram chat IDs.
-    # Drop them silently — their output was already written by FileOutputHandler.
-    try:
-        chat_id_int = int(chat_id)
-    except (ValueError, TypeError):
-        logger.debug(f"Relay: dropping non-Telegram chat_id '{chat_id}' (local session)")
-        return None
-
-    # chat_id=0 is not a valid Telegram peer (causes PeerIdInvalidError).
-    if chat_id_int == 0:
-        logger.warning(
-            f"Relay: dropping message with zero chat_id (invalid Telegram peer): {message}"
-        )
+    if not _deliverable_peer(chat_id, "message", message):
         return None
 
     # Must have either text or files
@@ -811,10 +834,12 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     text = message.get("text", "")
     reply_to = message.get("reply_to")
     if chat_id and text:
-        # Skip dead-lettering for non-Telegram (local) session IDs
-        try:
-            chat_id_int = int(chat_id)
-        except (ValueError, TypeError):
+        # Same parse as the send paths (one predicate, `utils.peer`), but not
+        # `_deliverable_peer`: this is about discarding a stored record rather
+        # than dropping a send, so the log text differs, and the zero case here
+        # deliberately logs only the chat_id rather than the whole payload.
+        chat_id_int = numeric_peer(chat_id)
+        if chat_id_int is None:
             logger.debug(f"Relay: discarding dead letter for non-Telegram chat_id '{chat_id}'")
             return
 
