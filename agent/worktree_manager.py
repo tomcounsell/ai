@@ -466,7 +466,7 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     try:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
-    except Exception as e:  # pragma: no cover - import-time failure
+    except Exception as e:
         logger.warning("worktree_busy_check: model imports failed (%s)", e)
         return ("error", f"model_import_failed:{type(e).__name__}", "")
 

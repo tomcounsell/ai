@@ -527,6 +527,63 @@ def test_transcripts_dry_run_deletes_nothing(tmp_path):
     assert (old / f"{SESSION_A}.jsonl").exists(), "dry-run must not delete a transcript"
 
 
+def test_transcripts_never_follow_a_symlinked_transcript(tmp_path):
+    """A `<uuid>.jsonl` symlink is not a transcript, whatever it points at.
+
+    Without the `entry.is_symlink()` guard in `_is_transcript_entry` the name
+    matches the transcript shape, `stat()` reports the *target's* age, and the
+    sweep unlinks a pointer to a file it never surveyed and does not own.
+    """
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "precious.jsonl"
+    target.write_text("{}")
+    os.utime(target, (OLD, OLD))
+
+    link = proj / f"{SESSION_A}.jsonl"
+    link.symlink_to(target)
+    os.utime(proj, (OLD, OLD))
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sweep.removed == [], "a symlinked transcript must never be a candidate"
+    assert link.is_symlink(), "the symlink itself must survive"
+    assert target.exists(), "the link target must survive"
+
+
+def test_transcripts_never_descend_into_a_symlinked_project(tmp_path):
+    """The containment boundary: the sweep stays inside the projects dir.
+
+    Without the `project.is_symlink()` guard in `sweep_transcripts`, a symlink
+    placed under `~/.claude/projects/` is descended into and every aged
+    `<uuid>.jsonl` behind it is deleted through the link — real files, outside
+    the scope the sweep was pointed at.
+    """
+    root = tmp_path / "projects"
+    outside = tmp_path / "outside-project"
+    outside.mkdir()
+    behind_link = [outside / f"{SESSION_A}.jsonl", outside / f"{SESSION_B}.jsonl"]
+    for f in behind_link:
+        f.write_text("{}")
+        os.utime(f, (OLD, OLD))
+    os.utime(outside, (OLD, OLD))
+
+    root.mkdir()
+    (root / "linked-proj").symlink_to(outside, target_is_directory=True)
+
+    # A genuine in-scope project, so the assertion below is not vacuous.
+    real = _project(root, "real-proj")
+    (real / f"{SESSION_A}.jsonl").write_text("{}")
+    _age(real)
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sweep.removed == [f"real-proj/{SESSION_A}.jsonl"]
+    assert all(f.exists() for f in behind_link), "files behind a symlinked project must survive"
+
+
 def test_transcripts_missing_dir_is_not_an_error(tmp_path):
     sweep = sweep_transcripts(projects_dir=tmp_path / "nope")
     assert sweep.removed == [] and sweep.errors == []
