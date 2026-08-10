@@ -20,12 +20,18 @@ Gates, in order, per open non-draft SDLC PR:
 Then the action ladder, keyed on ``(slug, head-sha)``:
 
     escalation key already set                 -> stop acting entirely
+    SDLC_STALL_RESUME_ENABLED=false            -> escalate once, stop
     attempts >= SDLC_STALL_RESUME_MAX_ATTEMPTS -> escalate once, stop
     action cooldown live                       -> skip this tick
     rung 1  live non-ledger eng session        -> steer_session(...)
-    rung 2  most recent resumable eng session  -> resume_session(...)
+    rung 2  resumable eng session              -> resume_session(...)
     rung 3  no target                          -> create_session(slug=sdlc-N)
     rung 4  action failed (non-benign)         -> escalate once, stop
+
+Rungs 1 and 2 both rank candidates ``(same_lane, recency)``, so a session
+carrying the stalled lane's own slug always wins and recency decides only among
+equals. Acting on another lane's session would land this issue's work as commits
+on that lane's branch.
 
 "Escalate once and **stop acting**" is literal: once the escalation key exists
 for a ``(slug, head-sha)``, every later tick skips the lane before it can claim
