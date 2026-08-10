@@ -40,6 +40,57 @@ CORRECTION_PATTERNS = [
 ]
 
 
+def resolve_projects_config_path() -> Path:
+    """Resolve the projects.json this machine should read.
+
+    Precedence: ``PROJECTS_CONFIG_PATH`` env override →
+    ``~/Desktop/Valor/projects.json`` (the iCloud-synced private vault copy) →
+    the in-repo ``config/projects.json`` fallback.
+
+    The returned path is not guaranteed to exist; callers decide how to treat a
+    missing config. Single resolver so every reader agrees on which file is
+    authoritative.
+    """
+    config_path = Path(
+        os.environ.get(
+            "PROJECTS_CONFIG_PATH",
+            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
+        )
+    ).expanduser()
+    if not config_path.exists():
+        config_path = AI_ROOT / "config" / "projects.json"
+    return config_path
+
+
+def machine_owns_project(project_key: str | None) -> bool:
+    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
+
+    Single-machine invariant: an automated reflection acts on a project's
+    sessions only when ``projects.<project_key>.machine == computer_name()``.
+    Making ownership structural (rather than relying on the operator enabling a
+    flag on exactly one box) means exactly one machine acts on a given lane even
+    if the reflection is enabled fleet-wide.
+
+    Fail-soft: an unresolvable / unknown / missing ``project_key`` → False
+    (treated as not-owned, so the caller falls back to propose-only — the safe
+    default). Any lookup error is swallowed and returns False.
+    """
+    if not project_key:
+        return False
+    try:
+        from config.machine import get_machine_name
+        from tools.reflection_machine_filter import _load_project_machines
+
+        owners = _load_project_machines(resolve_projects_config_path())
+        owner = owners.get(project_key)
+        if not owner:
+            return False
+        return owner == get_machine_name().strip().lower()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("machine_owns_project swallowed exception: %r", exc)
+        return False
+
+
 def load_local_projects() -> list[dict]:
     """Load projects from projects.json, filtered to those present on this machine.
 
@@ -51,14 +102,7 @@ def load_local_projects() -> list[dict]:
         projects.json key. Only projects whose working_directory exists on disk
         are returned.
     """
-    config_path = Path(
-        os.environ.get(
-            "PROJECTS_CONFIG_PATH",
-            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
-        )
-    ).expanduser()
-    if not config_path.exists():
-        config_path = AI_ROOT / "config" / "projects.json"
+    config_path = resolve_projects_config_path()
     if not config_path.exists():
         logger.warning(f"Project config not found at {config_path}, returning empty")
         return []
