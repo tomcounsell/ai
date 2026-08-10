@@ -141,6 +141,27 @@ class TestFailuresAreReturnValues:
         assert "--slug" in (result.error or "")
         assert spy["push"] == []
 
+    def test_role_and_session_type_must_agree(self, spy):
+        """``role`` gates the slug requirement; ``session_type`` picks the SessionType.
+
+        Left independent, ``role="teammate", session_type="eng"`` with no slug
+        skips the slug requirement and lands an ENG session in the main
+        checkout — the hole #1109/#1272 closed.
+        """
+        result = valor_session.create_session(
+            message="do some work with no issue reference",
+            role="teammate",
+            session_type="eng",
+            slug=None,
+            project_key="test-2696",
+        )
+
+        assert result.success is False
+        assert "disagree" in (result.error or "")
+        assert spy["resolve"] == []
+        assert spy["worktree"] == []
+        assert spy["push"] == [], "a mismatch must refuse with zero side effects"
+
     def test_unknown_session_type_is_refused(self, spy):
         result = valor_session.create_session(
             message="Run /sdlc for issue #2696",
@@ -199,6 +220,29 @@ class TestPayloadThreading:
 
         assert result.success is True
         assert spy["push"][0]["slug"] == "sdlc-2696"
+
+    def test_progress_notes_are_returned_not_printed(self, spy, capsys):
+        """Presentation belongs to ``cmd_create``; the core carries the text."""
+        result = valor_session.create_session(
+            message="Run /sdlc for issue #2696",
+            slug=None,
+            project_key="test-2696",
+        )
+
+        assert capsys.readouterr().err == "", "the core must not write to stderr"
+        assert any("Auto-derived slug: sdlc-2696" in n for n in result.notes)
+        assert any("Worktree:" in n for n in result.notes)
+
+    def test_sender_name_follows_session_type(self, spy):
+        valor_session.create_session(
+            message="Run /sdlc for issue #2696",
+            role="teammate",
+            session_type="teammate",
+            slug="sdlc-2696",
+            project_key="test-2696",
+        )
+
+        assert spy["push"][0]["sender_name"] == "valor-session (teammate)"
 
     def test_success_reports_worker_health_instead_of_printing_it(self, spy):
         result = valor_session.create_session(

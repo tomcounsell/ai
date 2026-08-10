@@ -16,6 +16,7 @@ safe default (no floor / not-owned), never an exception.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -126,6 +127,24 @@ class TestMachineOwnsProject:
             ),
         ):
             assert machine_owns_project("myproj") is False
+
+    def test_ownership_resolves_from_the_projects_config_path_override(self, tmp_path, monkeypatch):
+        """The actual delta of the extraction: the projects.json path is *resolved*.
+
+        Every other test here patches ``_load_project_machines``, which fences
+        exactly the code that changed — the swap of a hardcoded
+        ``config/projects.json`` for ``resolve_projects_config_path()``. This one
+        points ``PROJECTS_CONFIG_PATH`` at a real file and reads it end to end.
+        """
+        config = tmp_path / "projects.json"
+        config.write_text(
+            json.dumps({"projects": {"myproj": {"machine": "My-Machine"}}}),
+        )
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config))
+
+        with patch("config.machine.get_machine_name", return_value="My-Machine"):
+            assert machine_owns_project("myproj") is True
+            assert machine_owns_project("otherproj") is False
 
     def test_lookup_error_is_fail_soft_not_owned(self):
         """Any lookup exception resolves to not-owned (propose), never propagates."""

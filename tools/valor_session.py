@@ -442,6 +442,11 @@ class CreateResult:
     project_key: str | None = None
     worker_healthy: bool | None = None
     worker_heartbeat_age_s: float | None = None
+    # Operator-facing progress lines the core discovered (auto-derived slug,
+    # inherited project_key, provisioned worktree). The core does not print:
+    # presentation belongs to ``cmd_create``, and a reflection calling the core
+    # from a subprocess has no stderr anyone reads.
+    notes: list[str] = dataclasses.field(default_factory=list)
 
 
 def create_session(
@@ -468,9 +473,12 @@ def create_session(
     roles and fails when nothing can be derived (#1109, #1272). ``project_key=None``
     falls back to parent inheritance, then a cwd match.
 
+    ``role`` and ``session_type`` must agree — see the coherence check below.
+
     ``classification_type``, ``issue_url``, ``project_config``, and ``working_dir``
     are derived here; they are not caller inputs.
     """
+    notes: list[str] = []
     _load_env()
     try:
         import asyncio
@@ -497,6 +505,29 @@ def create_session(
             if not child_sessions_allowed():
                 return CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)
 
+        # ------------------------------------------------------------------
+        # role / session_type coherence.
+        #
+        # ``role`` gates the slug requirement (#1109/#1272) while
+        # ``session_type`` selects the SessionType. Left independent, a
+        # programmatic caller passing role="teammate", session_type="eng" and
+        # no slug would skip the slug requirement and land an ENG session in
+        # the main checkout — precisely the hole #1109/#1272 closed. Refuse a
+        # mismatch outright, before any resolution or filesystem work, with the
+        # same zero-side-effect refusal shape as the #1633 gate above.
+        # ``cmd_create`` always passes both identically, so this is latent-only.
+        # ------------------------------------------------------------------
+        if role != session_type:
+            return CreateResult(
+                success=False,
+                error=(
+                    f"role={role!r} and session_type={session_type!r} disagree. "
+                    "They gate different things (slug requirement vs. SessionType) "
+                    "and must name the same kind of session."
+                ),
+                notes=notes,
+            )
+
         _role_to_session_type = {
             "eng": SessionType.ENG,
             "teammate": SessionType.TEAMMATE,
@@ -509,6 +540,7 @@ def create_session(
                     f"Unknown session_type value: {session_type!r}. "
                     f"Allowed values: {sorted(_role_to_session_type)}"
                 ),
+                notes=notes,
             )
 
         # Derive a session_id from timestamp + role
@@ -535,13 +567,11 @@ def create_session(
             derived = _derive_slug_from_message(message)
             if derived:
                 slug = derived
-                print(
-                    f"  Auto-derived slug: {slug} (from 'issue #N' in message)",
-                    file=sys.stderr,
-                )
+                notes.append(f"  Auto-derived slug: {slug} (from 'issue #N' in message)")
             else:
                 return CreateResult(
                     success=False,
+                    notes=notes,
                     error=(
                         "Eng sessions must be created with --slug <slug> "
                         "or include 'issue #N' in the message so a worktree can be "
@@ -569,10 +599,7 @@ def create_session(
                 if inherited_key:
                     project_key = inherited_key
                     parent_uuid = getattr(parent, "agent_session_id", parent_id)
-                    print(
-                        f"  Inherited project_key={project_key} from parent {parent_uuid}",
-                        file=sys.stderr,
-                    )
+                    notes.append(f"  Inherited project_key={project_key} from parent {parent_uuid}")
         if not project_key:
             # Final fallback: cwd-based match. Raises ProjectKeyResolutionError
             # on no match — no silent coercion to a default key.
@@ -594,7 +621,7 @@ def create_session(
             _validate_slug(slug)  # Raises ValueError for invalid slugs
             wt_path = get_or_create_worktree(repo_root, slug)
             working_dir = str(wt_path)
-            print(f"  Worktree:    {working_dir}", file=sys.stderr)
+            notes.append(f"  Worktree:    {working_dir}")
         else:
             working_dir = str(repo_root)
 
@@ -604,7 +631,10 @@ def create_session(
                 session_id=session_id,
                 working_dir=working_dir,
                 message_text=message,
-                sender_name=f"valor-session ({role})",
+                # Derived from session_type (not role) so the label can never
+                # disagree with the SessionType actually enqueued. The
+                # coherence check above makes the two identical anyway.
+                sender_name=f"valor-session ({session_type})",
                 chat_id=chat_id,
                 telegram_message_id=0,
                 session_type=resolved_session_type,
@@ -630,10 +660,11 @@ def create_session(
             project_key=project_key,
             worker_healthy=worker_healthy,
             worker_heartbeat_age_s=worker_age_s,
+            notes=notes,
         )
 
     except Exception as e:
-        return CreateResult(success=False, error=str(e))
+        return CreateResult(success=False, error=str(e), notes=notes)
 
 
 def cmd_create(args: argparse.Namespace) -> int:
@@ -718,6 +749,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         model=model,
         requires_real_chrome=bool(getattr(args, "needs_real_chrome", False)),
     )
+
+    # Presentation of the core's progress notes lives here, not in the core.
+    for note in result.notes:
+        print(note, file=sys.stderr)
 
     if not result.success:
         print(f"Error: {result.error}", file=sys.stderr)
