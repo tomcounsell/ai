@@ -1,13 +1,13 @@
 ---
 status: Ready
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2696
 last_comment_id: none
-revision_applied: false
-revision_applied_at: 2026-08-10T04:15:01Z
+revision_applied: true
+revision_applied_at: 2026-08-10T04:52:09Z
 ---
 
 # SDLC Stall Auto-Resume (steer, resume, or create an eng session; escalate once)
@@ -50,6 +50,9 @@ Baseline: `main` @ `96b0f65dd`, verified 2026-08-10. Issue filed the same day.
 | `create_local` omits `slug` at `sdlc_session_ensure.py:837-843` | Read; confirmed | Unchanged |
 | Three stalled lanes have zero sessions for their slug | Live query: all four `sdlc-local-*` anchors exist with `slug=None`, `status=running` | **Corrected** — the sessions exist, they are just invisible to a slug query, and they are ledger rows |
 | Alert target drift (`Eng: Valor` in code, `Dev: Valor` in doc `:276`) | Read both | Unchanged |
+| `touch_issue_lock` raises on Redis failure, so the gate can map it to "unknown" | Round-3 re-read of `models/session_lifecycle.py:1310-1323` | **Falsified** — it fails OPEN, returning `acquired=True`. Gate 5' redesigned onto a direct key read; see spike-3 |
+| `_derive_sdlc_metadata` mis-classifies the reflection's steer text | Executed live against the real `valor` project config | **Corrected** — it returns `('sdlc', <issue url>)`, which is the desired result, not a defect |
+| Hollow sessions (non-terminal, no heartbeat, no fence) are a live hazard | Round-3 observation: four `sdlc-local-*` rows reporting `running`, refreshed only by a bulk probe | **New** — constrains Gate 5's secondary row check (freshness bound) and the create rung (created sessions must reach a terminal status) |
 
 `git log --since=2026-08-01 -- reflections/sdlc_progress.py docs/features/pm-session-liveness.md`
 returns nothing touching either file. No active plan in `docs/plans/` overlaps this area.
@@ -117,16 +120,28 @@ recon. No prototypes were required.
 
 ### spike-3: Does the issue lock give a trustworthy liveness signal?
 - **Assumption**: "`touch_issue_lock(issue, None, peek=True)` distinguishes a live lane from a dead one."
-- **Method**: live query
-- **Result**: **Yes.** All four live lanes returned
-  `IssueLockResult(acquired=False, owner_session_id='sdlc-local-{N}', owner_run_id=..., orphaned_lock=False, target_repo='tomcounsell/ai')`.
-  `orphaned_lock` is computed from `renewed_at` recency (`_lock_renewal_is_fresh`,
-  `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS`, default 20 min), refreshed by the heartbeat
-  (`tools/sdlc_lease_heartbeat.py`) and the worker tick — never from an `AgentSession` status. A
-  dead run stops renewing and the lease self-frees within `ISSUE_LOCK_TTL_SECONDS` (30 min).
-- **Confidence**: high
-- **Impact if false**: the gate degrades to "unknown" and the reflection declines to act — the
-  fail-safe posture, not a duplicate lane.
+- **Method**: live query, then code-read (round-3 re-verification against `main`)
+- **Result**: **The lock payload is trustworthy; `touch_issue_lock` as the reader is not.**
+
+  The *evidence* holds. All four live lanes' lock payloads showed a live owner, and liveness is
+  computed by `_lock_owner_is_live` (`models/session_lifecycle.py:982-1052`) from
+  `renewed_at` recency first (`_lock_renewal_is_fresh`, `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS`,
+  default 20 min), then a same-machine pid + `create_time` check — never from an `AgentSession`
+  status. A dead run stops renewing and the lease self-frees within `ISSUE_LOCK_TTL_SECONDS`
+  (30 min).
+
+  The *reader* does not hold. `touch_issue_lock` **fails open**: every Redis exception is swallowed
+  and returned as `IssueLockResult(acquired=True, ...)` (`:1310-1323`, documented at `:1140-1144`).
+  Under the mapping table `acquired=True` means "lock unheld → not live → continue", so a Redis flap
+  during the peek would route the ladder *into* acting. The function never raises, so "unknown" is
+  unreachable through it and a test that mocks it to raise would be testing a fiction.
+
+  **Resolution (round 3, owner direction — critique option (b)):** the reflection does not call
+  `touch_issue_lock`. It reads `session:issuelock:{issue_number}` directly and classifies the payload
+  with `_lock_owner_is_live`, under the caller's own `except Exception -> None`. That is the only
+  shape in which "unknown → skip" is actually producible. See Gate 5'.
+- **Confidence**: high — both halves verified by direct code read against `main`.
+- **Impact if false**: n/a — the fail-open behavior is a read fact, not an inference.
 
 ### spike-4: Does the reflection framework already enforce single-machine ownership?
 - **Assumption**: "`run_per_project_audit` only yields projects this machine owns."
@@ -151,9 +166,26 @@ recon. No prototypes were required.
 
 ## Appetite
 
-**Medium.** One reflection module rewritten in place, one shared helper extracted, one feature doc
-section rewritten, one test file substantially extended. No new service, no schema change, no
-migration.
+**Large.** Raised from Medium in the round-3 revision, deliberately and on the record: the owner's
+decision to keep the create rung (Open Question Q1) added a session-provisioning capability and a
+second cross-module extraction after the appetite was first set, and leaving `Medium` in place would
+have been a stale number rather than a judgment.
+
+What the work actually is:
+
+1. `reflections/sdlc_progress.py` rewritten in place — gate 5 replaced, gate 6 added, the
+   notification tail replaced by a four-rung action ladder with benign-race classification.
+2. **Extraction A** — `machine_owns_project` out of `reflections/crash_recovery.py` into
+   `reflections/utilities.py`, with a projects.json path-resolution fix.
+3. **Extraction B** — `create_session` out of `tools/valor_session.py::cmd_create`, which rewrites an
+   independently-tested CLI entry point. This is the expensive one: `cmd_create` is 220 lines of
+   interleaved resolution, filesystem, and printing, and the extraction must preserve its behavior
+   exactly (see "The create rung" for the boundary).
+4. `docs/features/pm-session-liveness.md` rewritten; one test file substantially rewritten (several
+   existing cases REPLACED, not added around) plus a new integration test.
+
+Still no new service, no schema change, no migration, and no new dependency — the size is in the
+breadth of the change, not its infrastructure.
 
 ## Solution
 
@@ -194,18 +226,58 @@ def _lane_is_live(issue_number: int) -> bool | None:
     """True if a live run owns this issue's lock, False if free/orphaned, None if unknown."""
 ```
 
-implemented over `models.session_lifecycle.touch_issue_lock(issue_number, None, peek=True)`. Passing
-`run_id=None` with `peek=True` never mutates (`session_lifecycle.py:1092-1095`, `:1122-1127`), so
-the reflection can never accidentally claim or renew a lease.
+**Mechanism: a direct, non-fail-open read of the lock key — NOT `touch_issue_lock`.**
+
+`touch_issue_lock` cannot express "unknown". It swallows every Redis exception and returns
+`IssueLockResult(acquired=True, ...)` (`models/session_lifecycle.py:1310-1323`), which this gate
+would read as "lock unheld → not live → continue" — a Redis flap would push the ladder into acting
+instead of declining, and would do so at both call sites the High-severity create-rung risk depends
+on. Fail-open is correct for `touch_issue_lock`'s own callers (a Redis hiccup must not wedge the
+pipeline) and exactly wrong here, where the caller wants to be *more* reluctant when blind.
+
+So the reflection reads the key itself and classifies the payload with the same helper
+`touch_issue_lock` uses:
+
+```python
+_LOCK_KEY = "session:issuelock:{issue_number}"
+
+def _lock_says_live(issue_number: int) -> bool | None:
+    try:
+        from models.session_lifecycle import _lock_owner_is_live
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(f"session:issuelock:{issue_number}")
+        if raw is None:
+            return False                       # no lock -> nobody owns the lane
+        return _lock_owner_is_live(json.loads(raw))
+    except Exception:
+        logger.warning(...)
+        return None                            # unknown -> caller skips
+```
+
+This is read-only by construction — a `GET` cannot claim or renew a lease, which is a stronger
+guarantee than the `peek=True` / `run_id=None` argument pair the earlier draft relied on.
+
+Three notes the builder must not lose:
+
+- `_lock_owner_is_live` is imported private-but-in-repo, deliberately. Re-deriving the
+  renewal-recency + pid + `create_time` logic in the reflection would fork the liveness rule the
+  moment `session_lifecycle.py` changes; this feature's whole thesis is that the lock owns liveness.
+- **A malformed payload is unknown, not free.** `json.loads` raising lands in the `except` and
+  returns `None`. `touch_issue_lock` maps a malformed payload to `acquired=False` (held-by-nobody);
+  that is a different and, here, less safe reading.
+- `_lock_owner_is_live` itself fails *toward* live on every indeterminate branch (foreign machine,
+  legacy payload with no `create_time`, psutil error). That polarity is right for this gate: a lock
+  we cannot adjudicate suppresses action rather than licensing a second lane.
 
 Mapping:
 
-| Peek result | Meaning | Gate |
+| Read result | Meaning | Gate |
 |---|---|---|
-| `acquired=True` | lock unheld | not live → continue |
-| `acquired=False, orphaned_lock=False` | live owner, renewals fresh | **live → skip silently** |
-| `acquired=False, orphaned_lock=True` | owner died, TTL not yet lapsed | not live → continue |
-| exception | unknown | **None → skip silently** |
+| key absent | lock unheld | not live → continue |
+| payload present, `_lock_owner_is_live` → `True` | live owner (fresh renewal, or a pid/machine check that cannot disprove life) | **live → skip silently** |
+| payload present, `_lock_owner_is_live` → `False` | owner died, TTL not yet lapsed | not live → continue |
+| Redis error, malformed JSON, or any exception | unknown | **None → skip silently** |
 
 This also produces a happy coincidence that the design leans on: by the time the gate lets us
 through, the stalled lane's lock is free or self-freeing, so the eng session we steer will not hit
@@ -215,14 +287,15 @@ A secondary, cheap sanity check is retained, and its tiebreak is stated explicit
 signals can disagree.
 
 **Tiebreak rule: the two signals are OR-ed for "live", never AND-ed.** A lane is live if the lock
-peek says live **OR** a non-ledger non-terminal `AgentSession` carries this `issue_number`. The row
-check can only ever *add* liveness; it must never turn a `orphaned_lock=True` result into "not
-live". That inversion is the permanent-false-negative mode spike-2 already ruled out for ledger
-anchors, and it is the single way this secondary check could make the detector worse.
+read says live **OR** a fresh non-ledger non-terminal `AgentSession` carries this `issue_number`. The
+row check can only ever *add* liveness; it must never turn a lock-says-dead result into "not live".
+That inversion is the permanent-false-negative mode spike-2 already ruled out for ledger anchors, and
+it is the single way this secondary check could make the detector worse.
 
 Stated as code, so the builder cannot get the polarity wrong:
 
 ```python
+lock_live = _lock_says_live(issue_number)
 if lock_live is None:
     return None            # unknown -> caller skips
 if lock_live:
@@ -230,10 +303,28 @@ if lock_live:
 return _nonledger_row_live(issue_number) or False   # row can only add liveness
 ```
 
+Note the ordering consequence: because an unknown lock read short-circuits to `None`, the secondary
+row check is never consulted during a Redis outage. That is intentional. The row query goes through
+the same Redis; a degraded backend cannot be its own second opinion.
+
 The row check costs one indexed query and catches a lane running without a lock (a Redis flap
 during acquire). Ledger rows are excluded via `agent.session_health._is_ledger`, exactly as
 `stall_advisory.py:130-139` does. If the row query itself raises, it contributes nothing (`False`)
 rather than `None` — a failed *secondary* signal must not veto a successful primary one.
+
+**The row check must be freshness-bounded, because hollow sessions are real.** Observed live during
+round-3 recon: four `sdlc-local-*` rows reporting `status=running` with no heartbeat and no fence,
+their `updated_at` refreshed only by a bulk liveness probe. Those particular rows are `is_ledger` and
+so already excluded — but the general hazard is not, and this feature *creates* non-ledger eng
+sessions that could become hollow the same way. A frozen non-terminal row would otherwise add false
+liveness forever and re-create the permanent-false-negative mode spike-2 ruled out, this time through
+the side door of a session the reflection itself minted.
+
+So `_nonledger_row_live` requires **both** a non-terminal status **and** an `updated_at` newer than
+`SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` (default 30 — provisional, tunable; deliberately aligned
+with `ISSUE_LOCK_TTL_SECONDS` so the two liveness horizons expire together). A row older than that
+contributes `False`: it is not evidence of life, it is evidence of a row nobody has touched. This
+keeps the secondary signal's failure mode "stops adding liveness", never "suppresses forever".
 
 ### Gate 6' — machine ownership
 
@@ -269,13 +360,89 @@ session, and wakes the worker. It gets its own guards and its own telemetry.
 **Mechanism — extract a programmatic core, do not shell out.** `resume_session` already exists as a
 "programmatic core … shared by `cmd_resume` (CLI) and the auto-resume reflection"
 (`tools/valor_session.py:786-790`). Creation has no such core: `cmd_create`
-(`tools/valor_session.py:423-645`) interleaves argparse reads, `print` calls, and `sys.exit` codes
-with the actual work, which is only two steps — `agent.worktree_manager.get_or_create_worktree` and
-`agent.agent_session_queue._push_agent_session`. Extract
-`tools.valor_session.create_session(...) -> CreateResult` around exactly those two steps, mirroring
-`ResumeResult`'s shape (`success`, `session_id`, `error`), and rewrite `cmd_create` as
-argparse-parsing and printing over it. Both reflection rungs then call programmatic cores rather
-than one calling a core and the other shelling out to a CLI contract.
+(`tools/valor_session.py:423-645`) interleaves argparse reads, `print` calls, and exit codes with the
+actual work. Both reflection rungs must call programmatic cores rather than one calling a core and
+the other shelling out to a CLI contract.
+
+**The extraction boundary is "everything from slug resolution onward."** An earlier draft of this
+plan described `cmd_create`'s real work as "only two steps — `get_or_create_worktree` and
+`_push_agent_session`". That was wrong, and building to it would have silently dropped five inputs
+`_push_agent_session` actually receives. Verified against `main`, `cmd_create` performs, in order:
+
+| Step | Location | Moves into `create_session`? |
+|---|---|---|
+| argparse attribute reads, `--json` flag | `:423-504` | **No** — stays in `cmd_create` |
+| slug auto-derive-or-reject (`_derive_slug_from_message`; eng requires a slug, #1109/#1272) | `:511-536` | **Yes** |
+| three-tier `project_key` resolution (explicit > `--parent` inheritance > cwd) | `:538-568` | **Yes** |
+| `_resolve_project_working_directory(project_key)` → `repo_root`, `project_config` | `:577` | **Yes** |
+| `_derive_sdlc_metadata(message, project_config)` → `classification_type`, `issue_url` | `:578` | **Yes** |
+| `_validate_slug` + `get_or_create_worktree` → `working_dir` | `:580-588` | **Yes** |
+| `_push_agent_session(...)` with the full payload | `:592-608` | **Yes** |
+| `_check_worker_health()` | `:612` | **Yes** — returned in the result, not printed by the core |
+| `print` / JSON emission / exit codes | `:614-645` | **No** — stays in `cmd_create` |
+
+`cmd_create` keeps **only** argparse reads, printing, and exit codes. Everything else is the core.
+
+Signature, naming the full payload explicitly so nothing is dropped:
+
+```python
+@dataclass
+class CreateResult:
+    success: bool
+    session_id: str | None = None
+    error: str | None = None
+    working_dir: str | None = None
+    project_key: str | None = None
+    worker_healthy: bool | None = None
+    worker_heartbeat_age_s: float | None = None
+
+def create_session(
+    *,
+    message: str,
+    role: str = "eng",
+    slug: str | None = None,          # None -> auto-derive-or-fail for non-teammate roles
+    project_key: str | None = None,   # None -> parent inheritance, then cwd match
+    parent_id: str | None = None,
+    session_type: str = "eng",
+    chat_id: int = 0,
+    model: str | None = None,
+    requires_real_chrome: bool = False,
+) -> CreateResult: ...
+```
+
+`classification_type`, `issue_url`, `project_config`, and `working_dir` are **derived inside** the
+core (they are not caller inputs) and passed to `_push_agent_session` exactly as `cmd_create` passes
+them today; `model` and `requires_real_chrome` are caller inputs and must be threaded through. The
+Success Criterion "`valor-session create` behaves identically" is checked by re-running the existing
+`cmd_create` tests unchanged.
+
+**Errors become return values, not exit codes.** `cmd_create`'s failure modes — the slugless-eng
+rejection, `ProjectKeyResolutionError`, `_validate_slug`'s `ValueError`, and the blanket
+`except Exception` — currently `return 1` after printing. In the core they become
+`CreateResult(success=False, error=...)`, and `cmd_create` maps a falsey result back to its print +
+exit-1 behavior. This is what lets the reflection's create rung distinguish "refused" from "crashed"
+without parsing stderr.
+
+**`_derive_sdlc_metadata` on the reflection's steer text — verified, and it does NOT degrade to
+`(None, None)`.** The round-2 critique asked for this to be checked rather than assumed. Read against
+`main` (`tools/valor_session.py:110-148`): the function returns `("sdlc", url)` when the message
+contains a GitHub issue URL **or** a bare `issue #N` reference. The steer message (see "The steer
+message") contains `issue #{issue}` by design, so it matches branch 2 and yields
+`classification_type="sdlc"` with the issue URL built from the project's `github.org`/`github.repo`
+config.
+
+Executed live against `main` with the real `valor` project config, the steer text yields:
+
+```
+github cfg: {'org': 'tomcounsell', 'repo': 'ai'}
+_derive_sdlc_metadata(...) -> ('sdlc', 'https://github.com/tomcounsell/ai/issues/2696')
+```
+
+That is the correct and desired outcome, not a mis-classification: the created session *is* SDLC work
+on that issue, and the metadata is what gives it a real `issue_url`. The builder must not "fix" this
+into `(None, None)`, and no test may assert `(None, None)` for this text. The only degraded case is a
+project whose config lacks `github.org`/`github.repo`, where `issue_url` is `None` while
+`classification_type` stays `"sdlc"` — harmless, since the message text still names the issue.
 
 The created session is an `eng` session with `slug = "sdlc-{issue}"` — the stalled lane's own slug,
 so it lands in the lane's existing worktree and on the lane's existing branch rather than starting a
@@ -287,13 +454,32 @@ case for a stalled lane.
 | Guard | Why |
 |---|---|
 | Gate 6' machine ownership must have passed | Two machines must never both create a lane. |
-| Re-peek the issue lock immediately before creating | Gate 5' ran earlier in the tick; the lock can be re-acquired in between. A held lock here is a **benign race** — no attempt charged, no escalation. |
+| Re-read the issue lock immediately before creating | Gate 5' ran earlier in the tick; the lock can be re-acquired in between. Uses the same `_lock_says_live` direct read, so an unknown result here also declines. A live owner is a **benign race** — no attempt charged, no escalation. |
 | Charged against the same per-`(slug, head-sha)` attempt budget | A create-loop is impossible: three creates for one stalled sha exhausts the budget and escalates once. |
 | `SDLC_STALL_CREATE_MAX_PER_TICK` (default 1) | Per-project-tick brake, enforced by a plain local counter in `_check_project_stalls` — see Budgets. |
 | Distinct `kind="create"` in logs, `findings`, and the summary counters | The rungs must be tellable apart in telemetry; the create rung is the one to watch. |
 
 The rung is self-limiting across ticks: once a session is created for a project it is non-terminal,
 so the next tick's rung 1 finds it and steers it instead of creating another.
+
+**The created session must be able to reach a terminal status.** This is a hard requirement, not a
+nicety, and it is the counterpart to the hollow-row hazard named under Gate 5'. The self-limiting
+property above depends on rung 1 finding the created session — but if that session goes hollow
+(non-terminal forever, no heartbeat, worktree frozen), rung 1 finds it every tick and steers a corpse
+until the attempt budget escalates. Two properties keep that bounded:
+
+- The session is created through `_push_agent_session`, the same enqueue path the bridge uses, so it
+  is claimed by the worker and driven by the normal session lifecycle that ends in a terminal status.
+  This reflection introduces no bespoke session-provisioning path that could sidestep it. (Contrast
+  `tools/sdlc_session_ensure.py`, which uses `create_local` and mints the `is_ledger` anchors that
+  legitimately never execute.)
+- The per-`(slug, head-sha)` attempt budget bounds the steer-a-corpse loop to
+  `SDLC_STALL_RESUME_MAX_ATTEMPTS` regardless, and the freshness bound on the secondary row check
+  stops a hollow row from suppressing the gate.
+
+The reflection deliberately does **not** try to detect or clean up a hollow session it created —
+that is `stall_advisory`'s and `crash_recovery`'s territory, and reaching into it here would collide
+with the "No killing anything" no-go.
 
 ### Benign races are not attempts
 
@@ -314,13 +500,32 @@ re-read-before-reject pattern (`agent/session_executor.py:827-832`):
 
 | Rung | Failure | Benign iff |
 |---|---|---|
-| steer | `steer_session` returns failure | re-read row exists and is **non-terminal** with a fresher `updated_at` than the one selected — someone else is driving it |
 | resume | `resume_session` returns failure | re-read row exists and is **not terminal** — it was resumed by another actor (typically `crash_recovery`) |
 | create | `create_session` refused | the issue lock is now held by a live owner — the lane restarted itself |
 
 Anything else is a real failure: charge the attempt, escalate per the escalation rules. Benign-race
 classification is recorded in `findings` (`"benign-race: resume"`) so a persistently racing pair of
 reflections is visible rather than silent.
+
+**The steer rung has no benign-race branch, deliberately.** An earlier draft gave it one ("re-read row
+is non-terminal with a fresher `updated_at`"). Verified against `main`, that branch is unreachable:
+`steer_session`'s only `success=False` returns are empty message, session not found, terminal status
+(`agent/session_executor.py:827-832`), and `is_ledger` (`:841-849`). A live non-ledger target simply
+**succeeds** — being actively driven by someone else does not make a steer fail, it just queues
+another message. Every real steer failure means the target is gone, terminal, or was never
+steerable, all of which are genuine dead ends that should charge an attempt. The classifier therefore
+covers the resume and create rungs only, and no test may mock `steer_session` into a
+failure-while-non-terminal shape the function cannot emit.
+
+**Accepted side effect on a benign-race resume.** `resume_session` pushes the steering message
+unconditionally (`tools/valor_session.py:856`) *before* the `transition_status` call that can fail.
+So when this reflection loses the race to `crash_recovery`, its stall instruction has already landed
+on `steering:{session_id}` and will be drained by the session the other actor resumed. "No attempt,
+no escalation, return early" therefore does **not** mean "no side effect": it means no budget
+consumed and no human paged. The duplicated instruction is harmless — it names the issue and asks for
+one `/sdlc` stage, which is what that session should be doing anyway. Making the push conditional
+would require changing `resume_session`'s contract for all its callers, which is outside this plan's
+boundary.
 
 ### The steer message
 
@@ -345,7 +550,7 @@ exception `_DEDUP_PREFIX` already claims (`sdlc_progress.py:33-36`).
 | Key | Purpose | Lifetime |
 |---|---|---|
 | `sdlc:stall:resume:cooldown:{slug}:{sha}` | Action cooldown — retrying an action is cheap, so this is short | `SDLC_STALL_RESUME_COOLDOWN_HOURS`, default **1** |
-| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget — `INCR`, TTL refreshed on each bump | 24 h |
+| `sdlc:stall:resume:attempts:{slug}:{sha}` | Attempt budget — `INCR`, TTL refreshed on each bump | `SDLC_STALL_ATTEMPTS_TTL_HOURS`, default **24** |
 | `sdlc:stall:escalated:{slug}:{sha}` | Human escalation, `SET NX` — the anti-ladder key | `SDLC_STALL_ESCALATION_TTL_DAYS`, default **30** |
 
 Separating the action cooldown from the human-escalation key is the whole fix for defect 2. The old
@@ -366,6 +571,14 @@ env override and a comment marking it tunable.
 | `SDLC_STALL_RESUME_MAX_ATTEMPTS` | 3 | Per `(slug, sha)` action attempts before escalate-once-and-stop |
 | `SDLC_STALL_CREATE_MAX_PER_TICK` | 1 | Max **creations** per project per tick — a burst brake on the widest rung |
 | `SDLC_STALL_RESUME_ENABLED` | `true` | Break-glass; `false` restores notification-only, still with the anti-ladder escalation key |
+| `SDLC_STALL_ATTEMPTS_TTL_HOURS` | 24 | TTL on the attempts key, refreshed on each bump. Bounds how long an exhausted budget stays exhausted for an unchanged head sha |
+| `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` | 30 | Freshness bound on Gate 5's secondary row check, so a hollow non-terminal row cannot add liveness forever |
+
+Every one of these is a named module constant read through an `os.environ.get(...)` override with a
+comment marking it provisional and tunable, mirroring the existing `_threshold_seconds()`
+float-then-int-hours pattern at `reflections/sdlc_progress.py:56-61`. No bare literal thresholds
+survive anywhere in the module — the round-2 critique caught the attempts TTL sitting as a bare
+"24 h" in prose, and the rule is now stated as a build-time invariant rather than an aspiration.
 
 There is deliberately **no cross-project run budget**. `run_per_project_audit` takes
 `audit_one: Callable[[dict], dict]` (`reflections/utilities.py:74-79`) and calls it once per project
@@ -417,7 +630,7 @@ reflection tick (1800s)
        ├─ gh pr list                      -> open non-draft session/sdlc-<N> PRs
        ├─ gh issue view <N>               -> issue open?
        ├─ git log origin/session/sdlc-<N> -> (sha, ts) -> age >= threshold?
-       ├─ touch_issue_lock(N, None, peek) -> Redis session:issuelock:{N} -> live?
+       ├─ _R.get(session:issuelock:{N}) + _lock_owner_is_live -> live? (never touch_issue_lock)
        ├─ AgentSession.query(issue_number)-> non-ledger non-terminal rows?  (secondary)
        ├─ machine_owns_project(key)       -> projects.json
        ├─ Redis: attempts / cooldown      -> act or skip
@@ -439,13 +652,14 @@ again later is treated as a fresh incident rather than a budget-exhausted one.
 
 | Race | Hazard | Mitigation |
 |---|---|---|
-| Lane restarts between the lock peek and the steer | Duplicate work in the target eng session | The steer is advisory; the eng session runs `/sdlc`, which itself short-circuits on `ISSUE_LOCKED` against a live foreign run. Two layers, both fail-closed. |
+| Lane restarts between the lock read and the steer | Duplicate work in the target eng session | The steer is advisory; the eng session runs `/sdlc`, which itself short-circuits on `ISSUE_LOCKED` against a live foreign run. Two layers, both fail-closed. |
 | Two reflection ticks overlap | Double steer | `SET NX` action-cooldown key is atomic; the loser skips. |
 | Two machines both own the checkout | Duplicate lanes | Gate 6' machine-ownership. |
 | `resume_session` transition loses to a worker pickup | Steer lands, transition fails | `resume_session` already pushes the steer first by design (`valor_session.py:837-856`); the message waits in the list and is drained at the next turn boundary either way. |
 | Target session goes terminal between selection and steer | Steer rejected | `steer_session` re-reads status and rejects terminal (`session_executor.py:827-832`); the failure charges an attempt and falls through to escalation. |
 | **`crash_recovery` resumes the same session first** | `resume_session` returns `success=False`; charging it would march a *successful* recovery toward a false human escalation — the original complaint through a side door | Benign-race classification: re-read the row; non-terminal means another actor resumed it. No attempt, no escalation, return early. See "Benign races are not attempts". |
-| **Lane re-acquires its issue lock between gate 5' and the create rung** | A duplicate lane on top of a live one — the worst outcome in this change | Re-peek the lock immediately before creating; a live owner is a benign race, not a failure. |
+| **Lane re-acquires its issue lock between gate 5' and the create rung** | A duplicate lane on top of a live one — the worst outcome in this change | Re-read the lock immediately before creating; a live owner is a benign race, not a failure, and an unknown read declines. |
+| **`resume_session` pushes the steer before its transition can fail** | On a benign-race resume the stall instruction has already landed on `steering:{session_id}` and is drained by the session another actor resumed | **Accepted side effect**, not mitigated. The duplicate instruction names the issue and asks for one `/sdlc` stage — what that session should be doing anyway. Making the push conditional means changing `resume_session` for all callers, outside this plan's boundary. See "Benign races are not attempts". |
 | **Two stalled lanes in one project both fall to create in one tick** | Two session creations in a single tick | `SDLC_STALL_CREATE_MAX_PER_TICK` local counter (default 1); the second lane waits for the next tick, by which time rung 1 finds the created session. |
 
 ## No-Gos
@@ -505,7 +719,7 @@ lands on `steering:{session_id}` and is readable by `peek_steering_messages`.
       attempt and produces no Telegram message.
 - [ ] Auto-resume attempts are bounded per `(slug, head-sha)`; on exhaustion the system escalates
       exactly once and stops acting.
-- [ ] Every new external boundary (lock peek, session query, steer, resume, create, Redis) logs a
+- [ ] Every new external boundary (lock read, session query, steer, resume, create, Redis) logs a
       warning and continues; the reflection never raises. Unknown state declines to act, and every
       gate that returns unknown leaves a marker in `findings` so degradation is visible.
 - [ ] `valor-session create` behaves identically after the `create_session` extraction.
@@ -518,16 +732,25 @@ lands on `steering:{session_id}` and is readable by `peek_steering_messages`.
 Each failure boundary gets a test that asserts *both* halves of the posture: no crash, and no
 action.
 
+**One prohibition, stated up front: no test may mock `touch_issue_lock` to raise.** It does not
+raise — it fails open and returns `acquired=True` on every Redis exception
+(`models/session_lifecycle.py:1310-1323`). A test built on that mock would pass while asserting
+behavior the production code cannot produce, which is precisely the trap the round-2 critique caught
+this plan walking into. The reflection does not call `touch_issue_lock` at all; the injectable
+boundary is the direct `_R.get` on `session:issuelock:{N}`, which does raise.
+
 | Boundary | Injected failure | Asserted |
 |---|---|---|
-| `touch_issue_lock` | raises | gate returns `None`; no steer, no alert; reflection returns `status="ok"` |
-| `AgentSession.query` | raises | no steer, no alert |
-| `steer_session` | returns `success=False`, row re-reads terminal | attempt charged; escalation fires once |
-| `steer_session` | returns `success=False`, row re-reads **non-terminal** | benign race: no attempt, no escalation, `findings` marker |
+| Lock key read (`_R.get`) | raises | gate returns `None`; no steer, no create, no alert; reflection returns `status="ok"`; `findings` marker |
+| Lock key read | returns malformed (non-JSON) payload | gate returns `None` — **unknown, not free**; no action |
+| `AgentSession.query` (secondary row check) | raises | contributes `False`, never `None`; a lock-says-live result still suppresses |
+| `AgentSession.query` (target selection) | raises | no steer, no alert |
+| `steer_session` | returns `success=False` (any cause) | attempt charged; escalation fires once. **No benign-race branch exists for this rung** — see "Benign races are not attempts" |
 | `resume_session` | returns `success=False`, row re-reads terminal | attempt charged; escalation fires once |
 | `resume_session` | returns `success=False`, row re-reads **non-terminal** (the `crash_recovery` race) | benign race: no attempt, no escalation, `findings` marker |
 | `create_session` | raises / returns `success=False` | attempt charged; escalation fires once |
-| Issue lock re-peek before create | live owner returned | benign race: no create, no attempt, no escalation |
+| Issue lock re-read before create | live owner returned | benign race: no create, no attempt, no escalation |
+| Issue lock re-read before create | read raises (`None`) | no create, no attempt, no escalation; `findings` marker |
 | `get_or_create_worktree` | raises | surfaced as `create_session` failure; no partial session enqueued |
 | Redis `INCR` (attempts) | raises | no action this tick (fail-safe: cannot prove we are under budget); `findings` marker |
 | Redis `SET NX` (escalation) | raises / returns falsey | no Telegram send |
@@ -542,7 +765,7 @@ behavior this plan reverses and must change rather than be added around.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_happy_path_emits_single_alert` —
       REPLACE: the happy path now emits a steering message and **no** alert.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_no_alert_when_session_active_or_unknown`
-      — REPLACE: rewrite against the lock peek (`live` / `free` / `unknown`) instead of
+      — REPLACE: rewrite against the direct lock read (`live` / `free` / `unknown`) instead of
       `_has_active_session`.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_alert_when_only_terminal_sessions` —
       UPDATE: terminal sessions now mean "resume target available", not "alert".
@@ -557,7 +780,7 @@ behavior this plan reverses and must change rather than be added around.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_dedup_redis_unavailable_skips_alert`
       — UPDATE: retarget from the alert key to the escalation key.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_has_active_session_handles_redis_failure`
-      — DELETE: `_has_active_session` is removed; superseded by the lock-peek failure test.
+      — DELETE: `_has_active_session` is removed; superseded by the lock-read failure test.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — tests for draft PRs, closed issues,
       missing branches, gh/git failures, cwd threading, and the canonical return shape are UNCHANGED
       and must keep passing.
@@ -569,19 +792,27 @@ behavior this plan reverses and must change rather than be added around.
 
 New coverage to add:
 
-- [ ] Live-local-lane suppression: lock peek reports a live owner → no steer, no alert.
-- [ ] Gate 5' tiebreak polarity: lock says orphaned + a live non-ledger row for the issue → **live**
-      (suppressed). Lock says live + no row → **live**. Row query raises + lock says live → still
-      live. This is the inversion guard; it is the most important new unit test.
+- [ ] Live-local-lane suppression: the lock read reports a live owner → no steer, no alert.
+- [ ] Gate 5' tiebreak polarity: lock says dead + a fresh live non-ledger row for the issue →
+      **live** (suppressed). Lock says live + no row → **live**. Row query raises + lock says live →
+      still live. This is the inversion guard; it is the most important new unit test.
+- [ ] Gate 5' unknown-vs-free discrimination: `_R.get` raising → `None` → no action; `_R.get`
+      returning malformed JSON → `None` → no action; `_R.get` returning `None` (key absent) → not
+      live → continue. These three outcomes must be distinguishable — that is the whole point of the
+      round-2 BLOCKER, and a test suite that cannot tell them apart has not fixed it.
+- [ ] Gate 5' secondary-row freshness: a non-terminal non-ledger row whose `updated_at` is older than
+      `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` contributes **no** liveness (the hollow-session
+      guard); an equivalent fresh row does.
 - [ ] Steer-target selection order: live eng session preferred over resumable, resumable preferred
       over create; ledger anchors never selected; sessions from another `project_key` never
       selected.
 - [ ] Create rung: no live and no resumable eng session → `create_session` called once with
       `slug="sdlc-{issue}"`, `session_type="eng"`, and no Telegram message sent.
-- [ ] Create rung lock re-peek: lock becomes held between gate 5' and create → no create, no
+- [ ] Create rung lock re-read: lock becomes held between gate 5' and create → no create, no
       attempt charged, no escalation.
 - [ ] Benign-race classification: `resume_session` fails but the row re-reads non-terminal → no
-      attempt charged, no escalation. Same for `steer_session`.
+      attempt charged, no escalation. **Resume and create rungs only** — there is no steer
+      equivalent; assert instead that a `steer_session` failure always charges an attempt.
 - [ ] Attempt-budget exhaustion: attempts reach the cap → one escalation, then silence across
       further ticks.
 - [ ] Machine-ownership gate: non-owner machine takes no action.
@@ -601,7 +832,7 @@ New coverage to add:
   is exactly the mirage spike-2 documents. The lock is the authority; the `issue_number` row query
   survives only as an OR-ed secondary signal that can add liveness and never remove it (see Gate
   5'). Do not promote it, do not add a second row query, and do not let a row result veto the lock.
-  Time-box: if the lock peek proves insufficient, escalate as an Open Question rather than
+  Time-box: if the lock read proves insufficient, escalate as an Open Question rather than
   reintroducing row inference as the authority.
 - **Making the steer conversational.** The steer is one message with a `/sdlc` instruction. It does
   not negotiate, ask questions, or carry pipeline state. Anything richer belongs in `/sdlc` itself.
@@ -619,10 +850,10 @@ New coverage to add:
 |---|---|---|
 | Steering the wrong eng session (a human conversation in progress) | Medium | The steer is a short, explicit instruction naming the issue; the eng session's own routing decides. Bounded per lane by the `(slug, sha)` attempt cap, and each lane steers at most once per cooldown. |
 | A steered eng session ignores the message | Medium | Attempt budget converges to escalate-once; success charges an attempt too, so an ignored steer cannot loop. |
-| Lock peek misreads a live lane as dead during a Redis flap | Medium | Peek exceptions → `None` → skip. A false "free" requires Redis to return a *wrong* payload, not to fail. |
+| Lock read misreads a live lane as dead during a Redis flap | Medium | The reflection reads `session:issuelock:{N}` directly under its own `except Exception -> None`, rather than through the fail-open `touch_issue_lock` (which would report a flap as `acquired=True`, i.e. "free"). Malformed JSON is also `None`. A false "free" therefore requires Redis to return a *wrong* payload, not to fail — and `_lock_owner_is_live` fails toward "live" on every indeterminate payload branch. |
 | 30-day escalation TTL hides a genuinely new problem | Low | The key is scoped by head sha; any commit re-arms it. A stalled sha is by definition the same incident. |
 | Helper extraction breaks `crash_recovery` | Low | Same signature, same fail-soft semantics; covered by re-running its existing tests. |
-| The create rung spawns a lane on top of a live one | **High** | Three independent guards: gate 5' lock peek, a second lock peek immediately before create, and `/sdlc`'s own `ISSUE_LOCKED` short-circuit inside the created session. All three fail closed. |
+| The create rung spawns a lane on top of a live one | **High** | Three independent guards: gate 5' lock read, a second lock read immediately before create, and `/sdlc`'s own `ISSUE_LOCKED` short-circuit inside the created session. All three fail closed — and the first two are non-fail-open by construction (direct `_R.get`, not `touch_issue_lock`), which is what makes the claim true rather than aspirational. |
 | `create_session` extraction regresses `valor-session create` | Medium | The extraction moves two calls (`get_or_create_worktree`, `_push_agent_session`) behind a core and leaves argparse/printing in `cmd_create`; existing `cmd_create` tests are re-run unchanged as the regression check. |
 | A created session burns tokens on an already-finished lane | Low | The lane is only reached after gates 1-4 confirm an open issue, an open non-draft PR, and a commit older than the threshold. A finished lane fails gate 1 or 3. |
 | Two machines both act despite the gate | Low | `projects.<key>.machine` is the repo's declared source of truth and is validated by `bridge/config_validation.py`. |
@@ -634,29 +865,36 @@ New coverage to add:
    resolving projects.json the same way `load_local_projects` does (`PROJECTS_CONFIG_PATH` →
    Desktop → repo fallback). Update `crash_recovery` to import it and delete the private copy. Grep
    for any other reference and sweep.
-2. **Replace gate 5.** Delete `_has_active_session`. Add `_lane_is_live(issue_number)` over
-   `touch_issue_lock(..., peek=True)` with the three-way result mapping, plus the secondary
-   non-ledger `issue_number` session check **OR-ed for liveness only** — implement the polarity
-   exactly as the code block in Gate 5'. Fail-soft to `None` on the lock peek; a failing row query
-   contributes `False`, never `None`.
+2. **Replace gate 5.** Delete `_has_active_session`. Add `_lock_says_live(issue_number)` as a
+   **direct `_R.get("session:issuelock:{N}")` read** classified by
+   `models.session_lifecycle._lock_owner_is_live`, under the caller's own `except Exception -> None`
+   — do **not** route this through `touch_issue_lock`, which fails open and cannot express
+   "unknown". Then add `_lane_is_live(issue_number)` layering the secondary non-ledger
+   `issue_number` session check **OR-ed for liveness only**, freshness-bounded by
+   `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES` — implement the polarity exactly as the code block in
+   Gate 5'. A failing row query contributes `False`, never `None`.
 3. **Add gate 6.** Call `machine_owns_project(project["slug"])` in `_check_project_stalls`; skip
    silently when not the owner.
 4. **Add the Redis key helpers.** `_action_cooldown_set`, `_bump_attempts`, `_escalation_set` —
    named module constants with env overrides and provisional-tunable comments. Delete
    `_dedup_set`, `_DEDUP_PREFIX`'s 6-hour alert key, `_cooldown_seconds`, and
    `_DEFAULT_COOLDOWN_HOURS`.
-5. **Extract `create_session` in `tools/valor_session.py`.** Add
-   `create_session(*, project_key, slug, message, session_type, ...) -> CreateResult` wrapping
-   `get_or_create_worktree` + `_push_agent_session`, mirroring `ResumeResult`'s dataclass shape.
-   Rewrite `cmd_create` as argparse-parsing and printing over the new core — no behavior change.
-   Re-run the existing `cmd_create` tests as the regression check.
+5. **Extract `create_session` in `tools/valor_session.py`.** Boundary: **everything from slug
+   resolution onward** — slug auto-derive-or-reject, three-tier `project_key` resolution,
+   `_resolve_project_working_directory`, `_derive_sdlc_metadata`, `_validate_slug` +
+   `get_or_create_worktree`, `_push_agent_session` with its full payload
+   (`classification_type`, `issue_url`, `project_config`, `model`, `requires_real_chrome`), and
+   `_check_worker_health`. Use the signature and `CreateResult` dataclass given in "The create rung";
+   convert `cmd_create`'s `return 1` failure paths into `CreateResult(success=False, error=...)`.
+   `cmd_create` retains only argparse reads, printing, and exit codes. Re-run the existing
+   `cmd_create` tests unchanged as the regression check — behavior must be identical.
 6. **Add `_pick_steer_target(project_key)`.** Live non-ledger eng session first, then most recent
    resumable eng session with a `claude_session_uuid`, else `"create"`. Returns `(kind, session)`.
 7. **Add `_attempt_action(...)`.** Compose the message, dispatch via `steer_session`,
    `resume_session`, or `create_session`, classify the outcome (benign race vs. real failure per
    "Benign races are not attempts"), charge the attempt only when not a benign race, and return a
    structured outcome carrying `kind` so telemetry can tell the rungs apart.
-8. **Add the create-rung guards.** Re-peek the issue lock immediately before `create_session`; a
+8. **Add the create-rung guards.** Re-read the issue lock immediately before `create_session`; a
    live owner returns a benign-race outcome. Enforce `SDLC_STALL_CREATE_MAX_PER_TICK` with a local
    counter owned by `_check_project_stalls`.
 9. **Rewrite the tail of `_check_project_stalls`.** Wire the ladder: attempt budget → cooldown →
@@ -664,7 +902,7 @@ New coverage to add:
    `{status, findings, summary, duration}` return shape and extend the summary with per-rung counts
    (steered / resumed / created / escalated).
 10. **Add degradation markers.** Every gate that returns unknown appends a short `findings` marker
-    (e.g. `"gate-unknown: lock-peek"`) so a Redis or `gh` degradation is visible instead of reading
+    (e.g. `"gate-unknown: lock-read"`) so a Redis or `gh` degradation is visible instead of reading
     like a healthy zero-stall tick.
 11. **Rewrite `_send_alert`'s caller contract.** New message text (attempt-and-failure voice), fired
     only from the escalation path, `SET NX`-guarded. Keep the `Eng: Valor` target.
@@ -690,11 +928,16 @@ New coverage to add:
 - [ ] Replace the Tunables table with the full new knob set (`SDLC_STALL_THRESHOLD_HOURS`,
       `SDLC_STALL_RESUME_ENABLED`, `SDLC_STALL_RESUME_MAX_ATTEMPTS`,
       `SDLC_STALL_CREATE_MAX_PER_TICK`, `SDLC_STALL_RESUME_COOLDOWN_HOURS`,
-      `SDLC_STALL_ESCALATION_TTL_DAYS`), and drop the removed `SDLC_STALL_COOLDOWN_HOURS`.
+      `SDLC_STALL_ESCALATION_TTL_DAYS`, `SDLC_STALL_ATTEMPTS_TTL_HOURS`,
+      `SDLC_STALL_ROW_LIVENESS_MAX_AGE_MINUTES`), and drop the removed `SDLC_STALL_COOLDOWN_HOURS`.
+      All eight must appear; the round-2 critique caught the tunables list enumerating a subset.
 - [ ] Document the create rung explicitly, including its guards — it is the one capability an
       operator needs to know the reflection has.
-- [ ] Note the new `tools/valor_session.py::create_session` core in
-      `docs/tools-reference.md` if `valor-session` has an entry describing its internals.
+- [ ] `docs/tools-reference.md`: **no change required.** Verified during the round-3 revision —
+      `grep -n "valor-session" docs/tools-reference.md` returns nothing, so there is no entry
+      describing `valor-session create`'s internals to keep in sync. Recorded as a resolved
+      check rather than a build-time judgment call; do not add a new entry for an internal
+      refactor that changes no CLI surface.
 - [ ] Add a cross-reference to `docs/features/session-steering.md` — steering is now a consumer
       surface of this reflection.
 - [ ] Check `docs/features/README.md` for an index entry needing a description refresh.
@@ -743,12 +986,30 @@ against `main` @ `e051e95da` during the structural check.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, structural verification | Gate 5' assumes a lock-peek failure raises so the reflection can map it to `None` (unknown → skip). `touch_issue_lock` does not raise: it **fails open**, returning `IssueLockResult(acquired=True, ...)` on any Redis exception (`models/session_lifecycle.py:1140-1144` docstring; `:1310-1323` the `except Exception` return). The plan's mapping table reads `acquired=True` as "lock unheld → not live → **continue**", so a Redis flap during peek routes the ladder into acting rather than declining. This falsifies spike-3's "Impact if false: the gate degrades to unknown and the reflection declines to act", the Risks-table claim "A false 'free' requires Redis to return a wrong payload, not to fail", and the Failure Path row "`touch_issue_lock` raises → gate returns `None`" (untestable against the real function). It also guts two of the three guards listed against the High-severity risk "The create rung spawns a lane on top of a live one", since both gate 5' and the pre-create re-peek call the same fail-open function. | pending | `_lane_is_live` cannot distinguish "genuinely free" from "Redis errored" through `touch_issue_lock`'s return value alone. Pick one and make spike-3, the mapping table, the Risks table, and the Failure Path Test Strategy agree: (a) probe Redis health independently in the same tick before trusting an `acquired=True` peek (a cheap `POPOTO_REDIS_DB.ping()` in a `try`, or reuse the `_bump_attempts` write already made that tick as the liveness proof) and map probe-failure to `None`; (b) call a non-fail-open read directly instead of `touch_issue_lock` — `_R.get(f"session:issuelock:{issue_number}")` plus `_lock_owner_is_live(json.loads(raw))`, with the caller's own `except Exception -> None`, which is what "unknown → skip" actually requires; or (c) accept the residual risk explicitly in the Risks table and rewrite the Failure Path row to the behavior the code can produce. Do NOT write a test that mocks `touch_issue_lock` to raise. |
-| BLOCKER | Risk & Robustness, Scope & Value (both flagged the create rung) | The create-rung mechanism asserts `cmd_create`'s real work "is only two steps — `get_or_create_worktree` and `_push_agent_session`". `cmd_create` does substantially more before those calls: slug auto-derivation-or-reject (`tools/valor_session.py:520-536`), three-tier `project_key` resolution (`:546-568`), `_resolve_project_working_directory` (`:577`), `_derive_sdlc_metadata` producing `classification_type` and `issue_url` (`:578`), and `_validate_slug` (`:583`) — and `_push_agent_session` is called with `classification_type`, `issue_url`, `project_config`, `model`, and `requires_real_chrome` (`:593-608`). The plan's `create_session(*, project_key, slug, message, session_type, ...)` sketch names none of them, so the extraction as scoped either drops them (behavioral drift that directly violates the Success Criterion "`valor-session create` behaves identically after the `create_session` extraction") or leaves the builder to re-derive the boundary mid-build with no spec. | pending | State the extraction boundary as "everything from slug resolution onward" and name the full payload in `create_session`'s signature: `classification_type`, `issue_url`, `project_config`, `model`, `requires_real_chrome`. `cmd_create` keeps only argparse reads, `print`, and exit codes. Separately verify `_derive_sdlc_metadata(message, project_config)` degrades to `(None, None)` on the reflection's stall-instruction text rather than mis-classifying, since that text is not a normal create message. |
-| CONCERN | Scope & Value | The create rung solves a scenario the reported incident never exhibited: spike-5 found five resumable eng sessions present at the sampled moment, so steer + resume + the separated escalation key already closes the observed defect. The rung the plan itself calls "the widest-blast-radius capability in this change" was an unresolved Open Question in round 1 and is now decided into scope, carrying a new cross-module core extraction, a five-row guard table, a new brake knob, three race rows, and five-plus new tests. | pending | If the rung stays, `appetite: Medium` must be re-justified against two cross-module extractions plus a new session-provisioning capability. If it is split out, delete "The create rung", the `SDLC_STALL_CREATE_MAX_PER_TICK` knob, Step 5, Step 8, the two create rows in Race Conditions, the four create rows in Failure Path Test Strategy, and the create bullets in Success Criteria and Test Impact, and reopen Q1 as the follow-up issue's subject; rung 3 then becomes escalate-once. |
-| CONCERN | History & Consistency | The plan states "every threshold is a named module constant with an env override and a comment marking it tunable", but the attempts-key TTL is a bare "24 h" in the Redis-state table with no knob in Budgets or the Documentation tunables list (which enumerates exactly six knobs and omits it). | pending | `_bump_attempts` reads its TTL via a `_DEFAULT_STALL_ATTEMPTS_TTL_HOURS = 24` module constant with a provisional-tunable comment and an `os.environ.get("SDLC_STALL_ATTEMPTS_TTL_HOURS", ...)` override, mirroring the existing `_threshold_seconds()` float-then-int-hours pattern at `reflections/sdlc_progress.py:56-61`. Add it to the Budgets table and the Documentation tunables list. |
-| CONCERN | History & Consistency | The steer rung's benign-race branch ("re-read row exists and is non-terminal with a fresher `updated_at`") has no reachable failure path in the real `steer_session`, whose only `success=False` returns are empty message, session not found, terminal status (`agent/session_executor.py:827-832`), and `is_ledger` (`:841-849`). A still-live non-ledger target simply succeeds. The corresponding Failure Path row is therefore only satisfiable by mocking a failure shape the function never emits, and the one real steer race (target goes terminal) is already classified non-benign in the same plan. | pending | Either drop the steer row from the benign-race table and the matching Failure Path row, keeping the classifier for the resume and create rungs only, or name the concrete mechanism that makes `steer_session` fail while the target stays non-terminal. The re-read itself is `AgentSession.query.filter(session_id=...).first()` mirroring `session_executor.py:827-832`; the builder should confirm the live `steer_session` against `main` before building a double for a dead branch. |
-| NIT | Scope & Value | Appetite says "one shared helper extracted" (singular), but the round-2 revision performs two extractions across two modules: `machine_owns_project` out of `reflections/crash_recovery.py` (Step 1) and `create_session` out of `tools/valor_session.py::cmd_create` (Step 5), the latter rewriting an independently-tested CLI entry point. | pending | Text-only: amend Appetite to name both extractions and the `cmd_create` rewrite. |
-| NIT | Risk & Robustness | `resume_session` pushes the steering message unconditionally (`tools/valor_session.py:856`) before the `transition_status` call that can fail, so on a benign-race resume the reflection's stall instruction has already landed on `steering:{session_id}` and is drained into the session another actor resumed. Harmless duplicate instruction, but "no attempt, no escalation, return early" reads as "no side effect". | pending | Note it in the Race Conditions table as an accepted side effect. Making the push conditional would require changing `resume_session`, which is outside this plan's boundary. |
-| NIT | History & Consistency | Success Criteria asserts "`valor-session create` behaves identically after the `create_session` extraction", but the Documentation checklist only conditionally notes the new core in `docs/tools-reference.md` "if `valor-session` has an entry describing its internals", leaving a build-time judgment call with no fallback. | pending | Grep `docs/tools-reference.md` for a `valor-session create` section; make the item unconditional or state "if no entry exists, none is required". |
+| BLOCKER | Risk & Robustness, structural verification | Gate 5' assumes a lock-peek failure raises so the reflection can map it to `None` (unknown → skip). `touch_issue_lock` does not raise: it **fails open**, returning `IssueLockResult(acquired=True, ...)` on any Redis exception (`models/session_lifecycle.py:1140-1144` docstring; `:1310-1323` the `except Exception` return). The plan's mapping table reads `acquired=True` as "lock unheld → not live → **continue**", so a Redis flap during peek routes the ladder into acting rather than declining. This falsifies spike-3's "Impact if false: the gate degrades to unknown and the reflection declines to act", the Risks-table claim "A false 'free' requires Redis to return a wrong payload, not to fail", and the Failure Path row "`touch_issue_lock` raises → gate returns `None`" (untestable against the real function). It also guts two of the three guards listed against the High-severity risk "The create rung spawns a lane on top of a live one", since both gate 5' and the pre-create re-peek call the same fail-open function. | **Round 3** — adopted, option (b) per owner direction. The reflection no longer calls `touch_issue_lock` at all: `_lock_says_live` does a direct `_R.get("session:issuelock:{N}")` classified by `_lock_owner_is_live`, under the caller's own `except Exception -> None`, so "unknown" is genuinely producible and a malformed payload reads as unknown rather than free. spike-3, the Gate 5' mapping table, the Risks row, the Race Conditions rows, the Failure Path table, Step 2, Step 8 and the Data Flow diagram were all rewritten to that mechanism. The Failure Path section carries an explicit prohibition on mocking `touch_issue_lock` to raise. | `_lane_is_live` cannot distinguish "genuinely free" from "Redis errored" through `touch_issue_lock`'s return value alone. Pick one and make spike-3, the mapping table, the Risks table, and the Failure Path Test Strategy agree: (a) probe Redis health independently in the same tick before trusting an `acquired=True` peek (a cheap `POPOTO_REDIS_DB.ping()` in a `try`, or reuse the `_bump_attempts` write already made that tick as the liveness proof) and map probe-failure to `None`; (b) call a non-fail-open read directly instead of `touch_issue_lock` — `_R.get(f"session:issuelock:{issue_number}")` plus `_lock_owner_is_live(json.loads(raw))`, with the caller's own `except Exception -> None`, which is what "unknown → skip" actually requires; or (c) accept the residual risk explicitly in the Risks table and rewrite the Failure Path row to the behavior the code can produce. Do NOT write a test that mocks `touch_issue_lock` to raise. |
+| BLOCKER | Risk & Robustness, Scope & Value (both flagged the create rung) | The create-rung mechanism asserts `cmd_create`'s real work "is only two steps — `get_or_create_worktree` and `_push_agent_session`". `cmd_create` does substantially more before those calls: slug auto-derivation-or-reject (`tools/valor_session.py:520-536`), three-tier `project_key` resolution (`:546-568`), `_resolve_project_working_directory` (`:577`), `_derive_sdlc_metadata` producing `classification_type` and `issue_url` (`:578`), and `_validate_slug` (`:583`) — and `_push_agent_session` is called with `classification_type`, `issue_url`, `project_config`, `model`, and `requires_real_chrome` (`:593-608`). The plan's `create_session(*, project_key, slug, message, session_type, ...)` sketch names none of them, so the extraction as scoped either drops them (behavioral drift that directly violates the Success Criterion "`valor-session create` behaves identically after the `create_session` extraction") or leaves the builder to re-derive the boundary mid-build with no spec. | **Round 3** — adopted. "The create rung" now states the boundary as *everything from slug resolution onward*, with a nine-row table classifying each step of `cmd_create` as moves/stays, the full `create_session` signature plus a `CreateResult` dataclass, and a note that `return 1` paths become `success=False` results. Step 5 restated to match. `_derive_sdlc_metadata` was executed live against the real `valor` config on the actual steer text: it returns `('sdlc', 'https://github.com/tomcounsell/ai/issues/2696')` — correct, not a mis-classification — and the plan forbids any test asserting `(None, None)`. | State the extraction boundary as "everything from slug resolution onward" and name the full payload in `create_session`'s signature: `classification_type`, `issue_url`, `project_config`, `model`, `requires_real_chrome`. `cmd_create` keeps only argparse reads, `print`, and exit codes. Separately verify `_derive_sdlc_metadata(message, project_config)` degrades to `(None, None)` on the reflection's stall-instruction text rather than mis-classifying, since that text is not a normal create message. |
+| CONCERN | Scope & Value | The create rung solves a scenario the reported incident never exhibited: spike-5 found five resumable eng sessions present at the sampled moment, so steer + resume + the separated escalation key already closes the observed defect. The rung the plan itself calls "the widest-blast-radius capability in this change" was an unresolved Open Question in round 1 and is now decided into scope, carrying a new cross-module core extraction, a five-row guard table, a new brake knob, three race rows, and five-plus new tests. | **Round 3** — COST observation adopted; the split-out recommendation is **overruled on the decision**. The owner explicitly decided the create rung stays after being shown this exact tradeoff, and separately confirmed that PM sessions may create and orchestrate as many eng sessions as they want. The guards on the rung are justified by "unbounded RETRY is dangerous" (a reflection minting a fresh session every 30 minutes because the last one did not move the PR), not by "session creation is dangerous". The cost half of the finding stands and is paid: appetite raised **Medium -> Large** with an itemized justification naming both extractions and the `cmd_create` rewrite. | If the rung stays, `appetite: Medium` must be re-justified against two cross-module extractions plus a new session-provisioning capability. If it is split out, delete "The create rung", the `SDLC_STALL_CREATE_MAX_PER_TICK` knob, Step 5, Step 8, the two create rows in Race Conditions, the four create rows in Failure Path Test Strategy, and the create bullets in Success Criteria and Test Impact, and reopen Q1 as the follow-up issue's subject; rung 3 then becomes escalate-once. |
+| CONCERN | History & Consistency | The plan states "every threshold is a named module constant with an env override and a comment marking it tunable", but the attempts-key TTL is a bare "24 h" in the Redis-state table with no knob in Budgets or the Documentation tunables list (which enumerates exactly six knobs and omits it). | **Round 3** — adopted. `SDLC_STALL_ATTEMPTS_TTL_HOURS` (default 24) added to the Redis-state table, the Budgets table, and the Documentation tunables list, with the invariant restated under Budgets as a build-time rule: no bare literal thresholds survive in the module. | `_bump_attempts` reads its TTL via a `_DEFAULT_STALL_ATTEMPTS_TTL_HOURS = 24` module constant with a provisional-tunable comment and an `os.environ.get("SDLC_STALL_ATTEMPTS_TTL_HOURS", ...)` override, mirroring the existing `_threshold_seconds()` float-then-int-hours pattern at `reflections/sdlc_progress.py:56-61`. Add it to the Budgets table and the Documentation tunables list. |
+| CONCERN | History & Consistency | The steer rung's benign-race branch ("re-read row exists and is non-terminal with a fresher `updated_at`") has no reachable failure path in the real `steer_session`, whose only `success=False` returns are empty message, session not found, terminal status (`agent/session_executor.py:827-832`), and `is_ledger` (`:841-849`). A still-live non-ledger target simply succeeds. The corresponding Failure Path row is therefore only satisfiable by mocking a failure shape the function never emits, and the one real steer race (target goes terminal) is already classified non-benign in the same plan. | **Round 3** — adopted, first option: the steer row is dropped from the benign-race table and the corresponding Failure Path row is gone. Verified against `main` — a live non-ledger steer target simply **succeeds**, so the branch is unreachable. The plan now says so explicitly and forbids mocking that shape; a `steer_session` failure always charges an attempt. Test Impact updated to assert exactly that. | Either drop the steer row from the benign-race table and the matching Failure Path row, keeping the classifier for the resume and create rungs only, or name the concrete mechanism that makes `steer_session` fail while the target stays non-terminal. The re-read itself is `AgentSession.query.filter(session_id=...).first()` mirroring `session_executor.py:827-832`; the builder should confirm the live `steer_session` against `main` before building a double for a dead branch. |
+| NIT | Scope & Value | Appetite says "one shared helper extracted" (singular), but the round-2 revision performs two extractions across two modules: `machine_owns_project` out of `reflections/crash_recovery.py` (Step 1) and `create_session` out of `tools/valor_session.py::cmd_create` (Step 5), the latter rewriting an independently-tested CLI entry point. | **Round 3** — adopted, and superseded by the appetite raise. The Appetite section now names Extraction A (`machine_owns_project`) and Extraction B (`create_session`, "the expensive one") separately and calls out that Extraction B rewrites an independently-tested CLI entry point. | Text-only: amend Appetite to name both extractions and the `cmd_create` rewrite. |
+| NIT | Risk & Robustness | `resume_session` pushes the steering message unconditionally (`tools/valor_session.py:856`) before the `transition_status` call that can fail, so on a benign-race resume the reflection's stall instruction has already landed on `steering:{session_id}` and is drained into the session another actor resumed. Harmless duplicate instruction, but "no attempt, no escalation, return early" reads as "no side effect". | **Round 3** — adopted as an accepted side effect. New Race Conditions row states that on a benign-race resume the stall instruction has already landed on `steering:{session_id}`, that "no attempt, no escalation" means no budget consumed and no human paged rather than no side effect, and that making the push conditional would change `resume_session`'s contract for all callers — outside this plan's boundary. | Note it in the Race Conditions table as an accepted side effect. Making the push conditional would require changing `resume_session`, which is outside this plan's boundary. |
+| NIT | History & Consistency | Success Criteria asserts "`valor-session create` behaves identically after the `create_session` extraction", but the Documentation checklist only conditionally notes the new core in `docs/tools-reference.md` "if `valor-session` has an entry describing its internals", leaving a build-time judgment call with no fallback. | **Round 3** — adopted, resolved rather than deferred. `grep -n "valor-session" docs/tools-reference.md` returns nothing, so no entry exists; the Documentation item is now an unconditional "no change required" with that verification recorded, not a build-time judgment call. | Grep `docs/tools-reference.md` for a `valor-session create` section; make the item unconditional or state "if no entry exists, none is required". |
 
+
+### Round 3 revision (applied 2026-08-10)
+
+All eight round-2 findings are dispositioned in the "Addressed By" column above. Seven were adopted
+as recommended. One — the Scope & Value CONCERN proposing the create rung be split out — had its
+**cost observation adopted and its recommendation overruled by owner decision**, recorded here rather
+than silently: the create rung stays, and the appetite was raised from Medium to Large instead.
+
+Two facts verified against `main` during this revision, both of which changed the design rather than
+merely confirming it:
+
+1. **`touch_issue_lock` fails open, it does not raise.** The entire "unknown → skip" posture the
+   design rests on was unreachable through it. Gate 5' now reads the lock key directly. This is the
+   round-2 BLOCKER and the single largest change in this revision.
+2. **Hollow sessions are real, not hypothetical.** Four `sdlc-local-*` rows were observed reporting
+   `running` with no heartbeat and no fence. This constrains two places the earlier draft left open:
+   Gate 5's secondary row check is now freshness-bounded, and the create rung carries an explicit
+   requirement that sessions it creates be able to reach a terminal status.
