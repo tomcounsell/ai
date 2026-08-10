@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-08-07
 revised: 2026-08-08
 revision_applied: true
-revision_applied_at: 2026-08-07T18:15:43Z
+revision_applied_at: 2026-08-07T19:40:07Z
 tracking: https://github.com/tomcounsell/ai/issues/2643
 last_comment_id: none
 ---
@@ -229,7 +229,7 @@ mtime `Aug 7 16:43`.
 
 ### The doubling, stated precisely
 
-`scripts/valor-service.sh:626-630` points **both** `StandardOutPath` and `StandardErrorPath` of the
+`scripts/valor-service.sh:627-630` points **both** `StandardOutPath` and `StandardErrorPath` of the
 `com.valor.bridge-watchdog` plist at `${LOG_DIR}/watchdog.log`. Combined with today's module-scope
 configuration, a single launchd tick produces:
 
@@ -545,7 +545,7 @@ never touched by either module.
 
 Evidence, in order of weight:
 
-1. **The plist doubles.** `scripts/valor-service.sh:626-630` sends both `StandardOutPath` and
+1. **The plist doubles.** `scripts/valor-service.sh:627-630` sends both `StandardOutPath` and
    `StandardErrorPath` to `logs/watchdog.log`. Any root StreamHandler is therefore a second write
    path into the same file. Round 1's shape (`basicConfig` deleted, but the handler on a propagating
    logger with root configured) writes every watchdog record twice, exactly as #1311 described.
@@ -787,11 +787,11 @@ corrupts sibling tests in the same xdist worker.
 |---|---|---|
 | **TC1** | Fresh subprocess: after `import monitoring.bridge_watchdog`, `root.handlers == []` **and** `root.level == logging.WARNING`. **The absolute form, restored in revision 3** — it is satisfiable now that `scripts/log_rotate.py` is fixed in the same PR | any module-scope root mutation reachable from the bridge watchdog's import graph, including `basicConfig` at `bridge_watchdog.py:78` (which is no longer a no-op once log_rotate stops pre-configuring root) and `basicConfig` at `log_rotate.py:62`. **Measured RED on today's source** (`[<StreamHandler <stderr> (NOTSET)>] / 20`) and **measured GREEN under the fix** (`[] / 30`, obtained by neutralizing exactly the statements this plan deletes) |
 | **TC1a** | Same subprocess, **`basicConfig` spy**: wrap `logging.basicConfig` in a recorder that captures `sys._getframe(1).f_code.co_filename` (the *immediate* caller, never the import stack), then `import monitoring.bridge_watchdog`. Assert no recorded caller is under `<repo>/monitoring/` **or** equals `<repo>/scripts/log_rotate.py` | the same two `basicConfig` statements as TC1, but it **names which module relapsed** instead of only reporting that root is dirty. Kept alongside TC1 for that attribution, not for extra coverage. **Measured RED on today's source**: the recorder returns exactly `['<repo>/scripts/log_rotate.py:62', '<repo>/monitoring/bridge_watchdog.py:78']`, both in the forbidden set. Green after the fix — measured: those are the only two `basicConfig` calls in the entire import graph |
-| **TC2** | Same subprocess: no logger in `logging.root.manager.loggerDict` (plus root) holds a handler with `pathlib.Path(h.baseFilename).name == "watchdog.log"` — exact basename, not `endswith`, so a worker-side leak is never misattributed to the bridge | `logger.addHandler(_watchdog_file_handler)` at `:93` (and the handler construction at `:87-92`) |
+| **TC2** | Same subprocess: no logger in `logging.root.manager.loggerDict` (plus root) holds a handler with `pathlib.Path(h.baseFilename).name == "watchdog.log"` — exact basename, not `endswith`, so a worker-side leak is never misattributed to the bridge. The iteration is guarded on both sides: skip entries that are not `isinstance(lg, logging.Logger)` (`loggerDict` also holds `logging.PlaceHolder` objects, which have no `.handlers`) and read the path via `getattr(h, "baseFilename", "")` (stream handlers have no `baseFilename`), so the probe reports a real leak rather than an `AttributeError` | `logger.addHandler(_watchdog_file_handler)` at `:93` (and the handler construction at `:87-92`) |
 | **TC3** | Fresh subprocess: after `import monitoring.worker_watchdog`, `root.handlers == []` **and** `root.level == logging.WARNING`. Measured green today (`[] / 30`) — the worker's import graph never reaches `scripts.update` | a `logging.basicConfig(...)` or root `addHandler` reintroduced in the worker |
-| **TC4** | Same subprocess: no handler anywhere has `pathlib.Path(h.baseFilename).name == "worker_watchdog.log"` | `logger = _configure_logger()` at `worker_watchdog.py:162` |
-| **TC5** | Scope-aware AST walk over an **explicit 14-file list** — every `monitoring/*.py` (13 files) plus `scripts/log_rotate.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `if`/`try`/`with` bodies; never enters `def`/`class` bodies. **The file list is hard-coded and asserted to be exactly these 14**, so the guard's advertised breadth cannot silently exceed its real breadth, and a new `monitoring/*.py` file cannot slip past it unnoticed | all three deleted bridge statements, the worker's module-scope configure call, **and `log_rotate.py:62`**. Re-run at revision 3 over exactly these 14 files: the walk reports `bridge_watchdog.py:78 basicConfig`, `bridge_watchdog.py:86 mkdir`, `bridge_watchdog.py:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig` — **5 hits, nothing else** — so it passes cleanly the moment the fix lands. It is scoped to these 14 files and the plan says so: a repo-wide guard would fail on day one against `bridge/telegram_bridge.py:566` and ~20 `scripts/migrate_*.py` files, which belong to other workstreams |
-| **TC5b** | AST assertion on the call site, per module: `_configure_logging` (bridge), `_configure_logger` (worker), and `logging.basicConfig` (log_rotate) are each called exactly once outside any function definition, and that call is a direct child of an `if __name__ == "__main__":` block | moving the configure call to the top of `main()`. This is the only guard that catches that mutation — the import probes never call `main()`, and the entry-point proofs are green either way — and it is what keeps the five `main()` tests in `tests/unit/test_bridge_watchdog.py`, and `test_log_rotate.py`'s two `log_rotate.main()` calls at `:121` and `:166`, from reopening or reconfiguring a production log through a new door |
+| **TC4** | Same subprocess: no handler anywhere has `pathlib.Path(h.baseFilename).name == "worker_watchdog.log"`, using TC2's identical `isinstance(lg, logging.Logger)` / `getattr(h, "baseFilename", "")` guards | `logger = _configure_logger()` at `worker_watchdog.py:162` |
+| **TC5** | Scope-aware AST walk over an **explicit 14-file list** — every `monitoring/*.py` (13 files) plus `scripts/log_rotate.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `try`/`with` bodies and into every module-level `if` **except the entry-point guard**; never enters `def`/`class` bodies. **The file list is hard-coded and asserted to be exactly these 14**, so the guard's advertised breadth cannot silently exceed its real breadth, and a new `monitoring/*.py` file cannot slip past it unnoticed | all three deleted bridge statements, the worker's module-scope configure call, **and `log_rotate.py:62`** — see the exemption note directly below for the measured hit sets in both directions |
+| **TC5b** | AST assertion on the call site, per module: `_configure_logging` (bridge), `_configure_logger` (worker), and `logging.basicConfig` (log_rotate) are each called exactly once outside any function definition, and that call is a direct child of an `if __name__ == "__main__":` block. **TC5b does NOT inherit TC5's exemption** — it is a separate walker whose entire job is to look *inside* the guard. Sharing one scoping rule between the two is what round 3 rejected | moving the configure call to the top of `main()`. This is the only guard that catches that mutation — the import probes never call `main()`, and the entry-point proofs are green either way — and it is what keeps the five `main()` tests in `tests/unit/test_bridge_watchdog.py`, and `test_log_rotate.py`'s two `log_rotate.main()` calls at `:121` and `:166`, from reopening or reconfiguring a production log through a new door |
 | **TC6** | Fresh subprocess: `bw.logger.propagate is False` and `bw.logger.level == logging.INFO` and `bw.logger.isEnabledFor(logging.INFO)` after a bare import | deletion of `logger.propagate = False`; deletion of `logger.setLevel(logging.INFO)` |
 | **TC7** | Monkeypatch `bw.WATCHDOG_LOG_FILE` → `tmp_path/"nested"/"watchdog.log"`; `bw._configure_logging()`; emit one INFO record; flush; assert the file exists and its single line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] probe$` | formatter-string change; removal of `parents=True` from the mkdir; a level regression |
 | **TC8** | Same setup: after `_configure_logging()`, `logging.getLogger().handlers` is unchanged and holds no `_watchdog_owned` handler | attaching to root (`logging.getLogger().addHandler(fh)`) instead of the module logger — i.e. a relapse to round-1's shape |
@@ -801,10 +801,38 @@ corrupts sibling tests in the same xdist worker.
 | **TC12** | Monkeypatch `bw.WATCHDOG_LOG_FILE`, attach a sentinel unowned `logging.NullHandler()` to `bw.logger`, call `_configure_logging()`, assert the sentinel is still attached and not closed | a relapse from owned-only clearing to a blanket `for h in list(logger.handlers)` sweep, which would strip a test's `caplog.handler` |
 | **TC13** | Fresh subprocess: after `import scripts.log_rotate`, `root.handlers == []` **and** `root.level == logging.WARNING` | `logging.basicConfig(...)` at `log_rotate.py:62`. **Measured RED on today's source**: the import moves root from `[] / 30` to `[<StreamHandler <stderr> (NOTSET)>] / 20`. **Measured GREEN under the fix**: `[] / 30`. This is the direct, unmediated gate on the newly in-scope module |
 | **TC14** | Same subprocess: `log_rotate.logger.name == "log_rotate"`, `.level == logging.INFO`, and **`.propagate is True`** | *level clause:* deletion of the added `setLevel(logging.INFO)` — **measured RED today**, where the logger is NOTSET (`level == 0`) and only behaves as INFO because the `basicConfig` being removed set root to INFO. *propagate clause:* a cargo-culted `logger.propagate = False` copied from the watchdogs — measured to make script mode emit **nothing at all** (exit 0, empty stderr, both INFO lines gone), which no other guard in this plan detects. Green today and green after the fix, i.e. a pure regression guard, and Task 5 measures it flipping red under that mutation |
-| **TC15** | Copy `scripts/log_rotate.py` verbatim into `tmp_path/scripts/log_rotate.py` (so `LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"` resolves under `tmp_path`, never a real checkout), then `runpy.run_path(that_copy, run_name="__main__")` inside the root-logger snapshot fixture. Assert: `SystemExit(0)`; root gained exactly **one** `StreamHandler` with `stream is sys.stderr`, `formatter._fmt == "%(asctime)s %(levelname)s %(message)s"`; `root.level == logging.INFO`; `logging.getLogger("log_rotate").propagate is True`; and the captured stderr line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO done: rotated=0 skipped=0$` | deleting the `basicConfig` outright instead of relocating it, or changing any of its `level` / `format` / `stream` arguments. **Rehearsed against the real fixed source text**: root ended at `[<StreamHandler <stderr> (NOTSET)>] / 20`, `stream is sys.stderr` True, `_fmt` exact, `log_rotate` logger level 20 / propagate True, stderr line `2026-08-08 01:32:20,623 INFO done: rotated=0 skipped=0`. **The `tmp_path` copy is mandatory, not stylistic**: `runpy`-ing the real file rotates whatever `logs/` sits beside it, and against the main checkout that means rotating production logs over 10 MB — a `[DESTRUCTIVE]` operation this plan forbids |
+| **TC15** | **Fresh subprocess** (revision 4 — see the note below; it cannot run in-process). Inside the CHILD: `shutil.copy` the real `scripts/log_rotate.py` into a `tempfile.mkdtemp()/scripts/` tree (so `LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"` resolves under that temp dir, never a real checkout), `runpy.run_path(that_copy, run_name="__main__")` under `try/except SystemExit`, then emit `exit_code`, `root.handlers`, `root.level`, `handler.stream is sys.stderr`, `formatter._fmt`, and `logging.getLogger("log_rotate").propagate` as one JSON line on stdout. The parent asserts: exit code `0`; root holds exactly **one** `StreamHandler` with `stream is sys.stderr`, `formatter._fmt == "%(asctime)s %(levelname)s %(message)s"`; `root.level == logging.INFO`; `propagate is True`; and **some** line of the child's captured stderr matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO done: rotated=0 skipped=0$` — the child emits **two** INFO lines (`logs dir not found: <tmp>/logs` first, then `done: …`), so the assertion is `any(...)`, not "the line" | deleting the `basicConfig` outright instead of relocating it, or changing any of its `level` / `format` / `stream` arguments; and (jointly with TC14) the cargo-cult `logger.propagate = False`. **Rehearsed in the subprocess shape against the real fixed source text, with the PARENT's root deliberately dirtied first** (proving the child is unaffected): exit code `0`, `root.handlers == ['StreamHandler']`, `root.level == 20`, `stream is sys.stderr` True, `_fmt` exact, `log_rotate` logger level 20 / propagate True, stderr `2026-08-08 02:34:50,267 INFO logs dir not found: …` + `2026-08-08 02:34:50,267 INFO done: rotated=0 skipped=0`, and the parent's root handler list unchanged. **The temp-dir copy is mandatory, not stylistic, and survives the move to a subprocess**: `LOGS_DIR` is derived from `__file__`, so `runpy`-ing the real file — in a child just as much as in-process — rotates whatever `logs/` sits beside it, and against the main checkout that means rotating production logs over 10 MB, a `[DESTRUCTIVE]` operation this plan forbids |
 
 TC2 and TC4 deliberately assert on **handler state** rather than on the shared file's byte count, so
 they cannot flake when another agent's test run appends to the same file concurrently.
+
+**TC5's entry-point-guard exemption (revision 4).** The fix relocates exactly the forbidden calls
+into `if __name__ == "__main__":`, which *is* a module-level `if`. Without an exemption the walk
+convicts correct code. The `ast.If` branch therefore skips the entry-point guard **before** the
+recursive descent, and the skip covers `node.body` only — `orelse` bodies and every other
+module-level `if` are still walked:
+
+```python
+t = node.test
+if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__":
+    continue
+```
+
+**Measured over exactly these 14 files, in both directions.** *With* the exemption: **5 hits on
+today's source** and **0 hits on fixed source**, so Task 4's "zero hits" is reachable and the build
+can go green. *Without* it: **5 hits today** (identical set) and **3 hits on fixed source**. Each hit
+names the exact statement whose presence it reports:
+
+| Configuration | Source | Hits | Which statement each hit is |
+|---|---|---|---|
+| with exemption | today | **5** | `monitoring/bridge_watchdog.py:78` the module-scope `logging.basicConfig` this plan deletes; `:86` the module-scope `LOGS_DIR.mkdir`; `:93` the module-scope `logger.addHandler(_watchdog_file_handler)`; `monitoring/worker_watchdog.py:162` the module-scope `logger = _configure_logger()`; `scripts/log_rotate.py:62` the module-scope `logging.basicConfig` |
+| with exemption | fixed | **0** | — |
+| without exemption | today | **5** | identical set to the row above |
+| without exemption | fixed | **3** | `monitoring/bridge_watchdog.py:1049 _configure_logging()`, `monitoring/worker_watchdog.py:874 _configure_logger()`, `scripts/log_rotate.py:189 logging.basicConfig(...)` — i.e. the three relocated calls the fix is *supposed* to produce, each a direct child of its `__main__` guard. This is the round-3 BLOCKER |
+
+**TC5b is a separate walker and does not share TC5's exemption.** TC5b asserts the configure call
+*is* a direct child of the `__main__` guard, so it must descend into exactly the block TC5 skips.
+One shared scoping rule cannot serve both.
 
 **TC1b is deleted in revision 3.** It measured root as a *delta* across the bridge watchdog's import,
 which was the only shape available while `scripts/log_rotate.py` pre-configured root. TC1's restored
@@ -815,7 +843,8 @@ rejects *any* handler on root. Keeping both would be one guard doing one job twi
 **Every subprocess probe pins its own environment; none inherits one.** `scripts/pytest-clean.sh`
 sets no `PYTHONPATH` (verified: zero matches), and this repo has already been bitten by a shared
 venv's `.pth` silently importing the main checkout from inside a worktree. TC1, TC1a, TC2, TC3, TC4,
-TC13, and TC14 therefore build the child environment explicitly rather than trusting a human `export`:
+TC13, TC14, **and TC15** therefore build the child environment explicitly rather than trusting a
+human `export`:
 
 ```python
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -841,10 +870,25 @@ durable regression coverage lives in TC7 and TC10, which assert the same formatt
 rotation against a monkeypatched `tmp_path`.
 
 **`log_rotate`'s entry-point proof is different and *is* a permanent test (TC15)**, because
-`runpy`-ing a `tmp_path` copy of the source has no production surface at all: `LOGS_DIR` is derived
-from `__file__`, so the copy's rotation target is `tmp_path/logs`. The watchdogs cannot use that trick
+`runpy`-ing a temp-dir copy of the source has no production surface at all: `LOGS_DIR` is derived
+from `__file__`, so the copy's rotation target is `<tmpdir>/logs`. The watchdogs cannot use that trick
 — their log path comes from `PROJECT_DIR`, resolved from the real module location, which is why their
 proof stays a one-time worktree step.
+
+**TC15 runs in a subprocess, and this is forced, not stylistic (revision 4).** The relocated
+`logging.basicConfig(...)` is a documented no-op once root already has handlers, and under pytest
+root always does. Measured in this repo's venv, in-process: root is
+`[_LiveLoggingNullHandler, _FileHandler /dev/null, LogCaptureHandler, LogCaptureHandler]` at level 30
+both before and after the `runpy` call, zero stderr `StreamHandler`s are added, `root.level ==
+logging.INFO` is False, and the `done: rotated=0 skipped=0` record goes to `caplog` rather than
+stderr — all four assertions fail against *correct* code, and neither named mutation is
+distinguishable. In a fresh child the same source produces the measured state in TC15's row above.
+**Clearing `root.handlers` in-process is barred as an alternative**: it removes pytest's
+`LogCaptureHandler` mid-test and breaks `caplog` for every sibling in the same xdist worker. Both
+named mutations are measured red in the subprocess shape: `logger.propagate = False` yields exit 0
+with **completely empty stderr** (both INFO lines gone, so the regex has no line to match) while root
+state is otherwise identical, and deleting `basicConfig` entirely yields `root.handlers == []`,
+`root.level == 30`, no `StreamHandler`, no `_fmt`, empty stderr.
 
 **A guard that no mutation can make fail is removed, not kept.** Round 1's two inline-python
 Verification rows re-implemented TC1-TC4 and are deleted (see Verification). Round 1's anti-criterion
@@ -1186,8 +1230,10 @@ single short-lived process per launchd tick.
   `LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"` is derived from the module's own
   location, so running the real file's `__main__` guard rotates whatever `logs/` sits beside it —
   against the main checkout that renames every production log over 10 MB into a `.1` slot and shifts
-  the existing backups. TC15 copies the source into `tmp_path/scripts/log_rotate.py` precisely so its
-  rotation target is `tmp_path/logs`. Rehearsed that way; never any other way.
+  the existing backups. TC15 copies the source into a `tempfile.mkdtemp()/scripts/log_rotate.py`
+  tree inside its child process precisely so its rotation target is `<tmpdir>/logs`. The subprocess
+  move in revision 4 does **not** relax this: a child `runpy` of the real file rotates the real
+  `logs/` exactly as an in-process one would. Rehearsed that way; never any other way.
 - **No behavioral change to recovery, escalation, health-check, or rotation logic.** Only logging
   setup moves. `LOG_MAX_SIZE`, `LOG_MAX_BACKUPS`, `LOG_BACKUP_HARD_CAP`, and `SELF_EXCLUDED_FILES` are
   untouched.
@@ -1266,9 +1312,10 @@ needs no wiring.
       line `main()` emits.
 - [ ] Comment in `tests/unit/test_watchdog_log_isolation.py` explaining why TC2 / TC4 assert on
       handler state rather than file size (concurrent-writer flake), why the root-state gates must run
-      in a subprocess (`basicConfig` is a no-op when root already has pytest's handlers), and why TC15
-      `runpy`s a `tmp_path` copy rather than the real `scripts/log_rotate.py` (whose `LOGS_DIR` is
-      derived from `__file__` and would rotate production logs).
+      in a subprocess (`basicConfig` is a no-op when root already has pytest's handlers) — TC15
+      included, for that same reason — and why TC15 `runpy`s a temp-dir copy rather than the real
+      `scripts/log_rotate.py` (whose `LOGS_DIR` is derived from `__file__` and would rotate
+      production logs).
 
 ### Test Suite Index
 - [ ] Add `tests/unit/test_watchdog_log_isolation.py` to the `tests/README.md` index with its feature
@@ -1302,7 +1349,8 @@ needs no wiring.
       entry-point configuration runs.
 - [ ] `scripts/log_rotate.py` run as a script still configures root with `level=INFO`,
       `format="%(asctime)s %(levelname)s %(message)s"`, `stream=sys.stderr`, and still emits its
-      diagnostics formatted — proved by TC15 against a `tmp_path` copy of the real source, so the
+      diagnostics formatted — proved by TC15's subprocess probe against a temp-dir copy of the real
+      source, so the
       LaunchAgent's `logs/log_rotate_error.log` output is byte-shaped identically to today.
 - [ ] `tests/unit/test_log_rotate.py` and `tests/unit/test_update_log_cleanup.py` pass unmodified.
 - [ ] `tests/unit/test_bridge_watchdog.py` passes. Exactly two `caplog` sites in it are edited to the
@@ -1369,8 +1417,10 @@ needs no wiring.
 - Create the worktree at `.worktrees/watchdog-import-time-log-handler/` on branch
   `session/watchdog-import-time-log-handler`, provision its `.venv` on the pinned interpreter, and
   `export PYTHONPATH=$PWD` in every shell.
-- Write `tests/unit/test_watchdog_log_isolation.py` with TC1-TC12 as tabulated in Technical Approach,
-  including the snapshot/restore logging fixture.
+- Write `tests/unit/test_watchdog_log_isolation.py` with **TC1-TC15** as tabulated in Technical
+  Approach, including the snapshot/restore logging fixture. All fifteen — TC13, TC14, and TC15
+  included — must exist **before** the red demo below is captured, because that output is the PR's
+  evidence and the red/green table names all three.
 - Run the red demo and capture output **verbatim** for the PR body:
   ```bash
   cd /Users/tomcounsell/src/ai/.worktrees/watchdog-import-time-log-handler
@@ -1382,7 +1432,7 @@ needs no wiring.
 
   | Red against unfixed source | Green against unfixed source (regression guards, not red-demo guards) |
   |---|---|
-  | **TC1** (measured: root is `[<StreamHandler <stderr> (NOTSET)>] / 20` after the import, not `[] / 30`), **TC1a** (spy records both `scripts/log_rotate.py:62` and `monitoring/bridge_watchdog.py:78`), TC2, TC4, TC5 (5 hits), TC5b, TC6 (today `bw.logger.propagate is True`, `level == 0`), TC7, TC8, TC9, TC11, TC12, **TC13** (measured: `[<StreamHandler>] / 20`), **TC14's level clause** (measured: `log_rotate.logger.level == 0`) | TC3 (the worker's root is already clean, measured `[] / 30`), TC10 (the worker already has the right formatter, rotation, and `propagate = False` since #1311), **TC14's propagate clause** (`propagate is True` today and after), **TC15** (today's module-scope `basicConfig` already produces the same root state under `runpy`; it guards against the relocation being botched, not against today's placement) |
+  | **TC1** (measured: root is `[<StreamHandler <stderr> (NOTSET)>] / 20` after the import, not `[] / 30`), **TC1a** (spy records both `scripts/log_rotate.py:62` and `monitoring/bridge_watchdog.py:78`), TC2, TC4, TC5 (5 hits), TC5b, TC6 (today `bw.logger.propagate is True`, `level == 0`), TC7, TC8, TC9, TC11, TC12, **TC13** (measured: `[<StreamHandler>] / 20`), **TC14's level clause** (measured: `log_rotate.logger.level == 0`) | TC3 (the worker's root is already clean, measured `[] / 30`), TC10 (the worker already has the right formatter, rotation, and `propagate = False` since #1311), **TC14's propagate clause** (`propagate is True` today and after), **TC15** (measured green today in the subprocess shape: today's module-scope `basicConfig` produces the same child root state under `runpy` — `['StreamHandler'] / 20`, `stream is sys.stderr`, exact `_fmt`, `propagate True`, both INFO lines on stderr. It guards against the relocation being botched, not against today's placement) |
 
   Each guard in the right-hand column is justified by a named mutation in Task 5's table, and Task 5
   measures it flipping red. A guard that is green in both columns and red under no mutation is
@@ -1458,7 +1508,11 @@ needs no wiring.
   pass **with no edits**. If either needs an edit, stop: Test Impact predicts none, and a surprise
   there means the transformation did more than intended.
 - Re-run `tests/unit/test_watchdog_log_isolation.py`; TC1, TC1a, TC13, and TC14's level clause should
-  now flip green. Confirm the AST scan reports **zero** hits across all 14 guarded files.
+  now flip green. Confirm the AST scan reports **zero** hits across all 14 guarded files — reachable
+  only with TC5's entry-point-guard exemption in place (measured 0 with it, 3 without).
+- Assert the module is not short, so a smaller green run cannot pass for a complete one:
+  `PYTHONPATH=$PWD ./scripts/pytest-clean.sh --collect-only -q tests/unit/test_watchdog_log_isolation.py`
+  must collect every case TC1-TC15 declares.
 - Commit.
 
 ### 5. Green demo, mutation check, and real-invocation proof
@@ -1527,11 +1581,24 @@ needs no wiring.
   which restarts the bridge.
 - The "each new record appears exactly once" claim is **not** made from a shell invocation. The
   second copy comes from the plist's `StandardErrorPath` redirect under launchd, which a shell run
-  does not have. The de-duplication claim rests on the plist text at `scripts/valor-service.sh:626-630`
+  does not have. The de-duplication claim rests on the plist text at `scripts/valor-service.sh:627-630`
+  (`StandardOutPath` key/value then `StandardErrorPath` key/value; `:626` is the `StartInterval`
+  value `<integer>60</integer>`, which revision 3 mis-cited)
   plus the `logs/worker_watchdog.log` control (13,861 lines, multiplicity histogram entirely 1), and
   the plan says so rather than staging a local run that proves nothing.
 - Run the full `tests/unit/` suite once (Risk 3). This is the one run in this plan that is not
-  narrowly scoped; run it with `-n0` and expect roughly 20 minutes.
+  narrowly scoped, and it is the one run that uses the **repo default** rather than `-n0`:
+  ```bash
+  PYTHONPATH=$PWD ./scripts/pytest-clean.sh tests/unit/ -q
+  ```
+  `pyproject.toml:195` pins `addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile
+  --timeout=420 --timeout-method=thread"`, and CLAUDE.md's "roughly 20 minutes" figure describes
+  exactly that parallel default — so **expect roughly 20 minutes for this command**. `--dist=loadfile`
+  already isolates by file, which is the granularity the logging-leak risk operates at: module-scope
+  import side effects are per-worker-process. `-n0` stays the flag for the four narrowly scoped files
+  elsewhere in this plan, where it costs seconds; forcing `-n0` here would serialize the whole tree
+  into one process and blow past the 20-minute budget by a large multiple, and CLAUDE.md both warns
+  "a long-running suite is not stuck" and forbids pattern-killing pytest.
 - **Per-guard mutation check (#2658).** One at a time, reintroduce each statement below, confirm the
   named test flips red, then revert. A mutation no test catches means that guard is decorative and
   must be rewritten or removed.
@@ -1560,9 +1627,9 @@ needs no wiring.
   | move `_configure_logging()` from the `__main__` guard to the top of `main()` | **TC5b** (the call-site AST assertion). Named explicitly because no runtime probe catches it: the import probes never call `main()`, and the entry-point proof stays green either way | yes |
   | restore `logging.basicConfig(...)` at `scripts/log_rotate.py` module scope | **TC13** (root becomes `[<StreamHandler <stderr> (NOTSET)>] / 20` — measured, this is today's state), **TC1** (the bridge's root is dirty again through the `:72` import chain), **TC1a** (spy records `scripts/log_rotate.py`), TC5 | yes — measured `[] / 30` for both TC13 and TC1 under the fix |
   | delete `logger.setLevel(logging.INFO)` (log_rotate) | **TC14's level clause** (logger falls back to NOTSET, `level == 0` — measured, this is today's state) | yes — measured `level == 20` after the fix |
-  | add `logger.propagate = False` (log_rotate) — the cargo-cult mutation | **TC14's propagate clause**, and **TC15** (script mode emits nothing: measured exit 0 with completely empty stderr, both INFO lines gone, so the `done: rotated=0 skipped=0` regex assertion has no line to match) | yes — measured: `propagate True`, and script mode prints `2026-08-08 01:32:20,623 INFO done: rotated=0 skipped=0` |
-  | delete `logging.basicConfig(...)` entirely instead of relocating it | **TC15** (root stays `[]` after `runpy`, no StreamHandler, no formatted line) | yes — measured: root ends `[<StreamHandler <stderr>>] / 20`, `stream is sys.stderr`, `_fmt == "%(asctime)s %(levelname)s %(message)s"` |
-  | change log_rotate's `level` / `format` / `stream` argument | **TC15** (asserts all three explicitly) | yes — rehearsed against the real fixed source text |
+  | add `logger.propagate = False` (log_rotate) — the cargo-cult mutation | **TC14's propagate clause**, and **TC15** (script mode emits nothing: measured in the subprocess probe as exit 0 with completely empty stderr, both INFO lines gone, so the `done: rotated=0 skipped=0` regex assertion has no line to match, while root state stays otherwise identical) | yes — measured: `propagate True`, and script mode prints `… INFO logs dir not found: <tmp>/logs` then `2026-08-08 02:34:50,267 INFO done: rotated=0 skipped=0` |
+  | delete `logging.basicConfig(...)` entirely instead of relocating it | **TC15** (measured in the subprocess probe: `root.handlers == []`, `root.level == 30`, no `StreamHandler`, no `_fmt`, empty stderr) | yes — measured: root ends `['StreamHandler'] / 20`, `stream is sys.stderr`, `_fmt == "%(asctime)s %(levelname)s %(message)s"` |
+  | change log_rotate's `level` / `format` / `stream` argument | **TC15** (asserts all three explicitly on the child's reported state) | yes — rehearsed against the real fixed source text in the subprocess shape |
   | move log_rotate's `basicConfig` from the `__main__` guard to the top of `main()` | **TC5b** (its log_rotate leg). No runtime probe catches it: `tests/unit/test_log_rotate.py:121` and `:166` call `main()` directly, and both would then reconfigure root mid-suite | yes |
 - Confirm the prefix gate prints `LOGS_PREFIX_INTACT` for both main-checkout logs (No-Gos).
 
@@ -1655,12 +1722,12 @@ fails against correct code — and both were measured in both directions before 
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency | TC5's AST walk fails against correctly fixed source. Its predicate forbids module-scope calls to `logging.basicConfig`, any `.addHandler`, any `.mkdir`, and `_configure_logger` / `_configure_logging`, and the plan specifies that the walk "Descends into module-level `if`/`try`/`with` bodies". `if __name__ == "__main__":` is a module-level `if`, and the fix puts exactly those forbidden calls inside it in all three modules. Implemented literally and run against a byte-for-byte copy of the three files with only this plan's edits applied, the walk returns **3 hits on correct code** (`bridge_watchdog.py _configure_logging`, `worker_watchdog.py _configure_logger`, `log_rotate.py logging.basicConfig`), so Task 4's "Confirm the AST scan reports zero hits across all 14 guarded files" is unreachable. TC5b needs the opposite behaviour (it asserts the call sits inside the guard), so the two guards cannot share one scoping rule. | pending | Give TC5's walker an entry-point-guard exemption, applied to `node.body` only and placed BEFORE the recursive descent, while still descending into every other module-level `if`/`try`/`with`: `t = node.test; if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__": continue`. Measured both directions with the exemption: **5 hits** on today's source (`bridge_watchdog.py:78 basicConfig`, `:86 mkdir`, `:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig`) and **0 hits** on fixed source. Without it: 5 today, 3 on fixed. TC5b must NOT inherit the exemption. |
-| BLOCKER | Risk & Robustness, History & Consistency | TC15 cannot pass in-process under pytest. It is specified to `runpy` a `tmp_path` copy of the fixed `scripts/log_rotate.py` "inside the root-logger snapshot fixture" and then assert root gained exactly one stderr `StreamHandler`, `root.level == logging.INFO`, an exact `formatter._fmt`, and a formatted line on captured stderr. Under pytest root already carries handlers, so the relocated `logging.basicConfig(...)` returns early. Measured in this repo's venv: root is `[_LiveLoggingNullHandler, _FileHandler /dev/null, LogCaptureHandler, LogCaptureHandler]` at level 30 both before and after the `runpy` call, **zero** stderr `StreamHandler`s are added, `root.level == logging.INFO` is False, and the `done: rotated=0 skipped=0` record goes to pytest's capture handler rather than stderr. All four assertions fail on correct code and neither named mutation is distinguishable. The plan states the governing rule twice ("`logging.basicConfig()` is a no-op when root already has handlers, and under pytest root always does") and applies it to TC1/TC3 but not to TC15; the subprocess-probe list omits TC15 deliberately. | pending | Move TC15 into a fresh subprocess like TC1/TC3/TC13 and add it to the subprocess list. Probe source: `shutil.copy` the real `scripts/log_rotate.py` into a `tempfile.mkdtemp()/scripts/` tree inside the CHILD, `runpy.run_path(copy, run_name="__main__")` under `try/except SystemExit`, then print `root.handlers`, `root.level`, `handler.stream is sys.stderr`, `formatter._fmt` and captured stderr as JSON; run via `subprocess.run([sys.executable, "-c", PROBE_SRC], cwd=REPO_ROOT, env={**os.environ, "PYTHONPATH": str(REPO_ROOT)}, capture_output=True, text=True)`. Do NOT instead clear `root.handlers` in-process — that removes pytest's `LogCaptureHandler` mid-test and breaks `caplog` for every sibling in the same xdist worker. The `tmp_path`-copy requirement survives the move: `LOGS_DIR` is derived from `__file__`, so a subprocess `runpy` of the real file still rotates the real `logs/`. |
-| CONCERN | Scope & Value | Revision 3 added TC13, TC14 and TC15 to the Technical Approach table, to Task 1's own red/green expectation table, to Task 4's Validates list, to Test Impact and to three Success Criteria, but no task instructs anyone to write them. Task 1 is the only authoring step for the new module and still says "with TC1-TC12 as tabulated". A builder following it literally ships twelve cases, after which Task 1's red demo cites three cases that do not exist, Task 4's "TC13, and TC14's level clause should now flip green" is vacuously satisfied, and the three `log_rotate` Success Criteria have no instrument behind them. | pending | Change Task 1's authoring bullet to "TC1-TC15" and note in the same bullet that TC13/TC14/TC15 must exist before the red demo is captured, since that output is the PR's evidence. Add a collected-count assertion to Task 4 (`pytest --collect-only -q tests/unit/test_watchdog_log_isolation.py`) so a short module fails rather than producing a smaller green run. |
-| CONCERN | Risk & Robustness | Task 5's "run it with `-n0` and expect roughly 20 minutes" mixes a serial flag with a parallel-run figure. `pyproject.toml:195` pins `addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread"`, and CLAUDE.md's ~20-minute figure describes that default. `-n0` disables xdist and serializes the whole `tests/unit/` tree into one process, so the real wall clock is a large multiple. CLAUDE.md warns "a long-running suite is not stuck" and forbids pattern-killing pytest, so a validator working to a wrong budget is set up either to abandon the run or to reach for the one remedy the repo bans. | pending | Either run the full-suite pass with the repo default (`-n auto --dist=loadfile`, which already isolates by file and is the granularity the logging-leak risk operates at, since module-scope import side effects are per-worker-process) and keep `-n0` for the four narrowly scoped files, or keep `-n0`, measure the real duration once, and write that number into Task 5 with an explicit "do not kill this" note. |
-| NIT | Risk & Robustness | TC2/TC4 iterate `logging.root.manager.loggerDict` and read `h.baseFilename`. `loggerDict` holds `logging.PlaceHolder` objects (no `.handlers`) alongside real loggers, and most handlers have no `baseFilename`, so the literal predicate raises `AttributeError` rather than asserting anything. | pending | `for lg in list(logging.root.manager.loggerDict.values()) + [logging.getLogger()]: if not isinstance(lg, logging.Logger): continue`, then `pathlib.Path(getattr(h, "baseFilename", "")).name == "watchdog.log"`. |
-| NIT | History & Consistency | The plist citation `scripts/valor-service.sh:626-630` is off by one: line 626 is `<integer>60</integer>` (the `StartInterval` value); the stream keys run 627-630. The range is the load-bearing evidence for the doubling claim and is quoted four times. | pending | Verified by line-numbered read: 625 `<key>StartInterval</key>`, 626 `<integer>60</integer>`, 627 `<key>StandardOutPath</key>`, 628 `<string>${LOG_DIR}/watchdog.log</string>`, 629 `<key>StandardErrorPath</key>`, 630 `<string>${LOG_DIR}/watchdog.log</string>`. Change the range to `627-630` everywhere it appears. |
+| BLOCKER | History & Consistency | TC5's AST walk fails against correctly fixed source. Its predicate forbids module-scope calls to `logging.basicConfig`, any `.addHandler`, any `.mkdir`, and `_configure_logger` / `_configure_logging`, and the plan specifies that the walk "Descends into module-level `if`/`try`/`with` bodies". `if __name__ == "__main__":` is a module-level `if`, and the fix puts exactly those forbidden calls inside it in all three modules. Implemented literally and run against a byte-for-byte copy of the three files with only this plan's edits applied, the walk returns **3 hits on correct code** (`bridge_watchdog.py _configure_logging`, `worker_watchdog.py _configure_logger`, `log_rotate.py logging.basicConfig`), so Task 4's "Confirm the AST scan reports zero hits across all 14 guarded files" is unreachable. TC5b needs the opposite behaviour (it asserts the call sits inside the guard), so the two guards cannot share one scoping rule. | **Revision 4** — Technical Approach TC5 row, new "TC5's entry-point-guard exemption" note with the four-way measurement table, TC5b row ("does NOT inherit"), Task 4 zero-hits bullet. Re-measured independently: with the exemption 5 hits today / 0 on fixed; without it 5 today / 3 on fixed (`bridge_watchdog.py:1049`, `worker_watchdog.py:874`, `log_rotate.py:189`) | Give TC5's walker an entry-point-guard exemption, applied to `node.body` only and placed BEFORE the recursive descent, while still descending into every other module-level `if`/`try`/`with`: `t = node.test; if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__": continue`. Measured both directions with the exemption: **5 hits** on today's source (`bridge_watchdog.py:78 basicConfig`, `:86 mkdir`, `:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig`) and **0 hits** on fixed source. Without it: 5 today, 3 on fixed. TC5b must NOT inherit the exemption. |
+| BLOCKER | Risk & Robustness, History & Consistency | TC15 cannot pass in-process under pytest. It is specified to `runpy` a `tmp_path` copy of the fixed `scripts/log_rotate.py` "inside the root-logger snapshot fixture" and then assert root gained exactly one stderr `StreamHandler`, `root.level == logging.INFO`, an exact `formatter._fmt`, and a formatted line on captured stderr. Under pytest root already carries handlers, so the relocated `logging.basicConfig(...)` returns early. Measured in this repo's venv: root is `[_LiveLoggingNullHandler, _FileHandler /dev/null, LogCaptureHandler, LogCaptureHandler]` at level 30 both before and after the `runpy` call, **zero** stderr `StreamHandler`s are added, `root.level == logging.INFO` is False, and the `done: rotated=0 skipped=0` record goes to pytest's capture handler rather than stderr. All four assertions fail on correct code and neither named mutation is distinguishable. The plan states the governing rule twice ("`logging.basicConfig()` is a no-op when root already has handlers, and under pytest root always does") and applies it to TC1/TC3 but not to TC15; the subprocess-probe list omits TC15 deliberately. | **Revision 4** — TC15 rewritten as a fresh-subprocess probe; TC15 added to the subprocess-probe list; new "TC15 runs in a subprocess" note; `[DESTRUCTIVE]` No-Go, test-comment checklist, Success Criterion, and three Task 5 mutation rows re-worded to the subprocess shape. Rehearsed with the parent's root deliberately dirtied: child exit 0, `root.handlers == ['StreamHandler']`, level 20, `stream is sys.stderr`, exact `_fmt`, propagate True, two INFO lines on stderr, parent root untouched. Both mutations measured red in the child. In-process clearing of `root.handlers` explicitly barred | Move TC15 into a fresh subprocess like TC1/TC3/TC13 and add it to the subprocess list. Probe source: `shutil.copy` the real `scripts/log_rotate.py` into a `tempfile.mkdtemp()/scripts/` tree inside the CHILD, `runpy.run_path(copy, run_name="__main__")` under `try/except SystemExit`, then print `root.handlers`, `root.level`, `handler.stream is sys.stderr`, `formatter._fmt` and captured stderr as JSON; run via `subprocess.run([sys.executable, "-c", PROBE_SRC], cwd=REPO_ROOT, env={**os.environ, "PYTHONPATH": str(REPO_ROOT)}, capture_output=True, text=True)`. Do NOT instead clear `root.handlers` in-process — that removes pytest's `LogCaptureHandler` mid-test and breaks `caplog` for every sibling in the same xdist worker. The `tmp_path`-copy requirement survives the move: `LOGS_DIR` is derived from `__file__`, so a subprocess `runpy` of the real file still rotates the real `logs/`. |
+| CONCERN | Scope & Value | Revision 3 added TC13, TC14 and TC15 to the Technical Approach table, to Task 1's own red/green expectation table, to Task 4's Validates list, to Test Impact and to three Success Criteria, but no task instructs anyone to write them. Task 1 is the only authoring step for the new module and still says "with TC1-TC12 as tabulated". A builder following it literally ships twelve cases, after which Task 1's red demo cites three cases that do not exist, Task 4's "TC13, and TC14's level clause should now flip green" is vacuously satisfied, and the three `log_rotate` Success Criteria have no instrument behind them. | **Revision 4** — Task 1 authoring bullet now reads TC1-TC15 and requires all fifteen to exist before the red demo is captured; Task 4 gains a `--collect-only` count assertion | Change Task 1's authoring bullet to "TC1-TC15" and note in the same bullet that TC13/TC14/TC15 must exist before the red demo is captured, since that output is the PR's evidence. Add a collected-count assertion to Task 4 (`pytest --collect-only -q tests/unit/test_watchdog_log_isolation.py`) so a short module fails rather than producing a smaller green run. |
+| CONCERN | Risk & Robustness | Task 5's "run it with `-n0` and expect roughly 20 minutes" mixes a serial flag with a parallel-run figure. `pyproject.toml:195` pins `addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread"`, and CLAUDE.md's ~20-minute figure describes that default. `-n0` disables xdist and serializes the whole `tests/unit/` tree into one process, so the real wall clock is a large multiple. CLAUDE.md warns "a long-running suite is not stuck" and forbids pattern-killing pytest, so a validator working to a wrong budget is set up either to abandon the run or to reach for the one remedy the repo bans. | **Revision 4** — first option taken. Task 5's full-suite step now runs the repo default (`-n auto --dist=loadfile`, per `pyproject.toml:195`), which is what the ~20-minute figure describes; `-n0` is kept for the four narrowly scoped files and the bullet says why | Either run the full-suite pass with the repo default (`-n auto --dist=loadfile`, which already isolates by file and is the granularity the logging-leak risk operates at, since module-scope import side effects are per-worker-process) and keep `-n0` for the four narrowly scoped files, or keep `-n0`, measure the real duration once, and write that number into Task 5 with an explicit "do not kill this" note. |
+| NIT | Risk & Robustness | TC2/TC4 iterate `logging.root.manager.loggerDict` and read `h.baseFilename`. `loggerDict` holds `logging.PlaceHolder` objects (no `.handlers`) alongside real loggers, and most handlers have no `baseFilename`, so the literal predicate raises `AttributeError` rather than asserting anything. | **Revision 4** — both guards folded into the TC2 row and referenced from TC4 | `for lg in list(logging.root.manager.loggerDict.values()) + [logging.getLogger()]: if not isinstance(lg, logging.Logger): continue`, then `pathlib.Path(getattr(h, "baseFilename", "")).name == "watchdog.log"`. |
+| NIT | History & Consistency | The plist citation `scripts/valor-service.sh:626-630` is off by one: line 626 is `<integer>60</integer>` (the `StartInterval` value); the stream keys run 627-630. The range is the load-bearing evidence for the doubling claim and is quoted four times. | **Revision 4** — re-verified by line-numbered read and corrected to `627-630` | Verified by line-numbered read: 625 `<key>StartInterval</key>`, 626 `<integer>60</integer>`, 627 `<key>StandardOutPath</key>`, 628 `<string>${LOG_DIR}/watchdog.log</string>`, 629 `<key>StandardErrorPath</key>`, 630 `<string>${LOG_DIR}/watchdog.log</string>`. Change the range to `627-630` everywhere it appears. |
 
 Everything else re-verified and found sound at round 3, by direct measurement rather than reading:
 the two-`basicConfig` spy result (exactly `scripts/log_rotate.py:62` and `monitoring/bridge_watchdog.py:78`,
@@ -1703,6 +1770,17 @@ What changed as a consequence, all of it re-measured rather than reasoned:
 Round 3's critique is the last. Every guard above was mutation-checked in both directions before this
 revision was written: named statement, confirmed red on the mutation, confirmed green on correct
 code. The second half is what round 2 caught this plan on twice.
+
+**Revision 4 is a two-fix surgical patch, not a re-plan.** Round 3's two BLOCKERs were both "the gate
+convicts correct code": TC5's walk descended into the very `__main__` guard the fix populates, and
+TC15 asserted a root state that `basicConfig`'s no-op semantics make unreachable under pytest. Both
+remedies were re-measured independently before being written in — TC5 four ways (with/without the
+exemption × today/fixed source, over exactly the 14 guarded files) and TC15 three ways (fixed source
+plus both named mutations, in the subprocess shape, with the parent's root deliberately dirtied to
+prove child isolation). The two CONCERNs and both NITs are folded in. Nothing else in the plan
+changed: the three-module scope, the #1311 topology, the Data Flow / `lastResort` table, the
+entry-point proof, the log baseline gate, both `[DESTRUCTIVE]` No-Gos, and #2678's narrowing all
+stand exactly as revision 3 left them.
 
 ### Rounds 1 and 2
 
