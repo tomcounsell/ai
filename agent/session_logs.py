@@ -130,7 +130,7 @@ def save_session_snapshot(
         return None
 
 
-def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
+def cleanup_old_snapshots(max_age_hours: float = 168, dry_run: bool = False) -> list[str]:
     """Remove session log directories older than max_age_hours.
 
     Checks the modification time of each session directory under
@@ -138,14 +138,17 @@ def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
 
     Args:
         max_age_hours: Maximum age in hours before cleanup. Defaults to 168 (7 days).
+        dry_run: When True, identify directories without removing them.
 
     Returns:
-        Count of session directories removed.
+        Names of the session directories removed (or, under ``dry_run``, the
+        ones that would be). Naming them rather than counting them is what lets
+        the scheduled sweep report which sessions it acted on.
     """
     if not SESSION_LOGS_DIR.exists():
-        return 0
+        return []
 
-    removed = 0
+    removed: list[str] = []
     cutoff = time.time() - (max_age_hours * 3600)
 
     try:
@@ -161,14 +164,19 @@ def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
                 newest_mtime = 0
 
             if newest_mtime < cutoff:
-                shutil.rmtree(session_dir, ignore_errors=True)
-                removed += 1
-                logger.info(f"Cleaned up old session logs: {session_dir.name}")
+                if not dry_run:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                removed.append(session_dir.name)
+                logger.info(
+                    f"{'Would clean up' if dry_run else 'Cleaned up'} "
+                    f"old session logs: {session_dir.name}"
+                )
 
     except Exception as e:
         logger.warning(f"Error during session log cleanup: {e}")
 
     if removed:
-        logger.info(f"Removed {removed} old session log director(ies)")
+        verb = "Would remove" if dry_run else "Removed"
+        logger.info(f"{verb} {len(removed)} old session log director(ies)")
 
     return removed

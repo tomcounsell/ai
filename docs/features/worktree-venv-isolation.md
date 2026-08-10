@@ -152,9 +152,11 @@ uv sync --all-extras   # now allowed: the worktree is isolated
 
 ### Teardown
 
-The env lives inside the worktree directory (`.venv` is gitignored), so the
-existing `remove_worktree` / worktree-gc paths delete it with the worktree. No
-new cleanup wiring.
+The env lives inside the worktree directory (`.venv` is gitignored), so whatever
+removes the worktree removes the env with it. Two callers do that: `remove_worktree`
+(via `cleanup_after_merge`, on the post-merge path) and the daily `disk-reclaim`
+sweep for lanes nobody cleaned up by hand. See
+[Scheduled Disk Reclaim](scheduled-disk-reclaim.md).
 
 ## Measured cost (2026-07-17, uv 0.6.10, macOS/APFS)
 
@@ -168,6 +170,13 @@ proxies; these numbers came from a real provisioning run on a warm uv cache:
   mode on macOS/APFS is copy-on-write **clones** from its global cache
   (`st_nlink` stays 1, blocks are shared) — physical incremental cost for
   cached packages is near zero.
+
+  Re-measured 2026-08-07 with a `df` delta across a real `uv sync` on a warm
+  cache: `du` reported **541 MB**, free space fell by **9 MB**. A 60x gap, so
+  `du` over a `.worktrees/` tree is an upper bound and not a disk-pressure
+  number. The docstring in `agent/worktree_manager.py` that said "hardlinks"
+  was corrected to match; both stories imply "near-free", but only clones
+  explain `st_nlink == 1`.
 - **Interrupted-sync probe** (validates the marker design): `uv sync` killed
   (SIGKILL) 0.25s in left `pyvenv.cfg` present, site-packages partially
   populated (360 of 365 entries), and no `.provisioned` marker — confirming

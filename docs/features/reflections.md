@@ -195,6 +195,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 | `merged-branch-cleanup` | `reflections.housekeeping.merged_branch_cleanup.run` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
 | `disk-space-check` | `reflections.housekeeping.disk_space_check.run` | Check free disk space; warn if below 10 GB |
 | `analytics-rollup` | `reflections.housekeeping.analytics_rollup.run` | Aggregate daily analytics; purge old records |
+| `disk-reclaim` | `reflections.housekeeping.disk_reclaim.run` | Age out merged worktree lanes, old Claude session transcripts, and session snapshots; dry-run until `DISK_RECLAIM_APPLY=true` (see [Scheduled Disk Reclaim](scheduled-disk-reclaim.md)) |
 
 **Auditing:**
 
