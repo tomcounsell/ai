@@ -10,7 +10,7 @@ revision_applied: true
 revision_applied_at: 2026-08-10T04:15:01Z
 ---
 
-# SDLC Stall Auto-Resume (steer the eng session, escalate once)
+# SDLC Stall Auto-Resume (steer, resume, or create an eng session; escalate once)
 
 ## Problem
 
@@ -617,7 +617,7 @@ New coverage to add:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Steering the wrong eng session (a human conversation in progress) | Medium | The steer is a short, explicit instruction naming the issue; the eng session's own routing decides. Bounded by the run budget so at most a couple land per tick. |
+| Steering the wrong eng session (a human conversation in progress) | Medium | The steer is a short, explicit instruction naming the issue; the eng session's own routing decides. Bounded per lane by the `(slug, sha)` attempt cap, and each lane steers at most once per cooldown. |
 | A steered eng session ignores the message | Medium | Attempt budget converges to escalate-once; success charges an attempt too, so an ignored steer cannot loop. |
 | Lock peek misreads a live lane as dead during a Redis flap | Medium | Peek exceptions → `None` → skip. A false "free" requires Redis to return a *wrong* payload, not to fail. |
 | 30-day escalation TTL hides a genuinely new problem | Low | The key is scoped by head sha; any commit re-arms it. A stalled sha is by definition the same incident. |
@@ -636,30 +636,45 @@ New coverage to add:
    for any other reference and sweep.
 2. **Replace gate 5.** Delete `_has_active_session`. Add `_lane_is_live(issue_number)` over
    `touch_issue_lock(..., peek=True)` with the three-way result mapping, plus the secondary
-   non-ledger `issue_number` session check. Fail-soft to `None`.
+   non-ledger `issue_number` session check **OR-ed for liveness only** — implement the polarity
+   exactly as the code block in Gate 5'. Fail-soft to `None` on the lock peek; a failing row query
+   contributes `False`, never `None`.
 3. **Add gate 6.** Call `machine_owns_project(project["slug"])` in `_check_project_stalls`; skip
    silently when not the owner.
 4. **Add the Redis key helpers.** `_action_cooldown_set`, `_bump_attempts`, `_escalation_set` —
    named module constants with env overrides and provisional-tunable comments. Delete
    `_dedup_set`, `_DEDUP_PREFIX`'s 6-hour alert key, `_cooldown_seconds`, and
    `_DEFAULT_COOLDOWN_HOURS`.
-5. **Add `_pick_steer_target(project_key)`.** Live non-ledger eng session first, then most recent
-   resumable eng session with a `claude_session_uuid`. Returns `(kind, session)` or `(None, None)`.
-6. **Add `_attempt_resume(...)`.** Compose the steer message, dispatch via `steer_session` or
-   `resume_session`, charge the attempt on both branches, return a structured outcome.
-7. **Rewrite the tail of `_check_project_stalls`.** Wire the ladder: budget check → cooldown →
-   target → attempt → escalate-on-failure. Keep the canonical
-   `{status, findings, summary, duration}` return shape and extend the summary with steer counts,
-   mirroring `stall_advisory`'s `run_state` accounting.
-8. **Rewrite `_send_alert`'s caller contract.** New message text (attempt-and-failure voice), fired
-   only from the escalation path, `SET NX`-guarded. Keep the `Eng: Valor` target.
-9. **Update the module docstring.** Delete "Notification-only for v1 — never creates or resumes PM
-   sessions"; describe the ladder and list every env knob.
-10. **Update the existing tests** per Test Impact, then add the new coverage listed there.
-11. **Add the E2E integration test** against real Redis with a `test-`-prefixed project key and ORM
+5. **Extract `create_session` in `tools/valor_session.py`.** Add
+   `create_session(*, project_key, slug, message, session_type, ...) -> CreateResult` wrapping
+   `get_or_create_worktree` + `_push_agent_session`, mirroring `ResumeResult`'s dataclass shape.
+   Rewrite `cmd_create` as argparse-parsing and printing over the new core — no behavior change.
+   Re-run the existing `cmd_create` tests as the regression check.
+6. **Add `_pick_steer_target(project_key)`.** Live non-ledger eng session first, then most recent
+   resumable eng session with a `claude_session_uuid`, else `"create"`. Returns `(kind, session)`.
+7. **Add `_attempt_action(...)`.** Compose the message, dispatch via `steer_session`,
+   `resume_session`, or `create_session`, classify the outcome (benign race vs. real failure per
+   "Benign races are not attempts"), charge the attempt only when not a benign race, and return a
+   structured outcome carrying `kind` so telemetry can tell the rungs apart.
+8. **Add the create-rung guards.** Re-peek the issue lock immediately before `create_session`; a
+   live owner returns a benign-race outcome. Enforce `SDLC_STALL_CREATE_MAX_PER_TICK` with a local
+   counter owned by `_check_project_stalls`.
+9. **Rewrite the tail of `_check_project_stalls`.** Wire the ladder: attempt budget → cooldown →
+   rung selection → action → escalate on non-benign failure. Keep the canonical
+   `{status, findings, summary, duration}` return shape and extend the summary with per-rung counts
+   (steered / resumed / created / escalated).
+10. **Add degradation markers.** Every gate that returns unknown appends a short `findings` marker
+    (e.g. `"gate-unknown: lock-peek"`) so a Redis or `gh` degradation is visible instead of reading
+    like a healthy zero-stall tick.
+11. **Rewrite `_send_alert`'s caller contract.** New message text (attempt-and-failure voice), fired
+    only from the escalation path, `SET NX`-guarded. Keep the `Eng: Valor` target.
+12. **Update the module docstring.** Describe the ladder (steer → resume → create → escalate once),
+    the benign-race rule, and every env knob.
+13. **Update the existing tests** per Test Impact, then add the new coverage listed there.
+14. **Add the E2E integration test** against real Redis with a `test-`-prefixed project key and ORM
     cleanup.
-12. **Rewrite `docs/features/pm-session-liveness.md`** per the Documentation section.
-13. **Run `python -m ruff check` and `python -m ruff format`**, then the targeted test files via
+15. **Rewrite `docs/features/pm-session-liveness.md`** per the Documentation section.
+16. **Run `python -m ruff check` and `python -m ruff format`**, then the targeted test files via
     `scripts/pytest-clean.sh`.
 
 ## Documentation
@@ -668,45 +683,53 @@ New coverage to add:
       replace gate 5's description with the lock-peek liveness rule, add gate 6 (machine ownership),
       and document the action ladder.
 - [ ] Delete the "Not auto-recovery… Recovery is a human decision after seeing the alert" bullet in
-      §"What this is NOT" and replace it with the new boundary: *this reflection resumes pipelines
-      but never creates sessions and never kills anything.* Describe only the new status quo
-      (CLAUDE.md principle 1) — no "formerly notification-only" note.
+      §"What this is NOT" and replace it with the new boundary: *this reflection steers, resumes,
+      and creates eng sessions to restart a stalled lane, but never kills anything.* Describe only
+      the new status quo (CLAUDE.md principle 1) — no "formerly notification-only" note.
 - [ ] Correct the alert-target drift in the same file: the target is `Eng: Valor`, not `Dev: Valor`.
 - [ ] Replace the Tunables table with the full new knob set (`SDLC_STALL_THRESHOLD_HOURS`,
       `SDLC_STALL_RESUME_ENABLED`, `SDLC_STALL_RESUME_MAX_ATTEMPTS`,
-      `SDLC_STALL_RESUME_RUN_BUDGET`, `SDLC_STALL_RESUME_COOLDOWN_HOURS`,
+      `SDLC_STALL_CREATE_MAX_PER_TICK`, `SDLC_STALL_RESUME_COOLDOWN_HOURS`,
       `SDLC_STALL_ESCALATION_TTL_DAYS`), and drop the removed `SDLC_STALL_COOLDOWN_HOURS`.
+- [ ] Document the create rung explicitly, including its guards — it is the one capability an
+      operator needs to know the reflection has.
+- [ ] Note the new `tools/valor_session.py::create_session` core in
+      `docs/tools-reference.md` if `valor-session` has an entry describing its internals.
 - [ ] Add a cross-reference to `docs/features/session-steering.md` — steering is now a consumer
       surface of this reflection.
 - [ ] Check `docs/features/README.md` for an index entry needing a description refresh.
 
 ## Open Questions
 
-1. **When no eng session is steerable at all, is escalate-once acceptable, or should the reflection
-   create a session?** The plan says escalate-once (No-Gos). Spike-5 shows the target population is
-   healthy today, but it varies. Creating a session from a reflection is the single widest-blast-
-   radius option in this change; deferring it keeps the appetite Medium. **Recommendation: ship
-   escalate-once, revisit if the branch fires.**
-2. **Should the steer prefer an eng session already conversing about this issue?** The current
-   ladder picks the most recently updated eng session for the project, which is a proxy. A stricter
-   match (a session whose `issue_number` equals the stalled issue) would be more precise but is
-   usually empty. **Recommendation: most-recent, as planned — precision here buys little.**
-3. **Is a 30-day escalation TTL right, or should the key be TTL-less?** TTL-less is the purest "tell
-   a human once" but leaks keys for abandoned branches. 30 days is a compromise.
-   **Recommendation: 30 days, env-overridable.**
+All three are settled. Recorded here as decisions rather than deleted, because each one shapes a
+guard the builder must not quietly drop.
+
+1. **When no eng session is steerable at all, does the reflection escalate or create a session?**
+   **DECIDED — create a session.** Owner call, 2026-08-10. Creation is a designed third rung on the
+   ladder, not a fallback flag: it is bounded by the same per-`(slug, sha)` attempt budget, gated on
+   machine ownership, refuses to run while a live owner holds the issue lock, capped at
+   `SDLC_STALL_CREATE_MAX_PER_TICK` per project per tick, and distinguishable in telemetry. See
+   "The create rung". Escalation now means only "the system tried to create and could not".
+2. **Should the steer prefer an eng session already conversing about this issue?**
+   **DECIDED — no; most-recently-updated eng session for the project.** A stricter `issue_number`
+   match is usually empty, and the create rung now covers the empty case properly.
+3. **Is a 30-day escalation TTL right, or should the key be TTL-less?**
+   **DECIDED — 30 days, env-overridable** via `SDLC_STALL_ESCALATION_TTL_DAYS`. TTL-less is the
+   purest "tell a human once" but leaks keys for abandoned branches.
 
 ## Critique Results
 
 ### Round 1 (FULL depth)
 
-Critics: Risk & Robustness, Scope & Value, History & Consistency. Four findings: 1 BLOCKER,
-2 CONCERNs, 1 NIT. The blocker is the run-budget knob, flagged independently by all three critics.
+Critics: Risk & Robustness, Scope & Value, History & Consistency. Five findings: 1 BLOCKER,
+2 CONCERNs, 2 NITs. The blocker is the run-budget knob, flagged independently by all three critics.
+All five are addressed in the Round-2 revision (2026-08-10); the "Addressed By" column names where.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (all 3) | `SDLC_STALL_RESUME_RUN_BUDGET` is specified as "Max steers per reflection tick across all projects", but `_check_project_stalls` is invoked once per project by `reflections/utilities.py::run_per_project_audit`, whose `audit_one` parameter is `Callable[[dict], dict]` (utilities.py:589) with no shared state threaded between calls. The "three keys, three lifetimes" Redis table lists no run-tick-scoped key either, so the cross-project cap has no specified mechanism, and the Test Impact item "Run-budget brake: more stalled lanes than `SDLC_STALL_RESUME_RUN_BUDGET` → only the budgeted number are steered in one tick" cannot be satisfied as written. | pending | Pick ONE and make the Budgets table, the Redis-state table, Step 7, and the Test Impact bullet agree. (a) Drop the knob: the per-`(slug, sha)` attempt cap already bounds the worst case, and the live incident showed at most 3 concurrent stalled lanes; remove it from Budgets, from Step 7's "mirroring `stall_advisory`'s `run_state` accounting", and from the Test Impact bullet. (b) Keep it and thread run state explicitly: `run_state = {"steered": 0}; bound = functools.partial(_check_project_stalls, run_state=run_state); return run_per_project_audit(bound, ...)`, with `_check_project_stalls` checking `run_state["steered"] >= budget` before acting and incrementing on every charged attempt. A module-level global is NOT an option — reflections run in a subprocess-isolated scheduler. (c) Re-scope the knob per-project and reword both tables. |
-| CONCERN | Scope & Value | Gate 5' retains "a secondary, cheap sanity check … skip if any non-ledger non-terminal `AgentSession` carries this `issue_number`" (plan:211-214), but Rabbit Holes bans that exact variant by name — "match `issue_number` … re-derives liveness from a row's existence. Do not go down this road; the lock is the authority" (plan:459-462). The plan tells the builder both to build it and never to build it, and specifies no rule for which signal wins when the lock and the row disagree. | pending | If the secondary check is kept, `_lane_is_live` must OR the two signals for "live" (lock-live OR a non-terminal non-ledger row with this `issue_number`) and never let the row check override a lock-says-orphaned result into "not live" — that inversion is the permanent-false-negative mode spike-2 already ruled out for ledger anchors. Then amend the Rabbit Holes wording so the ban reads "never as the primary authority" rather than an absolute prohibition. Otherwise delete the secondary check: a Redis flap during lock acquire already fails soft to `None` (skip), which is the same posture. |
-| CONCERN | Risk & Robustness | The Race Conditions table omits the cross-reflection resume race: `crash_recovery` runs every 300s and can call `resume_session` on the same terminal eng session this reflection selects. The loser of the atomic `transition_status` gets `ResumeResult(success=False)`, which under "an attempt is charged on success as well as failure" is indistinguishable from a genuine dead end — so another reflection's legitimate resume can drive this ladder to a false human escalation, the exact outcome the plan exists to prevent. | pending | In `_attempt_resume`, before charging the attempt on a `resume_session` failure, re-read the row: `fresh = AgentSession.query.filter(session_id=session.session_id).first()`; if `fresh` exists and its status is NOT terminal, classify the outcome as "already-resumed-elsewhere" — no attempt charged, no escalation, return early. Mirror `steer_session`'s re-read-before-reject pattern in `agent/session_executor.py`. Add the race to the Race Conditions table and a failure-path test row for it. |
-| NIT | Risk & Robustness | Every fail-safe branch (lock-peek exception, `AgentSession.query` exception, `machine_owns_project` exception, Redis `INCR` exception) declines to act and logs only a `logger.warning`; none appends to the reflection's `findings`/`summary`. A sustained Redis or `gh` degradation would leave the ladder silently inert while the dashboard summary reads identically to a healthy day with zero stalls (`errored` stays 0 because nothing raises). | pending | Optional observability improvement: append a short marker finding (e.g. `"gate-unknown: lock-peek"`) whenever a gate returns `None`, so degradation trends visibly instead of looking like quiet. |
-| NIT | Structural check | The plan shipped without a `## Critique Results` section. `tools/sdlc_verdict.py` requires that section to be present and populated before a non-READY verdict can be recorded, so its absence would have failed the `CRITIQUE_FINDINGS_MISSING` gate. | pending | This section was created by the critique run itself; the plan template should carry the header from creation. |
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (all 3) | `SDLC_STALL_RESUME_RUN_BUDGET` is specified as "Max steers per reflection tick across all projects", but `_check_project_stalls` is invoked once per project by `reflections/utilities.py::run_per_project_audit`, whose `audit_one` parameter is `Callable[[dict], dict]` (utilities.py:589) with no shared state threaded between calls. The "three keys, three lifetimes" Redis table lists no run-tick-scoped key either, so the cross-project cap has no specified mechanism, and the Test Impact item "Run-budget brake: more stalled lanes than `SDLC_STALL_RESUME_RUN_BUDGET` → only the budgeted number are steered in one tick" cannot be satisfied as written. | **Round 2** — option (a): knob dropped. See Budgets, which now states why no cross-project cap is enforceable and replaces it with `SDLC_STALL_CREATE_MAX_PER_TICK`, a per-project-tick brake enforced by a local counter (real shared state within one `_check_project_stalls` call). Removed from Budgets, Step 9, Test Impact, and the Documentation tunables list. | Pick ONE and make the Budgets table, the Redis-state table, Step 7, and the Test Impact bullet agree. (a) Drop the knob: the per-`(slug, sha)` attempt cap already bounds the worst case, and the live incident showed at most 3 concurrent stalled lanes; remove it from Budgets, from Step 7's "mirroring `stall_advisory`'s `run_state` accounting", and from the Test Impact bullet. (b) Keep it and thread run state explicitly: `run_state = {"steered": 0}; bound = functools.partial(_check_project_stalls, run_state=run_state); return run_per_project_audit(bound, ...)`, with `_check_project_stalls` checking `run_state["steered"] >= budget` before acting and incrementing on every charged attempt. A module-level global is NOT an option — reflections run in a subprocess-isolated scheduler. (c) Re-scope the knob per-project and reword both tables. |
+| CONCERN | Scope & Value | Gate 5' retains "a secondary, cheap sanity check … skip if any non-ledger non-terminal `AgentSession` carries this `issue_number`" (plan:211-214), but Rabbit Holes bans that exact variant by name — "match `issue_number` … re-derives liveness from a row's existence. Do not go down this road; the lock is the authority" (plan:459-462). The plan tells the builder both to build it and never to build it, and specifies no rule for which signal wins when the lock and the row disagree. | **Round 2** — secondary check kept, polarity pinned. Gate 5' now carries an explicit "Tiebreak rule" with the OR-ed logic written out as code, and Rabbit Holes is reworded to ban row inference as the *primary authority* rather than absolutely. New unit test "Gate 5' tiebreak polarity" is the inversion guard. | If the secondary check is kept, `_lane_is_live` must OR the two signals for "live" (lock-live OR a non-terminal non-ledger row with this `issue_number`) and never let the row check override a lock-says-orphaned result into "not live" — that inversion is the permanent-false-negative mode spike-2 already ruled out for ledger anchors. Then amend the Rabbit Holes wording so the ban reads "never as the primary authority" rather than an absolute prohibition. Otherwise delete the secondary check: a Redis flap during lock acquire already fails soft to `None` (skip), which is the same posture. |
+| CONCERN | Risk & Robustness | The Race Conditions table omits the cross-reflection resume race: `crash_recovery` runs every 300s and can call `resume_session` on the same terminal eng session this reflection selects. The loser of the atomic `transition_status` gets `ResumeResult(success=False)`, which under "an attempt is charged on success as well as failure" is indistinguishable from a genuine dead end — so another reflection's legitimate resume can drive this ladder to a false human escalation, the exact outcome the plan exists to prevent. | **Round 2** — generalized beyond resume into the "Benign races are not attempts" rule, applied to all three rungs with a per-rung classification table. Added to Race Conditions (3 new rows), Failure Path Test Strategy (4 new rows), and Test Impact. | In `_attempt_resume`, before charging the attempt on a `resume_session` failure, re-read the row: `fresh = AgentSession.query.filter(session_id=session.session_id).first()`; if `fresh` exists and its status is NOT terminal, classify the outcome as "already-resumed-elsewhere" — no attempt charged, no escalation, return early. Mirror `steer_session`'s re-read-before-reject pattern in `agent/session_executor.py`. Add the race to the Race Conditions table and a failure-path test row for it. |
+| NIT | Risk & Robustness | Every fail-safe branch (lock-peek exception, `AgentSession.query` exception, `machine_owns_project` exception, Redis `INCR` exception) declines to act and logs only a `logger.warning`; none appends to the reflection's `findings`/`summary`. A sustained Redis or `gh` degradation would leave the ladder silently inert while the dashboard summary reads identically to a healthy day with zero stalls (`errored` stays 0 because nothing raises). | **Round 2** — adopted. Step 10 adds degradation markers; Success Criteria and Test Impact both require them. | Optional observability improvement: append a short marker finding (e.g. `"gate-unknown: lock-peek"`) whenever a gate returns `None`, so degradation trends visibly instead of looking like quiet. |
+| NIT | Structural check | The plan shipped without a `## Critique Results` section. `tools/sdlc_verdict.py` requires that section to be present and populated before a non-READY verdict can be recorded, so its absence would have failed the `CRITIQUE_FINDINGS_MISSING` gate. | **Round 2** — noted; the section exists now and is populated. Template fix is out of scope for this plan. | This section was created by the critique run itself; the plan template should carry the header from creation. |
 
