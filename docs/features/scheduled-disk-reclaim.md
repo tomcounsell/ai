@@ -12,7 +12,7 @@ Issue #2517.
 |---|---|---|
 | `.worktrees/{slug}/` | `cleanup_after_merge()` (`agent/worktree_manager.py`) | 14 days idle |
 | `~/.claude/projects/*/<uuid>.jsonl` and `*/<uuid>/` | `unlink` / `shutil.rmtree` | 30 days idle |
-| `logs/sessions/*` | `cleanup_old_snapshots()` (`agent/agent_sessions.py`) | 168 hours |
+| `logs/sessions/*` | `cleanup_old_snapshots()` (`agent/session_logs.py`) | 168 hours |
 
 The 30-day transcript window is chosen so it sits clear of the 14-day worktree
 window: a lane's transcript outlives the lane, so a merged lane can still be
