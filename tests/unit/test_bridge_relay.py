@@ -5,6 +5,7 @@ from Redis outbox queues and sends them via Telethon.
 """
 
 import json
+import logging
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +24,9 @@ from bridge.telegram_relay import (
     RELAY_POLL_INTERVAL,
     _dead_letter_message,
     _record_sent_message,
+    _send_custom_emoji_message,
     _send_queued_message,
+    _send_queued_reaction,
     get_outbox_length,
     process_outbox,
 )
@@ -1279,3 +1282,136 @@ class TestNullMsgIdDedup:
         }
         result = await _send_queued_message(mock_client, message)
         assert result is DELIVERED_NO_ID
+
+
+class TestZeroPeerGuard:
+    """All three send paths reject chat_id=0 identically (#2644).
+
+    ``chat_id="0"`` is the chatless-session placeholder. It is a truthy string,
+    so the "malformed payload" checks let it through, and ``int("0")`` parses
+    cleanly, so the non-Telegram-peer checks let it through too. Reaching
+    Telethon it raises ``PeerIdInvalidError``. Only the message path guarded
+    against it before this class existed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_path_drops_zero_chat_id(self):
+        message = {"chat_id": "0", "text": "hello", "session_id": "s"}
+
+        mock_send = AsyncMock()
+        with patch("bridge.markdown.send_markdown", mock_send):
+            result = await _send_queued_message(MagicMock(), message)
+
+        assert result is None
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reaction_path_drops_zero_chat_id(self):
+        message = {"chat_id": "0", "reply_to": 42, "emoji": "👍", "session_id": "s"}
+
+        mock_react = AsyncMock()
+        with patch("bridge.response.set_reaction", mock_react):
+            result = await _send_queued_reaction(MagicMock(), message)
+
+        assert result is False
+        mock_react.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_emoji_path_drops_zero_chat_id(self):
+        message = {"chat_id": "0", "reply_to": 42, "emoji": "🎉", "session_id": "s"}
+        mock_client = MagicMock()
+        mock_client.send_message = AsyncMock()
+
+        result = await _send_custom_emoji_message(mock_client, message)
+
+        assert result is None
+        mock_client.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reaction_path_still_sends_for_valid_negative_peer(self):
+        """Supergroup ids are negative and must survive the guard."""
+        message = {
+            "chat_id": "-1003900483201",
+            "reply_to": 42,
+            "emoji": "👍",
+            "session_id": "s",
+        }
+
+        mock_react = AsyncMock(return_value=True)
+        with patch("bridge.response.set_reaction", mock_react):
+            result = await _send_queued_reaction(MagicMock(), message)
+
+        assert result is True
+        mock_react.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_custom_emoji_path_still_sends_for_valid_peer(self):
+        message = {"chat_id": "12345", "reply_to": None, "emoji": "🎉", "session_id": "s"}
+        sent = MagicMock()
+        sent.id = 77
+        mock_client = MagicMock()
+        mock_client.send_message = AsyncMock(return_value=sent)
+
+        result = await _send_custom_emoji_message(mock_client, message)
+
+        assert result == 77
+        mock_client.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reaction_path_drops_local_session_id_quietly(self, caplog):
+        """Local session ids are routine, not a bug — no send, no warning.
+
+        The log level is the whole point of this test, so it asserts on it.
+        Without that, the test passes even with the guard removed: ``int()``
+        raises inside the ``try``, the broad handler catches it, and the drop
+        still happens — but at WARNING, which is exactly what "quietly"
+        forbids. Asserting only "no send" cannot tell those two apart, and a
+        test that passes for a reason unrelated to the code it names is worth
+        less than no test at all (#2658).
+        """
+        message = {
+            "chat_id": "local-abc123",
+            "reply_to": 42,
+            "emoji": "👍",
+            "session_id": "s",
+        }
+
+        mock_react = AsyncMock()
+        with caplog.at_level(logging.DEBUG, logger="bridge.telegram_relay"):
+            with patch("bridge.response.set_reaction", mock_react):
+                result = await _send_queued_reaction(MagicMock(), message)
+
+        assert result is False
+        mock_react.assert_not_called()
+
+        relay_records = [r for r in caplog.records if r.name == "bridge.telegram_relay"]
+        assert any(
+            r.levelno == logging.DEBUG and "local session" in r.message for r in relay_records
+        ), f"Expected a DEBUG drop record, got: {[(r.levelname, r.message) for r in relay_records]}"
+        assert not [r for r in relay_records if r.levelno >= logging.WARNING], (
+            "A local session id must not produce a warning — that is the "
+            "difference between the guard running and the broad except swallowing "
+            f"a ValueError: {[(r.levelname, r.message) for r in relay_records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_agrees_with_utils_peer_on_odd_inputs(self):
+        """The relay and the source side must answer alike for the same chat_id.
+
+        ``int()`` accepts "+5", 5.9, and True; ``utils.peer`` rejects all three.
+        While the relay re-derived the parse, a payload carrying any of them was
+        deliverable to the relay and undeliverable to the source side — the
+        exact drift this guard exists to close, one layer down.
+        """
+        from utils.peer import deliverable_telegram_peer
+
+        for odd in ["+5", 5.9, True, "--5", "0", "-1003900483201"]:
+            message = {"chat_id": odd, "reply_to": 42, "emoji": "👍", "session_id": "s"}
+            mock_react = AsyncMock(return_value=True)
+            with patch("bridge.response.set_reaction", mock_react):
+                sent = await _send_queued_reaction(MagicMock(), message) is not False
+
+            assert sent is deliverable_telegram_peer(odd), (
+                f"relay and utils.peer disagree on {odd!r}: "
+                f"relay sent={sent}, utils.peer={deliverable_telegram_peer(odd)}"
+            )

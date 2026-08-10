@@ -430,7 +430,7 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
     )
 
 
-def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
+def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     """Check whether any non-terminal AgentSession references this worktree.
 
     Walks the AgentSession table looking for rows whose ``working_dir`` lives
@@ -447,25 +447,28 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
     against the session's. ``.worktrees/sdlc-1218`` matches ``.worktrees/
     sdlc-1218/subdir`` but not ``.worktrees/sdlc-1218-other`` (Risk 5).
 
-    Failure mode: if the Popoto query raises (Redis unavailable, malformed
-    row, anything), the helper logs a WARNING and returns ``None`` (fail-open).
-    Refusing every worktree removal because Redis hiccupped would cause more
-    operational pain than the busy guard prevents.
+    This is the shared scan behind two public wrappers with deliberately
+    opposite failure postures. It reports an unanswerable query as its own
+    state rather than collapsing it into "clear", so each caller can decide:
+    interactive removal keeps the historical fail-open behavior, while an
+    unattended reaper must fail closed. Collapsing the two is what would let a
+    Redis hiccup read as "no session is using this worktree".
 
     Args:
         repo_root: Path to the main repository.
         slug: Work item slug whose worktree we want to remove.
 
     Returns:
-        ``(session_id, agent_session_id)`` of the first live session
-        referencing the worktree, or ``None`` if clear.
+        ``(state, a, b)`` where ``state`` is one of ``"clear"``, ``"busy"``, or
+        ``"error"``. For ``"busy"``, ``a``/``b`` are the session_id and
+        agent_session_id. For ``"error"``, ``a`` is the reason.
     """
     try:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
-    except Exception as e:  # pragma: no cover - import-time failure
-        logger.warning("worktree_busy_check: model imports failed (%s); fail-open", e)
-        return None
+    except Exception as e:
+        logger.warning("_scan_worktree_sessions: model imports failed (%s)", e)
+        return ("error", f"model_import_failed:{type(e).__name__}", "")
 
     worktree_dir = (repo_root / WORKTREES_DIR / slug).resolve()
     worktree_norm = os.path.normpath(str(worktree_dir))
@@ -474,8 +477,8 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
     try:
         sessions = AgentSession.query.all()
     except Exception as e:
-        logger.warning("worktree_busy_check: AgentSession query failed (%s); fail-open", e)
-        return None
+        logger.warning("_scan_worktree_sessions: AgentSession query failed (%s)", e)
+        return ("error", f"query_failed:{type(e).__name__}", "")
 
     for session in sessions:
         try:
@@ -508,12 +511,45 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
             ):
                 session_id = getattr(session, "session_id", "") or ""
                 agent_session_id = getattr(session, "agent_session_id", "") or ""
-                return (session_id, agent_session_id)
+                return ("busy", session_id, agent_session_id)
         except Exception as e:
-            logger.debug("worktree_busy_check: skipping session row (%s)", e)
+            logger.debug("_scan_worktree_sessions: skipping session row (%s)", e)
             continue
 
+    return ("clear", "", "")
+
+
+def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
+    """Fail-open busy check: ``(session_id, agent_session_id)`` or ``None``.
+
+    An unanswerable query reads as ``None`` here, the same as genuinely clear.
+    That is deliberate for interactive and post-merge removal (#1357): refusing
+    every worktree removal because Redis hiccupped would cause more operational
+    pain than the busy guard prevents, and a human is present to notice.
+
+    Unattended callers must use :func:`worktree_busy_probe` instead.
+    """
+    state, session_id, agent_session_id = _scan_worktree_sessions(repo_root, slug)
+    if state == "busy":
+        return (session_id, agent_session_id)
     return None
+
+
+def worktree_busy_probe(repo_root: Path, slug: str) -> tuple[str, str]:
+    """Tri-state busy check for callers that must fail CLOSED.
+
+    Returns ``(state, detail)`` where state is ``"clear"``, ``"busy"``, or
+    ``"error"``. Unlike :func:`worktree_busy_check`, a failed query is reported
+    as ``"error"`` rather than silently passing for ``"clear"``, so a scheduled
+    reaper can skip the worktree instead of deleting it on the strength of a
+    question it could not ask.
+    """
+    state, a, b = _scan_worktree_sessions(repo_root, slug)
+    if state == "busy":
+        return ("busy", a or b or "unknown")
+    if state == "error":
+        return ("error", a)
+    return ("clear", "")
 
 
 def _worktree_has_live_process(worktree_dir: Path) -> int | None:
@@ -1093,8 +1129,11 @@ def provision_worktree_venv(worktree_dir: Path) -> bool:
     it with a warning, and legacy uv versions could honor it destructively),
     and ``UV_PROJECT_ENVIRONMENT`` pinned to the absolute
     ``<worktree>/.venv`` so the target env never depends on uv's project
-    discovery. uv hardlinks packages from its global cache, so the per-
-    worktree disk cost is incremental, not a full copy.
+    discovery. On macOS/APFS uv's default link mode makes copy-on-write
+    *clones* from its global cache, not hardlinks: ``st_nlink`` stays 1 and
+    the blocks are shared, so ``du`` reports a full copy while the physical
+    incremental cost is near zero. Measured 2026-08-07 on a fresh worktree —
+    ``du`` 541 MB, actual ``df`` delta 9 MB.
 
     The interpreter is pinned to the main checkout's (``--python`` from
     ``worktree_interpreter_pin``) so a worktree measures the same Python the
@@ -1348,9 +1387,16 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     work as a WIP commit on ``session/{slug}`` plus a durable named ref
     ``refs/session-wip/{slug}`` before any ``git worktree remove --force``.
 
-    Mechanism (WIP commit + named ref, NOT ``git stash``): a plain ``git stash``
-    inside a worktree writes to the *per-worktree* ``refs/stash``, which is
-    destroyed with the worktree — useless as a teardown backstop. Instead:
+    Mechanism (WIP commit + named ref, NOT ``git stash``). The reason is NOT
+    that a worktree's stash is worktree-local: ``refs/stash`` lives in the
+    *common* ref store, so a stash pushed from a worktree is visible as
+    ``stash@{0}`` from the main checkout and survives the worktree's removal
+    (verified on git 2.50.1). That shared stack is precisely the problem —
+    every lane on this machine pushes onto the same one, so an entry's position
+    is meaningless and a teardown backstop keyed on it would race every peer
+    (issue #2650, shape 1). A WIP commit under a slug-scoped named ref is
+    single-owner by construction, and it captures untracked files, which
+    ``git stash`` declines by default. Instead:
 
     1. ``git -C <worktree> status --porcelain`` — if empty, no-op.
     2. ``git -C <worktree> add -A`` — captures untracked + tracked edits.

@@ -602,7 +602,7 @@ class TestCrashAutoResume:
                 # gate would otherwise fall to propose-only. Patch it True to
                 # exercise the resume path this test asserts.
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=True,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
@@ -691,7 +691,7 @@ class TestCrashAutoResume:
                 # Machine-ownership gate (Gap 3b): patch True so the bootstrap
                 # resume path runs (see the eligible-session test above).
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=True,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
@@ -764,7 +764,7 @@ class TestDeterministicFloorAndConvergence:
                     crash_autoresume_deterministic_floor_attempts=1,
                 ),
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=True,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
@@ -806,7 +806,7 @@ class TestDeterministicFloorAndConvergence:
                     crash_autoresume_deterministic_floor_attempts=0,
                 ),
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=True,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
@@ -847,7 +847,7 @@ class TestDeterministicFloorAndConvergence:
                     crash_autoresume_deterministic_floor_attempts=1,
                 ),
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=False,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
@@ -894,7 +894,7 @@ class TestDeterministicFloorAndConvergence:
                     crash_autoresume_max_attempts=3,
                 ),
                 patch(
-                    "reflections.crash_recovery._machine_owns_project",
+                    "reflections.crash_recovery.machine_owns_project",
                     return_value=True,
                 ),
                 patch("tools.valor_session.resume_session", return_value=failing),

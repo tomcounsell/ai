@@ -3,7 +3,7 @@ name: do-pr-review
 description: "Review a pull request against its plan. Triggered by 'review this PR', 'check the pull request', 'do a PR review', or a PR URL."
 argument-hint: "<pr-number>"
 context: fork
-allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*), Bash(sdlc-tool:*), Read, Write, Edit, Grep, Glob
+allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*), Bash(sdlc-tool:*), Read, Write, Edit, Grep, Glob, Agent
 ---
 
 # PR Review

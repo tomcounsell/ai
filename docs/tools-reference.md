@@ -409,6 +409,43 @@ Default `--window` is the watchdog's own `SESSION_PROGRESS_DEADLINE_S`, so the C
 **What it deliberately refuses to do.** Instantaneous `%CPU` and child-process count are not collected anywhere in `tools/session_progress.py`, and a test asserts they never creep in. Those two readings produced the 2026-08-07 misdiagnosis (#2662): a healthy session that went on to open a 14-file PR was reported as deadlocked because `%CPU` sampled 0.0 between subprocess bursts and the parent transcript was silent — the *expected* shape of a long synchronous `Agent` call. Every collector here is fail-silent and reports absence as absence: a missing marker directory, an absent transcript, an unreadable task dir, and a dead pid each read as "no signal", never as a hang.
 
 Resolution goes through `tools.valor_session._find_session`, the same Popoto-ORM resolver every other verb uses. No raw Redis access on this path.
+### Disk Reclaim (`tools.disk_reclaim`)
+
+Ages out three categories of on-disk state whose teardown code previously had no
+scheduled caller: merged/idle `.worktrees/{slug}/` lanes, `~/.claude/projects/`
+transcripts, and `logs/sessions/` snapshots. Also registered as the daily
+`disk-reclaim` reflection (`reflections.housekeeping.disk_reclaim.run`) —
+registration is per-host, since `config/reflections.yaml` is gitignored and
+vault-synced, so a machine that has not added the entry never runs the sweep on
+a schedule. See the registration block in
+[`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md).
+
+```bash
+# Report only — this is the default, and the only mode reachable without operator intent
+python -m tools.disk_reclaim
+python -m tools.disk_reclaim --json                            # raw report
+
+# Remove. BOTH the flag and the env var are required; --apply alone exits 2
+DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply
+
+# Tune the age floors (defaults: 14 days / 30 days / 168 hours)
+python -m tools.disk_reclaim --worktree-min-age-days 14 --transcript-max-age-days 30 --snapshot-max-age-hours 168
+```
+
+`--repo-root` (default cwd) scopes the **worktree sweep only** — it selects the
+checkout whose lanes are considered and whose open PRs `gh` is asked about. The
+transcript sweep always reads `~/.claude/projects/` and the snapshot sweep always
+reads the installed `agent` package's `SESSION_LOGS_DIR`.
+
+Every guard fails **closed** — a check that cannot answer skips the candidate, and
+an unreachable `gh` skips every lane. Removal delegates to `cleanup_after_merge()`,
+so `force=True` is never passed and a lane with uncommitted changes, a live
+session, a live process, an open PR, or an unmerged branch is never removed. The
+transcript sweep works at file granularity inside each project directory and never
+touches a `memory/` store at any age.
+
+See [`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md)
+for the guard table, the arming rationale, and the reflection registration block.
 
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 

@@ -130,7 +130,7 @@ function toggleJobRuns(el) {
                         <span class="freshness-chip {% if _age < 60 %}freshness-fresh{% elif _age < 600 %}freshness-warm{% else %}freshness-stale{% endif %}" title="last evidence {{ _age | format_duration }} ago">{{ _age | format_duration }}</span>
                         {% endif %}
                         {% if job.total_cost_usd %}
-                        <span class="text-muted mono" style="font-size: 11px;" title="summed across {{ job.run_count }} run(s)">${{ '%.2f' | format(job.total_cost_usd) }}</span>
+                        <span class="text-muted mono" style="font-size: 11px;" title="summed across {{ job.run_count }} run(s)">{{ job.total_cost_usd | usd }}</span>
                         {% endif %}
                     </div>
                     {% endif %}

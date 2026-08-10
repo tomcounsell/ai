@@ -9,8 +9,10 @@ Start with: python -m ui.app
 import datetime
 import json
 import logging
+import math
 import os
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -113,6 +115,18 @@ def _filter_format_relative(seconds: float | None) -> str:
     return f"in {label}"
 
 
+def _filter_usd(amount: float | None) -> str:
+    """Jinja2 filter: format a USD amount, always rounded UP to the cent.
+
+    Two decimal places, never truncating a fraction of a cent away: a
+    sub-cent cost reads as $0.01, not $0.00.
+    """
+    if amount is None:
+        return "$0.00"
+    cents = math.ceil(Decimal(str(float(amount))) * 100)
+    return f"${cents / 100:.2f}"
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -137,6 +151,7 @@ def create_app() -> FastAPI:
     templates.env.filters["format_interval_filter"] = _filter_format_interval
     templates.env.filters["format_relative"] = _filter_format_relative
     templates.env.filters["freshness_age"] = _filter_freshness_age
+    templates.env.filters["usd"] = _filter_usd
 
     # Store templates in app state for access by routers
     app.state.templates = templates

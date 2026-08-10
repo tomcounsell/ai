@@ -344,3 +344,86 @@ class TestStandalone:
             # Must not raise and must not queue anything.
             standalone("celebration")
         mock_redis.rpush.assert_not_called()
+
+
+class TestTransportOverrideDeliverability:
+    """VALOR_TRANSPORT forces the transport, not the peer's reachability (#2644).
+
+    PR #2651 routed the chatless case to "system" via ``deliverable_telegram_peer``,
+    but only on the inferred path: ``_resolve_transport`` returned the override
+    bare, before the peer check was ever consulted. So
+    ``VALOR_TRANSPORT=telegram`` with ``TELEGRAM_CHAT_ID=0`` skipped the check
+    entirely and enqueued a payload aimed at peer 0. Low likelihood — the
+    override has no production setter — which is precisely why the relay-side
+    guard is defence in depth rather than the only line.
+    """
+
+    def test_override_to_telegram_still_demotes_zero_peer(self, monkeypatch):
+        from tools.react_with_emoji import _resolve_transport
+
+        monkeypatch.setenv("VALOR_TRANSPORT", "telegram")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+
+        assert _resolve_transport() == "system"
+
+    def test_override_to_telegram_honored_for_a_real_peer(self, monkeypatch):
+        from tools.react_with_emoji import _resolve_transport
+
+        monkeypatch.setenv("VALOR_TRANSPORT", "telegram")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "-1003900483201")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+
+        assert _resolve_transport() == "telegram"
+
+    def test_non_telegram_override_is_passed_through_untouched(self, monkeypatch):
+        """The peer check has no business vetoing an email or a custom transport."""
+        from tools.react_with_emoji import _resolve_transport
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+        for override in ("email", "system", "somethingelse"):
+            monkeypatch.setenv("VALOR_TRANSPORT", override)
+            assert _resolve_transport() == override
+
+    def test_unset_chat_id_still_resolves_telegram(self, monkeypatch):
+        """Unchanged behavior: callers must keep emitting their "must be set" error."""
+        from tools.react_with_emoji import _resolve_transport
+
+        monkeypatch.delenv("VALOR_TRANSPORT", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+
+        assert _resolve_transport() == "telegram"
+
+    def test_react_with_override_and_zero_peer_queues_nothing(self, monkeypatch, capsys):
+        """End to end: the override no longer produces a chat_id="0" payload."""
+        from tools.react_with_emoji import react
+
+        monkeypatch.setenv("VALOR_TRANSPORT", "telegram")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "67890")
+        monkeypatch.setenv("VALOR_SESSION_ID", "test-session")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+
+        mock_redis = MagicMock()
+        with patch("tools.react_with_emoji._get_redis", return_value=mock_redis):
+            react("excited")
+
+        mock_redis.rpush.assert_not_called()
+        assert "no-op" in capsys.readouterr().out.lower()
+
+    def test_standalone_with_override_and_zero_peer_queues_nothing(self, monkeypatch, capsys):
+        from tools.react_with_emoji import standalone
+
+        monkeypatch.setenv("VALOR_TRANSPORT", "telegram")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.setenv("VALOR_SESSION_ID", "test-session")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+
+        mock_redis = MagicMock()
+        with patch("tools.react_with_emoji._get_redis", return_value=mock_redis):
+            standalone("celebration")
+
+        mock_redis.rpush.assert_not_called()
+        assert "no-op" in capsys.readouterr().out.lower()
