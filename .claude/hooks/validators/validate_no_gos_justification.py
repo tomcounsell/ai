@@ -40,8 +40,31 @@ PUNT_PHRASES = [
     # "operator/human will <do something>" is a punt. "operator will SEE the
     # log line change" is a description of observable behavior, which every
     # plan's impact section is made of (#2682). Only the action sense counts.
+    #
+    # The optional adverb slot is load-bearing: impact prose says "will *simply*
+    # see", "will *then* see", "will *now* observe", and without the slot each
+    # of those scores as a punt — a false positive that blocks an unrelated
+    # lane's write. The slot must live INSIDE the negative lookahead. Placed
+    # before it (``will\s+(?:\w+ly\s+)?(?!see\b|...)``) it does nothing: the
+    # group is optional, so when the lookahead fails with the adverb consumed
+    # the engine backtracks, matches the group as empty, re-tests the lookahead
+    # against the adverb itself ("simply" is not "see"), and the pattern matches
+    # anyway. Written as ``(?!<optional adverb><perception verb>)`` the
+    # assertion is what we actually mean: what follows is NOT an optionally
+    # adverb-prefixed perception verb.
+    #
+    # ``no longer`` stays a standalone alternative rather than an adverb,
+    # because it exempts ANY following verb ("will no longer rotate the key" is
+    # not a punt). Demoted into the adverb slot it would only exempt perception
+    # verbs, re-introducing a false positive.
+    #
+    # ``\w+ly`` deliberately over-matches a few verbs ("apply", "supply"), which
+    # is harmless: after "apply" the next token is not a perception verb, and
+    # "apply" is not one either, so the inner pattern fails and the line stays a
+    # punt. Pinned by ``test_action_sense_is_still_a_punt``.
     r"\b(?:operator|human)\s+will\s+"
-    r"(?!see\b|notice\b|observe\b|read\b|find\b|know\b|get\b|receive\b|experience\b|no longer\b)",
+    r"(?!(?:(?:\w+ly|then|now|also|still|already|just|soon|never)\s+)?"
+    r"(?:see|notice|observe|read|find|know|get|receive|experience)\b|no longer\b)",
     r"\bin v2\b",
     r"\bdefer(?:red)? to v\d\b",
     r"\bpunt(?:ed)? to\b",
@@ -149,7 +172,20 @@ def extract_no_gos_section(content: str) -> str | None:
 
 
 def no_gos_line_span(content: str) -> tuple[int, int]:
-    """0-based ``[start, end)`` line indices of the No-Gos section body.
+    """0-based ``[start, end)`` line range covering the No-Gos section.
+
+    Wider than the section *body* on both ends, deliberately. ``start`` is the
+    ``## No-Gos`` heading line itself, and ``end`` is one past the following
+    ``## `` heading (or at/past EOF when No-Gos is the last section). Both
+    headings land inside the range but cost nothing: the caller skips any line
+    beginning with ``#``.
+
+    The ``+ 1`` is what keeps a final *unterminated* line in range. ``end`` is
+    derived from a newline count, so when No-Gos is the last section and the
+    file has no trailing newline, the closing line contributes no newline and
+    would otherwise fall outside the scan — silently disarming the guard on the
+    one section where the quoted-context exemption does not apply. Pinned by
+    ``test_table_row_inside_no_gos_still_fails``'s no-trailing-newline case.
 
     ``(-1, -1)`` when there is no such section.
     """

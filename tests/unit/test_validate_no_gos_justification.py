@@ -296,16 +296,27 @@ Nothing deferred — every relevant item is in scope for this plan.
         ok, message = mod.validate(str(plan))
         assert ok, message
 
-    def test_table_row_inside_no_gos_still_fails(self, tmp_path):
-        """No-Gos is where commitments live; the exemption must not reach it."""
+    @pytest.mark.parametrize("trailing_newline", [True, False])
+    def test_table_row_inside_no_gos_still_fails(self, tmp_path, trailing_newline):
+        """No-Gos is where commitments live; the exemption must not reach it.
+
+        The no-trailing-newline variant pins the ``+ 1`` in
+        ``no_gos_line_span``. ``end`` is computed by counting newlines, so when
+        No-Gos is the last section and the file does not end in one, the final
+        punt line contributes no newline and falls outside the scanned range
+        without it — the guard silently returns clean on exactly the section it
+        exists to police. Trailing newlines are an editor detail no plan author
+        controls, so both shapes must fail.
+        """
         mod = import_validator()
         plan = tmp_path / "p.md"
-        plan.write_text(
+        content = (
             "## Problem\n\nThing.\n\n"
             "## No-Gos (Out of Scope)\n\n"
             "| Item | Disposition |\n|---|---|\n"
             "| Rate limiting | Punted to the next sprint. |\n"
         )
+        plan.write_text(content if trailing_newline else content.rstrip("\n"))
         ok, message = mod.validate(str(plan))
         assert not ok
         assert "unjustified deferrals" in message
@@ -415,10 +426,12 @@ class TestFenceMarkersFollowCommonMark:
     def test_inline_backticks_do_not_open_a_fence(self, tmp_path):
         """A mid-line code span does not open a fence (the ``^`` anchor).
 
-        Scope note: this pins the mid-line case only. A *line-initial* span
-        (a line beginning ```foo```) does open a fence that never closes,
-        swallowing later punts. That is pre-existing, in the fail-open
-        direction, and out of scope here.
+        Scope note: this pins the mid-line case only. A line-initial span of
+        three or more backticks (a line beginning ```foo```) does open a fence
+        that never closes, swallowing later punts. That is pre-existing, in the
+        fail-open direction, and out of scope here. Line-initial spans *shorter*
+        than a fence are pinned by
+        ``test_line_initial_short_code_span_does_not_open_a_fence``.
         """
         mod = import_validator()
         plan = tmp_path / "p.md"
@@ -426,6 +439,29 @@ class TestFenceMarkersFollowCommonMark:
             "# Plan\n\n"
             "## Design\n\n"
             "Call ```foo``` then ```bar```.\n\n"
+            "The retry backoff will be done post-merge.\n\n"
+            "## No-Gos (Out of Scope)\n\n"
+            "Nothing deferred — every relevant item is in scope for this plan.\n"
+        )
+        ok, message = mod.validate(str(plan))
+        assert not ok
+        assert "will be done post-merge" in message
+
+    @pytest.mark.parametrize("ticks", ["`", "``"])
+    def test_line_initial_short_code_span_does_not_open_a_fence(self, tmp_path, ticks):
+        """A fence needs three markers; one or two are an inline code span.
+
+        Pins the ``{3,}`` floor in ``FENCE``. Relaxed to ``{1,}``, a line that
+        merely *begins* with a code span — ```flag` enables it.``, ordinary
+        plan prose — opens a fence that nothing ever closes, exempting every
+        later line to EOF and disarming the validator for the whole document.
+        """
+        mod = import_validator()
+        plan = tmp_path / "p.md"
+        plan.write_text(
+            "# Plan\n\n"
+            "## Design\n\n"
+            f"{ticks}flag{ticks} enables it.\n\n"
             "The retry backoff will be done post-merge.\n\n"
             "## No-Gos (Out of Scope)\n\n"
             "Nothing deferred — every relevant item is in scope for this plan.\n"
@@ -493,6 +529,16 @@ class TestOperatorWillIsActionSenseOnly:
             "The operator will observe a single formatted record.",
             "A human will read the same message in both files.",
             "The operator will no longer see two copies.",
+            # An adverb between "will" and the perception verb must not defeat
+            # the exemption — impact prose is written this way constantly.
+            "The operator will simply see one log line.",
+            "The operator will then see the change.",
+            "An operator will now observe a single record.",
+            "The human will eventually receive the digest.",
+            "The operator will still find both entries.",
+            "A human will already know the outcome.",
+            # "no longer" exempts any following verb, not just perception ones.
+            "The operator will no longer rotate the key.",
         ],
     )
     def test_perception_sense_is_not_a_punt(self, line):
@@ -506,6 +552,13 @@ class TestOperatorWillIsActionSenseOnly:
             "The operator will run the migration by hand.",
             "A human will apply the config change.",
             "The operator will need to click through the vendor UI.",
+            # The adverb slot admits ``\w+ly``, which over-matches verbs ending
+            # in "ly". "apply" must stay a punt: it is not a perception verb,
+            # and neither is the "the" that follows it.
+            "The operator will apply the patch.",
+            "The operator will supply the credentials.",
+            # An adverb in front of a real action is still a punt.
+            "The operator will manually rotate the signing key.",
         ],
     )
     def test_action_sense_is_still_a_punt(self, line):
