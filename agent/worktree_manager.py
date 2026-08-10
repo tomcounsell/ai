@@ -467,7 +467,7 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
     except Exception as e:
-        logger.warning("worktree_busy_check: model imports failed (%s)", e)
+        logger.warning("_scan_worktree_sessions: model imports failed (%s)", e)
         return ("error", f"model_import_failed:{type(e).__name__}", "")
 
     worktree_dir = (repo_root / WORKTREES_DIR / slug).resolve()
@@ -477,7 +477,7 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     try:
         sessions = AgentSession.query.all()
     except Exception as e:
-        logger.warning("worktree_busy_check: AgentSession query failed (%s)", e)
+        logger.warning("_scan_worktree_sessions: AgentSession query failed (%s)", e)
         return ("error", f"query_failed:{type(e).__name__}", "")
 
     for session in sessions:
@@ -513,7 +513,7 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
                 agent_session_id = getattr(session, "agent_session_id", "") or ""
                 return ("busy", session_id, agent_session_id)
         except Exception as e:
-            logger.debug("worktree_busy_check: skipping session row (%s)", e)
+            logger.debug("_scan_worktree_sessions: skipping session row (%s)", e)
             continue
 
     return ("clear", "", "")
