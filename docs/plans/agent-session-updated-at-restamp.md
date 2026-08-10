@@ -7,7 +7,7 @@ created: 2026-08-08
 tracking: https://github.com/tomcounsell/ai/issues/2660
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-07T19:18:13Z
+revision_applied_at: 2026-08-10T05:05:00Z
 ---
 
 # AgentSession.save() restamps updated_at on maintenance writes, faking liveness
@@ -210,6 +210,40 @@ The string match on `"invalid"`/`"validation"` matched exactly one of `pre_save`
 Keep the WARNING log line and its fields so operator-facing output is unchanged in shape.
 
 Note for the inline comment and the feature doc: `is_valid()` is read-only **with respect to Redis**. It calls `setattr` during coercion (`popoto/models/base.py:829-839`), so the in-memory instance can move. Say "writes nothing to Redis," not "read-only."
+
+**1b. Keep the sweep TTL-neutral with an explicitly-named keepalive write (#2698).**
+
+The probe was doing a second job nobody declared. `AgentSession` carries `Meta.ttl = 2592000` (30 days, `models/agent_session.py:628-631`), and a full `save()` resets that TTL to the ceiling. Because the sweep full-saved every hydrated row every 5 minutes to an hour, **every row's expiry clock has been pushed back forever and `Meta.ttl` has never once fired.** Measured against the real model on an isolated Redis:
+
+```
+ttl right after initial save : 2592000
+ttl after 3s idle            : 2591997
+ttl after a no-op save probe : 2592000   <- reset to the ceiling
+ttl around is_valid()        : unchanged
+```
+
+So step 1 alone does not merely stop a bogus write. It activates a 30-day expiry on session rows for the first time in the system's life, as a side effect of a liveness fix. That is a retention-policy change, and this plan says three times over (No-Gos, Risk 2, and the fence-dead rung) that it is a write-authorization fix and retention policy is out of scope. Honoring that boundary means the sweep must leave the TTL exactly where it is today.
+
+**Do not do this by dropping `Meta.ttl`.** It does not work, and the way it fails is invisible. Redis keeps the TTL already stamped on a key; clearing the model attribute only stops future stamps. Measured:
+
+```
+ttl=600 -> sleep 5s -> ttl=595
+flip Meta.ttl to None, reload (instance _ttl is None), re-save
+ttl after re-save: 595   <- RETAINED and still decaying, not cleared
+```
+
+Every `AgentSession` hash in Redis right now carries a live 30-day clock from its last write, so that route would leave the existing population expiring while new rows never do, and popoto exposes no ORM-level `persist`/`clear_ttl`/`set_ttl` to fix it up. It would read as neutral and measure as neutral on a fresh key while quietly expiring production.
+
+**Do it with a narrow partial save instead.** `AgentSession.save()` skips the `updated_at` stamp whenever `update_fields` omits it (`models/agent_session.py:1008`), while popoto still reapplies the TTL on a partial write. That separates the two behaviors cleanly. Measured on the real model:
+
+```
+save(update_fields=["status"]) :  ttl 2591996 -> 2592000 (refreshed), updated_at UNMOVED
+is_valid()                     :  ttl unchanged,                     updated_at UNMOVED
+```
+
+So the healthy path becomes: `is_valid()` for classification, then one value-preserving `save(update_fields=[<field>])` whose sole purpose is holding the TTL where it is. Name it in the code for what it is, a placeholder preserving pre-existing behavior pending the #2698 policy decision, not a permanent design. It is the whole reason a write survives on the healthy path at all, so a reviewer who deletes it as redundant must be able to read why it is there.
+
+Two constraints on the field choice. It must not be `updated_at`, and it must be added to `_UPDATED_AT_OMISSION_OK_FIELDS` (`models/agent_session.py:973-992`): that allowlist only downgrades a log level, but without the entry the sweep emits one WARNING per row per tick ("save() called with update_fields missing 'updated_at'"), which is 59+ lines of noise every sweep on the observed population.
 
 **2. Add `preserve_updated_at` to `AgentSession.save()` (`models/agent_session.py:995-1024`) and use it in the restore.**
 
@@ -442,6 +476,12 @@ The real gap is that `tools/sdlc_session_ensure.py --kill-orphans` — the tool 
 
 **Mitigation:** `scripts/_strip_migration.py:32-40` is an explicit Test Impact item. The load-bearing half of its argument (atomicity, not quiescence) survives; only the cited example changes. Per the repo's no-legacy-code rule, the paragraph is rewritten to the new status quo rather than annotated with history.
 
+### Risk 4b: the TTL keepalive is deleted as redundant, silently activating a 30-day expiry
+
+**Impact:** The keepalive is the only write left on the healthy path, and it looks exactly like the thing this plan exists to remove. A reviewer or a later cleanup pass reads "we removed the pointless write, why is there still a write?" and deletes it. Nothing fails, no test goes red on a fresh fixture, and 30 days later production session rows start disappearing from the authoritative store one at a time. This is the highest-consequence, lowest-visibility failure in the plan: the damage is silent, delayed well past the merge, and irreversible per row.
+
+**Mitigation:** three independent guards, because a comment alone will not survive. (a) The inline comment names #2698 and states that deleting the line activates an expiry, rather than merely describing what the line does. (b) A Success Criterion asserts TTL neutrality behaviorally, on a key whose TTL has been allowed to decay first, so the assertion can actually fail (asserting on a freshly-written key passes either way, which is the trap that makes the `Meta.ttl = None` route look correct). (c) The No-Gos record it so the next planner sees it without reading the diff. Note that the delayed, per-row nature of the damage is exactly why the criterion cannot be "no row expired during the test."
+
 ### Risk 5: restore preserves a timestamp from a row that was archived mid-corruption
 
 **Impact:** A restored row could carry an `updated_at` that is future-dated or nonsensical relative to restore time.
@@ -503,6 +543,7 @@ Task 3's test set pins each.
 - [SEPARATE-SLUG #2673] `config/reflections.yaml:29-35` still declares `session-liveness-check` (`every: 300s`, `enabled: true`), but `tests/unit/test_reflection_scheduler.py:75-76`, `:699-706`, `:721` all assert it was intentionally removed from the registry by #2439 (spike-3: out-of-process actuation is unsafe by design). The registry and the tests disagree and no test asserts absence, so the drift is invisible to CI. Surfaced by this recon; unrelated to the restamp (that reflection writes nothing).
 - [SEPARATE-SLUG #2674] `agent/health_check.py:625` writes `s.updated_at = time.time()` — a float into a `DatetimeField` — on the PostToolUse hook path. Honest activity, wrong type, inconsistent with the `utc_now()` datetime every other writer stores. Changing the stored type touches every reader that dispatches on `isinstance`, which is a different blast radius than this fix.
 - [SEPARATE-SLUG #2677] **Scheduling the ledger orphan reaper.** `tools/sdlc_session_ensure.py --kill-orphans` is the correct authority for a process-less ledger anchor and nothing invokes it. Carved out of this plan during critique round 1 for three reasons: (a) it converts a human-invoked CLI into an unattended hourly fleet-wide `finalize_session()` actuator on `running` eng sessions, the class #2439 removed as unsafe by design, and that needs its own safety argument rather than a bundled task; (b) it needs a soak, an env kill switch, and a metric, none of which are timestamp-authorship work; (c) Task 3 here narrows the `updated_at` signal its no-payload fallback depends on, so `ORPHAN_AGE_SECONDS` has to be re-derived first. See Risk 3. Landing the `is_ledger` skip without it is safe: the skip holds today's net outcome for ledger rows constant rather than regressing it.
+- [SEPARATE-SLUG #2698] **Activating the `AgentSession` 30-day expiry.** `Meta.ttl = 2592000` has never fired, because the probe this plan removes was resetting it to the ceiling on every sweep tick. Letting it activate is defensible on its own merits (it is the declared intent of the field) but it is a data-retention policy change with no archive backstop: `restore_if_empty()` is a cold-start-only rehydrate, so a row expiring on its own is simply gone from the authoritative store. This plan therefore ships TTL-neutral via the step 1b keepalive and defers the decision. Recorded as a No-Go so a builder does not "simplify" the keepalive away while implementing Task 1.
 - **Making the fence-dead rung terminal in `_cleanup_stale_sessions`.** A dead fence currently selects a reason string and falls through to the recency and age gates (`scripts/update/run.py:272`), an asymmetry two green tests pin as "the fence ADDS protection; it never subtracts it." Making it terminal would finalize rows seconds after spawn, bypassing the 120-minute floor. That is a retention-policy change; this plan is a write-authorization fix. If it is wanted, it belongs in its own issue with its own risk analysis.
 
 ## Update System
@@ -542,6 +583,7 @@ Not applicable — this repo has no external docs site.
 
 - [ ] `cleanup_corrupted_agent_sessions()` writes no `AgentSession` hash on the healthy path: each seeded healthy row's `updated_at` is byte-identical before and after a sweep. **The assertion is on the field, not on a Redis command count.** The sweep unconditionally calls `AgentSession.repair_indexes()` (`agent/session_health.py:5649`, the "Unconditional `repair_indexes()` (issue #1361)" block whose comment records that the prior gate was removed permanently) and then `clean_indexes()` on `AgentSession` and `Memory`. Those are index writes by design and stay. A command-count spy is guaranteed non-zero on a correct build, so a literal "zero writes" criterion would either fail a correct implementation or push a builder into re-introducing the #1361 gate.
 - [ ] Its corruption-detection behavior is unchanged, **against the one fixture this model can construct**: an `AgentSession` whose `created_at` is `None` (the sole `is_valid()`-False shape — see Risk 1) is classified corrupt by both the old save-probe and the new `is_valid()` call, and a healthy row is classified corrupt by neither. Drive the sweep with `AgentSession.query.all` patched to yield the instance. Mutation check: hard-code the new check to `True` and the healthy-row half must go red; hard-code it to `False` and the corrupt-row half must go red. This criterion asserts classification parity, not that such rows occur in Redis — no hydration path producing one was found, and the criterion does not claim one exists.
+- [ ] **The sweep is TTL-neutral (#2698).** Seed a healthy row, let its TTL decay measurably (assert the decay happened before proceeding, so the fixture cannot pass vacuously), run a full `cleanup_corrupted_agent_sessions()` sweep, and assert the key's TTL is back at the `Meta.ttl` ceiling while `updated_at` is byte-identical. **Both halves are required and they fail in opposite directions:** delete the keepalive and the TTL half goes red; revert `is_valid()` to `save()` and the `updated_at` half goes red. Assert on the TTL value read back from Redis, not on whether a keepalive function was called. A criterion written against a freshly-written key passes whether or not the keepalive exists, which is precisely how the rejected `Meta.ttl = None` approach measured as correct.
 - [ ] Archive restore reproduces the archived `updated_at` **byte-identically** when the payload carries a real `datetime`, and falls back to a fresh stamp for **both** non-`datetime` shapes — `None`, and a raw ISO string that `_deserialize_payload` could not parse. The restored row's `updated_at` must be non-`None` in both fallback cases. The failure being guarded is a silently stamp-less row, not a quarantine: `AgentSession.__setattr__` maps both shapes to `None` before `save()` runs, so nothing raises either way (Research finding 0). The two assertions must fail in opposite directions under a hard-coded flag.
 - [ ] A `/sdlc` stage dispatch that only re-binds the run lock leaves `updated_at` unmoved, while still persisting `active_run_id` and `owned_run_ids` (the post-save readback at `tools/sdlc_session_ensure.py:509-515` still passes). A dispatch that advances a stage state still refreshes `updated_at`.
 - [ ] `_cleanup_stale_sessions` skips `is_ledger` rows before evaluating any liveness rung, and reports `skipped_ledger` separately.
@@ -606,6 +648,9 @@ Not applicable — this repo has no external docs site.
 - Preserve the WARNING log line's shape and fields.
 - Rewrite the "Try a no-op save" comment to state that the check **writes nothing to Redis**, citing #1817. Not "read-only" — `is_valid()` calls `setattr` during coercion (`popoto/models/base.py:829-839`).
 - The parity fixture is `created_at = None`, and it is the only one. `AgentSession.__setattr__` heals every `_DATETIME_FIELDS` value to a `datetime` or `None` before validation, the model has zero `max_length` fields, and a bad `id` is rejected at construction and already caught by Check 1. Do not spend build time hunting a broader corrupt-row fixture; Risk 1 records why none exists.
+- **Add the TTL keepalive from Technical Approach step 1b, in the same healthy-path branch.** One value-preserving `save(update_fields=[<field>])` per healthy row, with a comment naming it as a #2698 placeholder that preserves today's no-expiry behavior and is expected to be deleted once the retention policy is decided. Without it this task activates a 30-day expiry on every session row, which is out of scope per the No-Gos.
+- Add that field to `_UPDATED_AT_OMISSION_OK_FIELDS` (`models/agent_session.py:973-992`) so the keepalive does not emit a WARNING per row per tick. Verify the downgrade actually fires: `tests/unit/test_agent_session_updated_at_utc.py:193-245` already covers the allowlist and is the place to extend.
+- Do **not** implement neutrality by clearing `Meta.ttl`. Step 1b records the measurement showing it leaves already-persisted keys decaying, so it would look neutral on a fresh fixture and expire production rows.
 
 ### 2. `preserve_updated_at` and archive restore
 
