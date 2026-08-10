@@ -9,6 +9,7 @@ exactly one guard tripped and asserts the lane survived with the right reason.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 
@@ -525,6 +526,56 @@ def test_transcripts_dry_run_deletes_nothing(tmp_path):
     sweep = sweep_transcripts(max_age_days=30, apply=False, projects_dir=root)
     assert sweep.removed == [f"old-proj/{SESSION_A}.jsonl"]
     assert (old / f"{SESSION_A}.jsonl").exists(), "dry-run must not delete a transcript"
+
+
+def test_transcripts_preserve_a_uuid_stem_with_a_different_suffix(tmp_path):
+    """The most consequential of the three guards (#2681 review).
+
+    A uuid-stemmed file with an extension other than `.jsonl` is exactly the
+    sidecar Claude Code might start writing tomorrow, and the whole point of an
+    allow-list is that tomorrow's shape is preserved by default rather than
+    reaped by default. Dropping the suffix requirement flips `<uuid>.json` from
+    preserved to candidate, and nothing caught it.
+    """
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    (proj / f"{SESSION_A}.jsonl").write_text("{}")  # control: a real transcript
+    near_miss = proj / f"{SESSION_B}.json"
+    near_miss.write_text("{}")
+    _age(proj)
+
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert sweep.removed == [f"proj/{SESSION_A}.jsonl"], "only the .jsonl may go"
+    assert near_miss.exists(), "a uuid stem with a non-.jsonl suffix must survive"
+
+
+def test_preserved_entries_backstop_a_loosened_allow_list(tmp_path, monkeypatch):
+    """`PRESERVED_PROJECT_ENTRIES` is defence in depth, and this is the depth.
+
+    `memory` is excluded structurally today because its name does not match
+    `_SESSION_ID_RE`, so the frozenset is unreachable in production and no
+    ordinary test can reach it. That is exactly why it is worth pinning: the
+    hazard it guards is someone loosening the pattern later. Simulating that
+    loosening is the only way to show the backstop is real rather than
+    decorative — and if this test fails, the memory store has lost its last
+    line of defence.
+    """
+    import tools.disk_reclaim as dr
+
+    root = tmp_path / "projects"
+    proj = _project(root, "proj")
+    memory = proj / "memory"
+    memory.mkdir()
+    (memory / "MEMORY.md").write_text("# Memory Index")
+    _age(proj)
+
+    monkeypatch.setattr(dr, "_SESSION_ID_RE", re.compile(r".*"))
+    sweep = sweep_transcripts(max_age_days=30, apply=True, projects_dir=root)
+
+    assert memory.is_dir(), "the frozenset must catch what a loosened regex lets through"
+    assert (memory / "MEMORY.md").read_text() == "# Memory Index"
+    assert "proj/memory" not in sweep.removed
 
 
 def test_transcripts_never_follow_a_symlinked_transcript(tmp_path):

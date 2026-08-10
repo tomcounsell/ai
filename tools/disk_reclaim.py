@@ -79,6 +79,14 @@ _SESSION_ID_RE = re.compile(
 
 # Never a candidate, at any age. The per-project memory store (MEMORY.md plus
 # one file per memory) is durable curated state, not a transcript.
+#
+# Defence in depth, and unreachable in production today: `memory` does not match
+# `_SESSION_ID_RE`, so the allow-list already excludes it and removing this check
+# changes nothing that currently happens. The hazard it guards is someone
+# loosening that pattern later, which is precisely the change that would find no
+# backstop if this were deleted for looking inert. Pinned by
+# `test_preserved_entries_backstop_a_loosened_allow_list`, which loosens the
+# regex and asserts the memory store still survives.
 PRESERVED_PROJECT_ENTRIES = frozenset({"memory"})
 
 # Matches cleanup_old_snapshots' own long-standing default (7 days).
@@ -284,6 +292,11 @@ def open_pr_branches(repo_root: Path) -> set[str] | None:
                 "--json",
                 "headRefName",
             ],
+            # `--repo` above is what actually scopes this call — it outranks
+            # both cwd and GH_REPO. The cwd pin and the GH_REPO scrub are
+            # belt-and-braces for the day someone edits the argv; neither is
+            # load-bearing on its own, so do not read this line as the
+            # mechanism.
             cwd=str(repo_root),
             capture_output=True,
             text=True,
