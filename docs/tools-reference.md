@@ -400,6 +400,10 @@ Signals aggregated, all of which already existed:
 
 `pr-link` artifacts parsed from the transcript are reported (and appended to the verdict line as `PR #102 opened 5m ago`) but never vote on the verdict: a PR proves work *happened*, not that work is *happening*.
 
+`exec_pid` liveness is reported and does not vote either: a session between turns legitimately has a dead `exec_pid`, and letting that force a negative would manufacture the false "wedged" reading this tool exists to prevent. But a pid known to be *gone* is positive evidence, not absence of it, so when it contradicts a `PROGRESSING` verdict the fact is appended to the line callers actually read — `PROGRESSING — tool_activity 5m ago (note: exec_pid 41234 is not running)`. A pid whose state is merely unknowable adds nothing.
+
+A timestamp dated more than a minute into the future is treated as **absent**, not as maximally fresh. Clock skew or a corrupt marker would otherwise clamp to age `0.0` and pin the verdict to `PROGRESSING` forever — the most confident possible answer from the least trustworthy possible input. Such a session reads `UNKNOWN`, and the reason names the skewed signals.
+
 Default `--window` is the watchdog's own `SESSION_PROGRESS_DEADLINE_S`, so the CLI never disagrees with the running system about what counts as progress. Tighten it only if you intend to own the interpretation.
 
 **What it deliberately refuses to do.** Instantaneous `%CPU` and child-process count are not collected anywhere in `tools/session_progress.py`, and a test asserts they never creep in. Those two readings produced the 2026-08-07 misdiagnosis (#2662): a healthy session that went on to open a 14-file PR was reported as deadlocked because `%CPU` sampled 0.0 between subprocess bursts and the parent transcript was silent — the *expected* shape of a long synchronous `Agent` call. Every collector here is fail-silent and reports absence as absence: a missing marker directory, an absent transcript, an unreadable task dir, and a dead pid each read as "no signal", never as a hang.

@@ -85,6 +85,11 @@ _TERMINAL_FALLBACK = frozenset({"completed", "failed", "killed", "abandoned", "c
 # cannot be imported. See :func:`default_window_s`.
 _WINDOW_FALLBACK_S = 1800
 
+# How far ahead of our clock a marker may be dated and still be believed.
+# Writers and readers are the same host today, so this only absorbs ordinary
+# jitter; anything beyond it is skew or corruption. See :meth:`Signal.age_s`.
+FUTURE_TS_TOLERANCE_S = 60.0
+
 
 def terminal_statuses() -> frozenset[str]:
     """Terminal session statuses, from the lifecycle module when importable."""
@@ -137,10 +142,28 @@ class Signal:
     counts_as_evidence: bool = True
 
     def age_s(self, now: float) -> float | None:
-        """Seconds since this signal fired, or ``None`` when absent."""
+        """Seconds since this signal fired, or ``None`` when absent or impossible.
+
+        A timestamp meaningfully in the future is not evidence of anything. It
+        means clock skew or a corrupt marker, and treating it as age ``0.0``
+        would pin the verdict to ``PROGRESSING`` forever — the most confident
+        possible answer drawn from the least trustworthy possible input, which
+        is exactly the posture this module exists to avoid. Reported as absent
+        instead, so it reads as ``UNKNOWN``.
+
+        Sub-``FUTURE_TS_TOLERANCE_S`` overshoot is ordinary jitter between a
+        writer's clock and ours, and still clamps to ``0.0``.
+        """
         if self.ts is None:
             return None
-        return max(0.0, now - self.ts)
+        delta = now - self.ts
+        if delta < -FUTURE_TS_TOLERANCE_S:
+            return None
+        return max(0.0, delta)
+
+    def is_implausible(self, now: float) -> bool:
+        """True when a timestamp exists but is too far in the future to trust."""
+        return self.ts is not None and (now - self.ts) < -FUTURE_TS_TOLERANCE_S
 
 
 def _as_unix_ts(val) -> float | None:
@@ -198,8 +221,22 @@ def tool_activity_signal(session_id: str | None, *, hook_edge_root: str | None =
             from agent.session_runner.liveness import tool_activity_ts  # noqa: PLC0415
 
             ts = tool_activity_ts(session_id)
-        except Exception:
-            ts = None
+        except Exception as exc:
+            # Loud, not silent. This is the load-bearing signal; degrading it
+            # to absent is correct behaviour but must never be invisible, or a
+            # break in tool_activity_ts costs the tool its headline reading
+            # while every caller still reads a confident UNKNOWN.
+            logger.warning(
+                "session_progress: tool_activity_ts unavailable (%s: %s) — "
+                "the load-bearing liveness signal is degraded to absent",
+                type(exc).__name__,
+                exc,
+            )
+            return Signal(
+                "tool_activity",
+                None,
+                detail=f"unavailable: {type(exc).__name__}",
+            )
         return Signal("tool_activity", ts)
 
     # Test/override path: read the markers directly under the given root.
@@ -453,12 +490,22 @@ def compute_verdict(
     if status and status in terminal_statuses():
         return VERDICT_UNKNOWN, f"session status is {status!r} — not running"
 
+    # `age_s` returns None for a future-dated timestamp, so an implausible
+    # marker drops out here rather than voting as maximally fresh.
     ages = [
-        (sig.name, sig.age_s(now))
+        (sig.name, age)
         for sig in signals
-        if sig.counts_as_evidence and sig.ts is not None
+        if sig.counts_as_evidence and sig.ts is not None and (age := sig.age_s(now)) is not None
     ]
     if not ages:
+        skewed = [sig.name for sig in signals if sig.is_implausible(now)]
+        if skewed:
+            return (
+                VERDICT_UNKNOWN,
+                f"the only timestamps found are dated in the future "
+                f"({', '.join(sorted(skewed))}) — clock skew or a corrupt "
+                f"marker, so they are not evidence of anything",
+            )
         return (
             VERDICT_UNKNOWN,
             "no liveness evidence found (no hook-edge marker, no task output, "
@@ -524,7 +571,28 @@ class ProgressReport:
             when = format_age(self.now - age) if age else "unknown"
             label = f"PR #{number}" if number else "PR"
             parts.append(f"{label} opened {when} ago")
-        return f"{self.verdict} — {'; '.join(parts)}"
+        line = f"{self.verdict} — {'; '.join(parts)}"
+        note = self.contradiction_note
+        return f"{line} ({note})" if note else line
+
+    @property
+    def contradiction_note(self) -> str | None:
+        """A fact in ``fields`` that argues against the verdict, or None.
+
+        ``exec_pid_alive is False`` is positive evidence the process is gone,
+        not absence of evidence — the distinction this whole module is built
+        on. It still must not *vote*: a session between turns legitimately has
+        a dead ``exec_pid``, and letting that force a negative would
+        manufacture the false "wedged" reading #2662 was made of. So the fact
+        is surfaced on the line callers actually read, and left out of the
+        arithmetic.
+        """
+        if self.verdict != VERDICT_PROGRESSING:
+            return None
+        if self.fields.get("exec_pid_alive") is not False:
+            return None
+        pid = self.fields.get("exec_pid")
+        return f"note: exec_pid {pid} is not running" if pid else "note: exec_pid is not running"
 
     def to_dict(self) -> dict:
         return {

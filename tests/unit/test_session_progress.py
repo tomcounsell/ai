@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -64,6 +66,18 @@ def _session(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _unused_pid() -> int:
+    """A pid that has certainly been reaped.
+
+    Spawn a trivial child and wait for it. `subprocess` reaps it, so the pid is
+    gone rather than a zombie -- a zombie still answers `kill(pid, 0)` and
+    would make the test assert the opposite of what it means to.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
 
 
 def _write_marker(root, session_id, ts, name="pm_hook_edges.toolactivity"):
@@ -530,3 +544,174 @@ def test_cmd_progress_is_read_only(monkeypatch, capsys):
         VERDICT_NO_RECENT_ACTIVITY,
         VERDICT_UNKNOWN,
     }
+
+
+# ---------------------------------------------------------------------------
+# The load-bearing signal's PRODUCTION path (review of #2668)
+# ---------------------------------------------------------------------------
+
+
+class TestToolActivityProductionPath:
+    """Every prior assertion routed through the `hook_edge_root` override.
+
+    So a break in the production branch — the one that actually runs — left the
+    suite green while the tool lost its headline reading.
+    """
+
+    def test_production_branch_propagates_the_real_value(self, monkeypatch):
+        import agent.session_runner.liveness as liveness
+
+        monkeypatch.setattr(liveness, "tool_activity_ts", lambda _sid: NOW - 4.0)
+        sig = tool_activity_signal("some-session")  # no hook_edge_root: production path
+        assert sig.ts == NOW - 4.0
+        assert sig.age_s(NOW) == 4.0
+
+    def test_production_branch_propagates_absence(self, monkeypatch):
+        import agent.session_runner.liveness as liveness
+
+        monkeypatch.setattr(liveness, "tool_activity_ts", lambda _sid: None)
+        assert tool_activity_signal("some-session").ts is None
+
+    def test_a_broken_liveness_import_degrades_loudly_not_silently(self, monkeypatch, caplog):
+        """Degrading to absent is right; doing it invisibly is not."""
+        import agent.session_runner.liveness as liveness
+
+        def boom(_sid):
+            raise RuntimeError("liveness contract changed")
+
+        monkeypatch.setattr(liveness, "tool_activity_ts", boom)
+        with caplog.at_level("WARNING"):
+            sig = tool_activity_signal("some-session")
+
+        assert sig.ts is None, "must degrade, not raise"
+        assert sig.detail and "RuntimeError" in sig.detail
+        assert any("load-bearing" in r.getMessage() for r in caplog.records), (
+            "a break in the headline signal must be visible in the logs"
+        )
+
+    def test_report_uses_the_production_path_when_no_override(self, monkeypatch):
+        """End to end: the value reaches the verdict, not just the Signal."""
+        import agent.session_runner.liveness as liveness
+
+        monkeypatch.setattr(liveness, "tool_activity_ts", lambda _sid: NOW - 10.0)
+        report = build_report(
+            _session(),
+            now=NOW,
+            window_s=WINDOW,
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_PROGRESSING
+        assert "tool_activity" in report.verdict_reason
+
+
+# ---------------------------------------------------------------------------
+# A known-dead exec_pid contradicts PROGRESSING (review of #2668)
+# ---------------------------------------------------------------------------
+
+
+class TestDeadPidIsSurfacedButDoesNotVote:
+    def test_pid_alive_distinguishes_false_from_unknowable(self):
+        """`False` is positive evidence; `None` is absence of it."""
+        assert pid_alive(None) is None
+        # pid 1 exists on every unix; either alive or permission-denied-alive.
+        assert pid_alive(1) is True
+        dead = _unused_pid()
+        assert pid_alive(dead) is False, "a reaped pid must read False, never None"
+
+    def test_dead_pid_is_named_in_the_verdict_line(self, tmp_path):
+        dead = _unused_pid()
+        root = tmp_path / "hooks"
+        _write_marker(root, "test-progress-session", NOW - 300.0)
+        report = build_report(
+            _session(exec_pid=dead),
+            now=NOW,
+            window_s=WINDOW,
+            hook_edge_root=str(root),
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_PROGRESSING, "pid must not vote"
+        assert report.fields["exec_pid_alive"] is False
+        assert "not running" in report.verdict_line
+        assert str(dead) in report.verdict_line
+
+    def test_unknowable_pid_adds_no_note(self, tmp_path):
+        """Only a definite negative is a contradiction. `None` is silence."""
+        root = tmp_path / "hooks"
+        _write_marker(root, "test-progress-session", NOW - 300.0)
+        report = build_report(
+            _session(exec_pid=None),
+            now=NOW,
+            window_s=WINDOW,
+            hook_edge_root=str(root),
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_PROGRESSING
+        assert report.contradiction_note is None
+        assert "not running" not in report.verdict_line
+
+    def test_no_note_when_the_verdict_is_not_progressing(self, tmp_path):
+        """A dead pid alongside NO RECENT ACTIVITY is not a contradiction."""
+        dead = _unused_pid()
+        root = tmp_path / "hooks"
+        _write_marker(root, "test-progress-session", NOW - 99_999.0)
+        report = build_report(
+            _session(exec_pid=dead),
+            now=NOW,
+            window_s=WINDOW,
+            hook_edge_root=str(root),
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_NO_RECENT_ACTIVITY
+        assert report.contradiction_note is None
+
+
+# ---------------------------------------------------------------------------
+# Future-dated timestamps are not evidence (review of #2668)
+# ---------------------------------------------------------------------------
+
+
+class TestFutureDatedTimestamps:
+    def test_far_future_signal_reads_as_absent(self):
+        sig = Signal("tool_activity", NOW + 86400.0)
+        assert sig.age_s(NOW) is None
+        assert sig.is_implausible(NOW) is True
+
+    def test_small_skew_still_clamps_to_zero(self):
+        """Ordinary jitter between two clocks is not corruption."""
+        sig = Signal("tool_activity", NOW + 5.0)
+        assert sig.age_s(NOW) == 0.0
+        assert sig.is_implausible(NOW) is False
+
+    def test_future_marker_yields_unknown_not_progressing(self, tmp_path):
+        root = tmp_path / "hooks"
+        _write_marker(root, "test-progress-session", NOW + 86400.0)
+        report = build_report(
+            _session(),
+            now=NOW,
+            window_s=WINDOW,
+            hook_edge_root=str(root),
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_UNKNOWN, (
+            "a marker from the future is skew or corruption, not maximal freshness"
+        )
+        assert "future" in report.verdict_reason
+
+    def test_a_real_signal_still_wins_over_a_skewed_one(self, tmp_path):
+        """One bad clock must not suppress evidence that is actually good."""
+        root = tmp_path / "hooks"
+        _write_marker(root, "test-progress-session", NOW + 86400.0, name="a.toolactivity")
+        report = build_report(
+            _session(last_turn_at=NOW - 12.0),
+            now=NOW,
+            window_s=WINDOW,
+            hook_edge_root=str(root),
+            projects_root="/nonexistent",
+            task_output_roots=[],
+        )
+        assert report.verdict == VERDICT_PROGRESSING
