@@ -367,6 +367,40 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 
 See `docs/features/session-steering.md` for full documentation.
 
+### Disk Reclaim (`tools.disk_reclaim`)
+
+Ages out three categories of on-disk state whose teardown code previously had no
+scheduled caller: merged/idle `.worktrees/{slug}/` lanes, `~/.claude/projects/`
+transcripts, and `logs/sessions/` snapshots. Also runs daily as the
+`disk-reclaim` reflection (`reflections.housekeeping.disk_reclaim.run`).
+
+```bash
+# Report only — this is the default, and the only mode reachable without operator intent
+python -m tools.disk_reclaim
+python -m tools.disk_reclaim --json                            # raw report
+
+# Remove. BOTH the flag and the env var are required; --apply alone exits 2
+DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply
+
+# Tune the age floors (defaults: 14 days / 30 days / 168 hours)
+python -m tools.disk_reclaim --worktree-min-age-days 14 --transcript-max-age-days 30 --snapshot-max-age-hours 168
+```
+
+`--repo-root` (default cwd) scopes the **worktree sweep only** — it selects the
+checkout whose lanes are considered and whose open PRs `gh` is asked about. The
+transcript sweep always reads `~/.claude/projects/` and the snapshot sweep always
+reads the installed `agent` package's `SESSION_LOGS_DIR`.
+
+Every guard fails **closed** — a check that cannot answer skips the candidate, and
+an unreachable `gh` skips every lane. Removal delegates to `cleanup_after_merge()`,
+so `force=True` is never passed and a lane with uncommitted changes, a live
+session, a live process, an open PR, or an unmerged branch is never removed. The
+transcript sweep works at file granularity inside each project directory and never
+touches a `memory/` store at any age.
+
+See [`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md)
+for the guard table, the arming rationale, and the reflection registration block.
+
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
 Write stage progress markers (in_progress/completed/skipped) to the issue-keyed pipeline ledger in Redis. Called by each SDLC sub-skill at start and completion. The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd.
