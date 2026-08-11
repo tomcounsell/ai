@@ -9,6 +9,7 @@ contract (pr-changed-files mode).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -551,6 +552,13 @@ class TestRotationKeyExplosion:
 # ---------------------------------------------------------------------------
 
 
+def _stale_pairs(content: str) -> list[tuple[str, str]]:
+    """Flatten the regex fix channel to (pattern_source, replacement) pairs."""
+    return [
+        (pattern.pattern, new) for pattern, new in docs_auditor._detect_stale_term_fixes(content)
+    ]
+
+
 class TestStaleTermDictionary:
     def test_stale_term_dict_seeded(self):
         assert "SessionLog" in docs_auditor.STALE_TERMS
@@ -561,12 +569,194 @@ class TestStaleTermDictionary:
         content = "The SessionLog has been renamed to AgentSession."
         fixes = docs_auditor._detect_stale_term_fixes(content)
         # Migration context recognized -> no fix queued
-        assert ("SessionLog", "AgentSession") not in fixes
+        assert fixes == []
 
     def test_no_migration_context_queues_fix(self):
         content = "The SessionLog has methods to track session state."
-        fixes = docs_auditor._detect_stale_term_fixes(content)
-        assert ("SessionLog", "AgentSession") in fixes
+        assert (r"\bSessionLog\b", "AgentSession") in _stale_pairs(content)
+
+    def test_fixes_travel_on_the_regex_channel(self):
+        fixes = docs_auditor._detect_stale_term_fixes("The SessionLog tracks state.")
+        assert fixes
+        for pattern, new in fixes:
+            assert isinstance(pattern, re.Pattern)
+            assert isinstance(new, str)
+
+    def test_absent_key_emits_no_fix(self):
+        assert docs_auditor._detect_stale_term_fixes("Nothing stale here at all.") == []
+
+
+# ---------------------------------------------------------------------------
+# TestStaleTermWordBoundary — the #2711 regression
+# ---------------------------------------------------------------------------
+
+
+class TestStaleTermWordBoundary:
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "| `save_session_snapshot()` | `agent/session_logs.py` | (none) |",
+            "See `bridge/session_logs.py` for the re-export shim.",
+            "The SessionLogs collection is plural.",
+            "A `_RedisJob` wrapper carries the payload.",
+        ],
+    )
+    def test_compound_identifiers_are_not_rewritten(self, content):
+        """`session_log` must not match inside `session_logs` (issue #2711)."""
+        assert docs_auditor._detect_stale_term_fixes(content) == []
+
+    def test_standalone_term_still_matches(self):
+        assert _stale_pairs("The session_log field is written on exit.") == [
+            (r"\bsession_log\b", "agent_session")
+        ]
+
+    def test_apply_leaves_session_logs_path_untouched(self, repo):
+        doc = repo / "docs" / "features" / "snap.md"
+        original = "Snapshots live in `agent/session_logs.py`.\n"
+        doc.write_text(original)
+        (repo / "agent").mkdir()
+        (repo / "agent" / "session_logs.py").write_text("")
+
+        regex_fixes = docs_auditor._detect_stale_term_fixes(original)
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/snap.md"), repo, [], regex_fixes=regex_fixes
+        )
+        assert applied == 0
+        assert withheld == []
+        assert doc.read_text() == original
+
+
+# ---------------------------------------------------------------------------
+# TestExistenceInvariant — no fix may introduce an absent repo path
+# ---------------------------------------------------------------------------
+
+
+class TestExistenceInvariant:
+    @pytest.fixture()
+    def doc(self, repo):
+        p = repo / "docs" / "features" / "inv.md"
+        p.write_text("See `agent/real.py` and `agent/other.py`.\n")
+        (repo / "agent").mkdir()
+        (repo / "agent" / "real.py").write_text("")
+        (repo / "agent" / "other.py").write_text("")
+        return Path("docs/features/inv.md")
+
+    def test_fix_introducing_absent_path_is_rejected_and_reported(self, repo, doc):
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc, repo, [("agent/real.py", "agent/ghost.py")]
+        )
+        assert applied == 0
+        assert len(withheld) == 1
+        assert withheld[0] == {
+            "doc": str(doc),
+            "old": "agent/real.py",
+            "new": "agent/ghost.py",
+            "reason": "target-absent",
+        }
+        assert "agent/ghost.py" not in (repo / doc).read_text()
+
+    def test_rejection_is_logged_with_offending_path(self, repo, doc, caplog):
+        with caplog.at_level("WARNING", logger="reflections.docs_auditor"):
+            docs_auditor._apply_fixes_to_file(doc, repo, [("agent/real.py", "agent/ghost.py")])
+        assert any("agent/ghost.py" in r.getMessage() for r in caplog.records)
+
+    def test_sibling_valid_fix_still_applies(self, repo, doc):
+        (repo / "agent" / "renamed.py").write_text("")
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc,
+            repo,
+            [("agent/real.py", "agent/ghost.py"), ("agent/other.py", "agent/renamed.py")],
+        )
+        assert applied == 1
+        assert len(withheld) == 1
+        text = (repo / doc).read_text()
+        assert "agent/renamed.py" in text
+        assert "agent/real.py" in text
+        assert "agent/ghost.py" not in text
+
+    def test_all_fixes_rejected_writes_nothing(self, repo, doc):
+        original = (repo / doc).read_text()
+        mtime = (repo / doc).stat().st_mtime_ns
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc,
+            repo,
+            [("agent/real.py", "agent/ghost.py"), ("agent/other.py", "agent/phantom.py")],
+        )
+        assert applied == 0
+        assert len(withheld) == 2
+        assert (repo / doc).read_text() == original
+        assert (repo / doc).stat().st_mtime_ns == mtime
+
+    def test_preexisting_absent_path_is_never_revalidated(self, repo):
+        p = repo / "docs" / "features" / "pre.md"
+        p.write_text("Legacy `agent/vanished.py` and `agent/real.py`.\n")
+        (repo / "agent").mkdir()
+        (repo / "agent" / "real.py").write_text("")
+        (repo / "agent" / "kept.py").write_text("")
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/pre.md"), repo, [("agent/real.py", "agent/kept.py")]
+        )
+        assert applied == 1
+        assert withheld == []
+        assert "agent/vanished.py" in p.read_text()
+
+    def test_regex_channel_is_also_guarded(self, repo, doc):
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc, repo, [], regex_fixes=[(re.compile(r"\breal\b"), "ghost")]
+        )
+        assert applied == 0
+        assert len(withheld) == 1
+        assert withheld[0]["reason"] == "target-absent"
+
+    @pytest.mark.parametrize("body", ["", "   \n\t\n"])
+    def test_empty_or_whitespace_doc_with_no_fixes_writes_nothing(self, repo, body):
+        p = repo / "docs" / "features" / "empty.md"
+        p.write_text(body)
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/empty.md"), repo, []
+        )
+        assert (applied, withheld) == (0, [])
+        assert p.read_text() == body
+
+    def test_ok_result_carries_withheld_keys(self):
+        res = docs_auditor._ok_result("ok")
+        assert res["fixes_withheld"] == 0
+        assert res["withheld"] == []
+
+    def test_audit_surfaces_withheld_without_writing(self, repo, auth_ok, patch_redis):
+        p = repo / "docs" / "features" / "aud.md"
+        p.write_text("Reference `agent/real.py` here.\n")
+        (repo / "agent").mkdir()
+        (repo / "agent" / "real.py").write_text("")
+
+        with (
+            patch.object(
+                docs_auditor,
+                "_detect_renamed_symbol_fixes",
+                return_value=[("agent/real.py", "agent/ghost.py")],
+            ),
+            patch.object(docs_auditor, "_detect_renamed_link_fixes", return_value=[]),
+            patch.object(
+                docs_auditor,
+                "_resolve_pr_changed_files",
+                return_value=[Path("docs/features/aud.md")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch") as commit,
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert result["status"] == "ok"
+        assert result["fixes_withheld"] == 1
+        assert result["withheld"][0]["new"] == "agent/ghost.py"
+        assert result["files_touched"] == []
+        commit.assert_not_called()
+        assert "agent/ghost.py" not in p.read_text()
 
 
 # ---------------------------------------------------------------------------
