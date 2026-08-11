@@ -74,6 +74,13 @@ STUB_DOC_LINE_THRESHOLD = 5
 STALE_BRANCH_AGE_DAYS = 7
 STALE_PR_AGE_DAYS = 14
 
+# Marker stamped into a docs-audit PR body when the existence invariant withheld
+# any fix on the run that opened it. The rotation path is the one path with no
+# human review — it opens the PR and the branch sweeper can auto-merge it — so
+# `_pr_is_auto_merge_eligible` refuses any PR carrying this marker. A withheld
+# fix means the auditor wanted to write something wrong; that needs a human read.
+WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
+
 # Redis key namespace for state/locks/liveness.
 REDIS_LAST_RUN_HASH = "docs_audit:last_run"
 REDIS_RUNNING_KEY = "docs_audit:running:global"
@@ -1309,12 +1316,18 @@ def _record_daily_pr(repo_root: Path) -> None:
         logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
 
 
-def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
+def _push_branch_and_pr(
+    slug: str, repo_root: Path, withheld: list[dict] | None = None
+) -> str | None:
     """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
 
     Always returns the repo to the main branch afterward, even on error.
     Skips PR creation if an open PR for the same slug already exists or if
     the daily cap (1 PR per calendar day) has been reached.
+
+    ``withheld`` is the run's existence-invariant rejections. When non-empty the
+    PR body lists them and carries ``WITHHELD_PR_MARKER``, which disqualifies the
+    PR from the sweeper's auto-merge path.
     """
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
@@ -1360,6 +1373,20 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             cwd=str(repo_root),
             check=True,
         )
+        body = "Automated docs auditor pass."
+        if withheld:
+            rejected = "\n".join(
+                f"- `{w.get('doc')}`: `{w.get('old')}` → `{w.get('new')}` "
+                f"({w.get('reason', 'unknown')})"
+                for w in withheld
+            )
+            body += (
+                f"\n\n{WITHHELD_PR_MARKER}\n"
+                f"⚠️ **{len(withheld)} fix(es) withheld** by the existence invariant — "
+                "the auditor tried to introduce a path that is absent from the working "
+                "tree. Not eligible for auto-merge; review the surviving fixes before "
+                f"merging.\n\n{rejected}"
+            )
         pr_result = subprocess.run(
             [
                 "gh",
@@ -1368,7 +1395,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
                 "--title",
                 f"Docs auditor: {slug}",
                 "--body",
-                "Automated docs auditor pass.",
+                body,
             ],
             capture_output=True,
             text=True,
@@ -1713,6 +1740,14 @@ def run_docs_auditor() -> dict:
         )
 
         files_touched: list[str] = result.get("files_touched", [])
+        # Existence-invariant rejections. This is the one caller with no human in
+        # the loop — it opens a PR the sweeper may auto-merge — so the withheld
+        # count must reach every surface this function produces, not just a log line.
+        withheld: list[dict] = result.get("withheld", [])
+        fixes_withheld: int = result.get("fixes_withheld", 0)
+        withheld_note = (
+            f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
+        )
 
         # 6. Zero-diff gate
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
@@ -1720,13 +1755,13 @@ def run_docs_auditor() -> dict:
             _write_liveness(slug, "skipped", None, 0)
             return {
                 "status": "ok",
-                "findings": [f"docs-auditor: zero-diff for {primary}"],
-                "summary": f"docs-auditor: zero-diff ({slug})",
+                "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
+                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
             }
 
         # 7. Memory refresh hook (fire-and-forget) — fired after commit
         # 8. Push branch + PR
-        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT)
+        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, withheld=withheld)
 
         try:
             refresh_docs_in_memory(files_touched)
@@ -1737,6 +1772,12 @@ def run_docs_auditor() -> dict:
         msg = (
             f"docs-auditor pass for {slug}: "
             f"{len(files_touched)} files, {result.get('fixes_applied', 0)} fixes"
+            + (
+                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                "PR is not auto-merge eligible"
+                if fixes_withheld
+                else ""
+            )
             + (f"\nPR: {pr_url}" if pr_url else "")
         )
         _send_telegram_notification(msg)
@@ -1751,6 +1792,14 @@ def run_docs_auditor() -> dict:
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
         )
+        if fixes_withheld:
+            findings.append(
+                f"{fixes_withheld} fix(es) withheld by the existence invariant "
+                "(target-absent); PR is not auto-merge eligible"
+            )
+            findings.extend(
+                f"withheld: {w.get('doc')} {w.get('old')!r} -> {w.get('new')!r}" for w in withheld
+            )
         if pr_url:
             findings.append(f"PR: {pr_url}")
 
@@ -1759,7 +1808,8 @@ def run_docs_auditor() -> dict:
             "findings": findings,
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
-                f"{result.get('fixes_applied', 0)} fixes, PR={pr_url or 'none'}"
+                f"{result.get('fixes_applied', 0)} fixes{withheld_note}, "
+                f"PR={pr_url or 'none'}"
             ),
         }
 
@@ -1789,6 +1839,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
     - ≤ 50 net lines changed (additions + deletions)
     - No reviews, review requests, or comments
     - PR is between 1 and 7 days old (not brand-new, not stale)
+    - The opening run withheld no fixes (no ``WITHHELD_PR_MARKER`` in the body)
     """
     try:
         meta_res = subprocess.run(
@@ -1798,7 +1849,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
                 "view",
                 str(pr_number),
                 "--json",
-                "files,reviews,reviewRequests,comments,createdAt,additions,deletions",
+                "files,reviews,reviewRequests,comments,createdAt,additions,deletions,body",
             ],
             capture_output=True,
             text=True,
@@ -1808,6 +1859,14 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
         if meta_res.returncode != 0:
             return False
         meta = json.loads(meta_res.stdout or "{}")
+
+        # Withheld fixes disqualify: the run that opened this PR proposed at least
+        # one rewrite to a nonexistent path, so its surviving output is suspect.
+        if WITHHELD_PR_MARKER in (meta.get("body") or ""):
+            logger.info(
+                "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number
+            )
+            return False
 
         # No reviewer activity
         if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
