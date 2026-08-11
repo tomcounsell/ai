@@ -72,7 +72,7 @@ Every site below moved from a hand-rolled client (or `ollama.chat()`) to `run_ty
 |------|--------------|-----|-----|
 | `agent/intent_classifier.py` | `IntentClassification` | sync `anthropic.Anthropic` (Haiku), hand-rolled text parse | `run_typed`; `parsed.model_dump()` replaces `dataclasses.asdict(parsed)` to keep the function's dict-returning cached contract |
 | `agent/memory_extraction.py` (`_llm_call`) | `ExtractionResult` | `AsyncAnthropic` (Haiku), hand-rolled `json.loads`-shape repair | `run_typed`, shared by four call sites in the module; the merged LLM refusal-detector stays in place |
-| `bridge/session_router.py` | `SessionRouteDecision` | `anthropic_slot()` (Haiku), fence-strip + `json.loads` | `run_typed` |
+| `bridge/job_router.py` | `JobRouteDecision` | the superseded semantic session router's `anthropic_slot()` (Haiku), fence-strip + `json.loads` | `run_typed_local` (granite) |
 | `bridge/routing.py` (`classify_needs_response`) | `NeedsResponseDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
 | `bridge/routing.py` (`classify_conversation_terminus`) | `TerminusDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
 | `bridge/routing.py` (`classify_work_request`) | `RoutingDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
