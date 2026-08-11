@@ -406,22 +406,22 @@ are needed.
 
 ## Success Criteria
 
-- [ ] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
+- [x] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
       `bridge/session_logs.py` (the #2711 regression, as a hard assertion).
-- [ ] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
+- [x] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
       working tree, while still applying valid sibling fixes in the same file.
-- [ ] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
+- [x] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
       writes nothing and still surfaces the withheld count.
-- [ ] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
+- [x] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
       `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name them).
-- [ ] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
+- [x] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
       `docs/research/`, and `site/` untouched.
-- [ ] The auditor's own detectors report zero findings over every doc this PR touches (the
+- [x] The auditor's own detectors report zero findings over every doc this PR touches (the
       PR #2528 verification method).
-- [ ] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
+- [x] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
       `tests/unit/test_docs_auditor_substrate.py`.
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Both #2711 and #2713 closed from the PR.
+- [x] Documentation updated (`/do-docs`).
+- [x] Both #2711 and #2713 closed from the PR.
 
 ## Team Orchestration
 
