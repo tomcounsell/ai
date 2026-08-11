@@ -428,12 +428,18 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
 
     eng_group = resolve_eng_group(project)
     if eng_group is None:
-        return {"status": "skipped", "findings": ["no Eng: group configured"]}
+        # NOTE: "ok" (not "skipped") -- utilities.py:207 discards findings on
+        # "skipped" status, and this is a real config gap the operator needs
+        # to see in the aggregated report, not a legitimate no-op like the
+        # machine-ownership check above.
+        return {"status": "ok", "findings": ["no Eng: group configured"]}
     eng_group_name, eng_chat_id = eng_group
 
     repo = _project_repo(project)
     if repo is None:
-        return {"status": "skipped", "findings": ["no github.org/repo configured"]}
+        # NOTE: same rationale as the Eng: group check above -- "ok" so the
+        # finding survives aggregation instead of being silently dropped.
+        return {"status": "ok", "findings": ["no github.org/repo configured"]}
 
     cwd = project.get("working_directory", ".")
 

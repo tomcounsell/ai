@@ -228,13 +228,77 @@ a reflection-worker restart.
 
 ## Scratch-issue dry run (merge-time verification record)
 
-At merge time there were zero open `upvote` issues in `tomcounsell/ai`
-(Freshness Check), so the human-visible "one thread per issue" criterion
-cannot be verified by waiting for a real pickup. It was instead verified by
-a throwaway `upvote`-labeled scratch issue, both processes restarted,
-`run_sdlc_upvote_lanes()` invoked directly on the machine owning `valor`.
-*(Record the observed outcome and message id here once that run has
-happened; do not leave this section unfilled at merge.)*
+**DEFERRED as of 2026-08-11 — do not read this as "done" or as an unfilled
+placeholder still awaiting an answer; it is a considered deferral with a
+concrete reason and a concrete unblock path.**
+
+**Machine-ownership check (performed):** this machine (`Valor the Cowboy`)
+is the `valor`-owning machine per `projects.<key>.machine` in
+`~/Desktop/Valor/projects.json`, so the dry run was *not* deferred for lack
+of ownership.
+
+**Reason it could not actually run here, pre-merge:** the anchoring feature
+this dry run exists to verify is split across two runtime boundaries, and
+only one of them can run this PR's code before merge.
+`reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes()` can be invoked
+directly from this worktree's own `.venv` (it has this branch's code), and
+it *would* enqueue a real Telegram send — but the send itself, and the ack
+write `publish_sent_message_id` in `bridge/outbox_ack.py`, only execute
+inside the **already-running production `bridge/telegram_bridge.py`
+process** (the sole owner of the Telethon session; `tools/valor_telegram.py`
+deliberately never opens its own Telethon client, to avoid the SQLite
+session-lock conflict this fact implies). That production process runs from
+the separate main checkout at `/Users/valorengels/src/ai`, currently at
+`main`'s HEAD, which does **not** contain this PR's `bridge/outbox_ack.py`
+or the `telegram_relay.py` ack-write call (verified: neither file/hunk
+exists on `main` as of this patch). Restarting the production bridge and
+reflection-worker services (as `## Update System` / Task 7 describe) restarts
+them on unmerged main -- it does not deploy this branch's code, because
+neither launchd plist points at this worktree. So today, on this machine,
+before merge: the announcement would send (the base send path is unchanged),
+but `await_sent_message_id` would always time out and return `None`/`0`,
+producing a false-negative result that looks like a broken feature rather
+than an unexercised one. Running a second, independent Telethon client from
+the worktree to sidestep this is not an option either -- it would conflict
+on the single `data/*.session` file the production bridge already locks.
+Deploying this PR's code into the live bridge pre-merge (checking out this
+branch into the main checkout, or fast-forwarding main) is out of scope for
+a PATCH-stage fix: it would put unreviewed code into the process actually
+serving the real `Eng:` groups and is squarely a MERGE-stage action, not a
+patch one.
+
+**Exact steps to close this out (post-merge, on the `valor`-owning
+machine):**
+1. Merge this PR, then run `/update` (propagates the merged code) followed
+   by `./scripts/valor-service.sh restart` (bridge/watchdog/worker) and a
+   `com.valor.reflection-worker` restart — both processes must restart for
+   anchoring to work at all (see "Restart required after merge" above).
+2. Verify both processes are actually on the merged SHA (`tail -5
+   logs/bridge.log` shows "Connected to Telegram"; check the reflection
+   worker's log for its startup banner).
+3. Open a throwaway issue in `tomcounsell/ai` and label it `upvote`.
+4. Set `SDLC_UPVOTE_PICKUP_ENABLED=false` in the reflection worker's
+   environment for the duration of the run (so the scheduled tick cannot
+   race the manual invocation), then in a foreground shell where the var is
+   unset: `.venv/bin/python -c "from reflections.sdlc_upvote_lanes import
+   run_sdlc_upvote_lanes; print(run_sdlc_upvote_lanes())"`.
+5. Assert by eye and by record: the announcement appears in `Eng: Valor`;
+   the created session's persisted `telegram_message_id` is non-zero and
+   equals that message's id; the lane's first outbound message renders as a
+   reply under the announcement.
+6. Remove the `upvote` label and close the scratch issue **before** killing
+   the created session (kill-first re-opens the scratch issue as a live
+   candidate for the next scheduled tick); delete the test `AgentSession`
+   via the ORM (`instance.delete()`), not raw Redis.
+7. Replace this section with the observed outcome: issue number, Telegram
+   message id, session id, and the confirmed `telegram_message_id` value.
+
+This defers the *verification record*, not the code: every mechanical proxy
+row (the `telegram_message_id` → `TELEGRAM_REPLY_TO` plumbing tests,
+`resolve_eng_group`, the ack primitive's own unit tests) is implemented and
+passing, per `## Success Criteria`. What remains unverified until the steps
+above run post-merge is the live, cross-process integration the plan's
+own text warns the mechanical proxies cannot substitute for.
 
 ## No-Gos / deferred
 

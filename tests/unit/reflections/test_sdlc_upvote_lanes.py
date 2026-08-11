@@ -127,21 +127,49 @@ class TestScopeGates:
         assert result["status"] == "skipped"
         assert run_calls == []
 
-    def test_no_eng_group_skips(self, monkeypatch):
+    def test_no_eng_group_is_ok_not_skipped(self, monkeypatch):
+        # status must be "ok", not "skipped" -- reflections/utilities.py:207
+        # drops findings on "skipped", and a missing Eng: group is a real
+        # config gap the operator needs surfaced, not a legitimate no-op.
         monkeypatch.setattr(m, "machine_owns_project", lambda key: True)
         monkeypatch.setattr(m, "resolve_eng_group", lambda p: None)
         result = m._pick_up_upvoted(
             _project(has_eng_group=False), state=m._RunState(deadline=time.monotonic() + 100)
         )
-        assert result["status"] == "skipped"
+        assert result["status"] == "ok"
         assert "no Eng:" in result["findings"][0]
 
-    def test_no_repo_configured_skips(self, monkeypatch):
+    def test_no_repo_configured_is_ok_not_skipped(self, monkeypatch):
         monkeypatch.setattr(m, "machine_owns_project", lambda key: True)
         monkeypatch.setattr(m, "resolve_eng_group", lambda p: ("Eng: Valor", -100123))
         monkeypatch.setattr(m, "_project_repo", lambda p: None)
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 100))
-        assert result["status"] == "skipped"
+        assert result["status"] == "ok"
+        assert "no github.org/repo configured" in result["findings"][0]
+
+    def test_config_gap_findings_reach_aggregated_report(self, monkeypatch):
+        # Regression for the "findings dropped on skipped status" tech debt:
+        # a config-gap project's finding must survive
+        # reflections.utilities.run_per_project_audit's aggregation, not just
+        # the per-project return value.
+        from reflections.utilities import run_per_project_audit
+
+        monkeypatch.setattr(
+            "reflections.utilities.load_local_projects",
+            lambda: [_project(slug="gappy", has_eng_group=False)],
+        )
+        monkeypatch.setattr(m, "machine_owns_project", lambda key: True)
+        monkeypatch.setattr(m, "resolve_eng_group", lambda p: None)
+
+        aggregated = run_per_project_audit(
+            lambda project: m._pick_up_upvoted(
+                project, state=m._RunState(deadline=time.monotonic() + 100)
+            ),
+            name="sdlc-upvote-pickup",
+        )
+        assert aggregated["status"] == "ok"
+        assert any("no Eng: group configured" in f for f in aggregated["findings"])
+        assert aggregated["projects"][0]["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

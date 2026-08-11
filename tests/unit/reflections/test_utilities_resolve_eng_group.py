@@ -37,3 +37,11 @@ def test_matching_group_missing_chat_id_returns_none():
 def test_matching_group_non_integer_chat_id_returns_none():
     project = {"telegram": {"groups": {"Eng: Valor": {"chat_id": "-100123"}}}}
     assert resolve_eng_group(project) is None
+
+
+def test_groups_present_but_no_eng_key_returns_none():
+    # The `royop` shape named by Risk 6's mitigation: a well-formed `groups`
+    # dict that simply has no `Eng:`-prefixed key. This exercises the loop's
+    # fall-through `return None`, not an early guard on a malformed shape.
+    project = {"telegram": {"groups": {"General": {"chat_id": -100999}}}}
+    assert resolve_eng_group(project) is None
