@@ -228,9 +228,9 @@ a reflection-worker restart.
 
 ## Scratch-issue dry run (merge-time verification record)
 
-**DEFERRED as of 2026-08-11 — do not read this as "done" or as an unfilled
-placeholder still awaiting an answer; it is a considered deferral with a
-concrete reason and a concrete unblock path.**
+**DEFERRED as of 2026-08-11, tracked as #2722 — do not read this as "done"
+or as an unfilled placeholder still awaiting an answer; it is a considered
+deferral with a concrete reason and a concrete unblock path.**
 
 **Machine-ownership check (performed):** this machine (`Valor the Cowboy`)
 is the `valor`-owning machine per `projects.<key>.machine` in
@@ -305,12 +305,12 @@ own text warns the mechanical proxies cannot substitute for.
 - **No claim key, no label mutation, no reflection-side stage selection, no
   issue closing, no message editing or deletion.** See the module docstring
   and the plan's `## No-Gos` for the full rationale on each.
-- **Adding `valor-session` to `[project.scripts]`.** Recorded as a
-  follow-up issue at merge time — a repo-wide entrypoint decision with its
-  own stale-shim exposure (#2566), out of scope here.
+- **Adding `valor-session` to `[project.scripts]`.** Filed as #2724 — a
+  repo-wide entrypoint decision with its own stale-shim exposure (#2566),
+  out of scope here.
 - **Retrofitting `agent/session_executor.py`'s bespoke drain-poll onto the
-  new ack primitive.** Worth doing, deliberately not here — the primitive
-  should prove itself on one low-traffic consumer first.
+  new ack primitive.** Filed as #2723. Worth doing, deliberately not here —
+  the primitive should prove itself on one low-traffic consumer first.
 
 ## Related
 
