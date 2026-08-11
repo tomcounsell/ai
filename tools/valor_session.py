@@ -458,6 +458,7 @@ def create_session(
     parent_id: str | None = None,
     session_type: str = "eng",
     chat_id: str = "0",
+    telegram_message_id: int = 0,
     model: str | None = None,
     requires_real_chrome: bool = False,
 ) -> CreateResult:
@@ -477,6 +478,18 @@ def create_session(
 
     ``classification_type``, ``issue_url``, ``project_config``, and ``working_dir``
     are derived here; they are not caller inputs.
+
+    ``telegram_message_id`` anchors the session's outbound thread: it flows
+    straight into the enqueued ``AgentSession`` and, once the worker starts the
+    session, ``agent/sdk_client.py`` exports it as ``TELEGRAM_REPLY_TO`` so every
+    outbound message threads under that message. Defaulting to ``0`` preserves
+    every existing caller's behavior byte-for-byte; the only production caller
+    that sets it is a scheduled reflection that anchors an autonomous-pickup
+    announcement (see ``reflections/sdlc_upvote_lanes.py``). It is meaningful
+    only paired with a non-``"0"`` ``chat_id`` — a message id is scoped to its
+    chat, and ``chat_id="0"`` routes output to the system Room sink rather than
+    Telegram, so passing a non-zero ``telegram_message_id`` alongside
+    ``chat_id="0"`` is always a caller bug and is logged as a warning below.
     """
     notes: list[str] = []
     _load_env()
@@ -541,6 +554,14 @@ def create_session(
                     f"Allowed values: {sorted(_role_to_session_type)}"
                 ),
                 notes=notes,
+            )
+
+        if telegram_message_id and chat_id == "0":
+            logger.warning(
+                "create_session: telegram_message_id=%s passed with chat_id=\"0\" "
+                "(the system Room sink, not Telegram) — a message id is only "
+                "meaningful scoped to its chat. This is always a caller bug.",
+                telegram_message_id,
             )
 
         # Derive a session_id from timestamp + role
@@ -636,7 +657,7 @@ def create_session(
                 # coherence check above makes the two identical anyway.
                 sender_name=f"valor-session ({session_type})",
                 chat_id=chat_id,
-                telegram_message_id=0,
+                telegram_message_id=telegram_message_id,
                 session_type=resolved_session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
@@ -746,6 +767,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         parent_id=parent_id,
         session_type=role,
         chat_id=chat_id,
+        telegram_message_id=getattr(args, "telegram_message_id", 0) or 0,
         model=model,
         requires_real_chrome=bool(getattr(args, "needs_real_chrome", False)),
     )
@@ -1958,6 +1980,21 @@ def main() -> int:
         "--message", "-m", required=True, help="Initial message for the session"
     )
     create_parser.add_argument("--chat-id", help="Telegram chat ID (default: 0)")
+    create_parser.add_argument(
+        "--telegram-message-id",
+        type=int,
+        default=0,
+        help=(
+            "Telegram message id to anchor this session's outbound thread to "
+            "(default: 0, unanchored). Every subsequent output from the session "
+            "threads as a reply under this message via TELEGRAM_REPLY_TO. Only "
+            "meaningful together with --chat-id — a message id is scoped to its "
+            "chat. This is an operational debugging affordance (the production "
+            "caller is reflections/sdlc_upvote_lanes.py, which imports "
+            "create_session directly): use it to reproduce an anchored start by "
+            "hand against a test group when threading misbehaves."
+        ),
+    )
     create_parser.add_argument("--parent", help="Parent AgentSession ID (for child sessions)")
     create_parser.add_argument(
         "--project-key",
