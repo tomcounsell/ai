@@ -79,6 +79,19 @@ STALE_PR_AGE_DAYS = 14
 # human review — it opens the PR and the branch sweeper can auto-merge it — so
 # `_pr_is_auto_merge_eligible` refuses any PR carrying this marker. A withheld
 # fix means the auditor wanted to write something wrong; that needs a human read.
+#
+# This is a *conditional* instance of the "review requirement" option that #2726
+# defers — it applies only on the withheld path, leaves clean-run commit/staging
+# behavior untouched, and becomes a no-op if #2726 later adopts a wholesale
+# stage-and-report or explicit-path-list policy.
+#
+# NOTE: [cycle-2 nit — marker lives in a mutable PR body with no cross-check, so
+# a human `gh pr edit` that rewrites the body silently re-enables auto-merge]
+# left as-is because the sturdier carrier (a `do-not-auto-merge` label) does not
+# exist in this repo, and creating one plus wiring `gh pr create --label` risks
+# failing PR creation outright on any checkout where the label is missing — a
+# strictly worse failure than the human-only body-rewrite path this guards. No
+# automation in this repo runs `gh pr edit`.
 WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
 
 # Redis key namespace for state/locks/liveness.
@@ -484,9 +497,15 @@ def _detect_readme_broken_entries(
 def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     """Detect stale terms from STALE_TERMS dict that lack migration context.
 
-    Matching is **word-anchored**: a key matches a whole word only, never a
-    fragment of a longer identifier or path segment. ``session_log`` therefore
-    does not match inside ``agent/session_logs.py`` (#2711).
+    Matching is **word-anchored** with ``\\b``: a key never matches inside a
+    longer run of word characters, so ``session_log`` does not match inside
+    ``agent/session_logs.py`` or ``session_log_writer`` (#2711). That is the
+    whole guarantee — it stops short of "never rewrites a path". ``/``, ``.``
+    and ``-`` are all word boundaries, so a key that *equals* an entire path
+    segment still matches and is still rewritten (``models/session_log.py`` →
+    ``models/agent_session.py``). Only the existence invariant in
+    ``_apply_fixes_to_file`` catches that, and only when the rewritten path is
+    absent from the working tree.
 
     Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
     so detection and application share one matching semantics. These are passed
@@ -1430,6 +1449,7 @@ def _write_liveness(
     pr_url: str | None,
     files_touched: int,
     vault_narratives_compared: int | None = None,
+    fixes_withheld: int = 0,
 ) -> None:
     """Persist liveness signals for PM monitoring (Phase 2).
 
@@ -1437,6 +1457,13 @@ def _write_liveness(
     (i.e. only from the rotation call site that actually ran the vault drift
     comparison), so "detector ran, found zero drift" is distinguishable from
     "narrative→page mapping is silently empty/broken".
+
+    ``fixes_withheld`` is emitted only when non-zero, mirroring the same pattern.
+    This is the only durable, queryable surface the rotation produces — the
+    scheduler consumes just ``projects`` from a function reflection's return, so
+    without this a withheld run would be byte-identical to a clean one in Redis.
+    Both extras are keyword params with defaults, so the positional 4-arg/5-arg
+    call contract asserted by ``TestWriteLivenessVaultParam`` is unchanged.
     """
     try:
         r = _get_redis()
@@ -1450,6 +1477,8 @@ def _write_liveness(
         }
         if vault_narratives_compared is not None:
             summary["vault_narratives_compared"] = vault_narratives_compared
+        if fixes_withheld:
+            summary["fixes_withheld"] = fixes_withheld
         r.set(REDIS_LAST_COMPLETED_SUMMARY_KEY, json.dumps(summary))
     except Exception as e:
         logger.warning(f"docs_auditor: liveness write failed: {e}")
@@ -1742,7 +1771,9 @@ def run_docs_auditor() -> dict:
         files_touched: list[str] = result.get("files_touched", [])
         # Existence-invariant rejections. This is the one caller with no human in
         # the loop — it opens a PR the sweeper may auto-merge — so the withheld
-        # count must reach every surface this function produces, not just a log line.
+        # count must reach every surface this function produces, not just a log
+        # line: findings, summary, Telegram, the PR body (auto-merge gate) and
+        # the Redis liveness summary, which is the only durable queryable one.
         withheld: list[dict] = result.get("withheld", [])
         fixes_withheld: int = result.get("fixes_withheld", 0)
         withheld_note = (
@@ -1752,7 +1783,7 @@ def run_docs_auditor() -> dict:
         # 6. Zero-diff gate
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
-            _write_liveness(slug, "skipped", None, 0)
+            _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
             return {
                 "status": "ok",
                 "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
@@ -1786,8 +1817,16 @@ def run_docs_auditor() -> dict:
         _update_rotation_hash(project_key, files_touched)
 
         # 11. Liveness signal (threads the vault-drift compared count — the only
-        # call site that ran the vault comparison; the other 4 stay 4-arg).
-        _write_liveness(slug, "ok", pr_url, len(files_touched), vault_narratives_compared)
+        # call site that ran the vault comparison; the other 3 stay 4-arg — plus
+        # the withheld count, so Redis distinguishes a withheld run from a clean one).
+        _write_liveness(
+            slug,
+            "ok",
+            pr_url,
+            len(files_touched),
+            vault_narratives_compared,
+            fixes_withheld=fixes_withheld,
+        )
 
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
@@ -1862,6 +1901,17 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
 
         # Withheld fixes disqualify: the run that opened this PR proposed at least
         # one rewrite to a nonexistent path, so its surviving output is suspect.
+        #
+        # KNOWN ESCALATION GAP (#2728 cycle-2 review, follow-up issue pending):
+        # this disqualification is permanent, so a withheld PR nobody reviews
+        # falls through to the sweeper's stale-close at STALE_PR_AGE_DAYS —
+        # closed with --delete-branch, discarding the fixes that *did* pass the
+        # invariant, and the next rotation onto the same slug re-proposes,
+        # re-opens and re-closes it forever. Nothing pages a human: the only
+        # record is a `findings` entry, and the scheduler reads only `projects`
+        # from a function reflection. Still strictly safer than auto-merging
+        # suspect output. Ownership of the escalation (exempt from stale-close,
+        # or notify before closing) is deliberately out of scope here.
         if WITHHELD_PR_MARKER in (meta.get("body") or ""):
             logger.info(
                 "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number

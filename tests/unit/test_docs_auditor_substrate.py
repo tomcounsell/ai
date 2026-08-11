@@ -1344,6 +1344,32 @@ class TestWriteLivenessVaultParam:
         summary = self._summary(fake_redis)
         assert summary["vault_narratives_compared"] == 0
 
+    def test_withheld_count_absent_when_zero(self, fake_redis, patch_redis):
+        # A clean run must not carry the key at all — same shape as before.
+        docs_auditor._write_liveness("slug", "ok", None, 3)
+        assert "fixes_withheld" not in self._summary(fake_redis)
+
+    def test_withheld_count_emitted_when_nonzero(self, fake_redis, patch_redis):
+        # Redis is the only durable, queryable surface; a withheld run must not
+        # be byte-identical to a clean one there.
+        docs_auditor._write_liveness("slug", "ok", None, 3, fixes_withheld=2)
+        assert self._summary(fake_redis)["fixes_withheld"] == 2
+
+    def test_withheld_is_keyword_only_and_preserves_positional_contract(self):
+        import inspect
+
+        params = list(inspect.signature(docs_auditor._write_liveness).parameters)
+        # fixes_withheld must come last so existing 4-arg and 5-arg positional
+        # call sites keep their meaning.
+        assert params[-1] == "fixes_withheld"
+        assert params[:5] == [
+            "slug",
+            "status",
+            "pr_url",
+            "files_touched",
+            "vault_narratives_compared",
+        ]
+
 
 class TestVaultDeadCodeRemoved:
     def test_default_vault_weight_gone(self):
