@@ -150,6 +150,7 @@ When reconciling a secret between `.env` and the vault, verify the credential ag
 | `dashboard` | The web UI dashboard (`ui/`) |
 | `bridge` | The Telegram bridge |
 | `testing` | The test suite |
+| `upvote` | Pre-approved for autonomous SDLC pickup — a scheduled reflection may start a lane on this issue without further human input. |
 
 Do NOT use a `feature` label; it adds no signal.
 
