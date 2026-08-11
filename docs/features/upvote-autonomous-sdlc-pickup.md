@@ -97,7 +97,8 @@ slice.
 ## Concurrency ceilings
 
 - `UPVOTE_LANE_MAX_LIVE` (default 3, per project) — counted from open
-  `session/sdlc-*` PRs plus live issue locks on candidates.
+  `session/sdlc-*` PRs only (`_count_live_lanes`); deliberately an
+  undercount, not a lock-inclusive total.
 - `UPVOTE_LANE_MAX_LIVE_MACHINE` (default 5, machine-wide) — accumulated
   from each project's already-computed live count as the sweep proceeds,
   at zero extra `gh` calls.

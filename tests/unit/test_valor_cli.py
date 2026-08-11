@@ -344,6 +344,7 @@ class TestUnderlyingAttrContract:
             "model",
             "needs_real_chrome",
             "json",
+            "telegram_message_id",
         },
         "cmd_list": {"status", "role", "limit", "json"},
         "cmd_status": {"id", "full_message", "json"},

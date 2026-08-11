@@ -265,6 +265,141 @@ class TestSkipGates:
 
 
 # ---------------------------------------------------------------------------
+# Gate helpers exercised directly (not through _pick_up_upvoted) --
+# `_Lab` monkeypatches both `_recent_terminal_failed_session` and
+# `_non_terminal_session_for` away for every other test in this file, so
+# neither function's real body runs anywhere else. This is what caught the
+# naive/aware datetime TypeError (issue #2717 review): Popoto decodes
+# `AgentSession.created_at` as a naive datetime (popoto/models/encoding.py),
+# and `_recent_terminal_failed_session` used to compare it directly against
+# a tz-aware `cutoff`, raising `TypeError: can't compare offset-naive and
+# offset-aware datetimes` -- which `run_per_project_audit`'s per-project
+# try/except swallowed, marking the whole project "error" every tick.
+# ---------------------------------------------------------------------------
+
+
+class _GateFakeQuery:
+    """``AgentSession.query`` stand-in routed by the ``slug`` filter kwarg,
+    mirroring the ``_FakeQuery`` pattern in test_sdlc_progress_check.py."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls: list[dict] = []
+
+    def filter(self, **kw):
+        self.calls.append(dict(kw))
+        return list(self.rows)
+
+
+def _gate_row(project_key="valor", status="failed", created_at=None):
+    row = MagicMock()
+    row.project_key = project_key
+    row.status = status
+    row.created_at = created_at
+    return row
+
+
+@pytest.fixture
+def fake_agent_session(monkeypatch):
+    """Patches `models.agent_session.AgentSession` with a MagicMock whose
+    `.query` is swappable per-test via `.query = _GateFakeQuery(rows)`."""
+    session_cls = MagicMock()
+    monkeypatch.setattr("models.agent_session.AgentSession", session_cls)
+    return session_cls
+
+
+class TestRecentTerminalFailedSessionDirect:
+    """Direct tests of `_recent_terminal_failed_session` -- no monkeypatch of
+    the function itself, exercising the real naive/aware comparison."""
+
+    def test_naive_created_at_within_backoff_matches(self, fake_agent_session):
+        from datetime import UTC, datetime
+
+        # This is literally what Popoto returns: naive, no tzinfo -- but
+        # representing UTC wall-clock time, per bridge.utc.to_unix_ts's
+        # documented contract ("Popoto strips tzinfo on save").
+        recent_naive = datetime.now(UTC).replace(tzinfo=None, microsecond=469935)
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="valor", status="failed", created_at=recent_naive)]
+        )
+
+        result = m._recent_terminal_failed_session("sdlc-1", "valor", backoff_s=3600)
+
+        assert result is not None
+
+    def test_naive_created_at_outside_backoff_does_not_match(self, fake_agent_session):
+        from datetime import UTC, datetime, timedelta
+
+        old_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="valor", status="failed", created_at=old_naive)]
+        )
+
+        result = m._recent_terminal_failed_session("sdlc-1", "valor", backoff_s=3600)
+
+        assert result is None
+
+    def test_wrong_project_key_does_not_match(self, fake_agent_session):
+        from datetime import UTC, datetime
+
+        recent_naive = datetime.now(UTC).replace(tzinfo=None)
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="other-project", status="failed", created_at=recent_naive)]
+        )
+
+        result = m._recent_terminal_failed_session("sdlc-1", "valor", backoff_s=3600)
+
+        assert result is None
+
+    def test_wrong_status_does_not_match(self, fake_agent_session):
+        from datetime import UTC, datetime
+
+        recent_naive = datetime.now(UTC).replace(tzinfo=None)
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="valor", status="running", created_at=recent_naive)]
+        )
+
+        result = m._recent_terminal_failed_session("sdlc-1", "valor", backoff_s=3600)
+
+        assert result is None
+
+
+class TestNonTerminalSessionForDirect:
+    """Direct tests of `_non_terminal_session_for` -- no monkeypatch of the
+    function itself."""
+
+    def test_own_project_non_terminal_match(self, fake_agent_session):
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="valor", status="running")]
+        )
+
+        own_match, cross_project = m._non_terminal_session_for("sdlc-1", "valor")
+
+        assert own_match is not None
+        assert cross_project is False
+
+    def test_cross_project_match_sets_flag_not_own_match(self, fake_agent_session):
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="other-project", status="running")]
+        )
+
+        own_match, cross_project = m._non_terminal_session_for("sdlc-1", "valor")
+
+        assert own_match is None
+        assert cross_project is True
+
+    def test_terminal_status_excluded(self, fake_agent_session):
+        fake_agent_session.query = _GateFakeQuery(
+            [_gate_row(project_key="valor", status="completed")]
+        )
+
+        own_match, cross_project = m._non_terminal_session_for("sdlc-1", "valor")
+
+        assert own_match is None
+        assert cross_project is False
+
+
+# ---------------------------------------------------------------------------
 # Concurrency ceilings (§B)
 # ---------------------------------------------------------------------------
 
@@ -389,7 +524,10 @@ class TestAnchorAndCreate:
     def test_budget_early_return_when_already_expired(self, monkeypatch):
         lab = _Lab(monkeypatch)
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() - 1))
-        assert result["status"] == "skipped"
+        # "ok" (not "skipped") -- the budget-exhausted finding was actually
+        # evaluated and is worth surfacing, so run_per_project_audit must not
+        # silently drop it (it drops findings whenever status == "skipped").
+        assert result["status"] == "ok"
         assert "budget exhausted; project not scanned" in result["findings"]
         assert lab.send_calls == []
 

@@ -50,7 +50,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from config.settings import settings
 from reflections.pm_briefings.collector import _gh_issue_list, _project_repo
@@ -155,7 +155,6 @@ class _RunState:
 
     deadline: float
     machine_live_total: int = 0
-    findings: list[str] = field(default_factory=list)
 
 
 def _budget_remaining(state: _RunState) -> float:
@@ -278,16 +277,17 @@ def _non_terminal_session_for(slug: str, project_key: str):
 def _recent_terminal_failed_session(slug: str, project_key: str, backoff_s: int):
     from datetime import UTC, datetime, timedelta
 
+    from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
 
-    cutoff = datetime.now(tz=UTC) - timedelta(seconds=backoff_s)
+    cutoff_ts = (datetime.now(tz=UTC) - timedelta(seconds=backoff_s)).timestamp()
     for row in AgentSession.query.filter(slug=slug):
         if getattr(row, "project_key", None) != project_key:
             continue
         if getattr(row, "status", None) != "failed":
             continue
-        created_at = getattr(row, "created_at", None)
-        if created_at is not None and created_at >= cutoff:
+        created_ts = to_unix_ts(getattr(row, "created_at", None))
+        if created_ts is not None and created_ts >= cutoff_ts:
             return row
     return None
 
@@ -421,19 +421,19 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
     findings: list[str] = []
 
     if _budget_remaining(state) <= 0:
-        return {"status": "skipped", "findings": ["budget exhausted; project not scanned"]}
+        return {"status": "ok", "findings": ["budget exhausted; project not scanned"]}
 
     if not machine_owns_project(project_key):
         return {"status": "skipped", "findings": []}
 
     eng_group = resolve_eng_group(project)
     if eng_group is None:
-        return {"status": "skipped", "findings": [f"[{project_key}] no Eng: group configured"]}
+        return {"status": "skipped", "findings": ["no Eng: group configured"]}
     eng_group_name, eng_chat_id = eng_group
 
     repo = _project_repo(project)
     if repo is None:
-        return {"status": "skipped", "findings": [f"[{project_key}] no github.org/repo configured"]}
+        return {"status": "skipped", "findings": ["no github.org/repo configured"]}
 
     cwd = project.get("working_directory", ".")
 
@@ -442,14 +442,12 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
     # the machine-wide half.
     live_count = _count_live_lanes(repo, cwd)
     if live_count >= UPVOTE_LANE_MAX_LIVE:
-        findings.append(
-            f"[{project_key}] lane ceiling reached ({live_count}/{UPVOTE_LANE_MAX_LIVE})"
-        )
+        findings.append(f"lane ceiling reached ({live_count}/{UPVOTE_LANE_MAX_LIVE})")
         state.machine_live_total += live_count
         return {"status": "ok", "findings": findings}
     if state.machine_live_total + live_count >= UPVOTE_LANE_MAX_LIVE_MACHINE:
         findings.append(
-            f"[{project_key}] machine-wide lane ceiling reached "
+            f"machine-wide lane ceiling reached "
             f"({state.machine_live_total + live_count}/{UPVOTE_LANE_MAX_LIVE_MACHINE})"
         )
         state.machine_live_total += live_count
@@ -458,7 +456,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
 
     if _budget_remaining(state) <= 0:
         return {
-            "status": "skipped",
+            "status": "ok",
             "findings": findings + ["budget exhausted; project not scanned"],
         }
 
@@ -489,7 +487,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         own_session, cross_project_collision = _non_terminal_session_for(slug, project_key)
         if cross_project_collision:
             findings.append(
-                f"[{project_key}] cross-project slug collision on {slug} "
+                f"cross-project slug collision on {slug} "
                 f"(another project's lane holds it) -- proceeding anyway"
             )
         if own_session is not None:
@@ -512,7 +510,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         if pr is not None:
             if pr.get("state") == "MERGED":
                 findings.append(
-                    f"[{project_key}] issue #{issue_number} has a merged PR "
+                    f"issue #{issue_number} has a merged PR "
                     f"(#{pr.get('number')}) but is still open -- likely missing 'Closes #N'"
                 )
             continue  # gate 4
@@ -521,7 +519,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         # is uninterruptible once it starts.
         if _budget_remaining(state) < UPVOTE_PICKUP_WORST_CASE_S:
             findings.append(
-                f"[{project_key}] insufficient run budget for a pickup; "
+                f"insufficient run budget for a pickup; "
                 f"deferring issue #{issue_number} to the next tick"
             )
             break
@@ -531,8 +529,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         rc = _announce(eng_chat_id, producer_id, announce_text)
         if rc != 0:
             findings.append(
-                f"[{project_key}] announcement send failed (rc={rc}) for issue "
-                f"#{issue_number}; started nothing"
+                f"announcement send failed (rc={rc}) for issue #{issue_number}; started nothing"
             )
             continue
 
@@ -543,7 +540,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         if unconfirmed_delivery:
             anchor = 0
             findings.append(
-                f"[{project_key}] issue #{issue_number}: delivery unconfirmed "
+                f"issue #{issue_number}: delivery unconfirmed "
                 f"(no ack within {UPVOTE_ANCHOR_WAIT_S}s) -- starting unanchored"
             )
 
@@ -558,8 +555,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
                 f"Issue #{issue_number} was picked up by another lane just now.",
             )
             findings.append(
-                f"[{project_key}] issue #{issue_number}: another lane started during the "
-                f"anchor wait (benign)"
+                f"issue #{issue_number}: another lane started during the anchor wait (benign)"
             )
             continue
 
@@ -596,12 +592,10 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
                 f"Could not start the SDLC lane for issue #{issue_number}: "
                 f"{create_error}. Retrying on the next tick.",
             )
-            findings.append(
-                f"[{project_key}] create_session failed for issue #{issue_number}: {create_error}"
-            )
+            findings.append(f"create_session failed for issue #{issue_number}: {create_error}")
             continue
 
-        findings.append(f"[{project_key}] started SDLC lane for issue #{issue_number}: {title}")
+        findings.append(f"started SDLC lane for issue #{issue_number}: {title}")
         state.machine_live_total += 1
         break  # one pickup per project per tick
 
