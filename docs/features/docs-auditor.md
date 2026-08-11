@@ -133,7 +133,19 @@ it opens a PR the branch sweeper can auto-merge — so it threads the withheld s
 into its `findings`, its `summary`, and its Telegram message, and stamps
 `WITHHELD_PR_MARKER` plus the rejection list into the PR body.
 `_pr_is_auto_merge_eligible` refuses any PR carrying that marker, so a run that
-withheld a fix always requires a human merge.
+withheld a fix always requires a human merge. It also passes the count to
+`_write_liveness` as a keyword `fixes_withheld`, emitted into the Redis summary
+only when non-zero. That last surface is the load-bearing one: the reflection
+scheduler consumes only `projects` from a function reflection's return, so
+`findings` and `summary` reach no human, and without the liveness field a
+withheld run would be byte-identical to a clean one in Redis.
+
+Because the marker disqualification is permanent, a withheld PR nobody reviews
+reaches the sweeper's stale-close at `STALE_PR_AGE_DAYS` and is closed with
+`--delete-branch`, discarding the fixes that did pass the invariant; the next
+rotation onto that slug re-proposes and re-opens the same PR. This is strictly
+safer than auto-merging suspect output, and the escalation (exempt from
+stale-close, or notify before closing) is an open gap, not a shipped behavior.
 
 `status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
 caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
@@ -369,7 +381,8 @@ hook, and the `/do-docs` thin-caller contract. `TestIsSecretsPath` and
 `TestVaultSiteDrift` cover the vault↔site/docs drift detector (mixed-case,
 near-miss, symlink-into-secrets, out-of-vault exclusion; compared-count
 correctness; issue-cap enforcement); `TestWriteLivenessVaultParam` covers
-the `_write_liveness` 4-arg/5-arg contract; `TestVaultDeadCodeRemoved`
+the `_write_liveness` 4-arg/5-arg positional contract (`fixes_withheld` is a
+trailing keyword param, so that contract is unchanged); `TestVaultDeadCodeRemoved`
 asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
 
 ```bash
