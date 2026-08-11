@@ -558,7 +558,7 @@ def create_session(
 
         if telegram_message_id and chat_id == "0":
             logger.warning(
-                "create_session: telegram_message_id=%s passed with chat_id=\"0\" "
+                'create_session: telegram_message_id=%s passed with chat_id="0" '
                 "(the system Room sink, not Telegram) — a message id is only "
                 "meaningful scoped to its chat. This is always a caller bug.",
                 telegram_message_id,

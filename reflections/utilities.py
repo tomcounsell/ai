@@ -301,7 +301,9 @@ def _lock_says_live(issue_number: int) -> bool | None:
             raw = raw.decode("utf-8")
         return bool(_lock_owner_is_live(json.loads(raw)))
     except Exception as exc:
-        logger.warning("reflections.utilities: issue-lock read failed for #%s: %s", issue_number, exc)
+        logger.warning(
+            "reflections.utilities: issue-lock read failed for #%s: %s", issue_number, exc
+        )
         return None  # unknown -> caller declines to act
 
 
