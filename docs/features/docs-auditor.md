@@ -54,7 +54,61 @@ writes the SDLC stage marker and updates the plan frontmatter.
 | Renamed markdown links | `[label](old/path.md)` after a rename | `git log --follow --diff-filter=R` |
 | Renamed paths/symbols | `` `old/module.py` `` after a rename | `git log --follow --diff-filter=R` |
 | README broken entries | Index entries pointing at deleted files | filesystem check + rename probe |
-| Stale-term dictionary | `SessionLog`, `RedisJob`, `session_log`, `redis_job` | `STALE_TERMS` dict at module top |
+| Stale-term dictionary | `SessionLog`, `RedisJob`, `session_log`, `redis_job` | `STALE_TERMS` dict at module top, matched on word boundaries |
+
+The dictionary's current entries are model and field renames: `SessionLog` and
+`RedisJob` were renamed to AgentSession; the `session_log` and `redis_job`
+fields were renamed to agent_session. Stating the mapping in that form is also
+what keeps this page immune to its own detector — see the `migration_context`
+escape hatch below.
+
+#### Stale terms are word-anchored
+
+A `STALE_TERMS` key matches a **whole word only**, never a fragment of a longer
+identifier or path segment. `session_log` does not match inside
+`agent/session_logs.py`, and `SessionLog` does not match inside `SessionLogs`.
+
+Detection and application share one matching semantics: `_detect_stale_term_fixes`
+returns compiled `(pattern, replacement)` pairs on a dedicated `regex_fixes`
+channel, applied by `_apply_fixes_to_file` through `pattern.subn()`. The literal
+`fixes` channel used by the three rename detectors is untouched, so the
+`new == ""` line-delete sentinel keeps its exact-line-equality semantics.
+
+The `migration_context` escape hatch is unchanged: a doc that already says
+"renamed to X", "replaced by X", "now X", "formerly Y", or "replaces Y" gets no
+fix for that term.
+
+#### The existence invariant
+
+Every auto-fix, regardless of detector, is subject to one post-condition before
+anything is written: **the auditor may not introduce a repo-path reference that
+is absent from the working tree.**
+
+`_apply_fixes_to_file` simulates each fix, collects the `dir/file.{py,md}`-shaped
+references the candidate text would newly introduce, and resolves each against
+`repo_root`. If any is absent, that fix is rejected.
+
+- **Attributed per fix.** Only the offending fix is dropped; valid sibling fixes
+  in the same file still apply. The file is never abandoned wholesale.
+- **References already present in the document are never re-validated.** The
+  invariant constrains what the auditor *adds*, so it cannot reject a fix over
+  pre-existing prose that names a long-gone module.
+- **Rejections are reported, not silently discarded.** Each one logs a warning
+  naming the offending path and lands in the result contract.
+- **An all-rejected run writes nothing** — no file write, therefore no empty
+  commit.
+
+Rejected fixes surface on the `audit()` result:
+
+| Result key | Type | Meaning |
+|---|---|---|
+| `fixes_withheld` | `int` | count of fixes rejected by the existence invariant |
+| `withheld` | `list[dict]` | one entry per rejection: `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"` |
+
+`status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
+caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
+is correct"; `.claude/skill-context/do-docs.md` wires that branch for the
+cascade.
 
 ### File-as-issue (judgment required)
 
