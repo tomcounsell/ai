@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -757,6 +758,135 @@ class TestExistenceInvariant:
         assert result["files_touched"] == []
         commit.assert_not_called()
         assert "agent/ghost.py" not in p.read_text()
+
+
+# ---------------------------------------------------------------------------
+# TestLineDeleteSentinel — `new == ""` deletes only exact-matching lines
+# ---------------------------------------------------------------------------
+
+
+class TestLineDeleteSentinel:
+    """The `new == ""` sentinel used by `_detect_readme_broken_entries`.
+
+    Its semantics are exact line equality, never substring: a line that merely
+    *contains* `old` must survive. This is asserted here because the invariant
+    work restructured the branch's count bookkeeping.
+    """
+
+    @pytest.fixture()
+    def doc(self, repo):
+        p = repo / "docs" / "features" / "del.md"
+        p.write_text("- [Gone](gone.md)\nkeep me\n")
+        return Path("docs/features/del.md")
+
+    def test_exact_line_is_deleted(self, repo, doc):
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc, repo, [("- [Gone](gone.md)", "")]
+        )
+        assert (applied, withheld) == (1, [])
+        assert (repo / doc).read_text() == "keep me\n"
+
+    def test_line_merely_containing_old_survives(self, repo, doc):
+        (repo / doc).write_text("prefix - [Gone](gone.md) suffix\nkeep me\n")
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            doc, repo, [("- [Gone](gone.md)", "")]
+        )
+        assert (applied, withheld) == (0, [])
+        assert (repo / doc).read_text() == "prefix - [Gone](gone.md) suffix\nkeep me\n"
+
+
+# ---------------------------------------------------------------------------
+# TestWithheldBlocksAutoMerge — the rotation path's only review gate
+# ---------------------------------------------------------------------------
+
+
+class TestWithheldBlocksAutoMerge:
+    """A run that withheld a fix must not produce an auto-mergeable PR."""
+
+    @staticmethod
+    def _meta(body: str) -> dict:
+        return {
+            "files": [{"path": "docs/features/foo.md"}],
+            "reviews": [],
+            "reviewRequests": [],
+            "comments": [],
+            "additions": 1,
+            "deletions": 1,
+            "createdAt": (datetime.now(UTC) - timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+            "body": body,
+        }
+
+    def _eligible(self, body: str) -> bool:
+        with patch("reflections.docs_auditor.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout=json.dumps(self._meta(body)))
+            return docs_auditor._pr_is_auto_merge_eligible(123)
+
+    def test_clean_pr_is_eligible(self):
+        assert self._eligible("Automated docs auditor pass.") is True
+
+    def test_withheld_marker_disqualifies(self):
+        body = f"Automated docs auditor pass.\n\n{docs_auditor.WITHHELD_PR_MARKER}\n1 withheld"
+        assert self._eligible(body) is False
+
+    def test_pr_body_carries_marker_when_fixes_withheld(self, repo):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="https://github.com/o/r/pull/1", stderr="")
+
+        withheld = [
+            {
+                "doc": "docs/features/x.md",
+                "old": "a/b.py",
+                "new": "a/c.py",
+                "reason": "target-absent",
+            }
+        ]
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
+            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr("slug", repo, withheld=withheld)
+
+        create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
+        body = create[create.index("--body") + 1]
+        assert docs_auditor.WITHHELD_PR_MARKER in body
+        assert "a/c.py" in body
+
+    def test_rotation_result_surfaces_withheld_count(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok",
+            files_touched=["docs/features/foo.md"],
+            fixes_applied=1,
+            fixes_withheld=2,
+            withheld=[
+                {"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"},
+                {"doc": "docs/features/foo.md", "old": "a/d.py", "new": "a/e.py", "reason": "x"},
+            ],
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._push_branch_and_pr", return_value=None) as push,
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert any("2 fix(es) withheld" in f for f in result["findings"])
+        assert "withheld" in result["summary"]
+        assert push.call_args.kwargs["withheld"] == audit_result["withheld"]
+        assert "withheld" in notify.call_args.args[0]
 
 
 # ---------------------------------------------------------------------------

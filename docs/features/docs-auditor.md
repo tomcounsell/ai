@@ -64,9 +64,17 @@ escape hatch below.
 
 #### Stale terms are word-anchored
 
-A `STALE_TERMS` key matches a **whole word only**, never a fragment of a longer
-identifier or path segment. `session_log` does not match inside
-`agent/session_logs.py`, and `SessionLog` does not match inside `SessionLogs`.
+A `STALE_TERMS` key is matched with `\b` anchors, so it never matches inside a
+longer run of word characters: `session_log` does not match inside
+`agent/session_logs.py` or `session_log_writer`, and `SessionLog` does not match
+inside `SessionLogs`.
+
+That is the whole guarantee, and it stops short of "never rewrites a path".
+`/`, `.`, and `-` are all word boundaries, so a key that *equals* an entire path
+segment still matches and is still rewritten — `models/session_log.py` becomes
+`models/agent_session.py`. The existence invariant below is the only thing that
+catches such a rewrite, and only when the rewritten path is absent from the
+working tree; if both paths happen to exist, the rewrite is accepted.
 
 Detection and application share one matching semantics: `_detect_stale_term_fixes`
 returns compiled `(pattern, replacement)` pairs on a dedicated `regex_fixes`
@@ -88,11 +96,20 @@ is absent from the working tree.**
 references the candidate text would newly introduce, and resolves each against
 `repo_root`. If any is absent, that fix is rejected.
 
-- **Attributed per fix.** Only the offending fix is dropped; valid sibling fixes
-  in the same file still apply. The file is never abandoned wholesale.
+- **Attributed per term, not per occurrence.** Only the offending fix is
+  dropped; valid sibling fixes in the same file still apply, and the file is
+  never abandoned wholesale. But a fix is one `(old, new)` pair applied to the
+  whole document — `str.replace` and `pattern.subn()` both rewrite *every*
+  occurrence — so a single path-shaped hit withholds that term's legitimate
+  prose hits in the same file too.
 - **References already present in the document are never re-validated.** The
   invariant constrains what the auditor *adds*, so it cannot reject a fix over
-  pre-existing prose that names a long-gone module.
+  pre-existing prose that names a long-gone module. The residual hole: if a
+  doc already mentions an absent path somewhere, that path is in the original
+  reference set, so a fix that rewrites a *valid* path into that same absent
+  one passes the invariant. No live instance is known; the reachable route to
+  it is the rename-target selection defect tracked as **#2725**, and closing it
+  requires span-level (rather than document-level) attribution.
 - **Rejections are reported, not silently discarded.** Each one logs a warning
   naming the offending path and lands in the result contract.
 - **An all-rejected run writes nothing** — no file write, therefore no empty
@@ -104,6 +121,19 @@ Rejected fixes surface on the `audit()` result:
 |---|---|---|
 | `fixes_withheld` | `int` | count of fixes rejected by the existence invariant |
 | `withheld` | `list[dict]` | one entry per rejection: `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"` |
+
+`old` is whatever the emitting channel matched on: a literal string for the
+three rename detectors, but the **regex source** for a stale-term rejection
+(`\bsession_log\b`, not `session_log`). A caller that echoes `old` verbatim —
+`.claude/skill-context/do-docs.md` does — will show the pattern, which is the
+accurate thing to show, since that is what was withheld.
+
+The rotation caller (`run_docs_auditor`) is the one path with no human review —
+it opens a PR the branch sweeper can auto-merge — so it threads the withheld set
+into its `findings`, its `summary`, and its Telegram message, and stamps
+`WITHHELD_PR_MARKER` plus the rejection list into the PR body.
+`_pr_is_auto_merge_eligible` refuses any PR carrying that marker, so a run that
+withheld a fix always requires a human merge.
 
 `status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
 caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
