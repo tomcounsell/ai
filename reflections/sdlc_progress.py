@@ -79,13 +79,15 @@ from typing import Any
 
 from config.settings import settings
 
-# _LOCK_KEY and _lock_says_live moved to reflections/utilities.py (#2717) so
-# the sibling reflection reflections/sdlc_upvote_lanes.py can share the same
-# liveness rule instead of forking it. Re-exported here so this module's own
-# call sites (and this module's own name, ``sdlc_progress._LOCK_KEY``) keep
-# resolving unchanged.
+# _LOCK_KEY, _lock_says_live and _get_redis moved to reflections/utilities.py
+# (#2717) so the sibling reflection reflections/sdlc_upvote_lanes.py can share
+# the same liveness rule and Redis connection instead of forking them.
+# Re-exported here so this module's own call sites (and this module's own
+# names, e.g. ``sdlc_progress._LOCK_KEY`` and ``sdlc_progress._get_redis``)
+# keep resolving unchanged.
 from reflections.utilities import (  # noqa: F401
     _LOCK_KEY,
+    _get_redis,
     _lock_says_live,
     machine_owns_project,
     run_per_project_audit,
@@ -132,11 +134,7 @@ _DEFAULT_ATTEMPTS_TTL_DAYS = 30
 _DEFAULT_ESCALATION_TTL_DAYS = 30
 
 
-def _get_redis():
-    """Return the shared Popoto Redis connection (lazy import, error-tolerant)."""
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    return POPOTO_REDIS_DB
+# _get_redis is imported from reflections.utilities above.
 
 
 def _env_float(name: str, default: float) -> float:
