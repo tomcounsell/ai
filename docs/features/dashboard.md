@@ -281,7 +281,7 @@ strict subset of the 7d window (#2122 is the precedent for watching this fan-out
 
 ## Retention
 
-Inactive sessions are filtered by a configurable retention period (env var `DASHBOARD_RETENTION_HOURS`, default 48h). Active sessions always appear regardless of age.
+Inactive sessions are filtered by a configurable retention period (env var `DASHBOARD_RETENTION_HOURS`, default 48h). Active sessions are exempt from that window but are still subject to a hard cap (env var `DASHBOARD_MAX_AGE_HOURS`, default 240h / 10 days) — a session wedged in `pending`/`running` ages out of the dashboard rather than accumulating forever.
 
 ## Related
 

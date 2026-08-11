@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
 
+# Hard cap that overrides even the "active" exemption below. A wedged session
+# stuck in pending/running never ages out on its own — without this it
+# accumulates on the dashboard forever (issue: 14-day-old stuck Teammate
+# sessions found 2026-08-11). Default 10 days.
+DASHBOARD_MAX_AGE_HOURS = int(os.environ.get("DASHBOARD_MAX_AGE_HOURS", "240"))
+
 # Cache GitHub issue/PR titles to avoid repeated subprocess calls
 _github_title_cache: dict[str, str] = {}
 
@@ -1251,13 +1257,15 @@ def load_pipelines() -> list[PipelineProgress]:
 
     Sessions are kept when they are still active or when their best timestamp
     falls inside the retention window (``DASHBOARD_RETENTION_HOURS``, 48h by
-    default). The result is flat and unlimited. Callers assemble the view they
-    need.
+    default), subject to the hard cap (``DASHBOARD_MAX_AGE_HOURS``, 10 days by
+    default) that even active sessions cannot exceed. The result is flat and
+    unlimited. Callers assemble the view they need.
     """
     from models.session_enumeration import enumerate_sessions
 
     all_sessions = enumerate_sessions()
     cutoff = time.time() - DASHBOARD_RETENTION_HOURS * 3600
+    hard_cutoff = time.time() - DASHBOARD_MAX_AGE_HOURS * 3600
 
     # The env-fallback repo resolution inside `_session_to_pipeline` is
     # issue-independent and stable, so resolve it once per request instead of
@@ -1281,6 +1289,8 @@ def load_pipelines() -> list[PipelineProgress]:
             # (#2042), so it must not buy permanent exemption from the retention
             # window the way a genuinely active run does. Ledgers age out on
             # their timestamp like any settled row.
+            if best_timestamp(pipeline) < hard_cutoff:
+                continue
             retained_as_active = pipeline.status in ACTIVE_STATUSES and not pipeline.is_ledger
             if best_timestamp(pipeline) >= cutoff or retained_as_active:
                 all_pipelines.append(pipeline)
