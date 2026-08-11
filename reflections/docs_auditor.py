@@ -95,15 +95,25 @@ def _ok_result(
     fixes_applied: int = 0,
     issues_filed: int = 0,
     pr_url: str | None = None,
+    fixes_withheld: int = 0,
+    withheld: list[dict] | None = None,
     extras: dict | None = None,
 ) -> dict:
-    """Build the standard substrate return value."""
+    """Build the standard substrate return value.
+
+    ``fixes_withheld`` / ``withheld`` carry fixes the existence invariant rejected.
+    ``status`` stays ``"ok"`` for a withheld fix — it is not an error — which is
+    exactly why callers must branch on ``fixes_withheld > 0`` rather than trust
+    ``status`` alone.
+    """
     res: dict = {
         "status": status,
         "files_touched": files_touched or [],
         "fixes_applied": fixes_applied,
         "issues_filed": issues_filed,
         "pr_url": pr_url,
+        "fixes_withheld": fixes_withheld,
+        "withheld": withheld or [],
     }
     if extras:
         res.update(extras)
@@ -464,11 +474,22 @@ def _detect_readme_broken_entries(
     return fixes
 
 
-def _detect_stale_term_fixes(content: str) -> list[tuple[str, str]]:
-    """Detect stale terms from STALE_TERMS dict that lack migration context."""
-    fixes: list[tuple[str, str]] = []
+def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
+    """Detect stale terms from STALE_TERMS dict that lack migration context.
+
+    Matching is **word-anchored**: a key matches a whole word only, never a
+    fragment of a longer identifier or path segment. ``session_log`` therefore
+    does not match inside ``agent/session_logs.py`` (#2711).
+
+    Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
+    so detection and application share one matching semantics. These are passed
+    to ``_apply_fixes_to_file`` as ``regex_fixes``, never mixed into the literal
+    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel).
+    """
+    fixes: list[tuple[re.Pattern[str], str]] = []
     for old_term, new_term in STALE_TERMS.items():
-        if old_term not in content:
+        pattern = re.compile(rf"\b{re.escape(old_term)}\b")
+        if not pattern.search(content):
             continue
         migration_context = (
             f"renamed to {new_term}" in content
@@ -479,23 +500,72 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[str, str]]:
             or f"replaces {old_term}" in content
         )
         if not migration_context:
-            fixes.append((old_term, new_term))
+            fixes.append((pattern, new_term))
     return fixes
 
 
-def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str]]) -> int:
-    """Apply (old, new) text replacements to a file. Returns count of fixes applied."""
+# Path-shaped reference: ``dir/file.py`` or ``dir/file.md``, one or more segments.
+_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py|md)")
+
+
+def _absent_new_path_refs(original_refs: set[str], candidate: str, repo_root: Path) -> list[str]:
+    """Path refs a candidate rewrite would newly introduce that are absent from disk.
+
+    References already present in the original document are never re-validated —
+    the invariant constrains only what the auditor *adds*.
+    """
+    return sorted(
+        ref
+        for ref in set(_PATH_REF_RE.findall(candidate)) - original_refs
+        if not (repo_root / ref).exists()
+    )
+
+
+def _apply_fixes_to_file(
+    path: Path,
+    repo_root: Path,
+    fixes: list[tuple[str, str]],
+    regex_fixes: list[tuple[re.Pattern[str], str]] | None = None,
+) -> tuple[int, list[dict]]:
+    """Apply text replacements to a file, subject to the existence invariant.
+
+    ``fixes`` are literal ``(old, new)`` pairs; ``new == ""`` deletes the whole
+    line that exactly equals ``old``. ``regex_fixes`` are ``(pattern, replacement)``
+    pairs applied via ``pattern.subn()`` in their own loop.
+
+    **Existence invariant:** a fix may not introduce a ``dir/file.{py,md}``-shaped
+    reference that does not exist under ``repo_root``. Violating fixes are rejected
+    individually — valid sibling fixes in the same file still apply — logged at
+    warning level, and returned for the caller to surface.
+
+    Returns ``(applied_count, withheld)`` where ``withheld`` is a list of
+    ``{"doc", "old", "new", "reason"}`` dicts.
+    """
+    regex_fixes = regex_fixes or []
     full = repo_root / path
-    if not full.exists() or not fixes:
-        return 0
+    if not full.exists() or (not fixes and not regex_fixes):
+        return 0, []
     try:
         text = full.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         logger.warning(f"docs_auditor: cannot read {path}: {e}")
-        return 0
+        return 0, []
 
+    original_refs = set(_PATH_REF_RE.findall(text))
     new_text = text
     applied = 0
+    withheld: list[dict] = []
+
+    def _reject(old: str, new: str, absent: list[str]) -> None:
+        logger.warning(
+            "docs_auditor: withheld fix in %s (%r -> %r) — introduces absent path(s): %s",
+            path,
+            old,
+            new,
+            ", ".join(absent),
+        )
+        withheld.append({"doc": str(path), "old": old, "new": new, "reason": "target-absent"})
+
     for old, new in fixes:
         if not old:
             continue
@@ -505,23 +575,41 @@ def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str
             # inside an unrelated line.
             lines = new_text.splitlines(keepends=True)
             kept = [ln for ln in lines if ln.rstrip("\n\r") != old.rstrip("\n\r")]
-            removed = len(lines) - len(kept)
-            if removed > 0:
-                new_text = "".join(kept)
-                applied += removed
+            count = len(lines) - len(kept)
+            if count == 0:
+                continue
+            candidate = "".join(kept)
         else:
-            if old in new_text:
-                count = new_text.count(old)
-                new_text = new_text.replace(old, new)
-                applied += count
+            if old not in new_text:
+                continue
+            count = new_text.count(old)
+            candidate = new_text.replace(old, new)
+
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        if absent:
+            _reject(old, new, absent)
+            continue
+        new_text = candidate
+        applied += count
+
+    for pattern, new in regex_fixes:
+        candidate, count = pattern.subn(new, new_text)
+        if count == 0:
+            continue
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        if absent:
+            _reject(pattern.pattern, new, absent)
+            continue
+        new_text = candidate
+        applied += count
 
     if new_text != text:
         try:
             full.write_text(new_text, encoding="utf-8")
         except Exception as e:
             logger.warning(f"docs_auditor: cannot write {path}: {e}")
-            return 0
-    return applied
+            return 0, withheld
+    return applied, withheld
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +1073,7 @@ def audit(
     total_fixes = 0
     issues_filed = 0
     issue_findings: list[dict] = []
+    withheld: list[dict] = []
 
     for path in files:
         full = root / path
@@ -1002,7 +1091,9 @@ def audit(
         else:
             fixes.extend(_detect_renamed_link_fixes(path, content, root))
             fixes.extend(_detect_renamed_symbol_fixes(content, root))
-        fixes.extend(_detect_stale_term_fixes(content))
+        # Anchored stale terms travel on their own homogeneous channel — a
+        # compiled pattern must never land in the literal `fixes` list.
+        regex_fixes = _detect_stale_term_fixes(content)
 
         # Apply-mode writes are markdown-only (#2058). The detectors above are
         # markdown-regex based (bare-term renames, backtick link/symbol fixes),
@@ -1010,8 +1101,9 @@ def audit(
         # site/*.html doc page — must never be auto-rewritten inside tags,
         # attributes, or inline <script>. Reporting still runs; only the
         # write-back is guarded.
-        if fixes and apply_mode == "apply" and str(path).endswith(".md"):
-            applied = _apply_fixes_to_file(path, root, fixes)
+        if (fixes or regex_fixes) and apply_mode == "apply" and str(path).endswith(".md"):
+            applied, rejected = _apply_fixes_to_file(path, root, fixes, regex_fixes=regex_fixes)
+            withheld.extend(rejected)
             if applied > 0:
                 total_fixes += applied
                 touched.append(str(path))
@@ -1066,6 +1158,8 @@ def audit(
         files_touched=touched,
         fixes_applied=total_fixes,
         issues_filed=issues_filed,
+        fixes_withheld=len(withheld),
+        withheld=withheld,
     )
 
 
