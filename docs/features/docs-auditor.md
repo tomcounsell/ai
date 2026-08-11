@@ -145,7 +145,8 @@ reaches the sweeper's stale-close at `STALE_PR_AGE_DAYS` and is closed with
 `--delete-branch`, discarding the fixes that did pass the invariant; the next
 rotation onto that slug re-proposes and re-opens the same PR. This is strictly
 safer than auto-merging suspect output, and the escalation (exempt from
-stale-close, or notify before closing) is an open gap, not a shipped behavior.
+stale-close, or notify before closing) is an open gap tracked by
+[#2729](https://github.com/tomcounsell/ai/issues/2729), not a shipped behavior.
 
 `status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
 caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
