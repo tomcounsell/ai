@@ -83,7 +83,8 @@ STALE_PR_AGE_DAYS = 14
 # This is a *conditional* instance of the "review requirement" option that #2726
 # defers — it applies only on the withheld path, leaves clean-run commit/staging
 # behavior untouched, and becomes a no-op if #2726 later adopts a wholesale
-# stage-and-report or explicit-path-list policy.
+# stage-and-report or explicit-path-list policy. Recorded on #2726 itself so the
+# owner rules with the shipped partial gate in view, not against a blank slate.
 #
 # NOTE: [cycle-2 nit — marker lives in a mutable PR body with no cross-check, so
 # a human `gh pr edit` that rewrites the body silently re-enables auto-merge]
@@ -1902,7 +1903,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
         # Withheld fixes disqualify: the run that opened this PR proposed at least
         # one rewrite to a nonexistent path, so its surviving output is suspect.
         #
-        # KNOWN ESCALATION GAP (#2728 cycle-2 review, follow-up issue pending):
+        # KNOWN ESCALATION GAP — tracked by #2729:
         # this disqualification is permanent, so a withheld PR nobody reviews
         # falls through to the sweeper's stale-close at STALE_PR_AGE_DAYS —
         # closed with --delete-branch, discarding the fixes that *did* pass the
@@ -1911,7 +1912,8 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
         # record is a `findings` entry, and the scheduler reads only `projects`
         # from a function reflection. Still strictly safer than auto-merging
         # suspect output. Ownership of the escalation (exempt from stale-close,
-        # or notify before closing) is deliberately out of scope here.
+        # or notify before closing) is deliberately out of scope here and needs
+        # an owner ruling; see #2729.
         if WITHHELD_PR_MARKER in (meta.get("body") or ""):
             logger.info(
                 "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number
