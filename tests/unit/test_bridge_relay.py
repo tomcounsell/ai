@@ -503,6 +503,99 @@ class TestProcessOutbox:
         mock_record.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_ack_sent_id_flag_arms_publish(self):
+        """A payload carrying ack_sent_id=True triggers the opt-in ack write
+        to bridge.outbox_ack.publish_sent_message_id (issue #2717)."""
+        mock_redis = MagicMock()
+        message = json.dumps(
+            {
+                "chat_id": "12345",
+                "text": "announcement",
+                "session_id": "upvote-valor-42-1000",
+                "ack_sent_id": True,
+            }
+        )
+        mock_redis.keys.return_value = ["telegram:outbox:upvote-valor-42-1000"]
+        mock_redis.lpop.side_effect = [message, None]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_sent_message"),
+            patch("bridge.outbox_ack.publish_sent_message_id") as mock_publish,
+        ):
+            mock_send.return_value = 4242
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        mock_publish.assert_called_once_with("upvote-valor-42-1000", 4242)
+
+    @pytest.mark.asyncio
+    async def test_no_ack_flag_performs_no_publish_write(self):
+        """Without ack_sent_id in the payload, no telegram:sent:* write
+        happens -- existing traffic (which never sets the flag) is
+        unaffected (issue #2717)."""
+        mock_redis = MagicMock()
+        message = json.dumps(
+            {
+                "chat_id": "12345",
+                "text": "ordinary message",
+                "session_id": "test-session",
+            }
+        )
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [message, None]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_sent_message"),
+            patch("bridge.outbox_ack.publish_sent_message_id") as mock_publish,
+        ):
+            mock_send.return_value = 99
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        mock_publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ack_publish_failure_is_non_fatal(self):
+        """The relay must never crash on ack bookkeeping -- process_outbox
+        still records pm_sent_message_ids and returns normally when the ack
+        RPUSH raises (issue #2717)."""
+        mock_redis = MagicMock()
+        message = json.dumps(
+            {
+                "chat_id": "12345",
+                "text": "announcement",
+                "session_id": "upvote-valor-42-1000",
+                "ack_sent_id": True,
+            }
+        )
+        mock_redis.keys.return_value = ["telegram:outbox:upvote-valor-42-1000"]
+        mock_redis.lpop.side_effect = [message, None]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_sent_message") as mock_record,
+            patch(
+                "bridge.outbox_ack.publish_sent_message_id", side_effect=RuntimeError("redis down")
+            ),
+        ):
+            mock_send.return_value = 4242
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        mock_record.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_requeues_on_send_failure(self):
         """Should re-push message with _relay_attempts to queue tail on send failure."""
         mock_redis = MagicMock()
