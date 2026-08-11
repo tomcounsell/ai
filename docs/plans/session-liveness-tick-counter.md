@@ -1,11 +1,14 @@
 ---
-status: Planning
+status: Ready
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2716
 last_comment_id: none
+revised: 2026-08-10
+revision_applied: true
+revision_applied_at: 2026-08-11T03:27:10Z
 ---
 
 # Session liveness tick counter (rewrite of the dead stall reaction)
@@ -25,7 +28,19 @@ Relay: failed to set reaction ⏳ on msg 1308 in chat -1003449100931
 
 Even repaired, a single static reaction is a one-shot signal: it cannot show time passing, and it never escalates — a session can sit behind it forever.
 
-**Desired outcome:** a long-running session displays a visibly advancing liveness signal, emitted by an observer independent of the session, that cannot run indefinitely without the session producing substantive evidence of progress.
+**Desired outcome:** a long-running session displays a visibly advancing counter, emitted by the watchdog, that guarantees a progress message from the PM at least every 100 minutes.
+
+### What the counter means (decided 2026-08-10)
+
+This is the load-bearing semantic decision, and it is narrower than "liveness" in the colloquial sense. Read it before implementing anything.
+
+- **The counter asserts that the watchdog has eyes on this session.** That is the whole claim. The watchdog is a process independent of the session, so a ticking counter is proof *the observer* is alive and watching — which is exactly the guarantee `bridge/liveness.py` says a self-report cannot provide.
+- **The number is duration.** Nothing more. Tick 4 means "roughly 40 minutes since this counter started," not "4 units of progress" and not "4 checks passed."
+- **It does NOT guarantee the session is unstalled.** A wedged session and a busy session tick identically. Any wording that implies stall detection is wrong and must not appear in this document or in the code comments.
+- **The PM may take as long as it wants** working with eng sessions. Duration is not a failure condition.
+- **The forcing function is the guarantee.** At the ceiling the PM must publish a progress message — success, failure, or still-working — and a fresh counter anchors to that message. So the human is promised a substantive human-readable update at least every 100 minutes, and the counter is the visible countdown toward that promise.
+
+This is why no evidence-freshness gating is required: the counter is not trying to infer the session's internal state. It measures wall-clock time and forces a periodic answer. The answer, not the digit, is where stall information actually surfaces.
 
 ## Freshness Check
 
@@ -52,7 +67,7 @@ Queries: Telegram `messages.sendReaction` rate limits / FLOOD_WAIT; chat-level `
    → **Informs approach:** do not probe chat policy before reacting. Attempt the custom digit and let the existing `set_reaction` fallback handle rejection. A pre-flight check adds an API round trip per tick and still races policy changes.
 
 2. **No published per-method rate limit for `sendReaction`.** FLOOD_WAIT_X is the only feedback; it must be honored by sleeping X seconds. Bursts across many distinct chats are riskier than repeated reactions in one chat. ([MadelineProto FLOOD_WAIT](https://docs.madelineproto.xyz/docs/FLOOD_WAIT.html), [grammY flood limits](https://grammy.dev/advanced/flood))
-   → **Informs approach:** one reaction per session per 10 minutes is negligible, but the watchdog scans *all* sessions in one pass and could emit a burst across many chats simultaneously. `bridge/telegram_relay.py` already re-raises `FloodWaitError` rather than swallowing it; ticks must be individually skippable so one flood-waited chat cannot stall the sweep.
+   → **Informs approach:** the risk lands on the *relay*, not the watchdog — the watchdog writes only Redis and cannot flood-wait. See Risk 2 for the corrected analysis: `process_outbox` sleeps inline up to 300 s on FLOOD_WAIT, blocking all chats. One reaction per session per 10 minutes is negligible traffic, and a skipped tick is self-correcting, so this plan adds load without adding a mitigation and files the relay fix separately.
 
 ## Spike Results
 
@@ -67,20 +82,30 @@ No spikes required — every assumption that would have justified one was alread
 
 ```
 session_watchdog.watchdog_loop()            [bridge process, every WATCHDOG_INTERVAL=300s]
-  └─ check_all_sessions()
-       └─ for each active AgentSession:
-            compute elapsed = now - liveness_anchor
-            tick = elapsed // HEARTBEAT_TICK_INTERVAL_SECONDS
+  ├─ check_all_sessions()          [async; status="active" only — NOT our host]
+  └─ _publish_liveness_ticks()     [NEW, sync — called like check_stalled_sessions()]
+       └─ for each session in status in {running, active} with chat_id + telegram_message_id:
+            elapsed = now - counter_anchor          # anchor = counter start, pure duration
+            tick    = elapsed // HEARTBEAT_TICK_INTERVAL_SECONDS
             if tick > last_published_tick and tick <= HEARTBEAT_MAX_TICKS:
-              └─ queue reaction payload  →  redis LPUSH telegram:outbox:{session_id}
-            if tick > HEARTBEAT_MAX_TICKS:
-              └─ force progress message  →  steering queue (agent/steering.py)
+              └─ queue reaction payload (+priority field)
+                   → redis LPUSH telegram:outbox:{session_id}
+            elif tick > HEARTBEAT_MAX_TICKS and not ceiling_fired (SET NX):
+              └─ steer PM to publish progress → agent/steering.py
+                   → on new message: re-anchor counter to it
 
-bridge/telegram_relay._send_queued_reaction()   [drains outbox]
-  └─ set_reaction(client, chat_id, reply_to, EmojiResult)
-       ├─ ReactionCustomEmoji(document_id) attempt
-       └─ on failure → ReactionEmoji(standard glyph) fallback
+bridge/telegram_relay.process_outbox()          [drains ALL telegram:outbox:* keys]
+  └─ reaction branch (line 922)
+       ├─ DROP if session reached terminal status  (Race 1 guard)
+       ├─ DROP if a higher-priority reaction owns the slot
+       └─ set_reaction(client, chat_id, reply_to, EmojiResult)
+            ├─ ReactionCustomEmoji(document_id) attempt
+            └─ on failure → ReactionEmoji(standard glyph) fallback
 ```
+
+**Host function (corrected).** The tick publisher does NOT belong in `check_all_sessions()`: that function is `async` and queries `status="active"` only (`session_watchdog.py:245,255`), while worker-executed Telegram sessions run at `status="running"`. Placing it there would blind the feature to exactly the sessions it exists for. The new publisher is **synchronous**, called from `watchdog_loop()` alongside `check_stalled_sessions()` (line 233, called without `await`), and needs its own guarded `try` block so a tick failure cannot take down the loop.
+
+**Anchor (decided).** The anchor is *when the counter started* — session start, then re-anchored to each forced progress message. It is not "last observed progress evidence." Per the semantics above, the counter measures duration and makes no claim about the session's internal state, so no transcript-mtime or `updated_at` freshness probe is needed. This also sidesteps the hollow-session mirage entirely: there is no liveness inference to be fooled.
 
 **Critical timing constraint:** `WATCHDOG_INTERVAL` is 300s but a tick is 600s. The tick number MUST be derived from elapsed wall clock (`elapsed // interval`), never incremented once per scan. An increment-per-scan implementation would advance at 2x the intended rate and would double-count on any loop restart.
 
@@ -98,25 +123,36 @@ Both are fixed structurally here: a test asserts every emittable glyph is legal,
 
 This plan's real weight is not the counter — it is establishing an **owner for the originating message's single reaction slot.**
 
-Telegram permits one reaction per sender per message. Five writers currently target that slot:
+Telegram permits one reaction per sender per message. **Seven writers** currently target that slot — the inventory below was corrected during critique after the first draft got the count and two attributions wrong.
 
-| Writer | Glyph | Trigger |
-|---|---|---|
-| `bridge/telegram_bridge.py` | 👀 `REACTION_RECEIVED` | message received |
-| `agent/worker_down_reactions.py` | ⚠ `REACTION_WORKER_DOWN` | no live worker at ingestion |
-| `monitoring/session_watchdog.py` | ⏳ (dead) | stall observed |
-| `agent/session_completion.py` | terminal reaction | session completes |
-| `agent/output_handler.py` | RTR suppress reaction | read-the-room suppression |
+| # | Writer | Glyph | Trigger | Proposed rank |
+|---|---|---|---|---|
+| 1 | `agent/session_executor.py:2499-2532` | `REACTION_COMPLETE` / `REACTION_SUCCESS` / `REACTION_ERROR`, or `None` to clear | session reaches terminal state | **1 — terminal, always wins, final** |
+| 2 | `bridge/response.py::react_if_worker_down:386` | ⚠ `REACTION_WORKER_DOWN` | no live worker at ingestion (direct in-process `set_reaction`, not the outbox) | 2 |
+| 3 | `agent/tool_budget.py::_queue_budget_reaction:308` | 🤯 `BUDGET_REACTION_EMOJI` | tool budget exhausted → `paused_budget` | 2 |
+| 4 | `agent/worker_down_reactions.py:126` | ✍ `REACTION_PROCESSING` | worker picks the session up (overwrites the ⚠) | 3 |
+| 5 | `agent/output_handler.py:1486` + `tools/valor_telegram.py:977,1022` | RTR suppress reaction | read-the-room suppression | 3 |
+| 6 | `agent/session_completion.py:564` | 👀 (suppress, default arg) | child-session completion suppress | 4 |
+| 7 | `monitoring/session_watchdog.py:112,444` | ⏳ (dead — being deleted) | stall observed | — |
+| → | **`_publish_liveness_ticks()` (new)** | digit 1-9 / fallback arc | every `HEARTBEAT_TICK_INTERVAL_SECONDS` | **5 — lowest; yields to everything** |
 
-They do not currently collide often because the dead one never fires and the others are roughly sequential in a session's life. A counter that mutates the slot every 10 minutes changes that: it will actively fight the completion and worker-down writers unless precedence is explicit.
+Corrections from the first draft, recorded so nobody re-derives the wrong list: `session_completion.py` queues a *suppress* 👀 and is **not** the terminal writer (that is `session_executor.py`); the ⚠ setter and the ✍ pickup writer are two distinct writers, not one; and `tool_budget.py` and `tools/react_with_emoji.py` were missed entirely.
 
-**Required outcome:** a single documented precedence order, with the counter yielding to terminal states. Terminal (completion/error) must always win and must be final; worker-down outranks a tick; a tick outranks nothing.
+`tools/react_with_emoji.py:99` is an eighth path — an agent-callable arbitrary reaction that *can* target the anchor message. It is deliberately unranked: it is a human/agent acting intentionally, and the precedence model should not silently override a deliberate act. It simply wins whenever it runs, and the next tick will overwrite it. State this explicitly rather than leaving it undefined.
+
+They rarely collide today because the dead one never fires and the rest are roughly sequential in a session's life. A counter mutating the slot every 10 minutes ends that.
+
+**Required outcome:** one documented precedence order, enforced at the single drain point. The tick ranks lowest and yields to everything; terminal is final and can never be overwritten by a tick.
+
+**Enforcement point and the No-Go it breaks.** With seven writers across two processes, precedence can only be enforced where all outbox traffic converges: `bridge/telegram_relay.py::process_outbox`, reaction branch (line 922). That requires a `priority` (or `kind`) field on the reaction payload, which every outbox writer must emit — which means touching their call sites. The first draft's No-Go forbidding call-site changes directly contradicted this. **Resolved: the No-Go is lifted for the minimal payload-field addition only.** Adding a field is not refactoring; rewriting their trigger logic remains out of scope. Writer #2 sets reactions in-process rather than via the outbox and so bypasses the drain guard entirely — note it as a known gap rather than pretending the guard is total.
 
 ## Appetite
 
-**Medium.** The counter itself is small. The slot-precedence model is the real work, and it is the part that must not be rushed — an unarbitrated slot produces flickering reactions that read as system malfunction to the human.
+**Large.** Revised up from Medium during critique, and kept as one issue by explicit decision rather than split.
 
-Scope is held down by two decisions: delete the broken custom-emoji index rather than repair it, and pin digit ids statically.
+The counter itself is small. The real work is arbitrating seven writers across two processes, adding a drop guard to the relay's hot delivery loop, and the forcing function. Calling that Medium was not honest.
+
+Scope is still held down by three decisions: delete the broken custom-emoji index rather than repair it, pin digit ids statically, and use a pure-duration anchor that requires no evidence-freshness machinery.
 
 ## Prerequisites
 
@@ -129,6 +165,8 @@ Scope is held down by two decisions: delete the broken custom-emoji index rather
 1. **A time-derived tick**, computed by the watchdog from elapsed wall clock against a liveness anchor, idempotent across scans and loop restarts.
 2. **One reaction-slot owner** with documented precedence, replacing five independent writers racing one slot.
 3. **A hard ceiling** that refuses to advance and forces a substantive progress message, with a fresh counter re-anchored to that new message.
+
+   **Reachability (checked during critique).** 9 ticks × 600 s = 90 min of ticking, ceiling at 100 min counting the 👀 slot. Against that, `check_all_sessions` abandons `status="active"` sessions at `ABANDON_THRESHOLD = 1800` s of `updated_at` silence and `DURATION_THRESHOLD = 7200` s total (`session_watchdog.py:78-79`). **The ceiling therefore serves `status="running"` sessions** — worker-executed Telegram sessions, which `check_all_sessions` never abandons because it never queries them. That is the population this feature exists for, so the ceiling is live code, not dead. For `active` sessions the 30-minute abandon can pre-empt the ceiling around tick 3; that is correct behavior (an abandoned session should stop ticking) and must not be "fixed" by raising the threshold.
 4. **Deletion of the dead path** — `_apply_stall_reaction` and its machinery — in the same change.
 
 ### Flow
@@ -137,8 +175,16 @@ Scope is held down by two decisions: delete the broken custom-emoji index rather
 2. It computes `tick = elapsed // HEARTBEAT_TICK_INTERVAL_SECONDS` against the session's liveness anchor.
 3. If `tick` exceeds the last published tick and the slot is not held by a higher-precedence state, it queues a reaction payload carrying the digit `document_id` plus its standard-emoji fallback.
 4. The relay drains the payload; `set_reaction` attempts the custom emoji and falls back automatically.
-5. On delivery success, the published-tick marker advances. On failure it does not, so the next scan retries.
+5. The published-tick marker advances at **enqueue**, not delivery — see the decision below.
 6. When `tick` would exceed `HEARTBEAT_MAX_TICKS`, no reaction is queued. Instead the session is steered to publish a progress message, and the counter re-anchors to that message.
+
+**Decision: the marker advances on enqueue, and the "delivery outcome" requirement from the first draft is explicitly retracted.** The critique correctly flagged that no channel connects the relay's delivery result back to the watchdog, and that "Why Previous Fixes Failed" makes delivery-reflecting bookkeeping the structural fix — so dropping it silently would re-create #1313's defect.
+
+It is not being dropped silently; it is being retracted with an argument that only holds because of the pure-duration semantics. A time-derived tick is **self-correcting**: if tick 4 fails to deliver, tick 5 fires ten minutes later from the same wall-clock derivation and overwrites the slot correctly. The counter converges without any feedback channel. A missed digit is cosmetic, not a stuck state.
+
+This is materially different from #1313, where the dedup key was a **one-shot latch**: a single failed ⏳ meant no reaction for that entire stall period, with nothing to retry it. The defect there was a permanent false "applied" record, not a transient gap. Building a relay→watchdog feedback channel would stack a second retry layer on a payload the relay already retries three times, for a digit that repairs itself on the next tick.
+
+What replaces it as the structural defense against #1313's defect class: a test asserting every emittable glyph is legal (so the delivery failure cannot happen for the original reason), and the relay's existing WARNING on failure as the diagnostic.
 
 ### Technical Approach
 
@@ -169,9 +215,12 @@ Scope is held down by two decisions: delete the broken custom-emoji index rather
 
 - [ ] `tests/unit/test_stall_detection.py::test_payload_matches_build_reaction_payload` — REPLACE: asserts the dead payload's schema parity; would pin the removed design in place.
 - [ ] `tests/unit/test_stall_detection.py` (stall-reaction cases: dedup, skip conditions, feature flag) — REPLACE: rewrite against counter behavior.
-- [ ] `tests/integration/test_watchdog_to_bridge.py` — UPDATE: end-to-end watchdog→outbox→relay path now carries a custom-emoji payload.
+- [ ] `tests/integration/test_watchdog_to_bridge.py` — UPDATE: end-to-end watchdog→outbox→relay path now carries a custom-emoji payload plus a priority field.
 - [ ] `tests/unit/test_custom_emoji_index.py` — DELETE: tests a function being removed. These tests pass only because they mock the client and feed it documents the real API never returns.
-- [ ] `tests/unit/test_heartbeat_reactions.py` — UPDATE: exists on the wip branch; keep and extend to cover slot precedence.
+- [ ] `tests/unit/test_heartbeat_reactions.py` — ADD: does not exist on `main` (it is on the unmerged `wip/session-heartbeat-ticker` branch). Extend to cover slot precedence and arc/registry disjointness.
+- [ ] `tests/unit/test_bridge_relay.py` (reaction payload cases at 412, 634, 1313-1411) — UPDATE: the drain-side precedence guard changes this path.
+- [ ] `tests/integration/test_worker_liveness_ingestion.py` — UPDATE: touches the ingestion-reaction sequence the precedence table now orders.
+- [ ] `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection` — UPDATE: shares `_assert_distinct()` with `bridge/response.py`; adding arc constants must not break the distinctness invariant.
 
 ## Rabbit Holes
 
@@ -185,8 +234,12 @@ Scope is held down by two decisions: delete the broken custom-emoji index rather
 ### Risk 1: Sticker pack disappears
 Digit `document_id`s belong to a third-party pack that could be uninstalled or withdrawn. **Mitigation:** every tick carries a standard-emoji fallback and `set_reaction` degrades automatically. The counter loses digits, not liveness.
 
-### Risk 2: FLOOD_WAIT under a wide sweep
-One scan touching many sessions across many distinct chats is the risky burst shape per the research. **Mitigation:** per-tick failures are isolated and retried on the next scan; never retried tightly in-loop.
+### Risk 2: FLOOD_WAIT stalls the shared relay
+Corrected during critique — the first draft aimed this at the wrong process. **The watchdog makes zero Telegram calls** (it writes Redis only) and therefore can never flood-wait; the original mitigation was a no-op against a nonexistent risk.
+
+The real exposure is `process_outbox`, whose flood handler sleeps **inline** for up to 300 s (`telegram_relay.py:943-955`), blocking the entire relay for every chat and every message type, not just reactions. Adding a per-session reaction every 10 minutes raises the odds of reaching that handler.
+
+**Mitigation:** none in this plan, deliberately. A per-chat skip in the relay is a change to shared delivery infrastructure with blast radius well beyond this feature and deserves its own issue. What this plan owes is not making it worse: ticks are low-frequency (one per session per 10 min), and a skipped tick is cosmetic and self-correcting. File the relay fix separately if tick traffic makes it bite.
 
 ### Risk 3: Reaction slot flicker
 If precedence is wrong, the human sees the reaction change back and forth between a tick and a terminal state — reads as malfunction. **Mitigation:** terminal states are final and always win; this is the plan's primary test target.
@@ -194,8 +247,13 @@ If precedence is wrong, the human sees the reaction change back and forth betwee
 ## Race Conditions
 
 ### Race 1: Tick vs. session completion
-A session completes while a tick payload is already queued in the outbox. The tick could land *after* the completion reaction and overwrite a terminal state with a liveness glyph.
-**Prevention:** the relay (or the drain) must drop a queued tick whose session has since reached a terminal status. Ordering alone is insufficient — the payload is already in the list.
+A session completes while a tick payload is already queued. The tick could land *after* the terminal reaction and overwrite it with a duration glyph.
+
+**There is no shared queue** — this is the part the first draft got wrong. `output_handler.react()` sets `session_id = chat_id` and writes `telegram:outbox:{chat_id}` (`output_handler.py:1486`), while ticks, stall, and budget reactions write `telegram:outbox:{session_id}`. `process_outbox` iterates `r.keys("telegram:outbox:*")` in **unspecified order** (`telegram_relay.py:891`), draining up to `RELAY_BATCH_SIZE=10` per key per cycle. So ordering is undefined *across two independent queues*, not merely unguaranteed within one. A builder assuming FIFO gets them partway there would be wrong.
+
+**Prevention:** drop the stale tick at the drain (`telegram_relay.py:922`), gated on a tick marker in the payload so the guard costs nothing for other reaction types. Constraints: no per-reaction Popoto status query on a 100 ms poll loop, and any status read goes through `asyncio.to_thread` like every other Redis call in that loop. Note that reactions exhausting `MAX_RELAY_RETRIES=3` are **discarded, not dead-lettered** (`telegram_relay.py:827-831`).
+
+**Latent today:** `tool_budget.py`'s 🤯 has this same bug right now — nothing stops it landing after a terminal reaction. It is rarer only because budget exhaustion is rarer, and the ⏳ path never exhibited it only because it never landed at all. The guard fixes all three.
 
 ### Race 2: Double-tick across watchdog restarts
 The watchdog restarts and rescans sessions mid-interval. **Prevention:** the tick is derived from elapsed wall clock, not incremented, so a rescan recomputes the same value. This is why increment-per-scan is prohibited.
@@ -206,10 +264,13 @@ Two scans both observe `tick > MAX` before the progress message is published. **
 ## No-Gos (Out of Scope)
 
 - **Not fixing `build_custom_emoji_index`.** Delete it, `rebuild_custom_emoji_index`, `_load_custom_embeddings`, `CUSTOM_CACHE_PATH`, and `tests/unit/test_custom_emoji_index.py`. It has no production caller, has never produced a cache file, and cannot work as written (it reads `result.documents` from `GetEmojiStickersRequest`, which returns only set descriptors — `sets=7, documents=0` on this account). Digit ids are pinned statically instead.
+  **This is a behavior change, not dead-code removal — say so in the commit.** `_load_custom_embeddings()` is called unconditionally at `emoji_embedding.py:385` and runs on *every* `find_best_emoji` call; it yields nothing only because the cache file never exists. Removing it (cut: `emoji_embedding.py:385-412`) means `find_best_emoji` can never again return `is_custom=True`. Keep `set_reaction`'s `ReactionCustomEmoji` branch (`response.py:360-370`) and `EmojiResult`'s `document_id`/`is_custom` fields — those are proven working with statically pinned ids and are what the counter rides on. Only the embedding-index half goes.
 - **Not changing `WATCHDOG_INTERVAL`.** The 5-minute scan is fine for a 10-minute tick.
 - **Not building the #2663 progress CLI.** Separate issue; this plan should consume the same progress truth when it exists, not pre-empt it.
-- **Not refactoring the other four reaction writers.** Define precedence; do not rewrite their call sites.
+- **Not rewriting the other reaction writers' trigger logic.** Adding a `priority` field to their payloads IS in scope (see Architectural Impact — precedence cannot be enforced without it). Changing when or why they fire is not.
+- **Not fixing the relay's inline FLOOD_WAIT sleep.** Real bug, shared infrastructure, its own issue (see Risk 2).
 - **Not keeping ⏳ or any parallel stall path.** No half-migration.
+- **Not claiming stall detection.** The counter measures duration and asserts watchdog attention. Any wording implying it detects a wedge is out of scope and wrong.
 
 ## Update System
 
@@ -237,8 +298,9 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 ## Success Criteria
 
-- A session running past one tick interval shows an advancing counter in Telegram, verified by eye in a real chat.
-- `grep -rn "STALL_REACTION_EMOJI\|_apply_stall_reaction" --include="*.py"` returns nothing outside git history.
+- A `status="running"` session past one tick interval shows an advancing counter in Telegram, verified by eye in a real chat.
+- `grep -rn "STALL_REACTION_EMOJI\|_apply_stall_reaction" --include="*.py"` returns nothing outside git history — including the prose reference at `tool_budget.py:311`.
+- The bridge starts. (Non-trivial: an arc glyph registered in `_reaction_constants()` raises `ImportError` at import.)
 - Zero `failed to set reaction` warnings from the watchdog path in `logs/bridge.log` over a session exercising the full counter.
 - Every emittable glyph is asserted legal by a test.
 - Advancing past the final tick raises rather than clamps.
@@ -248,18 +310,21 @@ No agent integration required — this is a bridge-internal change. The watchdog
 ## Step by Step Tasks
 
 ### 1. Establish reaction-slot precedence
-- Document the precedence order across all five writers in `docs/features/session-liveness-tick-counter.md`.
-- Implement the guard that prevents a tick from overwriting a terminal state, including the queued-payload case (Race 1).
+- Document the seven-writer precedence order in `docs/features/session-liveness-tick-counter.md`, including the unranked `react_with_emoji.py` path and the in-process `react_if_worker_down` gap.
+- Add the `priority` field to the reaction payload and emit it from every outbox writer (minimal call-site change; trigger logic untouched).
+- Implement the drain guard at `telegram_relay.py:922`: drop a tick whose session reached terminal status, and drop a lower-priority reaction when a higher one owns the slot. Status read via `asyncio.to_thread`.
 - Tests first: terminal-wins and no-flicker are the highest-value assertions in this plan.
 
 ### 2. Land the reaction constants
 - Adopt or rewrite the `wip/session-heartbeat-ticker` constants into their final home.
-- Resolve the 🤔 collision with `REACTION_ERROR` (Open Question 1) before finalizing the arc.
+- **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses 👀 or 🤔 stops the bridge from starting. The arc is a sequence, not a constant registry entry.
+- Add a test asserting the arc is disjoint from `_reaction_constants()` values, so a future edit cannot reintroduce the import-time crash.
 
 ### 3. Rewrite the watchdog path
 - Delete `_apply_stall_reaction`, `_clear_stall_reaction_dedup`, `STALL_REACTION_EMOJI`, the `watchdog:stall_reaction_applied:` key, and the `WATCHDOG_STALL_REACTION_ENABLED` gate.
-- Implement time-derived tick computation against the chosen anchor.
-- Advance the published-tick marker on delivery outcome, not enqueue.
+- Update the `agent/tool_budget.py:311` comment, which names `_apply_stall_reaction` as its model — deleting the function orphans that reference and it would survive the Success Criteria grep.
+- Add the sync `_publish_liveness_ticks()` called from `watchdog_loop()` with its own guarded `try`; status filter must include `running`.
+- Implement wall-clock tick derivation against the counter-start anchor. Marker advances at enqueue (see Flow step 5).
 
 ### 4. Implement the ceiling
 - Refuse to tick past `HEARTBEAT_MAX_TICKS`; steer the session to publish progress, guarded by an atomic `SET NX` (Race 3).
@@ -310,8 +375,14 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 **Upheld by the critique:** the diagnosis and its evidence; naming the reaction slot (not the counter) as the architectural weight; the increment-per-scan prohibition; refusing to probe chat policy; refusing to route ticks through `find_best_emoji`; deleting rather than repairing `build_custom_emoji_index`; the Rabbit Holes and No-Gos boundaries; the Freshness Check.
 
+## Resolved Questions
+
+All three questions from the first draft are decided. Kept here rather than deleted, because each rules out an approach a future reader would otherwise re-propose.
+
+1. **Counter semantics — DECIDED (owner, 2026-08-10).** The counter asserts watchdog attention; the number is duration; it makes no stall claim; the ceiling forces a PM progress message at minimum every 100 minutes. Full statement in the Problem section. This supersedes both the "advancing liveness signal" framing of the first draft and the critique's "gated duration" counter-proposal — no evidence-freshness gating is needed, because the counter never infers session state.
+2. **Scope — DECIDED (owner, 2026-08-10).** Kept whole, appetite raised to Large. Not split into a separate reaction-slot-ownership issue: precedence is a prerequisite for the counter, and shipping the counter without it produces exactly the flicker the plan exists to avoid.
+3. **Anchor — DECIDED, follows from (1).** Anchor is counter start (session start, re-anchored at each forced progress message). Pure duration. The transcript-mtime / `updated_at` / turn-transition debate is moot: with no liveness inference there is no mirage to defend against.
+
 ## Open Questions
 
-1. **The proposed fallback arc collides with `REACTION_ERROR`.** The requested arc is 👀 then alternating 🤔/👨‍💻, but 🤔 is `REACTION_ERROR`'s pinned glyph (`agent/constants.py`), and ✍ (`REACTION_PROCESSING`), 👀 (`REACTION_RECEIVED`), and ⚠ (`REACTION_WORKER_DOWN`) are also taken. In the fallback case — exactly when digits are unavailable — every odd tick would show the same glyph the system uses for "error". Options: (a) accept it, since ticks and errors are temporally distinct; (b) swap 🤔 for an unclaimed validated glyph (🥱, 😴, 🗿, 🤓); (c) re-pin `REACTION_ERROR`. Recommendation: (b), with 🥱/😴 also reading as honest elapsed-time signals.
-2. **How should a stalled session read on the counter?** The stall condition survives the rewrite but needs a representation: jump straight to the ceiling, use a distinct terminal glyph, or force the progress message immediately. Recommendation: jump to the ceiling, so a stall shortens the leash rather than adding a competing signal.
-3. **Which liveness anchor?** Last observed turn transition is the most honest but may not be cheaply available in the watchdog's current session read. Falling back to `updated_at` risks the mirage documented in the `project_sdlc_liveness_mirage` memory, where probe refreshes make a hollow session look alive. Needs a decision before Task 3.
+1. **Fallback arc glyph — one open call, low stakes.** The specified arc is 👀 then alternating 🤔/👨‍💻. Two facts, now verified: registering any arc glyph in `_reaction_constants()` raises `ImportError` at import, which Task 2 avoids by keeping the arc out of the registry entirely — so **there is no crash risk either way**. What remains is cosmetic: 🤔 is `REACTION_ERROR`'s pinned glyph, so in fallback mode (digits unavailable) every odd tick shows the system's "error" face. The specified arc is retained as-is pending a call, since the collision is visible only in a degraded mode that a Premium account rarely enters. Swapping 🤔 → 🥱 or 😴 removes the ambiguity and reads as honest elapsed time; both are in `VALIDATED_REACTIONS` and unclaimed. Builder may proceed with the specified arc; this is reversible in one line.
