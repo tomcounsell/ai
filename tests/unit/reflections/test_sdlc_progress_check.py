@@ -33,6 +33,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import reflections.utilities
 from reflections import sdlc_progress
 
 # ---------------------------------------------------------------------------
@@ -231,6 +232,11 @@ class _Lab:
 def fake_redis(monkeypatch):
     r = _FakeRedis()
     monkeypatch.setattr(sdlc_progress, "_get_redis", lambda: r)
+    # _lock_says_live's body now resolves its Redis client in
+    # reflections.utilities (moved there in #2717 so a sibling reflection can
+    # share the liveness rule); the sdlc_progress patch above no longer
+    # reaches it, so patch both.
+    monkeypatch.setattr(reflections.utilities, "_get_redis", lambda: r)
     return r
 
 
