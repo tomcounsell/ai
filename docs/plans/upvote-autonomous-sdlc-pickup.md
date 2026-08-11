@@ -573,28 +573,28 @@ Explicitly *not built*, as design decisions rather than deferrals (each has a `#
 
 ## Success Criteria
 
-- [ ] `CLAUDE.md`'s labels table documents `upvote` (the GitHub label description already exists).
-- [ ] `scripts/update/reflection_register.py` registers `sdlc-upvote-pickup` into the **vault** registry with `cron: 0 6-22/2 * * *` + `cron_tz: America/Los_Angeles` and an explicit `timeout:`, is wired into `scripts/update/run.py` before the vault→config copy, and a test proves the registered entry survives `load_registry`, validates clean, and computes a next-due time in the expected local window. No commit touches the gitignored `config/reflections.yaml`.
-- [ ] The whole run is bounded by `UPVOTE_RUN_BUDGET_S`, including the uninterruptible `create_session` call: a pickup is admitted only when the remaining budget covers `UPVOTE_PICKUP_WORST_CASE_S` (which derives from `settings.timeouts.uv_sync_s + settings.timeouts.git_subprocess_s`, not from a literal). Both invariants — `UPVOTE_RUN_BUDGET_S + UPVOTE_GH_TIMEOUT_S < UPVOTE_ENTRY_TIMEOUT_S` and `UPVOTE_PICKUP_WORST_CASE_S < UPVOTE_RUN_BUDGET_S` — are asserted by tests, and the behavioral budget test stubs a slow `create_session` rather than only a never-arriving ack.
-- [ ] Budget expiry is enforced by early return from the per-project callable (`run_per_project_audit` owns the loop), not by `break` or by raising.
-- [ ] Projects without an `Eng:` group are skipped; non-owned projects are skipped before any subprocess runs.
-- [ ] At most one issue is picked per project per tick, and the machine-wide accumulated live-lane count never exceeds `UPVOTE_LANE_MAX_LIVE_MACHINE`.
-- [ ] No claim key is written and no label is mutated — asserted by anti-criteria, not just by review.
-- [ ] An issue with an open PR is skipped; an issue with a *merged* PR is skipped and reported.
-- [ ] On pickup, the announcement is enqueued to the `Eng: X` group's `chat_id` and its message id is captured from the relay ack.
-- [ ] `create_session` accepts `telegram_message_id`, plumbs it in place of the `0` at `tools/valor_session.py:639`, and the created session's `telegram_message_id` equals the announcement id.
-- [ ] Subsequent output threads under the announcement (proven via the persisted `telegram_message_id` → `TELEGRAM_REPLY_TO` contract).
-- [ ] Two consecutive ticks start exactly one lane for the same issue.
-- [ ] A candidate whose `create_session` returned `success=False` **without writing any `AgentSession` row** is not re-announced within `UPVOTE_FAILURE_BACKOFF_S` (no announce/retract loop in the `Eng: X` group) — the backoff is keyed on the reflection's own observation, not on a session record that does not exist.
-- [ ] The announcement and retraction go out through `tools.valor_telegram`'s `send`, invoked as `[sys.executable, "-m", "tools.valor_telegram", …]` and never as the bare `valor-telegram` console script (#2566), so the promise gate, linkify and length guard apply and no stale PATH shim can intercept it; the reflection writes no `telegram:outbox:*` payload of its own.
-- [ ] Every send carries `--no-read-the-room` and a subprocess env scrubbed of `VALOR_SESSION_ID`, `TELEGRAM_REPLY_TO` and `AGENT_SESSION_ID` (§I), so an inherited session env cannot turn the announcement into a reaction or thread it into the wrong chat while still exiting 0. Exit 0 is treated as "enqueued", never "delivered"; a missing ack is reported as an unconfirmed delivery.
-- [ ] Gates 1 and 1.6 match on `slug` **and** `project_key`, so a live lane on another project's identically-numbered issue does not silently block a pickup; the cross-project collision is reported as a finding (§C).
-- [ ] `UPVOTE_CANDIDATE_SCAN_MAX` is the single candidate-truncation knob, passed as `_gh_issue_list`'s `limit`, with no second post-sort slice (§A).
+- [x] `CLAUDE.md`'s labels table documents `upvote` (the GitHub label description already exists).
+- [x] `scripts/update/reflection_register.py` registers `sdlc-upvote-pickup` into the **vault** registry with `cron: 0 6-22/2 * * *` + `cron_tz: America/Los_Angeles` and an explicit `timeout:`, is wired into `scripts/update/run.py` before the vault→config copy, and a test proves the registered entry survives `load_registry`, validates clean, and computes a next-due time in the expected local window. No commit touches the gitignored `config/reflections.yaml`.
+- [x] The whole run is bounded by `UPVOTE_RUN_BUDGET_S`, including the uninterruptible `create_session` call: a pickup is admitted only when the remaining budget covers `UPVOTE_PICKUP_WORST_CASE_S` (which derives from `settings.timeouts.uv_sync_s + settings.timeouts.git_subprocess_s`, not from a literal). Both invariants — `UPVOTE_RUN_BUDGET_S + UPVOTE_GH_TIMEOUT_S < UPVOTE_ENTRY_TIMEOUT_S` and `UPVOTE_PICKUP_WORST_CASE_S < UPVOTE_RUN_BUDGET_S` — are asserted by tests, and the behavioral budget test stubs a slow `create_session` rather than only a never-arriving ack.
+- [x] Budget expiry is enforced by early return from the per-project callable (`run_per_project_audit` owns the loop), not by `break` or by raising.
+- [x] Projects without an `Eng:` group are skipped; non-owned projects are skipped before any subprocess runs.
+- [x] At most one issue is picked per project per tick, and the machine-wide accumulated live-lane count never exceeds `UPVOTE_LANE_MAX_LIVE_MACHINE`.
+- [x] No claim key is written and no label is mutated — asserted by anti-criteria, not just by review.
+- [x] An issue with an open PR is skipped; an issue with a *merged* PR is skipped and reported.
+- [x] On pickup, the announcement is enqueued to the `Eng: X` group's `chat_id` and its message id is captured from the relay ack.
+- [x] `create_session` accepts `telegram_message_id`, plumbs it in place of the `0` at `tools/valor_session.py:639`, and the created session's `telegram_message_id` equals the announcement id.
+- [x] Subsequent output threads under the announcement (proven via the persisted `telegram_message_id` → `TELEGRAM_REPLY_TO` contract).
+- [x] Two consecutive ticks start exactly one lane for the same issue.
+- [x] A candidate whose `create_session` returned `success=False` **without writing any `AgentSession` row** is not re-announced within `UPVOTE_FAILURE_BACKOFF_S` (no announce/retract loop in the `Eng: X` group) — the backoff is keyed on the reflection's own observation, not on a session record that does not exist.
+- [x] The announcement and retraction go out through `tools.valor_telegram`'s `send`, invoked as `[sys.executable, "-m", "tools.valor_telegram", …]` and never as the bare `valor-telegram` console script (#2566), so the promise gate, linkify and length guard apply and no stale PATH shim can intercept it; the reflection writes no `telegram:outbox:*` payload of its own.
+- [x] Every send carries `--no-read-the-room` and a subprocess env scrubbed of `VALOR_SESSION_ID`, `TELEGRAM_REPLY_TO` and `AGENT_SESSION_ID` (§I), so an inherited session env cannot turn the announcement into a reaction or thread it into the wrong chat while still exiting 0. Exit 0 is treated as "enqueued", never "delivered"; a missing ack is reported as an unconfirmed delivery.
+- [x] Gates 1 and 1.6 match on `slug` **and** `project_key`, so a live lane on another project's identically-numbered issue does not silently block a pickup; the cross-project collision is reported as a finding (§C).
+- [x] `UPVOTE_CANDIDATE_SCAN_MAX` is the single candidate-truncation knob, passed as `_gh_issue_list`'s `limit`, with no second post-sort slice (§A).
 - [ ] **Human-visible outcome:** after a pickup, a reader scrolling the `Eng: X` group sees one announcement with the lane's subsequent messages collapsed under it as replies, not a flat stream of orphaned updates. **Verified at merge time by Task 7's scratch-issue dry run** — a throwaway `upvote`-labeled issue, both processes restarted, `run_sdlc_upvote_lanes()` invoked directly, and the resulting thread read by a human — not by waiting for a real pickup, because the one currently-open `upvote` issue (#2716) is skipped by gate 2 on its `PipelineLedger` progress, not because the queue is empty (Freshness Check). The outcome and the observed message id are recorded in the feature doc. This is the criterion the mechanical `telegram_message_id` → `TELEGRAM_REPLY_TO` rows are a proxy for; the proxy passing while this fails means the feature did not work. (The `python -m tools.valor_session create --telegram-message-id …` invocation from §G remains the *operator debugging* path for the plumbing alone — it is not a substitute for this run, since it exercises neither the reflection, nor `resolve_eng_group`, nor the send path, nor the relay ack.)
-- [ ] Create-failure posts a threaded retraction; anchor-timeout still starts the lane and records a finding.
-- [ ] `docs/features/upvote-autonomous-sdlc-pickup.md` exists and is indexed in `docs/features/README.md`.
-- [ ] Tests pass (`/do-test`); lint and format clean.
-- [ ] Documentation updated (`/do-docs`).
+- [x] Create-failure posts a threaded retraction; anchor-timeout still starts the lane and records a finding.
+- [x] `docs/features/upvote-autonomous-sdlc-pickup.md` exists and is indexed in `docs/features/README.md`.
+- [x] Tests pass (`/do-test`); lint and format clean.
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
