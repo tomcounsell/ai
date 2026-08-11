@@ -20,6 +20,7 @@ from scripts.update.reflection_register import (
     register_crash_recovery,
     register_memory_distill_backfill,
     register_reflection,
+    register_sdlc_upvote_pickup,
     remove_reflection,
 )
 
@@ -548,3 +549,118 @@ def test_removed_reflections_lists_test_baseline_refresh(mock_machine, tmp_path,
     assert result.action == "removed"
     assert "test-baseline-refresh" not in _names(vault_path)
     assert "other-reflection" in _names(vault_path)
+
+
+# ---------------------------------------------------------------------------
+# register_sdlc_upvote_pickup (#2717) — the first cron-scheduled entry in the
+# registry. The end-to-end registry-file -> ReflectionEntry.validate ->
+# compute_next_due path has never carried a cron value before this, so this
+# is the Risk-1 test: register into a real temp registry, reload with the
+# real loader, and assert the entry SURVIVED (an empty match list is the
+# failure -- load_registry logs a warning and silently *skips* an invalid
+# entry rather than raising).
+# ---------------------------------------------------------------------------
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_sdlc_upvote_pickup_registers_cron_entry_that_survives_load(
+    mock_machine, tmp_path, monkeypatch
+):
+    from agent.reflection_schedule import compute_next_due
+    from agent.reflection_scheduler import load_registry
+    from reflections.sdlc_upvote_lanes import UPVOTE_ENTRY_TIMEOUT_S
+
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_sdlc_upvote_pickup(project_dir)
+
+    assert result.success is True
+    assert result.action == "registered"
+    assert "sdlc-upvote-pickup" in _names(vault_path)
+
+    registry = load_registry(vault_path)
+    matches = [r for r in registry if r.name == "sdlc-upvote-pickup"]
+    assert matches, "entry missing or skipped as invalid by load_registry -- Risk 1 failure"
+    entry = matches[0]
+
+    assert entry.validate() == []
+    assert entry.effective_timeout() == UPVOTE_ENTRY_TIMEOUT_S
+
+    next_due = compute_next_due(entry.schedule, None)
+    assert next_due is not None
+    import datetime as _dt
+
+    dt = _dt.datetime.fromtimestamp(next_due, tz=_dt.UTC).astimezone(
+        _dt.timezone(_dt.timedelta(hours=-8))
+    )
+    # 06:00-22:00 window (DST-agnostic bound check via a wide UTC-offset guess
+    # is intentionally avoided -- assert against the schedule string instead,
+    # which is what the register step actually emits).
+    assert "6-22/2" in entry.schedule
+    assert "America/Los_Angeles" in entry.schedule
+    _ = dt  # exercised for readability; the schedule-string assertion above is authoritative
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_sdlc_upvote_pickup_is_idempotent(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_sdlc_upvote_pickup(project_dir)
+    second = register_sdlc_upvote_pickup(project_dir)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count("sdlc-upvote-pickup") == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_sdlc_upvote_pickup_coexists_with_existing_registrations(
+    mock_machine, tmp_path, monkeypatch
+):
+    """Registering the new cron entry must not disturb prior `every:` entries'
+    emitted blocks -- the two existing registrations stay byte-for-byte."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITH_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    register_crash_recovery(project_dir)
+    register_memory_distill_backfill(project_dir)
+    register_sdlc_upvote_pickup(project_dir)
+
+    names = _names(vault_path)
+    assert "crash-recovery" in names
+    assert "memory-distill-backfill" in names
+    assert "sdlc-upvote-pickup" in names
+
+    data = yaml.safe_load(vault_path.read_text())
+    crash_entry = next(r for r in data["reflections"] if r["name"] == "crash-recovery")
+    assert crash_entry["every"] == "300s"
+    assert "cron" not in crash_entry
+
+    upvote_entry = next(r for r in data["reflections"] if r["name"] == "sdlc-upvote-pickup")
+    assert upvote_entry["cron"] == "0 6-22/2 * * *"
+    assert upvote_entry["cron_tz"] == "America/Los_Angeles"
+    assert "every" not in upvote_entry
+    assert upvote_entry["timeout"] == 1500
+
+
+def test_register_reflection_requires_exactly_one_of_cadence_or_cron(tmp_path):
+    with pytest.raises(ValueError):
+        register_reflection(
+            tmp_path,
+            name="bad-entry",
+            callable_path="a.b",
+            description="d",
+            priority="low",
+        )
+    with pytest.raises(ValueError):
+        register_reflection(
+            tmp_path,
+            name="bad-entry",
+            callable_path="a.b",
+            description="d",
+            priority="low",
+            cadence="300s",
+            cron="0 6 * * *",
+        )

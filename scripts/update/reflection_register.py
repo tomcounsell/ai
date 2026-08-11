@@ -81,6 +81,9 @@ REMOVED_REFLECTIONS = (
 MEMORY_DISTILL_BACKFILL_NAME = "memory-distill-backfill"
 MEMORY_DISTILL_BACKFILL_CALLABLE = "reflections.memory_management.run_memory_distill_backfill"
 
+UPVOTE_PICKUP_NAME = "sdlc-upvote-pickup"
+UPVOTE_PICKUP_CALLABLE = "reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes"
+
 # Matches the leading whitespace of an existing ``reflections:`` list item so the
 # appended entry adopts the file's own indentation (the hand-authored registry
 # uses a 2-space dash; a yaml.safe_dump copy uses a column-0 dash).
@@ -106,26 +109,43 @@ def _build_entry_block(
     name: str,
     callable_path: str,
     description: str,
-    cadence: str,
     priority: str,
+    cadence: str | None = None,
+    cron: str | None = None,
+    cron_tz: str | None = None,
+    timeout: int | None = None,
 ) -> str:
     """Render one reflection entry as text at the file's own indentation.
 
     Kept as a text block (not a yaml.safe_dump) so the surrounding hand-authored
     registry keeps its header docs and inline comments -- a dump round-trip would
-    strip them.  ``cadence`` is the ``every:`` duration body (e.g. ``300s``,
-    ``7d`` -- see ``agent.reflection_schedule.parse_every_duration``).
+    strip them. Exactly one of ``cadence`` / ``cron`` must be supplied by the
+    caller (:func:`register_reflection` enforces this before calling here);
+    ``cadence`` is the ``every:`` duration body (e.g. ``300s``, ``7d`` -- see
+    ``agent.reflection_schedule.parse_every_duration``), ``cron`` is a raw
+    5-field cron expression rendered with a following ``cron_tz:`` line when
+    set (see ``agent.reflection_schedule._next_cron``). ``timeout:`` is
+    emitted only when ``timeout is not None`` -- omitting it preserves every
+    existing caller's block byte-for-byte.
     """
     field = dash_indent + "  "
-    return (
-        f"\n{dash_indent}- name: {name}\n"
-        f'{field}description: "{description}"\n'
-        f"{field}every: {cadence}\n"
-        f"{field}priority: {priority}\n"
-        f"{field}execution_type: function\n"
-        f'{field}callable: "{callable_path}"\n'
-        f"{field}enabled: true\n"
-    )
+    lines = [
+        f"\n{dash_indent}- name: {name}\n",
+        f'{field}description: "{description}"\n',
+    ]
+    if cadence is not None:
+        lines.append(f"{field}every: {cadence}\n")
+    else:
+        lines.append(f"{field}cron: {cron}\n")
+        if cron_tz is not None:
+            lines.append(f"{field}cron_tz: {cron_tz}\n")
+    lines.append(f"{field}priority: {priority}\n")
+    lines.append(f"{field}execution_type: function\n")
+    lines.append(f'{field}callable: "{callable_path}"\n')
+    if timeout is not None:
+        lines.append(f"{field}timeout: {timeout}\n")
+    lines.append(f"{field}enabled: true\n")
+    return "".join(lines)
 
 
 @dataclass
@@ -228,10 +248,16 @@ def _append_entry(
     name: str,
     callable_path: str,
     description: str,
-    cadence: str,
     priority: str,
+    cadence: str | None = None,
+    cron: str | None = None,
+    cron_tz: str | None = None,
+    timeout: int | None = None,
 ) -> str:
     """Append the named reflection entry to the registry at ``path``.
+
+    Mirrors :func:`_build_entry_block`'s signature (see there for the
+    cadence/cron/cron_tz/timeout contract) and forwards it unchanged.
 
     Returns a verdict, never raises:
       "present"    -- entry already there (no write)
@@ -258,8 +284,11 @@ def _append_entry(
         name=name,
         callable_path=callable_path,
         description=description,
-        cadence=cadence,
         priority=priority,
+        cadence=cadence,
+        cron=cron,
+        cron_tz=cron_tz,
+        timeout=timeout,
     )
 
     # Validate before replacing: the appended text must parse and the entry must
@@ -421,15 +450,31 @@ def register_reflection(
     name: str,
     callable_path: str,
     description: str,
-    cadence: str,
     priority: str,
+    cadence: str | None = None,
+    cron: str | None = None,
+    cron_tz: str | None = None,
+    timeout: int | None = None,
 ) -> RegisterResult:
     """Ensure the named reflection is registered in the vault registry.
 
     See the module docstring for the guard conditions and why the vault file
     (not the config copy) is written. Idempotent -- a no-op when an entry with
     ``name`` is already present.
+
+    Exactly one of ``cadence`` / ``cron`` must be supplied -- ``ValueError``
+    otherwise, so a caller cannot accidentally emit an entry with neither
+    scheduling mechanism (which ``load_registry`` would silently skip as
+    invalid -- the Risk 1 failure class this whole module exists to avoid).
+    ``cron_tz`` is only meaningful alongside ``cron``. ``timeout`` is
+    additive and optional for either scheduling mechanism.
     """
+    if bool(cadence) == bool(cron):
+        raise ValueError(
+            f"register_reflection({name!r}): exactly one of cadence/cron must be "
+            f"supplied (got cadence={cadence!r}, cron={cron!r})"
+        )
+
     vault_path = _vault_reflections_path()
     if not vault_path.exists():
         return RegisterResult(True, "skipped", f"vault reflections.yaml not found at {vault_path}")
@@ -449,8 +494,11 @@ def register_reflection(
         "name": name,
         "callable_path": callable_path,
         "description": description,
-        "cadence": cadence,
         "priority": priority,
+        "cadence": cadence,
+        "cron": cron,
+        "cron_tz": cron_tz,
+        "timeout": timeout,
     }
     verdict = _append_entry(target, **entry_kwargs)
     if verdict == "present":
@@ -524,12 +572,47 @@ def register_memory_distill_backfill(project_dir: Path) -> RegisterResult:
     )
 
 
+def register_sdlc_upvote_pickup(project_dir: Path) -> RegisterResult:
+    """Ensure the ``sdlc-upvote-pickup`` reflection is registered (#2717).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence. Registration is a **code change, not a
+    config edit**: ``config/reflections.yaml`` is gitignored and clobbered
+    from the vault on every ``/update`` (see this module's docstring), so a
+    hand-added entry never ships. This is the first cron-scheduled entry in
+    the registry (every prior entry uses ``every:``); the explicit
+    ``timeout:`` is imported from ``reflections.sdlc_upvote_lanes`` rather
+    than repeated as a literal, so the registered value and the module's own
+    budget arithmetic cannot drift apart.
+    """
+    from reflections.sdlc_upvote_lanes import UPVOTE_ENTRY_TIMEOUT_S
+
+    return register_reflection(
+        project_dir,
+        name=UPVOTE_PICKUP_NAME,
+        callable_path=UPVOTE_PICKUP_CALLABLE,
+        description=(
+            "Start half of autonomous SDLC: pick the oldest open `upvote`-labeled "
+            "issue per project, announce it in that project's `Eng:` Telegram "
+            "group, and create an Eng session anchored to the announcement. "
+            "Derives start/skip from artifacts only -- no claim key, no label "
+            "mutation. Set SDLC_UPVOTE_PICKUP_ENABLED=false to disable without "
+            "editing config."
+        ),
+        cron="0 6-22/2 * * *",
+        cron_tz="America/Los_Angeles",
+        priority="low",
+        timeout=UPVOTE_ENTRY_TIMEOUT_S,
+    )
+
+
 def main() -> int:
     project_dir = Path(__file__).resolve().parent.parent.parent
     exit_code = 0
     for register in (
         register_crash_recovery,
         register_memory_distill_backfill,
+        register_sdlc_upvote_pickup,
     ):
         result = register(project_dir)
         print(f"{result.action}: {result.detail}")
