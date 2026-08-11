@@ -27,9 +27,9 @@ flip ships as its own release.
 ## Job routing (`bridge/job_router.py`)
 
 The **single routing authority** for inbound messages — it replaced the
-expectations-based semantic session router (`bridge/session_router.py`,
-deleted). Session-level routing is now purely mechanical: reply-to resumes a
-session, everything else is a fresh session.
+expectations-based semantic session router, now deleted. Session-level routing
+is now purely mechanical: reply-to resumes a session, everything else is a
+fresh session.
 
 - **Reply-to** routes through the **permanent reply index** —
   `reply:{chat_id}:{message_id}` → `{job_id, room_id}`, a standalone
