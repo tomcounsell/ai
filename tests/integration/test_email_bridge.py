@@ -581,7 +581,6 @@ class TestInboundAttachmentsEndToEnd:
 
     @pytest.mark.asyncio
     async def test_single_attachment_full_flow(self, tmp_path, monkeypatch):
-
         import bridge.email_bridge as eb
         import bridge.routing as routing
         from bridge.email_bridge import (
