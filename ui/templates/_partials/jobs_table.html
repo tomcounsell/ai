@@ -34,11 +34,9 @@ function toggleJobRuns(el) {
         <tr>
             <th>Project</th>
             <th>Job</th>
-            <th>Runs</th>
-            <th>Started</th>
             <th>Status</th>
+            <th>Started</th>
             <th>SDLC Stages</th>
-            <th></th>
         </tr>
     </thead>
     <tbody>
@@ -74,23 +72,38 @@ function toggleJobRuns(el) {
                 {% else %}
                 <span class="text-muted">-</span>
                 {% endif %}
+                {# Second line under the project name, same shape as the job-ref
+                   line under the job title. Rendered only when it has something
+                   to say: a Job row has no single persona to report, because it
+                   rolls up runs whose personas may differ. #}
+                {% if job.active_run_count > 1 %}
+                <div class="job-ref mono">
+                    <span class="badge badge-blue" title="{{ job.active_run_count }} runs in flight">{{ job.active_run_count }} live</span>
+                </div>
+                {% endif %}
             </td>
             <td>
                 <div class="card-title" title="{{ job.full_display_name }}">{{ job.display_name }}</div>
                 <div class="job-ref mono">
-                    {% if job.issue_number %}<span class="job-ref-item" title="{{ job.repo }}">#{{ job.issue_number }}</span>{% endif %}
-                    {% if job.pr_number %}<span class="job-ref-item" title="pull request">PR {{ job.pr_number }}</span>{% endif %}
+                    {# The number doubles as the link that used to sit in a
+                       trailing column of its own. `issue_number` is derived from
+                       the newest run while `issue_url` is the first non-null
+                       across every run, so a url with no number is possible and
+                       still has to render a link. #}
+                    {% if job.issue_number %}
+                    <span class="job-ref-item" title="{{ job.repo }}">issue: {% if job.issue_url %}<a href="{{ job.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">{{ job.issue_number }}</a>{% else %}{{ job.issue_number }}{% endif %}</span>
+                    {% elif job.issue_url %}
+                    <span class="job-ref-item" title="{{ job.repo }}"><a href="{{ job.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a></span>
+                    {% endif %}
+                    {% if job.pr_number %}
+                    <span class="job-ref-item" title="pull request">PR: {% if job.pr_url %}<a href="{{ job.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">{{ job.pr_number }}</a>{% else %}{{ job.pr_number }}{% endif %}</span>
+                    {% elif job.pr_url %}
+                    <span class="job-ref-item" title="pull request"><a href="{{ job.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a></span>
+                    {% endif %}
                     {% if job.slug and job.display_name != job.slug %}<span class="job-ref-item">{{ job.slug }}</span>{% endif %}
                     {% if job.kind == 'thread' %}<span class="job-ref-item">conversation</span>{% endif %}
                 </div>
             </td>
-            <td>
-                <span class="badge badge-outline">{{ job.run_count }}</span>
-                {% if job.active_run_count > 1 %}
-                <span class="badge badge-blue" title="{{ job.active_run_count }} runs in flight">{{ job.active_run_count }} live</span>
-                {% endif %}
-            </td>
-            <td class="mono">{{ job.started_at | format_timestamp }}</td>
             <td>
                 {% if job.status %}
                 {# Liveness reads off the representative run, the one
@@ -139,6 +152,7 @@ function toggleJobRuns(el) {
                 <span class="text-muted">-</span>
                 {% endif %}
             </td>
+            <td class="mono">{{ job.started_at | format_timestamp }}</td>
             <td>
                 {% if job.stages %}
                 <div class="stage-indicator">
@@ -149,16 +163,6 @@ function toggleJobRuns(el) {
                 {% else %}
                 <span class="text-muted">-</span>
                 {% endif %}
-            </td>
-            <td>
-                <div class="flex gap-2">
-                    {% if job.issue_url %}
-                    <a href="{{ job.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
-                    {% endif %}
-                    {% if job.pr_url %}
-                    <a href="{{ job.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
-                    {% endif %}
-                </div>
             </td>
         </tr>
         {% for s in job.sessions %}
