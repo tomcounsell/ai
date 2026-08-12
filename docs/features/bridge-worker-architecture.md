@@ -76,6 +76,21 @@ Redis outbox  → polled by the matching bridge relay
                 ↓ delivers via Telethon (Telegram) or SMTP (email)
 ```
 
+**Producer-readable sent-message-id ack (issue #2717).** Historically nothing
+on the send path told a programmatic producer what Telegram message id its
+send became — `tools/valor_telegram.py send` only learns "enqueued", not
+"delivered", and the id itself was only ever recorded onto an *existing*
+`AgentSession` (`_record_sent_message`). `bridge/outbox_ack.py` closes that
+gap: a **leaf** module (imports the shared Redis client only, no Telethon)
+owning `telegram:sent:{session_id}` as a single-consumer, delete-on-read
+list with a short TTL. `bridge/telegram_relay.py::process_outbox` writes to
+it **opt-in**, gated on the outbox payload's `ack_sent_id` flag (so ordinary
+traffic incurs no extra Redis ops), and a producer reads it back with
+`await_sent_message_id(session_id, timeout_s)` — a bounded blocking poll.
+The first consumer is `reflections/sdlc_upvote_lanes.py`, which uses the
+captured id to anchor a newly-created session's `telegram_message_id`; see
+[Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
+
 **Inbound chat log write:** `bridge/dispatch.py::dispatch_telegram_session` appends an inbound entry to the new session's `chat_message_log` immediately after `enqueue_agent_session` completes. This is the single chokepoint for all Telegram-originating session enqueues. See `docs/features/chat-message-log.md` for the full write/read contract.
 
 **Reactions are telegram-only.** When `extra_context.transport == "email"` the

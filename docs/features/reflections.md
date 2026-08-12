@@ -67,6 +67,7 @@ This is the mechanism behind the current registrations:
 
 - `crash-recovery` (issue #1917)
 - `memory-distill-backfill` (issue #2202 — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3))
+- `sdlc-upvote-pickup` (issue #2717, `register_sdlc_upvote_pickup` in `scripts/update/reflection_register.py`) — cron-scheduled (`0 6-22/2 * * *`, PT), project-scoped, function-type reflection running `reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes`. Picks up the oldest open `upvote`-labeled issue per project and starts an autonomously anchored SDLC lane. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
 
 The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`). `test-baseline-refresh` (issues #1933/#2004) was retired this way when the merge-gate baseline ecosystem was deleted (#2376).
 

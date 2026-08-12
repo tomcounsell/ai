@@ -78,7 +78,20 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
-from reflections.utilities import machine_owns_project, run_per_project_audit
+
+# _LOCK_KEY, _lock_says_live and _get_redis moved to reflections/utilities.py
+# (#2717) so the sibling reflection reflections/sdlc_upvote_lanes.py can share
+# the same liveness rule and Redis connection instead of forking them.
+# Re-exported here so this module's own call sites (and this module's own
+# names, e.g. ``sdlc_progress._LOCK_KEY`` and ``sdlc_progress._get_redis``)
+# keep resolving unchanged.
+from reflections.utilities import (  # noqa: F401
+    _LOCK_KEY,
+    _get_redis,
+    _lock_says_live,
+    machine_owns_project,
+    run_per_project_audit,
+)
 
 logger = logging.getLogger("reflections.sdlc_progress")
 
@@ -96,7 +109,7 @@ _ESCALATED_KEY = "sdlc:stall:escalated:{slug}:{sha}"
 
 # The issue lock, owned by models.session_lifecycle. Read directly (never via
 # touch_issue_lock, which fails OPEN and so cannot express "unknown").
-_LOCK_KEY = "session:issuelock:{issue_number}"
+# _LOCK_KEY is imported from reflections.utilities above.
 
 # Only branches matching session/sdlc-<N> are flagged. Excludes session/<other-slug>
 # and ad-hoc branches — those aren't SDLC pipelines.
@@ -121,11 +134,7 @@ _DEFAULT_ATTEMPTS_TTL_DAYS = 30
 _DEFAULT_ESCALATION_TTL_DAYS = 30
 
 
-def _get_redis():
-    """Return the shared Popoto Redis connection (lazy import, error-tolerant)."""
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    return POPOTO_REDIS_DB
+# _get_redis is imported from reflections.utilities above.
 
 
 def _env_float(name: str, default: float) -> float:
@@ -297,37 +306,9 @@ def _last_commit(cwd: str, branch: str) -> tuple[str, int] | None:
 
 
 # --- Gate 5': liveness from the lock, not from session rows -----------------
-
-
-def _lock_says_live(issue_number: int) -> bool | None:
-    """True if a live run owns this issue's lock, False if free, None if unknown.
-
-    Deliberately a direct ``GET`` on the lock key rather than a call to
-    ``models.session_lifecycle.touch_issue_lock``. ``touch_issue_lock`` fails
-    OPEN — every Redis exception is swallowed and returned as
-    ``IssueLockResult(acquired=True)``, which this gate would read as "lock
-    unheld → not live → act". A flap would therefore push the ladder INTO
-    acting, exactly when it should be most reluctant. A bare ``GET`` also
-    cannot claim or renew a lease, which is a stronger read-only guarantee than
-    any argument pair.
-
-    Classification of the payload is delegated to ``_lock_owner_is_live`` (the
-    same helper ``touch_issue_lock`` uses) so this module never forks the
-    liveness rule. A malformed payload lands in the ``except`` and reads as
-    *unknown*, not as free.
-    """
-    try:
-        from models.session_lifecycle import _lock_owner_is_live
-
-        raw = _get_redis().get(_LOCK_KEY.format(issue_number=issue_number))
-        if raw is None:
-            return False  # no lock -> nobody owns the lane
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        return bool(_lock_owner_is_live(json.loads(raw)))
-    except Exception as exc:
-        logger.warning("sdlc_progress: issue-lock read failed for #%s: %s", issue_number, exc)
-        return None  # unknown -> caller declines to act
+#
+# _lock_says_live is imported from reflections.utilities above (#2717) —
+# not redefined here. See that module for the implementation and rationale.
 
 
 def _lane_is_live(issue_number: int) -> bool | None:

@@ -211,6 +211,52 @@ class TestPayloadThreading:
         assert pushed["chat_id"] == "0"
         assert pushed["project_config"]["working_directory"]
 
+    def test_telegram_message_id_anchor_reaches_push_agent_session(self, spy):
+        """The persisted AgentSession.telegram_message_id must equal what
+        create_session was given (#2717) -- this is the agent-visible
+        TELEGRAM_REPLY_TO contract proven end to end, not just at the
+        create_session boundary."""
+        result = valor_session.create_session(
+            message="Run the next SDLC stage for issue #2717",
+            slug="sdlc-2717",
+            project_key="test-2717",
+            chat_id="-100123456",
+            telegram_message_id=4242,
+        )
+
+        assert result.success is True
+        pushed = spy["push"][0]
+        assert pushed["telegram_message_id"] == 4242
+        assert pushed["chat_id"] == "-100123456"
+
+    def test_telegram_message_id_defaults_to_zero_unchanged(self, spy):
+        """Every existing caller's default behavior is byte-for-byte unchanged."""
+        valor_session.create_session(
+            message="Run the next SDLC stage for issue #2717",
+            slug="sdlc-2717",
+            project_key="test-2717",
+        )
+
+        pushed = spy["push"][0]
+        assert pushed["telegram_message_id"] == 0
+
+    def test_nonzero_anchor_with_chatless_sink_logs_warning(self, spy, caplog):
+        """A non-zero telegram_message_id paired with chat_id='0' (the system
+        Room sink, not Telegram) is always a caller bug and must be logged."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="tools.valor_session"):
+            result = valor_session.create_session(
+                message="Run the next SDLC stage for issue #2717",
+                slug="sdlc-2717",
+                project_key="test-2717",
+                chat_id="0",
+                telegram_message_id=4242,
+            )
+
+        assert result.success is True
+        assert any("caller bug" in rec.message for rec in caplog.records)
+
     def test_auto_derives_the_slug_from_an_issue_reference(self, spy):
         result = valor_session.create_session(
             message="Run /sdlc for issue #2696",

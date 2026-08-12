@@ -982,6 +982,23 @@ async def process_outbox(telegram_client) -> int:
                         session_id = message.get("session_id")
                         if session_id:
                             await asyncio.to_thread(_record_sent_message, session_id, msg_id)
+                            # Opt-in producer-readable ack (issue #2717). Gated on
+                            # the payload flag: an unconditional write would add
+                            # two Redis ops to every outbound message system-wide
+                            # for one low-traffic consumer. Non-fatal — the relay
+                            # must never crash on ack bookkeeping.
+                            if message.get("ack_sent_id"):
+                                try:
+                                    from bridge.outbox_ack import publish_sent_message_id
+
+                                    await asyncio.to_thread(
+                                        publish_sent_message_id, session_id, msg_id
+                                    )
+                                except Exception as ack_err:  # noqa: BLE001
+                                    logger.warning(
+                                        f"Relay: failed to publish sent-id ack for "
+                                        f"session {session_id}: {ack_err}"
+                                    )
                     # Append outbound entry to owning session's chat_message_log (issue #1192).
                     # Three-tier resolution: owner_agent_session_id → real session_id → chat lookup.
                     # Non-fatal — relay must never crash on chat-log bookkeeping.

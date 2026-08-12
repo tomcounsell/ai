@@ -357,3 +357,60 @@ class TestCreateChildSessionGate:
         assert "WARNING: VALOR_ALLOW_CHILD_SESSIONS" not in captured.err
         assert len(push_calls) == 1
         assert push_calls[0]["parent_agent_session_id"] is None
+
+
+class TestCreateTelegramMessageIdFlag:
+    """The `--telegram-message-id` CLI flag flows through cmd_create into
+    create_session's telegram_message_id kwarg (issue #2717 non-blocker)."""
+
+    def _stub_downstream(self, monkeypatch, tmp_path, push_calls):
+        monkeypatch.setattr(valor_session, "_check_worker_health", lambda: (True, 1))
+        monkeypatch.setattr(valor_session, "resolve_project_key", lambda cwd: "test-2717")
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
+
+        async def _fake_push(**kwargs):
+            push_calls.append(kwargs)
+            return 1
+
+        import agent.agent_session_queue as queue_mod
+
+        monkeypatch.setattr(queue_mod, "_push_agent_session", _fake_push)
+
+    def test_default_is_zero_when_flag_omitted(self, monkeypatch, tmp_path):
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+
+        # _make_args's Namespace has no telegram_message_id attribute at all
+        # -- exactly what argparse would produce for a flag with default=0
+        # if this test constructed the Namespace via the real parser, and
+        # exactly what cmd_create's getattr(args, "telegram_message_id", 0)
+        # is defending against.
+        args = _make_args("plain task", role="teammate", slug=None, parent=None, json=False)
+        rc = valor_session.cmd_create(args)
+
+        assert rc == 0
+        assert len(push_calls) == 1
+        assert push_calls[0]["telegram_message_id"] == 0
+
+    def test_passed_value_reaches_create_session(self, monkeypatch, tmp_path):
+        push_calls: list[dict] = []
+        self._stub_downstream(monkeypatch, tmp_path, push_calls)
+
+        args = _make_args(
+            "plain task",
+            role="teammate",
+            slug=None,
+            parent=None,
+            json=False,
+            chat_id="-100123",
+            telegram_message_id=42,
+        )
+        rc = valor_session.cmd_create(args)
+
+        assert rc == 0
+        assert len(push_calls) == 1
+        assert push_calls[0]["telegram_message_id"] == 42
