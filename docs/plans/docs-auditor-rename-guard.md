@@ -416,8 +416,10 @@ are needed.
       `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name them).
 - [x] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
       `docs/research/`, and `site/` untouched.
-- [x] The auditor's own detectors report zero findings over every doc this PR touches (the
-      PR #2528 verification method).
+- [x] The auditor's own detectors report zero findings over every doc this PR touches in
+      `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name
+      the dictionary in prose, same as the criterion above) — the PR #2528 verification
+      method, applied at its own stated width.
 - [x] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
       `tests/unit/test_docs_auditor_substrate.py`.
 - [x] Documentation updated (`/do-docs`).

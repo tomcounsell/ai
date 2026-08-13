@@ -355,6 +355,40 @@ class TestGitLogFollowCap:
 
 
 # ---------------------------------------------------------------------------
+# TestRenamedSymbolFixesDegenerate — old==new rename hops must not fix
+# ---------------------------------------------------------------------------
+
+
+class TestRenamedSymbolFixesDegenerate:
+    """A rename history that loops back to the original path is a no-op.
+
+    `_apply_fixes_to_file` would otherwise treat a same-text replacement as a
+    real, successful fix and inflate `fixes_applied` on a run that changed
+    nothing.
+    """
+
+    def test_newest_rename_hop_equal_to_original_path_yields_no_fix(self, repo: Path):
+        content = "See `tests/unit/test_summarizer.py` for details.\n"
+        with patch.object(
+            docs_auditor,
+            "_git_log_follow_renames",
+            return_value=[("deadbeef", "tests/unit/test_summarizer.py")],
+        ):
+            fixes = docs_auditor._detect_renamed_symbol_fixes(content, repo)
+        assert fixes == []
+
+    def test_genuine_rename_hop_still_yields_a_fix(self, repo: Path):
+        content = "See `agent/old_name.py` for details.\n"
+        with patch.object(
+            docs_auditor,
+            "_git_log_follow_renames",
+            return_value=[("deadbeef", "agent/new_name.py")],
+        ):
+            fixes = docs_auditor._detect_renamed_symbol_fixes(content, repo)
+        assert fixes == [("agent/old_name.py", "agent/new_name.py")]
+
+
+# ---------------------------------------------------------------------------
 # TestDoDocsContract — pr-changed-files mode contract for /do-docs
 # ---------------------------------------------------------------------------
 
@@ -1355,7 +1389,7 @@ class TestWriteLivenessVaultParam:
         docs_auditor._write_liveness("slug", "ok", None, 3, fixes_withheld=2)
         assert self._summary(fake_redis)["fixes_withheld"] == 2
 
-    def test_withheld_is_keyword_only_and_preserves_positional_contract(self):
+    def test_withheld_is_trailing_and_preserves_positional_contract(self):
         import inspect
 
         params = list(inspect.signature(docs_auditor._write_liveness).parameters)

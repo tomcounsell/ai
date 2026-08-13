@@ -86,13 +86,12 @@ STALE_PR_AGE_DAYS = 14
 # stage-and-report or explicit-path-list policy. Recorded on #2726 itself so the
 # owner rules with the shipped partial gate in view, not against a blank slate.
 #
-# NOTE: [cycle-2 nit — marker lives in a mutable PR body with no cross-check, so
-# a human `gh pr edit` that rewrites the body silently re-enables auto-merge]
-# left as-is because the sturdier carrier (a `do-not-auto-merge` label) does not
-# exist in this repo, and creating one plus wiring `gh pr create --label` risks
-# failing PR creation outright on any checkout where the label is missing — a
-# strictly worse failure than the human-only body-rewrite path this guards. No
-# automation in this repo runs `gh pr edit`.
+# NOTE: The marker lives in the PR body with no cross-check, so a human
+# `gh pr edit` that rewrites the body re-enables auto-merge. A
+# `do-not-auto-merge` label would be sturdier, but the label does not exist in
+# this repo and `gh pr create --label` fails outright when it is missing — a
+# worse failure than the human-only path this guards. No automation here runs
+# `gh pr edit`.
 WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
 
 # Redis key namespace for state/locks/liveness.
@@ -457,7 +456,7 @@ def _detect_renamed_symbol_fixes(content: str, repo_root: Path) -> list[tuple[st
         if (repo_root / path).exists():
             continue
         renames = _git_log_follow_renames(path, repo_root)
-        if renames:
+        if renames and renames[0][1] != path:
             fixes.append((path, renames[0][1]))
     return fixes
 
