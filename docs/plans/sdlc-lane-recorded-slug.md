@@ -692,7 +692,12 @@ shipped), `session-recovery-observation-audit.md` (an audit doc, not a lane),
 `session-type-pm-rename.md` (#648, closed), `resilience-simplification-three-tier.md`
 (`tracking: none yet` placeholder). **None is an active lane.** The plan additionally
 backfills `tracking:` where an issue genuinely exists and adds a Verification row that
-fails if any plan in `docs/plans/` lacks a resolvable `tracking:` line. The new
+fails if any plan in `docs/plans/` lacks a **resolvable** `tracking:` line — resolvable
+meaning it carries a real `#N` or `issues/N` token, not merely a non-empty value. The
+placeholder `tracking: none yet` is exactly the unresolved case Task 5 names and the row
+must **fail** on it, not wave it through. `session-recovery-observation-audit.md` is an
+audit document, not a lane plan; Task 5 moves it out of `docs/plans/` so the invariant is
+true by construction rather than by exception (see Task 5). The new
 `docs/plans/{recorded_slug}.md` rung also covers slug-named plans without frontmatter.
 
 ### Risk 3: Adopting the wrong branch for a lane whose `sdlc-{N}` branch is stale
@@ -1097,14 +1102,96 @@ No new agent integration required.
 | #2735 AC 1+2 | `SDLC_TARGET_REPO=$PWD .venv/bin/python -c "from tools.lane_identity import find_plan_path; assert find_plan_path(2663) is None, find_plan_path(2663); assert find_plan_path(2716) is not None"` | exit code 0 |
 | Ledger carries the field | `.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; assert 'slug' in PipelineLedger._meta.fields"` | exit code 0 |
 | Migration registered | `grep -c 'confirm_pipeline_ledger_slug_readable' scripts/update/migrations.py` | output > 1 |
-| Anti-criterion: no plan-stem slug derivation | `grep -rn 'Path(plan_path).stem' tools/ agent/ reflections/` | match count == 0 |
+| Anti-criterion: no slug derived from a plan filename | `grep -rnE '\.stem\b' tools/ agent/ reflections/` | every hit reviewed by hand; **zero** hits where the `.stem` of a plan path becomes a slug or a branch name. Broadened from the old literal `Path(plan_path).stem`, which a rename to `plan_path.stem` defeated. |
 | Anti-criterion: no stale import path | `grep -rn 'from tools._sdlc_utils import find_plan_path' --include=*.py --include=*.md . \| grep -v '^./.worktrees/' \| wc -l` | match count == 0 |
-| Anti-criterion: false belief deleted | `grep -rn 'never creates one\|this repo never creates' tools/ tests/ \| wc -l` | match count == 0 |
+| Anti-criterion: no stale prose reference to the moved symbol | see `AC-PROSE` below | match count == 0 |
+| Anti-criterion: docs sweep complete | see `AC-DOCSWEEP` below | every listed file names `tools/lane_identity`, none names `tools/_sdlc_utils` |
+| Anti-criterion: false belief deleted | see `AC-BELIEF` below | match count == 0 |
 | Anti-criterion: fallback mechanism deleted | `grep -rn '_is_ai_repo_fallback' tools/ tests/ \| wc -l` | match count == 0 |
-| Anti-criterion: no hardcoded prefix in probes | `grep -rn 'ls-remote.*session/{' tools/ \| wc -l` | match count == 0 |
-| Anti-criterion: no holder/pid/liveness field added | `grep -nE '^\s+(holder\|pid\|host\|heartbeat\|last_seen)\s*=' agent/pipeline_ledger.py \| wc -l` | match count == 0 |
-| Anti-criterion: no eager slug backfill in migration | `grep -n 'slug' scripts/update/migrations.py \| grep -c 'save\|create\|update_fields'` | match count == 0 |
-| Every plan resolvable | `.venv/bin/python -c "import pathlib,re,sys; bad=[p.name for p in pathlib.Path('docs/plans').glob('*.md') if not re.search(r'^tracking:\s*\S', p.read_text(), re.M)]; print(len(bad), bad); sys.exit(1 if bad else 0)"` | exit code 0 |
+| Anti-criterion: no hardcoded prefix in probes | `grep -rnE 'ls-remote.*session/' tools/ reflections/ \| wc -l` | match count == 0 outside `tools/lane_identity.py` — the `session/` prefix exists in exactly one place, `lane_branch_name` |
+| Anti-criterion: no holder/pid/liveness field added | see `AC-LIVENESS` below | match count == 0 |
+| Anti-criterion: no eager slug backfill in migration | see `AC-BACKFILL` below | match count == 0 |
+| Anti-criterion: no read path heals | see `AC-HEAL` below | hits are **exactly** the four sanctioned lane-start callers; zero hits in `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, `tools/sdlc_verdict.py`, `tools/sdlc_stage_marker.py` |
+| Anti-criterion: no `sdlc-{N}` construction outside the resolver | see `AC-MINT` below | the only hit is the mint rung inside `tools/lane_identity.py` |
+| Every plan resolvable | see `AC-TRACKING` below | exit code 0 |
+
+**Pipe-escaping warning.** The table cells above cannot contain a literal `|` — markdown
+would split the cell. Every command whose regex needs alternation therefore lives in the
+fenced block below, **unescaped and runnable as written**. Do not copy a `\|` out of a
+table cell into a `grep -E`: inside an ERE, `\|` is a *literal pipe character*, not
+alternation, which is precisely how the prior draft's liveness-field guard came to be
+vacuous.
+
+```bash
+# AC-PROSE / AC-DOCSWEEP — live docs must not name the symbol's old home.
+# Scope EXCLUDES docs/plans/completed/: those are historical records of shipped
+# work and are correct as written. Rewriting them would be exactly the
+# "historical artifacts in docs" the repo forbids, in reverse.
+grep -rn '_sdlc_utils.*find_plan_path' docs/features/ docs/sdlc/ | wc -l   # AC-PROSE, expect 0
+grep -rln 'find_plan_path' docs/features/ docs/sdlc/                      # AC-DOCSWEEP
+# Every file AC-DOCSWEEP lists must be read and updated. Do not work from an
+# enumerated list in this plan — re-run the grep at build time; the set will
+# have moved. Verified at revision time to include, at minimum,
+# docs/features/off-pipeline-merge-path.md, docs/features/sdlc-pipeline-portability.md
+# (twice, one of which also documents the _git_toplevel helper), and
+# docs/sdlc/do-plan-critique.md.
+
+# AC-BELIEF — the false "repo never creates session/sdlc-{N}" comments are gone
+grep -rnE 'never creates one|this repo never creates' tools/ tests/ | wc -l   # expect 0
+
+# AC-LIVENESS — no holder/pid/host/heartbeat/last_seen field on the ledger
+grep -nE '^[[:space:]]+(holder|pid|host|heartbeat|last_seen)[[:space:]]*=' \
+  agent/pipeline_ledger.py | wc -l                                            # expect 0
+
+# AC-BACKFILL — the migration is a read-only probe, it writes nothing
+grep -n 'slug' scripts/update/migrations.py | grep -cE 'save|create|update_fields'  # expect 0
+
+# AC-HEAL — only lane-start paths opt into healing
+grep -rn 'allow_heal=True' tools/ agent/ reflections/
+# expect exactly: tools/sdlc_session_ensure.py, tools/valor_session.py,
+#                 reflections/sdlc_upvote_lanes.py, reflections/sdlc_progress.py
+
+# AC-MINT — the lane-slug literal is constructed in exactly one place.
+# The trailing filter excludes OTHER `sdlc-` namespaces by shape (not by site):
+# sdlc-local-{N} session ids, the sdlc-cold-issue-marker-{N} synthetic id, and
+# the sdlc-{stage} tag form are unrelated identifiers and stay where they are.
+grep -rnE 'sdlc-\{|sdlc-%s|"sdlc-" *\+|f"sdlc-' tools/ agent/ reflections/ \
+  | grep -vE 'sdlc-local-|sdlc-cold-issue-marker-|sdlc-\{stage\}|sdlc-progress-check'
+# expect exactly one hit, the mint rung in tools/lane_identity.py.
+# Verified red at revision time: hits at tools/valor_session.py:92,107,
+# tools/sdlc_stage_query.py:349, reflections/sdlc_upvote_lanes.py:133,329, and
+# the two mint sites — every one of which this plan removes or rewrites.
+
+# AC-TRACKING — every plan doc carries a resolvable tracking issue
+.venv/bin/python -c "
+import pathlib, re, sys
+pat = re.compile(r'^tracking:.*(?:#\d+|issues/\d+)', re.M)
+bad = [p.name for p in pathlib.Path('docs/plans').glob('*.md') if not pat.search(p.read_text())]
+print(len(bad), bad)
+sys.exit(1 if bad else 0)"
+# Requires a real #N or issues/N token. The literal 'tracking: none yet' FAILS —
+# the prior draft's '^tracking:\s*\S' accepted it, green-lighting the exact case
+# Task 5 exists to fix. Verified red at revision time: 5 files, including
+# resilience-simplification-three-tier.md and session-recovery-observation-audit.md.
+```
+
+**Every zero-expecting anti-criterion must be demonstrated RED against current `main`
+before the fix lands.** A grep that never matches is indistinguishable from one that
+passes; two rows in the prior draft of this table were vacuous for exactly that reason
+(`AC-LIVENESS`'s escaped pipes, and a `Path(plan_path).stem` literal that a variable
+rename defeated). Task 7 captures the pre-fix output of each row alongside the post-fix
+output. **A zero-expecting row that is already green on `main` is a FAILED
+anti-criterion** and must be rewritten before build proceeds — it is proving nothing.
+
+Two rows are *positive* criteria and are green-on-main by construction, so the red rule
+does not apply to them: `AC-HEAL` (0 hits on `main` because the parameter does not exist
+yet; after the fix it must name exactly the four sanctioned callers) and the docs-sweep
+row. `AC-LIVENESS` is the deliberate exception among zero-expecting rows — it guards
+against *adding* something, so it is green on `main` and must stay green; its value is
+that the fixed ERE can now actually fire, which the fixed spelling is verified to do
+against a synthetic `holder = ...` line. Verified red at revision time: `AC-TRACKING`
+(5 files), the `.stem` sweep (`tools/sdlc_next_skill.py:205,357`), `AC-BELIEF`,
+`AC-MINT`, and both stale-import rows.
 
 ## Critique Results
 
