@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -34,6 +34,8 @@ def _make_session(
     status="running",
     age_seconds=7200,  # 2 hours old by default (past 120 min threshold)
     updated_at_seconds_ago=None,  # None means updated_at is None
+    is_ledger=False,
+    last_heartbeat_at=None,
 ):
     """Create a minimal session-like object for testing."""
     created = datetime.fromtimestamp(time.time() - age_seconds, tz=UTC)
@@ -49,20 +51,19 @@ def _make_session(
         status=status,
         created_at=created,
         updated_at=updated,
+        is_ledger=is_ledger,
+        last_heartbeat_at=last_heartbeat_at,
         delete=MagicMock(),
         save=MagicMock(),
         log_lifecycle_transition=MagicMock(),
     )
 
 
-def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
-    """Run _cleanup_stale_sessions with injected mocks.
-
-    Returns (killed_count, skipped_recent, finalize_mock) so tests can assert on
-    all. The third return value the function itself grew in #2518,
-    ``skipped_fence_live``, is asserted to be 0 here: none of these sessions
-    carries a fence, so a non-zero count would mean the fence gate fired on a
-    row that has nothing for it to read.
+def _run_cleanup_full(sessions_by_status, active_workers=None, age_minutes=120):
+    """Like ``_run_cleanup`` but returns the full 5-tuple, for tests that
+    deliberately exercise the ledger or heartbeat rungs (where the
+    fence-live/ledger/heartbeat-are-all-zero assertion in ``_run_cleanup``
+    would be wrong to apply).
     """
     from scripts.update.run import _cleanup_stale_sessions
 
@@ -86,10 +87,53 @@ def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
         finally:
             queue_module._active_workers = original
 
-    killed, skipped_recent, skipped_fence_live = result
+    return (*result, mock_finalize)
+
+
+def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
+    """Run _cleanup_stale_sessions with injected mocks.
+
+    Returns (killed_count, skipped_recent, finalize_mock) so tests can assert on
+    all. The full return value is now a 5-tuple (#2660):
+    ``(killed, skipped_recent, skipped_fence_live, skipped_ledger,
+    skipped_heartbeat)``. ``skipped_fence_live``, ``skipped_ledger``, and
+    ``skipped_heartbeat`` are all asserted to be 0 here: none of these
+    ``SimpleNamespace`` fixtures carries a fence, an ``is_ledger`` flag, or a
+    ``last_heartbeat_at`` value, so a non-zero count on any of them would mean
+    a rung fired on a row that has nothing for it to read.
+    """
+    from scripts.update.run import _cleanup_stale_sessions
+
+    active_workers = active_workers or {}
+
+    def mock_filter(status=None):
+        return sessions_by_status.get(status, [])
+
+    with (
+        patch("models.agent_session.AgentSession") as mock_as_class,
+        patch("models.session_lifecycle.finalize_session") as mock_finalize,
+    ):
+        mock_as_class.query.filter.side_effect = mock_filter
+
+        import agent.agent_session_queue as queue_module
+
+        original = getattr(queue_module, "_active_workers", {})
+        try:
+            queue_module._active_workers = active_workers
+            result = _cleanup_stale_sessions(Path("/tmp"), age_minutes=age_minutes)
+        finally:
+            queue_module._active_workers = original
+
+    killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat = result
     assert skipped_fence_live == 0, (
         "no session in this file records a fence, so the fence gate must not "
         "have fired -- a non-zero count means it read something it should not"
+    )
+    assert skipped_ledger == 0, (
+        "no session in this file sets is_ledger, so the ledger rung must not fire"
+    )
+    assert skipped_heartbeat == 0, (
+        "no session in this file sets last_heartbeat_at, so the heartbeat rung must not fire"
     )
     return killed, skipped_recent, mock_finalize
 
@@ -285,7 +329,7 @@ class TestCleanupUsesLifecycleLayer:
                 queue_module._active_workers = original
 
         assert call_count[0] == 2, "finalize_session must be called for both sessions"
-        killed, _skipped_recent, _skipped_fence_live = result
+        killed, _skipped_recent, _skipped_fence_live, _skipped_ledger, _skipped_heartbeat = result
         assert killed == 1
 
 
@@ -359,3 +403,70 @@ class TestCleanupAgeThreshold:
         assert killed == 0
         assert skipped == 0
         mock_finalize.assert_not_called()
+
+
+class TestLedgerAndHeartbeatRungs:
+    """New reaper rungs added by #2660: ``is_ledger`` (rung 2) and
+    ``last_heartbeat_at`` (rung 4). Fenced coverage for these same rungs lives
+    in ``tests/unit/test_update_stale_session_fence.py``; this file's fixtures
+    carry no fence, so these pin the legacy/no-fence path through both rungs.
+    """
+
+    def test_ledger_row_is_skipped_and_counted_separately_from_recent(self):
+        """A non-executable CLI anchor row is skipped at rung 2, not rung 5,
+        even though its ``updated_at`` is stale enough to otherwise be killed.
+        """
+        ledger_session = _make_session(
+            age_seconds=10800, updated_at_seconds_ago=None, is_ledger=True
+        )
+        sessions_by_status = {"running": [ledger_session], "pending": []}
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup_full(sessions_by_status)
+        )
+
+        assert killed == 0
+        assert skipped_ledger == 1
+        assert skipped_recent == 0
+        finalize.assert_not_called()
+
+    def test_fresh_heartbeat_spares_a_session_with_stale_updated_at(self):
+        """A session mid-execution (60s heartbeat tick, stale ``updated_at``
+        because the heartbeat's partial save deliberately doesn't move it) is
+        spared at rung 4, counted separately from ``skipped_recent``.
+        """
+        session = _make_session(
+            age_seconds=10800,
+            updated_at_seconds_ago=3600,  # stale by recency-window standards
+            last_heartbeat_at=datetime.now(UTC),
+        )
+        sessions_by_status = {"running": [session], "pending": []}
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup_full(sessions_by_status)
+        )
+
+        assert killed == 0
+        assert skipped_heartbeat == 1
+        assert skipped_recent == 0
+        finalize.assert_not_called()
+
+    def test_stale_heartbeat_falls_through_to_updated_at_rung(self):
+        """A ``last_heartbeat_at`` outside the recency window must not spare the
+        row at rung 4; it falls through and is decided by rung 5 as before.
+        """
+        session = _make_session(
+            age_seconds=10800,
+            updated_at_seconds_ago=3600,
+            last_heartbeat_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+        sessions_by_status = {"running": [session], "pending": []}
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup_full(sessions_by_status)
+        )
+
+        assert skipped_heartbeat == 0
+        assert killed == 1, (
+            "a stale heartbeat must not protect a session from the recency/age gates"
+        )

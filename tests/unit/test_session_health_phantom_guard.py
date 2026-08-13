@@ -30,6 +30,7 @@ returns a phantom) and verify:
 from __future__ import annotations
 
 import logging
+import time
 
 import pytest
 
@@ -362,6 +363,183 @@ class TestCleanupCorruptedAgentSessions:
         )
         assert drifted_key.encode() not in POPOTO_REDIS_DB.smembers("$Class:AgentSession"), (
             "Class-set membership not cleared"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #2660: the sweep's healthy path writes no field value, and the TTL keepalive
+# holds Meta.ttl at the ceiling without one. These two properties fail in
+# OPPOSITE directions -- deleting the refresh_ttl() call reds the TTL half
+# while leaving updated_at untouched; reverting Check 2 to a full save() reds
+# the updated_at half while leaving the TTL at the ceiling anyway (a save()
+# also resets TTL). Neither assertion alone would catch both regressions.
+# ---------------------------------------------------------------------------
+
+
+class TestSweepIsTtlAndUpdatedAtNeutral:
+    def test_ttl_restored_and_updated_at_byte_identical_across_a_sweep(self):
+        """The single most important test in this file (#2698).
+
+        Two healthy rows -- one terminal, one non-terminal, because a sweep
+        that only ever sees terminal rows would say nothing about the
+        population that actually needs the keepalive. Both are allowed to
+        decay for a real, measurable interval (Redis TTL granularity is one
+        second, so 1.5s is the floor for a non-flaky assertion), and the test
+        proves the decay happened before it proves the sweep undoes it --
+        otherwise a keepalive that no-ops silently would still pass.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+
+        running = AgentSession(
+            session_id="ttl-neutral-running", project_key="test", status="running"
+        )
+        running.save()
+        completed = AgentSession(
+            session_id="ttl-neutral-completed", project_key="test", status="completed"
+        )
+        completed.save()
+
+        running_key = running.db_key.redis_key
+        completed_key = completed.db_key.redis_key
+        # Re-fetch through the ORM rather than reading the in-memory instance:
+        # Popoto strips tzinfo on the Redis round-trip, so the in-memory
+        # aware datetime would never compare equal to a re-fetched naive one
+        # regardless of whether the sweep moved anything.
+        running_updated_before = AgentSession.get_by_id(running.agent_session_id).updated_at
+        completed_updated_before = AgentSession.get_by_id(completed.agent_session_id).updated_at
+
+        ttl_running_fresh = POPOTO_REDIS_DB.ttl(running_key)
+        ttl_completed_fresh = POPOTO_REDIS_DB.ttl(completed_key)
+
+        time.sleep(1.5)
+
+        ttl_running_decayed = POPOTO_REDIS_DB.ttl(running_key)
+        ttl_completed_decayed = POPOTO_REDIS_DB.ttl(completed_key)
+        assert ttl_running_decayed < ttl_running_fresh, (
+            "fixture did not actually decay -- the neutrality assertion below would pass vacuously"
+        )
+        assert ttl_completed_decayed < ttl_completed_fresh, (
+            "fixture did not actually decay -- the neutrality assertion below would pass vacuously"
+        )
+
+        cleanup_corrupted_agent_sessions()
+
+        assert POPOTO_REDIS_DB.ttl(running_key) == AgentSession._meta.ttl, (
+            "running row's TTL was not restored to the ceiling by the sweep's "
+            "refresh_ttl() keepalive"
+        )
+        assert POPOTO_REDIS_DB.ttl(completed_key) == AgentSession._meta.ttl, (
+            "completed row's TTL was not restored to the ceiling by the sweep's "
+            "refresh_ttl() keepalive"
+        )
+
+        after_running = AgentSession.get_by_id(running.agent_session_id)
+        after_completed = AgentSession.get_by_id(completed.agent_session_id)
+        assert after_running.updated_at == running_updated_before, (
+            "sweep moved updated_at on a healthy non-terminal row -- the sweep "
+            "must write no field value on the healthy path"
+        )
+        assert after_completed.updated_at == completed_updated_before, (
+            "sweep moved updated_at on a healthy terminal row -- the sweep "
+            "must write no field value on the healthy path"
+        )
+
+
+class TestCorruptionParityAgainstIsValid:
+    """Check 2's classification predicate is now ``is_valid()`` instead of a
+    ``save()`` probe (#2660). ``created_at = None`` is the model's ONLY
+    constructible ``is_valid()``-False fixture (Research findings 0/0b):
+    ``AgentSession.__setattr__`` heals every ``_DATETIME_FIELDS`` value before
+    validation runs, the model has zero ``max_length`` fields, and a bad ``id``
+    is rejected at construction. ``created_at`` is a ``SortedField`` outside
+    the normalizer and is one of only two ``null=False`` fields.
+
+    The sweep reads ``AgentSession.query.all()`` directly (not
+    ``query.filter``), so the injection seam here is ``AgentSession.query.all``
+    -- patched the same way ``tests/unit/test_update_stale_session_fence.py``
+    patches ``query.filter``.
+    """
+
+    def test_healthy_row_survives_and_corrupt_fixture_is_deleted(self, monkeypatch):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+
+        healthy = AgentSession(session_id="parity-healthy", project_key="test", status="running")
+        healthy.save()
+        healthy_id = healthy.agent_session_id
+
+        corrupt = AgentSession(session_id="parity-corrupt", project_key="test", status="running")
+        corrupt.save()
+        corrupt_key = corrupt.db_key.redis_key
+        # Bypass AgentSession.__setattr__'s normalizer -- it heals every
+        # _DATETIME_FIELDS value, but created_at is a SortedField outside it
+        # and is the model's only constructible is_valid()-False shape.
+        object.__setattr__(corrupt, "created_at", None)
+        assert corrupt.is_valid() is False, (
+            "fixture setup failed -- created_at=None must fail is_valid()"
+        )
+        assert healthy.is_valid() is True, "fixture setup failed -- healthy row must validate"
+
+        monkeypatch.setattr(AgentSession.query, "all", lambda: [healthy, corrupt])
+
+        result = cleanup_corrupted_agent_sessions()
+
+        assert result["corrupted"] == 1, (
+            "exactly the created_at=None fixture must be classified corrupt"
+        )
+        assert AgentSession.get_by_id(healthy_id) is not None, (
+            "a healthy row must never be classified corrupt by is_valid()"
+        )
+        assert not POPOTO_REDIS_DB.exists(corrupt_key), (
+            "the is_valid()-False fixture must be deleted, same as the old save() probe"
+        )
+
+
+class TestTtlKeepaliveFailureIsIsolatedFromClassification:
+    def test_refresh_ttl_raising_never_deletes_a_healthy_row(self, monkeypatch):
+        """Failure Path Test Strategy: a keepalive that raises must never route
+        a healthy row to ``session.delete()``. The classification try/except
+        and the keepalive try/except are separate statements specifically so a
+        transient Redis fault during the keepalive can't be misread as
+        corruption and trigger a bulk delete of live rows (Risk 1's last row).
+        This is the failure that is loud in production and invisible in a
+        green suite without this test.
+        """
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+
+        healthy = AgentSession(session_id="ttl-raise-healthy", project_key="test", status="running")
+        healthy.save()
+        healthy_id = healthy.agent_session_id
+
+        def _raising_refresh_ttl(self):
+            raise ConnectionError("simulated transient Redis fault")
+
+        monkeypatch.setattr(AgentSession, "refresh_ttl", _raising_refresh_ttl)
+
+        delete_calls = {"count": 0}
+        original_delete = AgentSession.delete
+
+        def _spy_delete(self, *args, **kwargs):
+            delete_calls["count"] += 1
+            return original_delete(self, *args, **kwargs)
+
+        monkeypatch.setattr(AgentSession, "delete", _spy_delete)
+
+        result = cleanup_corrupted_agent_sessions()
+
+        assert result["corrupted"] == 0, "a keepalive failure must not be classified as corruption"
+        assert delete_calls["count"] == 0, (
+            "a raising refresh_ttl() must never route a healthy row to session.delete()"
+        )
+        after = AgentSession.get_by_id(healthy_id)
+        assert after is not None, (
+            "a raising refresh_ttl() must never cause session.delete() on a healthy row"
         )
 
 

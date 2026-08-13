@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -2056,6 +2057,85 @@ class TestIssueLockWiring:
         assert result["session_id"] == "sdlc-local-2054"
         assert result["run_id"]
         assert legacy.active_run_id == result["run_id"]
+
+
+class TestBindDoesNotRestampUpdatedAt:
+    """#2660: the run-lock bind is a partial save (update_fields=["active_run_id",
+    "owned_run_ids"]) precisely so a stage dispatch that only re-binds the run
+    lock -- and changes nothing else -- does not restamp updated_at on the
+    whole row. This is the writer that kept the #2660 ledger anchors
+    permanently fresh, so it needs a REAL AgentSession (not a MagicMock,
+    whose .save() is a no-op that would pass this assertion vacuously either
+    way) to prove the partial save actually reaches Redis.
+    """
+
+    @staticmethod
+    def _lock_result(acquired: bool, owner_session_id=None, owner_run_id=None):
+        from models.session_lifecycle import IssueLockResult
+
+        return IssueLockResult(
+            acquired=acquired,
+            owner_session_id=owner_session_id,
+            owner_run_id=owner_run_id,
+        )
+
+    def test_bind_leaves_updated_at_unmoved_but_persists_run_identity(self):
+        from models.agent_session import AgentSession
+        from tools.sdlc_session_ensure import _acquire_run_lock_and_bind
+
+        session = AgentSession(session_id="sdlc-local-266001", project_key="test", status="running")
+        session.save()
+        session_id = session.agent_session_id
+        updated_before = AgentSession.get_by_id(session_id).updated_at
+
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                return_value=self._lock_result(True, session.session_id),
+            ),
+            patch("agent.supervised_run.supervised_run_status", return_value=None),
+            patch("tools._sdlc_utils._resolve_target_repo", return_value=None),
+        ):
+            run_id, error = _acquire_run_lock_and_bind(266001, session)
+
+        assert error is None
+        assert run_id
+
+        after = AgentSession.get_by_id(session_id)
+        assert after.updated_at == updated_before, (
+            "a bind that only changes active_run_id/owned_run_ids must not "
+            "restamp updated_at -- this is the writer #2660 narrows"
+        )
+        assert after.active_run_id == run_id, (
+            "the bind must still persist active_run_id despite the partial save"
+        )
+        assert after.owned_run_ids, (
+            "the bind must still persist owned_run_ids despite the partial save"
+        )
+        assert run_id in json.loads(after.owned_run_ids)
+
+    def test_bind_that_advances_a_stage_state_still_refreshes_updated_at(self):
+        """Contrast case: a writer OTHER than the bind (a genuine stage-state
+        advance, simulated here by a plain full save()) still moves
+        updated_at as before -- #2660 narrows only the bind, not every
+        writer on the row.
+        """
+        from models.agent_session import AgentSession
+
+        session = AgentSession(session_id="sdlc-local-266002", project_key="test", status="running")
+        session.save()
+        session_id = session.agent_session_id
+        updated_before = AgentSession.get_by_id(session_id).updated_at
+
+        time.sleep(0.05)
+        session.status = "running"  # no-op field change, but a full save()
+        session.save()
+
+        after = AgentSession.get_by_id(session_id)
+        assert after.updated_at != updated_before, (
+            "a genuine full save() (stage-state advance) must still refresh "
+            "updated_at -- only the run-lock bind is narrowed"
+        )
 
 
 class TestVerifiedRunIdReuse:

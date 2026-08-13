@@ -26,6 +26,7 @@ from agent.constants import (
     SESSION_ARCHIVE_BUSY_TIMEOUT_MS,
     SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS,
 )
+from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
 
 pytestmark = pytest.mark.usefixtures("redis_test_db")
@@ -154,6 +155,121 @@ def test_datetime_round_trip_fidelity(archive_db):
     assert restored.created_at == baseline.created_at
     assert restored.completed_at == baseline.completed_at
     assert restored.scheduled_at == baseline.scheduled_at
+
+
+def _set_archived_updated_at(db_path, session_id: str, raw_value) -> None:
+    """Directly rewrite the archived row's ``updated_at`` payload field.
+
+    Simulates the two non-datetime shapes ``_rehydrate_row`` must fall
+    through on (#2660): a row archived before it was ever stamped (``None``),
+    and a raw ISO string ``_deserialize_payload`` could not parse. Both are
+    written straight into the stored JSON payload -- the shape the archive
+    actually persists -- rather than constructed through the export path,
+    which would just re-serialize a real datetime.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute("SELECT payload FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        fields = json.loads(row[0])
+        fields["updated_at"] = raw_value
+        conn.execute(
+            "UPDATE sessions SET payload = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(fields), raw_value if isinstance(raw_value, str) else None, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# #2660: preserve_updated_at on restore -- three payload shapes that must fail
+# in OPPOSITE directions, per the plan's Failure Path Test Strategy. A single
+# "the row restored and has a timestamp" assertion is green under a
+# hard-coded True, a hard-coded False, AND the guard deleted entirely; this
+# trio is not.
+# ---------------------------------------------------------------------------
+
+
+def test_restore_preserves_a_real_datetime_byte_identically(archive_db):
+    """Reds if the preserve guard is hard-coded False or dropped."""
+    session = _make_session(status="completed")
+    session_id = session.id
+    # session.save() (inside _make_session) stamps updated_at itself, so the
+    # custom archived value must be set on the in-memory instance AFTER
+    # save() -- export_session serializes the in-memory instance directly, it
+    # does not re-fetch from Redis, so this is what actually lands in the
+    # payload without a second save() re-stamping it.
+    archived_at = datetime.now(UTC).replace(microsecond=456000)
+    session.updated_at = archived_at
+    baseline = session.updated_at.replace(tzinfo=None)
+
+    archive.export_session(session)
+    session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    result = archive.restore_if_empty()
+    assert result["restored"] == 1
+
+    restored = AgentSession.query.get(id=session_id)
+    assert restored.updated_at == baseline, (
+        "a real archived datetime must round-trip byte-identically through restore"
+    )
+
+
+def test_restore_stamps_fresh_when_archived_updated_at_is_none(archive_db):
+    """Reds if the preserve guard is hard-coded True.
+
+    A row archived before it was ever stamped carries updated_at=None in the
+    payload. Preserving it verbatim would restore a row with no liveness
+    stamp at all -- silent, not a raise or a quarantine.
+    """
+    session = _make_session(status="completed")
+    session_id = session.id
+    archive.export_session(session)
+    _set_archived_updated_at(archive_db, session_id, None)
+    session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    before_restore = time.time()
+    result = archive.restore_if_empty()
+    assert result["restored"] == 1
+
+    restored = AgentSession.query.get(id=session_id)
+    assert restored.updated_at is not None, (
+        "a None archived updated_at must fall through to a fresh stamp, not restore as None"
+    )
+    assert abs(to_unix_ts(restored.updated_at) - before_restore) < 30, (
+        "the fresh stamp must be near restore time"
+    )
+
+
+def test_restore_stamps_fresh_when_archived_updated_at_is_an_unparsed_string(archive_db):
+    """Reds if the preserve guard is hard-coded True.
+
+    ``_deserialize_payload`` leaves an unparseable ISO string in place (logs
+    a warning, does not raise) rather than converting it to a datetime.
+    AgentSession.__setattr__ maps that non-datetime value to None on
+    construction (Research finding 0), the same as the None case above, so
+    this must fall through to a fresh stamp too.
+    """
+    session = _make_session(status="completed")
+    session_id = session.id
+    archive.export_session(session)
+    _set_archived_updated_at(archive_db, session_id, "TOTALLY-NOT-A-DATE")
+    session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    before_restore = time.time()
+    result = archive.restore_if_empty()
+    assert result["restored"] == 1
+
+    restored = AgentSession.query.get(id=session_id)
+    assert restored.updated_at is not None, (
+        "an unparsed-string archived updated_at must fall through to a fresh stamp"
+    )
+    assert abs(to_unix_ts(restored.updated_at) - before_restore) < 30, (
+        "the fresh stamp must be near restore time"
+    )
 
 
 def test_key_and_parent_child_graph_preservation(archive_db):

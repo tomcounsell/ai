@@ -317,6 +317,61 @@ class TestJobRollup:
         job = group_into_jobs([_pipeline(message_text="check the worker queue")])[0]
         assert "check the worker queue" in job.display_name
 
+    def test_maintenance_sweep_does_not_flatten_job_ordering(self):
+        """#2660 dashboard-symptom regression, end to end against real Redis.
+
+        The reported bug: a maintenance sweep restamped every row's
+        ``updated_at`` to sweep time, which ``best_timestamp()`` prefers, so
+        ``Job.last_activity_at`` and the sort order flattened across every
+        touched row in one pass. Two seeded rows must be NON-terminal
+        (``completed_at is None``) so ``updated_at`` is the operative term in
+        ``best_timestamp`` rather than a vacuous pass through ``completed_at``.
+        Each is its own ad-hoc Job (no slug/issue/parent), so this also proves
+        the sweep doesn't reorder distinct Jobs relative to each other.
+        """
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+        from ui.data.jobs import group_into_jobs
+        from ui.data.sdlc import _session_to_pipeline
+
+        older = AgentSession(
+            session_id="dashboard-symptom-older", project_key="valor", status="running"
+        )
+        older.save()
+        newer = AgentSession(
+            session_id="dashboard-symptom-newer", project_key="valor", status="running"
+        )
+        newer.save()
+
+        def _jobs_by_session_id():
+            older_fresh = AgentSession.get_by_id(older.agent_session_id)
+            newer_fresh = AgentSession.get_by_id(newer.agent_session_id)
+            pipelines = [_session_to_pipeline(older_fresh), _session_to_pipeline(newer_fresh)]
+            jobs = group_into_jobs(pipelines)
+            return {j.sessions[0].session_id: j for j in jobs}, [
+                j.sessions[0].session_id for j in jobs
+            ]
+
+        before_jobs, order_before = _jobs_by_session_id()
+        assert order_before == ["dashboard-symptom-newer", "dashboard-symptom-older"], (
+            "fixture setup: newer must sort first before the sweep runs, or the "
+            "ordering assertion below would pass vacuously"
+        )
+        activity_before = {sid: j.last_activity_at for sid, j in before_jobs.items()}
+
+        cleanup_corrupted_agent_sessions()
+
+        after_jobs, order_after = _jobs_by_session_id()
+        activity_after = {sid: j.last_activity_at for sid, j in after_jobs.items()}
+
+        assert activity_after == activity_before, (
+            "a maintenance sweep must not move Job.last_activity_at for a healthy non-terminal row"
+        )
+        assert order_after == order_before, (
+            "a maintenance sweep must not reorder Jobs by flattening every "
+            "row's updated_at to sweep time"
+        )
+
 
 class TestScopeWithoutProjectConfig:
     """projects.json is absent on a fresh machine and in CI, and
