@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Needs Revision
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -258,3 +258,69 @@ War room 2026-08-13, FULL depth. **4 blockers**, all re-verified against source 
 4. **The #2731 Option B recommendation was blind to its target** — `CLAUDE_PID` names the top-level process even from a subagent, and `fence_is_live` returns `False` for unknown, which would have *admitted* the second agent. *Disposition: owner ruled lease-read-only; residual documented.*
 
 Also fixed from the concern list: eleven "bound by G4" claims (case-insensitive), not six; `tests/integration/test_sdlc_dispatch.py` added to Test Impact; Risk 6's speculative arithmetic dropped with the deferred workstream; the stub tasks given content; Q1 closed by ruling.
+
+### Round 2 — NEEDS REVISION
+
+War room 2026-08-13 (round 2). **4 blockers.** The two decisive ones were
+re-verified by the author by execution.
+
+**B1 (confirmed by execution) — WS1 does not fire on the loops it names.**
+`build_stage_snapshot` includes `_patch_cycle_count` and `_critique_cycle_count`
+(`agent/sdlc_router.py:226-227`), and those move on exactly the transitions
+inside the cited loops: `complete_stage("PATCH")` → `patch_cycle_count += 1`
+(`agent/pipeline_state.py:979`), `fail_stage("CRITIQUE")` →
+`critique_cycle_count += 1` (`:1020`). So consecutive dispatch snapshots in a
+real 8↔8b or 2b↔3 loop differ, and the walk still breaks at the snapshot test.
+Measured with the proposed one-line change applied:
+
+| fixture | count | escalates at `MAX_SAME_STAGE_DISPATCHES = 3`? |
+|---|---|---|
+| frozen alternation (no snapshot field moves) | **4** | yes |
+| real 8↔8b loop (`_patch_cycle_count` moves each cycle: 1,1,2,2,3,3) | **2** | **no** |
+
+The trade-off is the plan's own core and it was never stated: *the snapshot
+conjunct that protects the productive history (Risk 1) is the same thing that
+defeats detection of the stuck version of that loop.* The residual set WS1
+actually catches — alternation where **no** snapshot field moves — is precisely
+the state that arises when markers/verdicts/counters never land, i.e. **the
+record-completeness half this plan defers as fence-blocked.** WS1 is gated on
+the deferred half.
+
+**B2 (confirmed) — WS2 is dead code where the plan puts it.**
+`resolve_ledger_lease` returns `ISSUE_LOCKED` for *any* foreign holder
+(`tools/_sdlc_utils.py:744-749`) and `_cli_record` returns immediately
+(`tools/sdlc_dispatch.py:204-210`). A gate "before the append" therefore can
+never observe a foreign holder. Placing it *before* `resolve_ledger_lease` makes
+it reachable but regresses #2144: `reestablish_run_id` adopts a **live**
+supervisor's `run_id` (`tools/_sdlc_run_identity.py:162-164`), so "foreign +
+live → refuse" converts the sanctioned self-heal into a hard refusal. The new
+reason would also miss the heal tuple (`:378`) and the loud/exit tuple
+(`:394-403`), so it would exit **0** despite the plan promising non-zero.
+
+**B3 — row 3 of the liveness table is not implementable.** `orphaned_lock` means
+the lock is still *held* by the foreign `run_id`, merely judged dead
+(`models/session_lifecycle.py:1249`). Appending then requires passing
+`revalidate_ledger_lease`, which refuses on a foreign payload — so the append is
+only possible by skipping the revalidate (which Race 1 promises to keep) or by a
+lease-takeover primitive that exists nowhere (`tools/sdlc_session_ensure.py`
+computes `orphaned_lock` and still refuses, leaving TTL expiry as the only
+recovery).
+
+**B4 — an existing test inverts.**
+`tests/unit/test_sdlc_router_oscillation.py:313-320`
+(`test_compute_same_stage_count_resets_on_skill_change`) records three
+dispatches on `states = {}`, so all three snapshots are byte-identical: today
+`count == 1`, after the change `count == 3`. Success Criterion "every
+#1641/#1668 same-skill case passes unchanged" is false as written.
+
+**Confirmed sound by the critic:** the returned-skill invariant (Risk 2) holds by
+inspection — `skill` is read at `:1863` before the loop and both return sites use
+it, so `last_dispatched_skill` is bit-identical and the five routing consumers
+are unaffected. `tools/sdlc_stage_query.py` genuinely needs no edit. The
+intra-run residual and the fence-blocked deferral are honestly written.
+
+**Disposition: the lane as fenced cannot meaningfully close either issue.** WS1
+is a strict improvement but only for frozen alternation, which is the deferred
+half's territory; WS2 is dead code, a #2144 regression, or needs an unscoped
+primitive. Escalated to the lead for a fence/scope decision rather than revised
+a third time.
