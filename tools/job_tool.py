@@ -129,9 +129,7 @@ def add_expectation(
         raise JobToolError("expectation direction must be 'inbound' or 'outbound'")
     job = _own_room_job(session_id, job_id)
     try:
-        expectation_id = job.add_expectation(
-            text.strip(), direction=direction, owner=owner.strip()
-        )
+        expectation_id = job.add_expectation(text.strip(), direction=direction, owner=owner.strip())
     except ValueError as e:
         raise JobToolError(str(e)) from e
     try:
@@ -189,9 +187,7 @@ def main() -> None:
     p_goal.add_argument("--job-id", required=True)
     p_goal.add_argument("--text", required=True)
 
-    p_eadd = sub.add_parser(
-        "expectation-add", help="Record an expectation you are standing by"
-    )
+    p_eadd = sub.add_parser("expectation-add", help="Record an expectation you are standing by")
     p_eadd.add_argument("--job-id", required=True)
     p_eadd.add_argument("--direction", required=True, choices=["inbound", "outbound"])
     p_eadd.add_argument(
@@ -232,21 +228,16 @@ def main() -> None:
                 direction=args.direction,
                 owner=args.owner,
             )
-            print(
-                json.dumps({"expectation_id": expectation_id, "job_id": args.job_id}, indent=2)
-            )
+            print(json.dumps({"expectation_id": expectation_id, "job_id": args.job_id}, indent=2))
         elif args.command == "expectation-remove":
             removed = remove_expectation(session_id, args.job_id, args.expectation_id)
             if not removed:
                 print(
-                    f"Error: no open expectation {args.expectation_id!r} "
-                    f"on job {args.job_id!r}.",
+                    f"Error: no open expectation {args.expectation_id!r} on job {args.job_id!r}.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            print(
-                json.dumps({"removed": True, "expectation_id": args.expectation_id}, indent=2)
-            )
+            print(json.dumps({"removed": True, "expectation_id": args.expectation_id}, indent=2))
         elif args.command == "show":
             job = _own_room_job(session_id, args.job_id)
             print(json.dumps(_job_summary(job), indent=2))

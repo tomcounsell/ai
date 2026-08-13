@@ -449,6 +449,102 @@ class CreateResult:
     notes: list[str] = dataclasses.field(default_factory=list)
 
 
+def _resolve_spawn_job(job_id: str | None, parent_id: str | None):
+    """Resolve the Job a spawned lane's expectation lands on, or ``None``.
+
+    Chain (#2708, round-2 critique concern 1): explicit ``job_id`` argument
+    → walk ``parent_agent_session_id`` ancestors, calling
+    ``job_for_session`` on each until one resolves → ``None`` (caller
+    skip-and-logs; the drift advisory is the backstop for unresolved
+    cases). AgentSession stores no job_id field, so the walk-and-resolve
+    form is deliberate.
+    """
+    from models.job import Job
+
+    if job_id:
+        try:
+            jobs = list(Job.query.filter(id=job_id))
+            if jobs:
+                return jobs[0]
+            logger.warning("[valor-session] --job-id %s resolved no Job", job_id)
+        except Exception as e:  # noqa: BLE001 — resolution is best-effort
+            logger.warning("[valor-session] --job-id %s lookup failed: %s", job_id, e)
+
+    from bridge.job_router import job_for_session
+
+    seen: set[str] = set()
+    cursor = parent_id
+    while cursor and cursor not in seen and len(seen) < 10:
+        seen.add(cursor)
+        ancestor = _find_session(cursor)
+        if ancestor is None:
+            return None
+        job = job_for_session(ancestor)
+        if job is not None:
+            return job
+        cursor = getattr(ancestor, "parent_agent_session_id", None)
+    return None
+
+
+def _record_spawn_expectation(
+    *,
+    lane_owner: str,
+    message: str,
+    parent_id: str | None,
+    job_id: str | None,
+    expect_what: str | None,
+) -> str | None:
+    """Spawn-chokepoint outbound-expectation write (#2708, owner ruling 2026-08-13).
+
+    PM-authored expectations are canonical; this is the **null-fallback**
+    that guarantees a spawned lane's obligation is never unrecorded (the
+    predecessor ``AgentSession.expectations`` died with zero field writes).
+    Per-lane trigger: the fallback fires unless the bound Job already
+    carries an open OUTBOUND expectation whose ``owner`` is this lane — a
+    Job-wide any-exists check would skip the fallback for a second lane and
+    reproduce the #2494 silent-loss shape.
+
+    ``placeholder`` derives from provenance, mirroring
+    ``Job.goal_is_placeholder()``: ``expect_what`` present ⇒ deliberately
+    authored (``placeholder=False``, the prime's refine nudge skips it);
+    absent ⇒ mechanical summary of the spawn instruction
+    (``placeholder=True``).
+
+    Never raises and never blocks session creation. Returns a progress
+    note on write, ``None`` otherwise.
+    """
+    try:
+        job = _resolve_spawn_job(job_id, parent_id)
+        if job is None:
+            logger.info(
+                "[valor-session] no Job resolved for lane %s; spawn expectation "
+                "skipped (drift advisory is the backstop)",
+                lane_owner,
+            )
+            return None
+        if any(e.get("owner") == lane_owner for e in job.open_expectations(direction="outbound")):
+            return None  # PM already authored this lane's expectation
+        if expect_what and expect_what.strip():
+            what, placeholder = expect_what.strip(), False
+        else:
+            summary = " ".join((message or "").split())[:140]
+            what, placeholder = f"lane delivers: {summary}", True
+        expectation_id = job.add_expectation(
+            what,
+            direction="outbound",
+            owner=lane_owner,
+            holder=parent_id or "pm",
+            placeholder=placeholder,
+        )
+        return (
+            f"  Expectation: {expectation_id} (outbound, owner={lane_owner}, "
+            f"job={job.job_id}{', placeholder' if placeholder else ''})"
+        )
+    except Exception as e:  # noqa: BLE001 — must never block session creation
+        logger.warning("[valor-session] spawn expectation write failed: %s", e)
+        return None
+
+
 def create_session(
     *,
     message: str,
@@ -461,6 +557,8 @@ def create_session(
     telegram_message_id: int = 0,
     model: str | None = None,
     requires_real_chrome: bool = False,
+    job_id: str | None = None,
+    expect_what: str | None = None,
 ) -> CreateResult:
     """Programmatic core for session creation, shared by ``cmd_create`` and by
     callers that need to provision a session without going through the CLI.
@@ -671,6 +769,22 @@ def create_session(
 
         result = asyncio.run(_create())
 
+        # Spawn-chokepoint outbound expectation (#2708): record what this
+        # lane owes back on the bound Job, as a null-fallback under the
+        # PM-authored-is-canonical ruling. Best-effort by design — a miss
+        # is logged and the drift advisory backstops it; creation is never
+        # blocked.
+        if resolved_session_type == SessionType.ENG:
+            expectation_note = _record_spawn_expectation(
+                lane_owner=slug or session_id,
+                message=message,
+                parent_id=parent_id,
+                job_id=job_id,
+                expect_what=expect_what,
+            )
+            if expectation_note:
+                notes.append(expectation_note)
+
         # Check worker health after enqueue — the caller decides how to surface it
         worker_healthy, worker_age_s = _check_worker_health()
 
@@ -770,6 +884,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         telegram_message_id=getattr(args, "telegram_message_id", 0) or 0,
         model=model,
         requires_real_chrome=bool(getattr(args, "needs_real_chrome", False)),
+        job_id=getattr(args, "job_id", None),
+        expect_what=getattr(args, "expect_what", None),
     )
 
     # Presentation of the core's progress notes lives here, not in the core.
@@ -2065,6 +2181,26 @@ def main() -> int:
             "The worker scheduler will not start this session concurrently with "
             "another --needs-real-chrome session, since real Chrome has one DOM "
             "tree (issue #1256, Decision 2). No effect on ordinary sessions."
+        ),
+    )
+    create_parser.add_argument(
+        "--job-id",
+        dest="job_id",
+        help=(
+            "Explicitly bind the spawned lane's outbound expectation to this "
+            "Job (#2708). Without it, the Job is resolved by walking parent "
+            "sessions; on no resolution the expectation write is skipped "
+            "(logged) and the drift advisory backstops it."
+        ),
+    )
+    create_parser.add_argument(
+        "--expect-what",
+        dest="expect_what",
+        help=(
+            "PM-authored text of what this lane owes back (recorded as a "
+            "non-placeholder outbound expectation on the bound Job). When "
+            "omitted, a mechanical placeholder summary of the message is "
+            "recorded instead and the PM is nudged to refine it."
         ),
     )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")

@@ -198,9 +198,7 @@ class TestLifecycle:
         assert by_id[stale.job_id].status == "at-rest"
         assert by_id[fresh.job_id].status == "active"
 
-    def test_open_expectation_blocks_rest_but_an_empty_one_still_ages_out(
-        self, scratch_room_id
-    ):
+    def test_open_expectation_blocks_rest_but_an_empty_one_still_ages_out(self, scratch_room_id):
         """Under-recording degrades to today's behavior (rest by age), never
         to a false "done": only a *recorded* open expectation pins a Job open.
         """
@@ -238,9 +236,7 @@ def _age_out(job: Job) -> Job:
 
     from models.job import JOB_AT_REST_AGE_SECONDS
 
-    job.last_active_at = datetime.fromtimestamp(
-        time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
-    )
+    job.last_active_at = datetime.fromtimestamp(time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC)
     job.save()
     return job
 
@@ -277,7 +273,12 @@ class TestGoalSelfHeal:
         job = Job.mint(scratch_room_id, "check the deploy")
         data = json.loads(job.goal)
         data["promises"] = [
-            {"id": "legacy1", "ts": "2026-08-01T00:00:00+00:00", "text": "I'll report back", "removed_ts": None},
+            {
+                "id": "legacy1",
+                "ts": "2026-08-01T00:00:00+00:00",
+                "text": "I'll report back",
+                "removed_ts": None,
+            },
             {
                 "id": "legacy2",
                 "ts": "2026-08-02T00:00:00+00:00",
@@ -392,9 +393,7 @@ class TestOpenExpectationIndex:
             _json.loads = real_loads
 
         assert {j.job_id for j in flagged} >= {owing.job_id}
-        assert calls["n"] < 12, (
-            f"alarm parsed {calls['n']} goals; it must not scan the at-rest set"
-        )
+        assert calls["n"] < 12, f"alarm parsed {calls['n']} goals; it must not scan the at-rest set"
 
     def test_stale_flag_never_produces_a_wrong_answer(self, scratch_room_id):
         """A flag that says True with no open expectation must be filtered out.
@@ -441,9 +440,7 @@ class TestOpenExpectationIndex:
 
         assert second == 0, "a settled population must need no rewrites"
 
-    def test_backfill_does_not_clobber_a_concurrent_expectation(
-        self, scratch_room_id, monkeypatch
-    ):
+    def test_backfill_does_not_clobber_a_concurrent_expectation(self, scratch_room_id, monkeypatch):
         """Red-state proof (#2647): a bare save() in the backfill loop clobbers a
         concurrent expectation write. This must fail with expectations_survived=0
         on a bare save() and pass on the scoped one.

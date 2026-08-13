@@ -315,9 +315,7 @@ class Job(Model):
 
     def open_expectations(self, *, direction: str | None = None) -> list[dict]:
         """Open (undischarged) expectations, optionally filtered by direction."""
-        entries = [
-            e for e in self._goal_data()["expectations"] if e.get("removed_ts") is None
-        ]
+        entries = [e for e in self._goal_data()["expectations"] if e.get("removed_ts") is None]
         if direction is not None:
             entries = [e for e in entries if e.get("direction") == direction]
         return entries
