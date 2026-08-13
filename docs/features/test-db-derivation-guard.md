@@ -39,12 +39,14 @@ Everything else is a violation.
 
 ## The polarity is inverted, deliberately
 
-The guard is callee-agnostic almost everywhere, but not unconditionally, and the one exception is
-worth naming precisely. Route 1's `db=` keyword matching, and the dict-literal leg of a `**` splat
+The guard is callee-agnostic almost everywhere, but not unconditionally, and the exception is worth
+naming precisely. Route 1's `db=` keyword matching, and a dict-literal splat with a visible `"db"` key
 (`redis.Redis(**{"db": 15})`), are both callee-agnostic: the value is visible in the AST, so it is
-judged on its own terms regardless of what it is being passed to. The opaque `**name` splat
-(`redis.Redis(**kw)`) is the one place callee matters, because the value is *not* visible — there is
-nothing else to judge it by.
+judged on its own terms regardless of what it is being passed to, even when a later entry in the same
+literal could overwrite it (`**{"db": 15, **overrides}`). Callee matters wherever the value is not
+visible at all: the opaque `**name` splat (`redis.Redis(**kw)`) and a dict literal with no visible
+`"db"` key but an opaque entry (`redis.Redis(**{**base, "host": "x"})`) are both judged by callee,
+because there is nothing else to judge them by.
 
 Enumerating accepted *callee* shapes is what failed three times: everything unenumerated passes
 silently, and the next call site is always written in a shape nobody enumerated. That is still the
@@ -60,7 +62,10 @@ to `REDIS_CONSTRUCTORS` (`Redis`, `StrictRedis`, `from_url`), and the cost is re
 hidden. This matters beyond the code comment: a maintainer reading only this doc, without the module's
 own docstring, could see `REDIS_CONSTRUCTORS` as a violation of the guard's stated thesis and "restore"
 name-agnostic matching on that leg — which would re-trigger the 183-violation flood and get the guard
-deleted rather than fixed.
+deleted rather than fixed. Two live sites already sit on this callee-gated dict-literal path —
+`tests/unit/session_runner/test_runner_preempt.py:95` (`**{**FAST, **kwargs}`) and
+`tests/unit/test_settings.py:95` (`**{field: bad_value}`) — and widening the leg to callee-agnostic
+would turn both into violations, which is exactly the flood this scoping exists to avoid.
 
 The same inversion dissolves the `from_url` problem. The guard does not need to understand every URL
 expression, only to refuse every one it cannot prove safe.
