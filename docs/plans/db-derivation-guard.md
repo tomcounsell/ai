@@ -389,15 +389,15 @@ The PR must contain zero changes to `tests/conftest.py`, `tests/db_claim.py`,
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted
+- [x] Create `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted
       shapes, how to disposition a new site, why the polarity is inverted, and which of
       `check_dispositions`/`apply_dispositions` enforces the allowlist invariant.
-- [ ] Add entry to `docs/features/README.md` index table.
+- [x] Add entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] Module docstring on `tests/db_derivation_guard.py` names the two disposition tables and states
+- [x] Module docstring on `tests/db_derivation_guard.py` names the two disposition tables and states
       precisely which function enforces the "no allowlist entry may name a pool db" invariant.
-- [ ] `Exemption` docstring states matching is per-file-per-expression, not per-site.
+- [x] `Exemption` docstring states matching is per-file-per-expression, not per-site.
 
 ## Success Criteria
 
@@ -463,3 +463,31 @@ is worse than no check. The commands were always right; nothing could read them.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Anti-criterion: the four #2628-owned paths are untouched | `git diff --name-only origin/main...HEAD \| grep -c -e 'tests/conftest.py' -e 'tests/db_claim.py' -e 'tests/integration/test_notify_isolation.py' -e 'docs/features/test-db-ownership.md'` | printed number is `0` (`grep -c` exits 1 on zero matches; judge the number, not the exit status) |
 | Feature doc indexed | `grep -c 'test-db-derivation-guard' docs/features/README.md` | output > 0 |
+
+## Critique Results
+
+**Column semantics:** *Implementation Note* is the critic's suggestion at the time the finding was
+raised; *Addressed By* records what was actually adopted and supersedes it where the two differ.
+
+**Critique cycle 1, 2026-08-13 — RETROACTIVE.** CRITIQUE was skipped before BUILD; this pass runs
+against the shipped branch `session/db-derivation-guard` (PR #2700), which had already cleared six
+`/do-pr-review` rounds ending APPROVED at head `25e5367` with 0 blockers and 0 tech debt. The plan is
+judged as written against what shipped, so BLOCKER is reserved for a plan defect that would have
+changed the delivered outcome. War room depth: FULL (3 critics; LLM triage returned FULL on the
+shared test-infrastructure DB-claim invariant). Roster gate: 3/3 complete, all grounded. Findings:
+**9 total (0 blockers, 6 concerns, 3 nits)**. Structural re-run on the shipped tree: `scan_tree()`
+returns 26 candidates (17 `db=`, 9 `from_url`), 0 violations, 0 stale entries, `check_dispositions()`
+returns `[]`; `parse_verification_table` reads 12 checks / 0 malformed; `git diff --name-only
+origin/main...HEAD` names none of the four #2628-owned paths, so Risk 4 and Success Criterion 8 hold.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Structural | Two repo-mandated plan sections are absent: `## Update System` and `## Agent Integration`. The `docs/sdlc/do-plan-critique.md` addendum requires all four mandated sections; only `## Documentation` and `## Test Impact` are present. | pending | Add both as explicit no-op declarations rather than omitting them: `## Update System` — "No Popoto model changes; no `scripts/update/migrations.py` entry required." `## Agent Integration` — "`tests/db_derivation_guard.py` is a test-only non-collected module with no MCP surface; no server exposure required." A stated no-op is checkable; an absent section is indistinguishable from an overlooked one, which is exactly the failure mode this plan exists to attack. |
+| CONCERN | Structural | `## Test Impact` names `tests/unit/test_agent_catchup_recovery.py`, which does not exist. The real file, named correctly in Research Finding 3, the disposition table, and Task 2, is `tests/integration/test_agent_catchup_recovery.py`. | pending | Change the `## Test Impact` bullet to `tests/integration/test_agent_catchup_recovery.py`. The shipped diff converted the integration file, so this is a plan-text correction only. Any tooling that reads `## Test Impact` as the authoritative affected-test list currently resolves a nonexistent path and would silently find nothing. |
+| CONCERN | History & Consistency | Solution bullet 5 claims the PR is "fixing two live destructive-flush defects," but the disposition table and Risk 3 both resolve `tests/unit/test_conftest_isolation_guards.py:365` (`db=divergent_db`, flushed at `:366`) as DEFERRED to #2628. Only `tests/unit/test_redis_flush_guard.py:48,56` is actually converted. | pending | Reword bullet 5 to "fixing one live destructive-flush defect (`test_redis_flush_guard.py`) and deferring the second (`test_conftest_isolation_guards.py:365`, which keeps flushing an unowned pool slot) to #2628." The shipped `DEFERRED` tuple in `tests/db_derivation_guard.py` already encodes the correct disposition — the overclaim is in the Solution prose only, and it is the kind of top-line summary a reader trusts without reading two screens further. |
+| CONCERN | Risk & Robustness (Skeptic) | The plan states `TEST_DB_POOL_MAX` is imported "from `tests.db_claim` rather than re-declared," but no such public symbol exists. The shipped code imports the private `_TEST_DB_POOL_MAX` (`tests/db_derivation_guard.py:74`) from a file under #2628's exclusive lock, with only a point-in-time source comment as the contract. A rename in #2628 breaks collection of the whole guard test file. | pending | At `tests/db_derivation_guard.py:74`, wrap `from tests.db_claim import _TEST_DB_POOL_MAX as TEST_DB_POOL_MAX` in `try/except ImportError:` falling back to `int(os.environ.get("TEST_DB_POOL_MAX", "15"))` — byte-identical to the default `tests/db_claim.py:48` itself computes, so the fallback cannot drift from the real ceiling. The plan should state the cross-PR symbol dependency explicitly under Risk 4 (seam collision), which currently covers only file-level overlap and not symbol-level coupling. |
+| CONCERN | Risk & Robustness (Adversary) | The scanner walks `node.keywords` for a keyword literally named `db` and inspects `node.args` only for `from_url` (`tests/db_derivation_guard.py:560-561`). `redis.Redis.__init__` takes `db` as its third positional parameter, so `redis.Redis("localhost", 6379, 7)` hardcodes a pool slot undetected — the "a shape nobody enumerated" evasion class the plan's Q1 answer claims to be structurally incapable of missing. Positional `db` appears nowhere in the plan, the feature doc, or the planted-offender matrix, unlike every other evasion path (`**` splat, dict-literal `connection_kwargs`, literal URL, unparseable URL). | pending | In `scan_source`, alongside the `for kw in node.keywords:` loop, add: when `callee in REDIS_CONSTRUCTORS` and `len(node.args) >= 3`, treat `node.args[2]` as a `db-kwarg` candidate through the same `_is_claim_call` / one-hop-resolve acceptance path. Scope it to `REDIS_CONSTRUCTORS` deliberately — an unscoped positional rule would flag every third argument in the tree. Add a planted-offender case so the new branch is proven RED, per Risk 1. |
+| CONCERN | Scope & Value (User) | None of the nine Success Criteria assert what the engineer who trips the guard actually sees. Criterion 3 requires only that a violation name "the file and line," not that the message teaches the remedy. A guard built strictly to the stated criteria could emit "violates db= rule at line N" and pass every check while failing the plan's own desired outcome, which is that the engineer fixes it "without a human noticing." | pending | Add a tenth Success Criterion: "A violation message states the remedy — call `claim_test_db()` / `redis_test_url()`, or add a dispositioned ALLOWLIST/DEFERRED entry with a reason." The shipped `format_violation()` already emits exactly this; the criterion turns an incidental implementation choice into a checked deliverable, and it is the only criterion covering the plan's stated user. |
+| NIT | History & Consistency | The `**`-splat route gates on `REDIS_CONSTRUCTORS = frozenset({"Redis", "StrictRedis", "from_url"})` (`tests/db_derivation_guard.py:95`), a residual permit list at the splat layer — the one place the plan's inversion thesis is knowingly not applied. The module docstring admits an unlisted alias's opaque splat is invisible, and the false-positive data justifying the scoping lives only in source comments, never in the plan's Risks. | pending | exempt (NIT) |
+| NIT | Scope & Value | `## Appetite` reads "Medium. One session," which does not reflect the delivered surface: a ~733-line guard module, a `**`-splat route added mid-review, a mutation harness, two disposition tables, and a new feature doc. | pending | exempt (NIT) |
+| NIT | Structural | `docs/features/test-db-ownership.md`, named in spike-3 and in Risk 4's must-not-touch list, does not exist in the tree; #2628 creates it. The anti-criterion grep for it can therefore never match, which makes that quarter of the check unfalsifiable today. | pending | exempt (NIT) |

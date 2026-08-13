@@ -17,11 +17,7 @@ import pytest
 import redis
 import redis.asyncio as aioredis
 
-
-def _own_test_db(request) -> int:
-    """This xdist worker's private test db -- matches redis_test_db()."""
-    worker = getattr(request.config, "workerinput", {}).get("workerid", "")
-    return int(worker[2:]) + 1 if worker.startswith("gw") else 1
+from tests.db_claim import claim_test_db
 
 
 def test_flushdb_on_db0_is_blocked():
@@ -42,18 +38,21 @@ def test_flushall_is_blocked_on_db0():
         client.flushall()
 
 
-def test_flushall_is_blocked_even_on_test_db(request):
+def test_flushall_is_blocked_even_on_test_db():
     # flushall ignores the selected db and wipes everything, so it must be
     # blocked regardless of which db the client points at.
-    client = redis.Redis(db=_own_test_db(request))
+    client = redis.Redis(db=claim_test_db())
     with pytest.raises(RuntimeError, match="flushall"):
         client.flushall()
 
 
-def test_flushdb_on_own_test_db_is_allowed(request):
+def test_flushdb_on_own_test_db_is_allowed():
     # The redis_test_db fixture relies on being able to flush db>=1; the guard
-    # must not block that. Flush THIS worker's private db (safe under xdist).
-    client = redis.Redis(db=_own_test_db(request))
+    # must not block that. Flush THIS PROCESS'S claimed db -- the old helper
+    # re-derived gw{N}+1, which is not this process's claim as soon as any other
+    # pytest process on the machine holds a lower slot, so the flush landed on a
+    # database someone else owned (#2655).
+    client = redis.Redis(db=claim_test_db())
     assert client.flushdb() is True
 
 
