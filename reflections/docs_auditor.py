@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -451,6 +452,12 @@ def _detect_renamed_symbol_fixes(content: str, repo_root: Path) -> list[tuple[st
     longer exists but git history shows a rename, queue a replacement.
     """
     fixes: list[tuple[str, str]] = []
+    # Deliberately narrower than `_PATH_REF_RE`, which was widened to `*` for #2759.
+    # This is a *detector* pattern governing what the auditor proposes, not the write
+    # path the existence invariant guards. Widening it to bare names enlarges the
+    # candidate set and spends the GIT_LOG_FOLLOW_CAP per-run `git log --follow`
+    # budget on names that resolve to no single path anyway — a scope and volume
+    # change with its own failure modes, not a safety fix. Ruled unchanged in #2759.
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
         if (repo_root / path).exists():
@@ -494,57 +501,325 @@ def _detect_readme_broken_entries(
     return fixes
 
 
+def _normalize_prose(text: str | None) -> str:
+    """Lowercase, strip backticks, and collapse whitespace — for cue matching only.
+
+    The corpus writes every identifier backticked (``formerly `RedisJob```), which
+    is why the pre-#2744 hatch's bare substring tests (``f"formerly {old_term}"``)
+    never matched a single live document. Normalizing both the haystack and the
+    generated cues makes the hatch see the prose humans actually wrote.
+
+    **Never** use the result to produce output — it is lossy by design. It exists
+    solely to answer "does this document record a migration?".
+    """
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.replace("`", "").lower())
+
+
+# Verbs/adjectives that mark a sentence as recording a completed rename. Each fires
+# only in combination with the *new* term appearing somewhere in the same document
+# (see ``_has_migration_context``), which is what keeps them from exempting prose
+# that merely mentions a stale name.
+_MIGRATION_CUE_WORDS = (
+    "renamed",
+    "rename",
+    "replaced",
+    "replaces",
+    "replacing",
+    "formerly",
+    "earlier",
+    "old",
+    "alias",
+    "superseded",
+    "supersedes",
+)
+
+# Word-anchored alternation over the cue words. Anchoring is load-bearing, not
+# cosmetic: an unanchored substring test fires inside unrelated words ("old" is a
+# substring of threshold, holds, placeholder, bold, household), which collapses
+# tier 2 of ``_has_migration_context`` into "the document mentions the new term"
+# and exempts whole documents by accident.
+_MIGRATION_CUE_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _MIGRATION_CUE_WORDS) + r")\b"
+)
+
+
+def _migration_cues(old_term: str, new_term: str) -> tuple[str, ...]:
+    """Directed migration cues for one ``(old_term, new_term)`` pair, normalized.
+
+    These name *both* terms, so they are conclusive on their own and do not need
+    the new term to appear separately. Generated from the pair rather than
+    hard-coded, so adding a ``STALE_TERMS`` entry needs no edit here.
+    """
+    old = _normalize_prose(old_term)
+    new = _normalize_prose(new_term)
+    return (
+        f"renamed to {new}",
+        f"replaced by {new}",
+        f"now {new}",
+        f"formerly {old}",
+        f"replaces {old}",
+        f"replacing {old}",
+        f"earlier {old}",
+        f"old {old}",
+        f"alias {old}",
+        f"alias {new}",
+        f"{old} = {new}",
+        f"{old} -> {new}",
+        f"{old} → {new}",
+    )
+
+
+def _has_migration_context(normalized: str, old_term: str, new_term: str) -> bool:
+    """Whether a **whole document** records the ``old_term`` → ``new_term`` migration.
+
+    Two tiers, both evaluated over ``_normalize_prose``'d text:
+
+    1. A *directed* cue naming both (or the specific) terms — ``renamed to X``,
+       ``formerly Y``, ``Y = X``, ``Y -> X``, ``Y → X``, ``alias Y`` …
+    2. A generic migration cue word (``replacing``, ``earlier``, ``old`` …),
+       matched **word-anchored** via ``_MIGRATION_CUE_WORD_RE``, **plus** the new
+       term appearing somewhere in the document. Tier 2 is what catches real
+       corpus prose whose cue and term sit in different clauses, e.g.
+       *"`AgentSession` lands, replacing both the earlier `SessionLog` and
+       `RedisJob` models"* — where no directed cue names ``RedisJob`` at all.
+
+    Two things make tier 2 a guard rather than a rubber stamp, and both are
+    load-bearing:
+
+    - **The new term must appear.** Prose that merely mentions a stale name
+      without ever naming its successor is not a migration record.
+    - **The cue words are word-anchored.** A bare ``in`` substring test fires
+      inside unrelated words — ``old`` sits inside *threshold*, *holds*,
+      *placeholder*, *bold*, *household* — and with that, tier 2 degenerates into
+      "the document mentions the new term somewhere". Measured on the live corpus:
+      ``docs/guides/summarizer-output-audit.md`` was exempted for ``RedisJob``
+      solely because it contains ``summarize_threshold``.
+    """
+    if any(cue in normalized for cue in _migration_cues(old_term, new_term)):
+        return True
+    new = _normalize_prose(new_term)
+    if new and new in normalized:
+        return bool(_MIGRATION_CUE_WORD_RE.search(normalized))
+    return False
+
+
 def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     """Detect stale terms from STALE_TERMS dict that lack migration context.
 
     Matching is **word-anchored** with ``\\b``: a key never matches inside a
     longer run of word characters, so ``session_log`` does not match inside
-    ``agent/session_logs.py`` or ``session_log_writer`` (#2711). That is the
-    whole guarantee — it stops short of "never rewrites a path". ``/``, ``.``
-    and ``-`` are all word boundaries, so a key that *equals* an entire path
-    segment still matches and is still rewritten (``models/session_log.py`` →
-    ``models/agent_session.py``). Only the existence invariant in
-    ``_apply_fixes_to_file`` catches that, and only when the rewritten path is
-    absent from the working tree.
+    ``agent/session_logs.py`` or ``session_log_writer`` (#2711).
+
+    **Paths are never rewritten** (#2744). Word-anchoring alone did not deliver
+    that — ``/``, ``.`` and ``-`` are word boundaries, so a key equal to a whole
+    path segment used to be rewritten (``models/session_log.py`` →
+    ``models/agent_session.py``), a corruption the existence invariant provably
+    cannot catch because *both* files exist. Path-token suppression in
+    ``_apply_fixes_to_file`` now closes it: a match lying inside a
+    ``dir/file.{py,md}``-shaped token is left alone unconditionally.
+
+    **The migration-context hatch is DOCUMENT-scoped, deliberately.** Spike-2 of
+    ``docs/plans/docs-auditor-migration-context-and-bare-paths.md`` measured a
+    line-scoped (occurrence-scoped) hatch as *strictly worse*: it re-exposed 8
+    occurrences that the document scope correctly exempts, because migration
+    context in real prose sits in a different sentence from the term it explains.
+    Do not "improve" this into a per-occurrence rule.
+
+    Two further gates live at apply time rather than here, because the literal
+    ``fixes`` loop runs first and can delete lines out from under any index
+    computed against ``content``: fence/heading/deletion-prose suppression (via
+    ``_build_line_context`` / ``_is_documented_deletion``) and path-token
+    suppression. See ``_apply_fixes_to_file``.
 
     Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
     so detection and application share one matching semantics. These are passed
     to ``_apply_fixes_to_file`` as ``regex_fixes``, never mixed into the literal
-    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel).
+    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel). The
+    replacement stays a plain ``str``; the suppression callable is built at the
+    apply site so the withheld record and this channel's contract stay intact.
     """
+    normalized = _normalize_prose(content)
     fixes: list[tuple[re.Pattern[str], str]] = []
     for old_term, new_term in STALE_TERMS.items():
         pattern = re.compile(rf"\b{re.escape(old_term)}\b")
         if not pattern.search(content):
             continue
-        migration_context = (
-            f"renamed to {new_term}" in content
-            or f"replaced by {new_term}" in content
-            or f"now {new_term}" in content
-            or f"formerly {old_term}" in content
-            or f"Replaces {old_term}" in content
-            or f"replaces {old_term}" in content
-        )
-        if not migration_context:
+        if not _has_migration_context(normalized, old_term, new_term):
             fixes.append((pattern, new_term))
     return fixes
 
 
-# Path-shaped reference: ``dir/file.py`` or ``dir/file.md``, one or more segments.
-_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py|md)")
+# Path-shaped reference: ``dir/file.{py,md}`` *or* a bare ``file.{py,md}``. The
+# directory segment is optional (`*`, not `+`) so bare filenames enter the existence
+# invariant (#2759) — the #2711 corruption shape minus its directory prefix.
+_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
+
+# Basename -> number of owning paths, built once per repo root from the git index.
+# Keyed on the resolved ``repo_root`` so distinct checkouts (and distinct test
+# ``tmp_path`` roots) never share an index. Cleared at the top of every ``audit()``
+# run so a long-lived process does not answer from a stale snapshot.
+_BASENAME_INDEX_CACHE: dict[Path, dict[str, int]] = {}
 
 
-def _absent_new_path_refs(original_refs: set[str], candidate: str, repo_root: Path) -> list[str]:
+def _repo_basename_index(repo_root: Path) -> dict[str, int]:
+    """Map every tracked-or-untracked file's basename to how many paths own it.
+
+    Built from ``git ls-files --cached --others --exclude-standard``: one
+    subprocess, ``.gitignore`` respected for free, and files added but not yet
+    committed still counted (a doc may reference a file added in the same change).
+
+    On any subprocess failure the index degrades to empty and a warning is logged;
+    bare-name resolution then falls back to the doc-relative check alone.
+    """
+    key = repo_root.resolve()
+    cached = _BASENAME_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    index: dict[str, int] = {}
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=key,
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "docs_auditor: git ls-files failed in %s (rc=%s): %s — bare-name "
+                "existence falls back to doc-relative resolution only",
+                key,
+                proc.returncode,
+                (proc.stderr or "").strip(),
+            )
+        else:
+            for line in proc.stdout.splitlines():
+                name = line.rsplit("/", 1)[-1]
+                if name:
+                    index[name] = index.get(name, 0) + 1
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(
+            "docs_auditor: git ls-files errored in %s: %s — bare-name existence "
+            "falls back to doc-relative resolution only",
+            key,
+            e,
+        )
+
+    _BASENAME_INDEX_CACHE[key] = index
+    return index
+
+
+def _absent_new_path_refs(
+    original_refs: set[str], candidate: str, repo_root: Path, doc_path: Path
+) -> list[str]:
     """Path refs a candidate rewrite would newly introduce that are absent from disk.
 
     References already present in the original document are never re-validated —
-    the invariant constrains only what the auditor *adds*.
+    the invariant constrains only what the auditor *adds*. Because ``original_refs``
+    is computed with the same pattern, widening that pattern widens both sides
+    symmetrically and costs no new withholds on already-written prose.
+
+    Resolution order:
+
+    - A ref containing ``/`` resolves against ``repo_root`` alone, exactly as before.
+    - A **bare** ref (no ``/``, #2759) resolves first against the doc's own directory
+      (``repo_root / doc_path.parent / ref``), because a bare name in prose is most
+      often a sibling; then against the ``git ls-files`` basename index.
+
+    **Ambiguity is not a withhold.** ``>=1`` owner means the name exists and the fix
+    passes; ``>1`` owners is logged at DEBUG and allowed through. The invariant asks
+    "does this name denote something real", not "is it unambiguous" — ambiguity never
+    produced the #2711 corruption, which was a name existing nowhere. Only ``0``
+    owners is absent.
     """
-    return sorted(
-        ref
-        for ref in set(_PATH_REF_RE.findall(candidate)) - original_refs
-        if not (repo_root / ref).exists()
-    )
+    absent: list[str] = []
+    for ref in sorted(set(_PATH_REF_RE.findall(candidate)) - original_refs):
+        if "/" in ref:
+            if not (repo_root / ref).exists():
+                absent.append(ref)
+            continue
+        if (repo_root / doc_path.parent / ref).exists():
+            continue
+        owners = _repo_basename_index(repo_root).get(ref, 0)
+        if owners == 0:
+            absent.append(ref)
+        elif owners > 1:
+            logger.debug(
+                "docs_auditor: bare ref %r in %s resolves to %d paths — ambiguous "
+                "but present, allowed through",
+                ref,
+                doc_path,
+                owners,
+            )
+    return absent
+
+
+# A file-path-shaped token. Generalizes the single-segment shape to any number of
+# directory segments so a stale term matching the *first* segment is suppressed too.
+# Byte-identical to ``_PATH_REF_RE`` today, and deliberately kept separate: it answers
+# a different question (apply-time "is this match inside a path token?" suppression vs.
+# that one's write-path existence oracle) and either may diverge without the other.
+_PATH_TOKEN_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
+
+
+def _match_inside_path_token(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` lies wholly inside a ``dir/file.{py,md}`` token.
+
+    Scanning is confined to the match's own line, which bounds the cost and makes
+    the answer independent of how large the document is.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    rel_start, rel_end = start - line_start, end - line_start
+    return any(m.start() <= rel_start and rel_end <= m.end() for m in _PATH_TOKEN_RE.finditer(line))
+
+
+def _make_stale_term_replacer(replacement: str, suppressed: list[int]) -> Callable[[re.Match], str]:
+    """Build the apply-time suppression callable for one stale-term regex fix.
+
+    Context is re-derived from ``match.string`` — the text *currently being
+    rewritten* — and ``match.start()``, the live offset into it. That is the whole
+    point: ``_apply_fixes_to_file`` applies the literal ``fixes`` list first,
+    including ``_detect_readme_broken_entries``' ``new == ""`` whole-line-delete
+    sentinel, so any line index computed at detection time is stale the moment a
+    line ahead of it disappears — and it fails *silently*, producing a plausible
+    wrong rewrite rather than an error. There is no index here to go stale.
+
+    A suppressed match returns ``match.group(0)`` unchanged, but ``subn`` still
+    counts it, so each suppression is recorded in ``suppressed`` for the caller to
+    subtract from the reported ``applied`` count.
+
+    The callable is local to the apply loop and never travels on the regex channel:
+    ``_detect_stale_term_fixes`` keeps returning ``(re.Pattern, str)``, and
+    ``_reject`` keeps receiving the replacement *string* so the withheld record
+    stays human-readable in the PR body, findings summary, and warning log.
+    """
+    context_cache: dict[str, tuple[list[str], list[bool], list[str]]] = {}
+
+    def _replace(match: re.Match) -> str:
+        text = match.string
+        context = context_cache.get(text)
+        if context is None:
+            in_fence, heading_for_line = _build_line_context(text)
+            context = (text.splitlines(), in_fence, heading_for_line)
+            context_cache[text] = context
+        lines, in_fence, heading_for_line = context
+        line_idx = text.count("\n", 0, match.start())
+        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+            suppressed.append(1)
+            return match.group(0)
+        if _match_inside_path_token(text, match.start(), match.end()):
+            suppressed.append(1)
+            return match.group(0)
+        return replacement
+
+    return _replace
 
 
 def _apply_fixes_to_file(
@@ -559,8 +834,18 @@ def _apply_fixes_to_file(
     line that exactly equals ``old``. ``regex_fixes`` are ``(pattern, replacement)``
     pairs applied via ``pattern.subn()`` in their own loop.
 
-    **Existence invariant:** a fix may not introduce a ``dir/file.{py,md}``-shaped
-    reference that does not exist under ``repo_root``. Violating fixes are rejected
+    **Apply-time suppression (regex fixes only, #2744):** each regex fix's plain
+    ``str`` replacement is wrapped in a locally-built callable
+    (``_make_stale_term_replacer``) that leaves a match untouched when it sits in
+    a fenced code block, under a deletion-recording heading, next to deletion
+    prose, or inside a file-path token. The literal ``fixes`` loop runs *first*
+    and its ``new == ""`` sentinel deletes whole lines, so this context must be —
+    and is — derived from the live, already-mutated text at match time rather
+    than from any index computed at detection time.
+
+    **Existence invariant:** a fix may not introduce a ``file.{py,md}``-shaped
+    reference — bare or ``dir/``-prefixed (#2759) — that does not exist under
+    ``repo_root``; see ``_absent_new_path_refs``. Violating fixes are rejected
     individually — valid sibling fixes in the same file still apply — logged at
     warning level, and returned for the caller to surface.
 
@@ -611,7 +896,7 @@ def _apply_fixes_to_file(
             count = new_text.count(old)
             candidate = new_text.replace(old, new)
 
-        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root, path)
         if absent:
             _reject(old, new, absent)
             continue
@@ -619,10 +904,15 @@ def _apply_fixes_to_file(
         applied += count
 
     for pattern, new in regex_fixes:
-        candidate, count = pattern.subn(new, new_text)
-        if count == 0:
+        suppressed: list[int] = []
+        candidate, count = pattern.subn(_make_stale_term_replacer(new, suppressed), new_text)
+        count -= len(suppressed)
+        # An all-suppressed fix leaves the text byte-identical while ``subn``
+        # still reports a nonzero raw count. Skipping it keeps ``applied`` honest
+        # and avoids a pointless existence-invariant pass over unchanged text.
+        if count <= 0 or candidate == new_text:
             continue
-        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root, path)
         if absent:
             _reject(pattern.pattern, new, absent)
             continue
@@ -758,6 +1048,11 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
     findings: list[dict] = []
     lines = content.splitlines()
     in_fence, heading_for_line = _build_line_context(content)
+    # Deliberately narrower than `_PATH_REF_RE` (widened to `*` for #2759), for the
+    # same reason as `_detect_renamed_symbol_fixes`: this is a detector pattern
+    # governing what the auditor *proposes*, not the write path. Widening it would
+    # spend the per-run issue cap on bare names not resolvable to a single path.
+    # Ruled unchanged in #2759.
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
         if _is_placeholder_path(path):
@@ -1063,6 +1358,9 @@ def audit(
     """
     global _RENAME_QUERY_COUNT
     _RENAME_QUERY_COUNT = 0  # reset per-run cap
+    # The bare-name existence oracle is a per-*run* snapshot: a long-lived process
+    # must not answer from an index built before the last commit (#2759).
+    _BASENAME_INDEX_CACHE.clear()
 
     root = (repo_root or PROJECT_ROOT).resolve()
 

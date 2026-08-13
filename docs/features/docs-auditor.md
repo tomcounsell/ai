@@ -59,8 +59,38 @@ writes the SDLC stage marker and updates the plan frontmatter.
 The dictionary's current entries are model and field renames: `SessionLog` and
 `RedisJob` were renamed to AgentSession; the `session_log` and `redis_job`
 fields were renamed to agent_session. Stating the mapping in that form is also
-what keeps this page immune to its own detector — see the `migration_context`
-escape hatch below.
+what keeps this page immune to its own detector — see the migration-context
+hatch (gate 1) below.
+
+### Four gates guard every rewrite
+
+The auditor is an unreviewed autonomous committer: the rotation caller opens a
+PR the branch sweeper can auto-merge with nobody in between. That makes its two
+failure modes asymmetric. A stale term that survives is a cosmetic miss. A
+sentence the auditor falsifies is a corruption a human later trusts. Every gate
+below therefore errs toward **not** rewriting.
+
+Four fail-closed gates sit between a proposed rewrite and the disk, in order:
+
+| # | Gate | Where it runs |
+|---|------|---------------|
+| 1 | Migration-context hatch | `_detect_stale_term_fixes` (detection) |
+| 2 | Fence / heading / deletion-prose suppression | `_apply_fixes_to_file` (apply) |
+| 3 | Path-token suppression | `_apply_fixes_to_file` (apply) |
+| 4 | Existence invariant | `_apply_fixes_to_file` (apply) |
+
+Gates 1 to 3 govern stale-term rewrites. Gate 4 governs every auto-fix from
+every detector.
+
+Over the three docs the auditor previously corrupted, false rewrites went from
+**18 occurrences to 1**. Across all of `docs/**/*.md` outside `docs/plans/`,
+exactly one stale-term proposal survives — the accepted quoted-transcript
+residual at `docs/guides/summarizer-output-audit.md:68`, which the plan predicted
+and accepted; the four docs that still contain a `STALE_TERMS` key are all
+genuine migration or audit prose where any rewrite would produce a false
+sentence. The detector is quiet, not dead: a synthetic
+sentence carrying a stale term and no migration context still queues a fix, and
+a test pins that.
 
 #### Stale terms are word-anchored
 
@@ -69,12 +99,9 @@ longer run of word characters: `session_log` does not match inside
 `agent/session_logs.py` or `session_log_writer`, and `SessionLog` does not match
 inside `SessionLogs`.
 
-That is the whole guarantee, and it stops short of "never rewrites a path".
-`/`, `.`, and `-` are all word boundaries, so a key that *equals* an entire path
-segment still matches and is still rewritten — `models/session_log.py` becomes
-`models/agent_session.py`. The existence invariant below is the only thing that
-catches such a rewrite, and only when the rewritten path is absent from the
-working tree; if both paths happen to exist, the rewrite is accepted.
+Word-anchoring on its own does not deliver "never rewrites a path". `/`, `.`,
+and `-` are all word boundaries, so a key equal to a whole path segment still
+matches. Gate 3 is what closes that.
 
 Detection and application share one matching semantics: `_detect_stale_term_fixes`
 returns compiled `(pattern, replacement)` pairs on a dedicated `regex_fixes`
@@ -82,32 +109,152 @@ channel, applied by `_apply_fixes_to_file` through `pattern.subn()`. The literal
 `fixes` channel used by the three rename detectors is untouched, so the
 `new == ""` line-delete sentinel keeps its exact-line-equality semantics.
 
-The `migration_context` escape hatch is unchanged: a doc that already says
-"renamed to X", "replaced by X", "now X", "formerly Y", or "replaces Y" gets no
-fix for that term.
+#### Gate 1: the migration-context hatch is document-scoped
 
-#### The existence invariant
+`_has_migration_context` asks whether the **whole document** records the
+`old_term` → `new_term` migration, over text run through `_normalize_prose`
+(backticks stripped, whitespace collapsed, lowercased). That normalization is
+used for cue matching only and never to produce output; it is lossy by design.
+It is also the point: the corpus writes every identifier backticked, so a bare
+substring test for `formerly RedisJob` never sees the prose humans actually
+wrote.
+
+Two tiers of cue:
+
+1. **Directed cues**, generated per `(old_term, new_term)` pair by
+   `_migration_cues`: `renamed to X`, `replaced by X`, `now X`, `formerly Y`,
+   `replaces Y`, `replacing Y`, `earlier Y`, `old Y`, `alias`, `Y = X`,
+   `Y -> X`, `Y → X`. Each names both (or the specific) terms, so it is
+   conclusive alone. Generating them from the pair means adding a `STALE_TERMS`
+   entry costs no edit here.
+2. **Generic cue words** (`_MIGRATION_CUE_WORDS`: `renamed`, `replaced`,
+   `replacing`, `formerly`, `earlier`, `old`, `alias`, `superseded`, …), matched
+   **word-anchored** through the precompiled `_MIGRATION_CUE_WORD_RE`
+   alternation, that fire **only when the new term also appears somewhere in the
+   document**. Tier 2 is what catches real corpus phrasing whose cue and term sit
+   in different clauses, such as *"replacing both the earlier `SessionLog` and
+   `RedisJob` models"* for `RedisJob`, which no directed cue names.
+
+   **Both halves of tier 2 are the anti-over-exemption guard, and both are
+   load-bearing.** Requiring the new term means prose that mentions a stale name
+   without ever naming its successor is not a migration record and still queues a
+   fix. Word-anchoring the cue words means a cue cannot fire from inside an
+   unrelated word: `old` is a substring of *threshold*, *holds*, *placeholder*,
+   *bold* and *household*, all common in this corpus, and with a bare substring
+   test tier 2 collapses into "the document mentions the new term somewhere".
+   That was not hypothetical — `docs/guides/summarizer-output-audit.md` was
+   exempted for `RedisJob` solely because it contains `summarize_threshold`.
+   `TestStaleTermDictionary::test_cue_word_inside_a_larger_word_does_not_exempt`
+   pins it.
+
+**The scope is the document, deliberately.** Line-scoping (one exemption
+decision per occurrence) was measured and is strictly worse: it re-exposes 8
+occurrences the document scope correctly exempts, because in real prose the
+migration context sits in a *different* sentence from the term it explains. Do
+not "improve" this into a per-occurrence rule.
+
+#### Gates 2 and 3 are computed at apply time, never at detection time
+
+`_detect_stale_term_fixes` returns `(compiled pattern, replacement string)` and
+nothing else; the channel contract is unchanged. The suppression callable is
+built inside `_apply_fixes_to_file`'s regex loop by `_make_stale_term_replacer`,
+which wraps that plain string.
+
+That placement is load-bearing, not stylistic. `_apply_fixes_to_file` applies the
+literal `fixes` list **first** (including `_detect_readme_broken_entries`'
+`new == ""` whole-line-delete sentinel) and only then runs the regex fixes over
+the already-mutated text. Any line index computed at detection time is stale the
+moment a line ahead of it disappears, and it fails **silently**: a
+plausible-looking wrong rewrite rather than an error, which is precisely the
+corruption class these gates exist to close. The callable instead re-derives
+context from `match.string` (the text currently being rewritten) and
+`match.start()` (the live offset into it), so there is no index to go stale.
+
+Keeping the callable local also keeps `_reject` receiving the replacement
+*string*, so a withheld record stays readable in the PR body, the findings
+summary, and the warning log instead of rendering as `<function ... at 0x...>`.
+
+**Gate 2** reuses `_build_line_context` / `_is_documented_deletion`, the same
+machinery the deleted-target detector uses (described below): fenced code
+blocks, deletion or migration headings, and deletion prose on an adjacent line.
+
+**Gate 3** suppresses any match lying wholly inside a `_PATH_TOKEN_RE` token
+(`(?:[\w.-]+/)*[\w.-]+\.(?:py|md)`), scanned within the match's own line so the
+cost is independent of document size. This is the gate that stops
+`models/session_log.py` from becoming `models/agent_session.py`, a corruption
+the existence invariant provably cannot catch, because both files exist.
+
+A suppressed match returns unchanged, but `subn` still counts it as a
+substitution. Suppressions are therefore tallied in a closure cell and
+subtracted from the reported `applied` count, and an all-suppressed fix is
+skipped outright rather than booked as a no-op write.
+
+#### Gate 4: the existence invariant
 
 Every auto-fix, regardless of detector, is subject to one post-condition before
-anything is written: **the auditor may not introduce a slash-shaped `.py`/`.md`
-repo-path reference that is absent from the working tree.**
+anything is written: **the auditor may not introduce a `.py`/`.md` reference
+that is absent from the working tree.**
 
-That is the exact shape `_PATH_REF_RE` matches, and it is narrower than "any
-reference to a file". Two forms are deliberately **not** covered: paths with
-other extensions (`.sh`, `.ts`, `.json`), and the dotted module form
-(`bridge.session_log`) — the same class as the #2711 incident. A fix that
-introduces only those forms passes the invariant with `withheld=0`.
+`_PATH_REF_RE` is `(?:[\w.-]+/)*[\w.-]+\.(?:py|md)`. The directory segment is
+optional, so bare filenames (`agent_session.py`, `README.md`) are visible to the
+invariant alongside `dir/file.md` forms. A bare name existing nowhere is the
+#2711 corruption shape minus its directory prefix. Two forms are still
+deliberately **not** covered: other extensions (`.sh`, `.ts`, `.json`), and the
+dotted module form (`bridge.session_log`). A fix that introduces only those
+passes the invariant with `withheld=0`.
 
-`_apply_fixes_to_file` simulates each fix, collects the `dir/file.{py,md}`-shaped
-references the candidate text would newly introduce, and resolves each against
-`repo_root`. If any is absent, that fix is rejected.
+`_apply_fixes_to_file` simulates each fix, collects the references the candidate
+text would newly introduce, and hands them to `_absent_new_path_refs` together
+with the doc's own path. If any is absent, that fix is rejected.
+
+**Resolution order.** A ref containing `/` resolves against `repo_root` and
+nothing about it changed. A **bare** ref resolves first against the doc's own
+directory (`repo_root / doc_path.parent / ref`), because a bare name in prose is
+most often a sibling, and then against a basename index built from
+`git ls-files --cached --others --exclude-standard`. That is one subprocess, it
+respects `.gitignore` for free, and it counts files added but not yet committed,
+which matters because a doc may reference a file added in the same change. The
+index is memoized per resolved repo root and cleared at the top of every
+`audit()` run, so a long-lived process never answers from a pre-commit snapshot.
+On subprocess failure it logs a warning and degrades to doc-relative resolution
+alone.
+
+**Ambiguity is not a withhold.** `>=1` owner means the name denotes something
+real and the fix passes; `>1` owners is DEBUG-logged and allowed through; only
+`0` owners is absent. The invariant's question is "does this name denote
+something real", not "is it unambiguous". Ambiguity never produced the #2711
+corruption. A name existing *nowhere* did. The corpus carries 218 ambiguous
+refs across 108 multi-owner basenames, so withholding on ambiguity would fire
+constantly for no safety gain.
+
+Making the directory segment optional costs nothing on already-written prose.
+`_absent_new_path_refs` validates only `findall(candidate) - original_refs`, and
+`original_refs` is computed with the same pattern, so both sides widen
+symmetrically and pre-existing references are never re-validated. Measured
+self-baselining over `docs/features/*.md` (narrow `+` arm versus shipped `*` arm
+in one run), the widening produces **zero** new withholds.
+
+#### Why the sibling patterns stay narrower
+
+`_detect_renamed_symbol_fixes` and `_detect_deleted_target_issues` each carry
+their own `` `((?:[\w.-]+/)+[\w.-]+\.py)` `` pattern that still *requires* a
+directory segment. The asymmetry with `_PATH_REF_RE` is deliberate, and a
+comment at each site records why.
+
+Those two are **detector** patterns, governing what the auditor *proposes*.
+`_PATH_REF_RE` is the only one of the three on the write path. Widening the
+detectors enlarges the candidate set and spends the `GIT_LOG_FOLLOW_CAP` per-run
+`git log --follow` budget and the per-run issue cap on bare names that are not
+resolvable to a single path anyway. That is a scope and volume change with its
+own failure modes, not a safety fix.
 
 - **Attributed per term, not per occurrence.** Only the offending fix is
   dropped; valid sibling fixes in the same file still apply, and the file is
   never abandoned wholesale. But a fix is one `(old, new)` pair applied to the
   whole document — `str.replace` and `pattern.subn()` both rewrite *every*
-  occurrence — so a single path-shaped hit withholds that term's legitimate
-  prose hits in the same file too.
+  occurrence — so a single absent-target hit withholds that term's legitimate
+  prose hits in the same file too. Path-shaped occurrences no longer reach this
+  gate at all: gate 3 suppresses them first.
 - **References already present in the document are never re-validated.** The
   invariant constrains what the auditor *adds*, so it cannot reject a fix over
   pre-existing prose that names a long-gone module. The residual hole: if a
@@ -392,6 +539,18 @@ the `_write_liveness` 4-arg/5-arg positional contract (`fixes_withheld` is a
 trailing keyword param, so that contract is unchanged); `TestVaultDeadCodeRemoved`
 asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
 
+The four gates are covered by `TestStaleTermDictionary` (cue tiers across
+backticked, cased, alias, and arrow forms; the channel stays
+`(re.Pattern, str)`), `TestStaleTermWordBoundary` (path-token suppression, and a
+`README.md` fixture where an earlier line is deleted by the `new == ""` sentinel
+before a later stale term is evaluated, the case detection-time indices fail
+silently), `TestExistenceInvariant` (bare-name withhold, doc-relative
+resolution, ambiguous-but-present pass, no re-validation of pre-existing refs),
+and `TestWithheldBlocksAutoMerge` (a bare-name withhold reaching the PR body,
+Telegram, and liveness). `TestWithheldRateNonRegression` self-baselines the
+narrow and widened `_PATH_REF_RE` arms in one run inside a disposable detached
+`git worktree`, asserting the widening adds no withholds.
+
 ```bash
 pytest tests/unit/test_docs_auditor_substrate.py -v
 ```
@@ -406,3 +565,5 @@ pytest tests/unit/test_docs_auditor_substrate.py -v
 - Issue #1247 — design and rollout plan
 - Issue #1249 — memory refresh hook (forward-compat target)
 - Issue #2084 — vault↔site/docs drift detector, reflection enable, xref-orphan sweep
+- Issues #2744 / #2759 — the migration-context hatch, apply-time suppression, and
+  the bare-name existence invariant (`docs/plans/docs-auditor-migration-context-and-bare-paths.md`)
