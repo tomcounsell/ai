@@ -19,6 +19,37 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HOOK = REPO_ROOT / ".claude" / "hooks" / "post_tool_use.py"
 
+_HEAVY_MODULES = ("popoto", "redis", "config.settings", "models.memory", "models.agent_session")
+
+_GUARD_SHIM_DUMP = """\
+import time: self [us] | cumulative | imported package
+import time:       120 |        120 |   site
+import time:        45 |         45 |     tools.redis_flush_guard
+import time:        30 |         30 |     _redis_flush_guard_boot
+import time: cached    | cached     | _redis_flush_guard_boot
+import time: truncated output
+import time:  120 |  120
+"""
+
+_REAL_HEAVY_DUMP = """\
+import time: self [us] | cumulative | imported package
+import time:       310 |        310 |   redis
+import time:       220 |        530 |     popoto.models
+import time:       140 |        140 |   config.settings
+"""
+
+
+def _heavy_import_offenders(stderr: str, heavy: tuple[str, ...] = _HEAVY_MODULES) -> list[str]:
+    """Return which ``heavy`` module names are genuinely present in a
+    ``-X importtime`` stderr dump.
+
+    Placeholder body (Task 1 / red-first): the ORIGINAL substring scan,
+    verbatim. It is deliberately kept naive here so the crafted fixtures can
+    demonstrate the false positive before the identity-matching parser
+    replaces this body in Task 2.
+    """
+    return [m for m in heavy if m in stderr]
+
 
 def _sidecar(session_id: str) -> Path:
     return REPO_ROOT / "data" / "sessions" / session_id / "memory_buffer.json"
@@ -74,9 +105,26 @@ def test_counter_only_call_does_not_import_popoto(clean_session):
         capture_output=True,
     )
     assert proc.returncode == 0, proc.stderr
-    heavy = ("popoto", "redis", "config.settings", "models.memory", "models.agent_session")
-    offenders = [m for m in heavy if m in proc.stderr]
+    offenders = _heavy_import_offenders(proc.stderr)
     assert not offenders, f"counter-only path imported heavy modules: {offenders}"
+
+
+def test_heavy_detection_ignores_lookalike_module_names():
+    """``tools.redis_flush_guard`` / ``_redis_flush_guard_boot`` must NOT be
+    mistaken for the ``redis`` package: they merely contain "redis" as a
+    substring. Also covers Risk 2's malformed-row and empty-input guards."""
+    assert _heavy_import_offenders(_GUARD_SHIM_DUMP) == []
+    assert _heavy_import_offenders("") == []
+
+
+def test_heavy_detection_still_catches_real_imports():
+    """A genuine top-level ``redis``, a ``popoto.models`` descendant, and an
+    exact ``config.settings`` must still be flagged (over-loosening guard)."""
+    assert set(_heavy_import_offenders(_REAL_HEAVY_DUMP)) == {
+        "redis",
+        "popoto",
+        "config.settings",
+    }
 
 
 def test_counter_only_call_bumps_sidecar_counter(clean_session):
