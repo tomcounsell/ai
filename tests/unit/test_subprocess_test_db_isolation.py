@@ -131,6 +131,44 @@ ALLOWLIST: frozenset[str] = frozenset(
         "tests/unit/test_youtube_search.py:219",
         # [standalone-script] starred argv0 (*env_git) SKIP_ARGV0 cannot resolve; child is git
         "tests/unit/test_sdlc_next_skill.py:209",
+        #
+        # [standalone-script] validate_design_system_readonly.py: json/os/re/sys only,
+        # no subprocess. (Its sibling validate_design_system_sync.py IS converted —
+        # that one spawns `-m tools.design_system_sync`, a repo module.)
+        "tests/unit/hooks/test_validate_design_system_readonly.py:23",
+        # [standalone-script] validate_features_readme_sort.py: stdlib only, no subprocess
+        "tests/unit/test_features_readme_sort.py:255",
+        "tests/unit/test_features_readme_sort.py:277",
+        "tests/unit/test_features_readme_sort.py:304",
+        "tests/unit/test_features_readme_sort.py:334",
+        "tests/unit/test_features_readme_sort.py:346",
+        "tests/unit/test_features_readme_sort.py:360",
+        "tests/unit/test_features_readme_sort.py:386",
+        # [standalone-script] relink_global_skills.py: json/os/select/sys/pathlib, no subprocess
+        "tests/unit/test_relink_global_skills.py:27",
+        # [standalone-script] validate_commit_message.py: json/re/sys only, no subprocess
+        "tests/unit/test_sync_claude_to_opencode.py:421",
+        "tests/unit/test_sync_claude_to_opencode.py:436",
+        "tests/unit/test_validate_commit_message.py:26",
+        "tests/unit/test_validate_commit_message.py:76",
+        # [standalone-script] validate_no_destructive_git_in_*.py: stdlib plus
+        # hook_utils.destructive_git_shapes, itself stdlib-only; shells out to git only
+        "tests/unit/test_validate_no_destructive_git_in_shared_checkout.py:341",
+        "tests/unit/test_validate_no_destructive_git_in_worktree.py:129",
+        "tests/unit/test_validate_no_destructive_git_in_worktree.py:185",
+        "tests/unit/test_validate_no_destructive_git_in_worktree.py:208",
+        # [standalone-script] validate_no_gos_justification.py: stdlib only; shells to `gh`
+        "tests/unit/test_validate_no_gos_justification.py:145",
+        "tests/unit/test_validate_no_gos_justification.py:248",
+        # [standalone-script] validate_no_uv_sync_in_worktree.py: json/re/shlex/sys/pathlib
+        "tests/unit/test_validate_no_uv_sync_in_worktree.py:133",
+        "tests/unit/test_validate_no_uv_sync_in_worktree.py:188",
+        "tests/unit/test_validate_no_uv_sync_in_worktree.py:199",
+        "tests/unit/test_validate_no_uv_sync_in_worktree.py:487",
+        "tests/unit/test_validate_no_uv_sync_in_worktree.py:501",
+        # [standalone-script] validate_sdlc_on_stop.py: stdlib plus hook_utils.constants
+        # (stdlib-only); its subprocess use is `git` invocations exclusively
+        "tests/unit/test_validate_sdlc_on_stop.py:265",
     }
 )
 
