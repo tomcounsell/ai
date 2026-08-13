@@ -226,16 +226,16 @@ The rationale that must survive lives at the point of use instead:
 
 ## Success Criteria
 
-- [ ] `test_heavy_detection_ignores_lookalike_module_names` exists, and its FAIL output against the pre-fix substring logic is pasted verbatim in the PR body (red-first paper trail)
-- [ ] `test_heavy_detection_still_catches_real_imports` passes both before and after the parser change, proving the fix did not disarm the detector
-- [ ] `test_counter_only_call_does_not_import_popoto` routes through `_heavy_import_offenders` and no longer contains an inline substring comprehension
-- [ ] Risk 2's malformed-row guard is exercised, not just claimed: `_GUARD_SHIM_DUMP` contains a no-pipe row and a two-field row, and `test_heavy_detection_ignores_lookalike_module_names` asserts `_heavy_import_offenders("") == []` — both inside the existing two nodes, adding no third `def test_...`
-- [ ] `./scripts/pytest-clean.sh tests/unit/test_post_tool_use_fast_path.py -q` reports 6 passed (exactly six — the malformed and empty-input cases must NOT be split into a seventh node)
-- [ ] `git diff --name-only main...HEAD` lists exactly one file: `tests/unit/test_post_tool_use_fast_path.py`
-- [ ] `.claude/hooks/post_tool_use.py` is untouched
-- [ ] Tests pass (`/do-test`) — with the four known pre-existing `main` baseline failures excluded: `tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity::test_all_entries_have_required_fields`, two nodes in `tests/unit/test_session_modal_liveness_render.py`, and `tests/unit/test_update_hardlinks.py::test_no_husk_directories_in_skill_roots`
-- [ ] Documentation updated (`/do-docs`) — inline docstrings only, per the Documentation section
-- [ ] No agent integration to grep for; the Agent Integration section asserts none is required
+- [x] `test_heavy_detection_ignores_lookalike_module_names` exists, and its FAIL output against the pre-fix substring logic is pasted verbatim in the PR body (red-first paper trail)
+- [x] `test_heavy_detection_still_catches_real_imports` passes both before and after the parser change, proving the fix did not disarm the detector
+- [x] `test_counter_only_call_does_not_import_popoto` routes through `_heavy_import_offenders` and no longer contains an inline substring comprehension
+- [x] Risk 2's malformed-row guard is exercised, not just claimed: `_GUARD_SHIM_DUMP` contains a no-pipe row and a two-field row, and `test_heavy_detection_ignores_lookalike_module_names` asserts `_heavy_import_offenders("") == []` — both inside the existing two nodes, adding no third `def test_...`
+- [x] `./scripts/pytest-clean.sh tests/unit/test_post_tool_use_fast_path.py -q` reports 6 passed (exactly six — the malformed and empty-input cases must NOT be split into a seventh node)
+- [x] `git diff --name-only main...HEAD` lists exactly one file: `tests/unit/test_post_tool_use_fast_path.py`
+- [x] `.claude/hooks/post_tool_use.py` is untouched
+- [x] Tests pass (`/do-test`) — with the four known pre-existing `main` baseline failures excluded: `tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity::test_all_entries_have_required_fields`, two nodes in `tests/unit/test_session_modal_liveness_render.py`, and `tests/unit/test_update_hardlinks.py::test_no_husk_directories_in_skill_roots`
+- [x] Documentation updated (`/do-docs`) — inline docstrings only, per the Documentation section
+- [x] No agent integration to grep for; the Agent Integration section asserts none is required
 
 ## Team Orchestration
 
