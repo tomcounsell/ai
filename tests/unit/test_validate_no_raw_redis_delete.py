@@ -52,11 +52,24 @@ class TestRepoScopeGate:
         cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
         assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
 
-    def test_blocks_when_cwd_is_a_worktree_of_this_repo(self):
-        # Worktrees carry a full working tree, so the marker file is present.
-        assert (REPO_ROOT / ".claude/hooks/validators").is_dir()
+    def test_blocks_when_cwd_is_a_worktree_of_this_repo(self, tmp_path):
+        """A worktree's `.git` is a FILE sitting beside a full checkout,
+
+        including the marker itself. `_guard_applies` checks the marker
+        before `.git`, so a worktree must BLOCK rather than stand down as
+        if it were a foreign repo -- this builds that exact shape instead
+        of relying on the marker-before-`.git` ordering being pinned only
+        by accident (it otherwise happens to hold in
+        `test_blocks_when_cwd_is_this_repo` because `REPO_ROOT` itself
+        always carries a `.git`, dir or file).
+        """
+        worktree = tmp_path / "worktrees" / "some-slug"
+        marker_dir = worktree / ".claude" / "hooks" / "validators"
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "validate_no_raw_redis_delete.py").write_text("# marker\n")
+        (worktree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/some-slug\n")
         cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
-        assert validator.find_violation(cmd, str(REPO_ROOT / "tests")) is not None
+        assert validator.find_violation(cmd, str(worktree)) is not None
 
     def test_allows_when_cwd_is_another_repo(self, tmp_path):
         """The popoto case: raw Redis there is the library's own test seeding."""
