@@ -189,7 +189,7 @@ existing assertion (see Rabbit Holes).
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Redis reachable on the default port | `redis-cli -p 6379 ping` | The db-claim pool and both parent/child clients need a live server |
-| `tests/db_claim.subprocess_env` present on main | `python -c "import ast,sys; src=open('tests/db_claim.py').read(); sys.exit(0 if 'def subprocess_env' in src else 1)"` | The fix calls this helper; it must exist before the sweep |
+| `tests/db_claim.subprocess_env` present on main | `python -c "import ast,sys; t=ast.parse(open('tests/db_claim.py').read()); sys.exit(0 if any(isinstance(n,ast.FunctionDef) and n.name=='subprocess_env' for n in ast.walk(t)) else 1)"` | The fix calls this helper; it must exist before the sweep. Checks for a real function definition, not a substring that a comment could satisfy |
 
 Run via `python scripts/check_prerequisites.py docs/plans/subprocess-harness-test-db-inheritance.md`.
 
@@ -233,60 +233,107 @@ production db0 is never touched.
 - Lines **87**, **101**: replace `env = os.environ.copy(); env["AI_REPO_ROOT"] = …`
   with `env = subprocess_env(AI_REPO_ROOT=…)`. These deliberately point at a
   bad `AI_REPO_ROOT` and exit 2 inside the bash wrapper before Python starts, so
-  they cannot reach Redis today — convert them anyway so the file has one shape
-  and the guard needs no per-line exemptions.
+  they cannot reach Redis today. Convert them for **uniform file shape and
+  defence in depth** — one `env=` idiom per file, and no ambient `REDIS_URL`
+  leaking to a child if the wrapper's early-exit path is ever relaxed. (The
+  earlier draft justified this as "so the guard needs no per-line exemptions";
+  that was false — both sites invoke `WRAPPER`, so the revised argv-gated
+  predicate *does* match them, and converting them is what keeps the guard green
+  rather than what avoids an exemption. Do not carry the old rationale into a
+  code comment.)
 - Line **129** (`test_dispatch_from_foreign_cwd_with_own_tools_succeeds`):
   replace with `subprocess_env(AI_REPO_ROOT=str(REPO_ROOT))` — **and do not pass
   `project_root`**. This test plants a decoy `tools/` package in a foreign `cwd`
   and asserts the wrapper still resolves the real one; injecting `REPO_ROOT` on
   `PYTHONPATH` muddies the very resolution order the test exists to pin. Only
-  the `REDIS_URL` half of the helper is wanted here.
-- Lines **69**, **75**, **81** need no change: they pass neither `cwd` nor `env`
-  and terminate on the bash usage/`--help` path without importing Python. The
-  guard's predicate (Python interpreter + repo-rooted `cwd`) does not match
-  them, so no exemption comment is required.
+  the `REDIS_URL` half of the helper is wanted here. Note this site reaches
+  Python against `REPO_ROOT` from `cwd=str(tmp_path)` — it is invisible to any
+  `cwd`-spelling-based predicate, which is one reason the guard gates on argv
+  (Group D).
+- Lines **69**, **75**, **81** invoke `WRAPPER` and so *are* matched by the
+  argv-gated predicate. They pass no `env` today and terminate on the bash
+  usage/`--help` path without importing Python. Convert them too:
+  `env=subprocess_env()`. This is cheaper and more honest than three exemption
+  entries, and leaves the whole file with a single shape.
 
-**Group B — the audited sweep.** Same conversion at the remaining call sites the
-AST scan surfaced (~30 sites, 12 files):
+**Group B — the audited sweep.** Same conversion at the remaining call sites.
+**This enumeration is an indicative recon snapshot, not the work order.** A
+re-run of the predicate found it undercounts (`test_sdlc_stage_query.py` has 4
+matching sites, not 1; `test_sdlc_stage_marker.py` 3, not 2;
+`test_sdlc_session_ensure.py` 4, not 3). The authoritative work order is the
+guard's own red-state output, per the acceptance step on Task 3:
 
-`tests/unit/test_sdlc_meta_set.py` (6), `test_sdlc_session_ensure.py` (3),
-`test_sdlc_stage_marker.py` (2), `test_sdlc_stage_query.py` (1),
-`test_memory_search_cli.py` (2), `test_session_telemetry.py` (1),
-`test_evaluate_build.py` (3), `test_worker_entry.py` (2),
-`test_worker_supervisor.py` (1), `test_migrate_strip_pid_fields.py` (1),
-`tests/integration/test_sdlc_dispatch.py` (2),
-`tests/integration/test_design_system_pipeline.py` (4),
-`tests/integration/test_session_telemetry_e2e.py` (1).
+`tests/unit/test_sdlc_meta_set.py`, `test_sdlc_session_ensure.py`,
+`test_sdlc_stage_marker.py`, `test_sdlc_stage_query.py`,
+`test_memory_search_cli.py`, `test_session_telemetry.py`,
+`test_evaluate_build.py`, `test_worker_entry.py`, `test_worker_supervisor.py`,
+`test_migrate_strip_pid_fields.py`, `tests/unit/test_sdlc_dispatch.py`,
+`tests/integration/test_sdlc_dispatch.py` (2 env-less sites, :321 and :344),
+`tests/integration/test_design_system_pipeline.py`,
+`tests/integration/test_session_telemetry_e2e.py`.
 
-`test_session_telemetry_e2e.py` runs against a `WORKTREE` rather than the main
-checkout, so it takes `project_root=str(WORKTREE)`.
+Several of these pass a locally-built `clean_env` dict that strips
+`VALOR_SESSION_ID` / `AGENT_SESSION_ID` — `test_sdlc_stage_query.py:444,603,624`
+and `test_sdlc_stage_marker.py:1179`. Only the stage_marker one sets `REDIS_URL`;
+**the three stage_query sites set nothing**, so they run `python -m
+tools.sdlc_stage_query` against production db0 on every run today. That is a
+second live instance of the filed defect, not a stylistic wart. Convert them to
+`env = subprocess_env()` followed by the existing pops, exactly as Group C does.
 
-**Group C — one hand-rolled helper that re-derives the db.**
-`tests/unit/test_session_lifecycle.py:1602`'s `_subprocess_env` reads the db back
-out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. It happens to land on
-the right db today, but it is the exact anti-pattern the db-ownership work
-forbids, and it breaks the moment the parent's client is rebound differently.
-Replace its body with `env = subprocess_env()` followed by the existing
-`env.pop("SDLC_HOLDER_TOKEN", None)` — that pop is load-bearing (the test proves
-the env seam is gone) and `subprocess_env` has no removal argument, so it stays a
-two-line helper rather than becoming a direct call.
+`test_session_telemetry_e2e.py` takes `project_root=str(WORKTREE)`. Note that
+despite its name, that module's `WORKTREE` (line 16,
+`Path(__file__).parent.parent.parent`) resolves to the repo root, not a separate
+worktree; the argument is still correct, only the name is misleading.
+
+**Group C — the hand-rolled helpers that re-derive the db.** Two helpers read the
+db back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. Both happen
+to land on the right db today, but this is the exact anti-pattern the
+db-ownership work forbids, and both break the moment the parent's client is
+rebound differently. Neither collapses to a bare call, because each *removes*
+keys and `subprocess_env(**extra)` only adds them:
+
+- `tests/unit/test_session_lifecycle.py:1602` `_subprocess_env` → body becomes
+  `env = subprocess_env()` then the existing `env.pop("SDLC_HOLDER_TOKEN", None)`.
+  That pop is load-bearing: the test proves the env seam is gone.
+- `tests/unit/test_sdlc_dispatch.py:272` `_isolated_subprocess_env` (drives the
+  four sites at :380, :424, :467, :496) → body becomes `env = subprocess_env()`
+  then pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, and `active_run_id`. Those
+  three removals are the #2144 run-identity seam; a naive one-line replacement
+  re-inherits a live run identity from the parent and dissolves the
+  healable/unhealable boundary these tests assert.
 
 **Group D — the guard.** New file
 `tests/unit/test_subprocess_test_db_isolation.py`. It walks `tests/**/*.py` with
 `ast`, and for each `subprocess.run`/`Popen`/`check_output`/`check_call`/`call`:
 
-- match only calls whose first positional argument mentions a Python interpreter
-  or a repo entry point (`sys.executable`, `PYTHON`, `"-m"`, `scripts/`, the
-  `WRAPPER` constant) **and** whose `cwd=` expression names a repo checkout
-  (`REPO_ROOT`, `PROJECT_DIR`, `WORKTREE`, `parents[2]`, …);
-- assert the call has an `env=` keyword whose source text mentions
-  `subprocess_env`;
-- report every violation as `path:line` in one assertion message, not one
+- **Match on argv only — `cwd=` is not part of the predicate.** Matching on the
+  spelling of a `cwd` variable is what let the previous draft go green without
+  the sweep: converted files use inline `Path(__file__).parent.parent.parent`
+  (`test_worker_entry.py:68,86`, `test_evaluate_build.py:136,155,171`) or
+  lowercase `repo_root` (`test_worker_supervisor.py:274`,
+  `test_session_telemetry.py:468`), and `test_sdlc_tool_wrapper.py:129` reaches
+  Python against `REPO_ROOT` from `cwd=str(tmp_path)` — plausibly the very shape
+  that wrote the db0 row. A call matches when its first positional argument
+  mentions `sys.executable`, a name containing `PYTHON`, a `"-m"` element, the
+  `WRAPPER` constant, or a string containing `scripts/`.
+- **Exclusions are explicit and visible in the diff**: a module-level
+  `SKIP_ARGV0 = {"git"}` covering the `git`-in-`tmp_path` scratch repos (85 of
+  the 115 raw hits — no Popoto import, no isolation value), plus a named
+  `ALLOWLIST` of `path:line` entries, each with a comment giving its reason. Any
+  future exemption is a reviewable line, never a silent predicate loophole.
+- **The `env=` check resolves the value to an AST node, not to source text.** A
+  substring test on "subprocess_env" passes `_isolated_subprocess_env()` and
+  `_subprocess_env()` — the two helpers this plan exists to kill. The check
+  requires `env=` to be an `ast.Call` whose `func` is exactly the name
+  `subprocess_env` (or an attribute access ending in `.subprocess_env`), plus an
+  import of `tests.db_claim` in that module. Bare names such as
+  `_isolated_subprocess_env`, `_subprocess_env`, and `clean_env` are violations.
+- Report every violation as `path:line` in one assertion message, not one
   failure per site.
-
-The guard deliberately ignores `git` invocations in `tmp_path` scratch repos
-(85 of the 115 raw `cwd=`-without-`env=` hits) — they have no Popoto import and
-sweeping them would be noise with no isolation value.
+- **Self-test**: the module includes a test that parses a synthetic snippet
+  containing `env=_my_subprocess_env()` and asserts the scanner reports it. This
+  is what proves the predicate rejects the substring shape rather than merely
+  claiming to.
 
 ## Failure Path Test Strategy
 
@@ -314,10 +361,11 @@ sweeping them would be noise with no isolation value.
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_tool_wrapper.py` (6 call sites: lines 87, 101, 129, 172, 189, 230) — UPDATE: pass `env=subprocess_env(...)`; assertions unchanged.
-- [ ] `tests/unit/test_sdlc_meta_set.py` (6 sites) — UPDATE: add `env=subprocess_env(project_root=str(REPO_ROOT))`.
-- [ ] `tests/unit/test_sdlc_session_ensure.py` (3 sites) — UPDATE: same.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` (2 sites) — UPDATE: same.
-- [ ] `tests/unit/test_sdlc_stage_query.py` (1 site) — UPDATE: same.
+- [ ] `tests/unit/test_sdlc_meta_set.py` — UPDATE: add `env=subprocess_env(project_root=str(REPO_ROOT))`.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: same.
+- [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same; the `clean_env` at :1179 rebases on `subprocess_env()` keeping its strips.
+- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: same; the three `clean_env` sites (:444, :603, :624) set no `REDIS_URL` today and are live db0 writers.
+- [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :380, :424, :467, :496) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
 - [ ] `tests/unit/test_memory_search_cli.py` (2 sites) — UPDATE: same.
 - [ ] `tests/unit/test_session_telemetry.py` (1 site) — UPDATE: same.
 - [ ] `tests/unit/test_evaluate_build.py` (3 sites) — UPDATE: same, via the file's existing `_run` helper.
@@ -325,9 +373,9 @@ sweeping them would be noise with no isolation value.
 - [ ] `tests/unit/test_worker_supervisor.py` (1 site) — UPDATE: same.
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py` (1 site) — UPDATE: same.
 - [ ] `tests/unit/test_session_lifecycle.py::_subprocess_env` — REPLACE: helper body becomes `subprocess_env()` + the existing `SDLC_HOLDER_TOKEN` pop.
-- [ ] `tests/integration/test_sdlc_dispatch.py` (2 sites, plus `_isolated_subprocess_env` at line 272) — UPDATE: base the local helper on `subprocess_env()` so the guard's predicate is satisfied and the db is claimed rather than assumed.
-- [ ] `tests/integration/test_design_system_pipeline.py` (4 sites) — UPDATE: same.
-- [ ] `tests/integration/test_session_telemetry_e2e.py` (1 site) — UPDATE: `project_root=str(WORKTREE)`.
+- [ ] `tests/integration/test_sdlc_dispatch.py` (2 env-less sites, :321 and :344) — UPDATE: add `env=subprocess_env(...)`.
+- [ ] `tests/integration/test_design_system_pipeline.py` — UPDATE: same.
+- [ ] `tests/integration/test_session_telemetry_e2e.py` — UPDATE: `project_root=str(WORKTREE)`.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard.
 
 No assertions change meaning anywhere. Every edit is additive to the subprocess
@@ -354,9 +402,11 @@ invocation; the tests' subjects and expectations are untouched.
   fix and it is **off limits**: `conftest.py`'s db-claim machinery is owned by
   open PR #2683, and mutating global process env from a fixture has its own
   cross-test hazards. Revisit only after #2683 lands, as a separate issue.
-- **Consolidating the three hand-rolled `_subprocess_env` helpers.** Group C
-  handles the one that actively re-derives a db number. The other two are a
-  refactor, not a bug.
+- **Generalizing the hand-rolled env helpers into one shared utility.** Group C
+  rebases the two that re-derive a db number and Group B rebases the `clean_env`
+  dicts, each keeping its own strips because the strip sets differ and are
+  load-bearing per test. Collapsing them into a single parameterized helper is a
+  refactor with its own review surface; not this plan.
 
 ## Risks
 
@@ -467,18 +517,20 @@ bridge import. The only consumer is `pytest`.
 
 ## Success Criteria
 
-- [ ] Zero subprocess call sites in `tests/` launch a Python interpreter against
-  a repo checkout without `env=subprocess_env(...)`.
-- [ ] `tests/unit/test_subprocess_test_db_isolation.py` exists, and its red-state
-  output against pre-fix `main` (listing the ~30 violations) is pasted in the PR
-  description.
+- [ ] Zero subprocess call sites in `tests/` launch a Python interpreter or repo
+  entry point without `env=subprocess_env(...)`, except entries in the guard's
+  commented `ALLOWLIST`.
+- [ ] `tests/unit/test_subprocess_test_db_isolation.py` exists, its self-test
+  proves a `_my_subprocess_env()`-shaped value is rejected, and its red-state
+  output against pre-fix `main` is pasted in the PR description.
 - [ ] `tests/unit/test_sdlc_tool_wrapper.py` passes in full.
 - [ ] The full set of touched test files passes.
 - [ ] No file owned by PR #2683 appears in this PR's diff.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] Post-merge: the `PipelineLedger` row for issue `999999` is deleted from db0
-  via the ORM and its absence confirmed by an ORM read.
+- [ ] *(post-merge — tracked on #2763, not a merge gate)* The `PipelineLedger` row
+  for issue `999999` is deleted from db0 via the ORM and its absence confirmed by
+  an ORM read.
 
 ## Team Orchestration
 
@@ -524,13 +576,20 @@ bridge import. The only consumer is `pytest`.
 - Create `tests/unit/test_subprocess_test_db_isolation.py` with an `ast`-based
   scan of `tests/**/*.py`.
 - Predicate: `subprocess.{run,Popen,check_output,check_call,call}` whose first
-  positional arg mentions a Python interpreter or repo entry point AND whose
-  `cwd=` names a repo checkout; violation when `env=` is absent or its source
-  text does not mention `subprocess_env`.
+  positional arg mentions a Python interpreter or repo entry point
+  (`sys.executable`, a `PYTHON`-containing name, a `"-m"` element, `WRAPPER`, a
+  `scripts/` string). **`cwd=` is not part of the predicate.**
+- Violation when `env=` is absent, or when its value is not an `ast.Call` to the
+  exact name `subprocess_env` / `<mod>.subprocess_env` backed by a
+  `tests.db_claim` import in that module.
+- Exemptions only via `SKIP_ARGV0 = {"git"}` and a commented `ALLOWLIST` of
+  `path:line` entries.
 - Assert scanned-file count > 0 before asserting zero violations.
 - Failure message lists every `path:line` and states the remedy.
-- Run it against unmodified `main`, confirm it reports the ~30 known sites, and
-  save that output verbatim for the PR description.
+- Include the self-test: a synthetic `env=_my_subprocess_env()` snippet MUST be
+  reported as a violation.
+- Run it against unmodified `main`, confirm it reports the known sites, and save
+  that output verbatim for the PR description.
 
 ### 2. Fix the filed defect in test_sdlc_tool_wrapper.py
 - **Task ID**: build-wrapper-file
@@ -556,12 +615,21 @@ bridge import. The only consumer is `pytest`.
 - **Assigned To**: subprocess-env-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- **Work from the guard's red-state list, not from the Group B enumeration.** The
+  enumeration is a stale snapshot that undercounts. Acceptance step: diff the
+  guard's red-state `path:line` output against what was converted; every line is
+  either converted or added to the guard's commented `ALLOWLIST`. Task 3 is not
+  done until the guard is green *and* that diff is empty.
 - Convert each site, threading extra variables through `subprocess_env(**extra)`
   rather than hand-built dicts.
 - `test_session_telemetry_e2e.py`: `project_root=str(WORKTREE)`.
-- Rebase `test_sdlc_dispatch.py::_isolated_subprocess_env` and
-  `test_session_lifecycle.py::_subprocess_env` on `subprocess_env()`, preserving
-  the latter's `SDLC_HOLDER_TOKEN` pop.
+- Rebase `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` on
+  `subprocess_env()` **followed by pops of `VALOR_SESSION_ID`,
+  `AGENT_SESSION_ID`, and `active_run_id`** (the #2144 seam), and
+  `test_session_lifecycle.py::_subprocess_env` on `subprocess_env()` preserving
+  its `SDLC_HOLDER_TOKEN` pop.
+- Rebase the `clean_env` dicts in `test_sdlc_stage_query.py` (:444, :603, :624)
+  and `test_sdlc_stage_marker.py` (:1179) the same way, keeping their strips.
 - Touch none of the four files named in the No-Gos.
 - Run each touched file individually via `scripts/pytest-clean.sh`.
 
@@ -598,9 +666,10 @@ bridge import. The only consumer is `pytest`.
 - Run every Verification row.
 - Confirm all Success Criteria except the post-merge cleanup.
 
-### 7. Post-merge: delete the db0 reproduction row
+### 7. POST-MERGE (not a pipeline gate): delete the db0 reproduction row
 - **Task ID**: cleanup-prod-residue
-- **Depends On**: merge of this PR
+- **Depends On**: none — this task runs after the PR merges and is deliberately
+  outside the dependency graph, so no validator sees an unsatisfiable edge.
 - **Assigned To**: subprocess-env-builder
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
@@ -619,7 +688,8 @@ bridge import. The only consumer is `pytest`.
 |-------|---------|----------|
 | Isolation guard passes | `scripts/pytest-clean.sh tests/unit/test_subprocess_test_db_isolation.py -q` | exit code 0 |
 | Filed defect's file passes | `scripts/pytest-clean.sh tests/unit/test_sdlc_tool_wrapper.py -q` | exit code 0 |
-| No bare `os.environ.copy()` env in the target file | `grep -c "os.environ.copy()" tests/unit/test_sdlc_tool_wrapper.py` | match count == 0 |
+| No bare `os.environ.copy()` env in the target file | `! grep -q "os.environ.copy()" tests/unit/test_sdlc_tool_wrapper.py` | exit code 0 (`grep -c` would exit 1 on the *passing* state) |
+| Guard self-test rejects the substring shape | `scripts/pytest-clean.sh tests/unit/test_subprocess_test_db_isolation.py -q -k self_test` | exit code 0 |
 | Every wrapper-file subprocess with a repo cwd has an env | `python -c "import ast;t=ast.parse(open('tests/unit/test_sdlc_tool_wrapper.py').read());print(sum(1 for n in ast.walk(t) if isinstance(n,ast.Call) and ast.unparse(n.func).startswith('subprocess.') and any(k.arg=='cwd' for k in n.keywords) and not any(k.arg=='env' for k in n.keywords)))"` | output contains 0 |
 | Anti-criterion: PR does not touch #2683-owned files | `git diff --name-only main -- tests/conftest.py tests/db_claim.py tests/unit/test_conftest_isolation_guards.py tests/unit/test_redis_flush_guard_prod.py \| wc -l` | output contains 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -629,15 +699,15 @@ bridge import. The only consumer is `pytest`.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The guard accepts any `env=` whose source text *mentions* `subprocess_env`. The two hand-rolled helpers this plan exists to kill are named `_isolated_subprocess_env` (tests/unit/test_sdlc_dispatch.py:272) and `_subprocess_env` (tests/unit/test_session_lifecycle.py:1602) — both contain that substring, so they pass the guard while re-deriving the db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. A scan implementing the stated predicate silently accepted tests/unit/test_sdlc_dispatch.py:380,424,467,496. | pending | Resolve the `env=` value to a `Call` node and require `node.func.id == "subprocess_env"` (or `node.func.attr == "subprocess_env"`) plus an import of `tests.db_claim` in that module. Reject bare-name matches (`_isolated_subprocess_env`, `_subprocess_env`, `clean_env`). Add a self-test asserting a synthetic `env=_my_subprocess_env()` IS reported. |
-| BLOCKER | History & Consistency | `_isolated_subprocess_env` "at line 272" is attributed to `tests/integration/test_sdlc_dispatch.py`; it actually lives at **tests/unit/test_sdlc_dispatch.py:272** and drives 4 sites (:380, :424, :467, :496). That file appears nowhere in Test Impact / Group B / the task list, so 4 db-re-deriving sites fall outside the sweep. The integration file's real exposure is 2 env-less sites (:321, :344). | pending | Add `tests/unit/test_sdlc_dispatch.py` as its own Test Impact row and Step 3 bullet. The helper also *removes* `VALOR_SESSION_ID` / `AGENT_SESSION_ID` / `active_run_id` (the #2144 seam) and `subprocess_env(**extra)` only adds keys, so the rebase must be `env = subprocess_env()` followed by popping those three keys — a naive one-line replacement re-inherits a live run identity and breaks the healable/unhealable boundary the tests assert. |
-| CONCERN | Risk & Robustness | The guard's `cwd=` half matches on variable *spelling* (`REPO_ROOT`, `PROJECT_DIR`, `WORKTREE`, `parents[2]`). Files the plan converts do not use those spellings: test_worker_entry.py:68,86 and test_evaluate_build.py:136,155,171 use inline `Path(__file__).parent.parent.parent`; test_worker_supervisor.py:274 and test_session_telemetry.py:468 use lowercase `repo_root`. The guard goes green whether or not those files were swept. It also cannot see test_sdlc_tool_wrapper.py:129, which reaches Python against REPO_ROOT from `cwd=str(tmp_path)` — plausibly the shape that wrote the db0 row. | pending | Drop `cwd` from the match condition; gate on argv instead (`sys.executable`, a name containing `PYTHON`, a `"-m"` element, `WRAPPER`, a string containing `scripts/`). Carve out `SKIP_ARGV0 = {"git"}` plus a named, commented `path:line` allowlist so every exemption is a visible diff. |
-| CONCERN | History & Consistency | The Group B enumeration is a stale recon snapshot and undercounts: re-running the plan's own predicate finds test_sdlc_stage_query.py with 4 matching sites (plan says 1), test_sdlc_stage_marker.py with 3 (plan says 2), test_sdlc_session_ensure.py with 4 (plan says 3). Several extras pass a local `clean_env` (stage_query :445/:604/:625, stage_marker :1187) which the guard accepts under no reading, so the sweep as scoped finishes with the guard still red. | pending | Sequence Task 1 before Task 3 (already the case) and add a Task 3 acceptance step: diff the guard's red-state `path:line` list against Group B; every line is either converted or added to the documented exemption list. Task 3 is not done off the Group B enumeration alone. |
-| CONCERN | Scope & Value | The stated reason for converting lines 87/101 ("so the guard needs no per-line exemptions") is false under the plan's own predicate — those calls pass no `cwd`, so the predicate never matched them. The conversion is harmless, but the false premise will be propagated into a code comment. | pending | Restate as "uniform file shape / defence in depth". Lines 87/101 belong in the same category the plan already describes correctly for 69/75/81 ("pass neither `cwd` nor `env` … no exemption comment is required"). Fix the sentence, not the code. |
-| CONCERN | Scope & Value | Task 7 declares `Depends On: merge of this PR` — not a task ID — and its matching Success Criterion (post-merge db0 row deletion) is unachievable at every gate that reads the checklist. Task 6 already exempts it in prose but the criterion itself is unmarked, so a reviewer finds a permanently unchecked box. | pending | Mark the criterion inline `(post-merge — tracked on #2763, not a merge gate)`; give task 7 no `Depends On` and a bold POST-MERGE header, or move it entirely to a comment on #2763 so no validator sees an unsatisfiable dependency edge. |
-| NIT | History & Consistency | `tests/integration/test_session_telemetry_e2e.py`'s `WORKTREE = Path(__file__).parent.parent.parent` (line 16) resolves to the repo root, not a separate worktree; the plan's rationale ("runs against a `WORKTREE` rather than the main checkout") sends a reviewer hunting for something that is not there. The prescribed `project_root=str(WORKTREE)` is still correct. | pending | n/a (NIT) |
-| NIT | Scope & Value | The second Prerequisites check command imports `ast` and never uses it; the check is a substring test that also passes if `def subprocess_env` appears in a comment or docstring. | pending | n/a (NIT) |
-| NIT | Risk & Robustness | Verification row "No bare `os.environ.copy()` env in the target file" uses `grep -c`, which exits 1 when the count is 0 — the passing state carries a failing exit status. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The guard accepts any `env=` whose source text *mentions* `subprocess_env`. The two hand-rolled helpers this plan exists to kill are named `_isolated_subprocess_env` (tests/unit/test_sdlc_dispatch.py:272) and `_subprocess_env` (tests/unit/test_session_lifecycle.py:1602) — both contain that substring, so they pass the guard while re-deriving the db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. A scan implementing the stated predicate silently accepted tests/unit/test_sdlc_dispatch.py:380,424,467,496. | Group D bullet 3 + self-test bullet | Resolve the `env=` value to a `Call` node and require `node.func.id == "subprocess_env"` (or `node.func.attr == "subprocess_env"`) plus an import of `tests.db_claim` in that module. Reject bare-name matches (`_isolated_subprocess_env`, `_subprocess_env`, `clean_env`). Add a self-test asserting a synthetic `env=_my_subprocess_env()` IS reported. |
+| BLOCKER | History & Consistency | `_isolated_subprocess_env` "at line 272" is attributed to `tests/integration/test_sdlc_dispatch.py`; it actually lives at **tests/unit/test_sdlc_dispatch.py:272** and drives 4 sites (:380, :424, :467, :496). That file appears nowhere in Test Impact / Group B / the task list, so 4 db-re-deriving sites fall outside the sweep. The integration file's real exposure is 2 env-less sites (:321, :344). | Group C bullet 2; Test Impact row; Step 3 bullet | Add `tests/unit/test_sdlc_dispatch.py` as its own Test Impact row and Step 3 bullet. The helper also *removes* `VALOR_SESSION_ID` / `AGENT_SESSION_ID` / `active_run_id` (the #2144 seam) and `subprocess_env(**extra)` only adds keys, so the rebase must be `env = subprocess_env()` followed by popping those three keys — a naive one-line replacement re-inherits a live run identity and breaks the healable/unhealable boundary the tests assert. |
+| CONCERN | Risk & Robustness | The guard's `cwd=` half matches on variable *spelling* (`REPO_ROOT`, `PROJECT_DIR`, `WORKTREE`, `parents[2]`). Files the plan converts do not use those spellings: test_worker_entry.py:68,86 and test_evaluate_build.py:136,155,171 use inline `Path(__file__).parent.parent.parent`; test_worker_supervisor.py:274 and test_session_telemetry.py:468 use lowercase `repo_root`. The guard goes green whether or not those files were swept. It also cannot see test_sdlc_tool_wrapper.py:129, which reaches Python against REPO_ROOT from `cwd=str(tmp_path)` — plausibly the shape that wrote the db0 row. | Group D bullets 1-2; Step 1 predicate | Drop `cwd` from the match condition; gate on argv instead (`sys.executable`, a name containing `PYTHON`, a `"-m"` element, `WRAPPER`, a string containing `scripts/`). Carve out `SKIP_ARGV0 = {"git"}` plus a named, commented `path:line` allowlist so every exemption is a visible diff. |
+| CONCERN | History & Consistency | The Group B enumeration is a stale recon snapshot and undercounts: re-running the plan's own predicate finds test_sdlc_stage_query.py with 4 matching sites (plan says 1), test_sdlc_stage_marker.py with 3 (plan says 2), test_sdlc_session_ensure.py with 4 (plan says 3). Several extras pass a local `clean_env` (stage_query :445/:604/:625, stage_marker :1187) which the guard accepts under no reading, so the sweep as scoped finishes with the guard still red. | Group B preamble; Step 3 acceptance step | Sequence Task 1 before Task 3 (already the case) and add a Task 3 acceptance step: diff the guard's red-state `path:line` list against Group B; every line is either converted or added to the documented exemption list. Task 3 is not done off the Group B enumeration alone. |
+| CONCERN | Scope & Value | The stated reason for converting lines 87/101 ("so the guard needs no per-line exemptions") is false under the plan's own predicate — those calls pass no `cwd`, so the predicate never matched them. The conversion is harmless, but the false premise will be propagated into a code comment. | Group A lines 87/101 + 69/75/81 bullets | Restate as "uniform file shape / defence in depth". Lines 87/101 belong in the same category the plan already describes correctly for 69/75/81 ("pass neither `cwd` nor `env` … no exemption comment is required"). Fix the sentence, not the code. |
+| CONCERN | Scope & Value | Task 7 declares `Depends On: merge of this PR` — not a task ID — and its matching Success Criterion (post-merge db0 row deletion) is unachievable at every gate that reads the checklist. Task 6 already exempts it in prose but the criterion itself is unmarked, so a reviewer finds a permanently unchecked box. | Task 7 header/Depends On; Success Criteria marker | Mark the criterion inline `(post-merge — tracked on #2763, not a merge gate)`; give task 7 no `Depends On` and a bold POST-MERGE header, or move it entirely to a comment on #2763 so no validator sees an unsatisfiable dependency edge. |
+| NIT | History & Consistency | `tests/integration/test_session_telemetry_e2e.py`'s `WORKTREE = Path(__file__).parent.parent.parent` (line 16) resolves to the repo root, not a separate worktree; the plan's rationale ("runs against a `WORKTREE` rather than the main checkout") sends a reviewer hunting for something that is not there. The prescribed `project_root=str(WORKTREE)` is still correct. | Group B closing paragraph | n/a (NIT) |
+| NIT | Scope & Value | The second Prerequisites check command imports `ast` and never uses it; the check is a substring test that also passes if `def subprocess_env` appears in a comment or docstring. | Prerequisites table | n/a (NIT) |
+| NIT | Risk & Robustness | Verification row "No bare `os.environ.copy()` env in the target file" uses `grep -c`, which exits 1 when the count is 0 — the passing state carries a failing exit status. | Verification table | n/a (NIT) |
 
 ---
 
