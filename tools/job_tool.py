@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PM Job tools: create Jobs, author goals, add/remove promises (#2494).
+"""PM Job tools: create Jobs, author goals, record/discharge expectations (#2708).
 
 Room scope is enforced **at the tool layer**, not in the system prompt
 (prompt-level constraints drift; teammate permissions already live in three
@@ -12,15 +12,21 @@ The PM's contract (durability plan #2494, Milestone 3):
 
 * **Goal authoring** is the PM's mandated first step on any Job whose goal
   is still the router's mechanical mint placeholder (``author-goal``).
-* **Promises are PM-authored and PM-discharged**: standing by an outbound
-  deferral means ``promise-add`` (a new goal version); delivering means
-  ``promise-remove``. No mechanical trigger ever writes a promise.
+* **Expectations are PM-authored and PM-discharged** — the single
+  obligation primitive, both directions. Standing by an inbound obligation
+  (what we owe a requester) means ``expectation-add --direction inbound``;
+  recording what a spawned lane owes back is ``--direction outbound`` with
+  ``--owner <lane id/slug>``. Delivery means ``expectation-remove``. No
+  mechanical trigger ever discharges an expectation.
 
 Usage (CLI; session resolved from ``VALOR_SESSION_ID``):
     python -m tools.job_tool create --goal "Ship the fix end to end"
     python -m tools.job_tool author-goal --job-id ID --text "Real goal v1"
-    python -m tools.job_tool promise-add --job-id ID --text "I'll report back after CI"
-    python -m tools.job_tool promise-remove --job-id ID --promise-id PID
+    python -m tools.job_tool expectation-add --job-id ID --direction inbound \
+        --owner pm --text "I'll report back after CI"
+    python -m tools.job_tool expectation-add --job-id ID --direction outbound \
+        --owner session/my-lane --text "lane delivers the fix PR"
+    python -m tools.job_tool expectation-remove --job-id ID --expectation-id EID
     python -m tools.job_tool show --job-id ID
     python -m tools.job_tool list
 """
@@ -106,33 +112,56 @@ def author_goal(session_id: str, job_id: str, text: str):
     return job
 
 
-def add_promise(session_id: str, job_id: str, text: str) -> str:
-    """Stand by an outbound promise: append it to the Job's goal record."""
+def add_expectation(
+    session_id: str,
+    job_id: str,
+    text: str,
+    *,
+    direction: str,
+    owner: str,
+) -> str:
+    """Record an expectation on the Job (PM-authored, never a placeholder)."""
     if not text or not text.strip():
-        raise JobToolError("promise text must be non-empty")
+        raise JobToolError("expectation text must be non-empty")
+    if not owner or not owner.strip():
+        raise JobToolError("expectation owner must be non-empty")
+    if direction not in ("inbound", "outbound"):
+        raise JobToolError("expectation direction must be 'inbound' or 'outbound'")
     job = _own_room_job(session_id, job_id)
-    promise_id = job.add_promise(text.strip())
+    try:
+        expectation_id = job.add_expectation(
+            text.strip(), direction=direction, owner=owner.strip()
+        )
+    except ValueError as e:
+        raise JobToolError(str(e)) from e
     try:
         # Operator metric counterpart to metrics:promise_advisories_issued —
         # together they make an ignored advisory visible instead of silent.
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        POPOTO_REDIS_DB.incr("metrics:promises_authored")
+        POPOTO_REDIS_DB.incr("metrics:expectations_authored")
     except Exception:  # noqa: BLE001, S110 — metric is best-effort
         pass
     logger.info(
-        "[job-tool] session %s recorded promise %s on job %s", session_id, promise_id, job_id
+        "[job-tool] session %s recorded %s expectation %s on job %s",
+        session_id,
+        direction,
+        expectation_id,
+        job_id,
     )
-    return promise_id
+    return expectation_id
 
 
-def remove_promise(session_id: str, job_id: str, promise_id: str) -> bool:
-    """Discharge a delivered promise (append-only removal)."""
+def remove_expectation(session_id: str, job_id: str, expectation_id: str) -> bool:
+    """Discharge a delivered expectation (append-only removal)."""
     job = _own_room_job(session_id, job_id)
-    removed = job.remove_promise(promise_id)
+    removed = job.discharge_expectation(expectation_id)
     if removed:
         logger.info(
-            "[job-tool] session %s discharged promise %s on job %s", session_id, promise_id, job_id
+            "[job-tool] session %s discharged expectation %s on job %s",
+            session_id,
+            expectation_id,
+            job_id,
         )
     return removed
 
@@ -145,7 +174,7 @@ def _job_summary(job) -> dict:
         "goal": job.current_goal(),
         "goal_is_placeholder": job.goal_is_placeholder(),
         "goal_versions": len(job.goal_versions()),
-        "open_promises": job.open_promises(),
+        "open_expectations": job.open_expectations(),
     }
 
 
@@ -160,13 +189,21 @@ def main() -> None:
     p_goal.add_argument("--job-id", required=True)
     p_goal.add_argument("--text", required=True)
 
-    p_padd = sub.add_parser("promise-add", help="Record a promise you are standing by")
-    p_padd.add_argument("--job-id", required=True)
-    p_padd.add_argument("--text", required=True)
+    p_eadd = sub.add_parser(
+        "expectation-add", help="Record an expectation you are standing by"
+    )
+    p_eadd.add_argument("--job-id", required=True)
+    p_eadd.add_argument("--direction", required=True, choices=["inbound", "outbound"])
+    p_eadd.add_argument(
+        "--owner",
+        required=True,
+        help="Who delivers it: 'pm' for inbound; the lane session id/slug for outbound",
+    )
+    p_eadd.add_argument("--text", required=True)
 
-    p_prem = sub.add_parser("promise-remove", help="Discharge a delivered promise")
-    p_prem.add_argument("--job-id", required=True)
-    p_prem.add_argument("--promise-id", required=True)
+    p_erem = sub.add_parser("expectation-remove", help="Discharge a delivered expectation")
+    p_erem.add_argument("--job-id", required=True)
+    p_erem.add_argument("--expectation-id", required=True)
 
     p_show = sub.add_parser("show", help="Show one Job in your Room")
     p_show.add_argument("--job-id", required=True)
@@ -187,18 +224,29 @@ def main() -> None:
         elif args.command == "author-goal":
             job = author_goal(session_id, args.job_id, args.text)
             print(json.dumps(_job_summary(job), indent=2))
-        elif args.command == "promise-add":
-            promise_id = add_promise(session_id, args.job_id, args.text)
-            print(json.dumps({"promise_id": promise_id, "job_id": args.job_id}, indent=2))
-        elif args.command == "promise-remove":
-            removed = remove_promise(session_id, args.job_id, args.promise_id)
+        elif args.command == "expectation-add":
+            expectation_id = add_expectation(
+                session_id,
+                args.job_id,
+                args.text,
+                direction=args.direction,
+                owner=args.owner,
+            )
+            print(
+                json.dumps({"expectation_id": expectation_id, "job_id": args.job_id}, indent=2)
+            )
+        elif args.command == "expectation-remove":
+            removed = remove_expectation(session_id, args.job_id, args.expectation_id)
             if not removed:
                 print(
-                    f"Error: no open promise {args.promise_id!r} on job {args.job_id!r}.",
+                    f"Error: no open expectation {args.expectation_id!r} "
+                    f"on job {args.job_id!r}.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            print(json.dumps({"removed": True, "promise_id": args.promise_id}, indent=2))
+            print(
+                json.dumps({"removed": True, "expectation_id": args.expectation_id}, indent=2)
+            )
         elif args.command == "show":
             job = _own_room_job(session_id, args.job_id)
             print(json.dumps(_job_summary(job), indent=2))

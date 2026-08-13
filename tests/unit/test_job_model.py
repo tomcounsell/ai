@@ -3,14 +3,16 @@
 Job = a responsibility to complete something end to end. Schema ratified
 one-shot by the Task 5 schema gate: KeyField set {id, room_id}; two
 low-cardinality IndexedFields, ``status`` (active/at-rest) and the derived
-``has_open_promises`` (Schema Gate Amendment 1); recency
+``has_open_expectations`` (Schema Gate Amendment 2); recency
 ``SortedField(partition_by="room_id")``; ``goal`` as an append-only-versioned
-plain field. Never hard-closed; rest by age; any steer revives it.
+plain field carrying the expectation entries. Never hard-closed; rest by age
+unless an expectation is open; any steer revives it.
 
 These tests hit real Redis (repo convention) under a ``test-`` room-id
 prefix and delete every record via the ORM afterward.
 """
 
+import json
 import uuid
 
 import pytest
@@ -73,30 +75,107 @@ class TestMint:
         assert len(reloaded.goal_versions()) == 2
 
 
-class TestPromises:
-    def test_add_promise_appends_open_entry(self, scratch_room_id):
-        job = Job.mint(scratch_room_id, "check the deploy")
-        pid = job.add_promise("I'll report back after the deploy finishes")
+class TestExpectations:
+    """The single obligation primitive: (direction, holder, owner, what)."""
 
-        open_ = job.open_promises()
+    def test_inbound_expectation_defaults_to_the_requester_shape(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "check the deploy")
+        eid = job.add_expectation("I'll report back after the deploy finishes")
+
+        open_ = job.open_expectations()
         assert len(open_) == 1
-        assert open_[0]["id"] == pid
-        assert open_[0]["text"] == "I'll report back after the deploy finishes"
+        entry = open_[0]
+        assert entry["id"] == eid
+        assert entry["what"] == "I'll report back after the deploy finishes"
+        assert entry["direction"] == "inbound"
+        assert entry["holder"] == "requester"
+        assert entry["owner"] == "pm"
 
-    def test_remove_promise_is_append_only(self, scratch_room_id):
+    def test_outbound_expectation_records_holder_and_owner(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        job.add_expectation(
+            "deliver the migration PR",
+            direction="outbound",
+            holder="sdlc-local-7",
+            owner="session/job-expectations",
+        )
+
+        entry = job.open_expectations()[0]
+        assert entry["direction"] == "outbound"
+        assert entry["holder"] == "sdlc-local-7"
+        assert entry["owner"] == "session/job-expectations"
+
+    def test_placeholder_marker_round_trips(self, scratch_room_id):
+        """The spawn-time null-fallback marks its mechanical entry so the PM
+        prime's refine nudge can key on it (provenance-derived, #2708)."""
+        job = Job.mint(scratch_room_id, "ship the lane")
+        job.add_expectation(
+            "handle spawn instruction",
+            direction="outbound",
+            holder="pm",
+            owner="lane-1",
+            placeholder=True,
+        )
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.open_expectations()[0]["placeholder"] is True
+
+    def test_discharge_is_append_only(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "check the deploy")
-        pid = job.add_promise("I'll report back")
-        assert job.remove_promise(pid) is True
+        eid = job.add_expectation("I'll report back")
+        assert job.discharge_expectation(eid) is True
 
-        assert job.open_promises() == []
+        assert job.open_expectations() == []
         # Append-only: the discharged entry stays, with removed_ts set.
-        all_promises = job.all_promises()
-        assert len(all_promises) == 1
-        assert all_promises[0]["removed_ts"] is not None
+        history = job.all_expectations()
+        assert len(history) == 1
+        assert history[0]["removed_ts"] is not None
 
-    def test_remove_unknown_promise_returns_false(self, scratch_room_id):
+    def test_discharge_unknown_expectation_returns_false(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "check the deploy")
-        assert job.remove_promise("nope") is False
+        assert job.discharge_expectation("nope") is False
+
+    @pytest.mark.parametrize(
+        ("kwargs", "fragment"),
+        [
+            ({"what": "  "}, "what"),
+            ({"what": "deliver", "direction": "outbound", "holder": "pm", "owner": ""}, "owner"),
+            ({"what": "deliver", "direction": "sideways"}, "direction"),
+        ],
+    )
+    def test_unownable_or_unaddressed_expectation_is_rejected(
+        self, scratch_room_id, kwargs, fragment
+    ):
+        """An expectation with no owner or no text is unreconcilable — worse
+        than none, so it is refused at the write rather than stored."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+
+        with pytest.raises(ValueError, match=fragment):
+            job.add_expectation(**kwargs)
+
+        assert job.open_expectations() == []
+
+
+class TestStatusProjection:
+    """``status`` is chokepoint-maintained: an open expectation ⇒ active."""
+
+    def test_recording_an_expectation_forces_active(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.mark_at_rest()
+        assert job.status == "at-rest"
+
+        job.add_expectation("I'll report back")
+
+        assert job.status == "active"
+        assert Job.query.get(id=job.id, room_id=scratch_room_id).status == "active"
+
+    def test_discharge_does_not_force_rest(self, scratch_room_id):
+        """Rest is age-derived, never an instant consequence of discharge."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        eid = job.add_expectation("I'll report back")
+        job.discharge_expectation(eid)
+
+        assert job.status == "active"
 
 
 class TestLifecycle:
@@ -109,16 +188,7 @@ class TestLifecycle:
         assert job.status == "active"
 
     def test_sweep_to_rest_transitions_stale_active_jobs(self, scratch_room_id):
-        import time
-        from datetime import UTC, datetime
-
-        from models.job import JOB_AT_REST_AGE_SECONDS
-
-        stale = Job.mint(scratch_room_id, "old thread")
-        stale.last_active_at = datetime.fromtimestamp(
-            time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
-        )
-        stale.save()
+        stale = _age_out(Job.mint(scratch_room_id, "old thread"))
         fresh = Job.mint(scratch_room_id, "current thread")
 
         rested = Job.sweep_to_rest()
@@ -128,64 +198,179 @@ class TestLifecycle:
         assert by_id[stale.job_id].status == "at-rest"
         assert by_id[fresh.job_id].status == "active"
 
-    def test_at_rest_with_open_promises_query(self, scratch_room_id):
+    def test_open_expectation_blocks_rest_but_an_empty_one_still_ages_out(
+        self, scratch_room_id
+    ):
+        """Under-recording degrades to today's behavior (rest by age), never
+        to a false "done": only a *recorded* open expectation pins a Job open.
+        """
+        owing = Job.mint(scratch_room_id, "owes a lane")
+        owing.add_expectation("deliver the PR", direction="outbound", holder="pm", owner="lane-1")
+        _age_out(owing)
+        idle = _age_out(Job.mint(scratch_room_id, "nothing recorded"))
+
+        Job.sweep_to_rest()
+
+        by_id = {j.job_id: j for j in Job.query.filter(room_id=scratch_room_id)}
+        assert by_id[owing.job_id].status == "active"
+        assert by_id[idle.job_id].status == "at-rest"
+
+    def test_at_rest_with_open_expectations_query(self, scratch_room_id):
         resting = Job.mint(scratch_room_id, "check the deploy")
-        resting.add_promise("I'll report back")
+        resting.add_expectation("I'll report back")
+        # Reaching at-rest with an open expectation is an invariant violation
+        # by construction now — force it to prove the alarm still fires.
         resting.mark_at_rest()
 
         clean = Job.mint(scratch_room_id, "another thing")
         clean.mark_at_rest()
 
-        flagged = Job.at_rest_with_open_promises()
+        flagged = Job.at_rest_with_open_expectations()
         flagged_ids = {j.job_id for j in flagged}
         assert resting.job_id in flagged_ids
         assert clean.job_id not in flagged_ids
 
 
-class TestOpenPromiseIndex:
-    """The derived ``has_open_promises`` flag that bounds the at-rest backstop.
+def _age_out(job: Job) -> Job:
+    """Backdate ``last_active_at`` past the rest threshold."""
+    import time
+    from datetime import UTC, datetime
+
+    from models.job import JOB_AT_REST_AGE_SECONDS
+
+    job.last_active_at = datetime.fromtimestamp(
+        time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
+    )
+    job.save()
+    return job
+
+
+class TestGoalSelfHeal:
+    """``_goal_data()`` is total: no goal shape can make it raise."""
+
+    @pytest.mark.parametrize("raw", [None, "", "not json at all", "[]", '{"versions": null}'])
+    def test_malformed_goal_reads_as_empty(self, scratch_room_id, raw):
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.goal = raw
+        job.save()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.open_expectations() == []
+        assert reloaded.all_expectations() == []
+        assert reloaded.goal_versions() == []
+        assert reloaded.current_goal() == ""
+
+    def test_malformed_entries_cannot_lose_the_goal_write(self, scratch_room_id):
+        """Derivation happens before the save, so a junk entry costs a wrong
+        flag at worst — never the goal bytes."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job._write_goal_data({"versions": [], "expectations": ["junk", None, 7]})
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert json.loads(reloaded.goal)["expectations"] == ["junk", None, 7]
+        assert reloaded.has_open_expectations is False
+
+    def test_stray_promises_key_is_absorbed_on_every_read(self, scratch_room_id):
+        """Race 4: old code that lands a ``promises`` write after the migration
+        must not become invisible. The merge is per-read, not one-shot, and
+        preserves ids, timestamps, and discharge history."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        data = json.loads(job.goal)
+        data["promises"] = [
+            {"id": "legacy1", "ts": "2026-08-01T00:00:00+00:00", "text": "I'll report back", "removed_ts": None},
+            {
+                "id": "legacy2",
+                "ts": "2026-08-02T00:00:00+00:00",
+                "text": "already delivered",
+                "removed_ts": "2026-08-03T00:00:00+00:00",
+            },
+        ]
+        job.goal = json.dumps(data)
+        job.save()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        history = reloaded.all_expectations()
+
+        assert [e["id"] for e in history] == ["legacy1", "legacy2"]
+        assert [e["what"] for e in history] == ["I'll report back", "already delivered"]
+        assert {e["direction"] for e in history} == {"inbound"}
+        assert history[0]["holder"] == "requester"
+        assert history[0]["owner"] == "pm"
+        assert history[0]["ts"] == "2026-08-01T00:00:00+00:00"
+        assert history[1]["removed_ts"] == "2026-08-03T00:00:00+00:00"
+        assert [e["id"] for e in reloaded.open_expectations()] == ["legacy1"]
+
+    def test_absorption_converges_without_duplicating(self, scratch_room_id):
+        """Absorbed entries survive as expectations and are never doubled —
+        neither by repeated reads nor by the write that persists the merge."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        data = json.loads(job.goal)
+        data["promises"] = [
+            {"id": "legacy1", "ts": "2026-08-01T00:00:00+00:00", "text": "x", "removed_ts": None}
+        ]
+        job.goal = json.dumps(data)
+        job.save()
+
+        # Repeated reads before any write must not accumulate copies.
+        job = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert len(job.all_expectations()) == 1
+        assert len(job.all_expectations()) == 1
+
+        job.add_expectation("a second obligation")
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        ids = [e["id"] for e in reloaded.all_expectations()]
+        assert ids.count("legacy1") == 1
+        assert len(ids) == 2
+        # The obligation survived the conversion; only the retired key is gone.
+        assert "legacy1" in ids
+        assert "promises" not in json.loads(reloaded.goal)
+
+
+class TestOpenExpectationIndex:
+    """The derived ``has_open_expectations`` flag that bounds the at-rest alarm.
 
     The flag is a projection of ``goal``, so what matters is that it tracks
-    every promise mutation and that a stale flag can never change the answer.
+    every expectation mutation and that a stale flag can never change the answer.
     """
 
-    def test_flag_tracks_promise_lifecycle(self, scratch_room_id):
+    def test_flag_tracks_expectation_lifecycle(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "check the deploy")
-        assert job.has_open_promises is False
+        assert job.has_open_expectations is False
 
-        promise_id = job.add_promise("I'll report back")
-        assert job.has_open_promises is True
-        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_promises is True
+        expectation_id = job.add_expectation("I'll report back")
+        assert job.has_open_expectations is True
+        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_expectations is True
 
-        job.remove_promise(promise_id)
-        assert job.has_open_promises is False
-        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_promises is False
+        job.discharge_expectation(expectation_id)
+        assert job.has_open_expectations is False
+        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_expectations is False
 
-    def test_flag_stays_true_while_any_promise_is_open(self, scratch_room_id):
+    def test_flag_stays_true_while_any_expectation_is_open(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "two things")
-        first = job.add_promise("one")
-        job.add_promise("two")
+        first = job.add_expectation("one")
+        job.add_expectation("two")
 
-        job.remove_promise(first)
+        job.discharge_expectation(first)
 
-        assert job.has_open_promises is True
-        assert job.open_promises()
+        assert job.has_open_expectations is True
+        assert job.open_expectations()
 
     def test_flag_is_a_real_bool_not_a_truthy_string(self, scratch_room_id):
         """``IndexedField(type=bool)`` is load-bearing.
 
         Without the declared type the value round-trips as the string
-        ``"False"``, which is truthy, so every Job would look promise-owing.
+        ``"False"``, which is truthy, so every Job would look obligation-owing.
         """
-        job = Job.mint(scratch_room_id, "no promises here")
+        job = Job.mint(scratch_room_id, "no expectations here")
         reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
-        assert reloaded.has_open_promises is False
-        assert not reloaded.has_open_promises
+        assert reloaded.has_open_expectations is False
+        assert not reloaded.has_open_expectations
 
-    def test_backstop_hydrates_only_the_flagged_set(self, scratch_room_id):
+    def test_alarm_hydrates_only_the_flagged_set(self, scratch_room_id):
         """The bound is the point: work must not scale with the at-rest set."""
         owing = Job.mint(scratch_room_id, "owes a reply")
-        owing.add_promise("I'll report back")
+        owing.add_expectation("I'll report back")
         owing.mark_at_rest()
         for i in range(12):
             noise = Job.mint(scratch_room_id, f"settled {i}")
@@ -202,64 +387,66 @@ class TestOpenPromiseIndex:
 
         _json.loads = counting_loads
         try:
-            flagged = Job.at_rest_with_open_promises()
+            flagged = Job.at_rest_with_open_expectations()
         finally:
             _json.loads = real_loads
 
         assert {j.job_id for j in flagged} >= {owing.job_id}
         assert calls["n"] < 12, (
-            f"backstop parsed {calls['n']} goals; it must not scan the at-rest set"
+            f"alarm parsed {calls['n']} goals; it must not scan the at-rest set"
         )
 
     def test_stale_flag_never_produces_a_wrong_answer(self, scratch_room_id):
-        """A flag that says True with no open promise must be filtered out.
+        """A flag that says True with no open expectation must be filtered out.
 
         ``goal`` stays authoritative, so the re-verification against
-        ``open_promises()`` is what keeps a drifted projection harmless.
+        ``open_expectations()`` is what keeps a drifted projection harmless.
         """
         job = Job.mint(scratch_room_id, "settled but mislabelled")
         job.mark_at_rest()
-        job.has_open_promises = True
+        job.has_open_expectations = True
         job.save()
 
-        flagged = Job.at_rest_with_open_promises()
+        flagged = Job.at_rest_with_open_expectations()
 
         assert job.job_id not in {j.job_id for j in flagged}
 
     def test_backfill_stamps_a_row_the_flag_missed(self, scratch_room_id):
         """Legacy rows predate the field and index as nothing until stamped."""
         job = Job.mint(scratch_room_id, "owes a reply")
-        job.add_promise("I'll report back")
+        job.add_expectation("I'll report back")
         job.mark_at_rest()
         goal_before = job.goal
 
-        # Simulate the legacy shape: promise in the goal, flag never derived.
-        job.has_open_promises = False
+        # Simulate the legacy shape: expectation in the goal, flag never derived.
+        job.has_open_expectations = False
         job.save()
-        assert job.job_id not in {j.job_id for j in Job.at_rest_with_open_promises()}
+        assert job.job_id not in {j.job_id for j in Job.at_rest_with_open_expectations()}
 
-        stamped = Job.backfill_open_promises_index()
+        stamped = Job.backfill_open_expectations_index()
 
         assert stamped >= 1
-        assert job.job_id in {j.job_id for j in Job.at_rest_with_open_promises()}
+        assert job.job_id in {j.job_id for j in Job.at_rest_with_open_expectations()}
         # Write scope: the backfill's write must never touch goal.
         reloaded = Job.query.get(id=job.id, room_id=job.room_id)
         assert reloaded.goal == goal_before
 
     def test_backfill_is_idempotent(self, scratch_room_id):
         job = Job.mint(scratch_room_id, "owes a reply")
-        job.add_promise("I'll report back")
+        job.add_expectation("I'll report back")
         job.mark_at_rest()
 
-        Job.backfill_open_promises_index()
-        second = Job.backfill_open_promises_index()
+        Job.backfill_open_expectations_index()
+        second = Job.backfill_open_expectations_index()
 
         assert second == 0, "a settled population must need no rewrites"
 
-    def test_backfill_does_not_clobber_a_concurrent_promise(self, scratch_room_id, monkeypatch):
+    def test_backfill_does_not_clobber_a_concurrent_expectation(
+        self, scratch_room_id, monkeypatch
+    ):
         """Red-state proof (#2647): a bare save() in the backfill loop clobbers a
-        concurrent promise write. This must fail on main with promises_survived=0
-        and pass on the fix with promises_survived=1.
+        concurrent expectation write. This must fail with expectations_survived=0
+        on a bare save() and pass on the scoped one.
 
         A sequential "mutate, then call the method" test cannot reproduce the
         race, because QueryBuilder.__iter__ hydrates at call time — so the
@@ -268,34 +455,34 @@ class TestOpenPromiseIndex:
         """
         job = Job.mint(scratch_room_id, "owes a reply")
         snap = Job.query.get(id=job.id, room_id=job.room_id)
-        snap.has_open_promises = True
+        snap.has_open_expectations = True
         snap.save()  # creates the flag-vs-goal disagreement that makes the write fire
 
         live = Job.query.get(id=job.id, room_id=job.room_id)
-        live.add_promise("promise A")
+        live.add_expectation("expectation A")
 
         monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])
-        Job.backfill_open_promises_index()
+        Job.backfill_open_expectations_index()
 
         reloaded = Job.query.get(id=job.id, room_id=job.room_id)
-        promises_survived = 1 if reloaded.open_promises() else 0
-        assert promises_survived == 1, "the concurrent promise must survive the backfill"
+        survived = 1 if reloaded.open_expectations() else 0
+        assert survived == 1, "the concurrent expectation must survive the backfill"
 
     def test_backfill_write_is_scoped_to_the_flag(self, scratch_room_id, monkeypatch):
         """Write-scope pin: the backfill's save() must list only
-        ``has_open_promises``, never a bare save(). Pinned directly with a
+        ``has_open_expectations``, never a bare save(). Pinned directly with a
         save-spy rather than inferred from side effects, so a future edit that
         drops update_fields= or widens the list is caught here rather than only
         by a one-shot manual Verification grep.
         """
-        snap = Job.mint(scratch_room_id, "owes a reply")  # hydrated before any promise exists
+        snap = Job.mint(scratch_room_id, "owes a reply")  # hydrated before any entry exists
         live = Job.query.get(id=snap.id, room_id=snap.room_id)
-        live.add_promise("promise A")
+        live.add_expectation("expectation A")
 
         # Drift the stored flag with a scoped write so the backfill's write fires.
         drift = Job.query.get(id=snap.id, room_id=snap.room_id)
-        drift.has_open_promises = False
-        drift.save(update_fields=["has_open_promises"])
+        drift.has_open_expectations = False
+        drift.save(update_fields=["has_open_expectations"])
 
         last_active_before = Job.query.get(id=snap.id, room_id=snap.room_id).last_active_at
 
@@ -308,12 +495,12 @@ class TestOpenPromiseIndex:
 
         monkeypatch.setattr(Job, "save", spy)
         monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [snap])
-        stamped = Job.backfill_open_promises_index()
+        stamped = Job.backfill_open_expectations_index()
 
         assert stamped == 1
-        assert calls == [["has_open_promises"]]
+        assert calls == [["has_open_expectations"]]
         reloaded = Job.query.get(id=snap.id, room_id=snap.room_id)
-        assert reloaded.open_promises()
+        assert reloaded.open_expectations()
         assert reloaded.last_active_at == last_active_before
 
     def test_backfill_per_row_failure_is_logged_and_siblings_still_stamped(
@@ -325,15 +512,15 @@ class TestOpenPromiseIndex:
         per-row try.
         """
         j1 = Job.mint(scratch_room_id, "first")
-        j1.add_promise("promise A")
+        j1.add_expectation("expectation A")
         j2 = Job.mint(scratch_room_id, "second")
-        j2.add_promise("promise B")
+        j2.add_expectation("expectation B")
 
         # Drift both rows into flag-vs-goal disagreement so the write fires.
         for j in (j1, j2):
             d = Job.query.get(id=j.id, room_id=j.room_id)
-            d.has_open_promises = False
-            d.save(update_fields=["has_open_promises"])
+            d.has_open_expectations = False
+            d.save(update_fields=["has_open_expectations"])
 
         real_get = Job.query.get
 
@@ -345,10 +532,10 @@ class TestOpenPromiseIndex:
         monkeypatch.setattr(Job.query, "get", boom)
         monkeypatch.setattr(Job.query, "filter", lambda *a, **k: [j1, j2])
 
-        stamped = Job.backfill_open_promises_index()
+        stamped = Job.backfill_open_expectations_index()
 
         assert stamped == 1
-        assert Job.query.get(id=j2.id, room_id=j2.room_id).has_open_promises is True
+        assert Job.query.get(id=j2.id, room_id=j2.room_id).has_open_expectations is True
 
     def test_backfill_whole_loop_failure_returns_zero(self, scratch_room_id, monkeypatch):
         """Fail-open contract: a broken enumeration returns 0 rather than
@@ -359,9 +546,9 @@ class TestOpenPromiseIndex:
 
         monkeypatch.setattr(Job.query, "filter", boom)
 
-        assert Job.backfill_open_promises_index() == 0
+        assert Job.backfill_open_expectations_index() == 0
 
-    def test_backstop_never_raises_into_the_health_cycle(self, scratch_room_id, monkeypatch):
+    def test_alarm_never_raises_into_the_health_cycle(self, scratch_room_id, monkeypatch):
         """Fail-open contract: a broken query returns [] rather than raising."""
 
         def boom(*args, **kwargs):
@@ -369,7 +556,7 @@ class TestOpenPromiseIndex:
 
         monkeypatch.setattr(Job.query, "filter", boom)
 
-        assert Job.at_rest_with_open_promises() == []
+        assert Job.at_rest_with_open_expectations() == []
 
 
 class TestRecencyLookup:
