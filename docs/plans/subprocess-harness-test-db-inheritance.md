@@ -1,7 +1,7 @@
 ---
 status: Ready
 type: bug
-appetite: Small
+appetite: Medium
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2763
@@ -29,7 +29,9 @@ evidence, key `PipelineLedger:tomcounsell//ai{:}999999`.
 Under the code as shipped the *write* in the reviewed test never fires — the
 injected `boom` raises before the ledger write — so this is latent, not actively
 corrupting. It is one refactor of `_cli_record`'s ordering away from not being
-latent, and the same shape exists at ~30 other call sites across the suite.
+latent, and the same shape exists at 113 other call sites across the suite (114
+total across 54 files under the corrected predicate; see Appetite for the
+convert-vs-allowlist split).
 
 **Desired outcome:** every test subprocess that can reach Popoto runs against
 the parent's claimed test db, by construction, via the existing
@@ -172,17 +174,32 @@ into the child's env, and step 4 resolves to db `n`.
 
 ## Appetite
 
-**Size:** Small
+**Size:** Medium
 
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 0 (scope is fully specified by the recon audit)
+- PM check-ins: 0
 - Review rounds: 1
 
-The work is mechanical and the audit surface is already enumerated. The only
-genuine thinking is the two call sites where a naive conversion would weaken an
-existing assertion (see Rabbit Holes).
+**Re-derived from the corrected predicate, not from the round-1 recon snapshot.**
+Running the argv-gated predicate with one-hop delegator resolution over the real
+tree gives **766 files scanned, 114 violations across 54 files**, which splits as:
+
+- **70 sites / 32 files must be converted** — the child launches a repo module
+  (`-m tools.…`, `-m worker`, …), the `WRAPPER`, or an inline `-c` script, so it
+  can import popoto.
+- **44 sites / 25 files are ALLOWLIST candidates** — the child is a standalone
+  script (a `.claude/hooks/` validator, a `scripts/` one-file utility) that
+  imports no repo package and therefore cannot reach Redis.
+
+That is roughly twice the round-1 estimate of "~30 sites / 16 files", which is
+why the appetite moves from Small to **Medium**. The work stays one issue rather
+than splitting: every conversion is the same mechanical kwarg, the risk is
+uniform, and a second lane would duplicate the guard. The genuine thinking is
+concentrated in four places — the two helpers that re-derive a db (Group C), the
+one call site that must omit `project_root` (line 129), and the allowlist
+adjudication rule below.
 
 ## Prerequisites
 
@@ -285,7 +302,10 @@ despite its name, that module's `WORKTREE` (line 16,
 `Path(__file__).parent.parent.parent`) resolves to the repo root, not a separate
 worktree; the argument is still correct, only the name is misleading.
 
-**Group C — the hand-rolled helpers that re-derive the db.** Two helpers read the
+**Group C — the hand-rolled helpers that re-derive the db.** Four module-local
+env helpers exist in the suite. Two are already correct thin delegators to
+`subprocess_env` (landed with PR #2606; see Group D) and are left alone. The
+other two read the
 db back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. Both happen
 to land on the right db today, but this is the exact anti-pattern the
 db-ownership work forbids, and both break the moment the parent's client is
@@ -296,7 +316,7 @@ keys and `subprocess_env(**extra)` only adds them:
   `env = subprocess_env()` then the existing `env.pop("SDLC_HOLDER_TOKEN", None)`.
   That pop is load-bearing: the test proves the env seam is gone.
 - `tests/unit/test_sdlc_dispatch.py:272` `_isolated_subprocess_env` (drives the
-  four sites at :380, :424, :467, :496) → body becomes `env = subprocess_env()`
+  four sites at :375, :409, :462, :491) → body becomes `env = subprocess_env()`
   then pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, and `active_run_id`. Those
   three removals are the #2144 run-identity seam; a naive one-line replacement
   re-inherits a live run identity from the parent and dissolves the
@@ -321,6 +341,32 @@ keys and `subprocess_env(**extra)` only adds them:
   the 115 raw hits — no Popoto import, no isolation value), plus a named
   `ALLOWLIST` of `path:line` entries, each with a comment giving its reason. Any
   future exemption is a reviewable line, never a silent predicate loophole.
+- **Allowlist adjudication rule** — an entry is permitted for exactly two
+  reasons, and the reason is written in the comment:
+  1. `[#2628]` — the site lives in a file this plan's No-Gos forbid touching
+     because open PR #2683 owns it. There are five such sites:
+     `tests/unit/test_redis_flush_guard_prod.py:54,555,579,648` and
+     `tests/unit/test_conftest_isolation_guards.py:463`. Allowlisting them in the
+     *new* guard file touches no forbidden file, which is what breaks the
+     otherwise-unsatisfiable deadlock between "guard green" and "no #2683-owned
+     file in the diff". Each entry carries a note to remove it and convert the
+     site when #2628 lands.
+  2. `[standalone-script]` — the child is a single-file `.claude/hooks/`
+     validator or `scripts/` utility that imports no repo package, so it cannot
+     reach popoto. The ~44 sites in this class.
+
+  **When reachability is unclear, convert — do not allowlist.** A parametrized
+  argv (`[sys.executable, "-m", module, *argv]`, where `module` is a fixture
+  parameter) reaches repo code and belongs in the conversion set even though a
+  static scan cannot name the module.
+- **Module-local delegators resolve one hop.** A function whose entire body is
+  `return subprocess_env(...)` is a correct helper, not a violation. Two already
+  exist and are already right — `tests/integration/test_agent_session_scheduler.py:24`
+  (which alone drives 23 call sites) and `tests/integration/test_bot_await_reply.py`
+  — both landed with PR #2606. A guard that rejects them flags ~25 already-correct
+  sites and would push a builder to "fix" working code. Resolution is exactly one
+  hop and only for a single-`return` body; anything with logic in it (the Group C
+  helpers) stays a violation until rebased.
 - **The `env=` check resolves the value to an AST node, not to source text.** A
   substring test on "subprocess_env" passes `_isolated_subprocess_env()` and
   `_subprocess_env()` — the two helpers this plan exists to kill. The check
@@ -330,10 +376,13 @@ keys and `subprocess_env(**extra)` only adds them:
   `_isolated_subprocess_env`, `_subprocess_env`, and `clean_env` are violations.
 - Report every violation as `path:line` in one assertion message, not one
   failure per site.
-- **Self-test**: the module includes a test that parses a synthetic snippet
-  containing `env=_my_subprocess_env()` and asserts the scanner reports it. This
-  is what proves the predicate rejects the substring shape rather than merely
-  claiming to.
+- **Two self-tests, paired**: one parses a synthetic snippet containing
+  `env=_my_subprocess_env()` (a name whose body re-derives the db) and asserts
+  the scanner **reports** it; the other parses `def _w(**k): return
+  subprocess_env(**k)` used as `env=_w()` and asserts the scanner **accepts** it.
+  Together they prove the predicate rejects the substring shape without
+  rejecting legitimate delegation — either test alone permits a scanner that is
+  uselessly strict or uselessly loose.
 
 ## Failure Path Test Strategy
 
@@ -360,12 +409,25 @@ keys and `subprocess_env(**extra)` only adds them:
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_tool_wrapper.py` (6 call sites: lines 87, 101, 129, 172, 189, 230) — UPDATE: pass `env=subprocess_env(...)`; assertions unchanged.
+The rows below are the files needing *judgement*. They are not the whole set: the
+conversion covers **70 sites across 32 files**, and the guard's red-state output
+is the authoritative work order (Task 3). The remaining files not named here take
+the plain mechanical conversion with no per-file decision:
+`tests/integration/test_bot_await_reply.py`, `test_doc_impact_finder_sdk.py`,
+`test_sdlc_cross_repo_resolution.py`, `test_watchdog_recovery.py`,
+`tests/unit/session_runner/test_tool_activity_liveness.py`,
+`test_critique_resume.py`, `test_features_readme_sort.py`,
+`test_memory_timeline.py`, `test_room_resolution.py`,
+`test_sdlc_fork_issue_number.py`, `test_session_lifecycle_consolidation.py`,
+`test_session_progress.py`, `test_steering_mechanism.py`, `test_stop_detach.py`,
+`test_venv_health.py`, `test_worker_guard.py`, `test_youtube_search.py`.
+
+- [ ] `tests/unit/test_sdlc_tool_wrapper.py` (9 call sites: lines 69, 75, 81, 87, 101, 129, 172, 189, 230) — UPDATE: pass `env=subprocess_env(...)`; assertions unchanged.
 - [ ] `tests/unit/test_sdlc_meta_set.py` — UPDATE: add `env=subprocess_env(project_root=str(REPO_ROOT))`.
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: same.
 - [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same; the `clean_env` at :1179 rebases on `subprocess_env()` keeping its strips.
 - [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: same; the three `clean_env` sites (:444, :603, :624) set no `REDIS_URL` today and are live db0 writers.
-- [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :380, :424, :467, :496) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
+- [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :375, :409, :462, :491) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
 - [ ] `tests/unit/test_memory_search_cli.py` (2 sites) — UPDATE: same.
 - [ ] `tests/unit/test_session_telemetry.py` (1 site) — UPDATE: same.
 - [ ] `tests/unit/test_evaluate_build.py` (3 sites) — UPDATE: same, via the file's existing `_run` helper.
@@ -376,7 +438,8 @@ keys and `subprocess_env(**extra)` only adds them:
 - [ ] `tests/integration/test_sdlc_dispatch.py` (2 env-less sites, :321 and :344) — UPDATE: add `env=subprocess_env(...)`.
 - [ ] `tests/integration/test_design_system_pipeline.py` — UPDATE: same.
 - [ ] `tests/integration/test_session_telemetry_e2e.py` — UPDATE: `project_root=str(WORKTREE)`.
-- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard.
+- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard, including its `ALLOWLIST` (5 `[#2628]` entries + the `[standalone-script]` class).
+- [ ] `tests/unit/test_redis_flush_guard_prod.py` (:54, :555, :579, :648) and `tests/unit/test_conftest_isolation_guards.py` (:463) — NOT TOUCHED: real violations, allowlisted with a `[#2628]` reason because open PR #2683 owns both files.
 
 No assertions change meaning anywhere. Every edit is additive to the subprocess
 invocation; the tests' subjects and expectations are untouched.
@@ -469,7 +532,10 @@ there is no ordering to get right because the value is fixed before `fork`.
 
 - [SEPARATE-SLUG #2628] Any modification to `tests/conftest.py`,
   `tests/db_claim.py`, `tests/unit/test_conftest_isolation_guards.py`, or
-  `tests/unit/test_redis_flush_guard_prod.py`. All four are in open PR #2683's
+  `tests/unit/test_redis_flush_guard_prod.py`. The last two contain five real
+  violations (`:54,555,579,648` and `:463`); they are handled by `[#2628]`
+  `ALLOWLIST` entries in the new guard file, which keeps this No-Go and a green
+  guard simultaneously satisfiable. All four are in open PR #2683's
   diff. That PR also owns the `_subprocess_env` helper in
   `test_redis_flush_guard_prod.py`, which sets `PYTHONPATH` but **not**
   `REDIS_URL` — a genuine instance of this bug that must be fixed there, not
@@ -604,7 +670,8 @@ bridge import. The only consumer is `pytest`.
 - Lines 87, 101: `env=subprocess_env(AI_REPO_ROOT=<bad path>)`.
 - Line 129: `env=subprocess_env(AI_REPO_ROOT=str(REPO_ROOT))` with **no**
   `project_root`, plus the explanatory comment.
-- Leave lines 69/75/81 alone.
+- Lines 69, 75, 81: `env=subprocess_env()` (they invoke `WRAPPER`, so the
+  argv-gated predicate matches them; see Group A).
 - Run the file: `scripts/pytest-clean.sh tests/unit/test_sdlc_tool_wrapper.py`.
 
 ### 3. Sweep the remaining audited call sites
@@ -699,11 +766,11 @@ bridge import. The only consumer is `pytest`.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (3/3) | The No-Gos forbid touching `tests/unit/test_redis_flush_guard_prod.py` and `tests/unit/test_conftest_isolation_guards.py` (owned by open PR #2683), but an empirical run of the plan's own argv-gated predicate reports 5 live violations inside exactly those files: `test_redis_flush_guard_prod.py:54,555,579,648` and `test_conftest_isolation_guards.py:463`. No task allocates ALLOWLIST entries for them, so Task 4's "guard now green" gate, the Verification row "Isolation guard passes / exit 0", and the Success Criterion "no file owned by PR #2683 appears in this PR's diff" are mutually unsatisfiable as written. | pending | Add the five `path:line` entries to `ALLOWLIST` in the NEW guard file `tests/unit/test_subprocess_test_db_isolation.py` only — this edits no #2683-owned file, so the anti-criterion still holds. Each entry carries the comment `# owned by open PR #2683 (#2628) — No-Go here, fix there`. Make it a Task 1 acceptance sub-bullet so the conflict is resolved on the guard's first red/green cycle, and have Task 4 assert those specific lines are present in `ALLOWLIST` rather than merely that the guard passes. |
-| BLOCKER | Scope & Value, Risk & Robustness (elevated per cross-validation) | Appetite (`Small`, "PM check-ins: 0", "Review rounds: 1"), the 16-row Test Impact table, and Risk 4's "confirm it reports the ~30 known sites" are all sized against the stale recon snapshot. Running the plan's own corrected argv-gated predicate over `tests/` scans 766 files and reports **147 violations across ~60 files**. Whole suites appear nowhere in Group A/B/C or the task list: `tests/integration/test_agent_session_scheduler.py` alone contributes 23 sites, plus `test_youtube_search.py:219`, `test_worker_guard.py:52`, `test_venv_health.py:66`, `test_steering_mechanism.py` (3), `test_validate_no_uv_sync_in_worktree.py` (5), `test_pre_commit_hook.py` (3), `tests/e2e/test_telegram_flow.py:38`, and dozens more. Task 3 defers to the red-state list, but no gate re-derives appetite or team sizing from it. | pending | Re-derive scope from the measured red state before build starts, not mid-sweep. Either (a) split: keep Groups A/B/C in #2763 and open a follow-up issue for the ~44 newly-surfaced files, with the guard shipping ALLOWLIST-suppressed for the deferred set; or (b) re-declare `appetite: Medium`/`Large` with more than one review round. Update Risk 4's mitigation to expect a red-state count of order 100+, not "~30", so a builder does not stop early believing Group B was near-complete. |
-| BLOCKER | Structural (cross-reference check) | The plan contradicts itself on `test_sdlc_tool_wrapper.py` lines 69/75/81. Technical Approach Group A says "Convert them too: `env=subprocess_env()`. This is cheaper and more honest than three exemption entries". Task 2's bullet list says "Leave lines 69/75/81 alone." Test Impact lists that file as "6 call sites: lines 87, 101, 129, 172, 189, 230" — excluding them. The ground-truth run confirms all three are `NOENV` violations under the argv predicate, so following Task 2 leaves the guard red in the very file the issue was filed against. | pending | Task 2's builder follows the task list, not the prose. Delete "Leave lines 69/75/81 alone." from Task 2 and replace it with `Lines 69, 75, 81: env=subprocess_env()`, and change the Test Impact row to "9 call sites: lines 69, 75, 81, 87, 101, 129, 172, 189, 230". These three are `subprocess.run([str(WRAPPER)], ...)` and `[str(WRAPPER), "--help"]` with no `cwd` and no `env` — bare `subprocess_env()` with no `project_root` is correct; do not add `AI_REPO_ROOT`, which would break `test_wrapper_no_args_exits_2`'s usage-path assertion. |
-| CONCERN | Structural (cross-reference check) | Group D bullet 3 rejects any `env=` that is not literally a call to `subprocess_env`, naming `_isolated_subprocess_env` / `_subprocess_env` / `clean_env` as violations. But two *correct* thin delegating wrappers already exist whose entire body is `return subprocess_env(...)`: `tests/integration/test_agent_session_scheduler.py:25-37` and `tests/integration/test_bot_await_reply.py:33-43`. The predicate flags ~25 already-correct call sites, and Group C's claim that there are "Two helpers" that re-derive the db is wrong — there are four helpers, two broken and two already fixed by PR #2606. | pending | The anti-substring hardening from round 1 overshot. Resolve module-local helper names one hop: when `env=` is a `Call` to a bare `Name` defined in the same module, parse that function and accept it if its body's only `return` is a call to `subprocess_env`; otherwise it is a violation. This keeps `_isolated_subprocess_env` (which reads `POPOTO_REDIS_DB.connection_pool.connection_kwargs`) rejected while accepting the two legitimate delegators, and avoids a 25-entry ALLOWLIST that would read as noise. Add a second self-test asserting a synthetic `def _w(**k): return subprocess_env(**k)` delegator is ACCEPTED, paired with the existing one asserting `_my_subprocess_env()` is rejected. Also correct Group C's "Two helpers" count. |
-| CONCERN | History & Consistency | Group C, the Test Impact row, and Step 3 all cite `_isolated_subprocess_env`'s four driven call sites as `:380, :424, :467, :496`; the real lines in `tests/unit/test_sdlc_dispatch.py` are `:375, :409, :462, :491`. The helper itself is at `:272` as stated. This is the same stale-line-number class that produced round 1's History & Consistency BLOCKER on this exact helper — the Freshness Check re-verified `test_sdlc_tool_wrapper.py`'s lines but not this file's. | pending | Correct the four numbers to `:375, :409, :462, :491` in all three places, or drop the line numbers entirely and cite the helper name plus "all call sites in the file" — the helper name is stable, the numbers are not. Task 3's red-state diff gate catches the miss, but only after a builder has already edited four wrong lines and burned a pass on a Small-appetite, single-review-round plan. |
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (3/3) | The No-Gos forbid touching `tests/unit/test_redis_flush_guard_prod.py` and `tests/unit/test_conftest_isolation_guards.py` (owned by open PR #2683), but an empirical run of the plan's own argv-gated predicate reports 5 live violations inside exactly those files: `test_redis_flush_guard_prod.py:54,555,579,648` and `test_conftest_isolation_guards.py:463`. No task allocates ALLOWLIST entries for them, so Task 4's "guard now green" gate, the Verification row "Isolation guard passes / exit 0", and the Success Criterion "no file owned by PR #2683 appears in this PR's diff" are mutually unsatisfiable as written. | Group D allowlist rule 1; Test Impact NOT-TOUCHED row | Add the five `path:line` entries to `ALLOWLIST` in the NEW guard file `tests/unit/test_subprocess_test_db_isolation.py` only — this edits no #2683-owned file, so the anti-criterion still holds. Each entry carries the comment `# owned by open PR #2683 (#2628) — No-Go here, fix there`. Make it a Task 1 acceptance sub-bullet so the conflict is resolved on the guard's first red/green cycle, and have Task 4 assert those specific lines are present in `ALLOWLIST` rather than merely that the guard passes. |
+| BLOCKER | Scope & Value, Risk & Robustness (elevated per cross-validation) | Appetite (`Small`, "PM check-ins: 0", "Review rounds: 1"), the 16-row Test Impact table, and Risk 4's "confirm it reports the ~30 known sites" are all sized against the stale recon snapshot. Running the plan's own corrected argv-gated predicate over `tests/` scans 766 files and reports **147 violations across ~60 files**. Whole suites appear nowhere in Group A/B/C or the task list: `tests/integration/test_agent_session_scheduler.py` alone contributes 23 sites, plus `test_youtube_search.py:219`, `test_worker_guard.py:52`, `test_venv_health.py:66`, `test_steering_mechanism.py` (3), `test_validate_no_uv_sync_in_worktree.py` (5), `test_pre_commit_hook.py` (3), `tests/e2e/test_telegram_flow.py:38`, and dozens more. Task 3 defers to the red-state list, but no gate re-derives appetite or team sizing from it. | Appetite re-derived to Medium (70 convert / 44 allowlist); Test Impact preamble; Risk 4 | Re-derive scope from the measured red state before build starts, not mid-sweep. Either (a) split: keep Groups A/B/C in #2763 and open a follow-up issue for the ~44 newly-surfaced files, with the guard shipping ALLOWLIST-suppressed for the deferred set; or (b) re-declare `appetite: Medium`/`Large` with more than one review round. Update Risk 4's mitigation to expect a red-state count of order 100+, not "~30", so a builder does not stop early believing Group B was near-complete. |
+| BLOCKER | Structural (cross-reference check) | The plan contradicts itself on `test_sdlc_tool_wrapper.py` lines 69/75/81. Technical Approach Group A says "Convert them too: `env=subprocess_env()`. This is cheaper and more honest than three exemption entries". Task 2's bullet list says "Leave lines 69/75/81 alone." Test Impact lists that file as "6 call sites: lines 87, 101, 129, 172, 189, 230" — excluding them. The ground-truth run confirms all three are `NOENV` violations under the argv predicate, so following Task 2 leaves the guard red in the very file the issue was filed against. | Task 2 bullet; Test Impact row (9 sites) | Task 2's builder follows the task list, not the prose. Delete "Leave lines 69/75/81 alone." from Task 2 and replace it with `Lines 69, 75, 81: env=subprocess_env()`, and change the Test Impact row to "9 call sites: lines 69, 75, 81, 87, 101, 129, 172, 189, 230". These three are `subprocess.run([str(WRAPPER)], ...)` and `[str(WRAPPER), "--help"]` with no `cwd` and no `env` — bare `subprocess_env()` with no `project_root` is correct; do not add `AI_REPO_ROOT`, which would break `test_wrapper_no_args_exits_2`'s usage-path assertion. |
+| CONCERN | Structural (cross-reference check) | Group D bullet 3 rejects any `env=` that is not literally a call to `subprocess_env`, naming `_isolated_subprocess_env` / `_subprocess_env` / `clean_env` as violations. But two *correct* thin delegating wrappers already exist whose entire body is `return subprocess_env(...)`: `tests/integration/test_agent_session_scheduler.py:25-37` and `tests/integration/test_bot_await_reply.py:33-43`. The predicate flags ~25 already-correct call sites, and Group C's claim that there are "Two helpers" that re-derive the db is wrong — there are four helpers, two broken and two already fixed by PR #2606. | Group D delegator bullet; Group C four-helper count | The anti-substring hardening from round 1 overshot. Resolve module-local helper names one hop: when `env=` is a `Call` to a bare `Name` defined in the same module, parse that function and accept it if its body's only `return` is a call to `subprocess_env`; otherwise it is a violation. This keeps `_isolated_subprocess_env` (which reads `POPOTO_REDIS_DB.connection_pool.connection_kwargs`) rejected while accepting the two legitimate delegators, and avoids a 25-entry ALLOWLIST that would read as noise. Add a second self-test asserting a synthetic `def _w(**k): return subprocess_env(**k)` delegator is ACCEPTED, paired with the existing one asserting `_my_subprocess_env()` is rejected. Also correct Group C's "Two helpers" count. |
+| CONCERN | History & Consistency | Group C, the Test Impact row, and Step 3 all cite `_isolated_subprocess_env`'s four driven call sites as `:375, :409, :462, :491`; the real lines in `tests/unit/test_sdlc_dispatch.py` are `:375, :409, :462, :491`. The helper itself is at `:272` as stated. This is the same stale-line-number class that produced round 1's History & Consistency BLOCKER on this exact helper — the Freshness Check re-verified `test_sdlc_tool_wrapper.py`'s lines but not this file's. | Line numbers corrected to :375, :409, :462, :491 in all three places | Correct the four numbers to `:375, :409, :462, :491` in all three places, or drop the line numbers entirely and cite the helper name plus "all call sites in the file" — the helper name is stable, the numbers are not. Task 3's red-state diff gate catches the miss, but only after a builder has already edited four wrong lines and burned a pass on a Small-appetite, single-review-round plan. |
 
 ---
 
@@ -716,9 +783,10 @@ supervisor who wants to overrule a default.
 1. **Guard placement.** The guard is proposed as a pytest test. Would you rather
    it be a `PreToolUse` hook validator so the shape is rejected at authoring
    time rather than at test time? (Plan's position: test — see Rabbit Holes.)
-2. **Sweep breadth.** The plan converts the ~33 sites that launch Python against
-   a repo checkout and deliberately leaves the ~85 `git`-in-`tmp_path` sites
-   alone. Is that the right line, or do you want uniformity across all 115?
+2. **Sweep breadth.** The plan converts the 70 sites whose child can import repo
+   code, allowlists the 44 standalone-script children and the `git`-in-`tmp_path`
+   sites, and keeps it all in one issue at Medium appetite. Is that the right
+   line, or do you want the 44 split into a follow-up issue?
 3. **Doc destination.** `docs/features/test-db-ownership.md` does not exist on
    main yet — it arrives with PR #2683. Confirm the fallback (write to
    `tests/README.md` and fold in later) rather than creating a second doc.
