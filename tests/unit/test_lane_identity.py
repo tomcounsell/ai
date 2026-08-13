@@ -36,6 +36,8 @@ _ISSUE_LANE = 927350  # the lane whose branch diverges from its plan filename
 _ISSUE_OWNED = 927351  # an issue that genuinely owns a plan doc
 _ISSUE_MENTIONED = 927352  # an issue merely *mentioned* by that plan
 _ISSUE_RESOLVER = 927353  # scratch issue for resolver-contract tests
+_ISSUE_ADOPT = 927354  # scratch issue for adopt_lane_slug tests
+_ISSUE_META = 927355  # scratch issue for the stage-query `_meta` slug read
 
 
 def _cleanup(*issue_numbers: int, target_repo: str = _TEST_REPO) -> None:
@@ -47,7 +49,14 @@ def _cleanup(*issue_numbers: int, target_repo: str = _TEST_REPO) -> None:
 @pytest.fixture
 def clean_ledgers():
     """Remove every fixture ledger before and after the test."""
-    issues = (_ISSUE_LANE, _ISSUE_OWNED, _ISSUE_MENTIONED, _ISSUE_RESOLVER)
+    issues = (
+        _ISSUE_LANE,
+        _ISSUE_OWNED,
+        _ISSUE_MENTIONED,
+        _ISSUE_RESOLVER,
+        _ISSUE_ADOPT,
+        _ISSUE_META,
+    )
     _cleanup(*issues)
     yield
     _cleanup(*issues)
@@ -212,6 +221,80 @@ class TestMetaContamination:
         assert meta["plan_exists"] is False
         assert meta["revision_applied"] is False
         assert meta["revision_applied_at"] is None
+
+
+class _SessionStub:
+    """Minimal ``AgentSession`` shape ``_compute_meta`` reads off a session."""
+
+    def __init__(self, slug=None, pr_number=None):
+        self.slug = slug
+        self.pr_number = pr_number
+
+
+class TestMetaLaneSlugRead:
+    """``_meta['slug']`` is a two-rung read, and it never mints.
+
+    ``slug_source`` is what lets an operator tell "the branch check was skipped
+    because no identity is recorded" from "the branch check ran and verified
+    clean" -- the two states #2718 conflated.
+    """
+
+    @pytest.fixture
+    def meta_env(self, tmp_path, monkeypatch):
+        """An empty plans dir and a pinned repo, so only the slug read varies."""
+        repo_root = _write_plans_dir(tmp_path, {})
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(repo_root))
+        monkeypatch.setenv("GH_REPO", _TEST_REPO)
+        return repo_root
+
+    def _meta(self, session):
+        from tools.sdlc_stage_query import _compute_meta
+
+        with (
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
+        ):
+            return _compute_meta({}, session, _ISSUE_META)
+
+    def test_recorded_ledger_slug_wins(self, meta_env, clean_ledgers):
+        """Rung 1. A recorded identity outranks whatever a session carries."""
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_META)
+        ledger.slug = "the-recorded-lane"
+        ledger.save(update_fields=["slug"])
+
+        meta = self._meta(_SessionStub(slug="a-stale-session-slug"))
+
+        assert meta["slug"] == "the-recorded-lane"
+        assert meta["slug_source"] == "recorded"
+
+    def test_session_slug_is_the_cold_path_fallback(self, meta_env, clean_ledgers):
+        """Rung 2: a pre-cutover lane never heals, so its session is the source.
+
+        Dropping this leg would retire branch-head PR recovery for exactly the
+        lanes that have no recorded identity and never will.
+        """
+        meta = self._meta(_SessionStub(slug="a-pre-cutover-lane"))
+
+        assert meta["slug"] == "a-pre-cutover-lane"
+        assert meta["slug_source"] == "session"
+
+    def test_neither_rung_answers_is_unresolved(self, meta_env, clean_ledgers):
+        meta = self._meta(None)
+
+        assert meta["slug"] is None
+        assert meta["slug_source"] == "unresolved"
+
+    def test_meta_never_mints_and_creates_no_ledger(self, meta_env, clean_ledgers):
+        """``_compute_meta`` runs for any issue an operator names, not just lanes.
+
+        Healing here would mint an identity for a non-lane issue, contradicting
+        "minted exactly once at lane start".
+        """
+        meta = self._meta(None)
+
+        assert meta["slug"] is None
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_META) is None
+        assert list(PipelineLedger.query.filter(ledger_key=f"{_TEST_REPO}:{_ISSUE_META}")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -506,9 +589,14 @@ class TestResolveLaneSlugHealPath:
         assert resolved == f"sdlc-{_ISSUE_RESOLVER}"
         assert probed, "rung 3 never consulted origin"
 
-    def test_ladder_adopts_the_tracking_plan_stem(self, clean_ledgers, monkeypatch, tmp_path):
-        """Rung 4: a plan whose ``tracking:`` frontmatter claims the issue names
-        the lane, so a human-named lane keeps its human name."""
+    def test_ladder_never_adopts_a_plan_filename_stem(self, clean_ledgers, monkeypatch, tmp_path):
+        """There is no plan-stem rung: a plan filename is not a lane identity.
+
+        A plan doc that *tracks* the issue is still only a document that names
+        it. Deriving the lane slug from its filename is the defect this module
+        closes, and because the write is no-overwrite a wrong adoption could
+        never be corrected. The ladder falls through to the mint.
+        """
         import tools.lane_identity as lane_identity
 
         repo_root = _write_plans_dir(
@@ -524,7 +612,102 @@ class TestResolveLaneSlugHealPath:
         resolved = lane_identity.resolve_lane_slug(
             _ISSUE_RESOLVER, allow_heal=True, target_repo=_TEST_REPO
         )
+        assert resolved == f"sdlc-{_ISSUE_RESOLVER}"
+        assert not hasattr(lane_identity, "_adopt_tracking_plan_stem")
+
+
+class TestAdoptLaneSlug:
+    """``adopt_lane_slug`` records what the caller already knows -- no ladder.
+
+    The ladder is for callers that must *discover* an identity. A caller
+    holding a pushed branch name has already adopted one from the world, and
+    re-deriving over it is exactly the #2718 divergence this module closes.
+    """
+
+    def test_adopt_records_a_caller_supplied_slug(self, clean_ledgers):
+        from tools.lane_identity import adopt_lane_slug
+
+        assert adopt_lane_slug(_ISSUE_ADOPT, "sdlc-lane-a", target_repo=_TEST_REPO) == (
+            "sdlc-lane-a"
+        )
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_ADOPT).slug == "sdlc-lane-a"
+
+    def test_adopt_records_a_human_named_branch_verbatim(self, clean_ledgers):
+        """#2718's exact shape: the recorded value is the branch, not ``sdlc-N``.
+
+        This is the load-bearing case. Re-deriving here would mint
+        ``sdlc-{N}`` for a lane whose branch is ``session-liveness-tick-counter``
+        and every downstream branch probe would then miss.
+        """
+        from tools.lane_identity import adopt_lane_slug, mint_lane_slug
+
+        adopt_lane_slug(_ISSUE_ADOPT, "session-liveness-tick-counter", target_repo=_TEST_REPO)
+
+        recorded = PipelineLedger.get(_TEST_REPO, _ISSUE_ADOPT).slug
+        assert recorded == "session-liveness-tick-counter"
+        assert recorded != mint_lane_slug(_ISSUE_ADOPT)
+
+    def test_adopt_never_overwrites_a_recorded_slug(self, clean_ledgers):
+        """Conditional-on-empty: the loser returns the winner's value."""
+        from tools.lane_identity import adopt_lane_slug
+
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_ADOPT)
+        ledger.slug = "the-winner"
+        ledger.save(update_fields=["slug"])
+
+        assert adopt_lane_slug(_ISSUE_ADOPT, "a-rival-name", target_repo=_TEST_REPO) == "the-winner"
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_ADOPT).slug == "the-winner"
+
+    @pytest.mark.parametrize("slug", [None, "", "   "])
+    def test_adopt_declines_a_blank_slug(self, clean_ledgers, slug):
+        """A lane whose identity is a run of spaces is not an identity."""
+        from tools.lane_identity import adopt_lane_slug
+
+        assert adopt_lane_slug(_ISSUE_ADOPT, slug, target_repo=_TEST_REPO) is None
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_ADOPT) is None
+
+    @pytest.mark.parametrize("issue_number", [0, None, -5])
+    def test_adopt_declines_a_falsy_or_negative_issue_number(self, clean_ledgers, issue_number):
+        from tools.lane_identity import adopt_lane_slug
+
+        assert adopt_lane_slug(issue_number, "some-lane", target_repo=_TEST_REPO) is None
+        assert list(PipelineLedger.query.filter(ledger_key=f"{_TEST_REPO}:{issue_number}")) == []
+
+    def test_adopt_writes_nothing_when_the_target_repo_is_unresolvable(self, clean_ledgers):
+        """No ``None:{issue}`` phantom record is ever assembled."""
+        from tools.lane_identity import adopt_lane_slug
+
+        with patch("tools._sdlc_utils.resolve_target_repo_for_read", return_value=None):
+            assert adopt_lane_slug(_ISSUE_ADOPT, "some-lane") is None
+
+        assert list(PipelineLedger.query.filter(ledger_key=f"None:{_ISSUE_ADOPT}")) == []
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_ADOPT) is None
+
+    def test_adopt_walks_no_ladder_and_consults_no_git(self, clean_ledgers, monkeypatch):
+        """Unlike the healing arm, adoption makes no git subprocess at all.
+
+        Both probes are patched through the module attribute (the same idiom
+        the ladder tests use -- ``_git_toplevel`` is reached through
+        ``tools._sdlc_utils`` rather than bound at import, which is what makes
+        the patch bite).
+        """
+        import tools.lane_identity as lane_identity
+
+        probed: list[str] = []
+
+        monkeypatch.setattr(
+            lane_identity, "_ls_remote_heads", lambda: probed.append("ls-remote") or {}
+        )
+        monkeypatch.setattr(
+            "tools._sdlc_utils._git_toplevel", lambda *a, **k: probed.append("toplevel")
+        )
+
+        resolved = lane_identity.adopt_lane_slug(
+            _ISSUE_ADOPT, "session-liveness-tick-counter", target_repo=_TEST_REPO
+        )
+
         assert resolved == "session-liveness-tick-counter"
+        assert probed == [], f"adoption walked the ladder: {probed!r}"
 
 
 # ---------------------------------------------------------------------------

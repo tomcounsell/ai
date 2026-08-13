@@ -25,7 +25,7 @@ Then the action ladder, keyed on ``(slug, head-sha)``:
     action cooldown live                       -> skip this tick
     rung 1  live non-ledger eng session        -> steer_session(...)
     rung 2  resumable eng session              -> resume_session(...)
-    rung 3  no target                          -> create_session(slug=sdlc-N)
+    rung 3  no target                          -> create_session(slug=lane slug)
     rung 4  action failed (non-benign)         -> escalate once, stop
 
 Rungs 1 and 2 both rank candidates ``(same_lane, recency)``, so a session
@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
+from reflections.pm_briefings.collector import _project_repo
 
 # _LOCK_KEY, _lock_says_live and _get_redis moved to reflections/utilities.py
 # (#2717) so the sibling reflection reflections/sdlc_upvote_lanes.py can share
@@ -92,6 +93,7 @@ from reflections.utilities import (  # noqa: F401
     machine_owns_project,
     run_per_project_audit,
 )
+from tools.lane_identity import adopt_lane_slug
 
 logger = logging.getLogger("reflections.sdlc_progress")
 
@@ -640,6 +642,7 @@ def _attempt_action(
     sha: str,
     issue_number: int,
     project_key: str,
+    target_repo: str | None,
     message: str,
 ) -> ActionOutcome:
     """Dispatch one rung, classify the outcome, and charge the attempt.
@@ -698,13 +701,26 @@ def _attempt_action(
             outcome.benign = True
             outcome.error = "lane re-took its issue lock"
             return outcome
+        # This rung only fires for an issue that already has a PR and a pushed
+        # branch, so `slug` -- derived from that branch by the caller -- IS the
+        # lane's identity, adopted from the world. Record it rather than asking
+        # the resolver to re-derive it: the resolver's branch rung probes only
+        # the issue-derived name, so for a human-named lane it would miss, mint
+        # `sdlc-{N}`, and create the session under a name that diverges from the
+        # branch this tick is looking at. `slug` is therefore passed through
+        # untouched, keeping the attempts, cooldown and escalation keys (all
+        # charged against the caller's binding) on one name.
+        # `target_repo` is threaded because this reflection iterates projects in
+        # a process whose own cwd belongs to `ai` -- without it a non-`ai`
+        # project's lane would be recorded under this repo's key.
+        adopt_lane_slug(issue_number, slug, target_repo=target_repo)
         try:
             from tools.valor_session import create_session
 
             result = create_session(
                 message=message,
                 role="eng",
-                slug=f"sdlc-{issue_number}",
+                slug=slug,
                 project_key=project_key,
                 session_type="eng",
             )
@@ -743,6 +759,12 @@ def _check_project_stalls(project: dict) -> dict:
     t0 = time.time()
     wd = project.get("working_directory", "")
     project_key = project.get("slug", "?")
+    # The authoritative repo slug for THIS project. This process's own cwd
+    # belongs to `ai` regardless of which project the tick is acting on -- only
+    # subprocesses get `wd` -- so lane identity must be keyed explicitly or a
+    # non-`ai` project's lane records under the wrong repo. `None` is tolerated:
+    # `resolve_lane_slug` falls back to its own lease-first resolution.
+    target_repo = _project_repo(project)
     findings: list[str] = []
     counts = {"steered": 0, "resumed": 0, "created": 0, "escalated": 0}
     # Per-call state, deliberately not in Redis: it brakes creations WITHIN one
@@ -885,6 +907,7 @@ def _check_project_stalls(project: dict) -> dict:
             sha=sha,
             issue_number=issue_num,
             project_key=project_key,
+            target_repo=target_repo,
             message=message,
         )
         if outcome.dispatched and kind == "create":

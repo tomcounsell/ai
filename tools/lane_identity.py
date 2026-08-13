@@ -28,14 +28,19 @@ explicitly enabled (a lane-start path) and the field is still empty:
    through (merged-and-deleted is the common zero case and is not an error).
 3. **A direct probe for the issue-derived branch on origin.** Adopts an
    identity that already exists in the world before inventing one.
-4. **A plan doc whose ``tracking:`` frontmatter claims the issue.** Ownership is
-   proven by the frontmatter, not guessed from the filename.
-5. **Mint.** :func:`mint_lane_slug` is the sole home of the issue-derived slug
+4. **Mint.** :func:`mint_lane_slug` is the sole home of the issue-derived slug
    literal in this repo.
 
-A machine-local ``git worktree list`` rung is deliberately absent: it would make
-two hosts reach different answers for the same lane, and a per-host identity is
-not an identity.
+Rungs 2 and 3 **adopt an identity that already exists in the world** -- a pushed
+branch, a PR's head ref. A plan document is not an identity; it is a document
+that mentions an issue, so a ``docs/plans/`` filename-stem rung is deliberately
+absent. Reading a plan filename to name a lane is derivation wearing adoption's
+clothes, it is the precise defect this module closes, and because the write is
+no-overwrite a wrong adoption could never be corrected.
+
+A machine-local ``git worktree list`` rung is deliberately absent for a different
+reason: it would make two hosts reach different answers for the same lane, and a
+per-host identity is not an identity.
 """
 
 from __future__ import annotations
@@ -288,21 +293,6 @@ def _adopt_pushed_lane_branch(issue_number: int) -> str | None:
     return None
 
 
-def _adopt_tracking_plan_stem(issue_number: int) -> str | None:
-    """Rung 4: adopt the filename stem of the plan that *tracks* this issue.
-
-    This is not the plan-filename derivation the issue is about. That defect was
-    resolving a plan by a bare textual mention and then probing a branch under
-    its name on a *read* path. Here ownership is proven by ``tracking:``
-    frontmatter, the adoption happens once on a lane-start path, and the result
-    is recorded rather than re-derived on every tick.
-    """
-    plan_path = find_plan_path(issue_number)
-    if plan_path is None:
-        return None
-    return _nonempty(plan_path.stem)
-
-
 # ---------------------------------------------------------------------------
 # Conditional-on-empty healing write
 # ---------------------------------------------------------------------------
@@ -385,6 +375,53 @@ def _record_slug_if_empty(ledger_key: str, candidate: str) -> str:
             _release_slug_lock(ledger_key)
 
 
+def adopt_lane_slug(
+    issue_number: int,
+    slug: str | None,
+    *,
+    target_repo: str | None = None,
+) -> str | None:
+    """Record an identity the caller **already knows**, conditional-on-empty.
+
+    The ladder in :func:`resolve_lane_slug` exists for callers that must
+    *discover* a lane's identity. Some callers do not have to: a caller holding
+    a pushed branch name has already adopted the identity from the world, and it
+    is strictly better evidence than anything the ladder could re-derive. The
+    ladder's branch rung probes only the issue-derived name, so for a lane whose
+    branch is human-named it misses and mints ``sdlc-{N}`` -- a name that
+    diverges from the branch the caller is looking at. That divergence is the
+    defect this module closes, so re-deriving here would reintroduce it at the
+    site meant to fix it.
+
+    Hence the rule this module enforces in three clauses: a site that SEARCHES
+    may guess, a site that WRITES identity may not, and a site that already
+    KNOWS records what it knows.
+
+    Writes through the same conditional-on-empty path as the healing arm, so it
+    can never overwrite a recorded identity and needs no lease. Returns the
+    recorded slug (the caller's value, or the winner's on a lost race), or
+    ``None`` when there is nothing to record or no repo to key by.
+    """
+    slug = _nonempty(slug)
+    if not issue_number or issue_number < 1 or not slug:
+        return None
+
+    if target_repo is None:
+        target_repo = _sdlc_utils.resolve_target_repo_for_read(issue_number)
+    if not target_repo:
+        logger.debug(
+            "lane_identity: target repo unresolvable for issue #%s -- not adopting %r",
+            issue_number,
+            slug,
+        )
+        return None
+
+    ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+    if ledger is None:
+        return slug
+    return _record_slug_if_empty(ledger.ledger_key, slug)
+
+
 # ---------------------------------------------------------------------------
 # The resolver
 # ---------------------------------------------------------------------------
@@ -448,7 +485,6 @@ def resolve_lane_slug(
     candidate = (
         _adopt_from_pr(getattr(ledger, "pr_number", None), target_repo)
         or _adopt_pushed_lane_branch(issue_number)
-        or _adopt_tracking_plan_stem(issue_number)
         or mint_lane_slug(issue_number)
     )
     return _record_slug_if_empty(ledger.ledger_key, candidate)

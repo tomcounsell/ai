@@ -965,10 +965,28 @@ class TestCliRecordCritiqueFindingsGate:
         result = self._run(p, verdict=verdict)
         assert result["verdict"] == normalize_verdict(verdict)
 
-    def test_unresolvable_plan_under_needs_revision_no_raise(self):
-        """A None plan path is a different failure — the gate does not fire."""
-        result = self._run(None, verdict="NEEDS REVISION")
-        assert result["verdict"] == "NEEDS REVISION"
+    def test_unresolvable_plan_under_needs_revision_fails_closed(self):
+        """An unresolvable plan under NEEDS REVISION now REFUSES the write.
+
+        Plan resolution is one rung -- a ``tracking:`` frontmatter line naming
+        the issue -- so "unresolvable" and "no findings" are no longer
+        distinguishable: there is no document to read findings out of. Skipping
+        was safe only while the deleted bare-mention fallback made an
+        unresolvable plan rare.
+        """
+        from tools.sdlc_verdict import CritiqueFindingsMissingError
+
+        with pytest.raises(CritiqueFindingsMissingError, match="CRITIQUE_PLAN_UNRESOLVABLE"):
+            self._run(None, verdict="NEEDS REVISION")
+
+    @pytest.mark.parametrize(
+        "verdict",
+        ["READY TO BUILD", "MAJOR REWORK", "MAJOR REWORK (CRITIQUE INCOMPLETE)"],
+    )
+    def test_unresolvable_plan_outside_needs_revision_does_not_raise(self, verdict):
+        """The refusal stays exactly as narrow as the findings gate it extends."""
+        result = self._run(None, verdict=verdict)
+        assert result["verdict"] == normalize_verdict(verdict)
 
     def test_needs_revision_lowercase_variant_still_gates(self, tmp_path):
         """The gate triggers on the normalized form, so a lowercase/spacing

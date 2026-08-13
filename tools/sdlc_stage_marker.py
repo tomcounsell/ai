@@ -344,7 +344,7 @@ def _skip_precondition_error(
 
     # 1. A plan document means the stage genuinely applies.
     try:
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plan_path = find_plan_path(issue_number)
     except Exception as e:

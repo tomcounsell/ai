@@ -101,9 +101,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
-from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
 from tools._sdlc_utils import normalize_verdict
+from tools.lane_identity import find_plan_path as _find_plan_path
 from tools.sdlc_review_finalize import _cli_finalize, _cli_selfcheck
 
 logger = logging.getLogger(__name__)
@@ -771,11 +771,19 @@ def _cli_record(args) -> dict:
     if args.stage.upper() == "CRITIQUE" and normalize_verdict(args.verdict) == "NEEDS REVISION":
         plan_path = _find_plan_path(args.issue_number)
         if plan_path is None:
-            # A missing/unresolvable plan is a different failure than the
-            # resolvable-but-empty contradiction this gate judges; do not fire.
-            logger.debug(
-                "sdlc_verdict: CRITIQUE findings gate skipped — no plan resolved "
-                f"for issue #{args.issue_number}"
+            # Plan resolution is now ONE rung -- a `tracking:` frontmatter line
+            # naming the issue -- so "unresolvable" and "no findings" are no
+            # longer distinguishable: there is no document to read the findings
+            # out of. The gate must therefore fail CLOSED here. Skipping was
+            # safe only while the deleted bare-mention fallback made an
+            # unresolvable plan rare; it now lets a NEEDS REVISION verdict be
+            # recorded with nothing behind it.
+            raise CritiqueFindingsMissingError(
+                f"CRITIQUE_PLAN_UNRESOLVABLE: verdict 'NEEDS REVISION' recorded for "
+                f"issue #{args.issue_number}, but no plan doc tracks that issue, so the "
+                "findings that justify it cannot be persisted or read. Add a "
+                "`tracking:` frontmatter line naming the issue to its plan doc; "
+                "refusing verdict write."
             )
         elif not critique_table_has_findings(plan_path):
             raise CritiqueFindingsMissingError(
