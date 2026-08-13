@@ -26,7 +26,11 @@ if str(HOOKS_DIR) not in sys.path:
 if str(VALIDATORS_DIR) not in sys.path:
     sys.path.insert(0, str(VALIDATORS_DIR))
 
-from hook_utils.hook_target import read_hook_input, target_from_hook_input  # noqa: E402
+from hook_utils.hook_target import (  # noqa: E402
+    in_scope,
+    read_hook_input,
+    target_from_hook_input,
+)
 
 PORTED_VALIDATORS = [
     "validate_no_gos_justification.py",
@@ -174,6 +178,65 @@ class TestNoValidatorRaisesOnAHostilePayload:
         assert "Traceback" not in proc.stderr
 
 
+class TestInScope:
+    """The anchored scope predicate shared by all five validators.
+
+    Anchored means two things, and both are regressions the family has actually
+    shipped. The directory must match on a *path segment* — an unanchored
+    ``"docs/plans" in path`` fails closed on ``docs/plans_archive/old.md``. And
+    the test must work on the path **as given**, absolute included: rewriting an
+    absolute payload path to a cwd-relative form before a ``startswith`` puts
+    the payload's cwd (often absent) and the hook process's cwd (often another
+    lane's checkout) back into target selection.
+    """
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            # In scope: relative, nested, absolute, and Windows separators.
+            ("docs/plans/a.md", True),
+            ("docs/plans/completed/a.md", True),
+            ("/Users/x/src/ai/.worktrees/slug/docs/plans/a.md", True),
+            ("/private/tmp/pytest-1/docs/plans/a.md", True),
+            ("docs\\plans\\a.md", True),
+            ("C:\\repo\\docs\\plans\\a.md", True),
+            # Out of scope: sibling and prefix lookalikes.
+            ("docs/plans_archive/old.md", False),
+            ("docs/plansomething/a.md", False),
+            ("/repo/docs/plans_archive/old.md", False),
+            ("docs/plansible.md", False),
+            # Out of scope: wrong extension, wrong directory, bare filename.
+            ("docs/plans/helper.py", False),
+            ("docs/features/a.md", False),
+            ("tools/foo.py", False),
+            ("a.md", False),
+            ("", False),
+        ],
+    )
+    def test_scope(self, path, expected):
+        assert in_scope(path, "docs/plans", ".md") is expected
+
+    def test_an_absolute_path_needs_no_cwd_to_be_in_scope(self):
+        """The regression that made a payload without a `cwd` key fail open."""
+        assert in_scope("/anywhere/at/all/docs/plans/mine.md", "docs/plans", ".md") is True
+
+    @pytest.mark.parametrize("extension", [".md", "md"])
+    def test_extension_dot_is_optional(self, extension):
+        assert in_scope("docs/plans/a.md", "docs/plans", extension) is True
+
+    @pytest.mark.parametrize("directory", ["docs/plans", "docs/plans/", "/docs/plans/"])
+    def test_directory_slashes_are_tolerated(self, directory):
+        assert in_scope("docs/plans/a.md", directory, ".md") is True
+
+    def test_an_empty_extension_matches_any_suffix(self):
+        assert in_scope("docs/plans/helper.py", "docs/plans", "") is True
+
+    @pytest.mark.parametrize("directory", ["", "/"])
+    def test_an_empty_directory_is_never_in_scope(self, directory):
+        """A missing scope must fail closed to "not mine", not match everything."""
+        assert in_scope("docs/plans/a.md", directory, ".md") is False
+
+
 class TestWorkingTreeStateIsNeverAnInput:
     """The anti-regression: the deleted guessers must not come back."""
 
@@ -187,3 +250,16 @@ class TestWorkingTreeStateIsNeverAnInput:
         source = (VALIDATORS_DIR / validator).read_text()
         for banned in ("find_newest_plan_file", "find_newest_file", "porcelain", "newest_mtime"):
             assert banned not in source, f"{validator} still references {banned}"
+
+    @pytest.mark.parametrize("validator", PORTED_VALIDATORS)
+    def test_no_validator_resolves_its_target_against_a_cwd(self, validator):
+        """A cwd is process/payload state, so it is not an input to target selection.
+
+        Rewriting the payload's absolute path relative to ``payload["cwd"]``
+        reintroduces the whole defect: absent the key the path silently falls
+        out of scope, and once relative it resolves against whatever checkout
+        the hook process started in.
+        """
+        source = (VALIDATORS_DIR / validator).read_text()
+        for banned in ('get("cwd")', "normalize_target", "os.chdir", "os.getcwd"):
+            assert banned not in source, f"{validator} resolves its target against a cwd: {banned}"

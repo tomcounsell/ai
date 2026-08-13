@@ -112,7 +112,12 @@ class TestCheckContains:
 
 
 class TestInScope:
-    """`--directory` / `--extension` are the scope filter, nothing more."""
+    """`--directory` / `--extension` are the scope filter, nothing more.
+
+    The validator uses the shared anchored predicate from ``hook_target``; these
+    cases pin the pairing this hook is actually registered with. The predicate's
+    own exhaustive coverage lives in ``test_hook_target.py``.
+    """
 
     @pytest.mark.parametrize(
         "target,expected",
@@ -120,10 +125,12 @@ class TestInScope:
             ("docs/plans/a.md", True),
             ("docs/plans/completed/a.md", True),
             ("docs\\plans\\a.md", True),
+            ("/abs/checkout/docs/plans/a.md", True),
             ("docs/features/a.md", False),
             ("docs/plans/a.py", False),
             ("tools/foo.py", False),
             ("docs/plansomething/a.md", False),
+            ("docs/plans_archive/old.md", False),
             ("a.md", False),
         ],
     )
@@ -140,28 +147,21 @@ class TestInScope:
         assert mod.in_scope("docs/plans/a.md", "docs/plans/", ".md") is True
 
 
-class TestNormalizeTarget:
-    """An absolute payload path is expressed relative to the hook's cwd."""
+class TestCwdIsNeverAnInputToTargetSelection:
+    """The payload's path is judged as given, never rewritten against a cwd."""
 
-    def test_strips_the_cwd_prefix(self):
-        mod = import_validator()
-        assert mod.normalize_target("/repo/docs/plans/a.md", "/repo") == "docs/plans/a.md"
+    def test_normalize_target_is_gone(self):
+        """Rewriting an absolute payload path to a cwd-relative one was the defect.
 
-    def test_tolerates_a_trailing_slash_on_cwd(self):
+        It made the payload's ``cwd`` key mandatory for an absolute path to be in
+        scope (silently failing open when the harness sends none), and reduced the
+        target to a relative path that the read then resolved against the *hook
+        process's* cwd — a different lane's checkout.
+        """
         mod = import_validator()
-        assert mod.normalize_target("/repo/docs/plans/a.md", "/repo/") == "docs/plans/a.md"
-
-    def test_leaves_a_relative_path_alone(self):
-        mod = import_validator()
-        assert mod.normalize_target("docs/plans/a.md", "/repo") == "docs/plans/a.md"
-
-    def test_leaves_an_unrelated_absolute_path_alone(self):
-        mod = import_validator()
-        assert mod.normalize_target("/other/docs/plans/a.md", "/repo") == "/other/docs/plans/a.md"
-
-    def test_empty_cwd_is_a_no_op(self):
-        mod = import_validator()
-        assert mod.normalize_target("docs/plans/a.md", "") == "docs/plans/a.md"
+        assert not hasattr(mod, "normalize_target"), (
+            "cwd-relative rewriting reintroduces the cross-lane defect"
+        )
 
 
 class TestValidate:
@@ -208,47 +208,10 @@ def run_hook(payload: dict | str | None, cwd: Path, *args: str) -> subprocess.Co
     )
 
 
-def _git(root: Path, *args: str) -> None:
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "user.name=Test",
-            *args,
-        ],
-        cwd=str(root),
-        check=True,
-        capture_output=True,
-        timeout=30,
-    )
-
-
-def make_cross_lane_repo(root: Path) -> Path:
-    """A repo whose docs/plans/ holds a TRACKED anchor plus another lane's plan.
-
-    The tracked anchor is load-bearing, not decoration. With no tracked file
-    under ``docs/plans/``, ``git status --porcelain docs/plans/`` collapses the
-    whole directory to a single ``?? docs/plans/`` line whose path does not end
-    in ``.md``. The deleted ``get_git_new_files`` suffix filter dropped that
-    line, so the fixture would false-pass against the *unfixed* code and prove
-    nothing (#2689, and the "Data prerequisite" note under Race 1 of the plan).
-
-    Verified: against ``git show main:…validate_file_contains.py`` this fixture
-    exits 2 on a payload naming ``docs/features/mine.md``.
-    """
-    plans = root / "docs" / "plans"
-    plans.mkdir(parents=True, exist_ok=True)
-    (plans / "anchor.md").write_text(COMPLIANT_PLAN)
-    _git(root, "init", "-q")
-    _git(root, "add", "docs/plans/anchor.md")
-    _git(root, "commit", "-q", "-m", "anchor")
-    # The other lane's in-progress plan: untracked, deficient, newest by mtime.
-    (plans / "zzz-other-lane.md").write_text(DEFICIENT_PLAN)
-    return root
+@pytest.fixture
+def cross_lane(cross_lane_repo, tmp_path):
+    """The shared #2689 reproducer, wired with this module's plan bodies."""
+    return cross_lane_repo(tmp_path, COMPLIANT_PLAN, DEFICIENT_PLAN)
 
 
 class TestTargetIsTheFileTheHookNamed:
@@ -284,28 +247,24 @@ class TestTargetIsTheFileTheHookNamed:
         payload = {"tool_input": {"file_path": "docs/plans/x.md"}}
         assert mod.target_from_hook_input(payload) == "docs/plans/x.md"
 
-    def test_cross_lane_write_is_not_judged(self, tmp_path):
+    def test_cross_lane_write_is_not_judged(self, cross_lane, tmp_path):
         """The #2689 reproducer: another lane's deficient plan is sitting right there."""
-        make_cross_lane_repo(tmp_path)
         payload = {"tool_name": "Write", "tool_input": {"file_path": "docs/features/mine.md"}}
         proc = run_hook(payload, tmp_path, *CONTAINS_ARGS)
         assert proc.returncode == 0, proc.stderr
         assert "zzz-other-lane" not in proc.stderr
 
-    def test_cross_lane_source_write_is_not_judged(self, tmp_path):
-        make_cross_lane_repo(tmp_path)
+    def test_cross_lane_source_write_is_not_judged(self, cross_lane, tmp_path):
         payload = {"tool_name": "Write", "tool_input": {"file_path": "tools/foo.py"}}
         assert run_hook(payload, tmp_path, *CONTAINS_ARGS).returncode == 0
 
-    def test_out_of_scope_extension_exits_early(self, tmp_path):
+    def test_out_of_scope_extension_exits_early(self, cross_lane, tmp_path):
         """A .py write inside docs/plans/ is still out of scope."""
-        make_cross_lane_repo(tmp_path)
         payload = {"tool_input": {"file_path": "docs/plans/helper.py"}}
         assert run_hook(payload, tmp_path, *CONTAINS_ARGS).returncode == 0
 
-    def test_your_own_deficient_plan_is_still_blocked(self, tmp_path):
+    def test_your_own_deficient_plan_is_still_blocked(self, cross_lane, tmp_path):
         """Fail-closed direction. This is the assertion that keeps the guard armed."""
-        make_cross_lane_repo(tmp_path)
         (tmp_path / "docs" / "plans" / "mine.md").write_text(DEFICIENT_PLAN)
         payload = {"tool_name": "Write", "tool_input": {"file_path": "docs/plans/mine.md"}}
         proc = run_hook(payload, tmp_path, *CONTAINS_ARGS)
@@ -315,9 +274,8 @@ class TestTargetIsTheFileTheHookNamed:
         assert "zzz-other-lane" not in proc.stderr
 
     @pytest.mark.parametrize("required", REGISTERED_CONTAINS)
-    def test_each_registered_section_is_individually_enforced(self, required, tmp_path):
+    def test_each_registered_section_is_individually_enforced(self, required, cross_lane, tmp_path):
         """Drop exactly one required heading; the hook must still fire."""
-        make_cross_lane_repo(tmp_path)
         body = "\n".join(line for line in COMPLIANT_PLAN.splitlines() if line.strip() != required)
         (tmp_path / "docs" / "plans" / "mine.md").write_text(body + "\n")
         payload = {"tool_input": {"file_path": "docs/plans/mine.md"}}
@@ -325,50 +283,86 @@ class TestTargetIsTheFileTheHookNamed:
         assert proc.returncode == 2, proc.stdout
         assert required in proc.stderr
 
-    def test_your_own_compliant_plan_passes(self, tmp_path):
-        make_cross_lane_repo(tmp_path)
+    def test_your_own_compliant_plan_passes(self, cross_lane, tmp_path):
         (tmp_path / "docs" / "plans" / "mine.md").write_text(COMPLIANT_PLAN)
         payload = {"tool_input": {"file_path": "docs/plans/mine.md"}}
         proc = run_hook(payload, tmp_path, *CONTAINS_ARGS)
         assert proc.returncode == 0, proc.stderr
 
-    def test_absolute_payload_path_with_cwd_is_enforced(self, tmp_path):
-        """The harness always sends `cwd`; that is what makes an absolute path in scope."""
-        make_cross_lane_repo(tmp_path)
+    def test_absolute_payload_path_with_cwd_is_enforced(self, cross_lane, tmp_path):
         plan = tmp_path / "docs" / "plans" / "mine.md"
         plan.write_text(DEFICIENT_PLAN)
         payload = {"cwd": str(tmp_path), "tool_input": {"file_path": str(plan)}}
         assert run_hook(payload, tmp_path, *CONTAINS_ARGS).returncode == 2
 
-    def test_absolute_payload_path_with_cwd_passes_when_compliant(self, tmp_path):
-        make_cross_lane_repo(tmp_path)
+    def test_absolute_payload_path_with_cwd_passes_when_compliant(self, cross_lane, tmp_path):
         plan = tmp_path / "docs" / "plans" / "mine.md"
         plan.write_text(COMPLIANT_PLAN)
         payload = {"cwd": str(tmp_path), "tool_input": {"file_path": str(plan)}}
         proc = run_hook(payload, tmp_path, *CONTAINS_ARGS)
         assert proc.returncode == 0, proc.stderr
 
-    def test_no_target_and_no_positional_file_exits_zero(self, tmp_path):
+    def test_absolute_payload_path_without_cwd_is_enforced(self, cross_lane, tmp_path):
+        """No `cwd` key at all — the shape `.opencode/plugins/valor-bridge.ts` sends.
+
+        While the validator rewrote the absolute path relative to `payload["cwd"]`,
+        an absent key left the absolute path unrewritten, `startswith("docs/plans/")`
+        was false, and the hook exited 0 without ever reading the file: a silent
+        fail-open on the exact writes it exists to police.
+        """
+        plan = tmp_path / "docs" / "plans" / "mine.md"
+        plan.write_text(DEFICIENT_PLAN)
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(plan)}}
+        proc = run_hook(payload, tmp_path, *CONTAINS_ARGS)
+        assert proc.returncode == 2, proc.stdout
+        assert "## Agent Integration" in proc.stderr
+
+    def test_payload_cwd_diverging_from_the_process_cwd_judges_the_payloads_file(
+        self, cross_lane_repo, tmp_path
+    ):
+        """Two lanes, two checkouts: the file the payload named is the file judged.
+
+        Lane A holds the deficient plan the payload points at; lane B holds a
+        *compliant* plan at the same relative path and is where the hook process
+        happens to start. Reducing the target to `docs/plans/p.md` made both the
+        existence check and the content read resolve against lane B, so the hook
+        reported success for a file it never opened.
+        """
+        lane_a = tmp_path / "lane-a"
+        lane_b = tmp_path / "lane-b"
+        for lane in (lane_a, lane_b):
+            lane.mkdir()
+            cross_lane_repo(lane, COMPLIANT_PLAN, DEFICIENT_PLAN)
+        (lane_a / "docs" / "plans" / "p.md").write_text(DEFICIENT_PLAN)
+        (lane_b / "docs" / "plans" / "p.md").write_text(COMPLIANT_PLAN)
+
+        payload = {
+            "cwd": str(lane_a),
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(lane_a / "docs" / "plans" / "p.md")},
+        }
+        proc = run_hook(payload, lane_b, *CONTAINS_ARGS)
+        assert proc.returncode == 2, proc.stdout
+        assert "lane-a" in proc.stderr
+        assert "contains all" not in proc.stdout
+
+    def test_no_target_and_no_positional_file_exits_zero(self, cross_lane, tmp_path):
         """A bare invocation guesses nothing — it has nothing to judge."""
-        make_cross_lane_repo(tmp_path)
         proc = run_hook({}, tmp_path, *CONTAINS_ARGS)
         assert proc.returncode == 0, proc.stderr
 
     @pytest.mark.parametrize("payload", [None, "", "not json", "{}", {"tool_input": {}}])
-    def test_absent_or_malformed_input_passes_through(self, payload, tmp_path):
-        make_cross_lane_repo(tmp_path)
+    def test_absent_or_malformed_input_passes_through(self, payload, cross_lane, tmp_path):
         assert run_hook(payload, tmp_path, *CONTAINS_ARGS).returncode == 0
 
     @pytest.mark.parametrize("raw", ["null", "[1,2]", '"str"', "42"])
-    def test_non_dict_payload_exits_zero_without_a_traceback(self, raw, tmp_path):
+    def test_non_dict_payload_exits_zero_without_a_traceback(self, raw, cross_lane, tmp_path):
         """Syntactically valid JSON that is not an object must not raise."""
-        make_cross_lane_repo(tmp_path)
         proc = run_hook(raw, tmp_path, *CONTAINS_ARGS)
         assert proc.returncode == 0, proc.stderr
         assert "Traceback" not in proc.stderr
 
-    def test_unresolvable_plan_path_does_not_block(self, tmp_path):
-        make_cross_lane_repo(tmp_path)
+    def test_unresolvable_plan_path_does_not_block(self, cross_lane, tmp_path):
         payload = {"tool_input": {"file_path": "docs/plans/never-written.md"}}
         assert run_hook(payload, tmp_path, *CONTAINS_ARGS).returncode == 0
 

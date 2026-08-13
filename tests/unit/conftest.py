@@ -1,8 +1,69 @@
 # Feature markers are auto-applied by the root tests/conftest.py
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            *args,
+        ],
+        cwd=str(root),
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+@pytest.fixture
+def cross_lane_repo():
+    """Factory for the #2689 cross-lane reproducer repo, shared by the hook-validator tests.
+
+    Call it as ``cross_lane_repo(root, anchor_body, other_lane_body)``. It builds
+    a repo whose ``docs/plans/`` holds a TRACKED anchor doc plus another lane's
+    untracked, deficient, newest-by-mtime plan, and returns ``root``.
+
+    The tracked anchor is load-bearing, not decoration. With no tracked file
+    under ``docs/plans/``, ``git status --porcelain docs/plans/`` collapses the
+    whole directory to a single ``?? docs/plans/`` line whose path does not end
+    in ``.md``. The deleted guessers' suffix filter dropped that line, returned
+    None, and the validator exited 0 looking innocent — so a fixture without the
+    anchor passes against the *unfixed* code and proves nothing (#2689, and the
+    "Data prerequisite" note under Race 1 of the plan).
+
+    Verified: against ``git show main:…`` each ported validator exits 2 on this
+    fixture given a payload naming ``docs/features/mine.md``, and the
+    anchor-less variant exits 0.
+
+    Each test module keeps its own ``run_hook`` helper — that duplication is a
+    deliberate choice recorded in the plan's Technical Approach, because a
+    shared subprocess harness couples the test files to each other. Only the
+    fixture builder is shared.
+    """
+
+    def _make(root: Path, anchor_body: str, other_lane_body: str) -> Path:
+        plans = root / "docs" / "plans"
+        plans.mkdir(parents=True, exist_ok=True)
+        (plans / "anchor.md").write_text(anchor_body)
+        _git(root, "init", "-q")
+        _git(root, "add", "docs/plans/anchor.md")
+        _git(root, "commit", "-q", "-m", "anchor")
+        # The other lane's in-progress plan: untracked, deficient, newest by mtime.
+        (plans / "zzz-other-lane.md").write_text(other_lane_body)
+        return root
+
+    return _make
 
 
 @pytest.fixture(autouse=True)

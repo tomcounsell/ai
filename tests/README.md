@@ -270,13 +270,13 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_docs_auditor_substrate.py` | 130 | Documentation reference validation |
-| unit | `test_hook_target.py` | 99 | Shared hook-payload target resolution (`hook_target.py`) |
-| unit | `test_validate_no_gos_justification.py` | 72 | No-Gos section justification validation |
+| unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
+| unit | `test_validate_no_gos_justification.py` | 76 | No-Gos section justification validation |
 | unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |
+| unit | `test_validate_test_impact.py` | 42 | Test impact section validation |
+| unit | `test_validate_documentation_section.py` | 41 | Documentation section validation, payload-targeted |
+| unit | `test_validate_verification_section.py` | 31 | Verification validation |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
-| unit | `test_validate_test_impact.py` | 39 | Test impact section validation |
-| unit | `test_validate_documentation_section.py` | 38 | Documentation section validation, payload-targeted |
-| unit | `test_validate_verification_section.py` | 28 | Verification validation |
 | unit | `test_verification_parser.py` | 20 | Verification section parsing |
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |

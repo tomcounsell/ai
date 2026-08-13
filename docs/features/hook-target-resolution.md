@@ -20,8 +20,9 @@ the shared module described below.
 
 ## The Contract
 
-`.claude/hooks/hook_utils/hook_target.py` exposes two functions, and every
-validator in the family resolves its target through them and nowhere else:
+`.claude/hooks/hook_utils/hook_target.py` exposes three functions, and every
+validator in the family resolves and filters its target through them and
+nowhere else:
 
 - `read_hook_input() -> dict` — parses the hook's JSON payload from stdin.
   Never raises: empty stdin, malformed JSON, an unreadable stream, or a
@@ -29,11 +30,46 @@ validator in the family resolves its target through them and nowhere else:
 - `target_from_hook_input(hook_input: dict) -> str | None` — the path the
   triggering `Write` (or `NotebookEdit`) actually targeted, read from
   `tool_input.file_path` or `tool_input.notebook_path`.
+- `in_scope(path, directory, extension=".md") -> bool` — whether that path
+  falls inside the directory/extension pair this hook watches.
 
 The rule the whole module exists to enforce: **`None` means "nothing to
 validate," never "go find something to validate."** Working-tree state, git
 status, and file mtimes are never an input to target selection. A validator
 that cannot name its target from the payload exits 0 rather than guessing.
+
+### No cwd, ever
+
+`in_scope` judges the path **as given**. An absolute payload path is never
+first rewritten into a cwd-relative one, because both available cwds are the
+wrong thing to consult:
+
+- The **payload's** `cwd` need not exist. `.opencode/plugins/valor-bridge.ts`
+  builds `PostToolUse` payloads with no `cwd` key at all, and on macOS a
+  present one disagrees with `file_path` over `/tmp` versus `/private/tmp`. A
+  scope filter that requires the rewrite to have succeeded silently exits 0 on
+  those payloads — a fail-open on exactly the writes the hook exists to police.
+- The **hook process's** cwd is not the lane's. Once a target is reduced to
+  `docs/plans/p.md`, both the existence check and the file read resolve against
+  whichever checkout the hook process started in, so a validator can report
+  success for a file it never opened.
+
+Scope is therefore a containment test on an anchored path segment, not a
+`startswith` on a relative form: `docs/plans` matches `docs/plans/a.md` and
+`/repo/.worktrees/slug/docs/plans/a.md`, and does not match the sibling
+`docs/plans_archive/old.md` or the prefix lookalike `docs/plansomething/a.md`.
+The extension is part of the filter too, so `docs/plans/helper.py` is out of
+scope for hooks watching `.md` and is never asked to carry a plan section.
+
+### Explicit argv beats the scope filter
+
+All five validators take an optional positional path. The rule is uniform: an
+explicit argv path is judged directly, bypassing the scope filter, because an
+operator named it on purpose — and a path that names nothing is a user error
+worth reporting (exit 2). A hook-derived path gets the opposite treatment on
+both counts: it must pass the scope filter, and one that resolves to no file is
+not a finding at all (exit 0). The scope filter runs before any `Path.exists()`
+so an out-of-scope write is never even statted.
 
 Both functions guard a syntactically-valid non-dict payload. Stdin of `null`,
 `[1, 2]`, `"str"`, or `42` all parse cleanly with `json.loads`, and an
@@ -123,11 +159,17 @@ of whatever else `docs/plans/` holds.
 Any future test asserting this class of validator ignores working-tree state
 should include a tracked anchor in the fixture, or risk validating nothing.
 
+The builder lives in `tests/unit/conftest.py` as the `cross_lane_repo` fixture,
+a factory taking the anchor and other-lane plan bodies as arguments so each
+validator's test module supplies its own. The per-module `run_hook` subprocess
+helper is deliberately *not* shared — a shared harness would couple the test
+files to each other, and the helper is eight lines.
+
 ## Key Files
 
 | File | Role |
 |---|---|
-| `.claude/hooks/hook_utils/hook_target.py` | `read_hook_input()`, `target_from_hook_input()` — the shared contract. |
+| `.claude/hooks/hook_utils/hook_target.py` | `read_hook_input()`, `target_from_hook_input()`, `in_scope()` — the shared contract. |
 | `.claude/hooks/validators/validate_no_gos_justification.py` | No-Gos section justification check. |
 | `.claude/hooks/validators/validate_documentation_section.py` | Documentation section presence check. |
 | `.claude/hooks/validators/validate_test_impact_section.py` | Test Impact section presence check. |

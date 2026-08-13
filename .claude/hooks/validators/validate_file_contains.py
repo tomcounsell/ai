@@ -2,9 +2,10 @@
 """
 Validate that the file a Write just targeted contains required content strings.
 
-The target is the path the hook payload names, and nothing else. ``--directory``
-and ``--extension`` are the scope filter they have always effectively been: a
-write outside them passes through untouched.
+The target is the path the hook payload names, and nothing else — taken as
+given, never rewritten against a cwd. ``--directory`` and ``--extension`` are
+the scope filter they have always effectively been: a write outside them passes
+through untouched.
 
 Checks:
 1. Resolve the written file from the hook payload (or an explicit CLI path)
@@ -38,7 +39,7 @@ from pathlib import Path
 # Standalone script — sys.path mutation is safe (never imported as library).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hook_utils.hook_target import read_hook_input, target_from_hook_input  # noqa: E402
+from hook_utils.hook_target import in_scope, read_hook_input, target_from_hook_input  # noqa: E402
 
 DEFAULT_DIRECTORY = "docs/plans"
 DEFAULT_EXTENSION = ".md"
@@ -66,21 +67,6 @@ def check_contains(filepath: str, required: list[str]) -> tuple[bool, list[str],
         else:
             missing.append(req)
     return len(missing) == 0, found, missing
-
-
-def normalize_target(target: str, cwd: str) -> str:
-    """Express an absolute payload path relative to the hook's cwd when possible."""
-    if cwd and target.startswith(cwd.rstrip("/") + "/"):
-        return target[len(cwd.rstrip("/")) + 1 :]
-    return target
-
-
-def in_scope(target: str, directory: str, extension: str) -> bool:
-    """Whether the written path falls inside the directory/extension this hook watches."""
-    ext = extension if extension.startswith(".") else f".{extension}"
-    directory_norm = directory.rstrip("/") + "/"
-    normalized = target.replace("\\", "/")
-    return normalized.startswith(directory_norm) and normalized.endswith(ext)
 
 
 def validate(filepath: str, required_strings: list[str]) -> tuple[bool, str]:
@@ -116,9 +102,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # An explicit path (CLI / tests) wins; otherwise take the path the hook's
-    # own tool input names. Never guess: selecting by mtime or git status meant
-    # one lane's write got judged against another lane's file (#2682, #2689).
+    # An explicit path (CLI / tests) wins and bypasses the scope filter: it was
+    # named on purpose. Otherwise take the path the hook's own tool input names.
+    # Never guess: selecting by mtime or git status meant one lane's write got
+    # judged against another lane's file (#2682, #2689).
     if args.target_file:
         target = args.target_file
         if not Path(target).exists():
@@ -128,14 +115,16 @@ def main():
             print(f"ERROR: File does not exist: {target}", file=sys.stderr)
             sys.exit(2)
     else:
-        payload = read_hook_input()
-        resolved = target_from_hook_input(payload)
-        if not resolved:
+        target = target_from_hook_input(read_hook_input())
+        if not target:
             sys.exit(0)
 
-        cwd = payload.get("cwd")
-        target = normalize_target(resolved, cwd if isinstance(cwd, str) else "")
-
+        # The payload's path is judged as given. Rewriting it relative to a cwd
+        # would put process state back into target selection: with no `cwd` key
+        # the absolute path would fall out of scope and silently pass, and once
+        # reduced to a relative path the read would resolve against whichever
+        # checkout the hook process started in.
+        #
         # Scope filter runs before any filesystem access, so a write this hook
         # has no business judging is never even statted.
         if not in_scope(target, args.directory, args.extension):

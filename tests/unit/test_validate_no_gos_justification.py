@@ -241,21 +241,53 @@ class TestTargetIsTheFileTheWriteNamed:
         payload = {"tool_input": {"file_path": "docs/plans/never-written.md"}}
         assert run_hook(payload, cwd=tmp_path) == 0
 
-    def test_non_plan_path_passes_even_when_it_does_not_exist(self, tmp_path):
-        """The plan-path check must precede the existence check.
+    @pytest.mark.parametrize(
+        "path",
+        ["docs/plans_archive/old.md", "docs/plansomething/x.md", "docs/plans/helper.py"],
+    )
+    def test_lookalike_and_wrong_extension_paths_are_out_of_scope(self, path, tmp_path):
+        """The scope filter is anchored on a path segment and on the extension.
+
+        The unanchored predicate this replaced (``"docs/plans" not in path``)
+        exits 2 on every one of these: a sibling archive directory, a prefix
+        lookalike, and a Python helper that has no business carrying a No-Gos
+        section at all.
+        """
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(BAD_PLAN)
+        payload = {"tool_name": "Write", "tool_input": {"file_path": path}}
+        assert run_hook(payload, cwd=tmp_path) == 0
+
+    def test_hook_derived_non_plan_path_passes_even_when_it_does_not_exist(self, tmp_path):
+        """The scope filter must precede the existence check.
 
         Reversed, a Write to any non-plan path the hook cannot stat — a
         relative path resolved against a different cwd, a file in another
         worktree — exits 2 on a file the validator would never have judged.
         """
+        payload = {"tool_name": "Write", "tool_input": {"file_path": "tools/does-not-exist.py"}}
+        assert run_hook(payload, cwd=tmp_path) == 0
+
+    def test_explicit_cli_path_bypasses_the_scope_filter(self, tmp_path):
+        """Family-wide rule: an argv path was named on purpose, so it is judged.
+
+        ``validate_file_contains.py`` has always worked this way. The section
+        validators used to run the scope filter first, so the same flag shape
+        meant the opposite thing: an operator-supplied path outside
+        ``docs/plans`` was silently ignored instead of checked.
+        """
+        outside = tmp_path / "outside.md"
+        outside.write_text(BAD_PLAN)
         proc = subprocess.run(
-            [sys.executable, str(VALIDATOR), "tools/does-not-exist.py"],
+            [sys.executable, str(VALIDATOR), str(outside)],
             capture_output=True,
             text=True,
             cwd=str(tmp_path),
             timeout=30,
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 2
+        assert str(outside) in proc.stderr
 
 
 class TestQuotedCritiqueContentDoesNotFalsePositive:

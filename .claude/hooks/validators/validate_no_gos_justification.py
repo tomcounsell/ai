@@ -35,7 +35,10 @@ from pathlib import Path
 # Standalone script — sys.path mutation is safe (never imported as library).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hook_utils.hook_target import read_hook_input, target_from_hook_input  # noqa: E402
+from hook_utils.hook_target import in_scope, read_hook_input, target_from_hook_input  # noqa: E402
+
+PLAN_DIRECTORY = "docs/plans"
+PLAN_EXTENSION = ".md"
 
 VALID_TAGS = ("[EXTERNAL]", "[ORDERED]", "[DESTRUCTIVE]", "[SEPARATE-SLUG")
 
@@ -299,31 +302,30 @@ def main():
     parser.add_argument("plan_file", nargs="?", help="Path to plan file")
     args = parser.parse_args()
 
-    # An explicit path (CLI / tests) wins; otherwise take the path the hook's
-    # own tool input names. Never guess.
-    plan_file = args.plan_file
-    if not plan_file:
-        plan_file = target_from_hook_input(read_hook_input())
-
-    if not plan_file:
-        sys.exit(0)
-
-    # Only enforce on plan docs; pass through anything else. This has to come
-    # before the existence check, or a Write to any non-plan path that the hook
-    # cannot stat (a relative path resolved against a different cwd, a file in
-    # another worktree) exits 2 and blocks a write it has no business judging.
-    if "docs/plans" not in plan_file.replace("\\", "/"):
-        sys.exit(0)
-
-    path = Path(plan_file)
-    if not path.exists():
-        # An explicit CLI argument that names nothing is a user error worth
-        # reporting. A hook-derived path we cannot resolve is not: there is no
-        # content to judge, so there is no finding to make.
-        if args.plan_file:
+    # An explicit path (CLI / tests) wins and bypasses the scope filter: it was
+    # named on purpose. Otherwise take the path the hook's own tool input names.
+    # Never guess.
+    if args.plan_file:
+        plan_file = args.plan_file
+        if not Path(plan_file).exists():
+            # An explicit CLI argument that names nothing is a user error worth
+            # reporting. A hook-derived path we cannot resolve is not: there is
+            # no content to judge, so there is no finding to make.
             print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
             sys.exit(2)
-        sys.exit(0)
+    else:
+        plan_file = target_from_hook_input(read_hook_input())
+        if not plan_file:
+            sys.exit(0)
+
+        # Only enforce on plan docs; pass through anything else. The path is
+        # judged as given — never rewritten against a cwd — and the filter runs
+        # before any Path.exists(), so a Write this hook has no business judging
+        # is never statted and can never block.
+        if not in_scope(plan_file, PLAN_DIRECTORY, PLAN_EXTENSION):
+            sys.exit(0)
+        if not Path(plan_file).exists():
+            sys.exit(0)
 
     success, message = validate(plan_file)
     if success:

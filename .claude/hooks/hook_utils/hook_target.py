@@ -2,7 +2,8 @@
 
 The contract, in one line: ``None`` means "nothing to validate", never "go find
 something to validate". Working-tree state — ``git status``, mtimes, directory
-globs — is never an input to target selection.
+globs — is never an input to target selection. Neither is any cwd: not the hook
+process's, and not the payload's.
 
 That rule exists because every validator in this family got it wrong the same
 way. Each carried a private newest-plan-doc guesser that shelled out to
@@ -13,7 +14,7 @@ blocked by another lane's in-progress plan doc (#2682, fixed for one validator
 by PR #2688; #2689 carried the remaining four). Concurrent SDLC lanes hit this
 constantly, because writing a plan doc is exactly what two lanes do at once.
 
-Both functions are separately callable and both guard a non-dict argument:
+Both functions are separately callable and both guard a non-dict payload:
 stdin of ``null``, ``[1, 2]``, or ``"str"`` parses cleanly into a non-dict, and
 an unguarded ``.get`` on it raises ``AttributeError`` out of a hook that gates
 every ``Write``.
@@ -34,7 +35,8 @@ def read_hook_input() -> dict:
         if not raw.strip():
             return {}
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, OSError, EOFError, ValueError):
+    except (OSError, ValueError):
+        # ValueError covers json.JSONDecodeError, which subclasses it.
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -60,3 +62,36 @@ def target_from_hook_input(hook_input: dict) -> str | None:
     # contract — empty string means nothing to validate — actually hold.
     path = tool_input.get("file_path") or tool_input.get("notebook_path")
     return path if isinstance(path, str) and path else None
+
+
+def in_scope(path: str, directory: str, extension: str = ".md") -> bool:
+    """Whether ``path`` falls inside the directory/extension pair a hook watches.
+
+    The path is judged **as given**. An absolute payload path is never rewritten
+    against a cwd first: the hook process's cwd is not necessarily the payload's
+    (a lane's hook can run from another checkout), the payload need not carry a
+    ``cwd`` key at all (`.opencode/plugins/valor-bridge.ts` sends none), and on
+    macOS the two disagree over ``/tmp`` vs ``/private/tmp`` even when both are
+    present. Any such rewrite makes working-tree/process state an input to
+    target selection again, which is the whole defect (#2682, #2689).
+
+    So the directory test is *containment of an anchored segment*, not a
+    ``startswith`` on a relative form. ``docs/plans`` matches
+    ``docs/plans/a.md`` and ``/repo/docs/plans/a.md``, and does not match
+    ``docs/plans_archive/old.md`` or ``docs/plansomething/a.md``. The extension
+    is required too, so ``docs/plans/helper.py`` is out of scope for a hook
+    watching ``.md``.
+    """
+    if not path or not directory:
+        return False
+    normalized = path.replace("\\", "/")
+
+    if extension:
+        ext = extension if extension.startswith(".") else f".{extension}"
+        if not normalized.endswith(ext):
+            return False
+
+    anchored = directory.replace("\\", "/").strip("/")
+    if not anchored:
+        return False
+    return normalized.startswith(f"{anchored}/") or f"/{anchored}/" in normalized
