@@ -131,6 +131,23 @@ guessed name.
 
 **Notes:**
 
+**This plan is its own test case.** At plan time, `find_plan_path(2718)` resolves to
+*this* document — via the bare-`#N` fallback, because the plan mentions `#2718` in prose
+and no plan carries a `tracking:` line for it. That is the right answer for the wrong
+reason, and it will stop being true the moment the fallback is deleted. After the fix,
+`find_plan_path(2718)` correctly returns `None`: #2718 is a co-closed issue, not a lane.
+Its `_meta` will report `plan_exists: False`, and since it will have no PR of its own,
+router row 1 could dispatch `/do-plan` for it. **The builder must confirm #2718 is closed
+by this PR's `Closes #2718` before the router gets a chance to open a lane on it** — or,
+if the merge lags, accept that a `/do-plan` dispatch on #2718 is cosmetic noise against
+an issue that is about to close. The lane is #2735; there is exactly one plan doc and one
+branch.
+
+Similarly, this lane's own branch will be `session/sdlc-2735` (that is what
+`tools/valor_session.py:107` mints) while its plan doc is
+`docs/plans/sdlc-lane-recorded-slug.md` — the exact slug/branch divergence #2718
+describes. This lane is a live instance of the bug it fixes.
+
 Two drifts, neither changing a premise:
 
 1. `session/sdlc-2663` has advanced from `69039fae5` (cited in #2718) to `eeb89b4ee`.
