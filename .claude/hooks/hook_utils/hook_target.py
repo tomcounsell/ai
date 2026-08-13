@@ -5,9 +5,9 @@ something to validate". Working-tree state — ``git status``, mtimes, directory
 globs — is never an input to target selection.
 
 That rule exists because every validator in this family got it wrong the same
-way. Each carried a ``find_newest_plan_file`` that shelled out to
-``git status --porcelain docs/plans/`` and judged whichever untracked ``.md``
-had the newest mtime. The query ran in whatever checkout the hook process
+way. Each carried a private newest-plan-doc guesser that shelled out to
+``git status`` over ``docs/plans/`` and judged whichever untracked ``.md`` had
+the newest mtime. The query ran in whatever checkout the hook process
 started in, so a ``Write`` to ``docs/features/foo.md`` in one worktree was
 blocked by another lane's in-progress plan doc (#2682, fixed for one validator
 by PR #2688; #2689 carried the remaining four). Concurrent SDLC lanes hit this
