@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -632,6 +632,10 @@ bridge import. The only consumer is `pytest`.
 ---
 
 ## Open Questions
+
+None of these block the build: each carries a stated default position that the
+plan already builds against. They are recorded for the critique round and for a
+supervisor who wants to overrule a default.
 
 1. **Guard placement.** The guard is proposed as a pytest test. Would you rather
    it be a `PreToolUse` hook validator so the shape is rejected at authoring
