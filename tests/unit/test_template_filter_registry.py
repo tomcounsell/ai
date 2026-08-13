@@ -108,7 +108,9 @@ def test_every_template_filter_reference_resolves():
     assert len(demanded) > 0, "No filter usage found across templates — guard scanned nothing"
 
     if missing:
-        lines = "\n".join(f"  {path}:{lineno} uses unregistered filter '{name}'" for path, name, lineno in missing)
+        lines = "\n".join(
+            f"  {path}:{lineno} uses unregistered filter '{name}'" for path, name, lineno in missing
+        )
         pytest.fail(f"Template(s) reference unregistered Jinja filters:\n{lines}")
 
 
