@@ -276,9 +276,11 @@ tooling. No external library, API, or ecosystem pattern is involved.
 2. It calls `resolve_lane_slug(N)`, which walks the adoption ladder and, on a miss,
    mints `sdlc-{N}`. The result is written to `PipelineLedger.slug`
    **conditional-on-empty**, beside `stage_states_json` and `pr_number`.
-3. **Every consumer** calls `resolve_lane_slug(N)` and gets that recorded value. A
-   consumer that finds the field empty may self-heal it through the same ladder; the
-   write can never overwrite and never needs the lease.
+3. **Every consumer** calls `resolve_lane_slug(N)` — with the default
+   `allow_heal=False` — and gets that recorded value, or `None`. Consumers never mint.
+   Only the four lane-start callers listed in Technical Approach pass `allow_heal=True`,
+   and their write is conditional-on-empty: it can never overwrite and never needs the
+   lease.
 4. `find_plan_path(N)` resolves in two rungs: `tracking:` frontmatter (authoritative),
    then `docs/plans/{recorded_slug}.md`. No textual fallback.
 5. G8's PATCH check probes `session/{recorded_slug}`; `branch_exists` checks the same
@@ -311,9 +313,22 @@ inverts that: one writer, one record, every consumer a reader.
   - `_check_branch_pushed(slug)` becomes `_check_branch_pushed(branch_name)` — the
     `session/` prefix stops being hardcoded inside the probe.
 - **Coupling**: **decreases.** Today five modules each carry their own slug-derivation
-  logic. After, they all depend on one resolver. `tools/lane_identity.py` must not
-  import `tools/_sdlc_utils.py` (that direction would cycle); the dependency runs
-  `_sdlc_utils → lane_identity`.
+  logic. After, they all depend on one resolver.
+  **Import direction: `lane_identity → _sdlc_utils`, one symbol, no cycle.** An earlier
+  draft of this plan asserted the opposite direction and claimed the import "would
+  cycle". That claim was verified **false** and is retracted. Verified at plan time:
+  `tools/_sdlc_utils.py:24-25` imports only `agent.sdlc_router` and
+  `models.agent_session`; `tools/pr_head_resolver.py` is stdlib-only;
+  `agent/pipeline_ledger.py` imports only `popoto`. After Task 4 deletes `find_plan_path`
+  from `_sdlc_utils` with no shim, nothing gives `_sdlc_utils` any reason to import
+  `lane_identity`, so the reverse edge does not exist and cannot close a cycle.
+  `tools/lane_identity.py` therefore imports exactly one helper from `_sdlc_utils`:
+  `_git_toplevel`. That helper **stays where it is** — `_resolve_target_repo`
+  (`tools/_sdlc_utils.py:111`) calls it and 14 tests monkeypatch the literal path
+  `tools._sdlc_utils._git_toplevel`; moving it would churn those tests for no
+  correctness gain, which the minimum-solution constraint forbids. The plans-dir
+  resolution ladder is retained verbatim *including* its `_git_toplevel()` step; the
+  ladder is what moves, the helper is not.
 - **Data ownership**: lane identity moves from "nobody, re-derived per call" to
   `PipelineLedger`, which already owns the stages the slug names. `AgentSession.slug`
   remains for non-SDLC sessions (nightly triage, dev lanes) and is stamped from the
@@ -346,11 +361,16 @@ inverts that: one writer, one record, every consumer a reader.
 - **`PipelineLedger.slug`** — one nullable field, beside `stage_states_json` and
   `pr_number`, holding the lane's single identity. Pure identity: no holder, no pid, no
   liveness, no timestamp.
-- **`tools/lane_identity.py`** — the single home for lane-slug resolution and plan-path
-  resolution. Exposes `resolve_lane_slug(issue_number)`, `lane_branch_name(slug)`, and
-  the relocated `find_plan_path(issue_number)`.
-- **Adoption ladder** — how `resolve_lane_slug` answers when the field is empty:
-  adopt an identity that already exists in the world before inventing one.
+- **`tools/lane_identity.py`** — the single home for **both** slug resolvers, deliberately
+  colocated so the distinction between them is stated once and cannot drift. Exposes
+  `resolve_lane_slug(issue_number, *, allow_heal=False)`, `lane_branch_name(slug)`, and
+  the relocated `find_plan_path(issue_number)`. Its module docstring **opens** with the
+  two-slug distinction (lane slug vs. plan-doc slug, bridged by `tracking:`), so a reader
+  who arrives expecting one concept is corrected in the first sentence rather than
+  invited to re-unify them.
+- **Adoption ladder** — how `resolve_lane_slug` answers when the field is empty **and the
+  caller is a lane-start path that opted into `allow_heal=True`**: adopt an identity that
+  already exists in the world before inventing one. Read paths never walk the ladder.
 - **Conditional-on-empty write** — the healing write re-reads immediately before
   writing, writes only if still empty, uses `save(update_fields=["slug"])`, and takes
   no lease.
@@ -361,15 +381,23 @@ inverts that: one writer, one record, every consumer a reader.
 
 ### Flow
 
-**Lane start** → `ensure_session(N)` calls `resolve_lane_slug(N)` → ladder finds nothing
-→ mints `sdlc-{N}` → writes `PipelineLedger.slug` → **lane has an identity**
+**Lane start** → `ensure_session(N)` calls `resolve_lane_slug(N, allow_heal=True)` →
+ladder finds nothing → mints `sdlc-{N}` → writes `PipelineLedger.slug` → **lane has an
+identity**
 
-**Every later tick** → any consumer calls `resolve_lane_slug(N)` → reads the recorded
-value → **same answer everywhere**
+**Every later tick** → any consumer calls `resolve_lane_slug(N)` (heal off) → reads the
+recorded value → **same answer everywhere**
 
-**Migration lane (slug empty, branch already pushed)** → consumer calls
-`resolve_lane_slug(N)` → ladder rung 2 or 3 finds `session/sdlc-2663` → adopts
-`sdlc-2663` → conditional-on-empty write → **existing identity captured, not replaced**
+**Non-lane issue** (`stage-query --issue-number 2718`) → `resolve_lane_slug(2718)` → no
+ledger, or ledger with empty slug, heal off → **`None`, nothing minted, nothing written,
+no git call**
+
+**Migration lane (slug empty, branch already pushed)** → the next **lane-start** call for
+that issue (`ensure_session`, a reflection pickup, or `valor-session create`) walks the
+ladder → rung 2 or 3 finds `session/sdlc-2663` → adopts `sdlc-2663` →
+conditional-on-empty write → **existing identity captured, not replaced**. Read paths in
+the meantime return `None` and no-op, which is the correct behavior for an unresolved
+lane and strictly better than today's guess.
 
 ### Technical Approach
 
@@ -380,23 +408,61 @@ minted as `sdlc-2716`. `tracking:` frontmatter is the bridge between them and st
 authoritative. This plan does **not** try to force them to be the same string; forcing
 that is what produced the wedge.
 
-**`resolve_lane_slug(issue_number, *, allow_heal=True) -> str | None`** walks:
+**`resolve_lane_slug(issue_number, *, allow_heal: bool = False) -> str | None`** walks:
 
-1. `PipelineLedger.slug` if non-empty → return it. **Never re-derive over a recorded
-   value.** This rung is why the function is safe to call from anywhere.
+1. `PipelineLedger.load(...)` for the issue's key → `.slug` if non-empty → return it.
+   **Never re-derive over a recorded value.** This rung is why the function is safe to
+   call from anywhere. `load()` is a direct-key `HGETALL` and **never creates a ledger**;
+   when no ledger exists the function returns `None` immediately, so a read path can
+   never bring a `PipelineLedger` into existence for a non-lane issue.
 2. `ledger.pr_number` → `resolve_pr_head_sha(pr, cross_check=False)` (git-first) → match
    that SHA against one `git ls-remote --heads origin` listing → recover the exact
    `session/<name>` ref → slug is that name minus the `session/` prefix. Shape-agnostic;
-   this is the rung that recovers `dev-<hash>` lanes.
+   this is the rung that recovers `dev-<hash>` lanes. **The match must be unique**
+   (see "Rung 2 uniqueness" below).
 3. `git ls-remote --heads origin refs/heads/session/sdlc-{N}` exact probe → adopt
    `sdlc-{N}`.
 4. `docs/plans/` scan for a `tracking:` frontmatter match on issue N → adopt that plan's
    filename stem.
 5. Mint `sdlc-{N}`.
 
-Rungs 2-5 produce a *candidate*; the candidate is then written conditional-on-empty and
-returned. `allow_heal=False` stops after rung 1 and returns `None` — used by any caller
-that must be strictly read-only.
+**`allow_heal` defaults to `False`, and that default is load-bearing.** With
+`allow_heal=False` the function stops after rung 1 and returns `None` — no git call, no
+write, no ledger creation. Rungs 2-5 run **only** under `allow_heal=True`; they produce a
+*candidate*, which is then written conditional-on-empty and returned.
+
+The reason the default inverts (an earlier draft defaulted to `True`) is that
+`stage-query` runs for **any** issue number the router, the dashboard, or an operator
+asks about — not just lanes. A healing default would make a pure read path mint and
+persist `sdlc-{N}` on issues that are not lanes, contradicting this plan's own thesis
+that the slug is minted exactly once by `ensure_session`. This plan's own example proves
+it: a single `stage-query --issue-number 2718` would mint `sdlc-2718` for an issue this
+plan requires to resolve to `None`.
+
+**Who may pass `allow_heal=True` — the complete list, enforced by a grep anti-criterion:**
+
+| Caller | Why healing is correct there |
+|---|---|
+| `tools/sdlc_session_ensure.py::ensure_session` | The minter. Runs at lane start; this is where identity is created. |
+| `reflections/sdlc_upvote_lanes.py` lane pickup | Lane start on the reflection path; goes on to create a real branch. |
+| `reflections/sdlc_progress.py` stalled-lane respawn | Lane restart for an issue already known to be a lane. |
+| `tools/valor_session.py::cmd_create` (issue-scoped) | Lane start on the CLI path (see Blocker-4 seam below). |
+
+Every other caller — `_compute_meta`, `find_plan_path` rung 2, G8, `branch_exists`, the
+reflections' *discovery* probes — takes the default `False`. A consumer that finds no
+recorded slug gets `None` and no-ops. Self-healing is a **lane-start** behavior, not a
+read-path behavior; that is the reconciliation between "a consumer finding no slug MAY
+create one" and "minted exactly once".
+
+**Rung 2 uniqueness.** Matching a PR head SHA against a listing of 451 `session/` heads
+is not guaranteed unique: a re-created lane branch, a fork, or a `session/dev-*` left at
+the same tip all produce duplicate matches, and a listing-order-dependent answer is a
+per-invocation identity — the same failure class this plan rejects when it excludes the
+machine-local `git worktree list` rung. So: collect **all** matches before deciding.
+Adopt only when exactly one `refs/heads/session/*` ref matches; on zero or two-plus
+matches, emit a `logger.warning` naming every candidate and fall through to rung 3.
+Merged-and-deleted is the common zero case — `resolve_pr_head_sha` can return a SHA whose
+branch no longer exists on origin — and must be a clean fall-through, never an error.
 
 **Conditional-on-empty write.** Popoto has no compare-and-set. The write reuses the
 short-lived SETNX pattern `PipelineLedger.get_or_create` already uses for its create
@@ -413,7 +479,9 @@ closed.
 to two rungs:
 
 1. A `tracking:` frontmatter line naming issue N → authoritative, return immediately.
-2. `docs/plans/{resolve_lane_slug(N)}.md` if that file exists → return it.
+2. `docs/plans/{resolve_lane_slug(N)}.md` if that file exists → return it. This rung
+   takes the **default `allow_heal=False`** — `find_plan_path` is a read path and must
+   never mint. When no slug is recorded, rung 2 is simply skipped.
 3. Otherwise `None`.
 
 The bare-`#N` fallback and the entire `_is_ai_repo_fallback` mechanism are **deleted** —
@@ -439,8 +507,50 @@ only the ownership test changes.
 `_build_context`'s `branch_exists` (`:355-367`) does the same: recorded slug or `False`.
 
 **`_compute_meta`'s dead read is repaired.** `tools/sdlc_stage_query.py:487` replaces
-`getattr(session, "slug", None)` with `resolve_lane_slug(issue_number)`, which makes the
-`--head session/{slug}` PR-recovery rung at `:369` functional for the first time.
+`getattr(session, "slug", None)` with `resolve_lane_slug(issue_number)` — **default
+`allow_heal=False`** — which makes the `--head session/{slug}` PR-recovery rung at `:369`
+functional for the first time for lanes that have a recorded slug, and correctly inert
+(no probe at all) for issues that are not lanes. `_compute_meta` is the canonical example
+of a read path that must never mint: it runs for any issue the router, the dashboard, or
+an operator names.
+
+**The third minter is removed too.** `tools/valor_session.py:107`
+(`_derive_slug_from_message`) is the surviving `sdlc-{N}` minter the Problem table names.
+Leaving it would reproduce the exact #1915 failure this plan diagnoses — "a comment
+cannot enforce a convention against live minters" — at one-third scale, and because the
+ledger write is conditional-on-empty, whichever writer ran first would win
+non-deterministically. `_derive_slug_from_message` is a pure string function with no
+issue-lifecycle context, so it cannot call the resolver in place. **The seam is its
+caller**, `cmd_create`: resolve the issue number from the message first, then
+
+```
+slug = resolve_lane_slug(issue_number, allow_heal=True) if issue_number else None
+slug = slug or _derive_slug_from_message(message)
+```
+
+The `issue_number is None` branch preserves the documented "generic message → `None`
+slug" behavior verbatim; `_derive_slug_from_message` survives only as the no-issue /
+resolver-unavailable fallback, and its docstring says so.
+
+**The reflections stop guessing when *finding* a lane, not just when naming one.**
+`reflections/sdlc_upvote_lanes.py::_has_pr_on_branch` (`:328-344`) probes
+`gh pr list --head session/sdlc-{issue_number}`. After this plan a lane whose recorded
+slug is human-named would not be found by that probe — the #2718 wedge shape from the
+opposite direction, and now *silent*, because the recorded slug exists and looks
+authoritative. The site already receives `issue_number`, so it becomes:
+
+```
+head = lane_branch_name(resolve_lane_slug(issue_number))   # allow_heal=False
+if head is None:
+    ...skip the --head leg entirely...
+```
+
+The `None` case **skips the leg**; it never emits the literal `--head session/None`,
+which Empty/Invalid Input Handling already bans. `reflections/sdlc_progress.py`'s
+discovery is a *different* shape — a regex filter (`_SDLC_BRANCH_RE`, `:116`) over all
+open PRs plus `_issue_number_from_slug` (`:262`) to map back — and converting it to
+ledger-driven discovery is a restructuring, not a one-liner. It is deferred to a **filed
+issue**, not a promise; see No-Gos.
 
 **The false belief is deleted, not preserved.** The comments at
 `tools/sdlc_next_skill.py:346-349` and `tools/sdlc_stage_query.py:347-350` asserting
@@ -453,7 +563,9 @@ behavior that causes the #2718 wedge and must invert.
 
 **Minting moves out of the reflections.** `reflections/sdlc_upvote_lanes.py:489` and
 `reflections/sdlc_progress.py:707` stop constructing `f"sdlc-{issue_number}"` and call
-`resolve_lane_slug` instead. They receive the slug; they do not mint it.
+`resolve_lane_slug(issue_number, allow_heal=True)` instead — these two are lane-start
+paths, so they are on the sanctioned `allow_heal=True` list above. They receive the slug
+from the resolver; they do not construct it.
 
 **Closing on a sweep, not a list.** Per the repo's replicated-defect rule, this closes
 out on a clean grep sweep for the derivation patterns, not on the enumerated site list
