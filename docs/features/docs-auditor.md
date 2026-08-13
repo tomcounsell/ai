@@ -89,8 +89,14 @@ fix for that term.
 #### The existence invariant
 
 Every auto-fix, regardless of detector, is subject to one post-condition before
-anything is written: **the auditor may not introduce a repo-path reference that
-is absent from the working tree.**
+anything is written: **the auditor may not introduce a slash-shaped `.py`/`.md`
+repo-path reference that is absent from the working tree.**
+
+That is the exact shape `_PATH_REF_RE` matches, and it is narrower than "any
+reference to a file". Two forms are deliberately **not** covered: paths with
+other extensions (`.sh`, `.ts`, `.json`), and the dotted module form
+(`bridge.session_log`) — the same class as the #2711 incident. A fix that
+introduces only those forms passes the invariant with `withheld=0`.
 
 `_apply_fixes_to_file` simulates each fix, collects the `dir/file.{py,md}`-shaped
 references the candidate text would newly introduce, and resolves each against

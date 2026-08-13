@@ -1774,6 +1774,10 @@ def run_docs_auditor() -> dict:
         # count must reach every surface this function produces, not just a log
         # line: findings, summary, Telegram, the PR body (auto-merge gate) and
         # the Redis liveness summary, which is the only durable queryable one.
+        # Telegram has two mutually exclusive senders: step 9 below (files were
+        # touched) and the zero-diff early return (nothing was touched, which is
+        # where an all-withheld run lands — the loudest case, and one step 9 can
+        # never reach). Exactly one of the two fires per run.
         withheld: list[dict] = result.get("withheld", [])
         fixes_withheld: int = result.get("fixes_withheld", 0)
         withheld_note = (
@@ -1784,6 +1788,12 @@ def run_docs_auditor() -> dict:
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
             _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
+            if fixes_withheld:
+                _send_telegram_notification(
+                    f"docs-auditor pass for {slug}: zero-diff, no PR"
+                    f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                    "nothing was written and no PR was opened to review them"
+                )
             return {
                 "status": "ok",
                 "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],

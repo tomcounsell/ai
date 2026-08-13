@@ -391,19 +391,19 @@ are needed.
 
 ## Documentation
 
-- [ ] Update `docs/features/docs-auditor.md` to document the existence invariant and the
+- [x] Update `docs/features/docs-auditor.md` to document the existence invariant and the
       word-anchored stale-term semantics, including that rejected fixes are reported rather than
       applied.
-- [ ] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
+- [x] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
       `agent/session_logs.py`.
-- [ ] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
-      `bridge/session_logs.py`.
-- [ ] Repoint the two `bridge/session_router.py` **path** references (#2713):
+- [x] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
+      `agent/session_logs.py`.
+- [x] Repoint the two `bridge/session_router.py` **path** references (#2713):
       `docs/features/nonharness-llm-wrapper.md:75`, `docs/features/durability-model.md:30`.
-- [ ] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
+- [x] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
       prose about who consumes the routing hint, so it names the successor authority
       (`bridge/job_router.py`), not a substituted filename.
-- [ ] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
+- [x] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
       as "output is correct": it must branch on `fixes_withheld > 0` and re-check before trusting
       the substrate's self-committed output.
 

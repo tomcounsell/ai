@@ -922,6 +922,61 @@ class TestWithheldBlocksAutoMerge:
         assert push.call_args.kwargs["withheld"] == audit_result["withheld"]
         assert "withheld" in notify.call_args.args[0]
 
+    def test_all_withheld_zero_diff_run_still_notifies(self, repo, auth_ok, patch_redis):
+        """Every fix rejected => no files touched => the step-9 notify is unreachable.
+
+        That is the loudest case (the auditor tried to invent paths), so the
+        zero-diff early return must send its own Telegram alert.
+        """
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok",
+            files_touched=[],
+            fixes_applied=0,
+            fixes_withheld=2,
+            withheld=[
+                {"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"},
+                {"doc": "docs/features/foo.md", "old": "a/d.py", "new": "a/e.py", "reason": "x"},
+            ],
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness") as liveness,
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "zero-diff" in result["summary"]
+        assert notify.call_count == 1
+        msg = notify.call_args.args[0]
+        assert "2 fix(es) withheld" in msg
+        assert "docs_features_foo_md" in msg  # the rotation slug
+        assert liveness.call_args.kwargs["fixes_withheld"] == 2
+
+    def test_clean_zero_diff_run_does_not_notify(self, repo, auth_ok, patch_redis):
+        """No withholding => a zero-diff pass stays silent, as before."""
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result("ok", files_touched=[], fixes_applied=0)
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness"),
+        ):
+            docs_auditor.run_docs_auditor()
+
+        assert notify.call_count == 0
+
 
 # ---------------------------------------------------------------------------
 # TestDirtyTreeGuard
