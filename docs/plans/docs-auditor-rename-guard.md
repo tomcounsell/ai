@@ -304,11 +304,14 @@ result. A rejected fix must never be silently absorbed into `fixes_applied`.
 - [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
       introducing an absent path is rejected, reported, and not written; sibling valid fixes in
       the same file still apply.
+- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestRenamedSymbolFixesDegenerate`: a
+      rename hop that loops back to the original path yields no fix; a genuine hop still does.
 - [ ] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
       query cap only, unaffected.
 
-The three rename detectors have **zero** direct coverage today; the existence-invariant tests
-give them their first behavioral test through the shared apply path.
+The three rename detectors had **zero** direct coverage before this work;
+`_detect_renamed_symbol_fixes` now has direct cases, and the existence-invariant tests exercise
+all three through the shared apply path.
 
 ## Rabbit Holes
 
