@@ -612,6 +612,8 @@ Two integration points must be verified rather than added:
 
 ## Critique Results
 
+### Round 1 — NEEDS REVISION
+
 War room run 2026-08-13, FULL depth (roster: Risk & Robustness, Scope & Value, History & Consistency), plus independent lane verification. Verdict: **NEEDS REVISION** (2 blockers).
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
@@ -625,6 +627,43 @@ War room run 2026-08-13, FULL depth (roster: Risk & Robustness, Scope & Value, H
 | NIT | Scope & Value | Risk 3's mitigation ("the only callers are skills we are editing anyway") is an argument for dropping the flag alias, not keeping it. The alias's real purpose is the cross-machine propagation window before each machine's next `/update` picks up the hardlinked global skill — the plan never says so, and the alias has no removal trigger despite NO LEGACY CODE TOLERANCE. | revision 2026-08-13 | State the propagation-window reason explicitly and file a follow-up "drop `--blockers`/`--tech-debt` aliases" issue. Removal is a one-line `add_argument` diff. |
 | NIT | lane-verdict (independent); driver-verified | The `--verdict` help string at `tools/sdlc_verdict.py:935` reads "On APPROVED the head_sha trailer is appended if absent", which becomes false the moment #2769 lands. It is listed in neither the Documentation nor the Inline Documentation checklist. | revision 2026-08-13 | Add it to the Inline Documentation checklist alongside the `record_verdict` docstring item. |
 | NIT | Risk & Robustness | Nothing gives an operator a way to confirm after the fact that the honest-refusal path fired in production rather than an old message being served from a stale checkout on another machine. | revision 2026-08-13 | Nothing structural required — the Verification-table repo-wide grep plus the post-merge `/update` convention cover it. Listed so the reviewer can decline it explicitly. |
+
+### Round 2 — READY TO BUILD (with concerns)
+
+War room run 2026-08-13 (round 2), FULL depth (force-FULL: the plan edits
+`.claude/skills-global/`; roster: Risk & Robustness, Scope & Value, History &
+Consistency, 3/3 complete and grounded). Verdict: **READY TO BUILD (with concerns)**
+— 0 blockers, 4 concerns, 1 nit.
+
+**Round-1 disposition: all 9 findings verified substantively closed.** BLOCKER 1's
+mechanism fix holds: both production callers of `decide_next_dispatch`
+(`tools/sdlc_next_skill.py:534`, `agent/session_runner/runner.py:1386`) build `meta`
+in-process via `_compute_meta` in the same checkout, so the additive
+`latest_review_head_sha` meta key cannot be version-skewed against the router that
+reads it — the lane author's self-flagged "two sources for one fact" worry does not
+reproduce in this call graph. BLOCKER 2's four-site table, Technical Approach §1,
+Task 3's body, the new Success Criteria checkboxes, and the Verification anti-criterion
+are all consistent about four sites (the residue is prose-only, captured below). The
+one-commit HARD CONSTRAINT names `REVIEW_TRAILER_MISSING` and the peer-lane outage;
+the row-8c call edge's disjointness proof was independently verified sound
+(`record_verdict` is the sole `_verdicts` writer and always constructs `verdict` +
+`recorded_at` together — no partial-write path); the merge_predicate lazy-import and
+exact-`notes`-string obligations, the bundling-rationale split, the alias
+propagation-window rationale, the `--verdict` help-string checklist item, and the
+explicit decline-able observability nit are all present as claimed.
+
+The four concerns are consistency/coordination gaps, not design defects. None blocks
+the build.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness; History & Consistency | Stale "three sites" residue survives the BLOCKER-2 revision in four prose spots — Failure Path Test Strategy (line ~322 "the three `write_marker` sites"), Rabbit Holes (~349), Success Criteria #2740 AC3 (~439 "one sentence at three sites, all fixed"), and Task 2's Informed-By line (~527 "exactly three sites") — contradicting the corrected spike-4 table, Technical Approach §1, Task 3's body, and the Verification table, which all say four. AC3 in particular becomes the PR-body audit claim; shipping it at "three... all fixed" undercounts the fix in a plan whose theme is honest reporting. | pending | `grep -n "three sites\|three \`write_marker\` sites" docs/plans/verdict-finalize-cluster.md` locates all four spots. Update each to four (naming `:972` in `main()` where useful). No automated gate catches plan-doc self-inconsistency, so this must be swept in the revision pass, not left to BUILD. |
+| CONCERN | Risk & Robustness | `_compute_meta`'s planned `head_sha_of_record(record: dict)` call does not account for the REVIEW `_verdicts` entry legitimately being a bare `str` — the exact legacy shape `_extract_verdict_text` (`tools/sdlc_stage_query.py:443-451`) already tolerates for the sibling key. An unguarded call raises `AttributeError`, and `tools/sdlc_next_skill.py::_resolve_enriched` (:87-97) wraps `query_enriched` in a broad `except Exception` falling back to `{"stages": {}, "_meta": {}}` — silently discarding the ENTIRE ledger, so the router treats a fully-worked issue as brand new. Strictly worse than the fail-closed-to-stale outcome BLOCKER 1 was written to prevent. | pending | In `_compute_meta`, branch on `isinstance(verdicts.get("REVIEW"), dict)` before calling `head_sha_of_record`; for the str-shaped legacy case use `head_sha_of_text` — mirroring `_extract_verdict_text`'s dict-or-str duality. Add a `_compute_meta` unit case with a bare-string REVIEW record alongside the new-shape and legacy-mangled-dict cases Task 2's test note already requires. |
+| CONCERN | Scope & Value | The Appetite section still reads "Four defects across four files, three of which are small," but the round-2 blocker fix added `tools/sdlc_stage_query.py` to the file fence — five code files, and the fifth carries the router-wide-outage failure mode. The count undersells the blast radius the plan's own revision widened. | pending | Edit the Appetite paragraph to name the five files (`sdlc_review_finalize.py`, `sdlc_stage_marker.py`, `sdlc_verdict.py`, `sdlc_stage_query.py`, `agent/sdlc_router.py`) and let the router-outage failure mode justify why Medium still holds. |
+| CONCERN | History & Consistency; driver-verified | Risk 5's lane-collision mitigation predates the round-2 fence change and is now stale: `docs/plans/sdlc-lane-recorded-slug.md` (status Ready) plans a repair of the dead slug read at `tools/sdlc_stage_query.py::_compute_meta:487`, which falls INSIDE this plan's `_compute_meta:470-545` edit span for `latest_review_head_sha`. A literal git merge conflict is plausible if both lanes build concurrently, and Risk 5 currently gives BUILD no signal to look for it. | pending | Add `tools/sdlc_stage_query.py::_compute_meta` to Risk 5's named file list and extend the mitigation: "re-check at BUILD start; if `sdlc-lane-recorded-slug` has begun editing `_compute_meta`, coordinate before landing `latest_review_head_sha`." |
+| NIT | Scope & Value | The Open Questions preamble claims every question "already has a default chosen and encoded in Technical Approach," but Q4 (no-rule block signal) has no encoded default — §4 explicitly defers with "Choose one and apply it consistently." Does not block build; contradicts the preamble. | pending | Existing `guard_id` values are short codes (G2/G4/G7), which favors the `guard_id="NO_RULE"` sentinel for convention consistency. Either encode that default at §4 or soften the preamble to name Q4 as the one genuine implementer choice. |
+
+**Structural checks (round 2):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive; no Popoto model changes, so no migration obligation); task numbering PASS (1-8 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (all referenced source files exist; the four `State NOT persisted` sites re-verified by grep at `:567`, `:603`, `:719`, `:972`); prerequisites PASS (`gh auth status` OK, venv on the pinned interpreter); cross-references PASS except the three-vs-four residue and the stale Appetite/Risk-5 counts captured above. One Verification-table note for the revision pass: the row `grep -c "latest_review_head_sha" tools/sdlc_stage_query.py agent/sdlc_router.py` with expected "output > 0 in both" is human-evaluable (two `path:count` lines) but not exit-code-checkable — `grep` exits 0 if EITHER file matches; split it into two `grep -q` rows to make "in both" mechanical.
 
 ---
 
