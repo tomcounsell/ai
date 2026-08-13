@@ -1431,14 +1431,17 @@ No new agent integration required.
   path, above every branch, which is a strictly weaker and more obviously correct
   invariant than "before every return".
 - **`ensure_session` does not resolve `target_repo` itself and must not start.** The
-  ledger key is built inside `resolve_lane_slug`, which calls
-  `_resolve_target_repo()` from `tools/_sdlc_utils` — the same helper
-  `sdlc_session_ensure.py` already imports at `:223` and `:359`. `ensure_session` passes
-  only `issue_number`. Keeping repo resolution inside the resolver is what lets all three
-  lane-start callers share one code path; pushing it to the callers would replicate it
-  three times, which is the defect class this plan is closing. (The resolver's *read*
-  path uses a different helper — `resolve_target_repo_for_read` — for the reason recorded
-  under "Rung 1 branches on `allow_heal`".)
+  ledger key is built inside `resolve_lane_slug`, which resolves via
+  `resolve_target_repo_for_read(issue_number)` on **both** arms (cycle 5 — see "ONE repo
+  resolver" under Technical Approach; an earlier draft said `_resolve_target_repo()` here).
+  `ensure_session` passes only `issue_number` and is correct to: it runs inside the target
+  repo's own process, so the lease-first resolver answers correctly without help.
+- **This is NOT a general rule for callers.** The two *reflection* callers must pass
+  `target_repo=repo` explicitly, because they iterate projects in a process whose cwd
+  belongs to `ai` rather than to the project they are acting on. "Keep repo resolution
+  inside the resolver" is right for same-process callers and wrong for cross-project ones;
+  the rule is that **a caller holding an authoritative repo slug passes it, and a caller
+  that does not, does not**.
 - Under `allow_heal=True` the resolver calls `PipelineLedger.get_or_create(target_repo,
   issue_number)`, so a lane-start call **creates the ledger if it does not yet exist**.
   This is the mint's write target (see Technical Approach, "Rung 1 branches on
