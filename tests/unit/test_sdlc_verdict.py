@@ -1147,3 +1147,175 @@ class TestCliGetEmptyResultDiagnostics:
 
         assert result == {"verdict": "APPROVED"}
         assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: head_sha is its OWN record field, never concatenated into the
+# verdict token (normalize_verdict runs over the whole verdict string and was
+# mangling `APPROVED REVIEW_CONTEXT head_sha=<hex>` into
+# `APPROVED REVIEW CONTEXT HEAD SHA=<HEX>`).
+# ---------------------------------------------------------------------------
+
+_2769_SHA = "abcdef0123456789abcdef0123456789abcdef01"
+
+
+class TestRecordVerdictHeadSha:
+    def test_head_sha_is_stored_as_its_own_field_verdict_stays_bare(
+        self, fake_session_reload_patched
+    ):
+        session = fake_session_reload_patched
+        record = record_verdict(session, "REVIEW", "APPROVED", head_sha=_2769_SHA)
+
+        assert record["verdict"] == "APPROVED"
+        assert record["head_sha"] == _2769_SHA
+        got = get_verdict(session, "REVIEW")
+        assert got["verdict"] == "APPROVED"
+        assert got["head_sha"] == _2769_SHA
+
+    def test_head_sha_is_not_normalized(self, fake_session_reload_patched):
+        """It is a raw 40-hex commit SHA -- uppercasing it would break nothing
+        semantically (comparisons are case-insensitive) but the field must be
+        stored verbatim, not routed through normalize_verdict."""
+        session = fake_session_reload_patched
+        record = record_verdict(session, "REVIEW", "approved", head_sha=_2769_SHA)
+        assert record["verdict"] == "APPROVED"  # the verdict IS normalized
+        assert record["head_sha"] == _2769_SHA  # the SHA is NOT
+
+    @pytest.mark.parametrize("falsy", [None, "", "   ", "\n\t"])
+    def test_falsy_head_sha_writes_no_field_at_all(self, fake_session_reload_patched, falsy):
+        session = fake_session_reload_patched
+        record = record_verdict(session, "REVIEW", "APPROVED", head_sha=falsy)
+        assert "head_sha" not in record
+        assert "head_sha" not in get_verdict(session, "REVIEW")
+
+    def test_malformed_head_sha_never_reads_as_a_valid_trailer(self, fake_session_reload_patched):
+        """A non-40-hex value is stored but can never masquerade as a real head
+        SHA: it matches no PR head, so every freshness gate fails CLOSED."""
+        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE, head_sha_of_record
+
+        session = fake_session_reload_patched
+        record = record_verdict(session, "REVIEW", "APPROVED", head_sha="not-a-sha")
+
+        # Stored verbatim -- record_verdict does not validate, so the ledger
+        # keeps whatever the caller wrote.
+        assert record["head_sha"] == "not-a-sha"
+        # The verdict token itself carries no trailer-shaped text.
+        assert _HEAD_SHA_TRAILER_RE.search(record["verdict"]) is None
+        # ...but the READ path treats a malformed field exactly as it treats a
+        # malformed trailer: absent. Otherwise arbitrary text would satisfy
+        # _review_trailer_present, the gate that refuses a malformed trailer.
+        assert head_sha_of_record(record) == ""
+
+    def test_head_sha_lands_in_the_same_single_write(self, fake_session_reload_patched):
+        """Single-writer invariant: one update_stage_states call, never two."""
+        session = fake_session_reload_patched
+        with patch(
+            "tools.stage_states_helpers.update_stage_states", return_value=True
+        ) as mock_update:
+            record_verdict(session, "REVIEW", "APPROVED", head_sha=_2769_SHA, blockers=0)
+        assert mock_update.call_count == 1
+
+
+class TestReviewTrailerPresentReadsBothShapes:
+    """`_review_trailer_present` gates the REVIEW completed marker. It must
+    accept BOTH the new field shape and the legacy mangled-token shape."""
+
+    @pytest.mark.parametrize(
+        "verdict_record",
+        [
+            pytest.param({"verdict": "APPROVED", "head_sha": _2769_SHA}, id="field-shape"),
+            pytest.param(
+                {"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_2769_SHA.upper()}"},
+                id="legacy-mangled-token",
+            ),
+            pytest.param(
+                {"verdict": f"APPROVED REVIEW_CONTEXT head_sha={_2769_SHA}"},
+                id="legacy-raw-token",
+            ),
+        ],
+    )
+    def test_accepts_every_recorded_shape(self, verdict_record):
+        from tools.sdlc_verdict import _review_trailer_present
+
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=MagicMock()),
+            patch("tools.sdlc_verdict.get_verdict", return_value=verdict_record),
+        ):
+            assert _review_trailer_present(2769) is True
+
+    def test_refuses_an_approved_verdict_attributed_to_no_head_sha(self):
+        from tools.sdlc_verdict import _review_trailer_present
+
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=MagicMock()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+        ):
+            assert _review_trailer_present(2769) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #2767(a): `--blocker-count` / `--tech-debt-count`.
+#
+# The old bare `--blockers` had `type=int` and NO help text, on a call
+# /do-pr-review declares "mandatory and terminal". An agent passing findings
+# prose got `invalid int value:` and a hard STOP, leaving the review posted to
+# GitHub but absent from the ledger (observed on the popoto #537 pipeline).
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeCountFlagSpellings:
+    def _parse(self, argv):
+        from tools.sdlc_verdict import _build_parser
+
+        return _build_parser().parse_args(argv)
+
+    _BASE = ["finalize", "--pr", "1", "--issue-number", "42", "--verdict", "APPROVED"]
+
+    def test_new_spellings_parse(self):
+        args = self._parse(self._BASE + ["--blocker-count", "3", "--tech-debt-count", "5"])
+        assert args.blockers == 3
+        assert args.tech_debt == 5
+
+    def test_old_spellings_still_parse_to_the_same_dest(self):
+        """The cross-machine propagation window: a machine that has not yet run
+        /update still emits the old spellings against a merged sdlc-tool."""
+        args = self._parse(self._BASE + ["--blockers", "3", "--tech-debt", "5"])
+        assert args.blockers == 3
+        assert args.tech_debt == 5
+
+    def test_spellings_are_one_argument_not_two(self):
+        """Aliases on a single `add_argument`, so the last one wins rather than
+        two independent dests drifting apart."""
+        args = self._parse(self._BASE + ["--blockers", "3", "--blocker-count", "9"])
+        assert args.blockers == 9
+
+    def test_zero_survives_the_rename_and_is_not_conflated_with_absent(self):
+        """`0` means 'assessed, none found'; absent means 'not assessed'. The
+        `default=None` distinction must survive (record_verdict writes the key
+        only when the value is not None)."""
+        assert self._parse(self._BASE + ["--blocker-count", "0"]).blockers == 0
+        assert self._parse(self._BASE).blockers is None
+        assert self._parse(self._BASE).tech_debt is None
+
+    def test_prose_is_still_a_loud_failure_never_a_derived_count(self):
+        """Deliberately unchanged: a silently-wrong count corrupts the ledger,
+        which is strictly worse than the loud failure."""
+        with pytest.raises(SystemExit):
+            self._parse(self._BASE + ["--blocker-count", "1) mkdocs build --strict fails"])
+
+    def test_help_text_says_count_and_says_not_findings_text(self):
+        import contextlib
+        import io
+
+        from tools.sdlc_verdict import _build_parser
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+            _build_parser().parse_args(["finalize", "--help"])
+        # argparse hard-wraps help bodies, so compare against whitespace-
+        # normalized text rather than the raw column layout.
+        out = " ".join(buf.getvalue().split())
+        assert "--blocker-count" in out and "--tech-debt-count" in out
+        assert "--blockers" in out and "--tech-debt" in out
+        assert "COUNT" in out
+        assert "NOT the findings text" in out

@@ -15,7 +15,7 @@ wired in ``tools/sdlc_verdict.main()`` -- there is deliberately no top-level
 Surface Decision"):
 
 - :func:`finalize` -- state-mutating. Computes the PR head SHA, records the
-  verdict with the ``REVIEW_CONTEXT head_sha=<40-hex>`` trailer appended
+  BARE verdict token plus the head SHA as a SEPARATE ``head_sha`` record field
   (idempotent), writes the REVIEW ``completed`` marker on the APPROVED path,
   then reads all three back via :func:`check_review_persistence`. Raises
   :class:`ReviewFinalizeError` with a **named error** on any gap -- it cannot
@@ -36,6 +36,24 @@ Named error taxonomy (mirrors the existing WS3c/WS-D gate vocabulary in
   head commit (or the head SHA itself could not be resolved via ``gh``).
 - ``REVIEW_MARKER_INCOMPLETE`` -- the REVIEW stage marker is not
   ``completed``.
+
+**Head-SHA storage shape (#2769) and the legacy-read contract:** the head SHA
+the verdict judges is stored as its OWN ``head_sha`` field on the
+``_verdicts["REVIEW"]`` record, NOT concatenated into the verdict token. The
+old concatenation was silently corrupting the stored verdict:
+``record_verdict`` runs ``normalize_verdict`` over the WHOLE string, so
+``APPROVED REVIEW_CONTEXT head_sha=<hex>`` landed as ``APPROVED REVIEW CONTEXT
+HEAD SHA=<HEX>`` where a bare ``APPROVED`` belonged.
+
+Every reader goes through ``tools._sdlc_utils.head_sha_of_record`` (or
+``head_sha_of_text`` when it holds only a string), which prefers the field and
+falls back to the ``REVIEW_CONTEXT head_sha=`` regex over the verdict text.
+**That fallback is PERMANENT, not scaffolding:** ledgers written before the
+split hold mangled verdict strings forever and there is deliberately no
+migration. When a record carries both a ``head_sha`` field and a legacy in-token
+trailer that disagree, the FIELD wins. :func:`finalize` is idempotent against an
+already-trailered input: it lifts the SHA into the field and stores the bare
+token, never both.
 
 **Fail-closed contract:** every probe in :func:`check_review_persistence`
 (verdict presence, trailer well-formedness, marker completion) treats ANY
@@ -79,11 +97,26 @@ import logging
 
 from tools._sdlc_utils import (
     _HEAD_SHA_TRAILER_RE,
+    head_sha_of_record,
+    head_sha_of_text,
     normalize_verdict,
     resolve_target_repo_for_read,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_head_sha_trailer(verdict: str) -> str:
+    """Return ``verdict`` with any ``REVIEW_CONTEXT head_sha=`` trailer removed.
+
+    Issue #2769: the head SHA now rides as ``record_verdict(head_sha=...)``, so
+    the verdict token stored on the ledger is the bare verdict and nothing else.
+    A caller that hands :func:`finalize` an already-trailered string gets the
+    trailer lifted out into the field rather than stored a second time.
+    """
+    if not isinstance(verdict, str):
+        return ""
+    return _HEAD_SHA_TRAILER_RE.sub("", verdict).strip()
 
 
 # The complete REVIEW verdict vocabulary (#2548). These are the normalized
@@ -239,9 +272,11 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
 
         record = _resolve_issue_record(issue_number)
         verdict_text = ""
+        verdict_record: dict = {}
         if record is not None:
-            verdict_record = get_verdict(record, "REVIEW")
-            if isinstance(verdict_record, dict):
+            resolved = get_verdict(record, "REVIEW")
+            if isinstance(resolved, dict):
+                verdict_record = resolved
                 verdict_text = verdict_record.get("verdict") or ""
 
         result["verdict_present"] = bool(verdict_text)
@@ -284,8 +319,9 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             result["reason"] = "REVIEW_TRAILER_MISSING"
             return result
 
-        trailer = _HEAD_SHA_TRAILER_RE.search(verdict_text)
-        if trailer and trailer.group(1).lower() == head_sha.lower():
+        # Field-first, legacy-trailer-second (#2769).
+        recorded_head = head_sha_of_record(verdict_record)
+        if recorded_head and recorded_head.lower() == head_sha.lower():
             result["trailer_matches_head"] = True
         else:
             result["reason"] = "REVIEW_TRAILER_MISSING"
@@ -351,24 +387,30 @@ def finalize(
     blockers: int | None = None,
     tech_debt: int | None = None,
 ) -> dict:
-    """Atomically record verdict + head_sha trailer + REVIEW marker, then verify.
+    """Record verdict + head_sha + REVIEW marker, then verify all three landed.
 
     Collapses the historically hand-run 3-call sequence (``verdict record``,
     ``stage-marker REVIEW completed``, ``verdict get`` readback) into one
-    operation that cannot partially complete: any failure at any step raises
+    self-verifying call: any failure at any step raises
     :class:`ReviewFinalizeError` (or, for a lease-ownership refusal,
     :class:`tools.sdlc_verdict.OwnershipError` is NOT used here -- lease
     failures are reported as :class:`ReviewFinalizeError` too, prefixed with
     the same ``LEASE_ABSENT``/``ISSUE_LOCKED``/``TARGET_REPO_MISSING``
-    reasons ``tools/sdlc_verdict.py``'s ``_cli_record`` uses) with no
-    partial write left behind.
+    reasons ``tools/sdlc_verdict.py``'s ``_cli_record`` uses).
+
+    It is **not** transactional, and does not claim to be. The verdict is
+    written before the marker is attempted -- the deliberate #2415/#2577
+    ordering -- so the marker write can be refused with the verdict already
+    durable. That branch raises with a message naming exactly what landed
+    (#2740); re-running the identical call is idempotent and lands the marker.
 
     Args:
-        pr: PR number -- source of the head_sha trailer.
+        pr: PR number -- source of the recorded head SHA.
         issue_number: GitHub issue number (the ledger key component).
         verdict: Free-form verdict string (e.g. ``"APPROVED"``). May already
-            carry a ``REVIEW_CONTEXT head_sha=`` trailer -- if so it is left
-            untouched (idempotent append).
+            carry a ``REVIEW_CONTEXT head_sha=`` trailer -- if so the SHA is
+            lifted out into the record's ``head_sha`` field and stripped from
+            the stored token, so it is persisted exactly once (#2769).
         run_id: The caller's run identity (``sdlc-tool session-ensure``).
         blockers: Optional blocker count.
         tech_debt: Optional tech-debt count.
@@ -463,13 +505,21 @@ def finalize(
                 f"REVIEW_TRAILER_MISSING: {e} -- refusing to record a trailer-less verdict"
             ) from e
 
-        trailered_verdict = (
-            verdict
-            if _HEAD_SHA_TRAILER_RE.search(verdict)
-            else f"{verdict.strip()} REVIEW_CONTEXT head_sha={head_sha}"
-        )
+        # Idempotency (#2769): a caller may hand us a verdict that ALREADY
+        # carries a `REVIEW_CONTEXT head_sha=` trailer (an older skill, or a
+        # re-run echoing back a stored verdict). Lift that SHA out into the
+        # `head_sha=` kwarg and strip it from the token, so it is stored exactly
+        # once and never twice. The embedded trailer wins over the freshly
+        # fetched head, preserving the pre-split behavior of leaving an
+        # already-trailered verdict untouched.
+        embedded = head_sha_of_text(verdict)
+        recorded_head = embedded or head_sha
+        bare_verdict = _strip_head_sha_trailer(verdict)
     else:
-        trailered_verdict = verdict
+        # Non-APPROVED verdicts carry no trailer by design (plan No-Gos), but
+        # strip defensively so a stray one can never reach `normalize_verdict`.
+        recorded_head = head_sha_of_text(verdict) or None
+        bare_verdict = _strip_head_sha_trailer(verdict)
 
     # TOCTOU close (mirrors _cli_record): re-validate the lease non-peek
     # immediately before the write, never trusting the earlier peek.
@@ -486,10 +536,11 @@ def finalize(
     record = record_verdict(
         ledger,
         stage="REVIEW",
-        verdict=trailered_verdict,
+        verdict=bare_verdict,
         blockers=blockers,
         tech_debt=tech_debt,
         issue_number=issue_number,
+        head_sha=recorded_head,
     )
     if not record:
         raise ReviewFinalizeError(
@@ -504,10 +555,19 @@ def finalize(
             stage="REVIEW", status="completed", issue_number=issue_number, run_id=run_id
         )
         if marker_exit != 0:
+            # #2740: this branch is the ONLY layer that knows both facts --
+            # `record_verdict` committed above and `write_marker` refused here.
+            # `write_marker` cannot see the first and so must not narrate it;
+            # this must, because the reader is usually an agent that would
+            # otherwise need a separate `stage-query` to learn what landed.
+            # Named reason stays first: tooling and the /do-sdlc supervisor
+            # match on it. One remedy, not an inventory of fields (Risk 4).
             reason = marker_result.get("reason", "REVIEW_MARKER_INCOMPLETE")
             raise ReviewFinalizeError(
-                f"{reason}: REVIEW completion marker write failed for issue "
-                f"#{issue_number}: {marker_result}"
+                f"{reason}: the REVIEW verdict and its head SHA ARE persisted for "
+                f"issue #{issue_number}; only the REVIEW completion marker was not "
+                f"written: {marker_result}. Re-running this identical finalize "
+                f"command is idempotent and will land the marker."
             )
 
     result = check_review_persistence(pr, issue_number, run_id=run_id)

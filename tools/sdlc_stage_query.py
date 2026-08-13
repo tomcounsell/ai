@@ -13,6 +13,7 @@ used by the router's Legal Dispatch Guards::
             "critique_cycle_count": 1,
             "latest_critique_verdict": "NEEDS REVISION",
             "latest_review_verdict": null,
+            "latest_review_head_sha": null,
             "revision_applied": false,
             "revision_applied_at": null,
             "pr_number": null,
@@ -47,7 +48,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from tools._sdlc_utils import _resolve_target_repo
+from tools._sdlc_utils import _resolve_target_repo, head_sha_of_record, head_sha_of_text
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import is_pipeline_ledger as _is_pipeline_ledger
 from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_repo_for_read
@@ -451,6 +452,35 @@ def _extract_verdict_text(record) -> str | None:
     return None
 
 
+def _extract_head_sha(record) -> str | None:
+    """Read the head SHA a ``_verdicts[stage]`` entry attests to, or ``None``.
+
+    Issue #2769. ``_extract_verdict_text`` above flattens the record to its
+    ``verdict`` string and drops every sibling key, so the new ``head_sha``
+    FIELD would be invisible to the router without this second extractor and
+    its ``_meta.latest_review_head_sha`` slot.
+
+    The three-way shape match mirrors ``_extract_verdict_text`` EXACTLY and the
+    ``str`` arm is checked positively, never as ``not isinstance(record, dict)``:
+    the overwhelmingly common case is ``None`` (every issue still in
+    PLAN/BUILD/TEST has no REVIEW verdict), and letting ``None`` reach the
+    trailer regex raises ``TypeError``, which
+    ``tools/sdlc_next_skill._resolve_enriched``'s broad ``except`` swallows into
+    an EMPTY ledger -- routing a fully-worked issue back to ``/do-plan``.
+
+    Two layers guard that, deliberately: ``head_sha_of_text`` also type-checks
+    its input and returns ``""``, so it is the one actually holding the line
+    today and the negated form would not currently raise. This branch is the
+    layer that expresses the INTENT -- it is what keeps the guarantee if that
+    helper is ever tightened to its declared non-Optional ``str`` signature.
+    """
+    if isinstance(record, dict):
+        return head_sha_of_record(record) or None
+    if isinstance(record, str):
+        return head_sha_of_text(record) or None
+    return None
+
+
 def _compute_meta(
     raw_states: dict,
     session,
@@ -473,6 +503,7 @@ def _compute_meta(
 
     latest_critique = _extract_verdict_text(verdicts.get("CRITIQUE"))
     latest_review = _extract_verdict_text(verdicts.get("REVIEW"))
+    latest_review_head_sha = _extract_head_sha(verdicts.get("REVIEW"))
 
     pr_number = None
     # Resolution ladder (#2003 T1.7 single-writer): the AgentSession.pr_number
@@ -535,6 +566,7 @@ def _compute_meta(
         "critique_cycle_count": int(raw_states.get("_critique_cycle_count", 0) or 0),
         "latest_critique_verdict": latest_critique,
         "latest_review_verdict": latest_review,
+        "latest_review_head_sha": latest_review_head_sha,
         "revision_applied": revision_applied,
         "revision_applied_at": revision_applied_at,
         "pr_number": pr_number,
@@ -561,7 +593,12 @@ def _default_meta() -> dict:
         "patch_cycle_count": 0,
         "critique_cycle_count": 0,
         "latest_critique_verdict": None,
+        # Must stay key-for-key with _compute_meta's return (#2769): a key
+        # present in one and absent from the other makes `meta.get(...)` mean
+        # different things on the session-found vs session-missing paths, and
+        # the router's row 8f distinguishes "key absent" from "key None".
         "latest_review_verdict": None,
+        "latest_review_head_sha": None,
         "revision_applied": False,
         "revision_applied_at": None,
         "pr_number": None,
@@ -663,7 +700,7 @@ def query_enriched(
             "stages": {stage_name: status, ...},
             "_meta": {patch_cycle_count, critique_cycle_count,
                       latest_critique_verdict, latest_review_verdict,
-                      revision_applied, pr_number,
+                      latest_review_head_sha, revision_applied, pr_number,
                       same_stage_dispatch_count, last_dispatched_skill}
         }
 

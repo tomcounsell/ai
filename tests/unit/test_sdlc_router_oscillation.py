@@ -886,3 +886,69 @@ def test_g8_noop_on_malformed_unverified_stage():
     # Falls through to normal dispatch table (g8 itself does not fire).
     if isinstance(result, Dispatch):
         assert result.row_id != "G8"
+
+
+# ---------------------------------------------------------------------------
+# G4 bounds the widened row 8b (#2767b) — the #1641/#1668 re-opening risk
+# ---------------------------------------------------------------------------
+
+
+def _permanently_stale_states() -> dict:
+    """A CHANGES REQUESTED verdict that can never stop being stale.
+
+    The ``/do-patch`` dispatch is recorded after the verdict's ``recorded_at``
+    and nothing in the loop below ever records a fresher verdict, so widened
+    row 8b re-dispatches ``/do-pr-review`` on every turn. G4 must be what stops
+    it — not a hand-written cap inside the predicate.
+    """
+    return {
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "PATCH": "completed",
+        "REVIEW": "completed",
+        "DOCS": "pending",
+        "MERGE": "pending",
+        "_verdicts": {
+            "REVIEW": {"verdict": "CHANGES REQUESTED", "recorded_at": "2026-08-13T10:00:00+00:00"}
+        },
+        "_sdlc_dispatches": [{"skill": SKILL_DO_PATCH, "at": "2026-08-13T11:00:00+00:00"}],
+    }
+
+
+def test_g4_bounds_permanently_stale_review_verdict_loop():
+    """A permanently-stale verdict escalates to a human via G4 instead of
+    spinning forever on row 8b's ``/do-pr-review`` re-dispatch."""
+    states = _permanently_stale_states()
+    dispatched: list[str] = []
+    blocked: Blocked | None = None
+
+    for _ in range(MAX_SAME_STAGE_DISPATCHES + 3):
+        count, skill = compute_same_stage_count(
+            states,
+            build_stage_snapshot(
+                {k: v for k, v in states.items() if k != "_sdlc_dispatches"},
+                meta={"pr_number": 4242},
+            ),
+        )
+        meta = {
+            "pr_number": 4242,
+            "last_dispatched_skill": skill or SKILL_DO_PATCH,
+            "same_stage_dispatch_count": count,
+            "pr_merge_state": "BLOCKED",
+        }
+        result = decide_next_dispatch(states, meta)
+        if isinstance(result, Blocked):
+            blocked = result
+            break
+        assert result.skill == SKILL_DO_PR_REVIEW, f"unexpected re-dispatch target {result!r}"
+        assert result.row_id == "8b"
+        dispatched.append(result.skill)
+        record_dispatch(states, result.skill, pr_number=4242)
+
+    assert blocked is not None, "the stale-verdict loop never escalated — G4 bound is gone"
+    assert blocked.guard_id == "G4"
+    assert len(dispatched) <= MAX_SAME_STAGE_DISPATCHES + 1, (
+        f"row 8b re-dispatched {len(dispatched)} times before G4 fired"
+    )

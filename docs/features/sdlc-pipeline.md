@@ -247,10 +247,10 @@ session-ensure`, owns the per-issue lock for the WHOLE run:
   construction. The refused state is exactly what row 8e recovers.
 - **Head_sha staleness (row 8f + G6):** `sdlc-tool next-skill` context
   assembly live-fetches the PR head (`_fetch_pr_head_sha`,
-  `context["pr_head_sha"]`); the router compares it to the verdict's
-  `REVIEW_CONTEXT head_sha=` trailer — the same freshness definition
-  `tools/merge_predicate` enforces. A mismatch, a missing trailer, or a
-  failed lookup (fail-closed: `pr_head_sha=""` +
+  `context["pr_head_sha"]`); the router compares it to the head SHA the
+  verdict attributes to, surfaced as `_meta.latest_review_head_sha` — the same
+  freshness definition `tools/merge_predicate` enforces. A mismatch, a verdict
+  attributable to no head SHA, or a failed lookup (fail-closed: `pr_head_sha=""` +
   `pr_head_sha_lookup_failed=true`, never omitted) routes to `/do-pr-review`
   at the new head instead of merging.
 
