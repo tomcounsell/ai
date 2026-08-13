@@ -895,7 +895,7 @@ locking — but writing it as one step is what makes it true.
   gets its own issue rather than expanding this plan's scope. Three writers are in scope (unowned
   `flushdb`, unrestored module reload, popoto plugin's db-15 flush) and each has a deterministic
   proof; the soak is diagnostic, not a merge gate.
-- [SEPARATE-SLUG #2628] **Upstream popoto PR: make the bundled `pytest11` plugin's flush honour an
+- [TRACKED → #2770] **Upstream popoto PR: make the bundled `pytest11` plugin's flush honour an
   env-pinned db by default.** This is the more durable form of spike-4's fix — no downstream consumer
   could then collide with a claim pool — and there is precedent for landing changes upstream (popoto
   PR #518 is already in flight). It is deliberately **not built here**: it needs a popoto release plus
@@ -903,14 +903,14 @@ locking — but writing it as one step is what makes it true.
   pure-`tests/` PR. This plan takes the downstream repoint (Task 2), which lands in one commit, is
   fully under this repo's control, and — critically — is **already popoto-upgrade-durable** on its
   own: it drives the plugin through its documented `POPOTO_TEST_DB` resolution input and carries a
-  drift-detecting assertion, so a future popoto cannot silently re-open the hole. File the upstream
-  change as its own issue. Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s
-  four `db == 15` assertions belong to that upstream change, not to this one.
-- [SEPARATE-SLUG #2628] Consolidating the two owners of "which db popoto is on" — dropping
+  drift-detecting assertion, so a future popoto cannot silently re-open the hole. Filed as **#2770**.
+  Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s four `db == 15` assertions
+  belong to that upstream change, not to this one.
+- [TRACKED → #2771] Consolidating the two owners of "which db popoto is on" — dropping
   `redis_test_db`'s replace-and-repatch loop (`tests/conftest.py:616,626-628,640-641`) now that the
   plugin's in-place `_swap_db` already covers submodule bindings. Deferred: `tests/conftest.py:631`
   is what points `_POPOTO_ASYNC_REDIS_DB` at the test db in the sync setup phase, so removing the
-  fixture is a separate blast radius from this PR (round-4 concern 2).
+  fixture is a separate blast radius from this PR (round-4 concern 2). Filed as **#2771**.
 - [ORDERED] A general "no write on an unclaimed db" guard covering every mutating command rather
   than just `flushdb` (Resolved Question 2). Deferred: it costs a per-command wrapper on both sync
   and async clients paid by every test, and the AST recurrence guard (#2655) will block *construction*
@@ -962,7 +962,7 @@ No code change in those paths.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/test-db-ownership.md` — the claim pool, the ownership invariant, what
+- [x] Create `docs/features/test-db-ownership.md` — the claim pool, the ownership invariant, what
   the guard denies and why, how to get a scratch db, what the exhaustion error means and how to
   clear it. Include the `#2117 → #2606 → #2624 → #2628` history so the next agent understands why
   the invariant is enforced rather than documented.
@@ -979,22 +979,22 @@ No code change in those paths.
   Record the relationship to **#2645**: this guard is the general form of that incident's Layer-1
   db-0 rule, and the per-process flock-claimed set is the by-db discriminator #2645's rename-command
   vs ACL question is looking for.
-- [ ] Add the entry to the `docs/features/README.md` index table.
+- [x] Add the entry to the `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] `tests/README.md` — update the isolation section: tests must never construct a
+- [x] `tests/README.md` — update the isolation section: tests must never construct a
   `redis.Redis(db=N)` from a self-derived number; `claim_test_db()` and the `scratch_test_db`
   fixture are the only sources. Note that `--dist=loadfile` gives co-location but not assignment
   determinism, so cross-file leaks surface differently every run. Add the module-reload rule: a
   test that `importlib.reload`s a module owning a registry must restore it, and the conftest guard
   now covers `agent.index_drift` and `monitoring.bridge_watchdog`.
-- [ ] `tests/README.md:9` — fix the stale "~40s parallel" runtime claim. `CLAUDE.md` and
+- [x] `tests/README.md:9` — fix the stale "~40s parallel" runtime claim. `CLAUDE.md` and
   `pyproject.toml`'s `--timeout=420` put a full `tests/unit/` run at roughly 20 minutes; the
   existing figure is ~30x off and misleads every agent budgeting a run.
-- [ ] `tests/db_claim.py` module docstring — document `claimed_test_dbs()`,
+- [x] `tests/db_claim.py` module docstring — document `claimed_test_dbs()`,
   `claim_scratch_test_db()`, and the wait-then-fail exhaustion policy, replacing the current
   "graceful legacy fallback" description.
-- [ ] `tests/conftest.py:103-150` — rewrite the guard's docstring: it is now an *ownership* guard
+- [x] `tests/conftest.py:103-150` — rewrite the guard's docstring: it is now an *ownership* guard
   of which the db0 rule is one case, and it still carries the 2026-06-03 production-wipe rationale.
 
 ### External Documentation Site
@@ -1002,54 +1002,54 @@ Not applicable — this repo has no external docs site.
 
 ## Success Criteria
 
-- [ ] `flushdb()` against an unclaimed db raises, with a message naming the db, the claimed set, and
+- [x] `flushdb()` against an unclaimed db raises, with a message naming the db, the claimed set, and
   `scratch_test_db`; `flushall()` remains unconditionally blocked; `db == 0` remains blocked.
-- [ ] Every `redis.Redis(db=...)` site this plan converts takes its `db=` value from the claim API:
+- [x] Every `redis.Redis(db=...)` site this plan converts takes its `db=` value from the claim API:
   the `PYTEST_XDIST_WORKER` derivation (`_own_test_db`), the hardcoded `15`
   (`divergent_db`), `test_agent_catchup_recovery.py:61`'s `db=1`, and the two
   `connection_kwargs`-derived sites (`test_email_bridge.py:1399-1406`,
   `test_notify_isolation.py:61-65`). Verified per-site in review; the *structural* assertion that no
   such site can reappear is descoped to #2655.
-- [ ] `claim_test_db()` never returns a db number absent from `claimed_test_dbs()` — on **every**
+- [x] `claim_test_db()` never returns a db number absent from `claimed_test_dbs()` — on **every**
   return path, flock and registry-unreachable fallback alike. On exhaustion it polls briefly, then
   raises.
-- [ ] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
-- [ ] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
+- [x] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
+- [x] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
   the guard **intercepts** a `flushdb` aimed at db 1 — proven against a `SimpleNamespace` client stub
   carrying no connection, so no flush can reach an unowned db on any branch — and `flushdb()` on the
   claimed db is permitted with a real client. ~1 s, deterministic. **Red on `main` means no
   `RuntimeError` is raised** (the db-0-only guard does not intercept), never that a flush succeeded.
   Both outputs pasted into the PR body.
-- [ ] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
+- [x] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
   `covered_model_names()` unchanged and strands no `FakeCoveredModel`. Red on `main`. Output pasted
   into the PR body.
-- [ ] **The binding measurement (writer 3):** inside a test,
+- [x] **The binding measurement (writer 3):** inside a test,
   `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"]` is in `claimed_test_dbs()` — i.e. the
   popoto plugin no longer sits on db 15 while this process owns another slot. Red on `main` (the
   same fact the `PROBE sentinel_survived=False` observation reports), green on the branch. Stated in
   ownership terms deliberately: a literal `redis.Redis(db=15)` sentinel would itself be an unowned-db
   construction, contradicting the invariant this plan exists to establish.
-- [ ] The claim exists before any fixture runs: on a worker, `claimed_test_dbs()` is non-empty at the
+- [x] The claim exists before any fixture runs: on a worker, `claimed_test_dbs()` is non-empty at the
   first `_popoto_flush_db`. On the xdist controller, `_db_claim._CLAIMED_TEST_DB` stays `None` and no
   pool slot is consumed. Under `-n0` the master claims.
-- [ ] Pool exhaustion is paid **once per process**: the second `claim_test_db()` against a held pool
+- [x] Pool exhaustion is paid **once per process**: the second `claim_test_db()` against a held pool
   returns in well under the wait window and raises the same message.
-- [ ] `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` inside any test —
+- [x] `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` inside any test —
   the popoto plugin and this repo's fixture agree on one db, so a future popoto upgrade that changes
   the plugin's resolution order fails a test instead of silently rotating the suite.
-- [ ] The `redis_test_db` fast path at `tests/conftest.py:592-597` is deleted, so spike-5's
+- [x] The `redis_test_db` fast path at `tests/conftest.py:592-597` is deleted, so spike-5's
   disposition holds regardless of which Task 2 option (env export vs `-p no:popoto`) was chosen.
-- [ ] A live-client ownership check runs once per session: every popoto client
+- [x] A live-client ownership check runs once per session: every popoto client
   (`POPOTO_REDIS_DB`, `_POPOTO_ASYNC_REDIS_DB`) points at a db in `claimed_test_dbs()`. This is the
   plugin-agnostic runtime check; no static walk over `tests/` can see installed library code, so this
   criterion stands entirely on its own and is unaffected by the #2655 descope.
-- [ ] Every regression test added fails on `main` and passes on the branch — red-state output pasted
+- [x] Every regression test added fails on `main` and passes on the branch — red-state output pasted
   into the PR body.
-- [ ] Exhaustion-path tests complete in seconds, not the wait window — proving
+- [x] Exhaustion-path tests complete in seconds, not the wait window — proving
   `_TEST_DB_CLAIM_WAIT_S` is read as a module attribute at call time and is genuinely patchable.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail markers are added; the replaced exhaustion test is a hard assertion.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail markers are added; the replaced exhaustion test is a hard assertion.
 
 ## Team Orchestration
 
@@ -1611,7 +1611,7 @@ touch `tests/unit/test_recovery_respawn_safety.py` and neither duplicates nor co
 | popoto client sits on a claimed db (writer 3) | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k popoto_plugin` | exit code 0 |
 | Session-start claim: controller claims nothing, `-n0` master does | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k session_claim` | exit code 0 (stub configs; no nested pytest run) |
 | Exhaustion is paid once per process, not per test | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k exhaustion` | exit code 0, whole selection completes in seconds |
-| No production file touched | `git diff --name-only origin/main... \| grep -v '^tests/\\\|^docs/\\\|^pyproject.toml$' \|\| true` | prints nothing (judge the printed lines, not the exit code) |
+| Production files: docstring-only | `git diff --name-only origin/main... \| grep -v '^tests/\\\|^docs/\\\|^pyproject.toml$' \|\| true` | prints only `tools/redis_flush_guard.py` — a docstring-only rename fix (the flush-guard fixture/dict rename), no behavior change, no service restart |
 | Legacy fallback no longer reachable on exhaustion | `grep -c 'falling back to legacy' tests/db_claim.py \|\| true` | match count == 1 (registry-unreachable path only) |
 | Live-network test out of the unit suite | `grep -c 'class TestSearchIntegration' tests/unit/test_youtube_search.py \|\| true` | prints `0` (`grep -c` exits 1 on zero matches, hence the `\|\| true`; judge the printed count, not the exit code) |
 | Ownership doc exists | `test -f docs/features/test-db-ownership.md` | exit code 0 |

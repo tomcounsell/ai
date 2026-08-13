@@ -201,9 +201,24 @@ class TestSentryNoiseFilterNonSuppression:
 
 class TestToleranceConstant:
     def test_default_tolerance_is_zero(self):
-        import importlib
+        """The shipped default is a zero tolerance: any drift is real drift.
 
+        Asserted directly on the module. This used to call
+        ``importlib.reload(index_drift)`` to "re-evaluate" the constant, which
+        rebound ``DRIFT_COVERED_MODELS`` to a brand-new dict and left it in
+        ``sys.modules`` for the rest of the worker — so
+        tests/unit/test_index_drift_coverage.py's restore fixture then guarded an
+        orphaned dict while its test wrote into the live one, stranding a fake
+        model registration (#2628). A reload cannot observe a fresh import
+        anyway: the env is already read.
+        """
         from agent import index_drift
 
-        importlib.reload(index_drift)
         assert index_drift.AGENTSESSION_INDEX_DRIFT_TOLERANCE == 0
+
+    def test_tolerance_honors_its_env_override(self, monkeypatch):
+        """A non-default tolerance is set with monkeypatch, never with a reload."""
+        from agent import index_drift
+
+        monkeypatch.setattr(index_drift, "AGENTSESSION_INDEX_DRIFT_TOLERANCE", 3)
+        assert index_drift.AGENTSESSION_INDEX_DRIFT_TOLERANCE == 3

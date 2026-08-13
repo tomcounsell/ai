@@ -1420,12 +1420,14 @@ class TestWedgeGuardExtraContext:
 
             from tests.db_claim import claim_test_db
 
-            # Stay on this process's per-process claimed test db (issue #2060),
-            # not a hardcoded db=1 — otherwise a concurrent pytest process that
-            # claimed db1 could flush this client's data mid-test. Ask the claim
-            # API directly rather than reading it back off the popoto client's
-            # connection_kwargs: same value, one hop instead of two, and it is
-            # the only shape the derivation guard accepts (#2655).
+            # Stay on this process's claimed test db (issues #2060, #2628), not
+            # a hardcoded db=1 — otherwise a concurrent pytest process that
+            # claimed db1 could flush this client's data mid-test.
+            # claim_test_db() is the single authority for the number; asking it
+            # directly rather than reading the value back off the popoto
+            # client's connection_kwargs avoids a second derivation of the same
+            # fact that would drift the moment anything re-points popoto, and
+            # it is the only shape the derivation guard accepts (#2655).
             test_r = redis.Redis(db=claim_test_db(), decode_responses=True)
             with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
                 with patch("bridge.email_bridge._get_redis", return_value=test_r):

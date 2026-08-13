@@ -43,13 +43,24 @@ halves of the job, and it matters which is which:
   exemption expression. It receives only the ``Exemption`` dataclass and calls
   ``ast.parse(entry.expr)``, so it has no tree and no bindings. It rejects
   ``'14'``, ``"'redis://localhost:6379/14'"`` and ``'15 if base != 15 else 14'``
-  — and it **accepts** a bare name like ``'divergent_db'``, because a name in
-  isolation has no integer in it to find.
-- :func:`apply_dispositions` is what actually stops laundering. Its
+  — and it would **accept** a bare name, because a name in isolation has no
+  integer in it to find.
+- :func:`apply_dispositions` is what actually stops a bare name from
+  laundering a pool slot through ``ALLOWLIST``. Its
   ``cand.pool_db is None or i >= len(allowlist)`` condition refuses to let any
-  ``ALLOWLIST`` entry cover a candidate the *scan* proved names a pool slot,
-  and the scan does have the bindings, so ``divergent_db`` arrives carrying
-  ``pool_db=14``.
+  ``ALLOWLIST`` entry cover a candidate the *scan* proved names a pool slot.
+
+As of #2628, this scenario has no live example: the one bare-name exemption
+this file ever carried — ``unit/test_conftest_isolation_guards.py`` /
+``divergent_db`` — is gone. :func:`_resolve_one_hop` now recognises
+``divergent_db = scratch_test_db`` structurally (``scratch_test_db`` is a
+sanctioned fixture parameter in ``CLAIM_FIXTURE_NAMES``, mirroring the
+``redis_test_url`` leg of Route 2), so the scan marks that site ``ok=True``
+directly and it needs no disposition of any kind. ``ALLOWLIST`` is back to
+db-0 literals only. The ``apply_dispositions`` gate above is kept
+defensively: it is what would stop the *next* bare-name site from being
+laundered if a future author adds an ``ALLOWLIST`` entry for one without a
+matching structural leg.
 
 An earlier version of this docstring credited the whole protection to
 :func:`check_dispositions`. That was wrong and worth correcting rather than
@@ -78,15 +89,28 @@ TESTS_ROOT = Path(__file__).resolve().parent
 # The ONLY sanctioned sources of a db number. Matched on the terminal name, so
 # both ``claim_test_db()`` and ``_db_claim.claim_test_db()`` qualify.
 #
-# ``claim_scratch_test_db`` has no call sites yet: #2628 adds it to
-# tests/db_claim.py, and the deferred `divergent_db` site is waiting on it. The
-# entry is inert until then and becomes live the moment that lands. Do not
-# garbage-collect it as dead code in the meantime.
+# ``claim_scratch_test_db`` is called directly inside the ``scratch_test_db``
+# fixture body in tests/conftest.py (#2628). The guard cannot see through a
+# fixture body, so a test that receives ``scratch_test_db`` as a fixture
+# PARAMETER and rebinds it to a local name is recognised instead through
+# CLAIM_FIXTURE_NAMES -- see that frozenset's docstring, and the
+# ``redis_test_url`` fixture-parameter leg of Route 2, which this mirrors.
 CLAIM_FUNCS = frozenset({"claim_test_db", "claim_scratch_test_db"})
 
 # The sanctioned source of a Redis URL: ``tests.db_claim.redis_test_url()`` and
 # the same-named pytest fixture in conftest, which returns its value.
 CLAIM_URL_NAMES = frozenset({"redis_test_url"})
+
+# The sanctioned source of a raw db NUMBER returned by a pytest fixture whose
+# body the guard cannot see into. ``scratch_test_db`` (tests/conftest.py) calls
+# claim_scratch_test_db() and returns the int; a test that receives it as a
+# fixture PARAMETER and rebinds it to a local name (``divergent_db =
+# scratch_test_db``) cannot be resolved by :func:`_resolve_one_hop` the way
+# ``local = claim_test_db()`` can, because the bound value is a bare
+# ``ast.Name`` referencing a function argument, not a call. This mirrors
+# CLAIM_URL_NAMES / the ``redis_test_url`` leg of Route 2 exactly: the
+# identifier itself is the sanctioned source.
+CLAIM_FIXTURE_NAMES = frozenset({"scratch_test_db"})
 
 # Used ONLY to scope the opaque-``**``-splat leg (see `_splat_candidate`). Every
 # other route in this module is deliberately callee-agnostic; this is the one
@@ -164,39 +188,15 @@ ALLOWLIST: tuple[Exemption, ...] = (
 )
 
 # Temporary exemptions. Each MUST name a blocking issue and an expiry date, and
-# is reported on every run. These are NOT allowlist entries: the invariant check
-# below would reject at least one of them outright, which is the point.
-DEFERRED: tuple[Exemption, ...] = (
-    Exemption(
-        path="integration/test_notify_isolation.py",
-        expr="int(kw.get('db', 0) or 0)",
-        reason=(
-            "Derives its db from another client's connection_kwargs — the exact route this "
-            "guard rejects. The one-line conversion to claim_test_db() is behaviour-preserving "
-            "(pub/sub delivery is server-global, per the docstring at :53-57) but this file is "
-            "under #2628's exclusive lock and #2628 is folding the conversion in directly."
-        ),
-        blocked_on="#2628",
-        expires="2026-11-06",
-    ),
-    Exemption(
-        path="unit/test_conftest_isolation_guards.py",
-        expr="divergent_db",
-        reason=(
-            "Hand-picks a second pool slot (15, or 14 if this process claimed 15) and FLUSHES "
-            "it, so it can be flushed out from under a concurrent process. Fixing it needs a "
-            "second independently-claimed db — claim_scratch_test_db() — which does not exist "
-            "in tests/db_claim.py yet; #2628 is adding it. Deliberately DEFERRED and not "
-            "ALLOWLIST: the scan resolves this name's binding to pool slot 14, and "
-            "apply_dispositions refuses to let an ALLOWLIST entry cover a candidate carrying "
-            "a pool_db. (check_dispositions would accept the bare name — it sees only the "
-            "expression text, with no bindings — so apply_dispositions is the layer doing the "
-            "work here.) Weakening either is exactly the decay this guard exists to prevent."
-        ),
-        blocked_on="#2628",
-        expires="2026-11-06",
-    ),
-)
+# is reported on every run. These are NOT allowlist entries -- ALLOWLIST's
+# ``check_dispositions`` invariant (no entry may name a pool-slot literal)
+# does not apply to this tuple, which is what would let a DEFERRED entry cover
+# a site that genuinely needs a temporary pool-slot exemption. Empty as of
+# #2628: the last two sites that lived here -- integration/test_notify_isolation.py
+# (converted to db=claim_test_db()) and unit/test_conftest_isolation_guards.py's
+# divergent_db (recognised structurally, see CLAIM_FIXTURE_NAMES) -- are both
+# resolved, not merely deferred.
+DEFERRED: tuple[Exemption, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,8 @@ def _resolve_one_hop(
     enclosing_fn: ast.AST | None,
     bindings: dict[ast.AST, dict[str, list[ast.AST]]],
 ) -> tuple[bool, str, ast.AST | None]:
-    """Shape S2: a name bound exactly once in this function to a claim call."""
+    """Shape S2: a name bound exactly once in this function to a claim call,
+    or to a sanctioned fixture-parameter name (``CLAIM_FIXTURE_NAMES``)."""
     if enclosing_fn is None:
         return False, f"{name.id!r} is not a local name in any function scope", None
     bound = bindings.get(enclosing_fn, {}).get(name.id)
@@ -331,9 +332,12 @@ def _resolve_one_hop(
         return False, f"{name.id!r} has no local binding in the enclosing function", None
     if len(bound) > 1:
         return False, f"{name.id!r} is rebound {len(bound)} times in the enclosing function", None
-    if _is_claim_call(bound[0]):
-        return True, f"{name.id!r} = {ast.unparse(bound[0])}", bound[0]
-    return False, f"{name.id!r} = {ast.unparse(bound[0])}, which is not a claim call", bound[0]
+    value = bound[0]
+    if _is_claim_call(value):
+        return True, f"{name.id!r} = {ast.unparse(value)}", value
+    if isinstance(value, ast.Name) and value.id in CLAIM_FIXTURE_NAMES:
+        return True, f"{name.id!r} = {ast.unparse(value)}, a sanctioned fixture parameter", value
+    return False, f"{name.id!r} = {ast.unparse(value)}, which is not a claim call", value
 
 
 def _splat_candidate(
@@ -519,9 +523,12 @@ def scan_source(source: str, rel_path: str) -> ScanResult:
             # candidate at all -- not a violation, not a pass, simply unseen.
             # That is the same shape the guard exists to close: one nobody
             # enumerated. There is no live site today (191 `**` call sites
-            # under tests/, zero of them Redis constructions), but the deferred
-            # test_notify_isolation.py site already works with connection_kwargs
-            # dicts, so `redis.Redis(**kw)` is one refactor away.
+            # under tests/, zero of them Redis constructions).
+            # integration/test_notify_isolation.py once built a Redis client
+            # from a connection_kwargs dict -- the shape this leg exists for --
+            # but #2628 converted it to pass db=claim_test_db() as an explicit
+            # keyword instead, so this leg remains prospective rather than
+            # exercised by any current site.
             if kw.arg is None:
                 splat = _splat_candidate(kw.value, rel_path, node, callee)
                 if splat is not None:

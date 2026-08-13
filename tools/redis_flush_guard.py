@@ -6,7 +6,7 @@ production dataset (memories, Telegram history, chats, knowledge docs). On
 harness-created worktree that `tests/conftest.py`'s pytest-only guard never
 reaches, destroying 25,825 production keys.
 
-`tests/conftest.py::_install_redis_db0_flush_guard` only protects `pytest`
+`tests/conftest.py::_install_redis_flush_ownership_guard` only protects `pytest`
 runs -- it installs at conftest import time, which never happens for a bare
 `python -c "..."` debug script, a one-off REPL session, or any process that
 never imports the test suite. This module promotes the same shape to

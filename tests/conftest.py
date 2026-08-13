@@ -15,7 +15,13 @@ from uuid import uuid4
 
 import pytest
 
-from tests.db_claim import claim_test_db, release_test_db_claim
+from tests import db_claim
+from tests.db_claim import (
+    claim_scratch_test_db,
+    claim_test_db,
+    claimed_test_dbs,
+    release_test_db_claim,
+)
 
 # --- Un-awaited-coroutine leak guardrail (#2120) --------------------------
 # A test that hands an eagerly-created coroutine to a seam that drops it (never
@@ -88,19 +94,35 @@ os.environ["SENTRY_DSN"] = ""
 
 
 # ---------------------------------------------------------------------------
-# Production-Redis (db=0) flush guard
+# Redis flush OWNERSHIP guard (db=0 is the case that motivated it)
 # ---------------------------------------------------------------------------
-# A flushdb() against db=0 -- or any flushall() -- wipes the production dataset
-# (memories, Telegram history, chats, knowledge docs). The redis_test_db
-# fixture below isolates Popoto to a per-worker test db (db>=1), but test code
-# that constructs its OWN redis client bypasses that isolation: bare
-# redis.Redis() and redis.Redis.from_url(".../0") both default to db=0. On
-# 2026-06-03 exactly this footgun flushed production. We monkeypatch
-# flushdb/flushall on the sync and async Redis classes at conftest import time
-# (before collection) so any attempt to flush db=0 -- or call flushall, which
-# wipes EVERY db -- raises instead of destroying data. This patch lives in
-# conftest.py, so it only affects pytest runs; production code is untouched.
-def _install_redis_db0_flush_guard() -> None:
+# A flushdb() wipes an entire logical database. Against db=0 that is the
+# production dataset (memories, Telegram history, chats, knowledge docs) -- on
+# 2026-06-03 exactly that footgun flushed production, which is why this guard
+# exists at all. Against db>=1 it is some pytest process's whole test dataset,
+# and up to #2628 that was permitted unconditionally: two call sites still
+# computed their db the pre-#2606 way (``gw{N} -> db{N+1}``) instead of asking
+# the flock claim, so they wiped whichever unrelated live run happened to hold
+# that slot. The victim differed every run, which is what made the unit suite's
+# failure set rotate between identical runs.
+#
+# So the rule is OWNERSHIP, of which db=0 is one case: flushdb() is permitted
+# only against a database THIS process has claimed (tests/db_claim.py), and db 0
+# is simply a database no test process can ever claim. One wrapper, not two
+# idioms -- two independently-maintained flush guards is how one of them drifts.
+# The db=0 branch is kept for its message and its 2026-06-03 rationale.
+#
+# Fail-closed on an empty claimed set is deliberate and safe: tests/conftest.py's
+# pytest_configure claims this process's db before collection, so the only
+# processes that can observe an empty set are the xdist controller (which runs no
+# tests) and the window before that hook. No test can ever see it.
+#
+# We monkeypatch flushdb/flushall on the sync and async Redis classes at conftest
+# import time (before collection), so the guard covers clients built by installed
+# plugins too, not just this repo's own. The claimed set is read on EVERY call --
+# never captured at install time, when it is necessarily still empty. This patch
+# lives in conftest.py, so it only affects pytest runs; production is untouched.
+def _install_redis_flush_ownership_guard() -> None:
     try:
         import redis
         import redis.asyncio as aioredis
@@ -116,38 +138,89 @@ def _install_redis_db0_flush_guard() -> None:
 
     def _make_guarded_flushdb(orig):
         def _guarded_flushdb(self, *args, **kwargs):
-            if _db_of(self) == 0:
+            db = _db_of(self)
+            if db == 0:
                 raise RuntimeError(
                     "Refusing flushdb() on Redis db=0 (production) during tests. "
-                    "Use the autouse redis_test_db fixture, or build clients on the "
-                    "per-worker test db (see redis_url / tests/conftest.py). "
+                    "Use the autouse redis_test_db fixture, or build clients on this "
+                    "process's claimed test db (tests.db_claim.claim_test_db). "
                     "This guard exists because a db=0 flush wiped production on 2026-06-03."
+                )
+            claimed = db_claim.claimed_test_dbs()
+            if db not in claimed:
+                raise RuntimeError(
+                    f"Refusing flushdb() on Redis db={db}: this process has not claimed "
+                    f"it (claimed={sorted(claimed)}). That database belongs to another "
+                    "live pytest process and flushing it wipes its data mid-test (#2628). "
+                    "Use tests.db_claim.claim_test_db() for your own db, or request the "
+                    "scratch_test_db fixture if you genuinely need a second one."
                 )
             return orig(self, *args, **kwargs)
 
-        _guarded_flushdb._db0_guarded = True
+        _guarded_flushdb._flush_guarded = True
         return _guarded_flushdb
 
     def _make_guarded_flushall(orig):
         def _guarded_flushall(self, *args, **kwargs):
             raise RuntimeError(
                 "Refusing flushall() during tests -- it wipes ALL Redis dbs, including "
-                "production db=0. Flush the per-worker test db with flushdb() instead. "
-                "See tests/conftest.py."
+                "production db=0. Flush this process's claimed test db with flushdb() "
+                "instead. See tests/conftest.py."
             )
 
-        _guarded_flushall._db0_guarded = True
+        _guarded_flushall._flush_guarded = True
         return _guarded_flushall
 
     for mod in (redis, aioredis):
         cls = mod.Redis
-        if not getattr(cls.flushdb, "_db0_guarded", False):
+        if not getattr(cls.flushdb, "_flush_guarded", False):
             cls.flushdb = _make_guarded_flushdb(cls.flushdb)
-        if not getattr(cls.flushall, "_db0_guarded", False):
+        if not getattr(cls.flushall, "_flush_guarded", False):
             cls.flushall = _make_guarded_flushall(cls.flushall)
 
 
-_install_redis_db0_flush_guard()
+_install_redis_flush_ownership_guard()
+
+
+# ---------------------------------------------------------------------------
+# Session-start test-DB claim (#2628)
+# ---------------------------------------------------------------------------
+# The claim used to happen lazily, in the function-scoped autouse redis_test_db
+# fixture. That leaves a real "this process owns nothing yet" state that a test
+# can observe -- and popoto's bundled pytest plugin observes it, because its
+# autouse _popoto_flush_db sets up BEFORE redis_test_db and calls flushdb() on
+# every test. A fail-closed ownership guard meeting that state would deny each
+# worker's first flush; excusing it ("permit a flush when we do not know who owns
+# the target") is the pre-#2606 status quo restated.
+#
+# So the state is designed out rather than excused: pytest_configure runs before
+# collection and therefore before EVERY fixture, autouse or installed-plugin.
+# "Claimed" is the only state a test can observe, and the same hook exports
+# POPOTO_TEST_DB so popoto's plugin is pointed at this process's own db from its
+# very first flush -- no commit window in which the guard is live and the plugin
+# still targets its db-15 default (db 15 is the top slot of the claim pool, so
+# every flush of it was a cross-process wipe).
+def pytest_configure(config):
+    """Claim this process's test db, and point popoto's plugin at it (#2628)."""
+    is_worker = getattr(config, "workerinput", None) is not None
+    if not is_worker and getattr(config.option, "numprocesses", None):
+        # The xdist controller runs no tests, so a claim here would hold one of
+        # only 15 machine-global slots for the whole session and never use it.
+        # The `numprocesses` test is load-bearing: under -n0 the master DOES run
+        # the tests and must claim.
+        return
+    try:
+        db = claim_test_db()
+    except RuntimeError as exc:
+        # One line of output instead of a setup error on every collected test.
+        pytest.exit(str(exc), returncode=3)
+        return
+    os.environ["POPOTO_TEST_DB"] = str(db)
+    if is_worker:
+        # xdist does not surface a worker's pytest_report_header to the terminal,
+        # so provenance travels back through workeroutput instead (see
+        # pytest_report_header / pytest_terminal_summary below).
+        config.workeroutput["test_db"] = db
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +430,7 @@ def agent_hooks_consistency_guard():
 
 
 # ---------------------------------------------------------------------------
-# Shared-exception identity guard (#2603)
+# Shared module-object identity guard (#2603, widened by #2628)
 # ---------------------------------------------------------------------------
 # ``importlib.reload(models.session_lifecycle)`` keeps the module OBJECT but
 # rebinds every class defined in it to a brand-new class object. Every other
@@ -382,33 +455,66 @@ def agent_hooks_consistency_guard():
 # The repair is announced as a RuntimeWarning attributed to the test that caused
 # it, so a reload never hides: under ``-W error::RuntimeWarning`` it is a
 # teardown failure on the offending test, exactly like the coroutine leak guard.
-_SHARED_EXCEPTION_MODULES = ("models.session_lifecycle",)
+# Exception classes are not the only objects a reload orphans, and #2628 found
+# the second shape by the same rotate-run-to-run signature. A module-level
+# REGISTRY -- ``agent.index_drift.DRIFT_COVERED_MODELS`` -- is a plain dict that
+# other modules and test files bind by name at import time. Reloading rebinds it
+# to a brand-new dict and re-runs the registrations into that one, while
+# tests/unit/test_index_drift_coverage.py's ``restore_registry`` fixture holds
+# the orphaned old dict: the fixture then snapshots and restores the STALE dict
+# while ``register_drift_model`` writes into the LIVE one, so the cleanup
+# silently no-ops and a fake in-memory model stays registered for the rest of
+# that worker's life. `--dist=loadfile` decides whether the reloader and the
+# victim land on the same worker, so the damage appears only some runs.
+#
+# So the guard covers two kinds of shared object, per module:
+#   "exceptions" -- BaseException subclasses (the #2603 case)
+#   "registry"   -- module-level containers (dict/set/list) and the classes
+#                   defined in the module, which registry entries are instances
+#                   of and which must stay identity-consistent with them
+_SHARED_IDENTITY_MODULES: dict[str, str] = {
+    "models.session_lifecycle": "exceptions",
+    "agent.index_drift": "registry",
+    "monitoring.bridge_watchdog": "registry",
+    "monitoring.worker_watchdog": "registry",
+}
 
-# name -> {attr: original class}, captured the first time each module is seen.
-_SHARED_EXCEPTION_SNAPSHOT: dict[str, dict[str, type]] = {}
+# name -> {attr: original object}, captured the first time each module is seen.
+_SHARED_IDENTITY_SNAPSHOT: dict[str, dict[str, object]] = {}
 
 
-def _snapshot_shared_exceptions() -> None:
-    """Record the identity of exception classes other modules bind by name."""
-    for mod_name in _SHARED_EXCEPTION_MODULES:
+def _is_shared_identity_object(kind: str, mod_name: str, obj) -> bool:
+    """True when ``obj`` is one another module can hold by name across a reload."""
+    if kind == "exceptions":
+        return isinstance(obj, type) and issubclass(obj, BaseException)
+    if isinstance(obj, type):
+        # Only classes DEFINED here: an imported one is the defining module's to
+        # restore, and rebinding it from this module would fight that owner.
+        return getattr(obj, "__module__", None) == mod_name
+    return isinstance(obj, (dict, set, list))
+
+
+def _snapshot_shared_identity() -> None:
+    """Record the identity of module-level objects other modules bind by name."""
+    for mod_name, kind in _SHARED_IDENTITY_MODULES.items():
         mod = sys.modules.get(mod_name)
-        if mod is None or mod_name in _SHARED_EXCEPTION_SNAPSHOT:
+        if mod is None or mod_name in _SHARED_IDENTITY_SNAPSHOT:
             continue
-        _SHARED_EXCEPTION_SNAPSHOT[mod_name] = {
+        _SHARED_IDENTITY_SNAPSHOT[mod_name] = {
             attr: obj
             for attr, obj in vars(mod).items()
-            if isinstance(obj, type) and issubclass(obj, BaseException)
+            if not attr.startswith("__") and _is_shared_identity_object(kind, mod_name, obj)
         }
 
 
-def _repair_shared_exception_identity() -> dict[str, list[str]]:
-    """Rebind reloaded exception classes to the identity the process shares.
+def _repair_shared_identity() -> dict[str, list[str]]:
+    """Rebind reloaded module objects to the identity the process shares.
 
     Returns ``{module_name: [repaired_attr, ...]}`` for every module that needed
     repair; empty when nothing was reloaded.
     """
     repairs: dict[str, list[str]] = {}
-    for mod_name, originals in _SHARED_EXCEPTION_SNAPSHOT.items():
+    for mod_name, originals in _SHARED_IDENTITY_SNAPSHOT.items():
         mod = sys.modules.get(mod_name)
         if mod is None:
             continue
@@ -424,21 +530,21 @@ def _repair_shared_exception_identity() -> dict[str, list[str]]:
 
 
 @pytest.fixture(autouse=True)
-def shared_exception_identity_guard(request):
-    """Restore reloaded exception classes to the identity the process shares.
+def shared_module_identity_guard(request):
+    """Restore reloaded module objects to the identity the process shares.
 
     No-op (a handful of ``is`` comparisons) unless a test actually reloaded one
-    of the modules in ``_SHARED_EXCEPTION_MODULES``.
+    of the modules in ``_SHARED_IDENTITY_MODULES``.
     """
-    _snapshot_shared_exceptions()
+    _snapshot_shared_identity()
     yield
-    _snapshot_shared_exceptions()
-    for mod_name, repaired in _repair_shared_exception_identity().items():
+    _snapshot_shared_identity()
+    for mod_name, repaired in _repair_shared_identity().items():
         warnings.warn(
             f"{request.node.nodeid} reloaded {mod_name}, rebinding "
-            f"{', '.join(repaired)} to new class objects that no other module holds; "
+            f"{', '.join(repaired)} to new objects that no other module holds; "
             "identity restored. Reload a shared module in a subprocess, not in-process "
-            "(see tests/conftest.py, issue #2603).",
+            "(see tests/conftest.py, issues #2603 and #2628).",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -508,9 +614,11 @@ def _popoto_modules_with_redis_db():
 # using, which is precisely how ``TestKillCommandIntegration`` lost rows it had
 # just pushed. See that module's docstring for the full rationale.
 #
-# Note: the ``_run_cli_hook`` subprocess in test_tool_budget_enforcement.py
-# already derives its db from ``POPOTO_REDIS_DB.connection_pool.connection_kwargs['db']``,
-# so it inherits the claimed db automatically — no change needed there.
+# A subprocess inherits the claimed db through ``tests.db_claim.subprocess_env``,
+# which is the single sanctioned route. Reading it back out of
+# ``POPOTO_REDIS_DB.connection_pool.connection_kwargs['db']`` is a second
+# derivation of the same fact and is not used anywhere: ``claim_test_db()`` is
+# the one authority for the number (#2628).
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -518,6 +626,109 @@ def _test_db_claim_release():
     """Release the process's claimed test db at session end (atexit backstops)."""
     yield
     release_test_db_claim()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _popoto_client_ownership_check(_popoto_test_db):
+    """Assert every live popoto client points at a db this process owns (#2628).
+
+    A ``tests/``-scoped review cannot see this class of writer at all: popoto
+    ships its own ``pytest11`` plugin, which this repo loads on every run, and
+    before #2628 that plugin sat on its db-15 default -- the top slot of the
+    claim pool -- flushing it before every test in every pytest process on the
+    machine. The fix is an env export from ``pytest_configure``, so this check is
+    the thing that notices if a future popoto (or any other plugin that swaps the
+    popoto globals) stops honouring it: it asserts on whatever clients
+    ``popoto.redis_db`` holds, whatever version put them there.
+
+    Declaring ``_popoto_test_db`` as a dependency orders this after the plugin's
+    own db swap by construction, rather than by fixture-collection accident.
+
+    ``_POPOTO_ASYNC_REDIS_DB`` is ``None`` at every moment a session-scoped
+    fixture can observe it, and ``None`` is its CORRECT state -- the plugin nulls
+    it at both setup and teardown of every test so no client binds to a stale
+    event loop. Skip it; never assert it is non-``None``, because an
+    ``AttributeError`` raised here errors every test in the process in setup.
+    """
+    import popoto.redis_db as rdb
+
+    claimed = claimed_test_dbs()
+    for client in (rdb.POPOTO_REDIS_DB, getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)):
+        if client is None:
+            continue
+        db = client.connection_pool.connection_kwargs.get("db", 0)
+        assert db in claimed, (
+            f"a popoto client is pointed at db {db} which this process has not "
+            f"claimed (claimed={sorted(claimed)}); flushing it would wipe another "
+            "live pytest process's data (#2628)"
+        )
+    yield
+
+
+@pytest.fixture(scope="session")
+def scratch_test_db():
+    """A SECOND owned test db, for a test whose subject is db divergence.
+
+    Session-scoped and memoized on purpose: ``claim_scratch_test_db()`` takes an
+    additional pool slot with no per-test release, so a function-scoped fixture
+    would consume one slot per requesting test and walk the 15-slot pool into the
+    claim's exhaustion error -- manufacturing the very contention this change
+    makes fatal. One scratch slot per process, released with the primary claim.
+
+    Skips (never falls back to a borrowed number) when the pool is exhausted: an
+    unowned scratch db is the exact defect this fixture exists to remove.
+    """
+    db = claim_scratch_test_db()
+    if db is None:
+        pytest.skip(
+            "no free Redis db slot for a scratch test db; too many concurrent "
+            "pytest runs (try `scripts/reap-xdist.sh --apply`)"
+        )
+    return db
+
+
+# ---------------------------------------------------------------------------
+# Run provenance: which process owned which db (#2628)
+# ---------------------------------------------------------------------------
+# When a suite result looks wrong, the first question is "did another process
+# own my db". One line per process answers it from the log instead of a fresh
+# recon. Neither hook may CALL claim_test_db(): both also run in the xdist
+# controller, which owns no db and must never burn a pool slot -- that rule is a
+# property of the process, not of any one hook.
+_WORKER_DB_PROVENANCE: list[dict] = []
+
+
+def _format_test_db_provenance(collected) -> str:
+    """Render collected per-worker claims as one terminal line."""
+    if not collected:
+        return ""
+    parts = " ".join(f"{item.get('worker', '?')}=db{item.get('test_db')}" for item in collected)
+    return f"test-db claims (#2628): {parts}"
+
+
+def pytest_report_header(config):
+    """Name this process's claimed db when it is the one running the tests."""
+    if getattr(config, "workerinput", None) is not None:
+        return None  # xdist discards worker headers; workeroutput carries it
+    if getattr(config.option, "numprocesses", None):
+        return None  # controller owns no db; workers report via the summary
+    return f"test-db claim: worker=master db={db_claim._CLAIMED_TEST_DB}"
+
+
+def pytest_testnodedown(node, error):
+    """Collect each xdist worker's claimed db as it shuts down."""
+    output = getattr(node, "workeroutput", None) or {}
+    if "test_db" in output:
+        _WORKER_DB_PROVENANCE.append(
+            {"worker": getattr(node.gateway, "id", "?"), "test_db": output["test_db"]}
+        )
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Surface the workers' claimed dbs, which xdist otherwise never prints."""
+    line = _format_test_db_provenance(_WORKER_DB_PROVENANCE)
+    if line:
+        terminalreporter.write_line(line)
 
 
 @pytest.fixture(autouse=True)
@@ -575,9 +786,11 @@ def redis_test_db(request):
     explicitly request the fixture. This prevents accidental writes to db=0
     if a test imports a popoto model without requesting isolation.
 
-    Under pytest-xdist, each worker (gw0, gw1, ...) gets its own Redis database
-    (db=1, db=2, ...) to prevent cross-worker contamination from flushdb().
-    Without xdist, uses db=1 as before.
+    The db number is this PROCESS's flock claim (tests/db_claim.py), established
+    in ``pytest_configure`` before any fixture runs. It is never derived from the
+    xdist worker id: that is unique within one run but not across the several
+    pytest processes this machine runs at once, which is how one run's flushdb()
+    used to wipe another's data mid-test (#2060, #2628).
 
     CRITICAL: We replace the POPOTO_REDIS_DB object with a new Redis client
     pointed at the test db, rather than using SELECT on the production connection.
@@ -587,15 +800,6 @@ def redis_test_db(request):
     Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
     maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
-    import sys as _sys
-
-    # Fast path: if popoto isn't imported yet, this test cannot touch Redis
-    # via Popoto. Pure-logic tests that run before any popoto import skip
-    # flushdb + the patching dance entirely.
-    if "popoto.redis_db" not in _sys.modules:
-        yield
-        return
-
     import popoto.redis_db as rdb
     import redis
     import redis.asyncio as aioredis
