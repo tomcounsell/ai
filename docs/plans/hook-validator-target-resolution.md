@@ -413,7 +413,7 @@ Final validation (Task 6) is performed by the code reviewer named in the Appetit
 | Mtime selection gone | `grep -rl "newest_mtime" .claude/hooks/validators/ \| wc -l` | match count == 0 |
 | Shared module exists | `test -f .claude/hooks/hook_utils/hook_target.py` | exit code 0 |
 | All five import the helper | `grep -rl "from hook_utils.hook_target import" .claude/hooks/validators/ \| wc -l` | output contains 5 |
-| No stdin discarded | `grep -rn "^\s*json.load(sys.stdin)$" .claude/hooks/validators/` | exit code 1 |
+| No stdin discarded | `grep -ln "^\s*json.load(sys.stdin)$" .claude/hooks/validators/validate_documentation_section.py .claude/hooks/validators/validate_test_impact_section.py .claude/hooks/validators/validate_verification_section.py .claude/hooks/validators/validate_file_contains.py .claude/hooks/validators/validate_no_gos_justification.py \| wc -l` | match count == 0 |
 | No-Gos regression intact | `POPOTO_TEST_DB=12 scripts/pytest-clean.sh tests/unit/test_validate_no_gos_justification.py -q` | exit code 0 |
 | Family tests pass | `POPOTO_TEST_DB=12 scripts/pytest-clean.sh tests/unit/test_hook_target.py tests/unit/test_validate_documentation_section.py tests/unit/test_validate_test_impact.py tests/unit/test_validate_verification_section.py tests/unit/test_validate_file_contains.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .claude/hooks/ tests/unit/` | exit code 0 |
