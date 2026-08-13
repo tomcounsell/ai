@@ -407,9 +407,13 @@ Only terminal-status records are rewritten, each on one transactional Redis
 pipeline, and a second run reports zero stripped records. **Live rows are
 deferred, not aged out.** Every popoto `save()` re-issues `EXPIRE`, so the
 30-day TTL backstop only fires on a record nothing writes for 30 days — and
-`cleanup_corrupted_agent_sessions` re-saves every hydrated record on each
-pass. A deferred row therefore keeps its stale fields until a later run of
-the migration finds it terminal.
+`cleanup_corrupted_agent_sessions` holds every healthy row's TTL at that
+ceiling on each pass. Since #2660 it does so without writing any field
+value: a targeted `EXPIRE` via `AgentSession.refresh_ttl()`, not the
+whole-row re-save it used to issue as its corruption probe. #2698 owns the
+decision to stop and let the expiry activate. A deferred row therefore
+keeps its stale fields until a later run of the migration finds it
+terminal.
 
 Registered in `scripts/update/migrations.py` under the `schema_diet_fields`
 key, and again under `schema_diet_fields_v2` (#2524) so every machine

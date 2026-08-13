@@ -628,7 +628,7 @@ Not applicable — this repo has no external docs site.
 - [x] A separate ledger fixture (`is_ledger=True`, same otherwise) is skipped and counted in `skipped_ledger`, **not** `skipped_recent` — pinning that the two rungs are distinguishable and that rung 2 precedes rung 5.
 - [x] **The reported dashboard symptom is closed end to end.** With at least two **non-terminal** `AgentSession` rows seeded at distinct `updated_at` values, a full `cleanup_corrupted_agent_sessions()` sweep leaves `Job.last_activity_at` (`ui/data/jobs.py:449`) and the Job sort order (`:493-494`) unchanged. Non-terminal is required: `best_timestamp` (`ui/data/sdlc.py:1241`) short-circuits on `completed_at`, so a terminal fixture passes vacuously.
 - [x] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 - [x] No agent integration to grep for — the Agent Integration section declares none.
 - [x] No xfail conversions needed — none exist for this bug.
 - [x] Anti-criterion: `config/reflections.yaml` is unchanged. The ledger orphan reaper's registration is #2677.
