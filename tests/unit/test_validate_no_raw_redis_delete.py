@@ -53,15 +53,15 @@ class TestRepoScopeGate:
         assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
 
     def test_blocks_when_cwd_is_a_worktree_of_this_repo(self, tmp_path):
-        """A worktree's `.git` is a FILE sitting beside a full checkout,
+        """A worktree BLOCKS: its `.git` is a file sitting beside a full checkout.
 
-        including the marker itself. `_guard_applies` checks the marker
-        before `.git`, so a worktree must BLOCK rather than stand down as
-        if it were a foreign repo -- this builds that exact shape instead
-        of relying on the marker-before-`.git` ordering being pinned only
-        by accident (it otherwise happens to hold in
-        `test_blocks_when_cwd_is_this_repo` because `REPO_ROOT` itself
-        always carries a `.git`, dir or file).
+        That checkout includes the marker itself, and `_guard_applies` checks
+        the marker before `.git`, so a worktree must BLOCK rather than stand
+        down as if it were a foreign repo. This builds that exact shape instead
+        of relying on the marker-before-`.git` ordering being pinned only by
+        accident (it otherwise happens to hold in
+        `test_blocks_when_cwd_is_this_repo` because `REPO_ROOT` itself always
+        carries a `.git`, dir or file).
         """
         worktree = tmp_path / "worktrees" / "some-slug"
         marker_dir = worktree / ".claude" / "hooks" / "validators"
