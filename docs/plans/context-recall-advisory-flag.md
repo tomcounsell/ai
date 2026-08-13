@@ -698,6 +698,7 @@ inside tasks 1 and 2):
 | `CONTEXT_RECALL_INBOUND_ENABLED` | `false` (ships dark, D1) | `tools/classifier.py` |
 | `CONTEXT_RECALL_OUTBOUND_ENABLED` | `true` | `bridge/context_recall.py` |
 | `CONTEXT_RECALL_HISTORY_DEPTH` | `10` (D3) | `bridge/context_recall.py` |
+| `CONTEXT_RECALL_PREFILTER_MAX_CHARS` | `200` (provisional, tunable) | `bridge/context_recall.py` |
 
 Each gets a `.env.example` entry with a **description comment on the line immediately above the key** —
 required by `tests/unit/test_env_completeness.py::test_description_extracted_from_comment`, following the
@@ -928,8 +929,9 @@ Standard Tier 1 pool. `delivery-builder` carries `Domain: untrusted-input` frami
 - **Assigned To**: advisory-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `CONTEXT_RECALL_INBOUND_ENABLED=false`, `CONTEXT_RECALL_OUTBOUND_ENABLED=true`, and
-  `CONTEXT_RECALL_HISTORY_DEPTH=10` to `.env.example`, each with a description comment on the line
+- Add `CONTEXT_RECALL_INBOUND_ENABLED=false`, `CONTEXT_RECALL_OUTBOUND_ENABLED=true`,
+  `CONTEXT_RECALL_HISTORY_DEPTH=10`, and `CONTEXT_RECALL_PREFILTER_MAX_CHARS=200` to
+  `.env.example`, each with a description comment on the line
   **immediately above** the key (required by
   `tests/unit/test_env_completeness.py::test_description_extracted_from_comment`). Follow the block shape
   at `.env.example:278` and `:284`.
@@ -1001,7 +1003,7 @@ Standard Tier 1 pool. `delivery-builder` carries `Domain: untrusted-input` frami
 | Anti-criterion: advisory never appended to steer text | `grep -cE -e "text \+= .*advisory" -e "advisory.*\+ text" bridge/telegram_bridge.py; true` | prints `0` |
 | Anti-criterion: no automatic history read | `grep -cE -e "subprocess.*valor-telegram" -e "os\.system.*valor-" bridge/context_recall.py; true` | prints `0` |
 | Anti-criterion: no settings.py field for the toggles | `grep -c context_recall config/settings.py; true` | prints `0` |
-| Env keys registered | `grep -c "^CONTEXT_RECALL_" .env.example` | prints `3` |
+| Env keys registered | `grep -c "^CONTEXT_RECALL_" .env.example` | prints `4` |
 
 > **Why these rows use repeated `-e` instead of `|` alternation.** The previous revision of this plan
 > shipped `grep -cE "run_typed\|AsyncAnthropic\|anthropic" bridge/message_drafter.py`. Inside `grep -E`,
