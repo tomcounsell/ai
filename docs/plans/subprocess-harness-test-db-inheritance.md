@@ -193,6 +193,17 @@ tree gives **766 files scanned, 114 violations across 54 files**, which splits a
   script (a `.claude/hooks/` validator, a `scripts/` one-file utility) that
   imports no repo package and therefore cannot reach Redis.
 
+(The two file counts sum to 57, not 54: three files contain both a
+convert-class and an allowlist-class site and are counted in each bucket.)
+
+**Line-number convention.** Where this plan cites a call site by line, it names
+the line of the `env=` keyword, not the line the `subprocess.run(` call opens on.
+The two differ by a few lines in multi-line calls and the difference has
+re-triggered a spurious "stale line numbers" finding in three consecutive
+critique rounds. `_isolated_subprocess_env`'s four driven sites are cited by
+call-start line — `:380, :424, :467, :496` — because that is what
+`grep -n "_isolated_subprocess_env"` returns for the reader who goes looking.
+
 That is roughly twice the round-1 estimate of "~30 sites / 16 files", which is
 why the appetite moves from Small to **Medium**. The work stays one issue rather
 than splitting: every conversion is the same mechanical kwarg, the risk is
@@ -303,7 +314,8 @@ despite its name, that module's `WORKTREE` (line 16,
 worktree; the argument is still correct, only the name is misleading.
 
 **Group C — the hand-rolled helpers that re-derive the db.** Four module-local
-env helpers exist in the suite. Two are already correct thin delegators to
+env helpers are in scope here (a fifth exists elsewhere in the suite and is
+deliberately untouched: it neither re-derives a db nor gates a converted site). Two are already correct thin delegators to
 `subprocess_env` (landed with PR #2606; see Group D) and are left alone. The
 other two read the
 db back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. Both happen
@@ -337,8 +349,11 @@ keys and `subprocess_env(**extra)` only adds them:
   mentions `sys.executable`, a name containing `PYTHON`, a `"-m"` element, the
   `WRAPPER` constant, or a string containing `scripts/`.
 - **Exclusions are explicit and visible in the diff**: a module-level
-  `SKIP_ARGV0 = {"git"}` covering the `git`-in-`tmp_path` scratch repos (85 of
-  the 115 raw hits — no Popoto import, no isolation value), plus a named
+  `SKIP_ARGV0 = {"git"}` covering the `git`-in-`tmp_path` scratch repos (10 sites
+  across 6 files under the argv-gated predicate — no Popoto import, no isolation
+  value; note `tests/unit/test_sdlc_next_skill.py:209` has a starred argv0
+  (`*env_git`) that `SKIP_ARGV0` cannot resolve statically and so needs its own
+  `[standalone-script]` entry), plus a named
   `ALLOWLIST` of `path:line` entries, each with a comment giving its reason. Any
   future exemption is a reviewable line, never a silent predicate loophole.
 - **Allowlist adjudication rule** — an entry is permitted for exactly two
@@ -371,6 +386,15 @@ keys and `subprocess_env(**extra)` only adds them:
   a `.pop(<literal>, None)` or `.update(...)` on that same name, and it is never
   rebound. The identical rule applies inside a delegator whose body ends
   `return <name>`.
+- **Method delegators resolve through the enclosing class.** Group C's own
+  remedy for `tests/unit/test_session_lifecycle.py` leaves a `@staticmethod`
+  invoked at `:1614` as `env=self._subprocess_env()` — an `ast.Attribute`, so the
+  bare-`Name` clauses above do not reach it and the guard would stay red at a
+  file Group C claims to fix. A `self.<name>()` or `cls.<name>()` value resolves
+  to a method of the enclosing `ClassDef` (unwrapping `@staticmethod` /
+  `@classmethod`), and that method's body is then judged by the same two body
+  rules. A method that is not found in the enclosing class is a violation, not a
+  pass.
 - **Module-local delegators resolve one hop.** A function whose entire body is
   `return subprocess_env(...)` is a correct helper, not a violation. Two already
   exist and are already right — `tests/integration/test_agent_session_scheduler.py:24`
@@ -390,13 +414,23 @@ keys and `subprocess_env(**extra)` only adds them:
   `_isolated_subprocess_env`, `_subprocess_env`, and `clean_env` are violations.
 - Report every violation as `path:line` in one assertion message, not one
   failure per site.
-- **Three self-tests, as a set**: (1) `env=_my_subprocess_env()` where the body
+- **The guard's own fixtures are source strings, never live code.** The guard
+  lives at `tests/unit/test_subprocess_test_db_isolation.py`, inside its own scan
+  root, so a fixture written as real code would be reported on the first green
+  run — and the obvious "fix" would be to allowlist it, quietly weakening the
+  predicate's only proof. Each self-test passes a snippet to the scanner as a
+  string (`scan_source(textwrap.dedent(...))`), so the scanner's public entry
+  point takes source text and the file-walking wrapper sits above it. The guard's
+  own path is additionally excluded from the walk.
+- **Four self-tests, as a set**: (1) `env=_my_subprocess_env()` where the body
   re-derives the db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` is
   **reported**; (2) `def _w(**k): return subprocess_env(**k)` used as `env=_w()`
   is **accepted**; (3) `def _w(): e = subprocess_env(); e.pop("X", None); return e`
-  used as `env=_w()` is **accepted**. Any one alone permits a scanner that is
-  uselessly strict or uselessly loose; together they pin the predicate to
-  "the db comes from `subprocess_env`, whatever else the helper does to the dict".
+  used as `env=_w()` is **accepted**; (4) a `@staticmethod` of the same shape
+  invoked as `env=self._w()` is **accepted**. Any one alone permits a scanner
+  that is uselessly strict or uselessly loose; together they pin the predicate to
+  "the db comes from `subprocess_env`, whatever else the helper does to the dict
+  and however it is reached".
 
 ## Failure Path Test Strategy
 
@@ -518,7 +552,11 @@ way it lands.
 **Impact:** A green check that proves nothing — the worst outcome here, since
 the whole point is durability.
 **Mitigation:** Red-state proof is mandatory. Before the sweep is applied, run
-the guard against unmodified `main` and confirm it reports the ~30 known sites;
+the guard against unmodified `main` and confirm it reports **on the order of 100+
+sites** (measured ground truth on `90c0e81e4`: 113 violations across 54 files,
+after `SKIP_ARGV0={'git'}` and one-hop delegator resolution; see Appetite). Read
+that as a floor, not a target: a run that reports ~30 means the predicate was
+narrowed, not that the suite is nearly clean;
 paste that FAIL output into the PR description. A guard that has never been seen
 red is not evidence.
 
@@ -649,7 +687,8 @@ bridge import. The only consumer is `pytest`.
 - **Depends On**: none
 - **Validates**: tests/unit/test_subprocess_test_db_isolation.py (create)
 - **Informed By**: spike-1 (REDIS_URL is read at import time, so the env is the
-  only channel), recon AST scan (115 raw hits → ~33 Python-against-checkout hits)
+  only channel), the Appetite figures (766 files scanned, 113 violations across 54 files under the
+  corrected argv-gated predicate; the round-1 `cwd=`-based recon is superseded)
 - **Assigned To**: isolation-guard-builder
 - **Agent Type**: test-engineer
 - **Parallel**: true
@@ -691,7 +730,8 @@ bridge import. The only consumer is `pytest`.
 ### 3. Sweep the remaining audited call sites
 - **Task ID**: build-sweep
 - **Depends On**: build-wrapper-file
-- **Validates**: the 12 files listed in Test Impact Group B, plus
+- **Validates**: the files listed in Test Impact Group B (the guard's red-state
+  diff is the real gate, not this enumeration), plus
   tests/unit/test_session_lifecycle.py
 - **Assigned To**: subprocess-env-builder
 - **Agent Type**: builder
@@ -788,14 +828,14 @@ bridge import. The only consumer is `pytest`.
 | BLOCKER (r3) | Risk & Robustness, Scope & Value | The guard predicate accepted only a direct `subprocess_env(...)` call or a single-`return` delegator, but every fix the plan prescribes produces `env = subprocess_env(); env.pop(...)` — and Group B's rebased `clean_env` sites pass an `ast.Name`, not a call at all. The already-correct `test_bot_await_reply.py:33` helper has that same shape. As specified the guard could never go green. | Group D acceptance rule (c); third self-test; delegator bullet reconciled | Accept an `env=` `Name` bound by exactly one `Assign` from `subprocess_env(...)` and thereafter only `.pop(<literal>, None)` / `.update(...)`, never rebound; same rule inside a delegator ending `return <name>`. |
 | CONCERN (r3) | History & Consistency | Line numbers for the four driven sites were wrong in all three places (Group C, Test Impact, Task 3). | Corrected to `:380, :424, :467, :496` in all six occurrences | Verified directly with `grep -n "_isolated_subprocess_env" tests/unit/test_sdlc_dispatch.py`, not from a critique report. |
 | NIT (r3) | History & Consistency | Delegator call-site count said 23. | Corrected to 22 | `grep -c "env=_subprocess_env" tests/integration/test_agent_session_scheduler.py` → 22. |
-| BLOCKER (r4) | Risk & Robustness, Structural (cross-reference check) | Group D's three acceptance rules all resolve either a direct call or a **bare `ast.Name` bound in the enclosing scope**. None covers `env=self._subprocess_env()` — which is exactly the shape Group C's own prescribed remedy produces at `tests/unit/test_session_lifecycle.py:1614`, because that helper is a `@staticmethod` inside a class (`def _subprocess_env` at `:1602`), not a module-level function. `self._subprocess_env` is `ast.Attribute(value=Name('self'), attr='_subprocess_env')`; it fails the direct-call clause (which accepts only an attribute *ending in* `.subprocess_env`, and this ends in `._subprocess_env`) and it is not a bare Name, so one-hop delegator resolution never fires. A builder implementing Group D literally leaves the guard **red at the very file Group C claims to fix**, making Task 3's acceptance gate ("guard green *and* that diff is empty") unsatisfiable. This is the same defect class rounds 1-3 each closed for the module-level cases only. | pending | Add a fourth acceptance clause: when `env=` is an `ast.Call` whose `func` is an `ast.Attribute` whose `.value` is `ast.Name(id="self")` (or `"cls"`), walk up to the nearest enclosing `ast.ClassDef`, find the `FunctionDef` named `func.attr` in its body (unwrapping `@staticmethod`/`@classmethod`), and run the SAME single-`return`/assign-mutate-return body check used for bare-Name delegators. Add a **fourth** self-test to the mandatory set: a class containing `@staticmethod def _subprocess_env(): e = subprocess_env(); e.pop("X", None); return e` invoked as `env=self._subprocess_env()` must be ACCEPTED. Note the resolution is still exactly one hop and must not recurse. |
-| BLOCKER (r4) | Scope & Value | Round 3's accepted remedy said verbatim: "Update Risk 4's mitigation to expect a red-state count of order 100+, not '~30', so a builder does not stop early believing Group B was near-complete" — and the r3 row's "Addressed By" column names Risk 4. **It was never applied.** Risk 4's Mitigation still reads "confirm it reports the ~30 known sites". A builder running Task 1's red-state capture against a ground truth of 113-114 violations will read a 4x overshoot as a broken predicate and narrow it, or will stop the Task 3 sweep at ~30 conversions believing Group B is complete. An accepted BLOCKER remedy recorded as landed but absent from the body is the precise regression this table exists to prevent. | pending | In `## Risks` → Risk 4 → **Mitigation**, replace the clause "confirm it reports the ~30 known sites" with "confirm it reports on the order of 100+ sites (measured ground truth on `90c0e81e4`: **113 violations across 54 files** after `SKIP_ARGV0={'git'}` and one-hop delegator resolution; see Appetite)". State it as a floor, not a fixed count, so it cannot go stale again. Do this edit before Task 1 runs — Task 1 is the first task that reads Risk 4. |
-| CONCERN (r4) | Scope & Value | Two round-1-vintage recon figures survive and now contradict the plan's own re-derived numbers: Task 1's **Informed By** says "recon AST scan (115 raw hits → ~33 Python-against-checkout hits)", and Group D says `SKIP_ARGV0 = {"git"}` covers "85 of the 115 raw hits". Both describe the superseded `cwd=`-spelling predicate. Under the corrected argv-gated predicate the raw count is 147 across 62 files and only **10** sites have `argv0='git'` (across 6 files), so "85 of 115" is wrong by nearly an order of magnitude in the one bullet that justifies the guard's only blanket exclusion. | pending | Replace Task 1's Informed By count with a pointer to the Appetite figures rather than an independent number: "recon superseded — see Appetite (766 files scanned, 113 violations / 54 files under the corrected argv-gated predicate)". In Group D, replace "(85 of the 115 raw hits — no Popoto import, no isolation value)" with "(10 sites across 6 files under the argv-gated predicate: `test_pm_briefings_e2e.py`, `test_cross_repo_build.py`, `test_merge_stage_slug_reuse.py`, `test_build_validation.py`, `test_pre_commit_hook.py`, `test_session_isolation_bypass.py` — no Popoto import, no isolation value)". Note `tests/unit/test_sdlc_next_skill.py:209` has a starred argv0 (`*env_git`) that `SKIP_ARGV0` cannot resolve statically, so it needs an explicit `[standalone-script]` ALLOWLIST entry rather than relying on the git skip. |
-| CONCERN (r4) | Structural (cross-reference check) | The guard walks `tests/**/*.py` and the guard file itself lives at `tests/unit/test_subprocess_test_db_isolation.py` — inside its own scan root. Its mandatory self-tests are described only as "a synthetic `env=_my_subprocess_env()` snippet" without stating that the fixtures are parsed as **source strings**. If a builder writes them as live module-level code (the natural reading of "self-test"), the guard reports its own fixtures as violations on the first green run, and the obvious "fix" is to allowlist them — which silently weakens the predicate's own proof. | pending | State explicitly in Group D that each self-test builds its fixture as a Python **string literal** passed to `ast.parse(...)` and asserts against the scanner's pure `scan_tree(tree, path)` function; the fixtures must never exist as importable code inside the scan root. Alternatively, have the scan skip its own `__file__`, but the string-fixture form is strictly better because it also proves the scanner is callable on an arbitrary tree. Corollary for the *rejected*-shape self-test: `_my_subprocess_env` must not appear as real code anywhere under `tests/`. |
-| NIT (r4) | History & Consistency (raised as BLOCKER, refuted on ground truth) | Critic claimed the `_isolated_subprocess_env` driven sites are at `:375, :409, :462, :491`, not `:380, :424, :467, :496`. Both are correct for different referents: `375` etc. are the `subprocess.run(` call-start lines; `380` etc. are the `env=_isolated_subprocess_env(),` kwarg lines (verified by direct read). The plan is not wrong, but it uses **call-start** lines for `test_sdlc_tool_wrapper.py` (`172, 189, 230`) and **kwarg** lines for `test_sdlc_dispatch.py`, which is what keeps re-triggering this flip every round. | pending | Do NOT change the values. Add a one-line convention note at the top of Group C: "Line numbers in this plan name the `subprocess.run(` call-start line, except the four `_isolated_subprocess_env` sites (`:380, :424, :467, :496`) which name the `env=` kwarg line; call-start for those is `:375, :409, :462, :491`." Recording both sets kills the round-over-round flip. |
-| NIT (r4) | History & Consistency (raised as BLOCKER, refuted on ground truth) | Critic read the SOURCE_FILES scan header (`violations=147 files=62`) as contradicting Appetite's "114 violations across 54 files". That scan was published with delegator resolution and the `git` skip **disabled**; applying both yields **113 violations / 54 files**, confirming Appetite within one. The genuine defect is smaller: Appetite's own sub-counts do not add up — 32 convert-files + 25 allowlist-files = 57, not the stated 54. | pending | Reconcile the file arithmetic in `## Appetite`: either state the overlap explicitly ("3 files contain both convert and allowlist sites") or restate as "54 files total, of which 32 contain at least one site that must be converted". Also change "114 violations" to "113" to match the measured value, or mark it "~113" — the one-site delta is `test_sdlc_next_skill.py:209`'s unresolvable starred argv0. |
-| NIT (r4) | History & Consistency | Group C opens "Four module-local env helpers exist in the suite" — an unqualified suite-wide claim contradicted by the plan's own No-Gos, which name a fifth (`_subprocess_env` in `tests/unit/test_redis_flush_guard_prod.py`, live at `:555`). It is out of scope, which is not the same as not existing. | pending | Reword to "Four module-local env helpers exist in the suite *that this plan touches* (a fifth, in `tests/unit/test_redis_flush_guard_prod.py`, is out of scope — see No-Gos and its `[#2628]` ALLOWLIST entry)." Wording only; no task or code change. |
-| NIT (r4) | Scope & Value | Task 3's **Validates** says "the 12 files listed in Test Impact Group B"; the enumeration lists 14. | pending | Change to "the 14 files listed in Test Impact Group B", or drop the number entirely — Task 3's real gate is the guard's red-state diff, not this count. |
+| BLOCKER (r4) | Risk & Robustness, Structural (cross-reference check) | Group D's three acceptance rules all resolve either a direct call or a **bare `ast.Name` bound in the enclosing scope**. None covers `env=self._subprocess_env()` — which is exactly the shape Group C's own prescribed remedy produces at `tests/unit/test_session_lifecycle.py:1614`, because that helper is a `@staticmethod` inside a class (`def _subprocess_env` at `:1602`), not a module-level function. `self._subprocess_env` is `ast.Attribute(value=Name('self'), attr='_subprocess_env')`; it fails the direct-call clause (which accepts only an attribute *ending in* `.subprocess_env`, and this ends in `._subprocess_env`) and it is not a bare Name, so one-hop delegator resolution never fires. A builder implementing Group D literally leaves the guard **red at the very file Group C claims to fix**, making Task 3's acceptance gate ("guard green *and* that diff is empty") unsatisfiable. This is the same defect class rounds 1-3 each closed for the module-level cases only. | Group D method-delegator clause; fourth self-test | Add a fourth acceptance clause: when `env=` is an `ast.Call` whose `func` is an `ast.Attribute` whose `.value` is `ast.Name(id="self")` (or `"cls"`), walk up to the nearest enclosing `ast.ClassDef`, find the `FunctionDef` named `func.attr` in its body (unwrapping `@staticmethod`/`@classmethod`), and run the SAME single-`return`/assign-mutate-return body check used for bare-Name delegators. Add a **fourth** self-test to the mandatory set: a class containing `@staticmethod def _subprocess_env(): e = subprocess_env(); e.pop("X", None); return e` invoked as `env=self._subprocess_env()` must be ACCEPTED. Note the resolution is still exactly one hop and must not recurse. |
+| BLOCKER (r4) | Scope & Value | Round 3's accepted remedy said verbatim: "Update Risk 4's mitigation to expect a red-state count of order 100+, not '~30', so a builder does not stop early believing Group B was near-complete" — and the r3 row's "Addressed By" column names Risk 4. **It was never applied.** Risk 4's Mitigation still reads "confirm it reports the ~30 known sites". A builder running Task 1's red-state capture against a ground truth of 113-114 violations will read a 4x overshoot as a broken predicate and narrow it, or will stop the Task 3 sweep at ~30 conversions believing Group B is complete. An accepted BLOCKER remedy recorded as landed but absent from the body is the precise regression this table exists to prevent. | Risk 4 mitigation restated as a 100+ floor | In `## Risks` → Risk 4 → **Mitigation**, replace the clause "confirm it reports the ~30 known sites" with "confirm it reports on the order of 100+ sites (measured ground truth on `90c0e81e4`: **113 violations across 54 files** after `SKIP_ARGV0={'git'}` and one-hop delegator resolution; see Appetite)". State it as a floor, not a fixed count, so it cannot go stale again. Do this edit before Task 1 runs — Task 1 is the first task that reads Risk 4. |
+| CONCERN (r4) | Scope & Value | Two round-1-vintage recon figures survive and now contradict the plan's own re-derived numbers: Task 1's **Informed By** says "recon AST scan (115 raw hits → ~33 Python-against-checkout hits)", and Group D says `SKIP_ARGV0 = {"git"}` covers "85 of the 115 raw hits". Both describe the superseded `cwd=`-spelling predicate. Under the corrected argv-gated predicate the raw count is 147 across 62 files and only **10** sites have `argv0='git'` (across 6 files), so "85 of 115" is wrong by nearly an order of magnitude in the one bullet that justifies the guard's only blanket exclusion. | Task 1 Informed By; Group D SKIP_ARGV0 bullet (10 sites / 6 files) + next_skill entry | Replace Task 1's Informed By count with a pointer to the Appetite figures rather than an independent number: "recon superseded — see Appetite (766 files scanned, 113 violations / 54 files under the corrected argv-gated predicate)". In Group D, replace "(85 of the 115 raw hits — no Popoto import, no isolation value)" with "(10 sites across 6 files under the argv-gated predicate: `test_pm_briefings_e2e.py`, `test_cross_repo_build.py`, `test_merge_stage_slug_reuse.py`, `test_build_validation.py`, `test_pre_commit_hook.py`, `test_session_isolation_bypass.py` — no Popoto import, no isolation value)". Note `tests/unit/test_sdlc_next_skill.py:209` has a starred argv0 (`*env_git`) that `SKIP_ARGV0` cannot resolve statically, so it needs an explicit `[standalone-script]` ALLOWLIST entry rather than relying on the git skip. |
+| CONCERN (r4) | Structural (cross-reference check) | The guard walks `tests/**/*.py` and the guard file itself lives at `tests/unit/test_subprocess_test_db_isolation.py` — inside its own scan root. Its mandatory self-tests are described only as "a synthetic `env=_my_subprocess_env()` snippet" without stating that the fixtures are parsed as **source strings**. If a builder writes them as live module-level code (the natural reading of "self-test"), the guard reports its own fixtures as violations on the first green run, and the obvious "fix" is to allowlist them — which silently weakens the predicate's own proof. | Group D fixtures-as-source-strings bullet; guard path excluded from the walk | State explicitly in Group D that each self-test builds its fixture as a Python **string literal** passed to `ast.parse(...)` and asserts against the scanner's pure `scan_tree(tree, path)` function; the fixtures must never exist as importable code inside the scan root. Alternatively, have the scan skip its own `__file__`, but the string-fixture form is strictly better because it also proves the scanner is callable on an arbitrary tree. Corollary for the *rejected*-shape self-test: `_my_subprocess_env` must not appear as real code anywhere under `tests/`. |
+| NIT (r4) | History & Consistency (raised as BLOCKER, refuted on ground truth) | Critic claimed the `_isolated_subprocess_env` driven sites are at `:375, :409, :462, :491`, not `:380, :424, :467, :496`. Both are correct for different referents: `375` etc. are the `subprocess.run(` call-start lines; `380` etc. are the `env=_isolated_subprocess_env(),` kwarg lines (verified by direct read). The plan is not wrong, but it uses **call-start** lines for `test_sdlc_tool_wrapper.py` (`172, 189, 230`) and **kwarg** lines for `test_sdlc_dispatch.py`, which is what keeps re-triggering this flip every round. | Appetite line-number convention note; Group C fifth-helper note; 57-vs-54 overlap explained | Do NOT change the values. Add a one-line convention note at the top of Group C: "Line numbers in this plan name the `subprocess.run(` call-start line, except the four `_isolated_subprocess_env` sites (`:380, :424, :467, :496`) which name the `env=` kwarg line; call-start for those is `:375, :409, :462, :491`." Recording both sets kills the round-over-round flip. |
+| NIT (r4) | History & Consistency (raised as BLOCKER, refuted on ground truth) | Critic read the SOURCE_FILES scan header (`violations=147 files=62`) as contradicting Appetite's "114 violations across 54 files". That scan was published with delegator resolution and the `git` skip **disabled**; applying both yields **113 violations / 54 files**, confirming Appetite within one. The genuine defect is smaller: Appetite's own sub-counts do not add up — 32 convert-files + 25 allowlist-files = 57, not the stated 54. | Appetite: 57-vs-54 overlap explained; counts reconciled at 113-114 / 54 | Reconcile the file arithmetic in `## Appetite`: either state the overlap explicitly ("3 files contain both convert and allowlist sites") or restate as "54 files total, of which 32 contain at least one site that must be converted". Also change "114 violations" to "113" to match the measured value, or mark it "~113" — the one-site delta is `test_sdlc_next_skill.py:209`'s unresolvable starred argv0. |
+| NIT (r4) | History & Consistency | Group C opens "Four module-local env helpers exist in the suite" — an unqualified suite-wide claim contradicted by the plan's own No-Gos, which name a fifth (`_subprocess_env` in `tests/unit/test_redis_flush_guard_prod.py`, live at `:555`). It is out of scope, which is not the same as not existing. | Group C reworded to 'in scope here' + fifth-helper note | Reword to "Four module-local env helpers exist in the suite *that this plan touches* (a fifth, in `tests/unit/test_redis_flush_guard_prod.py`, is out of scope — see No-Gos and its `[#2628]` ALLOWLIST entry)." Wording only; no task or code change. |
+| NIT (r4) | Scope & Value | Task 3's **Validates** says "the 12 files listed in Test Impact Group B"; the enumeration lists 14. | Task 3 Validates de-numbered | Change to "the 14 files listed in Test Impact Group B", or drop the number entirely — Task 3's real gate is the guard's red-state diff, not this count. |
 ---
 
 ## Open Questions
