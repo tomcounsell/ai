@@ -42,6 +42,30 @@ sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 forces its own cwd to `~/src/ai` and relies on this env var to locate the target repo's plans and
 worktree when the target repo is not `ai` itself.
 
+### Step 3d.6 is loud, and its `run_id` is authoritative (issue #2675)
+
+Neither invocation may be wrapped in anything that discards stderr or the exit code. Both used to
+carry `2>/dev/null || true`, which routed every `LEASE_ABSENT`/`ISSUE_LOCKED` diagnostic to
+`/dev/null` and threw the exit code away — so a run whose lease had lapsed kept its stale `run_id`,
+had every subsequent write refused, and reported success. The same suppression is gone from the
+stage-marker calls in this repo's `docs/sdlc/do-plan.md`.
+
+Two obligations follow:
+
+- **Adopt the returned identity.** On exit code 0, read `run_id` out of the JSON and use *that*
+  value for every subsequent stage and `--run-id` flag. It can legitimately differ from the one you
+  passed in: a re-ensure rebinds a lapsed lease, and a fresh contest mints a new id. This is also
+  the value Step 5's `session-release` must carry.
+- **Branch on the exit code.** A non-zero exit routes through the Step 2 three-way table. A
+  *foreign-owner* `ISSUE_LOCKED` is the stop condition — the run has lost the issue. Everything else
+  is recoverable: a self/hand-off payload is inherited, an orphaned lock waits out its TTL, and a
+  transient broker error is surfaced and retried. Never turn a transient error into a pipeline
+  abort; halting a healthy run on a Redis blip is worse than the bug this step catches.
+
+Rebinding after a lapse is now backed by the durable, issue-keyed `_run_identities` anchor on the
+`PipelineLedger` rather than by the session record alone — see
+[SDLC Issue Ownership Lock](../features/sdlc-issue-ownership-lock.md) for the four reuse proofs.
+
 ## `session-release` invocation, this repo's path (Step 5)
 
 Step 5's release runs through the same `sdlc-tool` entry point as `session-ensure` (installed to
