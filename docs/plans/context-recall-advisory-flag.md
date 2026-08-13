@@ -744,36 +744,36 @@ realistic way this feature silently rots.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/context-recall-advisory.md` covering both edges, the advisory text
+- [x] Create `docs/features/context-recall-advisory.md` covering both edges, the advisory text
       contract, the two inbound delivery mechanisms and why they differ, the ordering rule relative to
       the injection banner, the transport split (granite inbound / Haiku outbound) with the
       cost-asymmetry rationale, the kill switches and their defaults, and every fail-open path.
-- [ ] That doc must carry a **Scope and known limitation** section stating plainly that the inbound
+- [x] That doc must carry a **Scope and known limitation** section stating plainly that the inbound
       advisory fires only when the chat holds a live-or-recent session with a non-empty
       `context_summary`, naming both gates (`telegram_bridge.py:2136`, `classifier.py:330-335`), and
       recording why universal coverage was rejected (a granite call per inbound message). A reader must
       not be able to infer universal inbound coverage from the doc.
-- [ ] Document that inbound ships **dark** (`CONTEXT_RECALL_INBOUND_ENABLED=false`) and what evidence
+- [x] Document that inbound ships **dark** (`CONTEXT_RECALL_INBOUND_ENABLED=false`) and what evidence
       would justify flipping it on.
-- [ ] Document the three env keys and their defaults, and note they must be added to the vault `.env`.
-- [ ] Add a `| [Context-Recall Advisory](context-recall-advisory.md) | … | Shipped |` row to
+- [x] Document the three env keys and their defaults, and note they must be added to the vault `.env`.
+- [x] Add a `| [Context-Recall Advisory](context-recall-advisory.md) | … | Shipped |` row to
       `docs/features/README.md`, alphabetized (it sorts between "Config Timeout Catalog" and
       "Dashboard").
-- [ ] Update `docs/features/intake-classifier.md` (106 lines): document the two new `IntentDecision`
+- [x] Update `docs/features/intake-classifier.md` (106 lines): document the two new `IntentDecision`
       fields, the extended prompt, and the fact that the verdict now reaches the PM instead of being
       log-only.
-- [ ] Update `docs/features/message-drafter.md` (289 lines): the drafter itself is unchanged and
+- [x] Update `docs/features/message-drafter.md` (289 lines): the drafter itself is unchanged and
       **remains LLM-free** — document that the context-recall gate lives in `output_handler`, and that
       the self-draft loop now has a second trigger sharing the same 2-attempt budget.
-- [ ] Update the `README.md` index row for Message Drafter if its description mentions the self-draft
+- [x] Update the `README.md` index row for Message Drafter if its description mentions the self-draft
       loop's trigger conditions.
 
 ### Inline Documentation
-- [ ] Comment the advisory-before-banner ordering at `agent/session_executor.py` citing
+- [x] Comment the advisory-before-banner ordering at `agent/session_executor.py` citing
       `injection_inspection.py:206-210`, so a future refactor cannot silently reorder it.
-- [ ] Comment the `front=False` choice at the interjection push site citing the cold-path
+- [x] Comment the `front=False` choice at the interjection push site citing the cold-path
       `steering_msgs[0]` behavior.
-- [ ] Docstring on `build_context_recall_advisory` stating the no-placeholder contract.
+- [x] Docstring on `build_context_recall_advisory` stating the no-placeholder contract.
 
 ## Success Criteria
 
