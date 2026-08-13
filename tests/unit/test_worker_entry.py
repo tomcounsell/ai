@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 
 class TestWorkerImport:
     """Test that the worker module can be imported."""
@@ -71,6 +73,7 @@ class TestWorkerDryRun:
             capture_output=True,
             text=True,
             timeout=30,
+            env=subprocess_env(project_root=str(Path(__file__).parent.parent.parent)),
         )
         # May exit 0 (config valid) or 1 (no Redis / no config)
         # The important thing is it doesn't crash with an unhandled exception
@@ -89,6 +92,7 @@ class TestWorkerDryRun:
             capture_output=True,
             text=True,
             timeout=30,
+            env=subprocess_env(project_root=str(Path(__file__).parent.parent.parent)),
         )
         assert result.returncode != 0
 
