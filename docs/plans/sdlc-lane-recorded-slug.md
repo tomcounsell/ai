@@ -7,7 +7,7 @@ created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2735
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-08-13T05:42:43Z
+revision_applied_at: 2026-08-13T09:10:40Z
 ---
 
 # SDLC Lane Identity: One Recorded Slug, Minted Once
@@ -219,10 +219,12 @@ tooling. No external library, API, or ecosystem pattern is involved.
   of re-planning an issue that already has a PR is structurally absent.** The residual
   risk is a *pre-PR* re-planning loop when `plan_exists` is spuriously `False`.
 - **Confidence**: high.
-- **Impact on plan**: The fallback removal is safe *only because* the resolver replaces
-  it — `find_plan_path` gains a `docs/plans/{recorded_slug}.md` rung, so a lane with a
-  recorded slug still resolves its plan. It also makes the `tracking:` backfill task
-  non-optional, and it drives the split of the PLAN artifact check (which needs the
+- **Impact on plan**: The fallback removal makes the `tracking:` backfill task
+  **non-optional and load-bearing**. A cycle-2 draft claimed the removal was "safe only
+  because the resolver replaces it — `find_plan_path` gains a `docs/plans/{recorded_slug}.md`
+  rung"; that rung is dropped in cycle 3 (see Technical Approach), so nothing replaces the
+  fallback. `tracking:` frontmatter plus Task 5's backfill and test are the whole
+  mitigation. It also and it drives the split of the PLAN artifact check (which needs the
   *plan-doc* path) from the PATCH artifact check (which needs the *lane branch*) — today
   both wrongly share one derived slug.
 
@@ -283,11 +285,11 @@ tooling. No external library, API, or ecosystem pattern is involved.
    `pr_number`.
 3. **Every consumer** calls `resolve_lane_slug(N)` — with the default
    `allow_heal=False` — and gets that recorded value, or `None`. Consumers never mint.
-   Only the four lane-start callers listed in Technical Approach pass `allow_heal=True`,
+   Only the three lane-start callers listed in Technical Approach pass `allow_heal=True`,
    and their write is conditional-on-empty: it can never overwrite and never needs the
    lease.
-4. `find_plan_path(N)` resolves in two rungs: `tracking:` frontmatter (authoritative),
-   then `docs/plans/{recorded_slug}.md`. No textual fallback.
+4. `find_plan_path(N)` resolves on one rung: a `tracking:` frontmatter line naming N.
+   No textual fallback, and no slug-named-file rung (dropped, revision cycle 3).
 5. G8's PATCH check probes `session/{recorded_slug}`; `branch_exists` checks the same
    name. With no resolvable slug, both **no-op** — they never probe a guess.
 6. **Output**: the same four router inputs, each now sourced from the lane's own
@@ -369,8 +371,11 @@ inverts that: one writer, one record, every consumer a reader.
   liveness, no timestamp.
 - **`tools/lane_identity.py`** — the single home for **both** slug resolvers, deliberately
   colocated so the distinction between them is stated once and cannot drift. Exposes
-  `resolve_lane_slug(issue_number, *, allow_heal=False)`, `lane_branch_name(slug)`, and
-  the relocated `find_plan_path(issue_number)`. Its module docstring **opens** with the
+  `resolve_lane_slug(issue_number, *, allow_heal=False)`, `mint_lane_slug(issue_number)`,
+  `lane_branch_name(slug)`, and the relocated `find_plan_path(issue_number)`.
+  `mint_lane_slug` is the pure, write-free `f"sdlc-{N}"` constructor — the **one** home of
+  that literal, used both by `resolve_lane_slug`'s mint rung and by `cmd_create`'s
+  non-recording fallback (Task 3). Its module docstring **opens** with the
   two-slug distinction (lane slug vs. plan-doc slug, bridged by `tracking:`), so a reader
   who arrives expecting one concept is corrected in the first sentence rather than
   invited to re-unify them.
@@ -457,7 +462,7 @@ else:
   read path can never bring a `PipelineLedger` into existence for a non-lane issue. This
   is cycle-1 blocker 1's fix and must not regress.
 - **Heal path (`allow_heal=True`)**: `get_or_create` is explicitly permitted to create the
-  ledger, because the four sanctioned callers are lane-start paths and **a lane by
+  ledger, because the three sanctioned callers are lane-start paths and **a lane by
   definition has stages**. Creating the record that will hold them is not a side effect;
   it is the point. `get_or_create` is already race-safe (SETNX-serialized create,
   `agent/pipeline_ledger.py:177-235`) and never clobbers a populated
@@ -489,10 +494,16 @@ plan requires to resolve to `None`.
 | `tools/sdlc_session_ensure.py::ensure_session` | The minter. Runs at lane start; this is where identity is created. |
 | `reflections/sdlc_upvote_lanes.py` lane pickup | Lane start on the reflection path; goes on to create a real branch. |
 | `reflections/sdlc_progress.py` stalled-lane respawn | Lane restart for an issue already known to be a lane. |
-| `tools/valor_session.py::cmd_create` (issue-scoped) | Lane start on the CLI path (see Blocker-4 seam below). |
 
-Every other caller — `_compute_meta`, `find_plan_path` rung 2, G8, `branch_exists`, the
-reflections' *discovery* probes — takes the default `False`. A consumer that finds no
+Three callers, not four. **`tools/valor_session.py::cmd_create` was removed from this list
+in revision cycle 3.** It looked like a lane-start path, but its auto-derive branch fires
+on any eng session whose `--message` merely mentions an issue in prose, so "lane start"
+was never something it actually knew. It reads with heal off and falls back to
+`mint_lane_slug()` without recording. See Task 3.
+
+Every other caller — `_compute_meta`, G8, `branch_exists`, `cmd_create`, the reflections'
+*discovery* probes — takes the default `False`. (`find_plan_path` no longer calls the
+resolver at all; its slug-named-file rung is dropped in cycle 3.) A consumer that finds no
 recorded slug gets `None` and no-ops. Self-healing is a **lane-start** behavior, not a
 read-path behavior; that is the reconciliation between "a consumer finding no slug MAY
 create one" and "minted exactly once".
@@ -518,14 +529,30 @@ stage transition, and gating it on the lease would reintroduce the deadlock clas
 closed.
 
 **`find_plan_path` becomes resolution, not derivation.** Moved into
-`tools/lane_identity.py` (so it can call `resolve_lane_slug` without a cycle) and reduced
-to two rungs:
+`tools/lane_identity.py` and reduced to **one rung**:
 
-1. A `tracking:` frontmatter line naming issue N → authoritative, return immediately.
-2. `docs/plans/{resolve_lane_slug(N)}.md` if that file exists → return it. This rung
-   takes the **default `allow_heal=False`** — `find_plan_path` is a read path and must
-   never mint. When no slug is recorded, rung 2 is simply skipped.
-3. Otherwise `None`.
+1. A `tracking:` frontmatter line naming issue N → authoritative, return it.
+2. Otherwise `None`.
+
+**The `docs/plans/{resolve_lane_slug(N)}.md` rung is dropped (revision cycle 3.)** An
+earlier draft added it as rung 2. It was near-dead code introduced by the same PR that
+deletes near-dead code for the same reason. It runs with `allow_heal=False`, so it
+requires both an already-recorded slug **and** a plan filename equal to the *lane* slug —
+which "Two slugs, kept distinct" (above) explicitly refuses to force. This very lane is
+the counterexample: recorded slug `sdlc-2735`, plan doc `sdlc-lane-recorded-slug.md`, rung
+2 misses. Keeping it would have meant shipping a rung whose only honest test is a
+contrived ledger built to hit it.
+
+Dropping it has a real cost, stated plainly rather than papered over: `tracking:` becomes
+a hard single point of failure for plan resolution, with no authoring-time enforcement.
+`tests/unit/test_plan_docs.py` (Task 5) is the sole guard, and it catches a missing
+`tracking:` on the next suite run, not at authoring time. Risk 2 records this. An
+authoring-time hook validator is the proper closure and is a No-Go for this lane.
+
+This also means `find_plan_path` no longer calls `resolve_lane_slug` at all, so the
+"moved into `tools/lane_identity.py` to avoid an import cycle" rationale weakens to plain
+colocation: the two live together because the module docstring's lane-slug-vs-plan-slug
+distinction is the thing a reader must not re-unify, not because either needs the other.
 
 The bare-`#N` fallback and the entire `_is_ai_repo_fallback` mechanism are **deleted** —
 not narrowed, not made section-aware. A heuristic that parses prose to decide which
@@ -794,8 +821,10 @@ above. The Verification table encodes the sweeps.
   `None` slug". They must stay green **and** `resolve_lane_slug` must not be called at
   all on that path — add that assertion so the invariant has an enforcing artifact rather
   than a stated one.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` (five `patch("tools._sdlc_utils.find_plan_path", …)`
-  sites at `:1376,1386,1394,1407,1419`), `tests/unit/test_sdlc_verdict.py`,
+- [ ] `tests/unit/test_sdlc_stage_marker.py` (several `patch("tools._sdlc_utils.find_plan_path", …)`
+  sites — **re-derive by sweep, do not work from a list**; the enumeration here was stale
+  in both directions at cycle 3 and the count moves with `main`),
+  `tests/unit/test_sdlc_verdict.py`,
   `tests/unit/test_sdlc_utils.py`, `tests/unit/test_sdlc_env_vars.py`,
   `tests/integration/test_off_pipeline_merge_path.py`,
   `tests/integration/test_sdlc_cross_repo_resolution.py` — **UPDATE**: patch targets and
@@ -877,9 +906,18 @@ regex stays tight — `^tracking:\s*\S` would accept the literal placeholder
 `tracking: none yet`, green-lighting the exact case the row exists to catch. The two files
 whose disposition needs a human call (`resilience-simplification-three-tier.md`'s
 placeholder, and `session-recovery-observation-audit.md`, an audit document rather than a
-lane plan) are excluded **by name** in an explicit `_NON_LANE_PLANS` set owned by
-`tests/unit/test_plan_docs.py`, not by loosening the pattern (see Task 5). The new
-`docs/plans/{recorded_slug}.md` rung also covers slug-named plans without frontmatter.
+lane plan) are excluded **by name** in the explicit `NON_LANE_PLANS` frozenset owned by
+`tools/plan_doc_scope.py`, not by loosening the pattern (see Task 5).
+
+**`tests/unit/test_plan_docs.py` is the SOLE guard (revision cycle 3).** An earlier draft
+also claimed "the new `docs/plans/{recorded_slug}.md` rung covers slug-named plans without
+frontmatter". That rung has been **dropped** (see Task 2), so this mitigation now rests
+entirely on the backfill plus the test. That is the honest position: after this lane
+`find_plan_path` is a one-rung `tracking:` lookup and `tracking:` is a hard single point
+of failure with **no authoring-time enforcement** — nothing stops a human from creating a
+plan doc without it. The test catches it on the next suite run rather than at authoring
+time. Closing that gap properly means a hook validator, which is a new control surface and
+belongs in its own lane (see No-Gos).
 
 ### Risk 3: Adopting the wrong branch for a lane whose `sdlc-{N}` branch is stale
 
@@ -891,14 +929,23 @@ fires when no PR is recorded, i.e. pre-build, when a pushed `session/sdlc-{N}` i
 construction *this* lane's. The write is also conditional-on-empty and never overwrites,
 so once `ensure_session` has minted at lane start, rung 3 is unreachable for that lane.
 
-### Risk 4: File collision with the in-flight #2660 lane on `tools/sdlc_session_ensure.py`
+### Risk 4: File collision on `tools/sdlc_session_ensure.py` — RETIRED (revision cycle 3)
 
-**Impact:** Merge conflict, or one lane's edit silently reverting the other's.
-**Mitigation:** #2660 Task 3 edits `_acquire_run_lock_and_bind` at `:486-493`. This plan
-places its ledger write in `ensure_session`'s own body, at the create and adopt return
-points, deliberately not inside `_acquire_run_lock_and_bind`. The two edits touch
-disjoint line ranges in the same file, which git resolves cleanly. Noted here so a
-reviewer does not "helpfully" consolidate them.
+**This risk no longer exists.** #2660 merged as `971ff1caf` before this lane started
+building, so `tools/sdlc_session_ensure.py` is no longer contested. Its
+`_acquire_run_lock_and_bind` now saves with `update_fields=["active_run_id",
+"owned_run_ids"]` at `:498` — which this lane must simply not disturb.
+
+Recorded because it changes a decision's justification, not the decision: the round-3
+critique forbade placing the mint inside `_acquire_run_lock_and_bind` **on file-collision
+grounds**, and those grounds are now gone. The mint still does not go there, for the three
+standing reasons recorded in Task 3 (wrong layer, the lock contest has losing branches, no
+shared state). A reviewer who notices the collision is moot should not conclude the
+placement is therefore open.
+
+**Live constraint that replaces it:** any write this lane adds via `session.save()` in
+that file must appear in an explicit `update_fields` list, or it silently never persists —
+the partial-save posture #2660 established is now the file's convention.
 
 ### Risk 5: `git ls-remote --heads origin` (full listing) is slow enough to matter in the router's poll loop
 
@@ -1110,7 +1157,7 @@ No new agent integration required.
 - [ ] `AC-MINT` returns exactly one hit — the mint rung in `tools/lane_identity.py`. All
   three prior minters (`reflections/sdlc_upvote_lanes.py`, `reflections/sdlc_progress.py`,
   `tools/valor_session.py`) are gone, verified by sweep rather than by checklist.
-- [ ] `AC-HEAL` shows `allow_heal=True` at exactly the four sanctioned lane-start callers
+- [ ] `AC-HEAL` shows `allow_heal=True` at exactly the three sanctioned lane-start callers
   and nowhere in `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`,
   `tools/sdlc_verdict.py`, or `tools/sdlc_stage_marker.py`.
 - [ ] `AC-TRACKING` exits 0, and the invariant has a durable owner —
@@ -1211,7 +1258,8 @@ No new agent integration required.
 - Add `slug = Field(null=True)` to `PipelineLedger` (`agent/pipeline_ledger.py`) with the
   full Fields-block docstring described under Documentation.
 - Create `tools/lane_identity.py` with `resolve_lane_slug`, `lane_branch_name`, and the
-  relocated `find_plan_path` (two rungs; `_is_ai_repo_fallback` and the bare-`#N`
+  relocated `find_plan_path` (ONE rung -- `tracking:` only; the slug-named-file rung is
+  dropped in cycle 3; `_is_ai_repo_fallback` and the bare-`#N`
   fallback deleted entirely). Preserve the plans-dir resolution ladder verbatim.
 - Implement the conditional-on-empty healing write, modeled on the SETNX pattern at
   `agent/pipeline_ledger.py:211`. Use `save(update_fields=["slug"])`. Take no lease.
@@ -1228,10 +1276,50 @@ No new agent integration required.
 - **Assigned To**: `identity-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- In `tools/sdlc_session_ensure.py::ensure_session`, call
-  `resolve_lane_slug(issue_number, allow_heal=True)` and persist the result, at the create
-  and adopt return points in `ensure_session`'s own body. **Do not** put this inside
-  `_acquire_run_lock_and_bind` — #2660 is editing `:486-493` concurrently (see Risk 4).
+- In `tools/sdlc_session_ensure.py::ensure_session`, make the mint **one unconditional
+  call** placed immediately after the validity guard (`if not issue_number or
+  issue_number < 1: return {}`, `:645`) and **before** the `VALOR_SESSION_ID` env
+  short-circuit at `:651`:
+
+  ```python
+  try:
+      resolve_lane_slug(issue_number, allow_heal=True)
+  except Exception as e:  # identity resolution must never fail an ensure
+      logger.debug(
+          "sdlc_session_ensure: lane slug resolution failed for #%s (%s: %s)",
+          issue_number, type(e).__name__, e,
+      )
+  ```
+
+  The call is idempotent and conditional-on-empty, so a single early invocation covers
+  **all six** success return points (`:680, :735, :756, :779, :795, :874`) by
+  construction and cannot double-write. It **must** swallow: `ensure_session`'s contract
+  is to return a session dict, and a Redis or git failure inside identity resolution must
+  not convert a successful ensure into `return {}`.
+- **Mint-site decision — recorded (revision cycle 3).** The alternative was hooking
+  `_acquire_run_lock_and_bind`, which is already documented (`:309-311`) as running
+  before every return point (#1954/#2003). It is **rejected**, and not for the reason the
+  round-3 critique gave. That reason (file collision with the in-flight #2660 lane on
+  `:486-493`) is now **moot** — #2660 merged as `971ff1caf` and the fence is lifted; that
+  helper now saves with `update_fields=["active_run_id", "owned_run_ids"]` at `:498`. The
+  standing reasons are:
+  1. **Wrong layer.** `_acquire_run_lock_and_bind` owns the *lease* — a transient,
+     contested, expiring claim. The slug is *permanent identity*. Owner direction #4 for
+     this lane is explicit that liveness belongs to the lease and the identity record
+     must not re-create the `#2446`/`#2451` shape; minting inside the lock contest is
+     exactly that conflation.
+  2. **The lock contest has losing branches.** The helper returns `ISSUE_LOCKED` at
+     `:475` and `RUN_BIND_FAILED` at `:531` *before* reaching the bind. A mint placed
+     after the bind is skipped for every blocked caller; a mint placed before it fires
+     even when the caller loses the contest. Neither is correct. A lane's identity does
+     not depend on who currently holds its lease.
+  3. **No shared state.** The slug write targets `PipelineLedger`, keyed by issue number
+     alone. It needs no `session` object, so it has no reason to live in the helper that
+     exists to bind one.
+  The "two sites to keep in sync" objection does not apply: the `:645` call is not a
+  second every-return-point mechanism. It is a single call on the function's only entry
+  path, above every branch, which is a strictly weaker and more obviously correct
+  invariant than "before every return".
 - **`ensure_session` does not resolve `target_repo` itself and must not start.** The
   ledger key is built inside `resolve_lane_slug`, which calls
   `_resolve_target_repo()` from `tools/_sdlc_utils` — the same helper
@@ -1255,12 +1343,45 @@ No new agent integration required.
   `_derive_slug_from_message` returns `f"sdlc-{N}"` and never calls `ensure_session`, so
   `valor-session create "handle issue #N"` mints a competing identity today. **Delete the
   function** (body *and* its `sdlc-{N}` docstring examples at `:92`) and replace it with
-  `_issue_number_from_message(message) -> int | None`, then at its caller `cmd_create`
-  (`:588`): `slug = resolve_lane_slug(issue_number, allow_heal=True) if issue_number else
-  None`. Retaining it as a fallback is not an option — its body is an `f"sdlc-` literal
-  that keeps `AC-MINT` red forever, and its fallback arm is dead by construction (it
-  returns `None` on exactly the branch that would call it). See Technical Approach for the
-  exact shape.
+  `_issue_number_from_message(message) -> int | None`. Retaining it as a fallback is not
+  an option — its body is an `f"sdlc-` literal that keeps `AC-MINT` red forever, and its
+  fallback arm is dead by construction (it returns `None` on exactly the branch that
+  would call it).
+- **`cmd_create` reads; it does not heal (revision cycle 3).** The auto-derive branch at
+  `tools/valor_session.py:588` fires for **any** eng session whose `--message` merely
+  matches `_ISSUE_REF_RE`. Under an earlier draft of this task it called the resolver with
+  `allow_heal=True`, so asking `valor-session create --role eng "what's going on with
+  issue #2663?"` would run `PipelineLedger.get_or_create` and write a permanent lane
+  identity for an issue that is not a lane — contradicting this plan's own Flow example
+  ("Non-lane issue → no ledger created, nothing minted") and the Success Criterion "Read
+  paths never mint". Because the write is no-overwrite, a conversational session could
+  permanently fix a wrong identity before the real lane ever started. The shape is:
+
+  ```python
+  issue_number = _issue_number_from_message(message)
+  if issue_number:
+      # Heal OFF: adopt the lane's recorded identity if one exists, otherwise
+      # take the same string as a session-local slug WITHOUT recording it.
+      slug = resolve_lane_slug(issue_number) or mint_lane_slug(issue_number)
+  ```
+
+  When a lane is already recorded this is a pure alignment win — the session lands on the
+  lane's real branch, which is `#2718`'s defect closed from the CLI side. When no lane
+  exists, the session still gets the `sdlc-{N}` slug it needs for a worktree (eng sessions
+  are rejected without one, `#1272`), but **no ledger is created and nothing is
+  recorded**. If a real lane later starts, `ensure_session`'s ladder reaches the same
+  `sdlc-{N}` string via rung 3 or rung 5, so the two converge without either having
+  guessed over the other.
+- **Do not "fix" this by having `cmd_create` call `ensure_session`.** That was the
+  round-3 critique's preferred option and it is worse: `ensure_session` acquires the
+  **issue lease**, so a conversational `valor-session create` mentioning `#2663` would
+  contest and hold a lock on someone else's lane. Trading a stray ledger row for a stray
+  lease is a strictly worse bargain.
+- `mint_lane_slug(issue_number) -> str` is the pure, write-free `f"sdlc-{N}"` constructor
+  exported by `tools/lane_identity.py`, and is the same function `resolve_lane_slug` uses
+  for its own rung 5. It keeps `AC-MINT` at exactly one literal while giving `cmd_create`
+  a non-recording fallback. This is **not** a fifth inventor: one function, one home, one
+  literal — which is the fix's whole shape.
 - Update `_derive_sdlc_metadata`'s docstring (`:110-133`), which names
   `_derive_slug_from_message`.
 - Scrub the two `sdlc-{N}` literals in `reflections/sdlc_upvote_lanes.py` — the comment at
@@ -1316,9 +1437,18 @@ No new agent integration required.
 - **Task ID**: `build-backfill`
 - **Depends On**: none
 - **Validates**: the "every plan resolvable" Verification row
-- **Assigned To**: `consumer-builder`
-- **Agent Type**: builder
+- **Assigned To**: `identity-tester`
+- **Agent Type**: test-engineer
 - **Parallel**: true
+- **Reassigned in revision cycle 3.** This task was co-assigned to `consumer-builder`
+  alongside Task 4, both marked `Parallel: true`. One agent cannot run two tasks in
+  parallel, so a scheduler honoring the flag either silently serializes them or dispatches
+  the same agent twice. It is worse than cosmetic here: Task 5 commits on `main` while
+  Task 4 works on the lane branch, so co-assignment forces a mid-task checkout switch in a
+  worktree on a machine running several other live SDLC lanes. `identity-tester` already
+  owns new test files, and Task 5's deliverable is three one-line frontmatter edits plus
+  one new test. Deliberately **not** resolved by serializing Task 5 behind Task 4: Task 7
+  depends on `build-backfill`, so serializing would lengthen the critical path for nothing.
 **Scope, deliberately bounded.** Removing the bare-`#N` fallback makes `tracking:` the
 only general way a plan resolves, so *some* backfill is load-bearing for this lane. The
 prior draft then grew past that into repo-wide docs governance — relocating an audit doc
@@ -1335,23 +1465,47 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 - **Two files are explicitly NOT resolved here.**
   `resilience-simplification-three-tier.md` (literal placeholder `tracking: none yet`) and
   `session-recovery-observation-audit.md` (an audit document, not a lane plan) both need a
-  human call this lane has no standing to make. They go into an explicit
-  `_NON_LANE_PLANS` frozenset in the test below, with a comment naming each and why.
+  human call this lane has no standing to make. They go into the
+  `NON_LANE_PLANS` frozenset described below, with a comment naming each and why.
   **This reverses Decision 2** (which had said "move the audit doc out of `docs/plans/`"):
   a file move plus inbound-link fixes is docs governance, and an exclusion set is
   enforceable today without importing a pending decision. Named as a deviation so the
   decider can rule; the invariant is unchanged either way.
+- **The exclusion set gets exactly one home (revision cycle 3).** Create
+  `tools/plan_doc_scope.py` exporting `NON_LANE_PLANS: frozenset[str]`, holding the two
+  filenames with a comment naming each and why. Both consumers **import** it: the test
+  below, and the `AC-TRACKING` anti-criterion. An earlier draft defined the frozenset in
+  the test and *restated* it as an inline literal in `AC-TRACKING` — while commenting that
+  the test owned it. That is this plan's own diagnosed root cause (several places
+  inventing the same value) reproduced inside the fix's verification: the next excluded
+  plan doc would be added to one copy and not the other, and the Verification row would
+  then disagree with the test it exists to prove. A non-test module rather than the test
+  file itself, so the AC does not import from `tests/` off-suite.
 - **Durable owner: a test, not a hook validator.** Add
   `tests/unit/test_plan_docs.py::test_every_plan_doc_carries_resolvable_tracking`
-  asserting every `docs/plans/*.md` minus `_NON_LANE_PLANS` carries a `#N` or `issues/N`
-  token. A hook validator is a new control surface with its own PreToolUse wiring and
-  belongs in its own lane. A test is the minimum acceptable outcome — a bare Verification
-  row runs once at build time and nothing re-checks it when the next plan doc lands.
-- **Exit condition**: that test passes, and `AC-TRACKING` (which honors the same exclusion
-  set) exits 0. Re-derive by running it; the three-file list above is a revision-time
-  snapshot for orientation.
-- Plan-doc edits commit **directly on main**, per the repo convention — never on the
-  feature branch.
+  asserting every `docs/plans/*.md` minus `NON_LANE_PLANS` (imported, not restated)
+  carries a `#N` or `issues/N` token. A hook validator is a new control surface with its
+  own PreToolUse wiring and belongs in its own lane. A test is the minimum acceptable
+  outcome — a bare Verification row runs once at build time and nothing re-checks it when
+  the next plan doc lands.
+- **Exit condition**: that test passes, and `AC-TRACKING` (which imports the same
+  exclusion set) exits 0. Re-derive by running it; the three-file list above is a
+  revision-time snapshot for orientation.
+- **Split commit, then sync — the ordering is load-bearing (revision cycle 3).** The three
+  `tracking:` frontmatter edits are plan-doc edits and commit **directly on main**, per the
+  repo convention. But `tools/plan_doc_scope.py` and `tests/unit/test_plan_docs.py` are
+  code and commit on the lane branch. That split creates a trap the prior draft did not
+  state: `AC-TRACKING` globs `docs/plans/*.md` in the *working tree*, and
+  `tests/unit/test_plan_docs.py` is a new branch-side file asserting over frontmatter
+  backfilled on `main` — so main-side backfills are **invisible** to the branch-side
+  validator and the lane's own suite run fails on a correct build. Required sequence:
+  1. Commit the three `tracking:` backfills on `main`; push.
+  2. `git -C <worktree> merge --ff-only origin/main` to carry them onto `session/sdlc-2735`.
+  3. Only then do Tasks 7 and 9 run their validation.
+  Task 7's preamble states this ordering as a precondition. The alternative — having the
+  test read plan docs from the `main` ref rather than the working tree — is a larger
+  change and diverges from how every other main-committed plan edit reaches a lane branch
+  here.
 
 ### 6. Test rewrite
 
@@ -1377,6 +1531,12 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 - **Assigned To**: `identity-validator`
 - **Agent Type**: validator
 - **Parallel**: false
+- **Precondition (revision cycle 3): the main-side backfills must already be merged into
+  the lane worktree.** Task 5 commits three `tracking:` frontmatter edits on `main`, and
+  this task's validators (`AC-TRACKING`, `tests/unit/test_plan_docs.py`) read the
+  *working tree* on `session/sdlc-2735`. Before running anything below, confirm
+  `git -C <worktree> merge --ff-only origin/main` has landed Task 5's main commit. Without
+  it, both checks fail on a correct build and the failure looks like a code defect.
 - Verify each AC from #2735 and #2718 individually against the built code.
 - Run every Verification-table command and every `AC-*` block command, and report actual
   output. Report **both** the pre-fix (`main`) and post-fix output for each zero-expecting
@@ -1432,7 +1592,7 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 | Ledger carries the field | `.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; assert 'slug' in PipelineLedger._meta.fields"` | exit code 0 |
 | Migration registered | `grep -c 'confirm_pipeline_ledger_slug_readable' scripts/update/migrations.py` | output > 1 |
 | Anti-criterion: no slug derived from a plan filename | `grep -rnE '\.stem\b' tools/ agent/ reflections/` | every hit reviewed by hand; **zero** hits where the `.stem` of a plan path becomes a slug or a branch name. Broadened from the old literal `Path(plan_path).stem`, which a rename to `plan_path.stem` defeated. |
-| Anti-criterion: no stale import path | `grep -rn 'from tools._sdlc_utils import find_plan_path' --include=*.py --include=*.md . \| grep -v '^./.worktrees/' \| wc -l` | match count == 0 |
+| Anti-criterion: no stale import path | `grep -rn 'from tools._sdlc_utils import find_plan_path' --include='*.py' --include='*.md' . \| grep -v '^./.worktrees/' \| wc -l` | match count == 0 |
 | Anti-criterion: no stale prose reference to the moved symbol | see `AC-PROSE` below | match count == 0 |
 | Anti-criterion: docs sweep complete | see `AC-DOCSWEEP` below | every listed file names `tools/lane_identity`, none names `tools/_sdlc_utils` |
 | Anti-criterion: false belief deleted | see `AC-BELIEF` below | match count == 0 |
@@ -1440,7 +1600,7 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 | Anti-criterion: no hardcoded prefix in probes | `grep -rnE 'ls-remote.*session/' tools/ reflections/ \| wc -l` | match count == 0 outside `tools/lane_identity.py` — the `session/` prefix exists in exactly one place, `lane_branch_name` |
 | Anti-criterion: no holder/pid/liveness field added | see `AC-LIVENESS` below | match count == 0 |
 | Anti-criterion: no eager slug backfill in migration | see `AC-BACKFILL` below | match count == 0 |
-| Anti-criterion: no read path heals | see `AC-HEAL` below | hits are **exactly** the four sanctioned lane-start callers; zero hits in `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, `tools/sdlc_verdict.py`, `tools/sdlc_stage_marker.py` |
+| Anti-criterion: no read path heals | see `AC-HEAL` below | hits are **exactly** the three sanctioned lane-start callers; zero hits in `tools/valor_session.py`, `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, `tools/sdlc_verdict.py`, `tools/sdlc_stage_marker.py` |
 | Anti-criterion: no `sdlc-{N}` construction outside the resolver | see `AC-MINT` below | the only hit is the mint rung inside `tools/lane_identity.py` |
 | Every plan resolvable | see `AC-TRACKING` below | exit code 0 |
 
@@ -1455,9 +1615,10 @@ vacuous.
 # AC-TESTSCOPE — the test row is sweep-driven so it cannot drift from the
 # Test Impact sweep it is supposed to prove. A fixed four-file list certified
 # a red suite: the module move breaks monkeypatch targets in six more files
-# the list never ran (test_sdlc_stage_marker.py has five patch sites at
-# :1376,1386,1394,1407,1419; plus test_sdlc_verdict.py, test_sdlc_utils.py,
-# test_sdlc_env_vars.py, and TWO integration files).
+# the list never ran (test_sdlc_stage_marker.py carries SEVERAL patch sites --
+# re-derive by sweep, never from an enumeration: the count has drifted every
+# revision as main moved, 5 -> 7 -> 6 as of cycle 3 -- plus test_sdlc_verdict.py,
+# test_sdlc_utils.py, test_sdlc_env_vars.py, and TWO integration files).
 # tests/integration/ MUST stay in scope: the module move is an import-path
 # change and the integration tests import the real symbol, so a unit-only
 # scope cannot prove it.
@@ -1494,8 +1655,11 @@ grep -n 'slug' scripts/update/migrations.py | grep -cE 'save|create|update_field
 
 # AC-HEAL — only lane-start paths opt into healing
 grep -rn 'allow_heal=True' tools/ agent/ reflections/
-# expect exactly: tools/sdlc_session_ensure.py, tools/valor_session.py,
+# expect exactly THREE sites: tools/sdlc_session_ensure.py,
 #                 reflections/sdlc_upvote_lanes.py, reflections/sdlc_progress.py
+# tools/valor_session.py is deliberately NOT on this list (revision cycle 3):
+# cmd_create's auto-derive fires on any prose issue mention, so it reads with
+# heal OFF and falls back to mint_lane_slug() without recording. See Task 3.
 
 # AC-MINT — the lane-slug literal is constructed in exactly one place.
 # The trailing filter excludes OTHER `sdlc-` namespaces by shape (not by site):
@@ -1515,15 +1679,14 @@ grep -rnE 'sdlc-\{|sdlc-%s|"sdlc-" *\+|f"sdlc-' tools/ agent/ reflections/ \
 # widening the trailing filter.
 
 # AC-TRACKING — every LANE plan doc carries a resolvable tracking issue.
-# The exclusion set is the same frozenset tests/unit/test_plan_docs.py owns;
-# it holds the two files whose disposition needs a human call this lane has no
-# standing to make (see Task 5).
+# The exclusion set has exactly ONE home: NON_LANE_PLANS in tools/plan_doc_scope.py.
+# Both this anti-criterion and tests/unit/test_plan_docs.py IMPORT it (revision
+# cycle 3). An earlier draft restated the frozenset as an inline literal here
+# while commenting that the test owned it -- reproducing, inside this fix's own
+# verification, the replicated-value defect the fix exists to close.
 .venv/bin/python -c "
 import pathlib, re, sys
-NON_LANE = {
-  'resilience-simplification-three-tier.md',  # literal 'tracking: none yet' placeholder
-  'session-recovery-observation-audit.md',    # audit document, not a lane plan
-}
+from tools.plan_doc_scope import NON_LANE_PLANS as NON_LANE
 pat = re.compile(r'^tracking:.*(?:#\d+|issues/\d+)', re.M)
 bad = [p.name for p in pathlib.Path('docs/plans').glob('*.md')
        if p.name not in NON_LANE and not pat.search(p.read_text())]
@@ -1547,16 +1710,29 @@ anti-criterion** and must be rewritten before build proceeds — it is proving n
 
 Two rows are *positive* criteria and are green-on-main by construction, so the red rule
 does not apply to them: `AC-HEAL` (0 hits on `main` because the parameter does not exist
-yet; after the fix it must name exactly the four sanctioned callers) and the docs-sweep
+yet; after the fix it must name exactly the three sanctioned callers) and the docs-sweep
 row. `AC-LIVENESS` is the deliberate exception among zero-expecting rows — it guards
 against *adding* something, so it is green on `main` and must stay green; its value is
 that the fixed ERE can now actually fire, which the fixed spelling is verified to do
 against a synthetic `holder = ...` line. Verified red at revision time (cycle 2, re-run
-after the edits above): `AC-TRACKING` (3 files, after the `_NON_LANE_PLANS` exclusion),
+after the edits above): `AC-TRACKING` (3 files, after the `NON_LANE_PLANS` exclusion),
 the `.stem` sweep (2 offending hits, `tools/sdlc_next_skill.py:205,357`, out of 6 total —
 the other 4 are unrelated `.stem` uses that a hand review must pass), `AC-BELIEF` (2),
-`AC-MINT` (8), `AC-PROSE` (3), the stale-import row (28), `_is_ai_repo_fallback` (4), and
+`AC-MINT` (8), `AC-PROSE` (3), the stale-import row (**29**, re-verified cycle 3 —
+`main` has moved since the 28 recorded in cycle 2), `_is_ai_repo_fallback` (4), and
 the hardcoded-`session/`-prefix row (2). `AC-DOCSWEEP` lists 8 files.
+
+**Quote both `--include` globs.** Under zsh an unquoted `--include=*.py` is glob-expanded,
+matches no file, and zsh **aborts the pipeline** with `no matches found`; `wc -l` then
+prints `0` and the stale-import row reports PASS on unmodified `main`. That is the same
+vacuous-anti-criterion class as `AC-LIVENESS`'s escaped pipe, and the cycle-2 count of 28
+could only have come from the quoted form — i.e. from a different command than the one a
+builder running the table would have executed. The row is now quoted on both globs.
+It still **under-counts** the real blast radius: the symbol is also imported as
+`from tools._sdlc_utils import find_plan_path as _find_plan_path`
+(`tools/sdlc_stage_query.py:51`, `tools/sdlc_verdict.py:104`), which this exact-string row
+happens to match, but a `from tools import _sdlc_utils` + attribute access would not.
+Treat it as paired with `AC-TESTSCOPE`, never as exhaustive.
 `AC-TESTSCOPE` is a positive criterion, red on `main` for a different reason
 (`tests/unit/test_lane_identity.py` does not exist yet). Every count re-verified against
 `main` at cycle-2 revision time — quote the counts, not just "red", so a later drift is
@@ -1566,15 +1742,15 @@ visible.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The mint is placed where the dominant lane-start path never goes. `ensure_session` has SIX success return points, verified in `tools/sdlc_session_ensure.py`: `:674` (env session already OWNS the issue — the "legitimate bridge case, true no-op"), `:729` (adopt ownerless env session), `:750` (adopt owned-run session), `:773` (reuse existing session found by issue), `:789` (reuse by local session id), `:868` (create). Task 3 says to write the slug "at the create and adopt return points", covering only `:729`, `:750`, `:868`. The three reuse/no-op paths — including `:674`, which short-circuits on the FIRST branch of the function for any bridge- or worker-started eng session — never reach the mint. A lane started conversationally keeps an empty slug forever and every consumer no-ops. This is cycle-2 blocker 1 recurring in a narrower shape: the write target now exists, but the write is placed where the dominant path never goes. | pending | Make the mint one unconditional call near the top of `ensure_session`, not a per-return-point write. Place it immediately after the existing validity guard (`if not issue_number or issue_number < 1: return {}`, `:639`) and before the `VALOR_SESSION_ID` env short-circuit: `try: resolve_lane_slug(issue_number, allow_heal=True)` / `except Exception: logger.debug(...)`. The call is idempotent and conditional-on-empty, so one early invocation covers every exit path by construction and cannot double-write. It MUST swallow: `ensure_session`'s contract is to return a session dict, and a Redis/git failure inside identity resolution must not convert a successful ensure into `return {}`. Do NOT satisfy this by moving the write into `_acquire_run_lock_and_bind` (the one helper all six paths share) — Risk 4 correctly forbids that line range because #2660 is editing `:486-493` concurrently. |
-| CONCERN | Risk & Robustness | `tools/valor_session.py::cmd_create` is on the sanctioned `allow_heal=True` list but is not gated on lane intent. Verified at `tools/valor_session.py:588`: the auto-derive branch fires for ANY non-teammate (i.e. `eng`) session whose `--message` merely matches `_ISSUE_REF_RE`. Today the consequence is local (a slug and a worktree). After this plan the same casual mention ("what's going on with issue #2663?") calls `resolve_lane_slug(N, allow_heal=True)`, whose heal path runs `PipelineLedger.get_or_create` and mints `sdlc-N` — creating a durable Redis ledger and a permanent recorded identity for an issue that is not a lane. That contradicts the plan's own Flow example ("Non-lane issue → no ledger created, nothing minted") and the Success Criterion "Read paths never mint", and because the write is no-overwrite a conversational session can permanently fix a wrong identity before the real lane starts. | pending | Preferred fix: drop `cmd_create` from the sanctioned list and have it call `ensure_session(issue_number)` — the plan's designated single minter — instead of the resolver directly. That keeps "minted exactly once by `ensure_session`" literally true and shrinks the `allow_heal=True` grep to three sites. If `cmd_create` must heal directly, gate it on an explicit lane opt-in rather than on an issue reference appearing in prose (`_derive_sdlc_metadata` is NOT a usable discriminator — it fires on the same `_ISSUE_REF_RE` signal). Either way, `AC-HEAL`'s expected four-caller list must be updated in the same edit or the anti-criterion fails on a correct build. |
-| CONCERN | Risk & Robustness | Task 5 commits the `tracking:` backfills "directly on main, never on the feature branch", but its exit condition (`AC-TRACKING` exits 0 and `tests/unit/test_plan_docs.py` passes) is checked by Tasks 7 and 9, which run in the lane worktree on `session/sdlc-2735`. `AC-TRACKING` globs `docs/plans/*.md` in the working tree, so main-side backfills are invisible to the validator. Worse, `tests/unit/test_plan_docs.py` is a NEW file created on the branch that asserts over plan docs backfilled on main, so the branch's own suite run fails. No task states the sync step. | pending | Add to Task 5: commit the three `tracking:` backfills on `main`, push, then `git -C <worktree> merge --ff-only origin/main` (or rebase the lane branch) BEFORE Task 7 runs, and state that ordering in Task 7's preamble. Alternative (larger): have `tests/unit/test_plan_docs.py` read plan docs from the repo's `main` ref rather than the working tree. The merge step is the smaller change and matches how every other main-committed plan edit reaches a lane branch here. |
-| CONCERN | Scope & Value | `_NON_LANE_PLANS` is defined twice — as a frozenset in `tests/unit/test_plan_docs.py` (Task 5's "durable owner") and again as an inline `NON_LANE = {...}` literal in the `AC-TRACKING` bash block, which even comments "the same frozenset `tests/unit/test_plan_docs.py` owns" while restating it. That is the repo's replicated-value defect, and it is this plan's own diagnosed root-cause pattern (five places inventing the same value) reproduced inside the fix's verification. The next excluded plan doc will be added to one copy and not the other, and the Verification row will then disagree with the test it exists to prove. | pending | Give the set exactly one home and have the anti-criterion import it: define `NON_LANE_PLANS: frozenset[str]` at module scope in `tests/unit/test_plan_docs.py` and rewrite `AC-TRACKING` as `.venv/bin/python -c "from tests.unit.test_plan_docs import NON_LANE_PLANS; ..."`. If importing from `tests/` off-suite is undesirable, put the frozenset in a small non-test module (e.g. `tools/plan_doc_scope.py`) that both the test and the AC import. Do not leave two literals. The regex stays the tight `^tracking:.*(?:#\d+\|issues/\d+)`; only the exclusion set is deduplicated. |
-| CONCERN | History & Consistency | The "no stale import path" Verification row is not runnable as written and therefore passes vacuously — the exact failure class the plan devotes a paragraph to (the `AC-LIVENESS` escaped-pipe precedent). Under zsh, the unquoted `--include=*.py` is glob-expanded, matches no file, and zsh ABORTS the pipeline with `no matches found: --include=*.py`; `wc -l` then prints `0`, so the row reports PASS on unmodified `main`. Verified both ways at critique time: unquoted → aborts, reports 0; quoted → **28**. The plan's claim "Verified red at revision time … the stale-import row (28)" is only reachable with the quoted form, i.e. the recorded number came from a different command than the one the builder will run. | pending | Change the cell to `grep -rn 'from tools._sdlc_utils import find_plan_path' --include='*.py' --include='*.md' . \| grep -v '^./.worktrees/' \| wc -l` (single quotes around BOTH glob values). Note the row still under-counts the real blast radius: the symbol is also imported as `from tools._sdlc_utils import find_plan_path as _find_plan_path` (`tools/sdlc_stage_query.py:51`, `tools/sdlc_verdict.py:104`), which this exact-string row happens to match, but a `from tools import _sdlc_utils` + attribute form would not. Pair the row with `AC-TESTSCOPE` rather than treating it as exhaustive. |
-| CONCERN | History & Consistency | `find_plan_path`'s replacement rung 2 (`docs/plans/{resolve_lane_slug(N)}.md`) is near-dead code added in the same PR that deletes near-dead code for the same reason. It runs with `allow_heal=False`, so it needs an already-recorded slug AND needs the plan filename to equal the LANE slug — which "Two slugs, kept distinct" explicitly refuses to force. This lane is the demonstration: recorded slug `sdlc-2735`, plan doc `sdlc-lane-recorded-slug.md`, rung 2 misses. After the fix `find_plan_path` is effectively a one-rung `tracking:` lookup, making `tracking:` a hard single point of failure with no authoring-time enforcement. | pending | If rung 2 is kept, add a Test Impact case that actually exercises it — a ledger whose recorded slug equals an existing `docs/plans/{slug}.md` stem (the `sdlc-1111.md` shape, which is real in this repo) — so it is not merged untested; no such case is currently listed. If rung 2 is dropped, `tests/unit/test_plan_docs.py` becomes the sole guard and Risk 2 must say so, replacing the sentence "The new `docs/plans/{recorded_slug}.md` rung also covers slug-named plans without frontmatter", which is currently the only stated mitigation for a `tracking:`-less plan and is unreachable for any plan whose filename is not the lane slug. |
-| CONCERN | Scope & Value | Task 4 (`build-consumers`) and Task 5 (`build-backfill`) are both marked `Parallel: true` and both `Assigned To: consumer-builder`. One agent cannot execute two tasks in parallel, so a scheduler honoring the flag either serializes them silently or dispatches the same agent twice. Task 5 additionally commits on `main` while Task 4 works on the lane branch, so co-assigning them forces a mid-task checkout switch in a worktree on a machine running three other SDLC lanes. | pending | Reassign Task 5 (three one-line frontmatter edits plus one new test file, `Depends On: none`) to `identity-tester` (already owns new test files) or `identity-documentarian` (already owns main-committed doc edits), keeping `Parallel: true` meaningful. Do NOT resolve this by serializing Task 5 behind Task 4 — Task 7 depends on `build-backfill`, so serializing lengthens the critical path for no benefit. |
-| NIT | History & Consistency | The `tests/unit/test_sdlc_stage_marker.py` patch-site inventory is stale in both directions. Verified at critique time there are SEVEN `patch("tools._sdlc_utils.find_plan_path", …)` sites — `:1375, :1386, :1394, :1407, :1419, :1428, :1444`. The plan names five and misses `:1428` and `:1444`. Harmless in practice (`AC-TESTSCOPE` is sweep-driven and the file carries the swept token), but the count is quoted as verified evidence in the Critique Results table. | pending | N/A (NIT) — if corrected, replace the enumerated line numbers with "seven patch sites (re-derive by sweep)", consistent with the plan's own rule that a moved-symbol cleanup closes out on a grep, not a list. |
-| NIT | Scope & Value | 1643 lines, nine tasks, five named agents to add one nullable Popoto field, one module, and route five call sites. The prior round raised this and the plan's reply ("the blockers required more specificity") was honest, but the trend is one-directional across three cycles, and this round's blocker again lives in a dense passage (Task 3's return-point instruction) that reads as settled because it is detailed, not because it was checked against the function it describes. | pending | N/A (NIT) — if trimmed, cut the `Decisions` `<details>` block holding the superseded original wording of the three open questions, and the cycle-1/cycle-2 narration in Technical Approach ("An earlier draft applied…", "The reason the default inverts…"). Those are revision history, not build instructions, and the repo's no-historical-artifacts rule already argues for their removal. |
+| BLOCKER | Risk & Robustness | The mint is placed where the dominant lane-start path never goes. `ensure_session` has SIX success return points, verified in `tools/sdlc_session_ensure.py`: `:674` (env session already OWNS the issue — the "legitimate bridge case, true no-op"), `:729` (adopt ownerless env session), `:750` (adopt owned-run session), `:773` (reuse existing session found by issue), `:789` (reuse by local session id), `:868` (create). Task 3 says to write the slug "at the create and adopt return points", covering only `:729`, `:750`, `:868`. The three reuse/no-op paths — including `:674`, which short-circuits on the FIRST branch of the function for any bridge- or worker-started eng session — never reach the mint. A lane started conversationally keeps an empty slug forever and every consumer no-ops. This is cycle-2 blocker 1 recurring in a narrower shape: the write target now exists, but the write is placed where the dominant path never goes. | **addressed** (cycle 3, Task 3 + Risk 4) | Make the mint one unconditional call near the top of `ensure_session`, not a per-return-point write. Place it immediately after the existing validity guard (`if not issue_number or issue_number < 1: return {}`, `:639`) and before the `VALOR_SESSION_ID` env short-circuit: `try: resolve_lane_slug(issue_number, allow_heal=True)` / `except Exception: logger.debug(...)`. The call is idempotent and conditional-on-empty, so one early invocation covers every exit path by construction and cannot double-write. It MUST swallow: `ensure_session`'s contract is to return a session dict, and a Redis/git failure inside identity resolution must not convert a successful ensure into `return {}`. Do NOT satisfy this by moving the write into `_acquire_run_lock_and_bind` (the one helper all six paths share) — Risk 4 correctly forbids that line range because #2660 is editing `:486-493` concurrently. |
+| CONCERN | Risk & Robustness | `tools/valor_session.py::cmd_create` is on the sanctioned `allow_heal=True` list but is not gated on lane intent. Verified at `tools/valor_session.py:588`: the auto-derive branch fires for ANY non-teammate (i.e. `eng`) session whose `--message` merely matches `_ISSUE_REF_RE`. Today the consequence is local (a slug and a worktree). After this plan the same casual mention ("what's going on with issue #2663?") calls `resolve_lane_slug(N, allow_heal=True)`, whose heal path runs `PipelineLedger.get_or_create` and mints `sdlc-N` — creating a durable Redis ledger and a permanent recorded identity for an issue that is not a lane. That contradicts the plan's own Flow example ("Non-lane issue → no ledger created, nothing minted") and the Success Criterion "Read paths never mint", and because the write is no-overwrite a conversational session can permanently fix a wrong identity before the real lane starts. | **addressed** (cycle 3, Task 3 `cmd_create` seam + AC-HEAL) | Preferred fix: drop `cmd_create` from the sanctioned list and have it call `ensure_session(issue_number)` — the plan's designated single minter — instead of the resolver directly. That keeps "minted exactly once by `ensure_session`" literally true and shrinks the `allow_heal=True` grep to three sites. If `cmd_create` must heal directly, gate it on an explicit lane opt-in rather than on an issue reference appearing in prose (`_derive_sdlc_metadata` is NOT a usable discriminator — it fires on the same `_ISSUE_REF_RE` signal). Either way, `AC-HEAL`'s expected four-caller list must be updated in the same edit or the anti-criterion fails on a correct build. |
+| CONCERN | Risk & Robustness | Task 5 commits the `tracking:` backfills "directly on main, never on the feature branch", but its exit condition (`AC-TRACKING` exits 0 and `tests/unit/test_plan_docs.py` passes) is checked by Tasks 7 and 9, which run in the lane worktree on `session/sdlc-2735`. `AC-TRACKING` globs `docs/plans/*.md` in the working tree, so main-side backfills are invisible to the validator. Worse, `tests/unit/test_plan_docs.py` is a NEW file created on the branch that asserts over plan docs backfilled on main, so the branch's own suite run fails. No task states the sync step. | **addressed** (cycle 3, Task 5 split-commit sequence + Task 7 precondition) | Add to Task 5: commit the three `tracking:` backfills on `main`, push, then `git -C <worktree> merge --ff-only origin/main` (or rebase the lane branch) BEFORE Task 7 runs, and state that ordering in Task 7's preamble. Alternative (larger): have `tests/unit/test_plan_docs.py` read plan docs from the repo's `main` ref rather than the working tree. The merge step is the smaller change and matches how every other main-committed plan edit reaches a lane branch here. |
+| CONCERN | Scope & Value | `_NON_LANE_PLANS` is defined twice — as a frozenset in `tests/unit/test_plan_docs.py` (Task 5's "durable owner") and again as an inline `NON_LANE = {...}` literal in the `AC-TRACKING` bash block, which even comments "the same frozenset `tests/unit/test_plan_docs.py` owns" while restating it. That is the repo's replicated-value defect, and it is this plan's own diagnosed root-cause pattern (five places inventing the same value) reproduced inside the fix's verification. The next excluded plan doc will be added to one copy and not the other, and the Verification row will then disagree with the test it exists to prove. | **addressed** (cycle 3, `tools/plan_doc_scope.py` single home) | Give the set exactly one home and have the anti-criterion import it: define `NON_LANE_PLANS: frozenset[str]` at module scope in `tests/unit/test_plan_docs.py` and rewrite `AC-TRACKING` as `.venv/bin/python -c "from tests.unit.test_plan_docs import NON_LANE_PLANS; ..."`. If importing from `tests/` off-suite is undesirable, put the frozenset in a small non-test module (e.g. `tools/plan_doc_scope.py`) that both the test and the AC import. Do not leave two literals. The regex stays the tight `^tracking:.*(?:#\d+\|issues/\d+)`; only the exclusion set is deduplicated. |
+| CONCERN | History & Consistency | The "no stale import path" Verification row is not runnable as written and therefore passes vacuously — the exact failure class the plan devotes a paragraph to (the `AC-LIVENESS` escaped-pipe precedent). Under zsh, the unquoted `--include=*.py` is glob-expanded, matches no file, and zsh ABORTS the pipeline with `no matches found: --include=*.py`; `wc -l` then prints `0`, so the row reports PASS on unmodified `main`. Verified both ways at critique time: unquoted → aborts, reports 0; quoted → **28**. The plan's claim "Verified red at revision time … the stale-import row (28)" is only reachable with the quoted form, i.e. the recorded number came from a different command than the one the builder will run. | **addressed** (cycle 3, both globs quoted; count re-verified at 29) | Change the cell to `grep -rn 'from tools._sdlc_utils import find_plan_path' --include='*.py' --include='*.md' . \| grep -v '^./.worktrees/' \| wc -l` (single quotes around BOTH glob values). Note the row still under-counts the real blast radius: the symbol is also imported as `from tools._sdlc_utils import find_plan_path as _find_plan_path` (`tools/sdlc_stage_query.py:51`, `tools/sdlc_verdict.py:104`), which this exact-string row happens to match, but a `from tools import _sdlc_utils` + attribute form would not. Pair the row with `AC-TESTSCOPE` rather than treating it as exhaustive. |
+| CONCERN | History & Consistency | `find_plan_path`'s replacement rung 2 (`docs/plans/{resolve_lane_slug(N)}.md`) is near-dead code added in the same PR that deletes near-dead code for the same reason. It runs with `allow_heal=False`, so it needs an already-recorded slug AND needs the plan filename to equal the LANE slug — which "Two slugs, kept distinct" explicitly refuses to force. This lane is the demonstration: recorded slug `sdlc-2735`, plan doc `sdlc-lane-recorded-slug.md`, rung 2 misses. After the fix `find_plan_path` is effectively a one-rung `tracking:` lookup, making `tracking:` a hard single point of failure with no authoring-time enforcement. | **addressed** (cycle 3, rung 2 DROPPED; Risk 2 rewritten to name the test as sole guard) | If rung 2 is kept, add a Test Impact case that actually exercises it — a ledger whose recorded slug equals an existing `docs/plans/{slug}.md` stem (the `sdlc-1111.md` shape, which is real in this repo) — so it is not merged untested; no such case is currently listed. If rung 2 is dropped, `tests/unit/test_plan_docs.py` becomes the sole guard and Risk 2 must say so, replacing the sentence "The new `docs/plans/{recorded_slug}.md` rung also covers slug-named plans without frontmatter", which is currently the only stated mitigation for a `tracking:`-less plan and is unreachable for any plan whose filename is not the lane slug. |
+| CONCERN | Scope & Value | Task 4 (`build-consumers`) and Task 5 (`build-backfill`) are both marked `Parallel: true` and both `Assigned To: consumer-builder`. One agent cannot execute two tasks in parallel, so a scheduler honoring the flag either serializes them silently or dispatches the same agent twice. Task 5 additionally commits on `main` while Task 4 works on the lane branch, so co-assigning them forces a mid-task checkout switch in a worktree on a machine running three other SDLC lanes. | **addressed** (cycle 3, Task 5 reassigned to `identity-tester`) | Reassign Task 5 (three one-line frontmatter edits plus one new test file, `Depends On: none`) to `identity-tester` (already owns new test files) or `identity-documentarian` (already owns main-committed doc edits), keeping `Parallel: true` meaningful. Do NOT resolve this by serializing Task 5 behind Task 4 — Task 7 depends on `build-backfill`, so serializing lengthens the critical path for no benefit. |
+| NIT | History & Consistency | The `tests/unit/test_sdlc_stage_marker.py` patch-site inventory is stale in both directions. Verified at critique time there are SEVEN `patch("tools._sdlc_utils.find_plan_path", …)` sites — `:1375, :1386, :1394, :1407, :1419, :1428, :1444`. The plan names five and misses `:1428` and `:1444`. Harmless in practice (`AC-TESTSCOPE` is sweep-driven and the file carries the swept token), but the count is quoted as verified evidence in the Critique Results table. | **addressed** (cycle 3, both enumerations replaced with a sweep instruction) | N/A (NIT) — if corrected, replace the enumerated line numbers with "seven patch sites (re-derive by sweep)", consistent with the plan's own rule that a moved-symbol cleanup closes out on a grep, not a list. |
+| NIT | Scope & Value | 1643 lines, nine tasks, five named agents to add one nullable Popoto field, one module, and route five call sites. The prior round raised this and the plan's reply ("the blockers required more specificity") was honest, but the trend is one-directional across three cycles, and this round's blocker again lives in a dense passage (Task 3's return-point instruction) that reads as settled because it is detailed, not because it was checked against the function it describes. | **partially addressed** (cycle 3) | N/A (NIT) — if trimmed, cut the `Decisions` `<details>` block holding the superseded original wording of the three open questions, and the cycle-1/cycle-2 narration in Technical Approach ("An earlier draft applied…", "The reason the default inverts…"). Those are revision history, not build instructions, and the repo's no-historical-artifacts rule already argues for their removal. |
 ---
 
 ## Decisions (formerly Open Questions)
@@ -1597,7 +1773,8 @@ settled decisions; the plan body above already reflects them. No open questions 
    move plus inbound-link fixes is repo-wide docs governance riding inside a one-field bug
    fix, and it does not make the invariant any more enforceable than an explicit exclusion
    does. The file (and `resilience-simplification-three-tier.md`'s `tracking: none yet`
-   placeholder) now sit in a documented `_NON_LANE_PLANS` frozenset. The row's regex stays
+   placeholder) now sit in a documented `NON_LANE_PLANS` frozenset, whose single home is
+   `tools/plan_doc_scope.py` (cycle 3; both the test and `AC-TRACKING` import it). The row's regex stays
    tight — requiring a real `#N` or `issues/N` token, since the old `^tracking:\s*\S`
    accepted the placeholder — and the invariant gains a durable owner in
    `tests/unit/test_plan_docs.py`, a test rather than a hook validator (a validator is a
@@ -1612,30 +1789,3 @@ settled decisions; the plan body above already reflects them. No open questions 
    **#2755, filed at plan-revision time** and referenced in No-Gos. Neither half is left
    as a bare promise.
 
-<details>
-<summary>Original wording of the three questions (superseded)</summary>
-
-1. **Slug stamping onto `AgentSession`.** Task 3 stamps the resolved slug onto
-   `AgentSession.slug` so the executor's existing readers (`session_executor.py` task-list
-   id, calendar slug, `sdk_client.py`'s `SDLC_SLUG` env) see the same identity. That is a
-   second home for the value, which cuts against "one record". The alternative is leaving
-   `AgentSession.slug` `None` for SDLC lanes and having those readers call the resolver —
-   more call sites, but one authority. **Which do you want?** Default if you do not
-   answer: stamp it, with the ledger documented as authoritative and the `AgentSession`
-   copy explicitly a convenience mirror.
-
-2. **`session-recovery-observation-audit.md`.** It has no `tracking:` line because it is
-   an audit document, not a lane plan. The "every plan resolvable" Verification row would
-   fail on it. **Move it out of `docs/plans/` (to `docs/` proper), or add an explicit
-   `tracking: none — audit document` sentinel the check accepts?** Default: move it, since
-   `docs/plans/` should mean "lane plans".
-
-3. **Scope boundary confirmation.** This plan touches `reflections/sdlc_upvote_lanes.py`
-   and `reflections/sdlc_progress.py` only to remove their minting. It does **not** touch
-   their branch/PR-discovery mechanisms (`gh pr list --head session/sdlc-{N}`), which are
-   the same guess in a different layer. Leaving them means the reflections still guess
-   when *finding* a lane even though they no longer guess when *naming* one. **In scope
-   for increment 1, or hold for increment 2?** Default: hold — increment 1 is about who
-   writes the identity.
-
-</details>
