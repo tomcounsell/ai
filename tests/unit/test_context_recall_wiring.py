@@ -588,3 +588,34 @@ class TestBuildContextRecallAdvisoryForIntent:
             project_name="p",
         )
         assert result is None
+
+
+class TestOutboundCheckIsInertUnderPytest:
+    """The suite-wide guard from ``tests/conftest.py`` (#2694).
+
+    ``TelegramRelayOutputHandler.send`` calls the outbound check on its main
+    path, so without a default stub every ``send()`` test that produces short
+    interrogative text pays for a real Haiku request. This pins the guard so a
+    future reader cannot quietly drop it: with the kill switch at its production
+    default and prefilter-passing text, the check must return ``advised=False``
+    without ever reaching ``agent.llm.run_typed``.
+    """
+
+    def test_default_check_returns_false_without_a_model_call(self, monkeypatch):
+        import bridge.context_recall as ctx
+
+        monkeypatch.delenv("CONTEXT_RECALL_OUTBOUND_ENABLED", raising=False)
+        assert ctx.outbound_enabled() is True
+
+        calls = []
+
+        async def _tripwire(*args, **kwargs):
+            calls.append(args)
+            return ctx.ContextRecallVerdict(advised=True, reason="live model call")
+
+        monkeypatch.setattr("agent.llm.run_typed", _tripwire)
+
+        verdict = asyncio.run(ctx.check_outbound_context_recall("which PR do you mean?"))
+
+        assert calls == [], "the outbound check reached the model despite the conftest stub"
+        assert verdict.advised is False

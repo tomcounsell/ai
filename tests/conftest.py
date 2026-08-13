@@ -88,6 +88,77 @@ os.environ["SENTRY_DSN"] = ""
 
 
 # ---------------------------------------------------------------------------
+# Live-Haiku guard on the outbound context-recall check (#2694)
+# ---------------------------------------------------------------------------
+# Same class of problem as the Sentry guard above: production code on a hot
+# path reaches a real external service, and the suite pays for it.
+#
+# `agent/output_handler.py::TelegramRelayOutputHandler.send` calls
+# `bridge.context_recall.check_outbound_context_recall(delivery_text)` on its
+# MAIN outbound path. That function's prefilter passes for any non-empty text
+# under 200 characters containing "?", and on a pass it issues a real
+# claude-haiku-4-5 request via `agent.llm.run_typed`. Every `send()` test whose
+# drafted text happens to be a short question therefore makes a live, billed
+# API call. Measured before this guard: one run of
+# tests/unit/test_output_handler.py issued 5 requests to /v1/messages
+# (reproducible even under `env -u ANTHROPIC_API_KEY`, because importing
+# bridge.telegram_bridge calls load_dotenv() and repopulates the key from the
+# real .env).
+#
+# The multi-second network await is also a yield point inside `send()`, between
+# the drafter call and the Redis self-draft budget bump. That reordered the
+# interleaving in `test_output_handler.py::TestDrafterFailureRecovery::
+# test_self_draft_attempts_bound_terminates_loop`, which gathers two concurrent
+# `send()` calls and asserts exactly two atomic bumps -- taking it from
+# deterministic-green to 6 failures in 12 runs on the review machine. That flake
+# is latency-dependent, so it does not reproduce on every host; the billed
+# request count above does, and removing the call removes both.
+#
+# So: stub the check inert by default. `send()` still runs its real
+# advisory/bounce branch logic against a genuine ContextRecallVerdict; only the
+# paid call is removed. A test that wants a live-shaped verdict monkeypatches
+# the same attribute itself in its body, which runs AFTER this fixture and
+# therefore wins (tests/unit/test_context_recall_wiring.py does exactly that).
+# tests/unit/test_context_recall.py binds the function by name at module import
+# and drives it through its own `agent.llm.run_typed` fake, so it is unaffected
+# by this rebinding -- which is correct: that file owns the function's units.
+#
+# Production code is untouched; the feature still defaults to ENABLED in
+# production. Escape hatch: set CONTEXT_RECALL_OUTBOUND_STUB=0 to run the real
+# check, so the #2694 negative control stays reproducible.
+_CONTEXT_RECALL_OUTBOUND_STUB_DISABLED = os.environ.get("CONTEXT_RECALL_OUTBOUND_STUB", "1") == "0"
+
+
+@pytest.fixture(autouse=True)
+def stub_outbound_context_recall():
+    """Make the outbound context-recall check inert (no live Haiku call) by default.
+
+    Rebinds the module attribute rather than a call site, so it covers every
+    existing and future `send()` test, plus any other caller. See the block
+    comment above for the measured symptoms this prevents (#2694).
+    """
+    if _CONTEXT_RECALL_OUTBOUND_STUB_DISABLED:
+        yield
+        return
+
+    try:
+        import bridge.context_recall as _ctx
+    except Exception:  # pragma: no cover - module unimportable in some envs
+        yield
+        return
+
+    async def _inert_check(_text=None):
+        return _ctx.ContextRecallVerdict(advised=False, reason="stubbed by tests/conftest.py")
+
+    original = _ctx.check_outbound_context_recall
+    _ctx.check_outbound_context_recall = _inert_check
+    try:
+        yield
+    finally:
+        _ctx.check_outbound_context_recall = original
+
+
+# ---------------------------------------------------------------------------
 # Production-Redis (db=0) flush guard
 # ---------------------------------------------------------------------------
 # A flushdb() against db=0 -- or any flushall() -- wipes the production dataset
