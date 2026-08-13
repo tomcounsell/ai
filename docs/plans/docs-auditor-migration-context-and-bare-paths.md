@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2744
 last_comment_id: 5277752954
+revision_applied: true
+revision_applied_at: 2026-08-13T08:47:47Z
 ---
 
 # Docs Auditor: Migration-Context Hatch and Bare-Path Existence Invariant
@@ -369,13 +371,43 @@ adding a `STALE_TERMS` entry needs no hatch edit. **Keep the hatch document-scop
 spike-2 measured line-scoping as strictly worse. State that ruling in the docstring so the
 next reader does not "fix" it.
 
-**2. Reuse `_build_line_context` / `_is_documented_deletion` (#2744).** `_detect_stale_term_fixes`
-currently takes only `content` and returns whole-document regex patterns applied via
-`pattern.subn()` in `_apply_fixes_to_file` (`:621-630`). To suppress *specific occurrences*
-without changing the channel's shape, compute the suppressed line indices at detection time
-and have the regex application skip them — a line-filtered `subn` over the non-suppressed
-lines. Keep the `(pattern, replacement)` tuple shape so
-`TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`:613`) still holds.
+**2. Reuse `_build_line_context` / `_is_documented_deletion` (#2744) — suppression is
+computed at APPLY time, never at detection time.** `_detect_stale_term_fixes` currently
+takes only `content` and returns whole-document regex patterns applied via
+`pattern.subn()` in `_apply_fixes_to_file` (`:619-628`).
+
+**Detection-time line indices are unusable, and this is not a style preference.**
+`_apply_fixes_to_file` applies the literal `fixes` list *first* (`:593-618`), including the
+`new == ""` whole-line-delete sentinel that `_detect_readme_broken_entries` emits, and only
+*then* runs `regex_fixes` over the already-mutated `new_text`. Any line index computed
+against the on-disk `content` is stale the moment a line is deleted ahead of it. On a
+`README.md` where both detectors fire, the stale-term loop would suppress the *wrong* line
+— and it would do so **silently**, producing a plausible-looking wrong rewrite rather than
+an error. That is precisely the corruption class this lane exists to close, so the design
+must not reintroduce it.
+
+**Correct mechanism.** Pass a *callable* replacement to `pattern.sub()` instead of a
+string. Inside the callable, `match.string` **is** the text currently being rewritten and
+`match.start()` is the live offset into it, so fence / heading / deletion-prose context is
+re-derived from the actual apply-time text on every match. There is no index to go stale
+and nothing to thread through from detection.
+
+**Channel-shape consequences the build must honor:**
+
+- The tuple becomes `(re.Pattern, str | Callable[[re.Match], str])`. This is a **widening,
+  not a break**: `re.sub`/`re.subn` accept either, and
+  `TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`:613`) asserts the
+  *first* element is a `re.Pattern`, which is unchanged. That test must still pass
+  unmodified. Update `_apply_fixes_to_file`'s docstring to state the widened type.
+- **`subn`'s count becomes wrong and must be corrected.** A suppressed match returns
+  `match.group(0)` unchanged, but `subn` still counts it as a substitution. Taking that
+  count as-is would inflate `fixes_applied` with rewrites that never happened. The callable
+  must tally its suppressions in a closure cell, and the effective count is
+  `subn_count - suppressed_count`.
+- **Guard the all-suppressed case.** If every match is suppressed, `candidate == new_text`
+  while `count > 0`. Without a `if candidate == new_text: continue` guard, the loop runs
+  `_absent_new_path_refs` pointlessly and adds a nonzero `applied` for a no-op. Add the
+  guard.
 
 **3. Path-token suppression (#2744).** A match whose surrounding token matches a file-path
 shape (`[\w.-]*/?[\w.-]+\.(?:py|md)`) is not rewritten. This is the rule that saves
@@ -413,6 +445,18 @@ the widening's new-withhold count at zero on the current corpus, and the #2744 w
 same lane strictly *reduces* the number of proposed fixes. #2739's plan
 (`docs/plans/docs-auditor-review-gate.md`) owns #2729's escalation path and can land in
 either order. Verification row `withheld-rate-non-regression` asserts this mechanically.
+
+**Ruling — the two issues land as ONE PR closing both.** This was previously posed as an
+open question, but the plan had already foreclosed it and a late "two PRs" answer would
+invalidate the task graph. The binding reason: #2759's AC4 is a *before/after corpus
+measurement*, and it is only valid if #2744's reduction has already landed when #2759's
+widening is measured — otherwise the two changes' effects on the withheld count are
+confounded and the number proves nothing. Task 5 (`Depends On: build-hatch,
+build-invariant`), Task 7's dual `Closes #2744` / `Closes #2759`, and the
+`withheld-rate-non-regression` Verification row all encode this. If two PRs were ever
+chosen instead, that row and Task 5's dependencies would have to split into two sequential
+validation passes with separately-pinned baselines — a restructuring this plan does not
+accommodate.
 
 **Build-time constraints (operator-mandated, non-negotiable):**
 
@@ -463,6 +507,8 @@ either order. Verification row `withheld-rate-non-regression` asserts this mecha
 - [ ] `::TestExistenceInvariant::test_preexisting_absent_path_is_never_revalidated` (`:725`) — **KEEP and extend**: the additive-only property is what makes the widening free (spike-4). Add a bare-name twin.
 - [ ] `::TestWithheldBlocksAutoMerge` (`:837`) — **UPDATE**: add a bare-name withhold case proving propagation to PR body / Telegram / liveness.
 - [ ] `::TestNonMarkdownApplyGuard` (`:489`) — **KEEP**: unaffected; verify still green (the `.md`-only write guard at `:1130` is untouched).
+- [ ] `::TestStaleTermWordBoundary` — **ADD** a `README.md` line-shift fixture: a broken index entry deleted via the `new == ""` sentinel on an earlier line plus a stale term with adjacent deletion prose on a later line. Proves apply-time suppression survives the literal loop's line deletions. Assert on resulting content — detection-time indices fail this silently, not loudly.
+- [ ] `::TestWithheldRateNonRegression` — **NEW**: the `withheld-rate-non-regression` row. See "How `withheld-rate-non-regression` must be implemented" under Verification; it must drive `_apply_fixes_to_file` directly with snapshot/restore, not `audit(apply_mode="dry-run")`.
 - [ ] No `xfail`/`xpass` markers exist anywhere in `tests/unit/test_docs_auditor_substrate.py` — verified by grep at plan time. **No xfail conversions required.**
 
 ## Rabbit Holes
@@ -609,8 +655,11 @@ keep their exact signatures and their `_ok_result` return contract
       change than before (#2759 AC4).
 - [ ] Every behavioral fix has a test demonstrated **red against `main`** before the fix and
       green after; the red output is pasted into the PR description as the paper trail.
-- [ ] The diff touches **only** `reflections/docs_auditor.py` and
-      `tests/unit/test_docs_auditor_substrate.py`.
+- [ ] The diff touches **only** `reflections/docs_auditor.py`,
+      `tests/unit/test_docs_auditor_substrate.py`, and `docs/**` (the last covers Task 6's
+      `docs/features/docs-auditor.md` update). The `File fence honored` Verification row's
+      grep allowlist is the single source of truth for this criterion; do not narrow the
+      grep to exclude `docs/`, which would break Task 6.
 - [ ] Tests pass (`/do-test`, with `POPOTO_TEST_DB=9`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -661,6 +710,7 @@ keep their exact signatures and their `_ok_result` return contract
 - On branch `session/docs-auditor-migration-context-and-bare-paths`, **before any production edit**, add tests asserting the hatch fires on: backticked ``formerly `RedisJob` ``; mixed case; alias form `` `SessionLog = AgentSession` ``; arrow form `SessionLog → AgentSession`; "replacing both the earlier `SessionLog`".
 - Add a test asserting `` `models/session_log.py` `` is not rewritten to `` `models/agent_session.py` `` (both files exist — the existence invariant cannot catch this).
 - Add a test asserting a stale term inside a fenced code block produces no fix.
+- **Add the line-shift fixture (critique blocker-adjacent).** A `README.md` carrying *both* a broken index entry that `_detect_readme_broken_entries` deletes via the `new == ""` sentinel on an **earlier** line, *and* a stale term with adjacent deletion prose on a **later** line. Assert the later term is still correctly suppressed after the earlier line is deleted. Detection-time index suppression fails this by silently suppressing the wrong line rather than raising, so the assertion must be on the resulting file content, not on an exception.
 - Run `POPOTO_TEST_DB=9 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -k "StaleTerm" -q` and **capture the FAILING output verbatim** into the PR description.
 - Do not modify `reflections/docs_auditor.py` in this task.
 
@@ -687,9 +737,10 @@ keep their exact signatures and their `_ok_result` return contract
 - **Parallel**: false
 - Add `_normalize_prose` (strip backticks, collapse whitespace, lowercase). Use it for cue matching only, never for output.
 - Replace the six literal arms at `:520-527` with a generated, case-insensitive cue list per `(old_term, new_term)`. Keep the hatch **document-scoped**; record that ruling and spike-2's measurement in the docstring.
-- Wire `_build_line_context` / `_is_documented_deletion` (`:689-747`) into stale-term detection so fenced and deletion-context occurrences are suppressed.
+- Wire `_build_line_context` / `_is_documented_deletion` (`:689-747`) into stale-term suppression **at apply time**, via a callable replacement passed to `pattern.sub()`. Re-derive context from `match.string` and `match.start()` on every match. **Do not precompute line indices at detection time** — the literal `fixes` loop runs first and its `new == ""` line-delete sentinel invalidates them silently (see Technical Approach step 2).
 - Add path-token suppression: a match inside a `[\w.-]*/?[\w.-]+\.(?:py|md)` token is never rewritten.
-- Preserve the `(re.Pattern, str)` channel shape — `test_fixes_travel_on_the_regex_channel` must pass unmodified.
+- Correct the substitution count: a suppressed match still increments `subn`'s counter, so tally suppressions in a closure cell and report `subn_count - suppressed_count` as `applied`. Add a `if candidate == new_text: continue` guard for the all-suppressed case.
+- Widen the channel's second element to `str | Callable[[re.Match], str]` and say so in `_apply_fixes_to_file`'s docstring. This is a widening, not a break — `test_fixes_travel_on_the_regex_channel` asserts only that the first element is a `re.Pattern` and must pass unmodified.
 - Rewrite the `_detect_stale_term_fixes` docstring: the "stops short of never rewrites a path" sentence is now false.
 - **FILE FENCE**: touch only `reflections/docs_auditor.py`. If anything else seems required, stop and report a blocker.
 
@@ -716,7 +767,9 @@ keep their exact signatures and their `_ok_result` return contract
 - **Parallel**: false
 - Confirm `git diff --name-only main...HEAD` lists exactly `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`.
 - Run the detector + apply over the three named docs in a scratch copy; assert zero byte changes for the first two and at most one occurrence for the third.
-- Measure withheld counts in dry-run over `docs/features/*.md` before (at `main`) and after; assert after ≤ before.
+- Land `TestWithheldRateNonRegression` (the `withheld-rate-non-regression` Verification row). **`audit(apply_mode="dry-run")` cannot be used** — see the row's note; `_apply_fixes_to_file` is gated on `apply_mode == "apply"` (`:1130`), so dry-run reports `fixes_withheld == 0` unconditionally. Drive `_apply_fixes_to_file` directly, per the row.
+- Measure the withheld count over `docs/features/*.md` at `main` first, pin it in the test as `MAIN_WITHHELD_BASELINE` with a comment recording the SHA it was measured at, then assert the post-change count is `<=` it.
+- **Qualitative check — confirm the quieter detector is quiet, not dead.** The detector is deliberately made to propose fewer fixes, so the daily rotation's auto-fix volume visibly drops after this ships. Eyeball the diff the auditor would now produce over the three named corpus docs and confirm what *survives* is genuine stale-term modernization rather than the detector having gone decorative. Pair it with the `Detector still detects` Verification row (which proves a no-migration-context doc still queues a fix) so the drop is attributable to suppression working, not to detection breaking.
 - Confirm each red test from tasks 1 and 2 now passes, and that its captured red output is in the PR description.
 - Run the full `POPOTO_TEST_DB=9 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q`.
 
@@ -755,18 +808,47 @@ keep their exact signatures and their `_ok_result` return contract
 | No sweeper-region edits (anti-criterion) | `git diff main...HEAD -- reflections/docs_auditor.py \| grep -c '_pr_is_auto_merge_eligible\|_push_branch_and_pr\|_commit_current_branch\|run_docs_branch_sweeper'` | match count == 0 |
 | File fence honored (anti-criterion) | `git diff --name-only main...HEAD \| grep -v -E '^(reflections/docs_auditor\.py\|tests/unit/test_docs_auditor_substrate\.py\|docs/)' \| wc -l \| tr -d ' '` | output contains 0 |
 | No swallowed exceptions introduced (anti-criterion) | `git diff main...HEAD -- reflections/docs_auditor.py \| grep '^+' \| grep -c 'except Exception: *pass'` | match count == 0 |
+| `withheld-rate-non-regression` (#2759 AC4, #2729 non-blocking ruling) | `POPOTO_TEST_DB=9 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -k WithheldRateNonRegression -q` | exit code 0 |
 | Sibling-pattern reason recorded | `grep -c '2759' reflections/docs_auditor.py` | output > 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_docs_auditor_substrate.py` | exit code 1 |
+
+### How `withheld-rate-non-regression` must be implemented
+
+This row is the mechanical proof behind two of the plan's rulings (#2759 AC4, and "this
+lane does not block on #2729"), so its measurement path has to actually reach the guard it
+claims to measure. Two ways to get it wrong, both of which report a reassuring **zero**
+regardless of the change's real effect:
+
+1. **Calling `_detect_stale_term_fixes` alone** (the style the `popoto doc clean` and
+   `migration-audit doc clean` rows use) never reaches `_absent_new_path_refs`.
+   `fixes_withheld` is populated only by `_apply_fixes_to_file`'s `withheld` list threaded
+   through `_ok_result`.
+2. **Calling `audit(..., apply_mode="dry-run")`** — the obvious fix for (1) — is *also*
+   wrong. `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `:1130`, so in
+   dry-run it never runs and `withheld` stays empty. Verified against source during this
+   revision.
+
+**The mechanism that works.** Drive `_apply_fixes_to_file` directly, against the real
+`repo_root` (the existence oracle and the `git ls-files` basename index both need a real
+git checkout — a `tmp_path` mirror makes every reference read as absent and the measurement
+becomes meaningless). Because that function writes, the test must snapshot each
+`docs/features/*.md` before the call and restore it in a `finally`, then assert
+`git diff --quiet -- docs/features/` to prove the corpus was left pristine.
+
+Live as `tests/unit/test_docs_auditor_substrate.py::TestWithheldRateNonRegression`, which
+keeps it inside the file fence. The `main` baseline is measured once during Task 5 and
+pinned in the test as `MAIN_WITHHELD_BASELINE` with a comment naming the SHA it came from;
+the assertion is `after <= MAIN_WITHHELD_BASELINE`.
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency | The plan twice promises an automated check named `withheld-rate-non-regression` (as the mechanism backing the "does not block on #2729" ruling, and as the proof for Success Criterion #2759 AC4), but no such row exists in the Verification table. The only description is prose inside Task 5 — a task narrative, not a reproducible command. | pending | Add a Verification row named `withheld-rate-non-regression` running a two-checkout comparison. It MUST call `audit(..., apply_mode="dry-run")` per file, not `_detect_stale_term_fixes` alone: `fixes_withheld` is only populated by `_apply_fixes_to_file`'s `withheld` list threaded through `_ok_result`, so calling the detector directly never reaches `_absent_new_path_refs` and would silently report zero regardless of the widening's effect. |
-| CONCERN | Risk & Robustness | The line-filtered `subn` design assumes suppression line indices computed at detection time (against `content` as read from disk) stay valid at apply time. They do not: `_apply_fixes_to_file` (`:593-618`) applies literal `fixes` first — including the `new == ""` whole-line-delete sentinel used by `_detect_readme_broken_entries` — and only then runs `regex_fixes` over the already-mutated `new_text` (`:619-628`). On a `README.md` where both detectors run, a line deletion shifts every subsequent line number before the stale-term loop runs. | pending | Derive fence/heading/deletion-prose context from the text actually being matched at apply time — e.g. `pattern.sub(callable, new_text)` where the callable re-derives context from `new_text` and `match.start()` — rather than threading precomputed indices from detection-time `content`. Add a `README.md` fixture with a broken index entry (deleted via the `new == ""` sentinel) on an earlier line and a stale term with adjacent deletion prose on a later line; index-based suppression fails this silently (wrong line suppressed) rather than raising, so it needs an explicit assertion. |
-| CONCERN | History & Consistency, Scope & Value | Open Question 3 ("one PR or two? Confirm.") is posed as unresolved, but the plan has already foreclosed it: the Freshness Check states AC4's corpus measurement "depends on #2744's reduction landing first", Task 5 carries `Depends On: build-hatch, build-invariant`, and Task 7 hard-codes `Closes #2744` and `Closes #2759` in one PR body. A late "two PRs" answer would invalidate the task graph. | pending | Move the one-PR decision out of Open Questions into a fourth Ruling in Technical Approach, stating the reason: AC4's before/after corpus measurement is only valid if #2744's reduction has landed when #2759's widening is measured. If two PRs were ever chosen instead, Task 5's `Depends On` and the `withheld-rate-non-regression` row must split into two sequential validation passes — a restructuring the plan does not currently accommodate. |
-| CONCERN | History & Consistency | Success Criteria asserts the diff "touches **only** `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`", but Task 6 mandates edits to `docs/features/docs-auditor.md` and the plan's own `File fence honored` Verification row already whitelists `docs/`. The criterion as written is falsified by the plan's own required deliverable, and Task 6 has to explain the discrepancy away in a parenthetical. | pending | Keep the Verification row's grep allowlist as the single source of truth (`^(reflections/docs_auditor\.py`, `tests/unit/test_docs_auditor_substrate\.py`, `docs/)`) and reword the Success Criteria bullet to cite that same set: "touches only `reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`, and `docs/**`". Do not narrow the grep to match the prose — that would break Task 6. |
-| CONCERN | Scope & Value | Every Success Criterion is a technical assertion (byte diffs, regex `fullmatch`, withheld counts, exit codes). The detector is deliberately made quieter, so the daily rotation's auto-fix volume visibly drops after this ships, and nothing confirms that drop reads as intended rather than as the auditor having broken. | pending | Extend Task 5 (`validate-corpus`, `fence-validator`) to build the `run_docs_auditor()` `findings`/`summary` output (or its dry-run equivalent) over the three named docs and assert the summary reads as a clean-corpus result rather than an error or empty-result string. Cheap: that task already runs the detector over the same three docs. Cross-reference the `docs/features/docs-auditor.md` note so the reduced fix rate is traceable to this change. |
+| BLOCKER | History & Consistency | The plan twice promises an automated check named `withheld-rate-non-regression` (as the mechanism backing the "does not block on #2729" ruling, and as the proof for Success Criterion #2759 AC4), but no such row exists in the Verification table. The only description is prose inside Task 5 — a task narrative, not a reproducible command. | **ADDRESSED** — Verification row `withheld-rate-non-regression` added, plus a dedicated "How ... must be implemented" subsection under Verification and a new `::TestWithheldRateNonRegression` row in Test Impact. **Correction to the critic's prescription:** `audit(..., apply_mode="dry-run")` does NOT work either — `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `:1130`, so dry-run leaves `withheld` empty and reports zero for the same reason the detector-only style does. Verified against source. The row drives `_apply_fixes_to_file` directly against the real `repo_root` with snapshot/restore. | Add a Verification row named `withheld-rate-non-regression` running a two-checkout comparison. It MUST call `audit(..., apply_mode="dry-run")` per file, not `_detect_stale_term_fixes` alone: `fixes_withheld` is only populated by `_apply_fixes_to_file`'s `withheld` list threaded through `_ok_result`, so calling the detector directly never reaches `_absent_new_path_refs` and would silently report zero regardless of the widening's effect. |
+| CONCERN | Risk & Robustness | The line-filtered `subn` design assumes suppression line indices computed at detection time (against `content` as read from disk) stay valid at apply time. They do not: `_apply_fixes_to_file` (`:593-618`) applies literal `fixes` first — including the `new == ""` whole-line-delete sentinel used by `_detect_readme_broken_entries` — and only then runs `regex_fixes` over the already-mutated `new_text` (`:619-628`). On a `README.md` where both detectors run, a line deletion shifts every subsequent line number before the stale-term loop runs. | **ADDRESSED** — Technical Approach step 2 rewritten: suppression is computed at APPLY time via a callable replacement passed to `pattern.sub()`, re-deriving context from `match.string` / `match.start()`. No index exists to go stale. Task 3 updated. Two consequences the critic did not name are now specified: `subn`'s count over-reports because suppressed matches still count as substitutions (tally in a closure cell, report `subn_count - suppressed_count`), and the all-suppressed case needs a `candidate == new_text` guard. The `README.md` line-shift fixture is added to Task 1 and Test Impact, asserting on content rather than an exception. | Derive fence/heading/deletion-prose context from the text actually being matched at apply time — e.g. `pattern.sub(callable, new_text)` where the callable re-derives context from `new_text` and `match.start()` — rather than threading precomputed indices from detection-time `content`. Add a `README.md` fixture with a broken index entry (deleted via the `new == ""` sentinel) on an earlier line and a stale term with adjacent deletion prose on a later line; index-based suppression fails this silently (wrong line suppressed) rather than raising, so it needs an explicit assertion. |
+| CONCERN | History & Consistency, Scope & Value | Open Question 3 ("one PR or two? Confirm.") is posed as unresolved, but the plan has already foreclosed it: the Freshness Check states AC4's corpus measurement "depends on #2744's reduction landing first", Task 5 carries `Depends On: build-hatch, build-invariant`, and Task 7 hard-codes `Closes #2744` and `Closes #2759` in one PR body. A late "two PRs" answer would invalidate the task graph. | **ADDRESSED** — promoted to a fourth Ruling in Technical Approach with the binding reason (AC4's before/after measurement is confounded if the two changes land separately), and Open Question 3 replaced by a pointer to it. | Move the one-PR decision out of Open Questions into a fourth Ruling in Technical Approach, stating the reason: AC4's before/after corpus measurement is only valid if #2744's reduction has landed when #2759's widening is measured. If two PRs were ever chosen instead, Task 5's `Depends On` and the `withheld-rate-non-regression` row must split into two sequential validation passes — a restructuring the plan does not currently accommodate. |
+| CONCERN | History & Consistency | Success Criteria asserts the diff "touches **only** `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`", but Task 6 mandates edits to `docs/features/docs-auditor.md` and the plan's own `File fence honored` Verification row already whitelists `docs/`. The criterion as written is falsified by the plan's own required deliverable, and Task 6 has to explain the discrepancy away in a parenthetical. | **ADDRESSED** — Success Criteria bullet reworded to `reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`, and `docs/**`, naming the `File fence honored` grep as the single source of truth and explicitly forbidding narrowing the grep to match the old prose. | Keep the Verification row's grep allowlist as the single source of truth (`^(reflections/docs_auditor\.py`, `tests/unit/test_docs_auditor_substrate\.py`, `docs/)`) and reword the Success Criteria bullet to cite that same set: "touches only `reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`, and `docs/**`". Do not narrow the grep to match the prose — that would break Task 6. |
+| CONCERN | Scope & Value | Every Success Criterion is a technical assertion (byte diffs, regex `fullmatch`, withheld counts, exit codes). The detector is deliberately made quieter, so the daily rotation's auto-fix volume visibly drops after this ships, and nothing confirms that drop reads as intended rather than as the auditor having broken. | **ADDRESSED** — Task 5 gains a qualitative check: eyeball the diff the auditor would produce over the three named docs and confirm surviving fixes are genuine modernization, paired with the existing `Detector still detects` row so the volume drop is attributable to suppression working rather than detection breaking. | Extend Task 5 (`validate-corpus`, `fence-validator`) to build the `run_docs_auditor()` `findings`/`summary` output (or its dry-run equivalent) over the three named docs and assert the summary reads as a clean-corpus result rather than an error or empty-result string. Cheap: that task already runs the detector over the same three docs. Cross-reference the `docs/features/docs-auditor.md` note so the reduced fix rate is traceable to this change. |
 
 ---
 
@@ -778,17 +860,22 @@ measured evidence rather than judgement calls: ambiguity passes rather than with
 recorded in code; and the lane does not block on #2729 because the widening's measured
 new-withhold count is zero (spike-4).
 
-Remaining questions for the supervisor:
+**Question 3 (one PR or two) is resolved** — promoted to a Ruling in Technical Approach per
+the critique. One PR closing both, because AC4's before/after corpus measurement is only
+valid if #2744's reduction has landed when #2759's widening is measured.
+
+The two remaining questions carry chosen defaults; the build proceeds on them unless the
+supervisor overrides.
 
 1. **Is the asymmetry ruling correct?** This plan deliberately errs toward *not*
    rewriting: a surviving stale term is accepted so that a falsified sentence becomes
    impossible. If the docs corpus is judged to need aggressive term modernization more than
    it needs prose safety, the hatch design inverts and this plan is wrong.
+   **Default: yes, the asymmetry stands.** For an unreviewed autonomous committer, a
+   surviving stale term is cosmetic while a falsified sentence is a corruption a human
+   later trusts. Reversible — it is a cue-set width, not a structural choice.
 2. **Is the single accepted residual acceptable?**
    `docs/guides/summarizer-output-audit.md:68` will still be rewritten
    (*"fixing RedisJob refs"* → *"fixing AgentSession refs"* in a quoted transcript). The
-   alternative is a "quoted history" detector, which is open-ended. Accept 17 → 1, or
-   spend more?
-3. **Should the two issues land as one PR or two?** They are one lane, one plan, one file
-   region, and the corpus measurement for #2759's acceptance criterion 4 depends on
-   #2744's reduction landing first. This plan assumes **one PR closing both**. Confirm.
+   alternative is a "quoted history" detector, which is open-ended.
+   **Default: accept 17 → 1**, tracked as a follow-up comment on #2744 per the No-Gos.
