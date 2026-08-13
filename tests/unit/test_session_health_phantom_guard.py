@@ -333,24 +333,26 @@ class TestCleanupCorruptedAgentSessions:
         pipe.sadd("$Class:AgentSession", drifted_key)
         pipe.execute()
 
-        # Force the cleanup to flag the record as corrupt by stubbing save().
-        # Without this, our drifted record is otherwise valid; the production
-        # case had `response_delivered_at` as an unbound Field descriptor that
-        # makes save() raise. We don't need to reproduce that exact failure
-        # — only the post-flag delete path.
-        original_save = AgentSession.save
+        # Force the cleanup to flag the record as corrupt by stubbing
+        # is_valid() (Check 2's classification predicate as of #2660 -- it
+        # replaced the save() probe). Without this, our drifted record is
+        # otherwise valid; the production case had `response_delivered_at`
+        # as an unbound Field descriptor that makes validation fail. We
+        # don't need to reproduce that exact failure — only the post-flag
+        # delete path.
+        original_is_valid = AgentSession.is_valid
 
-        def _failing_save(self):
+        def _failing_is_valid(self, *args, **kwargs):
             if getattr(self, "session_id", None) == "drift-test":
                 raise ValueError("validation invalid: simulated drifted record")
-            return original_save(self)
+            return original_is_valid(self, *args, **kwargs)
 
-        AgentSession.save = _failing_save
+        AgentSession.is_valid = _failing_is_valid
         try:
             with caplog.at_level(logging.WARNING, logger="agent.session_health"):
                 result = cleanup_corrupted_agent_sessions()
         finally:
-            AgentSession.save = original_save
+            AgentSession.is_valid = original_is_valid
 
         assert isinstance(result, dict)
         assert result["corrupted"] == 1, "Drifted record must be counted as cleaned"
