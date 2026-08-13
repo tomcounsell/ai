@@ -109,6 +109,8 @@ reflections and gating); proceeding with codebase context.
    records an outbound expectation on the PM's bound Job:
    `{direction: "outbound", holder: <pm session id>, owner: <lane session id or slug>,
    what: <spawn instruction summary>}` — via the same `_write_goal_data` chokepoint.
+   PM-authored entries are canonical; the spawn write is a placeholder null-fallback
+   (owner ruling 2026-08-13), refined by the PM under the prime's nudge.
 2. **Entry (inbound):** the promise gate (`bridge/promise_gate.py`) stays advisory. When an
    outbound message reads like an undischarged obligation, the advisory tells the PM to
    revise or deliberately record an inbound expectation via
@@ -191,12 +193,18 @@ reflections runner are already required by the repo).
 - **Rest derivation:** `sweep_to_rest` gains one clause: skip Jobs with open expectations.
   Age still gates rest for expectation-less Jobs (hazard 1 mitigation: under-recording
   degrades to today's behavior, never to a false "done").
-- **Spawn enforcement point:** the session-create core records the outbound expectation
-  mechanically when the creating PM's Job is resolvable, and the PM prime mandates
-  supplying it. This is bookkeeping of a deliberate PM act (the spawn), not a
-  classifier-inferred write; the 2026-07-31 advisory-only ruling governs message
-  classification, which stays advisory (see Open Questions #1 for the owner to confirm
-  this interpretation).
+- **Spawn enforcement point (SETTLED — owner ruling 2026-08-13):** PM-authored is
+  canonical, with a nudge to complete it; the spawn core stamps the mechanical form
+  **only as a null-fallback**. When a lane is created and no PM-authored outbound
+  expectation exists yet on the bound Job, the session-create core writes a mechanical
+  placeholder entry (owner = lane id/slug, what = spawn-instruction summary, marked
+  placeholder) so the obligation is never unrecorded; the PM prime's nudge drives
+  authoring/refining the real entry, exactly mirroring the router's mechanical
+  `Job.goal` placeholder + PM-authored goal v1 pattern. This satisfies both the
+  2026-07-31 advisory-only ruling (no classifier-driven writes; the fallback is
+  bookkeeping of a deliberate spawn act) and the AC's "enforcement point rather than
+  discretion" (the fallback guarantees the predecessor's zero-write failure cannot
+  recur).
 - **Advisory rewrite (inbound):** `build_promise_advisory` and the PM prime speak
   expectations; the issue-comment grammar (bare reassurance leaks inbound; third-party
   future leaks outbound) is documented as what the advisory should recognize — **no new
@@ -321,8 +329,9 @@ tick → owner gone → git/GitHub check → (shipped? steer PM with PR link for
 ### Risk 1: Under-recording makes "at rest" lie (issue hazard 1)
 **Impact:** an unrecorded lane's Job rests by age and reads as done; the reconciler never
 looks.
-**Mitigation:** rest stays age-gated (never instant-on-empty); spawn-time recording is
-mechanical at the session-create chokepoint, not discretionary; a drift advisory (PM has
+**Mitigation:** rest stays age-gated (never instant-on-empty); the spawn-time
+null-fallback at the session-create chokepoint guarantees an obligation is recorded even
+when the PM has not yet authored one (owner ruling 2026-08-13); a drift advisory (PM has
 live children but its Job has no open outbound expectation) surfaces on the health cadence
 to the operator surface. Test: a Job with no expectations is never asserted complete by any
 new code path.
@@ -403,10 +412,11 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 - `python -m tools.job_tool` gains `expectation-add` (`--direction`, `--owner`, `--text`),
   `expectation-remove` (`--expectation-id`), and `show`/`list` output switching to
   expectations. Same CLI surface the PM already uses — no new `pyproject.toml` entry point.
-- `tools/valor_session.py` create core records the outbound expectation (new
-  `--expect-what` optional override; defaults to the session's initial instruction
-  summary) when the creating context resolves a bound Job; silently skips (logged) when no
-  Job resolves — never blocks session creation.
+- `tools/valor_session.py` create core records the outbound expectation as a
+  null-fallback placeholder (new `--expect-what` optional PM-authored override; the
+  fallback `what` is the session's initial instruction summary, entry marked placeholder)
+  only when no PM-authored outbound expectation already covers the lane on the bound Job;
+  silently skips (logged) when no Job resolves — never blocks session creation.
 - PM prime (`.claude/skills/roles/prime-pm-role/SKILL.md`) updated: goal-authoring mandate
   extends to expectation hygiene (record on spawn if the mechanical write was skipped;
   discharge on delivery); promise vocabulary replaced.
@@ -499,8 +509,11 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 - **Assigned To**: reconciler-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- `tools/valor_session.py` create-core expectation write (skip-and-log on no Job; never
-  block creation); sweep other eng-child creation sites.
+- `tools/valor_session.py` create-core null-fallback expectation write per the owner
+  ruling (placeholder only when no PM-authored entry covers the lane; skip-and-log on no
+  Job; never block creation); sweep other eng-child creation sites.
+- PM prime nudge: author/refine placeholder outbound expectations (mirrors the
+  goal-authoring mandate keyed on `goal_is_placeholder()`).
 - `bridge/promise_gate.py` advisory copy → expectations (no verdict/regex changes).
 - `MessageDraft.expectations` → `open_questions` across drafter/redundancy
   filter/output_handler/session_completion.
@@ -557,19 +570,25 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 
 ---
 
+## Owner Rulings (settled — do not re-litigate in critique)
+
+1. **Spawn-time expectation write (ruled 2026-08-13):** "Keep it PM authored and the PM
+   can be nudged to complete it. If the PM hasn't yet decided and you need to fall back
+   for a null variable, use whatever would have been the mechanical solution."
+   Recorded interpretation: PM-authored is canonical with a nudge/enforcement point; the
+   spawn core stamps the mechanical placeholder form **only as a null-fallback** when no
+   PM-authored outbound expectation exists at lane creation, so the obligation is never
+   unrecorded and the PM's nudge drives authoring/refining the real entry — the same
+   pattern as the router's mechanical `Job.goal` placeholder + PM-authored goal v1.
+   Consistent with the 2026-07-31 advisory-only ruling (no classifier-driven writes) and
+   the AC's "enforcement point rather than discretion."
+
 ## Open Questions
 
-1. **Spawn-time mechanical write vs. the advisory-only ruling.** This plan reads the
-   2026-07-31 "no mechanical trigger writes an obligation" ruling as governing
-   *classifier-inferred* obligations (message text → promise), and treats spawn-time
-   recording as bookkeeping of a deliberate PM act — the issue's own AC requires "an
-   enforcement point rather than discretion." Confirm this interpretation, or direct that
-   the spawn write also be advisory (PM-authored on a nudge), accepting a higher
-   under-recording risk against the measured zero-write base rate of the predecessor field.
-2. **Naming: `expectation-add`/`expectation-remove` vs. `expect`/`discharge`** in
+1. **Naming: `expectation-add`/`expectation-remove` vs. `expect`/`discharge`** in
    `job_tool` — plan uses the former for symmetry with the retired promise verbs; cheap to
    change now, expensive later.
-3. **Does the at-rest operator backstop survive?** With status chokepoint-maintained, the
+2. **Does the at-rest operator backstop survive?** With status chokepoint-maintained, the
    old intersection is structurally empty; this plan replaces it with the reconciler's
    gone-owner surface and deletes `_check_jobs_at_rest_with_open_promises`'s query form.
    Confirm no residual operator report depends on the old shape.
