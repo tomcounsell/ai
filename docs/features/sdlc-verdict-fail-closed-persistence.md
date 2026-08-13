@@ -71,9 +71,8 @@ PR head:
 
 1. **No `verdict record` call at all** — `latest_review_verdict: null` after
    an APPROVED review; the router had nothing to consume.
-2. **Missing freshness trailer** — the recorded verdict lacked the required
-   `REVIEW_CONTEXT head_sha=<40-hex>` trailer, so the merge predicate treated
-   it as stale against the PR head.
+2. **Missing head-SHA attribution** — the recorded verdict named no head
+   commit, so the merge predicate treated it as stale against the PR head.
 3. **REVIEW stage marker never set to `completed`** — even with a valid
    verdict, the dispatch table couldn't route to DOCS.
 
@@ -91,29 +90,41 @@ New subparser on `tools/sdlc_verdict.py` (logic lives in
 `verdict` → `tools.sdlc_verdict` mapping in `scripts/sdlc-tool`'s
 `ALLOWED_SUBCOMMANDS` — no allowlist edit required.
 
-Given `--pr`, `--issue-number`, `--verdict`, `--blockers`, `--tech-debt`,
-`--run-id`, it:
+Given `--pr`, `--issue-number`, `--verdict`, `--blocker-count`,
+`--tech-debt-count`, `--run-id`, it:
 
 1. Resolves the PR's head SHA via `gh pr view <pr> --json headRefOid -q .headRefOid`.
-2. Records the verdict via the existing single-writer `record_verdict`, with
-   a `REVIEW_CONTEXT head_sha=<40-hex>` trailer appended if not already
-   present (idempotent).
+2. Records the verdict via the existing single-writer `record_verdict`: the
+   bare verdict token in `verdict`, and the head SHA in its own `head_sha`
+   field on the same record (#2769). A caller that passes an already-trailered
+   verdict string has the SHA lifted into the field and stripped from the
+   token, so it is stored exactly once.
 3. On the APPROVED path, writes the REVIEW `completed` stage marker.
 4. Reads all three back through the shared `check_review_persistence()` and
    raises `ReviewFinalizeError` — non-zero exit, named reason on stderr — if
    any of the three didn't land.
 
+`finalize` is self-verifying but deliberately **not** transactional: the
+verdict is written before the marker is attempted, the ordering #2415/#2577
+hardened the read sites around. When the marker write is refused after the
+verdict has landed, the error says exactly that — it names the verdict and head
+SHA as persisted and the marker as missing, and re-running the identical
+command is idempotent (#2740). `tools/sdlc_stage_marker.py` never narrates that
+split itself: it reports only that the marker write was refused and points at
+`sdlc-tool stage-query`, because it cannot see writes its caller already
+committed.
+
 `finalize` is state-mutating and requires `--run-id` (inherits the existing
 `RUN_ID_REQUIRED` gate + heal path). It collapses the previous hand-run
 3-call sequence (`verdict record`, `stage-marker REVIEW completed`, `verdict
-get` readback) into one operation that cannot partially complete.
+get` readback) into one self-verifying operation.
 
 **Named error taxonomy** (mirrors the existing WS3c/WS-D gate vocabulary):
 
 | Error | Meaning |
 |-------|---------|
 | `REVIEW_VERDICT_MISSING` | No readable REVIEW verdict for the issue. |
-| `REVIEW_TRAILER_MISSING` | Recorded verdict lacks a well-formed `REVIEW_CONTEXT head_sha=<40-hex>` trailer matching the PR's current head (or the head SHA itself couldn't be resolved via `gh`). |
+| `REVIEW_TRAILER_MISSING` | The recorded verdict resolves to no head SHA matching the PR's current head (or the head SHA itself couldn't be resolved via `gh`). |
 | `REVIEW_MARKER_INCOMPLETE` | REVIEW stage marker is not `completed`. |
 | `NO_CONFIRMED_MARKER_WRITE` | The run recorded zero confirmed `ok` stage-marker writes (issue #2451; see below). |
 
@@ -183,18 +194,15 @@ never disagree.
 
 `tools/sdlc_stage_marker.py::_review_trailer_present()` extends the existing
 WS3c completion-marker gate: a REVIEW `completed` marker on the APPROVED path
-now also requires a well-formed `REVIEW_CONTEXT head_sha=<40-hex>` trailer on
-the recorded verdict (reusing the shared `_HEAD_SHA_TRAILER_RE`, hoisted from
-`tools/merge_predicate.py` into `tools/_sdlc_utils.py` as the single
-definition). It closes failure #2 at the same gate that already closes the
+now also requires that the recorded verdict resolve to a head SHA, read via
+the shared `head_sha_of_record()` in `tools/_sdlc_utils.py`. It closes failure #2 at the same gate that already closes the
 #1642 verdict/marker desync — the prior gate (`_review_verdict_readable`) was
 truthiness-only, so an APPROVED verdict with no trailer still read as
 "present" and let the marker through.
 
 Non-APPROVED verdicts (CHANGES REQUESTED, BLOCKED_ON_CONFLICT, PR_CLOSED)
-are exempt — they legitimately carry no head_sha trailer and leave the
-marker `in_progress` by contract; the trailer conjunct is a pass-through for
-them.
+are exempt — they legitimately attribute to no head SHA and leave the marker
+`in_progress` by contract; the head-SHA conjunct is a pass-through for them.
 
 ### The backfill write path is now closed too (issue #2305 defect 4)
 

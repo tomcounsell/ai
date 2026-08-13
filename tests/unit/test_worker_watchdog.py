@@ -25,6 +25,25 @@ import monitoring.worker_watchdog as wwd
 
 # --- Fixtures -----------------------------------------------------------------
 
+# Several tests here call ``importlib.reload(wwd)`` to observe an import-time
+# decision. A reload re-evaluates every module-level constant against the env
+# in force at that moment, and nothing puts them back: HEARTBEAT_THRESHOLD was
+# left at 90 for the rest of the worker, changing the behavior of every later
+# test that reads it. Which tests those are depends on `--dist=loadfile`
+# scheduling, so the damage rotated run to run (#2628). Restore the module-level
+# scalars after every test in this file; the conftest identity guard separately
+# repairs the objects other modules hold by name.
+_WWD_MODULE_SCALARS = ("HEARTBEAT_THRESHOLD",)
+
+
+@pytest.fixture(autouse=True)
+def _restore_worker_watchdog_constants():
+    """Put module-level constants back after a test reloads the module."""
+    original = {name: getattr(wwd, name) for name in _WWD_MODULE_SCALARS}
+    yield
+    for name, value in original.items():
+        setattr(wwd, name, value)
+
 
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch):

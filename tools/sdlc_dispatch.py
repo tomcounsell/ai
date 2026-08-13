@@ -45,15 +45,18 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+# The lease helpers are reached through the MODULE object, never snapshotted
+# into these globals with a `from`-import: a snapshot taken during a lazy
+# first import that lands inside an active `unittest.mock` patch freezes the
+# MagicMock here for the life of the process and silently inverts every lease
+# check in this file (#2469, #2637). Guarded by
+# tests/unit/test_sdlc_lease_helper_binding.py.
+from tools import _sdlc_utils
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import (
     find_session as _find_session,
 )
-from tools._sdlc_utils import (
-    is_pipeline_ledger,
-    resolve_ledger_lease,
-    revalidate_ledger_lease,
-)
+from tools._sdlc_utils import is_pipeline_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +200,7 @@ def _cli_record(args) -> dict:
     ``{"ok": False, "history_length": 0, "reason": ...}`` -- LOUD, matching
     the shape SKILL.md already documents for ``ISSUE_LOCKED``.
     """
-    target_repo, lease_error = resolve_ledger_lease(args.issue_number, args.run_id)
+    target_repo, lease_error = _sdlc_utils.resolve_ledger_lease(args.issue_number, args.run_id)
     if lease_error is not None:
         logger.debug(
             "sdlc_dispatch: lease invalid for issue #%s (reason=%s) -- refusing dispatch record",
@@ -214,7 +217,7 @@ def _cli_record(args) -> dict:
 
     # TOCTOU close (Risk 5): re-validate the lease non-peek immediately
     # before the actual write.
-    if not revalidate_ledger_lease(args.issue_number, args.run_id, target_repo):
+    if not _sdlc_utils.revalidate_ledger_lease(args.issue_number, args.run_id, target_repo):
         logger.debug(
             "sdlc_dispatch: lease for issue #%s was taken by a foreign run between "
             "resolve and write -- refusing dispatch record",

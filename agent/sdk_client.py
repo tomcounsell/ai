@@ -470,8 +470,10 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug (Dev sessions use session.slug, legacy uses slug)
-        slug = getattr(session, "slug", None) or getattr(session, "slug", None)
+        # Work item slug. Deliberately no fallback: the arm that used to sit
+        # here read `work_item_slug`, which #609 reduced to a property
+        # aliasing `slug`, so any fallback resolves to the same value (#2756).
+        slug = getattr(session, "slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 
@@ -1249,7 +1251,7 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
             capture_output=True,
             text=True,
             cwd=str(repo_root),
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
         current_branch = result.stdout.strip()
     except Exception as e:
@@ -1286,14 +1288,14 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
             capture_output=True,
             text=True,
             cwd=str(repo_root),
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
         staged_result = subprocess.run(
             ["git", "diff", "--name-only", "--cached"],
             capture_output=True,
             text=True,
             cwd=str(repo_root),
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
         all_changed = set(
             diff_result.stdout.strip().split("\n") + staged_result.stdout.strip().split("\n")

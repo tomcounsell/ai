@@ -163,6 +163,30 @@ class PipelineLedger(Model):
         pr_number: The PR number resolved for this issue's work, or
             ``None``. Field-backed, single-writer, mirrors
             ``AgentSession.pr_number``.
+        slug: The lane's single identity -- the name of its branch, its
+            worktree, and its task list (issues #2735/#2718). **Pure
+            identity.** Written once at lane start by
+            ``tools/sdlc_session_ensure.py::ensure_session`` via
+            ``tools/lane_identity.py::resolve_lane_slug``, which is also
+            the only reader-facing resolver; every consumer reads it and
+            nothing derives it. Self-healing is conditional-on-empty: the
+            writer re-reads immediately before writing and writes only if
+            still blank, so a recorded value is **never overwritten** and
+            the write needs **no lease** (an identity write is not a stage
+            transition; gating it on the lease would reintroduce the
+            deadlock class #2026 closed). ``None`` for a lane that started
+            before this field existed -- consumers no-op on ``None`` rather
+            than probing a guessed branch name.
+
+            This is **not** a liveness signal, and no holder/pid/host/
+            heartbeat/last_seen companion field belongs here. Liveness lives
+            with the issue lease; #2446/#2451 came from spreading liveness
+            inference across extra fields, and this record exists to hold
+            identity only.
+
+            Both slug shapes are real: an issue-derived lane name and a
+            human-named one (a plan doc may carry a different name and is
+            linked by ``tracking:`` frontmatter, not by string equality).
 
     No TTL (see module docstring) -- this record must outlive every
     AgentSession lifecycle event, indefinitely.
@@ -173,6 +197,7 @@ class PipelineLedger(Model):
     issue_number = IntField(null=True)
     stage_states_json = Field(default="{}")
     pr_number = IntField(null=True)
+    slug = Field(null=True)
 
     @classmethod
     def get_or_create(cls, target_repo: str, issue_number: int) -> PipelineLedger:

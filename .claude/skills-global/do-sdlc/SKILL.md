@@ -28,7 +28,7 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 
 ## Worktree & branch ownership
 
-**Slug identity always wins.** Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}`, derived from the plan slug — this is the single source of truth (`worktree_manager.py` + `resolve_branch_for_stage`). Do NOT pre-allocate per-supervisor `.worktrees/sdlc-{N}` lanes: nothing reads a lane override, so lane instructions are silently dropped and every issue's builders land in `.worktrees/{slug}` regardless. Converging fork + supervisor onto one branch per plan is deliberate — it structurally collapses duplicate PRs, since GitHub permits only one open PR per head branch. Concurrent builders inside the one slug worktree must write disjoint file sets (do-build's `Parallel: true` convention: no shared-file writes).
+**Slug identity always wins.** Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}`, where `{slug}` is the lane's identity, recorded once at lane start and read (never re-derived) via `tools/lane_identity.py::resolve_lane_slug` — this is the single source of truth (`worktree_manager.py` + `resolve_branch_for_stage`; see [`docs/features/sdlc-lane-identity.md`](../../../docs/features/sdlc-lane-identity.md) in repos that have it). Do NOT pre-allocate per-supervisor `.worktrees/sdlc-{N}` lanes: nothing reads a lane override, so lane instructions are silently dropped and every issue's builders land in `.worktrees/{slug}` regardless. Converging fork + supervisor onto one branch per plan is deliberate — it structurally collapses duplicate PRs, since GitHub permits only one open PR per head branch. Concurrent builders inside the one slug worktree must write disjoint file sets (do-build's `Parallel: true` convention: no shared-file writes).
 
 ## Stage→Model Dispatch Table
 
@@ -131,6 +131,12 @@ sdlc-tool dispatch record --skill {skill} --issue-number {issue_number} --run-id
 ```
 
 ### 3c. Spawn the stage subagent
+
+**One writer per artifact — enumerate live children before you dispatch.** Every stage you dispatch is a writer on a shared artifact, and the plan doc in particular is a single file on the shared main checkout that no worktree isolates. Before spawning, account for the children you already have out: if a child is still holding the plan doc, do not dispatch a second one onto it, and do not edit it yourself while it does. Wait for the outstanding child to report, then dispatch.
+
+This is not hypothetical. On 2026-08-07 one plan doc took two concurrent revision children twice over (#2650, shape 3) — a writer watched its line count grow from 62 to 111 between its own reads and had to stop and ask who owned the file — and a supervisor patched a plan task while its own dispatched child held the doc, then had to warn the child mid-flight to re-read before committing (shape 4). Both were recovered only because an agent happened to notice the file moving underneath it.
+
+Since Hard Rule 6 already requires `run_in_background: false`, the ordinary loop has exactly one child out at a time and satisfies this for free. The rule bites when you are tempted to fan out, or to "just fix one line" in a doc a child is revising. Neither is safe; the second is the one that feels harmless.
 
 Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). Prompt template:
 
@@ -241,6 +247,30 @@ On exit (any path), report:
 2. **Stage trail**: each dispatch in order with its outcome and verdict
 3. **Artifacts**: issue, plan path, PR number, merge commit
 4. **Anything needing human attention**: unresolved blockers, skipped acknowledgments, follow-ups
+
+## Step 5: Release the run lease
+
+You hold this issue's run lease for as long as this supervision loop lives, and
+nothing reclaims it when you simply stop — there is no terminal transition on a
+HALT. Left held, it makes the *next* run on this issue refuse with a foreign-owner
+block until the lease's ceiling lapses hours later.
+
+So after the Final Report, hand the lease back with the pipeline tool's
+**`session-release`** subcommand, passing this run's issue number and `run_id`
+(see the repo context probe for the exact invocation). It is ownership-checked
+and best-effort: a wrong or already-released `run_id` is a safe no-op, so run it
+whenever in doubt and never let its output change your reported outcome.
+
+Do this on the exits nothing else observes:
+
+- the **3d.4 REVIEW self-check HALT**
+- a **`blocked`** router decision (3a / 3e)
+- the **iteration cap** being reached
+
+The **merged** exit needs no action from you — completing the MERGE stage
+releases the lease in the tool layer, on the marker write itself. Running the
+step there anyway is harmless (it reports no lease held), but it is not what
+makes the merged path correct.
 
 ## Relationship to /sdlc (in this repo)
 

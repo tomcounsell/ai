@@ -177,7 +177,7 @@ To prevent infinite steering loops (the agent's self-draft also fails validation
 
 ### `_derive_context_summary(raw_text) -> str | None`
 
-Derives a coarse one-sentence routing hint from the narration-stripped text. This is deliberately simple — first non-blank, non-heading line, capped at 140 characters at a word boundary. No NLP, no LLM. Purpose: give `session_router.py` and other routing readers a coarse topic hint. Not a quality deliverable, not user-facing prose. Returns `None` for empty or whitespace-only input.
+Derives a coarse one-sentence routing hint from the narration-stripped text. This is deliberately simple — first non-blank, non-heading line, capped at 140 characters at a word boundary. No NLP, no LLM. Purpose: give `bridge/job_router.py` — the single routing authority — and other routing readers a coarse topic hint. Not a quality deliverable, not user-facing prose. Returns `None` for empty or whitespace-only input.
 
 ### `_extract_open_questions(text) -> list[str]`
 

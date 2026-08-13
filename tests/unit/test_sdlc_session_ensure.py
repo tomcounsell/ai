@@ -17,12 +17,35 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+_LANE_IDENTITY_CLASS = "TestLaneSlugMintedAtLaneStart"
+
+
+@pytest.fixture(autouse=True)
+def _stub_lane_identity(request):
+    """Neutralize lane-slug resolution (#2735) outside the class that tests it.
+
+    ``ensure_session`` mints the lane's identity on entry, which peeks the issue
+    lock for the pinned target repo and writes a ``PipelineLedger``. That is
+    correct behavior and ``TestLaneSlugMintedAtLaneStart`` asserts it -- but for
+    every other test in this file it is noise: it adds a ``touch_issue_lock``
+    call that the lock-wiring assertions count, and it leaves a real ledger
+    record per test.
+    """
+    if request.cls is not None and request.cls.__name__ == _LANE_IDENTITY_CLASS:
+        yield
+        return
+    with patch("tools.sdlc_session_ensure.resolve_lane_slug", return_value=None):
+        yield
 
 
 class TestEnsureSession:
@@ -234,6 +257,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--issue-number" in result.stdout
@@ -245,6 +269,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode != 0
 
@@ -1097,6 +1122,92 @@ def _make_orphan_session(
     return s
 
 
+class TestLaneSlugMintedAtLaneStart:
+    """``ensure_session`` is the single minter of the lane slug (#2735).
+
+    It is the one component that runs on every lane-start path before any
+    plan or any stage exists, so it is where the lane's identity is created
+    and recorded on the ``PipelineLedger`` -- once, conditional-on-empty.
+    """
+
+    _TEST_REPO = "test-owner/test-repo"
+    _ISSUE = 927360
+
+    def _cleanup(self):
+        from agent.pipeline_ledger import PipelineLedger
+
+        for record in PipelineLedger.query.filter(ledger_key=f"{self._TEST_REPO}:{self._ISSUE}"):
+            record.delete()
+
+    def setup_method(self):
+        self._cleanup()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def test_ensure_session_records_the_lane_slug(self, monkeypatch):
+        """After ensure_session(N) on a clean Redis a ledger exists for N with
+        a non-empty slug -- the mint has a write target."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=self._ISSUE)
+
+        ledger = PipelineLedger.get(self._TEST_REPO, self._ISSUE)
+        assert ledger is not None
+        assert ledger.slug == f"sdlc-{self._ISSUE}"
+
+    def test_invalid_issue_number_mints_nothing(self, monkeypatch):
+        """The validity guard runs first: no ledger for a bogus issue number."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+        with patch("tools.sdlc_session_ensure.resolve_lane_slug") as mock_resolve:
+            assert ensure_session(issue_number=0) == {}
+            assert ensure_session(issue_number=-1) == {}
+        mock_resolve.assert_not_called()
+
+    def test_slug_resolution_failure_never_fails_the_ensure(self, monkeypatch):
+        """A Redis or git failure inside identity resolution must not convert a
+        successful ensure into ``return {}``."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch(
+                "tools.sdlc_session_ensure.resolve_lane_slug",
+                side_effect=RuntimeError("redis down"),
+            ),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=self._ISSUE)
+
+        assert result["session_id"] == f"sdlc-local-{self._ISSUE}"
+        assert result["created"] is True
+
+
 class TestKillOrphans:
     """Tests for the --kill-orphans zombie-cleanup CLI path."""
 
@@ -1447,7 +1558,6 @@ class TestKillOrphans:
         assert result["orphans"] == []
 
     def test_cli_dry_run_exits_zero_with_valid_json(self):
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
             [
                 sys.executable,
@@ -1459,7 +1569,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
-            env=env,
+            env=subprocess_env(project_root=REPO_ROOT, PYTHONDONTWRITEBYTECODE="1"),
         )
         assert result.returncode == 0
         # stdout must be parseable JSON
@@ -1480,6 +1590,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         # argparse .error() exits 2
         assert result.returncode != 0
@@ -2058,6 +2169,85 @@ class TestIssueLockWiring:
         assert legacy.active_run_id == result["run_id"]
 
 
+class TestBindDoesNotRestampUpdatedAt:
+    """#2660: the run-lock bind is a partial save (update_fields=["active_run_id",
+    "owned_run_ids"]) precisely so a stage dispatch that only re-binds the run
+    lock -- and changes nothing else -- does not restamp updated_at on the
+    whole row. This is the writer that kept the #2660 ledger anchors
+    permanently fresh, so it needs a REAL AgentSession (not a MagicMock,
+    whose .save() is a no-op that would pass this assertion vacuously either
+    way) to prove the partial save actually reaches Redis.
+    """
+
+    @staticmethod
+    def _lock_result(acquired: bool, owner_session_id=None, owner_run_id=None):
+        from models.session_lifecycle import IssueLockResult
+
+        return IssueLockResult(
+            acquired=acquired,
+            owner_session_id=owner_session_id,
+            owner_run_id=owner_run_id,
+        )
+
+    def test_bind_leaves_updated_at_unmoved_but_persists_run_identity(self):
+        from models.agent_session import AgentSession
+        from tools.sdlc_session_ensure import _acquire_run_lock_and_bind
+
+        session = AgentSession(session_id="sdlc-local-266001", project_key="test", status="running")
+        session.save()
+        session_id = session.agent_session_id
+        updated_before = AgentSession.get_by_id(session_id).updated_at
+
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                return_value=self._lock_result(True, session.session_id),
+            ),
+            patch("agent.supervised_run.supervised_run_status", return_value=None),
+            patch("tools._sdlc_utils._resolve_target_repo", return_value=None),
+        ):
+            run_id, error = _acquire_run_lock_and_bind(266001, session)
+
+        assert error is None
+        assert run_id
+
+        after = AgentSession.get_by_id(session_id)
+        assert after.updated_at == updated_before, (
+            "a bind that only changes active_run_id/owned_run_ids must not "
+            "restamp updated_at -- this is the writer #2660 narrows"
+        )
+        assert after.active_run_id == run_id, (
+            "the bind must still persist active_run_id despite the partial save"
+        )
+        assert after.owned_run_ids, (
+            "the bind must still persist owned_run_ids despite the partial save"
+        )
+        assert run_id in json.loads(after.owned_run_ids)
+
+    def test_bind_that_advances_a_stage_state_still_refreshes_updated_at(self):
+        """Contrast case: a writer OTHER than the bind (a genuine stage-state
+        advance, simulated here by a plain full save()) still moves
+        updated_at as before -- #2660 narrows only the bind, not every
+        writer on the row.
+        """
+        from models.agent_session import AgentSession
+
+        session = AgentSession(session_id="sdlc-local-266002", project_key="test", status="running")
+        session.save()
+        session_id = session.agent_session_id
+        updated_before = AgentSession.get_by_id(session_id).updated_at
+
+        time.sleep(0.05)
+        session.status = "running"  # no-op field change, but a full save()
+        session.save()
+
+        after = AgentSession.get_by_id(session_id)
+        assert after.updated_at != updated_before, (
+            "a genuine full save() (stage-state advance) must still refresh "
+            "updated_at -- only the run-lock bind is narrowed"
+        )
+
+
 class TestVerifiedRunIdReuse:
     """#2003 cycle-3 BLOCKER 1: the per-stage /sdlc router re-runs
     session-ensure at every stage boundary while its OWN prior stage's lock
@@ -2356,6 +2546,59 @@ class TestSupervisedRunModule:
         clear_supervised_run_signal(issue_number, "owner-run")
         assert read_supervised_run_signal(issue_number) is None
 
+    def test_heartbeat_restores_a_signal_that_lapsed_under_a_live_lease(self):
+        """Issue #2659 acceptance: a pipeline outliving the signal TTL still
+        lets its stage forks inherit.
+
+        This is the wedge that was observed twice on 2026-08-07 (#2642, #2629).
+        The signal shares the lease's 1800s TTL but was written only at
+        acquire, while ``tools/sdlc_lease_heartbeat.py`` renewed the lease
+        forever. Thirty minutes in, the signal lapsed under a live lease and
+        every stage fork the supervisor dispatched got a bare ``ISSUE_LOCKED``
+        from its own supervisor's lock -- and stood down, correctly, per the
+        substrate-probe rule. Live lock, live heartbeat, no error anywhere.
+
+        ``clear_supervised_run_signal`` stands in for the TTL lapsing: both
+        leave a held lease with no signal, which is the state that matters.
+        """
+        from agent.supervised_run import (
+            clear_supervised_run_signal,
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+        from models.session_lifecycle import touch_issue_lock
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        issue_number = 2659
+        run_id = "runsig-2659"
+
+        # Supervisor acquires the lease and publishes the signal.
+        assert touch_issue_lock(issue_number, run_id, session_id="s").acquired is True
+        write_supervised_run_signal(issue_number, run_id, session_id="s")
+        assert supervised_run_status(issue_number).live is True
+
+        # 30 minutes pass: the signal lapses, the lease does not.
+        clear_supervised_run_signal(issue_number, run_id)
+        assert supervised_run_status(issue_number).live is False  # the wedge
+
+        # One heartbeat tick against the still-held lease.
+        ticks = iter([0.0, 1.0, 999.0])
+        rc = run_heartbeat(
+            issue_number=issue_number,
+            run_id=run_id,
+            session_id="s",
+            interval=1,
+            max_lifetime=2,
+            _sleep=lambda s: None,
+            _monotonic=lambda: next(ticks),
+        )
+
+        assert rc == 0
+        # Inheritance is restored: a stage fork now reads SUPERVISED_RUN_ACTIVE.
+        status = supervised_run_status(issue_number)
+        assert status.live is True
+        assert status.run_id == run_id
+
     def test_operations_fail_open_on_redis_error(self):
         """Every op degrades to a safe default (never raises) on Redis error."""
         from agent.supervised_run import (
@@ -2574,3 +2817,67 @@ class TestOwnedRunIdsSelfRecognition:
 
         assert result["blocked"] is True
         assert result["reason"] == "SUPERVISED_RUN_ACTIVE"
+
+
+class TestLeaseHeartbeatSpawnIdentity:
+    """Issue #2714 L2: the spawner hands the heartbeat its supervisor identity.
+
+    The heartbeat is detached (``start_new_session=True``) and reparented to
+    pid 1 within seconds, so it can only ever watch an EXPLICITLY RECORDED
+    supervisor ``(pid, create_time)`` -- spike-2 proved the parent-pid shortcut
+    is unsound because it reads a HEALTHY heartbeat as orphaned.
+    """
+
+    def _spawn(self, monkeypatch, detailed):
+        from tools import sdlc_session_ensure as se
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("VALOR_WORKER_MODE", raising=False)
+        with (
+            patch.object(si, "resolve_supervisor_identity_detailed", detailed),
+            patch("subprocess.Popen") as popen,
+        ):
+            se._maybe_launch_lease_heartbeat(2714, "run-abc", "sdlc-local-2714")
+        return popen
+
+    def test_argv_carries_identity_when_both_halves_resolve(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        popen = self._spawn(monkeypatch, MagicMock(return_value=(si.SOURCE_ENV, 32886, 111.5)))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" in argv
+        assert argv[argv.index("--supervisor-pid") + 1] == "32886"
+        assert argv[argv.index("--supervisor-create-time") + 1] == "111.5"
+        assert argv[argv.index("--supervisor-source") + 1] == si.SOURCE_ENV
+
+    def test_argv_omits_identity_when_unresolved(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        popen = self._spawn(monkeypatch, MagicMock(return_value=(si.SOURCE_UNRESOLVED, None, None)))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" not in argv
+        assert "--supervisor-create-time" not in argv
+
+    def test_resolver_raising_still_spawns_the_heartbeat(self, monkeypatch):
+        """The renewer is the load-bearing part; identity is an enhancement."""
+        popen = self._spawn(monkeypatch, MagicMock(side_effect=RuntimeError("psutil exploded")))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" not in argv
+        assert "--issue-number" in argv
+
+    def test_pytest_guard_still_blocks_every_spawn(self, monkeypatch):
+        """The guard at sdlc_session_ensure.py:164 must stay intact -- a real
+        detached process must never outlive the test suite."""
+        from tools import sdlc_session_ensure as se
+
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_x (call)")
+        with patch("subprocess.Popen") as popen:
+            se._maybe_launch_lease_heartbeat(2714, "run-abc", "sdlc-local-2714")
+        popen.assert_not_called()

@@ -22,32 +22,78 @@ import uuid
 
 import pytest
 
+# Every reference goes through the MODULE object, never a collection-time
+# ``from agent.index_drift import DRIFT_COVERED_MODELS`` binding. A reload
+# elsewhere in the worker rebinds that name to a new dict, and a name bound here
+# at collection time would then point at the orphan: the fixture below would
+# snapshot and restore the stale dict while the test wrote into the live one,
+# silently no-opping the cleanup and stranding a fake model registration for the
+# rest of the worker (#2628).
 from agent import index_drift
-from agent.index_drift import (
-    DRIFT_COVERED_MODELS,
-    ModelDriftSpec,
-    covered_model_names,
-    reconcile_all_indexes,
-    reconcile_model_index,
-    register_drift_model,
-)
 
 
 @pytest.fixture
 def restore_registry():
     """Snapshot and restore DRIFT_COVERED_MODELS around a test that mutates it."""
-    original = dict(DRIFT_COVERED_MODELS)
+    original = dict(index_drift.DRIFT_COVERED_MODELS)
     yield
-    DRIFT_COVERED_MODELS.clear()
-    DRIFT_COVERED_MODELS.update(original)
+    index_drift.DRIFT_COVERED_MODELS.clear()
+    index_drift.DRIFT_COVERED_MODELS.update(original)
+
+
+def test_restore_registry_is_not_defeated_by_a_reload():
+    """The restore must reach whichever dict is LIVE, even after a reload.
+
+    This is the binding measurement for the second writer of the rotating
+    failure set (#2628). ``restore_registry`` used to snapshot and restore the
+    collection-time ``from agent.index_drift import DRIFT_COVERED_MODELS``
+    binding. An ``importlib.reload`` elsewhere in the worker rebinds that name to
+    a brand-new dict, so the fixture then cleaned the ORPHAN while
+    ``register_drift_model`` wrote into the live one: the cleanup silently
+    no-opped and a fake in-memory model stayed registered for the rest of that
+    worker's life, changing what every later drift test saw.
+    ``--dist=loadfile`` decides whether the reloader and the victim share a
+    worker, which is why the damage landed only some runs.
+
+    The fixture's body is driven directly rather than requested, so the reload
+    and the restore are observable inside one test instead of across two.
+    """
+    import contextlib
+    import importlib
+
+    original_registry = index_drift.DRIFT_COVERED_MODELS
+    original_contents = dict(original_registry)
+
+    restore = restore_registry.__wrapped__()
+    next(restore)  # snapshot phase
+    try:
+        importlib.reload(index_drift)
+        index_drift.register_drift_model(
+            index_drift.ModelDriftSpec(
+                name="FakeReloadProbe",
+                model_loader=lambda: None,
+            )
+        )
+        with contextlib.suppress(StopIteration):
+            next(restore)  # restore phase
+
+        assert "FakeReloadProbe" not in index_drift.covered_model_names(), (
+            "the restore cleaned an orphaned registry while the registration "
+            "landed in the live one, stranding a fake model for the rest of the "
+            "worker"
+        )
+    finally:
+        index_drift.DRIFT_COVERED_MODELS = original_registry
+        original_registry.clear()
+        original_registry.update(original_contents)
 
 
 def test_agentsession_is_covered_by_default():
     """The generalized registry must still cover AgentSession out of the box."""
-    assert "AgentSession" in DRIFT_COVERED_MODELS
-    assert "AgentSession" in covered_model_names()
+    assert "AgentSession" in index_drift.DRIFT_COVERED_MODELS
+    assert "AgentSession" in index_drift.covered_model_names()
 
-    spec = DRIFT_COVERED_MODELS["AgentSession"]
+    spec = index_drift.DRIFT_COVERED_MODELS["AgentSession"]
     assert spec.prefix == "AgentSession"
     assert spec.log_prefix == "[index-drift] AgentSession"
     # AgentSession keeps its dedicated, monkeypatchable hash counter.
@@ -56,8 +102,8 @@ def test_agentsession_is_covered_by_default():
 
 def test_reconcile_all_includes_every_registered_model():
     """reconcile_all_indexes must return a result for each covered model."""
-    results = reconcile_all_indexes()
-    assert set(results.keys()) == set(covered_model_names())
+    results = index_drift.reconcile_all_indexes()
+    assert set(results.keys()) == set(index_drift.covered_model_names())
     for value in results.values():
         assert isinstance(value, tuple)
         assert len(value) == 4  # (hash_count, queryable_count, drifted, truncated)
@@ -74,8 +120,8 @@ def test_agentsession_reconciles_cleanly_through_generic_path():
     )
     session.save()
     try:
-        hash_count, queryable_count, drifted, truncated = reconcile_model_index(
-            DRIFT_COVERED_MODELS["AgentSession"]
+        hash_count, queryable_count, drifted, truncated = index_drift.reconcile_model_index(
+            index_drift.DRIFT_COVERED_MODELS["AgentSession"]
         )
         assert hash_count >= 1
         assert queryable_count >= 1
@@ -102,23 +148,23 @@ def test_registering_a_model_extends_coverage(restore_registry):
     class _FakeModel:
         query = _FakeQuery()
 
-    before = set(covered_model_names())
+    before = set(index_drift.covered_model_names())
     assert "FakeCoveredModel" not in before
 
-    register_drift_model(
-        ModelDriftSpec(
+    index_drift.register_drift_model(
+        index_drift.ModelDriftSpec(
             name="FakeCoveredModel",
             model_loader=lambda: _FakeModel,
         )
     )
 
-    after = set(covered_model_names())
+    after = set(index_drift.covered_model_names())
     assert after == before | {"FakeCoveredModel"}
 
     # The generic sweep now reconciles it too -- coverage genuinely extended,
     # not just registry bookkeeping. No hashes exist for the fake prefix, so it
     # reconciles clean (0, 0, no drift, not truncated).
-    results = reconcile_all_indexes()
+    results = index_drift.reconcile_all_indexes()
     assert "FakeCoveredModel" in results
     assert results["FakeCoveredModel"] == (0, 0, False, False)
 
@@ -137,7 +183,7 @@ def test_spec_tolerance_resolution(monkeypatch, tolerance_env, env_value, expect
     if env_value is not None:
         monkeypatch.setenv(tolerance_env, env_value)
 
-    spec = ModelDriftSpec(
+    spec = index_drift.ModelDriftSpec(
         name="ToleranceProbe",
         model_loader=lambda: None,
         tolerance_env=tolerance_env,
@@ -163,12 +209,12 @@ def test_counter_attr_is_resolved_by_name_at_call_time(monkeypatch, restore_regi
     class _EmptyModel:
         query = _EmptyQuery()
 
-    spec = ModelDriftSpec(
+    spec = index_drift.ModelDriftSpec(
         name="AgentSession",  # reuse the name so counter_attr resolves
         model_loader=lambda: _EmptyModel,
         counter_attr="_count_agentsession_hashes",
     )
-    hash_count, queryable_count, drifted, truncated = reconcile_model_index(spec)
+    hash_count, queryable_count, drifted, truncated = index_drift.reconcile_model_index(spec)
     assert hash_count == 0
     assert queryable_count == 0
     assert drifted is False

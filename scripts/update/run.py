@@ -150,6 +150,7 @@ class UpdateResult:
         default_factory=list
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
+    sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -158,6 +159,13 @@ class UpdateResult:
     ffmpeg_result: kokoro.FfmpegResult | None = None
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
+    # Untyped (`object`, not the concrete dataclass) so `run.py` never needs
+    # a module-level import of `scripts.update.redis_flush_guard_pth` or
+    # `scripts.update.redis_acl` -- both steps below import lazily so a
+    # missing module degrades to a warning, never an ImportError at
+    # `/update` start (#2645).
+    redis_flush_guard_install_results: object | None = None
+    redis_acl_result: object | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
@@ -185,43 +193,65 @@ RECENT_ACTIVITY_WINDOW = (
 )  # 30 minutes — session considered live if updated_at within this window
 
 
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int, int]:
+def _cleanup_stale_sessions(
+    project_dir: Path, age_minutes: int = 120
+) -> tuple[int, int, int, int, int]:
     """Finalize ``running`` sessions that have no live execution process.
 
-    Authoritative liveness check: the ``(exec_pid, pid_create_time)`` fence. When a
-    session records both halves, :func:`agent.pid_fence.fence_is_live` answers
-    "is the process we spawned still running?" directly, so a fence-live session is
-    skipped regardless of ``updated_at`` age and a fence-dead session is finalized
-    with a reason that says the fence verified it.
+    Liveness ladder, evaluated in this order (every rung below the first is
+    additive: it can only produce a skip, never a finalization):
 
-    Fallback liveness check: ``updated_at`` recency. Rows with no fence — legacy
-    records, and any row where ``pid_create_time`` was never recorded — keep the
-    previous behavior: sessions whose ``updated_at`` is within
-    ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped. Per the legacy-row rule in
-    ``agent/pid_fence.py``, an absent ``create_time`` means "unknown", so these
-    finalizations do not claim that liveness was checked.
-
-    Last-resort check: ``created_at`` age. When ``updated_at`` is None the session
-    falls back to the 120-minute ``created_at`` threshold so that very old sessions
-    created before the heartbeat feature existed are still cleaned up.
-
-    Secondary defense: sessions whose ``chat_id`` has a live entry in
-    ``_active_workers`` are always skipped (in-process invocations only; the registry
-    is empty when the update script runs as a standalone subprocess).
+    1. A live worker in ``_active_workers`` (in-process invocations only) → skip,
+       terminal.
+    2. ``is_ledger`` (#2042 CLI anchor rows, reusing ``agent.session_health._is_ledger``)
+       → skip, terminal, counted as ``skipped_ledger``. Checked before the fence so
+       no later rung can reach a ledger row: a ledger anchor has no subprocess by
+       construction, so the process-liveness reaper below is structurally the
+       wrong owner for it (see #2660, #2677 for the process-less reaper that is).
+    3. The authoritative ``(exec_pid, pid_create_time)`` fence. When a session
+       records both halves, :func:`agent.pid_fence.fence_is_live` answers "is the
+       process we spawned still running?" directly. Fence live → skip, terminal.
+       Fence dead → **does not** ``continue``; it only selects the finalization
+       reason string and falls through to the rungs below. This fall-through is
+       deliberate: a dead fence is strong evidence, but making it terminal would
+       let a session be finalized seconds after spawn, bypassing the 120-minute
+       ``created_at`` floor. The fence ADDS protection; it never subtracts it.
+    4. ``last_heartbeat_at`` recency, within ``RECENT_ACTIVITY_WINDOW`` → skip,
+       terminal, counted as ``skipped_heartbeat``. Written only by the executor's
+       heartbeat loop (T+0 and every 60s tick via
+       ``save(update_fields=["last_heartbeat_at"])``); no maintenance path ever
+       sets it, so it cannot be forged by a sweep. Naive datetimes and raw floats
+       are normalized by ``to_unix_ts`` and read as real heartbeats; only a
+       missing or unparseable value falls through to the next rung.
+    5. ``updated_at`` recency, within ``RECENT_ACTIVITY_WINDOW`` → skip, counted as
+       ``skipped_recent``. Rows with no fence and no recent heartbeat — legacy
+       records, and any row where ``pid_create_time`` was never recorded — keep the
+       previous behavior. Per the legacy-row rule in ``agent/pid_fence.py``, an
+       absent ``create_time`` means "unknown", so these finalizations do not claim
+       that liveness was checked. This rung's live consumers are non-ledger rows:
+       the local Claude Code CLI session kept fresh by the PostToolUse hook, and
+       the enqueue window before a session's T+0 heartbeat lands.
+    6. ``created_at`` age ≥ ``age_minutes`` → finalize. Last-resort check for
+       sessions without an ``updated_at`` (created before the heartbeat feature
+       existed).
 
     Terminal sessions (killed/abandoned/failed/completed) are preserved
     for reflections to analyze — reflections handles its own 90-day expiry.
 
     Returns:
-        ``(killed_count, skipped_recent, skipped_fence_live)`` — sessions finalized,
-        sessions skipped on ``updated_at`` recency alone, and sessions skipped
-        because their fence positively resolved to a live process. The last count is
-        reported separately so an operator rolling ``/update`` across the fleet can
-        see the fence gate acting rather than inferring it from a total.
+        ``(killed_count, skipped_recent, skipped_fence_live, skipped_ledger,
+        skipped_heartbeat)`` — sessions finalized, sessions skipped on
+        ``updated_at`` recency alone, sessions skipped because their fence
+        positively resolved to a live process, sessions skipped as non-executable
+        ledger anchors, and sessions skipped on ``last_heartbeat_at`` recency. Each
+        count is reported separately so an operator rolling ``/update`` across the
+        fleet can see which signal drove each skip rather than inferring it from a
+        total.
     """
     import time
 
     from agent.pid_fence import fence_is_live
+    from agent.session_health import _is_ledger
     from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
@@ -244,6 +274,8 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     killed_count = 0
     skipped_recent = 0
     skipped_fence_live = 0
+    skipped_ledger = 0
+    skipped_heartbeat = 0
 
     # pending sessions are never stale — they were never started;
     # "pending" was added in PR #739 by mistake
@@ -256,6 +288,16 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                 worker = active_workers_registry[chat_id]
                 if worker is not None and not worker.done():
                     continue  # live worker exists — do not kill
+
+            # Ledger guard: a #2042 CLI anchor row has no subprocess by
+            # construction, so this process-liveness reaper is structurally the
+            # wrong owner for it. Checked before the fence so no later rung can
+            # reach a ledger row (the #2660 write-authorization fix removed the
+            # forged updated_at restamp that used to mask this gap). Scheduling
+            # the correct issue-lock-based reaper for these rows is #2677.
+            if _is_ledger(s):
+                skipped_ledger += 1
+                continue
 
             # Authoritative liveness check: the (exec_pid, pid_create_time) fence.
             # Checked ahead of recency so a fence-live session is skipped at any age,
@@ -270,6 +312,26 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     skipped_fence_live += 1
                     continue  # the process we spawned is still running
                 fence_verified_dead = True
+                # Deliberately no `continue` here. A dead fence selects the
+                # finalization reason below but still falls through the
+                # remaining rungs — the fence ADDS protection, it never
+                # subtracts it (making it terminal would bypass the
+                # `age_minutes` floor for a session seconds after spawn).
+
+            # last_heartbeat_at recency: written only by the executor's own
+            # heartbeat loop (T+0 and every 60s tick), never by any maintenance
+            # sweep, so it cannot be forged by a probe or a run-lock bind (#2660).
+            # to_unix_ts normalizes both naive datetimes (popoto strips tzinfo,
+            # so hydrated values are always naive) and raw floats into a unix
+            # timestamp, so those are read as real heartbeats. It returns None
+            # only for a missing or unparseable value, which falls through to
+            # the next rung rather than being read as fresh.
+            heartbeat_ts = to_unix_ts(getattr(s, "last_heartbeat_at", None))
+            if heartbeat_ts is not None:
+                heartbeat_recency = now - heartbeat_ts
+                if heartbeat_recency < RECENT_ACTIVITY_WINDOW:
+                    skipped_heartbeat += 1
+                    continue  # recent heartbeat — treat as live
 
             # Fallback liveness check: updated_at recency
             updated_ts = to_unix_ts(getattr(s, "updated_at", None))
@@ -318,7 +380,7 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     exc,
                 )
 
-    return killed_count, skipped_recent, skipped_fence_live
+    return killed_count, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat
 
 
 def _cleanup_duplicate_sessions(project_dir: Path) -> int:
@@ -885,6 +947,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
         result.warnings.append(f"memory-distill-backfill registration: {mdr.detail}")
 
+    # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
+    # (#2717) via the same generalized register path. Same ordering
+    # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
+    # vault→config copy so the entry propagates into the per-machine
+    # config/reflections.yaml on this same cycle.
+    log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
+    result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
+        project_dir
+    )
+    upr = result.sdlc_upvote_pickup_register_result
+    if upr.action == "registered":
+        log(
+            "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
+            v,
+            always=True,
+        )
+    elif upr.action == "noop":
+        log("sdlc-upvote-pickup reflection already registered", v)
+    elif upr.action == "skipped":
+        log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
+    if not upr.success:
+        log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
+        result.warnings.append(f"sdlc-upvote-pickup registration: {upr.detail}")
+
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
     # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
@@ -1050,6 +1136,47 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             log("No dependency changes, skipping sync", v)
 
+    # Step 3.05: Install the ambient production-Redis flush guard's `.pth`
+    # shim into every repo venv (#2645). Unconditional and deliberately
+    # OUTSIDE the `if config.do_dep_sync:` block above: Step 3 is
+    # CONDITIONAL (only runs when dep files changed or `--force-dep-sync`),
+    # so gating this step on it would leave a venv `uv sync` just created
+    # unguarded until the next `/update` that happens to touch a dependency
+    # file. Placed AFTER dep sync (not before) precisely so a venv `uv sync`
+    # created or recreated moments ago in THIS run is guarded within the
+    # same run -- `uv sync` is what creates `.venv` when absent
+    # (scripts/update/deps.py::sync_dependencies), so installing before it
+    # would find "no venv yet" and skip, leaving the freshly created venv
+    # unguarded until the next `/update` (Risk 1). Idempotent + non-fatal:
+    # log, warn, continue -- same contract as Step 3.13/3.14.
+    log("Installing Redis flush-guard .pth into repo venvs...", v)
+    try:
+        from scripts.update import redis_flush_guard_pth
+
+        result.redis_flush_guard_install_results = redis_flush_guard_pth.install_fleet(project_dir)
+        for venv_result in result.redis_flush_guard_install_results:
+            status = venv_result.get("status")
+            venv_label = venv_result.get("venv")
+            if status in ("installed", "unchanged"):
+                log(f"Redis flush guard: {venv_label} — {status}", v)
+            else:
+                log(
+                    f"WARN: Redis flush guard: {venv_label} — skipped "
+                    f"({venv_result.get('reason')})",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}"
+                )
+    except Exception as _rfg_exc:
+        log(
+            f"WARN: Redis flush guard install step failed unexpectedly: {_rfg_exc}",
+            v,
+            always=True,
+        )
+        result.warnings.append(f"Redis flush guard install: unexpected error: {_rfg_exc}")
+
     # Step 3.5: Auto-bump critical deps from PyPI.
     #
     # Only the lockfile-maintainer machine (see Step 2.6) runs auto-bump.
@@ -1116,8 +1243,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         # Pull rebase and re-push; if our changes are already present,
                         # reset to origin/main (no warning needed).
                         try:
+                            # Fetch + rebase onto the NAMED ref, not FETCH_HEAD
+                            # (#2650): `git pull --rebase` resolves its onto-
+                            # target through .git/FETCH_HEAD, which every
+                            # worktree of the repo shares, so a peer lane's
+                            # concurrent fetch can retarget our rebase.
                             deps.run_cmd(
-                                ["git", "pull", "--rebase", "origin", "main"],
+                                ["git", "fetch", "origin", "main"],
+                                cwd=project_dir,
+                            )
+                            deps.run_cmd(
+                                ["git", "rebase", "origin/main"],
                                 cwd=project_dir,
                             )
                             # Check if our commit is still ahead of origin
@@ -1327,6 +1463,51 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
         result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
+
+    # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
+    # Immediately after Step 3.13 durability, before Step 3.14 replication.
+    # Calls apply_redis_acl() with NO ARGUMENTS -- never apply=True, never a
+    # forwarded params.apply, never any global apply flag. `/update` must
+    # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
+    # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
+    # mutation landing silently in an unrelated PR is exactly the failure
+    # Risk 8 exists to prevent. A regression test asserts this call site
+    # passes no `apply` argument, so keep the call literally
+    # `apply_redis_acl()`. Imported lazily so a missing module (this file
+    # can land before scripts/update/redis_acl.py does) degrades to a
+    # logged skip, never an ImportError at `/update` start. Same non-fatal
+    # contract as 3.13/3.14: log, warn, continue.
+    log("Checking Redis ACL drift (report-only)...", v)
+    try:
+        from scripts.update import redis_acl
+
+        result.redis_acl_result = redis_acl.apply_redis_acl()
+        ra = result.redis_acl_result
+        if ra.success:
+            if ra.drift:
+                log(
+                    "Redis ACL: drift detected — planned commands: "
+                    + "; ".join(ra.planned_commands),
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "Redis ACL drift detected — see docs/features/redis-flush-hardening.md "
+                    "for the apply runbook"
+                )
+            else:
+                log("Redis ACL: no drift", v)
+            if ra.warning:
+                log(f"WARN: Redis ACL: {ra.warning}", v, always=True)
+                result.warnings.append(f"Redis ACL: {ra.warning}")
+        else:
+            log(f"WARN: Redis ACL check: {ra.error}", v, always=True)
+            result.warnings.append(f"Redis ACL check: {ra.error}")
+    except ImportError:
+        log("Redis ACL: module not present yet, skipping", v)
+    except Exception as _acl_exc:
+        log(f"WARN: Redis ACL step failed unexpectedly: {_acl_exc}", v, always=True)
+        result.warnings.append(f"Redis ACL: unexpected error: {_acl_exc}")
 
     # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
     # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this
@@ -1947,13 +2128,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 
     try:
-        stale_killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions(project_dir)
+        stale_killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat = (
+            _cleanup_stale_sessions(project_dir)
+        )
         if stale_killed > 0:
             log(f"Cleaned up {stale_killed} stale session(s)", v)
         if skipped_fence_live > 0:
             log(f"Skipped {skipped_fence_live} live session(s) (fence verified)", v)
+        if skipped_ledger > 0:
+            log(f"Skipped {skipped_ledger} ledger anchor session(s) (non-executable)", v)
+        if skipped_heartbeat > 0:
+            log(f"Skipped {skipped_heartbeat} live session(s) (recent heartbeat)", v)
         if skipped_recent > 0:
-            log(f"Skipped {skipped_recent} live session(s) (recent heartbeat)", v)
+            log(f"Skipped {skipped_recent} live session(s) (recent updated_at)", v)
     except Exception as e:
         log(f"WARN: Session cleanup failed: {e}", v)
 

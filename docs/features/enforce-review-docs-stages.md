@@ -77,11 +77,13 @@ existence:
    fail-closed on any `gh` error. (b) the DOCS stage gate above. (c) REVIEW
    verdict freshness: a recorded verdict must exist, contain `APPROVED`
    (case-insensitive), and be fresh against the PR's latest commit -- checked
-   via the `REVIEW_CONTEXT head_sha=` trailer when present, else by comparing
-   the verdict's recorded timestamp to the latest commit's committer date.
-   The trailer match tolerates `normalize_verdict` storage normalization
-   (`sdlc-tool verdict record` uppercases and maps underscores to spaces, so
-   a stored trailer reads `REVIEW CONTEXT HEAD SHA=<HEX>`); SHA comparison is
+   via the head SHA the verdict attributes to (`head_sha_of_record()`) when
+   resolvable, else by comparing the verdict's recorded timestamp to the latest
+   commit's committer date. That reader prefers the record's `head_sha` field
+   and falls back to a `REVIEW_CONTEXT head_sha=` trailer inside the verdict
+   text, tolerating `normalize_verdict` storage normalization (which uppercases
+   and maps underscores to spaces, so such a trailer reads
+   `REVIEW CONTEXT HEAD SHA=<HEX>`); SHA comparison is
    case-insensitive. A
    bare `"APPROVED" in verdict_text` check with no freshness comparison was
    the exact gap a stale approval could walk through (#2003 critique

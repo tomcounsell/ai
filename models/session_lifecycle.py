@@ -869,6 +869,19 @@ _RELEASE_IF_VALUE_MATCHES_LUA = (
     "return redis.call('del', KEYS[1]) else return 0 end"
 )
 
+# Compare-and-set renewal (issue #2714, L0): rewrite the lock payload with a
+# fresh TTL only if the stored value is still byte-identical to the one this
+# call just read (ARGV[1]). ARGV[2] is the self-healed payload, ARGV[3] the
+# TTL. A plain read-then-SET renewal has a real TOCTOU window: a release
+# landing between the GET and the SET is UNDONE by the SET, which recreates
+# the key -- a renewer minting a lease its owner already gave up. A `GET` on
+# an absent key returns `false`, never equal to ARGV[1], so this script is
+# structurally incapable of minting.
+_RENEW_IF_VALUE_MATCHES_LUA = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+    "redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]) return 1 end return 0"
+)
+
 
 class IssueLockResult(NamedTuple):
     """Result of touch_issue_lock().
@@ -1068,6 +1081,44 @@ def _current_process_create_time() -> float | None:
         return None
 
 
+def _healed_renewal_payload(payload: dict, target_repo: str | None) -> dict:
+    """Build the payload a same-owner renewal writes back.
+
+    Self-healing renewal (BLOCKER round-2, issue #2012): a bare
+    ``_R.expire(key, ttl)`` would renew the TTL without ever rewriting the
+    payload -- a lock acquired before ``target_repo`` pinning existed (or
+    whose payload otherwise lacks it) would then renew FOREVER without ever
+    gaining the field, hard-failing every issue-keyed ledger write across
+    cutover. So renewal re-writes the FULL payload: spread the EXISTING
+    payload (never reconstruct a subset -- that would silently drop
+    ``pid``/``hostname`` even though nothing asked it to) and override only
+    the fields below.
+
+    - ``target_repo``: re-pinned from the caller's freshly-resolved value
+      when given, else whatever the payload already carried.
+    - ``machine_id`` (issue #2537, same self-heal pattern): a pre-#2537
+      payload gains the stable identity on its next same-owner renewal.
+      Renewal requires a run_id match and run_ids are minted on exactly one
+      machine, so the renewer IS on the owner's machine. Identity is
+      immutable once stamped: an existing machine_id is never overwritten,
+      and an unresolvable local id ("") is never written over the legacy
+      hostname signal.
+    - ``renewed_at`` (issue #2620): unlike the identity fields above, this
+      one is deliberately OVERWRITTEN on every renewal -- the re-stamp IS
+      the liveness signal, since the payload's pid (the ephemeral
+      ``session-ensure`` CLI) is dead by the first tick. This also
+      self-heals a pre-#2620 payload.
+    """
+    healed_target_repo = target_repo if target_repo is not None else payload.get("target_repo")
+    new_payload = {**payload, "target_repo": healed_target_repo}
+    if not new_payload.get("machine_id"):
+        local_machine_id = _local_machine_id()
+        if local_machine_id:
+            new_payload["machine_id"] = local_machine_id
+    new_payload["renewed_at"] = time.time()
+    return new_payload
+
+
 def touch_issue_lock(
     issue_number: int | None,
     run_id: str | None,
@@ -1075,6 +1126,8 @@ def touch_issue_lock(
     ttl: int = ISSUE_LOCK_TTL_SECONDS,
     peek: bool = False,
     target_repo: str | None = None,
+    *,
+    renew_only: bool = False,
 ) -> IssueLockResult:
     """Acquire, renew, or peek the per-issue SDLC ownership lock.
 
@@ -1094,15 +1147,22 @@ def touch_issue_lock(
       SET NX its way into ownership. Reports the current holder
       (``acquired=False`` when a lock exists, ``True`` when free).
     - No existing key: ``SET NX EX`` claims it carrying ``run_id``.
-      Returns ``acquired=True``.
-    - Existing key, same run_id: renews via ``EXPIRE``. ``acquired=True``.
+      Returns ``acquired=True``. **Except under ``renew_only=True``**, which
+      never mints: an absent key returns ``acquired=False`` with
+      ``owner_run_id=None`` (issue #2714 L0).
+    - Existing key, same run_id: renews the full payload with a fresh TTL.
+      ``acquired=True``. Under ``renew_only=True`` the write is a
+      compare-and-set that only lands if the value is still the one this call
+      read.
     - Existing key, different run_id: a foreign run owns it. Returns
       ``acquired=False`` with the owner's run_id + session_id surfaced.
     - Malformed/legacy (non-JSON) value: treated as a foreign, non-matching
       holder -- fails toward "not acquired". Never raises on ``json.loads``.
     - Race: the ``SET NX`` fails because the key existed, but by the time
       of the follow-up ``GET`` the key has since expired -- treated as
-      free; this attempt succeeds (``acquired=True``).
+      free; this attempt succeeds (``acquired=True``). This branch is also
+      skipped under ``renew_only=True``: it is a second minting path, and a
+      renewer must have none.
 
     Stale-owner takeover keeps TTL semantics: an expired lock is claimable
     by the next fresh candidate; no takeover reads ``active_run_id`` as
@@ -1134,13 +1194,27 @@ def touch_issue_lock(
             acquire or a re-acquire-after-expiry, ``target_repo`` is
             written into the payload verbatim (including ``None`` -- a
             caller that could not resolve it is not this function's
-            problem to paper over). On a same-owner renewal, see the
-            self-healing behavior documented at that branch below.
+            problem to paper over). On a same-owner renewal, see
+            ``_healed_renewal_payload``.
+        renew_only: Keyword-only. True marks this call a RENEWAL of a lease
+            the caller believes it already holds (the detached lease
+            heartbeat, ``tools/sdlc_lease_heartbeat.py``). A renewer must
+            never mint, so both minting branches above are skipped and the
+            renewal write goes through a compare-and-set (issue #2714 L0).
+            The failure mode this closes: the heartbeat's extend landing a
+            millisecond after its supervisor released the lease used to
+            ``SET NX`` its way back into ownership of a lease nobody held,
+            then renew it to the max-lifetime ceiling with no supervisor
+            behind it.
 
     Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
     ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
     degrades to no cross-process protection rather than wedging the SDLC
     pipeline. Each fail-open logs the swallowed error CLASS explicitly.
+    A ``renew_only`` call is the ONE exception and fails CLOSED
+    (``acquired=False``): reporting ownership it cannot verify is exactly
+    the "renew a lease you do not hold" shape the mode exists to eliminate,
+    and the caller's own next peek is a cheap recovery.
     """
     if not issue_number:
         return IssueLockResult(acquired=True, owner_session_id=None)
@@ -1191,6 +1265,48 @@ def touch_issue_lock(
                 owner_session_id=payload.get("session_id"),
                 owner_run_id=payload.get("run_id"),
                 target_repo=payload.get("target_repo"),
+            )
+
+        if renew_only:
+            # Renewal, never minting (issue #2714 L0). Deliberately reached
+            # BEFORE the `SET NX` below: that statement acquires on an absent
+            # key, and the `raw is None` follow-up after it treats a
+            # since-expired key as acquired too. Both are minting paths, and a
+            # renewer whose lease was just released must have neither -- it
+            # must report the loss so its caller can stand down.
+            raw = _R.get(key)
+            if raw is None:
+                return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "[session-lifecycle] issue-lock value for issue=%s is not valid JSON "
+                    "(malformed or legacy) -- refusing to renew",
+                    issue_number,
+                )
+                return IssueLockResult(acquired=False, owner_session_id=None)
+            if payload.get("run_id") != run_id:
+                return IssueLockResult(
+                    acquired=False,
+                    owner_session_id=payload.get("session_id"),
+                    owner_run_id=payload.get("run_id"),
+                    target_repo=payload.get("target_repo"),
+                )
+            new_payload = _healed_renewal_payload(payload, target_repo)
+            # Compare-and-set against the exact bytes just read. A release
+            # landing inside this window makes the script a no-op rather than
+            # recreating the key.
+            renewed = _R.eval(
+                _RENEW_IF_VALUE_MATCHES_LUA, 1, key, raw, json.dumps(new_payload), ttl
+            )
+            if not renewed:
+                return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+            return IssueLockResult(
+                acquired=True,
+                owner_session_id=payload.get("session_id"),
+                owner_run_id=run_id,
+                target_repo=new_payload.get("target_repo"),
             )
 
         value = json.dumps(
@@ -1251,48 +1367,15 @@ def touch_issue_lock(
             return IssueLockResult(acquired=False, owner_session_id=None)
 
         if payload.get("run_id") == run_id:
-            # Self-healing renewal (BLOCKER round-2, issue #2012): a bare
-            # `_R.expire(key, ttl)` here would renew the TTL without ever
-            # rewriting the payload -- a lock acquired before target_repo
-            # pinning existed (or whose payload otherwise lacks it) would
-            # then renew FOREVER without ever gaining the field, hard-
-            # failing every issue-keyed ledger write across cutover. Instead
-            # we re-SET the full payload: spread the EXISTING payload
-            # (never reconstruct a subset -- that would silently drop
-            # `pid`/`hostname` even though nothing asked it to) and override
-            # only `target_repo`, re-pinning it from the caller's
-            # freshly-resolved value when given, else falling back to
-            # whatever the payload already carried. Re-validated against
-            # the payload just fetched by THIS call (not a cached peek from
-            # earlier) -- the caller (writers/readers of the issue-keyed
-            # ledger) must call this non-peek method immediately before its
-            # own ledger write, not trust an earlier peek. The single
-            # read-compare-write happens within one function invocation
-            # with no intervening peek, so this already closes the
-            # stale-peek TOCTOU race without any additional locking
-            # machinery.
-            healed_target_repo = (
-                target_repo if target_repo is not None else payload.get("target_repo")
-            )
-            new_payload = {**payload, "target_repo": healed_target_repo}
-            # machine_id self-heal (issue #2537, same pattern as target_repo
-            # above): a pre-#2537 payload gains the stable identity on its
-            # next same-owner renewal. Renewal requires a run_id match and
-            # run_ids are minted on exactly one machine, so the renewer IS on
-            # the owner's machine. Identity is immutable once stamped: an
-            # existing machine_id is never overwritten, and an unresolvable
-            # local id ("") is never written over the legacy hostname signal.
-            if not new_payload.get("machine_id"):
-                local_machine_id = _local_machine_id()
-                if local_machine_id:
-                    new_payload["machine_id"] = local_machine_id
-            # renewed_at re-stamp (issue #2620): unlike the identity fields
-            # above, this one is deliberately OVERWRITTEN on every renewal --
-            # the re-stamp IS the liveness signal, since the payload's pid
-            # (the ephemeral `session-ensure` CLI) is dead by the first tick.
-            # This also self-heals a pre-#2620 payload, which gains the field
-            # on its next same-owner renewal.
-            new_payload["renewed_at"] = time.time()
+            # Self-healing renewal (see `_healed_renewal_payload`), re-validated
+            # against the payload just fetched by THIS call (not a cached peek
+            # from earlier) -- the caller (writers/readers of the issue-keyed
+            # ledger) must call this non-peek method immediately before its own
+            # ledger write, not trust an earlier peek. The single
+            # read-compare-write happens within one function invocation with no
+            # intervening peek, so this closes the stale-peek TOCTOU race
+            # without any additional locking machinery.
+            new_payload = _healed_renewal_payload(payload, target_repo)
             _R.set(key, json.dumps(new_payload), ex=ttl)
             return IssueLockResult(
                 acquired=True,
@@ -1308,6 +1391,24 @@ def touch_issue_lock(
             target_repo=payload.get("target_repo"),
         )
     except Exception as e:
+        if renew_only:
+            # A renewer fails CLOSED (issue #2714 L0). This handler wraps the
+            # ENTIRE function, including the CAS EVAL above, so the default
+            # fail-open below would hand a renewer `acquired=True` on a
+            # transient Redis error -- the exact "report ownership without
+            # holding the key" shape the CAS exists to eliminate, letting a
+            # heartbeat keep renewing (and keep publishing a supervised-run
+            # signal for) a lease its supervisor already released. Reporting
+            # the loss costs the caller one cheap re-peek; claiming ownership
+            # it cannot verify costs a wedged issue.
+            logger.warning(
+                "[session-lifecycle] issue-lock renewal failed for issue=%s "
+                "(failing closed; error class %s): %s",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
+            return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
         logger.warning(
             "[session-lifecycle] issue-lock acquisition failed for issue=%s "
             "(failing open; error class %s): %s",

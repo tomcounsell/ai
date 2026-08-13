@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import uuid
@@ -30,6 +29,7 @@ import pytest
 
 from agent import tool_budget
 from models.agent_session import AgentSession, SessionType
+from tests.db_claim import subprocess_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -205,18 +205,15 @@ def _write_sidecar(cli_session_id: str, agent_session_id: str) -> Path:
 def _run_cli_hook(cli_session_id: str, *, max_calls: str = "5"):
     """Run the CLI PreToolUse hook as a real subprocess; return the exit code.
 
-    Point the subprocess's Popoto at the SAME per-worker test DB the in-process
-    ``redis_test_db`` fixture swapped to (the fixture rebinds the client object
-    at runtime; a fresh subprocess would otherwise import against db=0 and see
-    no sessions → a false silent-allow).
+    ``subprocess_env`` points the child's Popoto at the SAME test DB this
+    process claimed (the ``redis_test_db`` fixture rebinds the client object
+    in memory, which cannot cross a fork; a fresh subprocess would otherwise
+    import against db=0 and see no sessions → a false silent-allow).
     """
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    test_db = POPOTO_REDIS_DB.connection_pool.connection_kwargs.get("db", 0)
-    env = {**os.environ}
-    env["REDIS_URL"] = f"redis://127.0.0.1:6379/{test_db}"
-    env["MAX_TOOL_CALLS_PER_SESSION"] = max_calls
-    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    env = subprocess_env(
+        MAX_TOOL_CALLS_PER_SESSION=max_calls,
+        project_root=str(REPO_ROOT),
+    )
     payload = json.dumps(
         {"session_id": cli_session_id, "tool_name": "Read", "tool_input": {"file_path": "/x"}}
     )

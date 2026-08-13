@@ -52,6 +52,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
+from tools.lane_identity import mint_lane_slug
 
 logger = logging.getLogger(__name__)
 
@@ -88,23 +89,25 @@ _GITHUB_ISSUE_URL_RE = re.compile(
 _ENRICHMENT_HEADER_RE = re.compile(r"^(?:SESSION_ID|PROJECT|FROM|TASK_SCOPE|SCOPE):")
 
 
-def _derive_slug_from_message(message: str) -> str | None:
-    """Extract the first issue number from ``message`` and return ``sdlc-{N}``.
+def _issue_number_from_message(message: str) -> int | None:
+    """Extract the first issue number referenced in ``message``, or ``None``.
 
-    Returns None if no issue reference is present. Used by ``cmd_create`` to
-    auto-provision a worktree for PM-role sessions targeting a specific issue.
+    Used by ``cmd_create`` to auto-provision a worktree for eng-role sessions
+    targeting a specific issue. It reports only *which issue* the message names;
+    turning that into a lane slug is ``tools.lane_identity.mint_lane_slug``'s
+    job, which is the sole home of that literal.
 
     Examples:
-        "handle issue #1109"       -> "sdlc-1109"
-        "Start the pipeline for issue 735" -> "sdlc-735"
-        "do something generic"     -> None
+        "handle issue #1109"                -> 1109
+        "Start the pipeline for issue 735"  -> 735
+        "do something generic"              -> None
     """
     if not message:
         return None
     match = _ISSUE_REF_RE.search(message)
     if not match:
         return None
-    return f"sdlc-{match.group(1)}"
+    return int(match.group(1))
 
 
 def _derive_sdlc_metadata(
@@ -113,7 +116,7 @@ def _derive_sdlc_metadata(
     """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
 
     Detection is anchored to issue references only — the same signal
-    ``_derive_slug_from_message`` uses — so it stays consistent with slug
+    ``_issue_number_from_message`` uses — so it stays consistent with slug
     derivation and avoids over-classifying conversational sessions (plan
     Rabbit Holes / Risk 1). Precedence:
 
@@ -420,21 +423,78 @@ def _format_ts(ts: str | float | None) -> str:
         return str(ts)[:19]
 
 
-def cmd_create(args: argparse.Namespace) -> int:
-    """Create a new AgentSession and enqueue it.
+# Session roles accepted by ``valor-session create``; the argparse ``choices``
+# list and the core's role -> SessionType map are both keyed off this tuple.
+_ROLE_CHOICES = ("eng", "teammate")
 
-    ``project_key`` determines the repo; ``working_dir`` is always derived from
-    ``projects.json[project_key].working_directory`` (optionally with a
-    ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
-    different ``--project-key``.
 
-    Slug requirement: ``--role eng`` (issues #1109, #1272) requires a slug —
-    either via ``--slug <slug>`` or by including ``issue #N`` in the message
-    so the slug auto-derives to ``sdlc-N``. Slugless invocations exit 1 with
-    a stderr error. This prevents the session from inheriting the worker's
-    current branch state
-    and ensures dev sessions get worktree isolation.
+@dataclasses.dataclass
+class CreateResult:
+    """Result of a :func:`create_session` call.
+
+    Mirrors :class:`ResumeResult`: the programmatic core returns a value object
+    and the CLI wrapper turns it into prints and exit codes. Every failure mode
+    that used to ``print`` + ``return 1`` inside ``cmd_create`` surfaces here as
+    ``success=False`` with a populated ``error``.
     """
+
+    success: bool
+    session_id: str | None = None
+    error: str | None = None
+    working_dir: str | None = None
+    project_key: str | None = None
+    worker_healthy: bool | None = None
+    worker_heartbeat_age_s: float | None = None
+    # Operator-facing progress lines the core discovered (auto-derived slug,
+    # inherited project_key, provisioned worktree). The core does not print:
+    # presentation belongs to ``cmd_create``, and a reflection calling the core
+    # from a subprocess has no stderr anyone reads.
+    notes: list[str] = dataclasses.field(default_factory=list)
+
+
+def create_session(
+    *,
+    message: str,
+    role: str = "eng",
+    slug: str | None = None,
+    project_key: str | None = None,
+    parent_id: str | None = None,
+    session_type: str = "eng",
+    chat_id: str = "0",
+    telegram_message_id: int = 0,
+    model: str | None = None,
+    requires_real_chrome: bool = False,
+) -> CreateResult:
+    """Programmatic core for session creation, shared by ``cmd_create`` and by
+    callers that need to provision a session without going through the CLI.
+
+    Everything from slug resolution onward lives here: slug auto-derive-or-reject,
+    three-tier ``project_key`` resolution, working-dir derivation, SDLC metadata,
+    worktree provisioning, the enqueue, and the post-enqueue worker health read.
+    Argparse handling, ``--json`` emission, and exit codes stay in ``cmd_create``.
+
+    ``slug=None`` auto-derives from ``issue #N`` in ``message`` for non-teammate
+    roles and fails when nothing can be derived (#1109, #1272). ``project_key=None``
+    falls back to parent inheritance, then a cwd match.
+
+    ``role`` and ``session_type`` must agree — see the coherence check below.
+
+    ``classification_type``, ``issue_url``, ``project_config``, and ``working_dir``
+    are derived here; they are not caller inputs.
+
+    ``telegram_message_id`` anchors the session's outbound thread: it flows
+    straight into the enqueued ``AgentSession`` and, once the worker starts the
+    session, ``agent/sdk_client.py`` exports it as ``TELEGRAM_REPLY_TO`` so every
+    outbound message threads under that message. Defaulting to ``0`` preserves
+    every existing caller's behavior byte-for-byte; the only production caller
+    that sets it is a scheduled reflection that anchors an autonomous-pickup
+    announcement (see ``reflections/sdlc_upvote_lanes.py``). It is meaningful
+    only paired with a non-``"0"`` ``chat_id`` — a message id is scoped to its
+    chat, and ``chat_id="0"`` routes output to the system Room sink rather than
+    Telegram, so passing a non-zero ``telegram_message_id`` alongside
+    ``chat_id="0"`` is always a caller bug and is logged as a warning below.
+    """
+    notes: list[str] = []
     _load_env()
     try:
         import asyncio
@@ -444,71 +504,81 @@ def cmd_create(args: argparse.Namespace) -> int:
         from bridge.utc import utc_now
         from config.enums import SessionType
 
+        # ------------------------------------------------------------------
+        # Stopgap (#1633): refuse parent-attached session creation here too.
+        # The CLI keeps its own gate (with its operator-facing presentation),
+        # but the core must not become an ungated way around the stopgap for
+        # programmatic callers. Fires before any slug or project_key
+        # resolution, worktree provisioning, or enqueue, so the refused path
+        # has zero side effects.
+        # ------------------------------------------------------------------
+        if parent_id:
+            from models.child_session_gate import (
+                CHILD_SESSIONS_DISABLED_MESSAGE,
+                child_sessions_allowed,
+            )
+
+            if not child_sessions_allowed():
+                return CreateResult(success=False, error=CHILD_SESSIONS_DISABLED_MESSAGE)
+
+        # ------------------------------------------------------------------
+        # role / session_type coherence.
+        #
+        # ``role`` gates the slug requirement (#1109/#1272) while
+        # ``session_type`` selects the SessionType. Left independent, a
+        # programmatic caller passing role="teammate", session_type="eng" and
+        # no slug would skip the slug requirement and land an ENG session in
+        # the main checkout — precisely the hole #1109/#1272 closed. Refuse a
+        # mismatch outright, before any resolution or filesystem work, with the
+        # same zero-side-effect refusal shape as the #1633 gate above.
+        # ``cmd_create`` always passes both identically, so this is latent-only.
+        # ------------------------------------------------------------------
+        if role != session_type:
+            return CreateResult(
+                success=False,
+                error=(
+                    f"role={role!r} and session_type={session_type!r} disagree. "
+                    "They gate different things (slug requirement vs. SessionType) "
+                    "and must name the same kind of session."
+                ),
+                notes=notes,
+            )
+
         _role_to_session_type = {
             "eng": SessionType.ENG,
             "teammate": SessionType.TEAMMATE,
         }
-        role = args.role or "eng"
-        if role not in _role_to_session_type:
-            raise ValueError(
-                f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"
-            )
-        session_type = _role_to_session_type[role]
-        message = args.message
-        # Issue #1148: reject enrichment-header forwarding. A 200-char window
-        # at the start of the message is enough to catch the observed pattern
-        # ("PROJECT: Valor AI\nFOCUS: ...") without false-positives on prose
-        # that uses the words SCOPE/FROM/etc. mid-sentence.
-        if message and _ENRICHMENT_HEADER_RE.match(message[:200]):
-            print(
-                "Error: --message looks like a forwarded enrichment header, not a "
-                "task description.\n"
-                "Enrichment headers (PROJECT:, FROM:, SESSION_ID:, TASK_SCOPE:, "
-                "SCOPE:) are\n"
-                "injected automatically by the worker. Pass only the task content.",
-                file=sys.stderr,
-            )
-            return 2
-        chat_id = args.chat_id or "0"
-        parent_id = getattr(args, "parent", None)
-        model = getattr(args, "model", None)
-
-        # ------------------------------------------------------------------
-        # Stopgap (#1633): refuse NEW parent-attached session creation.
-        # The granite PTY container owns the PM/Dev split; parent-linked
-        # child sessions double-consume bounded pool slots. Fires before
-        # any filesystem or Redis work (slug derivation, worktree
-        # provisioning, enqueue) so the refused path has zero side effects.
-        # ------------------------------------------------------------------
-        if parent_id:
-            from models.child_session_gate import (
-                BYPASS_WARNING,
-                CHILD_SESSIONS_DISABLED_MESSAGE,
-                child_sessions_allowed,
-                child_sessions_disabled_json,
+        resolved_session_type = _role_to_session_type.get(session_type)
+        if resolved_session_type is None:
+            return CreateResult(
+                success=False,
+                error=(
+                    f"Unknown session_type value: {session_type!r}. "
+                    f"Allowed values: {sorted(_role_to_session_type)}"
+                ),
+                notes=notes,
             )
 
-            if not child_sessions_allowed():
-                if getattr(args, "json", False):
-                    print(json.dumps(child_sessions_disabled_json(), indent=2))
-                else:
-                    print(f"Error: {CHILD_SESSIONS_DISABLED_MESSAGE}", file=sys.stderr)
-                return 2
-            print(BYPASS_WARNING, file=sys.stderr)
+        if telegram_message_id and chat_id == "0":
+            logger.warning(
+                'create_session: telegram_message_id=%s passed with chat_id="0" '
+                "(the system Room sink, not Telegram) — a message id is only "
+                "meaningful scoped to its chat. This is always a caller bug.",
+                telegram_message_id,
+            )
 
         # Derive a session_id from timestamp + role
         ts_suffix = str(int(utc_now().timestamp() * 1000))
         session_id = f"{chat_id}_{ts_suffix}"
 
         # ------------------------------------------------------------------
-        # Step 1: resolve PM slug BEFORE any project/working_dir work.
+        # Step 1: resolve the slug BEFORE any project/working_dir work.
         #
-        # PM auto-slug derivation is a pure function of ``message`` and MUST
-        # fire before worktree creation so that "PM without slug and without
-        # issue reference" can refuse (exit 1) without first having computed
-        # a project root or touching the filesystem.
+        # Auto-slug derivation is a pure function of ``message`` and MUST
+        # fire before worktree creation so that "eng without slug and without
+        # issue reference" can refuse without first having computed a project
+        # root or touching the filesystem.
         # ------------------------------------------------------------------
-        slug = getattr(args, "slug", None)
         # Issue #1272: eng sessions also require a slug. An earlier behavior
         # accepted slugless non-teammate roles and let the worker fall back to
         # the main checkout — the residual hole that #887 left open. The
@@ -518,53 +588,54 @@ def cmd_create(args: argparse.Namespace) -> int:
         # downstream by the worker if a slugless eng session somehow reaches
         # the executor (future programmatic spawn site).
         if not slug and role != "teammate":
-            derived = _derive_slug_from_message(message)
-            if derived:
-                slug = derived
-                print(
-                    f"  Auto-derived slug: {slug} (from 'issue #N' in message)",
-                    file=sys.stderr,
-                )
+            # This is a CONVERSATIONAL seam, not a lane start: the branch fires
+            # for any eng session whose --message merely mentions an issue in
+            # prose. So it reads nothing and records nothing -- no resolver
+            # call, no ledger, no recorded identity. Adopting a live lane's
+            # recorded slug here would drop a conversational session into that
+            # lane's worktree and branch, which is the shared-slug contention
+            # #1915 Defect 2 fixed. The session gets its own worktree; if a real
+            # lane later starts for the issue, ensure_session's ladder reaches
+            # this same name anyway.
+            issue_number = _issue_number_from_message(message)
+            if issue_number:
+                slug = mint_lane_slug(issue_number)
+                notes.append(f"  Auto-derived slug: {slug} (from 'issue #N' in message)")
             else:
-                print(
-                    "Error: Eng sessions must be created with --slug <slug> "
-                    "or include 'issue #N' in the message so a worktree can be "
-                    "provisioned. Without a slug the session would inherit the "
-                    "worker's current branch state (see issues #1109, #1272).",
-                    file=sys.stderr,
+                return CreateResult(
+                    success=False,
+                    notes=notes,
+                    error=(
+                        "Eng sessions must be created with --slug <slug> "
+                        "or include 'issue #N' in the message so a worktree can be "
+                        "provisioned. Without a slug the session would inherit the "
+                        "worker's current branch state (see issues #1109, #1272)."
+                    ),
                 )
-                return 1
 
         # ------------------------------------------------------------------
         # Step 2: resolve project_key.
         #
-        # Precedence: --project-key > --parent inheritance > cwd-match.
+        # Precedence: explicit > parent inheritance > cwd-match.
         # No silent fallback — if all three fail, resolve_project_key raises
-        # ProjectKeyResolutionError, which propagates to the outer
-        # ``except Exception`` and returns exit 1 with a user-facing message.
+        # ProjectKeyResolutionError, which lands in the outer
+        # ``except Exception`` and comes back as a failed CreateResult.
         # ------------------------------------------------------------------
-        explicit_key = getattr(args, "project_key", None)
-        project_key: str | None = None
-        if explicit_key:
-            project_key = explicit_key
-        elif parent_id:
+        if not project_key and parent_id:
             # Parent inheritance: copy project_key from the parent session.
-            # If --parent points to a non-existent session, fall through to
-            # cwd-based resolution — a typo in --parent is a separate concern
-            # from mis-routing and should not hard-fail creation.
+            # If parent_id points to a non-existent session, fall through to
+            # cwd-based resolution — a typo there is a separate concern from
+            # mis-routing and should not hard-fail creation.
             parent = _find_session(parent_id)
             if parent is not None:
                 inherited_key = getattr(parent, "project_key", None)
                 if inherited_key:
                     project_key = inherited_key
                     parent_uuid = getattr(parent, "agent_session_id", parent_id)
-                    print(
-                        f"  Inherited project_key={project_key} from parent {parent_uuid}",
-                        file=sys.stderr,
-                    )
-        if project_key is None:
+                    notes.append(f"  Inherited project_key={project_key} from parent {parent_uuid}")
+        if not project_key:
             # Final fallback: cwd-based match. Raises ProjectKeyResolutionError
-            # on no match — no silent "valor" coercion.
+            # on no match — no silent coercion to a default key.
             project_key = resolve_project_key(os.getcwd())
 
         # ------------------------------------------------------------------
@@ -583,11 +654,9 @@ def cmd_create(args: argparse.Namespace) -> int:
             _validate_slug(slug)  # Raises ValueError for invalid slugs
             wt_path = get_or_create_worktree(repo_root, slug)
             working_dir = str(wt_path)
-            print(f"  Worktree:    {working_dir}", file=sys.stderr)
+            notes.append(f"  Worktree:    {working_dir}")
         else:
             working_dir = str(repo_root)
-
-        needs_real_chrome = bool(getattr(args, "needs_real_chrome", False))
 
         async def _create():
             await _push_agent_session(
@@ -595,56 +664,162 @@ def cmd_create(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 working_dir=working_dir,
                 message_text=message,
-                sender_name=f"valor-session ({role})",
+                # Derived from session_type (not role) so the label can never
+                # disagree with the SessionType actually enqueued. The
+                # coherence check above makes the two identical anyway.
+                sender_name=f"valor-session ({session_type})",
                 chat_id=chat_id,
-                telegram_message_id=0,
-                session_type=session_type,
+                telegram_message_id=telegram_message_id,
+                session_type=resolved_session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
                 classification_type=classification_type,
                 issue_url=issue_url,
                 model=model,
                 project_config=project_config,
-                requires_real_chrome=needs_real_chrome,
+                requires_real_chrome=requires_real_chrome,
             )
             return session_id
 
         result = asyncio.run(_create())
 
-        # Check worker health after enqueue — warn if no recent heartbeat
+        # Check worker health after enqueue — the caller decides how to surface it
         worker_healthy, worker_age_s = _check_worker_health()
-        worker_state = "ok" if worker_healthy else "down"
 
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "session_id": result,
-                        "status": "created",
-                        "project_key": project_key,
-                        "model": model,
-                        "worker_healthy": worker_healthy,
-                        "worker_state": worker_state,
-                        "worker_heartbeat_age_s": worker_age_s,
-                    },
-                    indent=2,
-                )
-            )
-        else:
-            print(f"Created session: {result}")
-            print(f"  Role:        {role}")
-            print(f"  Project key: {project_key}")
-            if model:
-                print(f"  Model:       {model}")
-            print(f"  Message: {message[:80]}")
-            print(f"  Chat ID: {chat_id}")
-            if worker_state == "down":
-                print(_worker_down_message(worker_age_s), file=sys.stderr)
-        return 0
+        return CreateResult(
+            success=True,
+            session_id=result,
+            working_dir=working_dir,
+            project_key=project_key,
+            worker_healthy=worker_healthy,
+            worker_heartbeat_age_s=worker_age_s,
+            notes=notes,
+        )
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        return CreateResult(success=False, error=str(e), notes=notes)
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    """Create a new AgentSession and enqueue it.
+
+    Thin CLI wrapper over :func:`create_session`: reads argparse attributes,
+    enforces the #1633 child-session stopgap with its operator-facing
+    presentation, and maps the returned :class:`CreateResult` onto printed
+    output and an exit code.
+
+    ``project_key`` determines the repo; ``working_dir`` is always derived from
+    ``projects.json[project_key].working_directory`` (optionally with a
+    ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
+    different ``--project-key``.
+
+    Slug requirement: ``--role eng`` (issues #1109, #1272) requires a slug —
+    either via ``--slug <slug>`` or by including ``issue #N`` in the message
+    so the slug auto-derives to ``sdlc-N``. Slugless invocations exit 1 with
+    a stderr error. This prevents the session from inheriting the worker's
+    current branch state
+    and ensures dev sessions get worktree isolation.
+    """
+    _load_env()
+
+    role = args.role or "eng"
+    if role not in _ROLE_CHOICES:
+        print(
+            f"Error: Unknown --role value: {role!r}. Allowed values: {sorted(_ROLE_CHOICES)}",
+            file=sys.stderr,
+        )
         return 1
+    message = args.message
+    # Issue #1148: reject enrichment-header forwarding. A 200-char window
+    # at the start of the message is enough to catch the observed pattern
+    # ("PROJECT: Valor AI\nFOCUS: ...") without false-positives on prose
+    # that uses the words SCOPE/FROM/etc. mid-sentence.
+    if message and _ENRICHMENT_HEADER_RE.match(message[:200]):
+        print(
+            "Error: --message looks like a forwarded enrichment header, not a "
+            "task description.\n"
+            "Enrichment headers (PROJECT:, FROM:, SESSION_ID:, TASK_SCOPE:, "
+            "SCOPE:) are\n"
+            "injected automatically by the worker. Pass only the task content.",
+            file=sys.stderr,
+        )
+        return 2
+    chat_id = args.chat_id or "0"
+    parent_id = getattr(args, "parent", None)
+    model = getattr(args, "model", None)
+
+    # ------------------------------------------------------------------
+    # Stopgap (#1633): refuse NEW parent-attached session creation.
+    # The granite PTY container owns the PM/Dev split; parent-linked
+    # child sessions double-consume bounded pool slots. Fires before
+    # any filesystem or Redis work (slug derivation, worktree
+    # provisioning, enqueue) so the refused path has zero side effects.
+    # ------------------------------------------------------------------
+    if parent_id:
+        from models.child_session_gate import (
+            BYPASS_WARNING,
+            CHILD_SESSIONS_DISABLED_MESSAGE,
+            child_sessions_allowed,
+            child_sessions_disabled_json,
+        )
+
+        if not child_sessions_allowed():
+            if getattr(args, "json", False):
+                print(json.dumps(child_sessions_disabled_json(), indent=2))
+            else:
+                print(f"Error: {CHILD_SESSIONS_DISABLED_MESSAGE}", file=sys.stderr)
+            return 2
+        print(BYPASS_WARNING, file=sys.stderr)
+
+    result = create_session(
+        message=message,
+        role=role,
+        slug=getattr(args, "slug", None),
+        project_key=getattr(args, "project_key", None),
+        parent_id=parent_id,
+        session_type=role,
+        chat_id=chat_id,
+        telegram_message_id=getattr(args, "telegram_message_id", 0) or 0,
+        model=model,
+        requires_real_chrome=bool(getattr(args, "needs_real_chrome", False)),
+    )
+
+    # Presentation of the core's progress notes lives here, not in the core.
+    for note in result.notes:
+        print(note, file=sys.stderr)
+
+    if not result.success:
+        print(f"Error: {result.error}", file=sys.stderr)
+        return 1
+
+    worker_state = "ok" if result.worker_healthy else "down"
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "session_id": result.session_id,
+                    "status": "created",
+                    "project_key": result.project_key,
+                    "model": model,
+                    "worker_healthy": result.worker_healthy,
+                    "worker_state": worker_state,
+                    "worker_heartbeat_age_s": result.worker_heartbeat_age_s,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"Created session: {result.session_id}")
+        print(f"  Role:        {role}")
+        print(f"  Project key: {result.project_key}")
+        if model:
+            print(f"  Model:       {model}")
+        print(f"  Message: {message[:80]}")
+        print(f"  Chat ID: {chat_id}")
+        if worker_state == "down":
+            print(_worker_down_message(result.worker_heartbeat_age_s), file=sys.stderr)
+    return 0
 
 
 def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
@@ -1148,6 +1323,40 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                     v_str = v_str[:200] + "…"
                 print(f"  {k:<35} {v_str}")
 
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_progress(args: argparse.Namespace) -> int:
+    """Read-only progress report for a session (issue #2663).
+
+    ``id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); see
+    :py:func:`_find_session`, which is the ORM-only resolver every other verb
+    uses. Nothing on this path writes, steers, or kills, so it is safe for any
+    agent to call against any session — including one it does not own.
+
+    Aggregation and the verdict rules live in :mod:`tools.session_progress`;
+    this function is the CLI seam only.
+    """
+    _load_env()
+    try:
+        from tools.session_progress import build_report
+
+        session = _find_session(args.id)
+        if session is None:
+            print(f"Session not found: {args.id}", file=sys.stderr)
+            return 1
+
+        window = getattr(args, "window", None)
+        report = build_report(session, window_s=float(window) if window is not None else None)
+
+        if getattr(args, "json", False):
+            print(json.dumps(report.to_dict(), indent=2, default=str))
+        else:
+            print(report.render())
         return 0
 
     except Exception as e:
@@ -1810,13 +2019,28 @@ def main() -> int:
         "--role",
         "-r",
         default="eng",
-        choices=["eng", "teammate"],
+        choices=list(_ROLE_CHOICES),
         help="Session role/type (default: eng)",
     )
     create_parser.add_argument(
         "--message", "-m", required=True, help="Initial message for the session"
     )
     create_parser.add_argument("--chat-id", help="Telegram chat ID (default: 0)")
+    create_parser.add_argument(
+        "--telegram-message-id",
+        type=int,
+        default=0,
+        help=(
+            "Telegram message id to anchor this session's outbound thread to "
+            "(default: 0, unanchored). Every subsequent output from the session "
+            "threads as a reply under this message via TELEGRAM_REPLY_TO. Only "
+            "meaningful together with --chat-id — a message id is scoped to its "
+            "chat. This is an operational debugging affordance (the production "
+            "caller is reflections/sdlc_upvote_lanes.py, which imports "
+            "create_session directly): use it to reproduce an anchored start by "
+            "hand against a test group when threading misbehaves."
+        ),
+    )
     create_parser.add_argument("--parent", help="Parent AgentSession ID (for child sessions)")
     create_parser.add_argument(
         "--project-key",
@@ -1903,6 +2127,41 @@ def main() -> int:
     )
     inspect_parser.add_argument("--id", required=True, help="Session ID")
     inspect_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # progress subcommand
+    progress_parser = subparsers.add_parser(
+        "progress",
+        help="Read-only progress report: is this session still working?",
+        description=(
+            "Aggregate every existing liveness signal for a session and emit one "
+            "verdict line: PROGRESSING, NO RECENT ACTIVITY, or UNKNOWN. Read-only "
+            "— it never steers, kills, or writes. Absence of evidence reports "
+            "UNKNOWN, never a false 'wedged'. %CPU and child-process count are "
+            "deliberately NOT consulted: those are the readings that produced the "
+            "misdiagnosis in issue #2662."
+        ),
+    )
+    progress_parser.add_argument(
+        "--id", required=True, help="Session ID (session_id or agent_session_id)"
+    )
+    # Shared with `tools/valor_cli.py`'s own `--window` parser (imported here
+    # rather than at module scope, matching `cmd_progress`'s own lazy import
+    # of `tools.session_progress`) so a negative value is rejected identically
+    # by both CLI entry points, at parse time, before any session lookup.
+    from tools.session_progress import window_arg_type  # noqa: PLC0415
+
+    progress_parser.add_argument(
+        "--window",
+        type=window_arg_type,
+        default=None,
+        help=(
+            "Freshness window in seconds, >= 0, for the PROGRESSING verdict. "
+            "Default is the watchdog's own SESSION_PROGRESS_DEADLINE_S, so this "
+            "CLI never disagrees with the running system about what counts as "
+            "progress."
+        ),
+    )
+    progress_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # children subcommand
     children_parser = subparsers.add_parser(
@@ -2026,6 +2285,7 @@ def main() -> int:
         "wait-for-children": cmd_wait_for_children,
         "release": cmd_release,
         "inspect": cmd_inspect,
+        "progress": cmd_progress,
         "children": cmd_children,
         "telemetry": cmd_telemetry,
         "crash-signatures": cmd_crash_signatures,

@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests/fixtures/design_system"
 
@@ -88,6 +90,7 @@ def test_all_pipeline_produces_committed_artifacts(worktree_fixture: Path):
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
     assert result.returncode == 0, result.stderr
     assert (worktree_fixture / "design-system.md").is_file()
@@ -102,6 +105,7 @@ def test_all_pipeline_produces_committed_artifacts(worktree_fixture: Path):
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
     assert check.returncode == 0, check.stderr
 
@@ -114,6 +118,7 @@ def test_check_detects_mutation(worktree_fixture: Path):
         [sys.executable, "-m", "tools.design_system_sync", "--all", "--pen", str(pen)],
         check=True,
         cwd=str(REPO_ROOT),
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
     brand = worktree_fixture / "css/brand.css"
     brand.write_text(brand.read_text() + "\n/* drift */\n", encoding="utf-8")
@@ -122,6 +127,7 @@ def test_check_detects_mutation(worktree_fixture: Path):
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
     assert result.returncode == 1
     assert "differs from generated output" in result.stderr

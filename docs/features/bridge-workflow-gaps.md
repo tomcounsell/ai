@@ -75,7 +75,12 @@ logs/sessions/
 
 ### Cleanup
 
-`cleanup_old_snapshots(max_age_hours=168)` removes session log directories older than 7 days.
+`cleanup_old_snapshots(max_age_hours=168)` removes session log directories older
+than 7 days. It is called by the daily `disk-reclaim` sweep, and deletes nothing
+until that sweep is armed with `DISK_RECLAIM_APPLY=true` — see
+[Scheduled Disk Reclaim](scheduled-disk-reclaim.md). Between the deletion of the
+reflections monolith and #2517 the function had no caller at all, so a machine
+that has not registered `disk-reclaim` still accumulates `logs/sessions/`.
 
 ## Completion Signal
 

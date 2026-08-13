@@ -37,19 +37,28 @@ Note the scope of that statement: since issue #2536, `Model.rebuild_indexes()` *
 ### How `run_cleanup()` Works
 
 1. Iterates all Popoto models from `models/__init__.__all__`, deduped and filtered by class `__name__` (not the `__all__` export string -- an alias like `AgentSession` for `AgentSession` cannot smuggle a guarded model past the exclusion checks)
-2. Skips models in `_SCHEDULER_STATE_MODELS` (live `get_or_create`-per-tick models, see Concurrency Safety) and `_GUARDED_ELSEWHERE` (models whose index hygiene is handled by their own guarded rebuild path -- currently just `AgentSession`)
+2. Skips models in `_SCHEDULER_STATE_MODELS` (live `get_or_create`-per-tick models, see Concurrency Safety) and `_GUARDED_ELSEWHERE` (`AgentSession`, `Room`, `Job` -- models whose index hygiene is handled by their own guarded `repair_indexes()` path)
 3. For each remaining model, counts orphaned index entries (dry-run scan) and captures a `keyspace_before` SCARD snapshot of the model's class-set index
 4. Runs `Model.rebuild_indexes()` in a daemon thread with a wall-clock timeout (see [Step 1 Un-Wedge](#step-1-un-wedge-daemon-thread--join-timeout) below), then captures `keyspace_after` and computes `keyspace_delta = keyspace_after - keyspace_before`
 5. Logs per-model orphan counts found/cleaned and the keyspace delta
+6. Finally runs `_run_guarded_repairs()`, which invokes the guarded `repair_indexes()` of each `_GUARDED_ELSEWHERE` model that has no other caller -- `Room` and `Job`. Results land under the summary's `guarded_repairs` key.
 
 Each model is processed independently -- one model failure does not abort the sweep. The SCAN-based `rebuild_indexes()` is safe to run concurrently with normal operations for every model still in scope.
+
+### The two-part `_GUARDED_ELSEWHERE` contract
+
+Listing a model in `_GUARDED_ELSEWHERE` is only half of registering it. The frozenset removes the model from the generic sweep; `_run_guarded_repairs()`'s `guarded_repairs` registry is what puts its own repair path back on the schedule. A model in the first and absent from the second receives **no index hygiene at all**.
+
+That is precisely what happened to `Job` (issue #2640): it was excluded from the sweep when it shipped and never registered, so its identity-less-hash quarantine, its `$IndexF:Job:*` clear, its `$SortF:Job:last_active_at:*` partition rebuild, and the daily `Job.backfill_open_promises_index()` re-derivation all went unrun in production while the docstrings claimed a daily cadence.
+
+`AgentSession` is the one deliberate absence from the registry, and it is safe because it has two other production callers (worker Step 2 and the hourly `agent-session-cleanup` reflection). Any new entry in the frozenset needs either a registry entry here or a named caller elsewhere.
 
 ### Cleanup Paths
 
 | Path | Trigger | Scope |
 |------|---------|-------|
-| Worker startup | `python -m worker` | All models except `AgentSession` via `run_cleanup()` |
-| ReflectionScheduler | Reflection subprocess tick (daily, `python -m reflections`) | All models except `AgentSession` via `run_cleanup()` |
+| Worker startup | `python -m worker` | All models except `_GUARDED_ELSEWHERE` via `run_cleanup()`, plus `Room` and `Job` via `_run_guarded_repairs()` |
+| ReflectionScheduler | Reflection subprocess tick (daily, `python -m reflections`) | All models except `_GUARDED_ELSEWHERE` via `run_cleanup()`, plus `Room` and `Job` via `_run_guarded_repairs()` |
 | Worker Step 2 | `python -m worker` (post-Step-1) | `AgentSession` only, via the guarded `AgentSession.repair_indexes()` |
 | Hourly `agent-session-cleanup` reflection | Worker-internal hourly tick (`agent/session_health.py`) | `AgentSession` only, via the guarded `AgentSession.repair_indexes()` |
 
@@ -181,7 +190,7 @@ The exposed case is a machine holding un-migrated legacy records. If that stops 
 | `models/agent_session.py` | AgentSession with Meta.ttl, the A1 rebuild guard (`repair_indexes()`), and the persisted quarantine-count Redis key |
 | `agent/agent_session_queue.py` | Refactored diagnostic fallback |
 | `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (Step 1, excludes `AgentSession`) and the guarded `AgentSession.repair_indexes()` (Step 2) |
-| `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`), model discovery (`_get_all_models()`), `_GUARDED_ELSEWHERE` exclusion set, and the daemon-thread rebuild timeout (`_run_rebuild_with_timeout()`) |
+| `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`), model discovery (`_get_all_models()`), `_GUARDED_ELSEWHERE` exclusion set, the `_run_guarded_repairs()` registry that schedules `Room.repair_indexes()` and `Job.repair_indexes()`, and the daemon-thread rebuild timeout (`_run_rebuild_with_timeout()`) |
 | `tools/doctor.py` | `agentsession-index-drift` check, `_recent_quarantine_suffix()` |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
 | `monitoring/sentry_config.py` | `drop_orphan_noise()` Sentry `before_send` filter (see Sentry Orphan-Noise Filter) |

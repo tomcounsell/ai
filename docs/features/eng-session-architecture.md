@@ -10,6 +10,8 @@ The AgentSession model uses a **session_type discriminator** (`SessionType` enum
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
+**Eng sessions have three origins**, not one: a human message routed through the persona resolver above, a stalled-lane recovery create from `sdlc_progress.py` (issue #2696), and — since issue #2717 — an autonomous pickup on an `upvote`-labeled issue from the scheduled `reflections/sdlc_upvote_lanes.py` reflection, which anchors the created session's `telegram_message_id` to its own Telegram announcement so the lane's output threads under it. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
+
 The system prompt for each session is assembled by `compose_system_prompt(persona, access_level, ...)` in [`agent/sdk_client.py`](../../agent/sdk_client.py) — the single composer for all session types. Eng sessions resolve to `(ENGINEER, AccessLevel.WORKER)`. This cell carries both the engineer persona and the per-project work-vault `CLAUDE.md` business-context layer (which was previously injected via a separate `PM_READONLY` access level — that level has been removed; the business context now rides `WORKER`). Teammate sessions resolve to `(TEAMMATE, TEAMMATE)`. See [Composed Persona System](composed-persona-system.md) for the full composer signature, the (persona x access-level) matrix, and the byte-stability invariant.
 
 ## Routing

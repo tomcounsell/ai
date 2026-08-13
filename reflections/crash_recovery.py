@@ -41,7 +41,8 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+
+from reflections.utilities import machine_owns_project
 
 logger = logging.getLogger("reflections.crash_recovery")
 
@@ -93,36 +94,6 @@ def _is_transient_clean_kill_to_failed(events: list[dict]) -> bool:
         return str(kill_info.get("confirmed_dead", "")).lower() == "true"
     except Exception as exc:  # noqa: BLE001
         logger.debug("_is_transient_clean_kill_to_failed swallowed exception: %r", exc)
-        return False
-
-
-def _machine_owns_project(project_key: str | None) -> bool:
-    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
-
-    Single-machine invariant (Gap 3b): auto-resume acts on a session only when
-    ``projects.<project_key>.machine == computer_name()``. Making ownership
-    structural (rather than relying on the operator setting the env flag on
-    exactly one box) means exactly one machine resumes a given session even if
-    the flag is on fleet-wide.
-
-    Fail-soft: an unresolvable / unknown / missing ``project_key`` → False
-    (treated as not-owned, so the reflection falls to propose-only — the safe
-    default). Any lookup error is swallowed and returns False.
-    """
-    if not project_key:
-        return False
-    try:
-        from config.machine import get_machine_name
-        from tools.reflection_machine_filter import _load_project_machines
-
-        projects_path = Path(__file__).resolve().parent.parent / "config" / "projects.json"
-        owners = _load_project_machines(projects_path)
-        owner = owners.get(project_key)
-        if not owner:
-            return False
-        return owner == get_machine_name().strip().lower()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("_machine_owns_project swallowed exception: %r", exc)
         return False
 
 
@@ -418,7 +389,7 @@ def run_crash_recovery() -> dict:
                 # not-owned (safe: propose only). This makes the single-machine
                 # invariant structural rather than relying on the operator
                 # setting the flag on exactly one box.
-                if not _machine_owns_project(getattr(session, "project_key", None)):
+                if not machine_owns_project(getattr(session, "project_key", None)):
                     proposed += 1
                     logger.info(
                         "propose-mode: this machine does not own project=%s for "

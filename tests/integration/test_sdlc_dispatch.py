@@ -24,6 +24,7 @@ from agent.sdlc_router import (
     Dispatch,
     decide_next_dispatch,
 )
+from tests.db_claim import subprocess_env
 from tools.sdlc_next_skill import decide
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -323,6 +324,7 @@ class TestNextSkillCLISubprocess:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
             timeout=15,
         )
         try:
@@ -354,6 +356,7 @@ class TestNextSkillCLISubprocess:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
             timeout=15,
         )
         # The tool should exit 0 even when session is not found (empty states → Row 1)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
 from tools.check_fence_census import EXEMPTION_MARKER, check_file
 
 #: tests/unit/test_fence_census.py -> repo root. Resolved from this file rather
@@ -42,6 +43,7 @@ def _run_checker(root: Path, *extra: str, cwd: Path | None = None):
         capture_output=True,
         text=True,
         cwd=str(cwd) if cwd is not None else str(Path(__file__).parent),
+        env=subprocess_env(),
         timeout=120,
     )
 

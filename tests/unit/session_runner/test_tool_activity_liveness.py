@@ -34,6 +34,7 @@ from agent.session_runner.hook_edge import (
     tool_activity_path,
 )
 from agent.session_runner.liveness import tool_activity_ts
+from tests.db_claim import subprocess_env
 
 pytestmark = pytest.mark.unit
 
@@ -57,6 +58,9 @@ def _run_hook(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=30,
+        # No project_root: this repo's importability is precisely what the hook
+        # must NOT depend on. subprocess_env only pins REDIS_URL (#2763).
+        env=subprocess_env(),
     )
 
 
@@ -281,5 +285,7 @@ def test_hook_module_imports_only_stdlib():
         capture_output=True,
         text=True,
         timeout=30,
+        # No project_root: the child strips this repo off sys.path on purpose.
+        env=subprocess_env(),
     )
     assert proc.returncode == 0, proc.stderr

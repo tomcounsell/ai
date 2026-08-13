@@ -170,12 +170,21 @@ in-process reload cannot observe a *first* import, so it could not have detected
 the module-level import it claimed to guard; it now runs its probe in a fresh
 interpreter and fails when a heavy dependency moves to module scope.
 
-**Fix:** `shared_exception_identity_guard`, an autouse fixture that snapshots the
-identity of every exception class in `_SHARED_EXCEPTION_MODULES` and, at each
-test's teardown, rebinds any that changed — then warns, naming the test that
-reloaded. Same doctrine as root cause 2: repair in place, one object per name,
-never pin the order. The warning is a teardown failure under
-`-W error::RuntimeWarning`, so a reintroduced reload cannot pass silently.
+**Fix:** `shared_module_identity_guard`, an autouse fixture that snapshots the
+identity of every shared module-level object registered in
+`_SHARED_IDENTITY_MODULES` and, at each test's teardown, rebinds any that
+changed — then warns, naming the test that reloaded. Same doctrine as root
+cause 2: repair in place, one object per name, never pin the order. The
+warning is a teardown failure under `-W error::RuntimeWarning`, so a
+reintroduced reload cannot pass silently.
+
+The guard now covers two kinds of shared object, not just exception classes:
+"exceptions" (the #2603 case above) and "registry" (module-level dicts, sets,
+and lists, plus the classes their entries are instances of), which #2628
+added after the same rotate-run-to-run signature turned up in
+`agent.index_drift`, `monitoring.bridge_watchdog`, and
+`monitoring.worker_watchdog` — see
+[`docs/features/test-db-ownership.md`](test-db-ownership.md).
 
 ## Root cause 6: a subprocess pointed at a db its parent does not own (issue #2605)
 
@@ -215,7 +224,7 @@ parent's ORM.
 
 ## Source of truth
 
-- `tests/conftest.py` — `mock_claude_sdk_cleanup`, `agent_hooks_consistency_guard`, `shared_exception_identity_guard`, and `_popoto_modules_with_redis_db()` docstrings are the authoritative mechanism explanations; this doc intentionally summarizes rather than duplicates them.
+- `tests/conftest.py` — `mock_claude_sdk_cleanup`, `agent_hooks_consistency_guard`, `shared_module_identity_guard`, and `_popoto_modules_with_redis_db()` docstrings are the authoritative mechanism explanations; this doc intentionally summarizes rather than duplicates them.
 - `tests/db_claim.py` — `claim_test_db()` / `_try_claim_db_slot()` / `subprocess_env()` docstrings own the db-claim and subprocess-environment mechanism.
 - `tests/unit/test_conftest_isolation_guards.py` — deterministic regression suite:
   - **Test A** — constructs the corrupt hooks-less-`agent` state directly, asserts the guard repairs it, and asserts a healthy `agent` is left untouched.

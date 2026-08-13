@@ -516,3 +516,120 @@ def test_verdict_freshness_passes_when_trailer_matches_authoritative_head(monkey
     mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
     assert failed == []
     assert any("head_sha trailer matches PR head commit" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: the head SHA now rides in the record's own `head_sha` field.
+# `_check_verdict_freshness` must read the FIELD, not just the in-token trailer.
+#
+# These assert the EXACT `notes` string, not merely pass/fail. A pass/fail-only
+# assertion cannot detect the regression: a record whose head SHA is invisible
+# to the reader looks trailer-less, and the trailer-less branch silently
+# downgrades to the WEAKER `recorded_at`-vs-commit-date comparison, which also
+# reports "fresh". That is a fail-OPEN on the merge gate #2404/#2415 exist to
+# keep honest, and only the note text distinguishes the two branches.
+# ---------------------------------------------------------------------------
+
+_FRESH_NOTE = "REVIEW verdict fresh: head_sha trailer matches PR head commit"
+_WEAK_NOTE = "REVIEW verdict fresh: recorded after the PR's latest commit"
+
+
+def test_verdict_freshness_reads_the_head_sha_field_new_shape(monkeypatch):
+    """New-shape record: bare `APPROVED` token + a separate `head_sha` field."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": "APPROVED",
+            "head_sha": _NEW,
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert failed == []
+    assert _FRESH_NOTE in notes
+    # The strong branch ran -- NOT the weaker timestamp fallback.
+    assert _WEAK_NOTE not in notes
+
+
+def test_verdict_freshness_blocks_on_stale_head_sha_field(monkeypatch):
+    """New-shape record whose field names the OLD head -> BLOCK, and never a
+    silent downgrade to the timestamp comparison."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": "APPROVED",
+            "head_sha": _OLD,
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert "REVIEW verdict predates PR head commit (head_sha trailer mismatch)" in failed
+    assert notes == []
+
+
+def test_verdict_freshness_field_wins_over_disagreeing_legacy_trailer(monkeypatch):
+    """Defined precedence (#2769): the field is authoritative. Here the legacy
+    in-token trailer is STALE but the field is current -> fresh."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_OLD.upper()}",
+            "head_sha": _NEW,
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert failed == []
+    assert _FRESH_NOTE in notes
+
+
+def test_verdict_freshness_legacy_record_still_takes_the_strong_branch(monkeypatch):
+    """Permanent legacy fallback: a pre-split record carrying only the mangled
+    in-token trailer must still hit the head_sha branch, never the weak one."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_NEW.upper()}",
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert failed == []
+    assert _FRESH_NOTE in notes
+    assert _WEAK_NOTE not in notes
+
+
+def test_merge_predicate_head_sha_reader_import_stays_in_function():
+    """The merge-guard hook loads this module under a bare interpreter, so its
+    module-level imports must stay stdlib-only. `head_sha_of_record` pulls in
+    models.agent_session transitively and MUST remain a lazy in-function
+    import."""
+    import inspect
+
+    source = inspect.getsource(mp)
+    assert "head_sha_of_record" in source
+    for line in source.splitlines():
+        if "from tools._sdlc_utils import" in line:
+            # Any occurrence must be indented (i.e. inside a function body).
+            assert line != line.lstrip(), f"module-level tools import: {line!r}"
+    assert not hasattr(mp, "head_sha_of_record")

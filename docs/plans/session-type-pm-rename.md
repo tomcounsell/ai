@@ -1,3 +1,7 @@
+---
+tracking: https://github.com/tomcounsell/ai/issues/648
+---
+
 # Plan: Rename SessionType.CHAT to PM and Add TEAMMATE
 
 **Issue:** [#648](https://github.com/tomcounsell/ai/issues/648)

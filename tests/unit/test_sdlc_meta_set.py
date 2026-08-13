@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -359,6 +361,7 @@ class TestMetaSetCLI:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert proc.returncode == 2
 
@@ -369,6 +372,7 @@ class TestMetaSetCLI:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert proc.returncode != 0
 
@@ -379,6 +383,7 @@ class TestMetaSetCLI:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert proc.returncode != 0
 
@@ -403,6 +408,7 @@ class TestMetaSetCLI:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert proc.returncode == 1
         assert "LEASE_ABSENT" in proc.stderr
@@ -425,6 +431,7 @@ class TestMetaSetCLI:
                 capture_output=True,
                 text=True,
                 cwd=str(REPO_ROOT),
+                env=subprocess_env(project_root=str(REPO_ROOT)),
             )
             assert proc.returncode == 2, f"value {bad!r} should exit 2, got {proc.returncode}"
 
@@ -435,5 +442,6 @@ class TestMetaSetCLI:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert proc.returncode == 0

@@ -14,7 +14,8 @@ in-process, in the same order the validators are currently registered:
   6. validate_no_destructive_git_in_worktree
   7. validate_no_destructive_git_in_shared_checkout
   8. validate_no_broad_process_kill
-  9. validate_design_system_sync (out-of-process -- see below)
+  9. validate_no_redis_flush
+  10. validate_design_system_sync (out-of-process -- see below)
 
 Outcome is first-block-wins: the first validator to return a block reason
 short-circuits the rest and the dispatcher emits ONE
@@ -113,10 +114,10 @@ def _run_merge_guard(command: str, _cwd: str) -> str | None:
     return validate_merge_guard.find_violation(command)
 
 
-def _run_no_raw_redis_delete(command: str, _cwd: str) -> str | None:
+def _run_no_raw_redis_delete(command: str, cwd: str) -> str | None:
     import validate_no_raw_redis_delete
 
-    return validate_no_raw_redis_delete.find_violation(command)
+    return validate_no_raw_redis_delete.find_violation(command, cwd)
 
 
 def _run_no_uv_sync_in_worktree(command: str, cwd: str) -> str | None:
@@ -143,6 +144,12 @@ def _run_no_destructive_git_in_shared_checkout(command: str, cwd: str) -> str | 
     return validate_no_destructive_git_in_shared_checkout.find_violation_from_hook_input(
         command, cwd
     )
+
+
+def _run_no_redis_flush(command: str, _cwd: str) -> str | None:
+    import validate_no_redis_flush
+
+    return validate_no_redis_flush.find_violation(command)
 
 
 def _run_design_system_sync(hook_input: dict) -> str | None:
@@ -193,6 +200,7 @@ _VALIDATORS: list[tuple[str, object, bool]] = [
         False,
     ),
     ("validate_no_broad_process_kill", _run_no_broad_process_kill, False),
+    ("validate_no_redis_flush", _run_no_redis_flush, False),
 ]
 
 

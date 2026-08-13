@@ -76,6 +76,21 @@ Redis outbox  → polled by the matching bridge relay
                 ↓ delivers via Telethon (Telegram) or SMTP (email)
 ```
 
+**Producer-readable sent-message-id ack (issue #2717).** Historically nothing
+on the send path told a programmatic producer what Telegram message id its
+send became — `tools/valor_telegram.py send` only learns "enqueued", not
+"delivered", and the id itself was only ever recorded onto an *existing*
+`AgentSession` (`_record_sent_message`). `bridge/outbox_ack.py` closes that
+gap: a **leaf** module (imports the shared Redis client only, no Telethon)
+owning `telegram:sent:{session_id}` as a single-consumer, delete-on-read
+list with a short TTL. `bridge/telegram_relay.py::process_outbox` writes to
+it **opt-in**, gated on the outbox payload's `ack_sent_id` flag (so ordinary
+traffic incurs no extra Redis ops), and a producer reads it back with
+`await_sent_message_id(session_id, timeout_s)` — a bounded blocking poll.
+The first consumer is `reflections/sdlc_upvote_lanes.py`, which uses the
+captured id to anchor a newly-created session's `telegram_message_id`; see
+[Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
+
 **Inbound chat log write:** `bridge/dispatch.py::dispatch_telegram_session` appends an inbound entry to the new session's `chat_message_log` immediately after `enqueue_agent_session` completes. This is the single chokepoint for all Telegram-originating session enqueues. See `docs/features/chat-message-log.md` for the full write/read contract.
 
 **Reactions are telegram-only.** When `extra_context.transport == "email"` the
@@ -155,8 +170,9 @@ relay drops reaction payloads with a falsy `emoji`; both writes are fail-silent.
 6. Run `KnowledgeWatcher` for work-vault file change monitoring
 7. Run message catchup scan and reconciler on startup
 8. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector-issue-1712)):
-   - `bridge:last_update_received` — written by the `NewMessage` handler before dedup; staleness while `bridge:last_probe_ok` is fresh indicates the Telethon update loop has wedged
+   - `bridge:last_update_received` — written by the `NewMessage` handler before dedup. This is a *traffic* signal: its silence is equally consistent with a wedged update loop and with nobody having sent anything, so on its own it is never a verdict
    - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect
+   - `bridge:last_missed_recovery` — written by the reconciler when a scan recovers a message the live path never delivered. This is the positive evidence a wedge verdict requires, and it has to come from here: the `NewMessage` handler writes both keys above, so neither can testify that the handler has stopped. The watchdog declares a wedge only when the probe is fresh, the live path has been silent for the ceiling *measured from the bridge process's start time*, and this key was stamped inside that window and after the process's startup grace. The known cost: a half-wedged client whose per-chat scans all throw keeps the probe fresh and stamps nothing, so it reads as a quiet account and never restarts — loud in the logs, unacted on, tracked in [#2691](https://github.com/tomcounsell/ai/issues/2691)
 
 The mechanical catchup (`bridge/catchup.py`) and reconciler (`bridge/reconciler.py`) cover **ingestion gaps** — messages that never got a session enqueued. They cannot recover **response failures** (session enqueued, hung/killed, no reply) because the `DedupRecord` entry already exists. The [Agent-Judgment Catchup](agent-judgment-catchup.md) is the response-failure complement: it reads the actual chat thread (including Valor's own `out` replies), uses an LLM judge to classify unanswered messages, and enqueues recovery sessions. It runs out-of-band via `valor-catchup` and as the final best-effort step of `/update`.
 

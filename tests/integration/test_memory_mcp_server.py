@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 
 def _project_root() -> str:
     return str(Path(__file__).resolve().parent.parent.parent)
@@ -142,14 +144,37 @@ def test_fresh_shell_import_resolution():
     ``python3`` resolves to a Python that has the ``mcp`` SDK
     installed. ``/usr/bin/python3`` does not (it is the system Python
     on Darwin).
+
+    ``PYTHONPATH`` is passed as an explicit override rather than through
+    ``subprocess_env(project_root=...)``: this test's subject IS module
+    resolution from ``PYTHONPATH`` alone, so the value must replace the
+    parent's rather than be prepended to it. The venv-steering variables
+    are stripped for the same reason — inheriting them would let the child
+    resolve modules through the activated venv and the test would pass for
+    the wrong reason. ``subprocess_env`` still supplies REDIS_URL so the
+    child's Popoto lands on this process's claimed test db, not db0 (#2763).
+
+    Every other interpreter-steering variable is stripped too. Building the env
+    from ``subprocess_env`` means the child inherits the parent's environment
+    rather than the three-key whitelist this test used before #2763, so the
+    strips are what keep the assertion's subject intact: with any of these left
+    in place the child could resolve modules through a channel other than
+    ``PYTHONPATH`` and the test would pass without proving anything.
     """
     import subprocess
 
-    env = {
-        "HOME": os.environ.get("HOME", ""),
-        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
-        "PYTHONPATH": _project_root(),
-    }
+    env = subprocess_env(
+        PATH="/opt/homebrew/bin:/usr/bin:/bin",
+        PYTHONPATH=_project_root(),
+    )
+    for steering_var in (
+        "VIRTUAL_ENV",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+    ):
+        env.pop(steering_var, None)
     result = subprocess.run(
         ["python3", "-m", "mcp_servers.memory_server", "--help"],
         capture_output=True,

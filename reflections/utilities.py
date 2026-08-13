@@ -40,6 +40,57 @@ CORRECTION_PATTERNS = [
 ]
 
 
+def resolve_projects_config_path() -> Path:
+    """Resolve the projects.json this machine should read.
+
+    Precedence: ``PROJECTS_CONFIG_PATH`` env override →
+    ``~/Desktop/Valor/projects.json`` (the iCloud-synced private vault copy) →
+    the in-repo ``config/projects.json`` fallback.
+
+    The returned path is not guaranteed to exist; callers decide how to treat a
+    missing config. Single resolver so every reader agrees on which file is
+    authoritative.
+    """
+    config_path = Path(
+        os.environ.get(
+            "PROJECTS_CONFIG_PATH",
+            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
+        )
+    ).expanduser()
+    if not config_path.exists():
+        config_path = AI_ROOT / "config" / "projects.json"
+    return config_path
+
+
+def machine_owns_project(project_key: str | None) -> bool:
+    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
+
+    Single-machine invariant: an automated reflection acts on a project's
+    sessions only when ``projects.<project_key>.machine == computer_name()``.
+    Making ownership structural (rather than relying on the operator enabling a
+    flag on exactly one box) means exactly one machine acts on a given lane even
+    if the reflection is enabled fleet-wide.
+
+    Fail-soft: an unresolvable / unknown / missing ``project_key`` → False
+    (treated as not-owned, so the caller falls back to propose-only — the safe
+    default). Any lookup error is swallowed and returns False.
+    """
+    if not project_key:
+        return False
+    try:
+        from config.machine import get_machine_name
+        from tools.reflection_machine_filter import _load_project_machines
+
+        owners = _load_project_machines(resolve_projects_config_path())
+        owner = owners.get(project_key)
+        if not owner:
+            return False
+        return owner == get_machine_name().strip().lower()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("machine_owns_project swallowed exception: %r", exc)
+        return False
+
+
 def load_local_projects() -> list[dict]:
     """Load projects from projects.json, filtered to those present on this machine.
 
@@ -51,14 +102,7 @@ def load_local_projects() -> list[dict]:
         projects.json key. Only projects whose working_directory exists on disk
         are returned.
     """
-    config_path = Path(
-        os.environ.get(
-            "PROJECTS_CONFIG_PATH",
-            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
-        )
-    ).expanduser()
-    if not config_path.exists():
-        config_path = AI_ROOT / "config" / "projects.json"
+    config_path = resolve_projects_config_path()
     if not config_path.exists():
         logger.warning(f"Project config not found at {config_path}, returning empty")
         return []
@@ -204,6 +248,97 @@ def run_per_project_audit(
         "summary": summary,
         "projects": project_records,
     }
+
+
+# --- Shared Redis client + issue-lock liveness ------------------------------
+#
+# Moved here from ``reflections/sdlc_progress.py`` (issue #2717) so a sibling
+# reflection (``reflections/sdlc_upvote_lanes.py``) can read the same
+# liveness signal without forking the rule. ``_lock_says_live``'s docstring
+# states the invariant it protects: classification of the lock payload is
+# delegated to ``models.session_lifecycle._lock_owner_is_live`` so this
+# module never diverges from the canonical liveness rule. A copy in a
+# sibling module would be exactly that fork. ``sdlc_progress`` re-exports
+# both names (``from reflections.utilities import _LOCK_KEY,
+# _lock_says_live``) so its own call sites and ``sdlc_progress._LOCK_KEY``
+# keep resolving unchanged.
+
+
+def _get_redis():
+    """Return the shared Popoto Redis connection (lazy import, error-tolerant)."""
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    return POPOTO_REDIS_DB
+
+
+_LOCK_KEY = "session:issuelock:{issue_number}"
+
+
+def _lock_says_live(issue_number: int) -> bool | None:
+    """True if a live run owns this issue's lock, False if free, None if unknown.
+
+    Deliberately a direct ``GET`` on the lock key rather than a call to
+    ``models.session_lifecycle.touch_issue_lock``. ``touch_issue_lock`` fails
+    OPEN — every Redis exception is swallowed and returned as
+    ``IssueLockResult(acquired=True)``, which this gate would read as "lock
+    unheld → not live → act". A flap would therefore push a caller INTO
+    acting, exactly when it should be most reluctant. A bare ``GET`` also
+    cannot claim or renew a lease, which is a stronger read-only guarantee than
+    any argument pair.
+
+    Classification of the payload is delegated to ``_lock_owner_is_live`` (the
+    same helper ``touch_issue_lock`` uses) so this module never forks the
+    liveness rule. A malformed payload lands in the ``except`` and reads as
+    *unknown*, not as free.
+    """
+    try:
+        from models.session_lifecycle import _lock_owner_is_live
+
+        raw = _get_redis().get(_LOCK_KEY.format(issue_number=issue_number))
+        if raw is None:
+            return False  # no lock -> nobody owns the lane
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return bool(_lock_owner_is_live(json.loads(raw)))
+    except Exception as exc:
+        logger.warning(
+            "reflections.utilities: issue-lock read failed for #%s: %s", issue_number, exc
+        )
+        return None  # unknown -> caller declines to act
+
+
+def resolve_eng_group(project: dict) -> tuple[str, int] | None:
+    """Resolve a project's ``Eng: X`` Telegram group name and numeric chat id.
+
+    Scans ``project["telegram"]["groups"]`` for keys carrying the literal
+    ``Eng:`` prefix (matching ``bridge/routing.py``'s ``chat_title.startswith
+    ("Eng:")`` fallback that grants the engineer persona) and returns
+    ``(group_name, chat_id)`` for the first match. Returns ``None`` on any
+    absence or malformation — missing ``telegram`` key, missing ``groups``
+    key, a non-dict ``groups`` value, no key with the ``Eng:`` prefix, a
+    group entry that is not a dict, a missing ``chat_id``, or a non-integer
+    ``chat_id``. There is deliberately no substring fallback and no default
+    chat: a project with no properly-configured ``Eng:`` group (e.g.
+    ``royop`` at plan time) must be skipped by the caller, never routed
+    somewhere plausible-looking.
+    """
+    try:
+        groups = (project.get("telegram") or {}).get("groups")
+        if not isinstance(groups, dict):
+            return None
+        for group_name, group_cfg in groups.items():
+            if not isinstance(group_name, str) or not group_name.startswith("Eng:"):
+                continue
+            if not isinstance(group_cfg, dict):
+                return None
+            chat_id = group_cfg.get("chat_id")
+            if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+                return None
+            return group_name, chat_id
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("resolve_eng_group swallowed exception: %r", exc)
+        return None
 
 
 def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:

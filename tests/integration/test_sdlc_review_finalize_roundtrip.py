@@ -152,6 +152,7 @@ class TestFinalizeSelfcheckRoundTrip:
         assert selfcheck_result == {
             "ok": True,
             "verdict_present": True,
+            "approved": True,
             "trailer_matches_head": True,
             "marker_completed": True,
             "reason": None,
@@ -162,6 +163,25 @@ class TestFinalizeSelfcheckRoundTrip:
 
         sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
         assert sm.states.get("REVIEW") == "completed", sm.states
+
+        # #2769 storage shape, asserted off the REAL persisted record: the
+        # verdict token is the BARE `APPROVED` (not the mangled
+        # `APPROVED REVIEW CONTEXT HEAD SHA=<HEX>` the concatenation produced)
+        # and the head SHA rides in its own `head_sha` field.
+        from tools._sdlc_utils import head_sha_of_record
+        from tools.sdlc_stage_query import _resolve_issue_record, query_enriched
+        from tools.sdlc_verdict import get_verdict
+
+        persisted = get_verdict(_resolve_issue_record(issue_number), "REVIEW")
+        assert persisted["verdict"] == "APPROVED", persisted
+        assert "REVIEW" not in persisted["verdict"].replace("APPROVED", "")
+        assert persisted["head_sha"].lower() == _HEAD_SHA.lower(), persisted
+        assert head_sha_of_record(persisted).lower() == _HEAD_SHA.lower()
+
+        # ...and it reaches the router through _meta.latest_review_head_sha.
+        enriched = query_enriched(issue_number=issue_number)
+        assert enriched["_meta"]["latest_review_verdict"] == "APPROVED"
+        assert enriched["_meta"]["latest_review_head_sha"].lower() == _HEAD_SHA.lower()
 
         from models.session_lifecycle import release_issue_lock
 
@@ -235,6 +255,7 @@ class TestFinalizeSelfcheckRoundTrip:
         assert selfcheck_result == {
             "ok": False,
             "verdict_present": False,
+            "approved": False,
             "trailer_matches_head": False,
             "marker_completed": False,
             "reason": "REVIEW_VERDICT_MISSING",

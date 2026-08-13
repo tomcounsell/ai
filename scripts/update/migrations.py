@@ -357,6 +357,34 @@ def _migrate_confirm_is_ledger_field_readable(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_confirm_pipeline_ledger_slug_readable(project_dir: Path) -> str | None:
+    """Confirm PipelineLedger.slug (issues #2735/#2718) is readable on legacy rows.
+
+    Purely additive, nullable field -- no backfill is required, and none is
+    performed. A backfill would have to *guess* the identity of a lane with
+    no branch and no PR, writing exactly the wrong-identity records the lane
+    slug exists to prevent; those lanes heal on their next lane-start call
+    instead. This is a read-only confirmation step: it loads a small sample
+    of existing ledger records and accesses ``.slug`` on each one to prove
+    Popoto's lazy-load descriptor healing resolves cleanly for rows written
+    before the field existed. Mirrors
+    ``_migrate_confirm_is_ledger_field_readable``. Writes nothing.
+    Returns None on success (including "no ledgers to check"), error string
+    on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from agent.pipeline_ledger import PipelineLedger
+
+        for ledger in list(PipelineLedger.query.all())[:5]:
+            _ = ledger.slug  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_backfill_pipeline_ledger(project_dir: Path) -> str | None:
     """Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger.
 
@@ -1032,6 +1060,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_is_ledger_field_readable": (
         _migrate_confirm_is_ledger_field_readable,
         "Confirm AgentSession.is_ledger (issue #2042) reads cleanly on legacy rows",
+    ),
+    "confirm_pipeline_ledger_slug_readable": (
+        _migrate_confirm_pipeline_ledger_slug_readable,
+        "Confirm PipelineLedger.slug (issues #2735/#2718) reads cleanly on legacy rows",
     ),
     "schema_diet_fields": (
         _migrate_schema_diet_fields,

@@ -118,8 +118,14 @@ import logging
 import sys
 import uuid
 
+# The lease helpers are reached through the MODULE object, never snapshotted
+# into these globals with a `from`-import: a snapshot taken during a lazy
+# first import that lands inside an active `unittest.mock` patch freezes the
+# MagicMock here for the life of the process and silently inverts every lease
+# check in this file (#2469, #2637). Guarded by
+# tests/unit/test_sdlc_lease_helper_binding.py.
+from tools import _sdlc_utils
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
-from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +344,7 @@ def _skip_precondition_error(
 
     # 1. A plan document means the stage genuinely applies.
     try:
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plan_path = find_plan_path(issue_number)
     except Exception as e:
@@ -485,6 +491,24 @@ def write_marker(
     return result, exit_code
 
 
+def _release_run_best_effort(issue_number: int | None, run_id: str | None) -> None:
+    """Hand back the issue lease + supervised-run signal. Never raises.
+
+    Fully exception-isolated on purpose: this sits inside the marker write's
+    body, so an un-swallowed failure here would be caught by the outer
+    STATE_MACHINE_RAISED handler and turn a persisted, successful MERGE
+    completion into a reported exit 1. Releasing is a courtesy that shortens a
+    lease's life; the marker write is the load-bearing operation.
+    """
+    try:
+        from tools.sdlc_session_release import release_run
+
+        result = release_run(issue_number, run_id)
+        logger.debug("sdlc_stage_marker: MERGE-completed lease release -> %s", result)
+    except Exception as e:
+        logger.debug("sdlc_stage_marker: MERGE-completed lease release failed: %s", e)
+
+
 def _write_marker_impl(
     stage: str,
     status: str,
@@ -507,7 +531,7 @@ def _write_marker_impl(
     if probe_substrate() == SUBSTRATE_ABSENT:
         return _degraded(stage, "state not persisted — substrate absent"), 0
 
-    target_repo, lease_error = resolve_ledger_lease(issue_number, run_id)
+    target_repo, lease_error = _sdlc_utils.resolve_ledger_lease(issue_number, run_id)
     if lease_error is not None:
         reason = lease_error.get("reason", "LEASE_ABSENT")
         if reason == "ISSUE_LOCKED":
@@ -541,7 +565,7 @@ def _write_marker_impl(
         sm = PipelineStateMachine.for_issue(target_repo, issue_number)
 
         if status == "in_progress":
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
@@ -556,9 +580,18 @@ def _write_marker_impl(
                 # the remedy; print it (issue #2554: this was routed to
                 # logger.debug, so the one actionable line never reached the
                 # operator and the failure looked like a bare exit 1).
+                # #2740: this says the MARKER write was refused and nothing
+                # more. `write_marker` cannot see writes its callers already
+                # committed — `finalize` records the verdict one step earlier —
+                # so asserting non-persistence here is a claim this
+                # function has no standing to make. Follow the
+                # STATE_MACHINE_RAISED precedent below: name the refusal, point
+                # at `stage-query`.
                 print(
                     f"[ERROR] STATE_MACHINE_REJECTED: start_stage({stage}) refused "
-                    f"for issue #{issue_number}: {e} State NOT persisted.",
+                    f"for issue #{issue_number}: {e} Marker write refused; other "
+                    "state may already have been persisted by the caller — re-read "
+                    "with `sdlc-tool stage-query`.",
                     file=sys.stderr,
                 )
                 return {
@@ -576,7 +609,7 @@ def _write_marker_impl(
                 reason, message = refusal
                 print(f"[ERROR] {reason}: {message} Marker write refused.", file=sys.stderr)
                 return {"error": reason.lower(), "reason": reason}, 1
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
@@ -592,9 +625,13 @@ def _write_marker_impl(
                     ),
                 )
             except ValueError as e:
+                # #2740: scoped to the marker write, for the same reason as the
+                # start_stage site above.
                 print(
                     f"[ERROR] STAGE_RAN_NOT_SKIPPABLE: skip_stage({stage}) refused for "
-                    f"issue #{issue_number}: {e} State NOT persisted.",
+                    f"issue #{issue_number}: {e} Marker write refused; other state may "
+                    "already have been persisted by the caller — re-read with "
+                    "`sdlc-tool stage-query`.",
                     file=sys.stderr,
                 )
                 return {
@@ -677,7 +714,7 @@ def _write_marker_impl(
                     "error": "critique_verdict_missing",
                     "reason": "CRITIQUE_VERDICT_MISSING",
                 }, 1
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
@@ -707,10 +744,18 @@ def _write_marker_impl(
                 try:
                     sm._backfill_predecessors(stage)
                 except ValueError as e:
+                    # #2740: the site the issue reports. On the `finalize`
+                    # path the verdict and its head SHA are ALREADY durable
+                    # when this fires — only the marker is missing — so the
+                    # old non-persistence claim cost a fresh investigation
+                    # every time it printed. `finalize` re-narrates this
+                    # accurately for its own callers; here we claim only what
+                    # this function did.
                     print(
                         f"[ERROR] STATE_MACHINE_REJECTED: predecessor backfill for "
                         f"{stage} refused for issue #{issue_number}: {e} "
-                        "State NOT persisted.",
+                        "Marker write refused; other state may already have been "
+                        "persisted by the caller — re-read with `sdlc-tool stage-query`.",
                         file=sys.stderr,
                     )
                     return {
@@ -719,6 +764,21 @@ def _write_marker_impl(
                     }, 1
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
+
+            if stage == "MERGE":
+                # Tool-layer release leg (issue #2714 L1). This transition --
+                # not a skill-body prose step -- is the happy-path release: it
+                # fires for /do-sdlc, the /sdlc router, and worker-driven
+                # pipelines alike, with zero skill cooperation. It is
+                # ordering-consistent with what already exists: once MERGE is
+                # completed, `_pipeline_is_terminal` makes `reestablish_run_id`
+                # decline to re-mint, so nothing downstream expects to still
+                # hold the lease.
+                #
+                # Deliberately NOT in the already-completed idempotent branch
+                # above: that branch does not own the transition, and releasing
+                # there could free a SUCCESSOR run's lease (Race 3).
+                _release_run_best_effort(issue_number, run_id)
 
         return {"stage": stage, "status": status}, 0
 
@@ -960,10 +1020,18 @@ def main() -> None:
             # A clear stderr diagnostic so a forked sub-skill / operator sees
             # the genuine writeback failure instead of a silent no-op
             # (mirrors sdlc_dispatch's loud-failure path).
+            # #2740: the fourth site, and the one outside write_marker. It sits
+            # after `maybe_heal_after_write` may have retried the write, so it
+            # is an overclaim for the same reason as the three inside. Kept
+            # (not deleted) though currently unreachable — every error key
+            # write_marker returns is in _DIAGNOSED_ERRORS — because it is what
+            # a bare `sdlc-tool stage-marker` caller would see the moment an
+            # undiagnosed error key is added.
             print(
                 f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
                 "(lease resolved, but the state-machine write was rejected or "
-                "raised). State NOT persisted.",
+                "raised). Persisted state is INDETERMINATE; re-read with "
+                "`sdlc-tool stage-query`.",
                 file=sys.stderr,
             )
     elif result.get("status") == "degraded":

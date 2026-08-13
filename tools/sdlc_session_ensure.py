@@ -68,6 +68,8 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+from tools.lane_identity import resolve_lane_slug
+
 logger = logging.getLogger(__name__)
 
 # Idle window (in seconds) before a sdlc-local session is considered a zombie
@@ -140,6 +142,38 @@ def _append_owned_run_id(session, run_id: str) -> None:
         )
 
 
+def _supervisor_identity_argv() -> list[str]:
+    """Heartbeat flags naming the supervising ``claude`` process, or ``[]``.
+
+    Issue #2714. Returns ``--supervisor-pid`` / ``--supervisor-create-time`` /
+    ``--supervisor-source`` only when the identity resolves in full. Any
+    failure returns ``[]``, which the heartbeat reads as "unresolved" -- never
+    as "dead", and never as a reason not to spawn at all.
+    """
+    try:
+        from tools.sdlc_supervisor_identity import resolve_supervisor_identity_detailed
+
+        source, pid, create_time = resolve_supervisor_identity_detailed()
+        if pid is None or create_time is None:
+            return []
+        return [
+            "--supervisor-pid",
+            str(pid),
+            "--supervisor-create-time",
+            repr(float(create_time)),
+            "--supervisor-source",
+            str(source),
+        ]
+    except Exception as e:  # noqa: BLE001 - identity is an enhancement, not a precondition
+        logger.debug(
+            "sdlc_session_ensure: supervisor identity resolution failed (%s: %s) "
+            "-- spawning the heartbeat unsupervised",
+            type(e).__name__,
+            e,
+        )
+        return []
+
+
 def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: str) -> None:
     """Spawn the detached lease-heartbeat renewer for a fresh LOCAL mint.
 
@@ -155,6 +189,16 @@ def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: st
       redundant (though harmless -- both are same-owner idempotent extends).
     - under pytest (``PYTEST_CURRENT_TEST`` set): never spawn a lingering
       detached process during the test suite.
+
+    The supervisor's ``(pid, create_time)`` is resolved HERE, not in the child
+    (issue #2714). This process is still inside the supervising ``claude``
+    process's tree; the detached child is not, and is reparented away within
+    seconds of spawn, so this is the only moment the identity is observable.
+    The flags are appended only when both halves resolve -- a partial identity
+    is no identity, and the heartbeat treats it as unresolved. Resolution is
+    strictly an enhancement: if it fails or raises, the heartbeat still spawns
+    (renewing the lease is the load-bearing job) and simply falls back to its
+    shortened unsupervised lifetime ceiling.
 
     Best-effort: any spawn failure is swallowed (the lease TTL is the backstop);
     never raises, never fails the ensure.
@@ -177,18 +221,21 @@ def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: st
         except Exception:
             logf = subprocess.DEVNULL
 
+        argv = [
+            sys.executable,
+            "-m",
+            "tools.sdlc_lease_heartbeat",
+            "--issue-number",
+            str(issue_number),
+            "--run-id",
+            run_id,
+            "--session-id",
+            session_id or "",
+        ]
+        argv.extend(_supervisor_identity_argv())
+
         subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tools.sdlc_lease_heartbeat",
-                "--issue-number",
-                str(issue_number),
-                "--run-id",
-                run_id,
-                "--session-id",
-                session_id or "",
-            ],
+            argv,
             stdout=logf,
             stderr=logf,
             stdin=subprocess.DEVNULL,
@@ -490,7 +537,13 @@ def _acquire_run_lock_and_bind(
         # active_run_id write; best-effort (never raises -- the post-save
         # readback below only asserts active_run_id, tolerating the list write).
         _append_owned_run_id(session, candidate)
-        session.save()
+        # Partial save, deliberately: this bind runs before EVERY ensure_session()
+        # return point, so a stage dispatch that changes nothing would otherwise
+        # restamp updated_at on the whole row -- this is the writer that kept the
+        # #2660 ledger anchors permanently fresh. Only active_run_id and
+        # owned_run_ids actually changed here; a stage that genuinely advances
+        # still refreshes updated_at via its own stage-state write (see #1676).
+        session.save(update_fields=["active_run_id", "owned_run_ids"])
     except Exception as e:
         release_issue_lock(issue_number, candidate)
         logger.debug(
@@ -637,6 +690,25 @@ def ensure_session(
     if not issue_number or issue_number < 1:
         logger.debug(f"sdlc_session_ensure: invalid issue_number {issue_number}")
         return {}
+
+    # Mint the lane's identity (issues #2735/#2718). ensure_session is the one
+    # component that runs on EVERY lane-start path before any plan or any stage
+    # exists, so this is where the slug is created and recorded on the
+    # PipelineLedger. The call sits on the function's only entry path, above
+    # every branch, so a single invocation covers all six success return points
+    # by construction; it is idempotent and conditional-on-empty, so it can
+    # never double-write. It must swallow: ensure_session's contract is to
+    # return a session dict, and a Redis or git failure inside identity
+    # resolution must not convert a successful ensure into `return {}`.
+    try:
+        resolve_lane_slug(issue_number, allow_heal=True)
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: lane slug resolution failed for #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
 
     try:
         # Env-var short-circuit: bridge-initiated sessions inject VALOR_SESSION_ID

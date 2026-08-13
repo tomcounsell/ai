@@ -1,0 +1,460 @@
+---
+status: Planning
+type: bug
+appetite: Medium
+owner: Valor Engels
+created: 2026-08-13
+tracking: https://github.com/tomcounsell/ai/issues/2755
+last_comment_id:
+---
+
+# sdlc_progress lane discovery: read recorded identity, not branch shape
+
+## Problem
+
+`reflections/sdlc_progress.py` is the SDLC stall detector. Every 30 minutes it asks
+"which lanes are wedged?" and answers by pattern-matching branch names:
+`_SDLC_BRANCH_RE = re.compile(r"^session/sdlc-\d+$")` (`:118`), applied as a corpus
+filter over every open PR (`:217-236`), with the issue number recovered by parsing
+the slug back out (`:263-266`).
+
+#2735 (merged as PR #2792) established that a lane's identity is a *recorded* value
+on `PipelineLedger.slug`, and that **both** slug shapes are real: issue-derived
+(`sdlc-2755`) and human-named (`dashboard-jinja-filter-registrar`, `dev-41a59eee`).
+A shape filter can only see the first kind.
+
+**Current behavior:**
+
+Measured against production on 2026-08-13, at plan time:
+
+| Open PR | Head branch | Seen by the detector today? |
+|---|---|---|
+| #2798 | `session/dashboard-jinja-filter-registrar` | no |
+| #2746 | `session/hook-validator-target-resolution` | no |
+| #2695 | `session/dev-41a59eee` | no |
+| #2685 | `session/flip-steering-writers-to-room-key` | no (also draft) |
+| #2683 | `session/suite-failure-rotation-db-ownership` | no |
+
+**Zero of the seven currently-open PRs match `session/sdlc-<N>`.** The stall detector
+is not degraded — it is presently blind to the entire lane population. And it is
+silent about it: no lane is reported missing, because a lane that never enters the
+corpus is never counted.
+
+**Desired outcome:**
+
+Discovery is driven by recorded identity and by links that exist in the world (the
+PR's own closing reference), not by the shape of a string. A stalled lane on
+`session/dev-41a59eee` is detected, steered, resumed, or escalated exactly like a
+lane on `session/sdlc-2755`. When identity cannot be resolved unambiguously, the
+tick reports `gate-unknown` and declines to act — it never guesses.
+
+## Freshness Check
+
+**Baseline commit:** `34ab8da2f` (working tree clean; `e50eba258` is the last code commit touching the referenced files)
+**Issue filed at:** 2026-08-13T05:18:28Z
+**Disposition:** Minor drift
+
+**File:line references re-verified:**
+
+- `reflections/sdlc_progress.py:116` — issue claimed `_SDLC_BRANCH_RE` — **drifted to `:118`**, definition otherwise identical.
+- `reflections/sdlc_progress.py:216-235` — issue claimed `_list_open_sdlc_prs` — **drifted to `:217-236`**; the regex is applied at `:235`.
+- `reflections/sdlc_progress.py:262` — issue claimed `_issue_number_from_slug` — **drifted to `:263-266`**, body identical (`re.match(r"sdlc-(\d+)$", slug)`).
+- `reflections/sdlc_upvote_lanes.py:328-344` — the already-converted sibling `_has_pr_on_branch` — **still holds**, now at `:329-345`, and is the reference pattern the issue advertised.
+- `agent/pipeline_ledger.py:200` — `PipelineLedger.slug` — **exists and is documented** (`:166-190`). Prerequisite satisfied.
+
+**Cited sibling issues/PRs re-checked:**
+
+- **#2735** — closed; shipped as PR **#2792**, merged 2026-08-13T13:14:20Z. It introduced `PipelineLedger.slug`, `tools/lane_identity.py`, and the pass-through of a human-named slug on `sdlc_progress`'s create rung (`:704-716`). The stated prerequisite is met; this plan is unblocked.
+- **#2718** — the wedge shape #2735 closed from the *write* direction. This issue is the same shape from the *read* direction.
+
+**Commits on main since issue was filed (touching referenced files):**
+
+- `e50eba258` "SDLC lane identity: one recorded slug, minted once (#2735, #2718) (#2792)" — **partially addresses**: it fixed the sibling site and the create rung, and it created the substrate this plan reads. It deliberately did not touch the discovery path (minimum-solution constraint), which is exactly why #2755 exists.
+
+**Active plans in `docs/plans/` overlapping this area:** `sdlc-lane-recorded-slug.md` — the #2735 plan, `status: Ready`, `revision_applied: true`, and now **shipped**. It is this plan's predecessor, not a live competitor. No coordination needed; no other plan touches `reflections/sdlc_progress.py`.
+
+**Notes:** All three drifted line numbers are corrected inline in the Technical Approach below. The drift is entirely attributable to `e50eba258` adding the `adopt_lane_slug` import at `:96`.
+
+## Prior Art
+
+- **PR #2792 (#2735 / #2718)**: "SDLC lane identity: one recorded slug, minted once" — introduced `PipelineLedger.slug`, `tools/lane_identity.py`'s four-rung adoption ladder, and converted `sdlc_upvote_lanes.py::_has_pr_on_branch` from a shape probe to a recorded-identity read. **Succeeded.** It is the direct predecessor and the source of every substrate this plan consumes. Its module docstring (`tools/lane_identity.py:1-46`) is required reading for the builder: it explains why a `docs/plans/` filename rung and a `git worktree list` rung are both deliberately absent.
+- **PR #2710 (#2696)**: "SDLC stall auto-resume: steer, resume, or create an eng session; escalate once" — built the entire action ladder in `sdlc_progress.py` that this plan feeds. **Succeeded**, and is not being modified: this plan changes only which lanes reach the ladder, never what the ladder does with them.
+- **`tools/merge_predicate.py::_resolve_tracked_issue` (`:355-440`)** — not a fix for this bug, but the closest existing solution to the same sub-problem ("given a PR, which issue owns it?"). It resolves via `PipelineLedger.query.filter(pr_number=...)` with repo-scoping and distinct-issue disambiguation, and its docstring records that an earlier `AgentSession.query.filter(slug=..., issue_number=...)` mechanism (PR #2035) was **empirically inert** — the two fields are populated by disjoint code paths, so the resolver always degraded to NO_SIGNAL. That failure is the reason this plan does not build a single-source resolver.
+
+No closed issue matches "lane discovery branch shape" — this is the first attempt at the discovery path.
+
+## Research
+
+Purely internal work: no external libraries, APIs, or ecosystem patterns are involved.
+The change is confined to one reflection module, one Popoto model already in the repo,
+and the `gh` CLI already in use throughout the file.
+
+No relevant external findings — proceeding with codebase context and training data.
+
+## Spike Results
+
+### spike-1: Does the production ledger actually carry enough identity to drive discovery?
+- **Assumption**: "`PipelineLedger.slug` and `.pr_number` are populated densely enough that ledger-driven discovery is a strict improvement over the regex."
+- **Method**: code-read + read-only production probe (`PipelineLedger.query`)
+- **Finding**: **Partly false, and this is the plan's central constraint.** Production holds 8 ledger records total (4 for `tomcounsell/ai`, 4 for `tomcounsell/popoto`). Of the `ai` records, **2 carry a `slug`** and **exactly 1 carries a `pr_number`** (issue 2719 → PR 2798 → slug `dashboard-jinja-filter-registrar`). Against the 5 open `session/*` PRs, a ledger-only resolver — by `pr_number` *or* by recorded `slug` — resolves **1 of 5**. The ledger is young: it only starts carrying identity for lanes that began after #2792, and `pr_number` is written only by `sdlc-tool meta-set --key pr_number` at PR-creation time.
+- **Confidence**: high (direct read of the live keyspace)
+- **Impact on plan**: The issue's proposed design — "enumerate `PipelineLedger`, read `slug`, build the branch set" — would have shipped a detector that sees 1 lane instead of 0. Better, but still blind to 4 of 5. The resolver must therefore be a **ladder** with a rung that adopts identity the world already publishes, not a single ledger read.
+
+### spike-2: Can a PR's own closing reference supply the issue number?
+- **Assumption**: "`gh pr list --json closingIssuesReferences` works and covers the lanes the ledger misses."
+- **Method**: prototype (live `gh` call, read-only)
+- **Finding**: **True, and it closes the gap.** `gh pr list --state open --json number,headRefName,isDraft,closingIssuesReferences` returns the field for every PR in a single call — no extra round trip per PR. All 5 open `session/*` PRs carry at least one closing reference: #2798→[2719], #2746→[2689, 2738], #2695→[2694], #2685→[2642], #2683→[2628]. Coverage against the ledger-only rung goes from 1/5 to 5/5.
+- **Confidence**: high
+- **Impact on plan**: `closingIssuesReferences` becomes rung 3 of the resolver, sourced from the *same* `gh` call that already fetches the corpus, so it costs zero additional subprocess work.
+
+### spike-3: Is the multi-closing-reference ambiguity hypothetical?
+- **Assumption**: "A PR closes at most one issue in practice, so rung 3 can take the first reference."
+- **Method**: prototype (same live `gh` call)
+- **Finding**: **False.** PR #2746 (`session/hook-validator-target-resolution`) declares **two** closing references: #2689 and #2738. Taking `[0]` would bind the lane's attempt budget, cooldown key, escalation key, and any created session to a sub-issue chosen by document order. `merge_predicate.py`'s docstring names this exact hazard ("the first `Closes #N` in the PR body ... for a multi-issue-closure PR, points at a sub-issue with no SDLC substrate").
+- **Confidence**: high
+- **Impact on plan**: Rung 3 adopts only on a **single distinct** reference. Two-or-more is a `gate-unknown: issue-ambiguous` finding and the lane is skipped, never guessed at. This mirrors `merge_predicate`'s AMBIGUOUS outcome and `lane_identity`'s rung-2 "unique match required" rule.
+
+### spike-4: What is the blast radius of widening the corpus filter?
+- **Assumption**: "Widening `^session/sdlc-\d+$` to a `session/` prefix admits only lanes."
+- **Method**: prototype (live `gh` call over all open PRs)
+- **Finding**: Of 7 open PRs, 5 are `session/*` and 2 are not (`fix/router-blocked-on-conflict`, `fix/g8-branch-resolution` — hotfix branches, correctly excluded by the prefix). So the `session/` namespace is a clean lane boundary today. But the corpus goes from **0 lanes to 5 lanes on the first tick after deploy**, all of them long-lived and several of them almost certainly past the 4-hour stall threshold. The create brake is 1/tick, but there is **no per-tick cap on steer or resume**.
+- **Confidence**: high for the counts; medium for "all 5 are past threshold" (depends on each branch's last commit time at deploy)
+- **Impact on plan**: Adds a per-tick action cap (see Key Elements) and a Risk row. A detector that has never acted on these lanes should not act on all of them in its first 30-minute window.
+
+## Data Flow
+
+1. **Entry point**: the `sdlc-progress-check` reflection fires on its schedule; `run_per_project_audit` calls `_check_project_stalls(project)` once per owned project (`reflections/sdlc_progress.py:754`).
+2. **Repo resolution**: `target_repo = _project_repo(project)` (`:771`) yields `owner/name`, or `None` for a project with no `github` block.
+3. **Corpus fetch**: `_list_open_lane_prs(cwd)` runs one `gh pr list` and returns open non-draft PRs whose head is in the `session/` namespace, each carrying `number`, `headRefName`, `isDraft`, `closingIssuesReferences`.
+4. **Slug**: `_slug_from_branch(branch)` strips `session/` — unchanged, already shape-agnostic.
+5. **Issue resolution** (new): `_resolve_lane_issue(pr, slug, target_repo)` walks the four-rung ladder and returns `(issue_number | None, reason)`. Ledger rungs read `PipelineLedger` via Popoto; rung 3 reads the payload already in hand; rung 4 parses the slug.
+6. **Gates**: unchanged — issue-open (`_issue_is_open`), staleness (`_last_commit` + threshold), liveness (`_lane_is_live`), escalation-once (`_escalation_exists`), attempt budget (`_attempts_count`), action cooldown (`_action_cooldown_set`).
+7. **Action**: unchanged — `_pick_steer_target` then `_attempt_action` (steer / resume / create), with `adopt_lane_slug(issue_number, slug, target_repo)` on the create rung (`:716`).
+8. **Output**: `findings` list and `counts` dict returned to the reflection runner; escalations reach a human via `_send_alert`.
+
+The change is confined to steps 3 and 5. Steps 6-8 are untouched, which is the point: this plan changes *which lanes reach the ladder*, never what the ladder does.
+
+## Architectural Impact
+
+- **New dependencies**: none. `PipelineLedger` is already imported in sibling reflections (`sdlc_upvote_lanes.py:317`); `sdlc_progress.py` already imports `tools.lane_identity` (`:96`).
+- **Interface changes**: `_list_open_sdlc_prs` is renamed to `_list_open_lane_prs` and its returned dicts gain a `closingIssuesReferences` key. Both are module-private; the only external references are tests (see Test Impact). `_SDLC_BRANCH_RE` is deleted. `_issue_number_from_slug` survives as the ladder's last rung.
+- **Coupling**: increases `sdlc_progress` → `PipelineLedger` coupling by one read path, and *decreases* coupling to branch-naming convention — which is the trade this issue exists to make. The lane-identity contract moves from an implicit string convention to an explicit recorded field, matching `sdlc_upvote_lanes` and `merge_predicate`.
+- **Data ownership**: unchanged. Discovery is read-only against the ledger. The single write on the create rung (`adopt_lane_slug`) already exists and is conditional-on-empty.
+- **Reversibility**: high. One module, one function boundary, no schema change, no migration. Reverting restores the regex.
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 1-2 (the resolver-ladder shape and the per-tick cap default are the two decisions worth confirming)
+- Review rounds: 1
+
+## Prerequisites
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `PipelineLedger.slug` exists | `python -c "from agent.pipeline_ledger import PipelineLedger; assert hasattr(PipelineLedger, 'slug')"` | #2735 substrate this plan reads |
+| `gh` supports `closingIssuesReferences` on `pr list` | `gh pr list --state open --limit 1 --json number,closingIssuesReferences` | Resolver rung 3 |
+| Redis reachable for ledger reads | `python -c "from agent.pipeline_ledger import PipelineLedger; list(PipelineLedger.query.filter(target_repo='tomcounsell/ai'))"` | Resolver rungs 1-2 |
+
+## Solution
+
+### Key Elements
+
+- **Namespace corpus filter**: `_list_open_lane_prs` admits open non-draft PRs whose head branch is in the `session/` namespace. The `session/` prefix is the lane boundary; the *shape of the rest* is not consulted. `_SDLC_BRANCH_RE` is deleted outright — the branch-shape concept leaves the module rather than lingering as a demoted fallback (AC bullet 4).
+- **Four-rung issue resolver** (`_resolve_lane_issue`): a single helper that returns `(issue_number | None, reason)` and is the module's only path from a PR to an issue number. Ordered most-authoritative first:
+  1. **Recorded ledger, by PR number** — `PipelineLedger.query.filter(pr_number=...)`, repo-scoped to `target_repo`, requiring exactly one distinct `issue_number`. Precedent: `tools/merge_predicate.py:415`.
+  2. **Recorded ledger, by recorded slug** — repo-scoped scan for a record whose `slug` equals this branch's slug, requiring a unique match. Catches lanes that have a recorded identity but whose `pr_number` was never written.
+  3. **The PR's own closing reference** — the single distinct entry in `closingIssuesReferences`, already in the corpus payload. This adopts an identity that exists in the world (the same principle as `lane_identity.py` rungs 2-3), and it is what covers the 4-of-5 lanes the ledger cannot see today.
+  4. **Issue-derived slug shape** — `_issue_number_from_slug`, retained solely as the last rung with a comment saying so. It is the only rung that *derives* rather than reads, so it sits at the bottom.
+  Any rung that finds two-or-more candidates does **not** fall through to a weaker rung — it returns `None` with an `ambiguous` reason. Falling through from "two authoritative answers" to "one guessed answer" would be strictly worse than declining.
+- **Explicit unresolved reporting**: a lane whose issue cannot be resolved emits a `gate-unknown: issue-unresolved {slug}` or `gate-unknown: issue-ambiguous {slug}` finding rather than a silent `continue`. The silence is half the bug: today an invisible lane produces no signal at all.
+- **Per-tick action cap**: `_DEFAULT_ACTIONS_MAX_PER_TICK` with a `SDLC_STALL_ACTIONS_MAX_PER_TICK` env override, following the module's existing provisional-constant convention (`:120-136`) and carrying the same grain-of-salt comment. It bounds steer + resume + create per project tick. The existing create brake stays as-is beneath it.
+- **`target_repo is None` handling**: rungs 1-2 are unavailable (an unscoped ledger query could bind a lane to another repo's issue). The resolver skips them and continues at rung 3. The now-stale comment at `:762-770`, which justifies the `None` case as unreachable *because the branch filter admits only issue-derived names*, is rewritten to state the new reason.
+
+### Flow
+
+**Reflection tick** → fetch open `session/*` PRs (one `gh` call) → **per PR**: strip `session/` for the slug → **resolver ladder** (ledger by PR → ledger by slug → PR closing ref → slug shape) → *resolved* → existing gates (issue-open, stale, live, escalated, budget, cooldown) → **action ladder** (steer / resume / create) → counts + findings
+                                                                                                                                          ↘ *unresolved or ambiguous* → `gate-unknown` finding → **next PR**
+
+### Technical Approach
+
+Corrected line references (post-`e50eba258`):
+
+- Delete `_SDLC_BRANCH_RE` at **`:118`** along with its comment block at `:116-117`.
+- Rewrite `_list_open_sdlc_prs` (**`:217-236`**) as `_list_open_lane_prs`: add `closingIssuesReferences` to the `--json` field list, replace the regex predicate at `:235` with a `session/` namespace test expressed through the existing `_slug_from_branch` helper (a non-`None` return *is* the membership test — do not introduce a second place that knows the prefix).
+- Keep `_slug_from_branch` (**`:256-260`**) unchanged; it is already shape-agnostic and it is the module's single owner of the prefix.
+- Demote `_issue_number_from_slug` (**`:263-266`**) to ladder rung 4; keep the body, replace the docstring with one that says it is the last resort and why.
+- Add `_resolve_lane_issue(pr, slug, target_repo)` next to it, with a docstring modeled on `merge_predicate._resolve_tracked_issue`: the rung order, the unique-match rule, the ambiguity outcome, and the reason rung 4 is last.
+- Rewrite the discovery loop at **`:811-819`** to call the corpus function and the resolver, and to append a finding on the unresolved/ambiguous path instead of a bare `continue`.
+- Guard every ledger read with a broad `except Exception` that logs and degrades to the next rung, matching `merge_predicate`'s Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`. A Redis outage must degrade this reflection, never crash it.
+- Rewrite the stale comment at **`:762-770`**.
+
+Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-branch-set, as the issue's Desired Outcome sketched. spike-1 shows that design resolves 1 of 5 live lanes; the ladder resolves 5 of 5 at lower cost (rung 3 is free — the data arrives in the corpus call). Rung 2 preserves the issue's intent as the ledger population matures, and becomes the dominant rung over time without further work.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] Every new ledger read is wrapped in a broad `except Exception` that logs at `warning` and returns "no answer from this rung". Each gets a test that injects a raising `PipelineLedger.query` and asserts (a) the tick does not raise, and (b) the resolver falls through to the next rung.
+- [ ] The existing `_run_gh` handlers (`FileNotFoundError`, `TimeoutExpired`, broad) are unchanged and already covered by `test_gh_pr_list_filenotfound_returns_empty`; that test is retargeted to the renamed function.
+
+### Empty/Invalid Input Handling
+- [ ] `closingIssuesReferences` absent, `None`, or `[]` → rung 3 yields nothing and the ladder continues to rung 4. Tested for all three shapes; `gh` omits the key entirely on some payload shapes, so `pr.get(...) or []` is the required idiom.
+- [ ] `headRefName` empty or `None` → `_slug_from_branch` returns `None` → PR excluded from the corpus. Tested.
+- [ ] A `session/` branch with an empty remainder (`"session/"`) → slug is `""` → excluded from the corpus, not passed to the resolver with an empty identity.
+- [ ] `target_repo is None` → rungs 1-2 skipped without an unscoped query. Tested by asserting the ledger query is never invoked.
+
+### Error State Rendering
+- [ ] Unresolved and ambiguous lanes surface as `gate-unknown: issue-unresolved {slug}` / `gate-unknown: issue-ambiguous {slug}` in the returned `findings`, and are asserted in tests. This is the user-visible failure path: the reflection's finding list is what a human reads.
+- [ ] The per-tick cap emits a distinct `action-cap: {slug} deferred to next tick` finding rather than silently dropping the lane, mirroring the existing `create-brake:` finding at `:897`.
+
+## Test Impact
+
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_gh_pr_list_filters_non_sdlc_branches` (`:1266-1276`) — REPLACE: it asserts `session/some-feature` is *excluded*, which is precisely the bug. Rewrite as `test_lane_pr_list_admits_the_session_namespace`: `session/sdlc-1395` and `session/some-feature` both admitted, `dependabot/update` excluded, draft excluded.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_gh_pr_list_filenotfound_returns_empty` (`:1255-1259`) — UPDATE: retarget to `_list_open_lane_prs`; assertion is unchanged.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — UPDATE: every `monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", ...)` site (`:311`, `:931`, `:971`, `:1124`, `:1134`, `:1219`, `:1225`, `:1233`, `:1243`, `:1301`, `:1309`) is retargeted to the new name, and the `_pr(...)` factory gains a `closing` parameter defaulting to the PR's own issue.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_create_rung_records_a_human_named_slug_verbatim` (`:618-643`) — UPDATE the docstring only. It currently states the branch filter "is the only thing standing between a human-named lane and a correctly-named session"; after this change that sentence is false and the test's justification for exercising `_attempt_action` directly no longer holds. The assertions stay.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py:579-590` — UPDATE: the comment block describing the shape filter as the boundary goes stale.
+- [ ] `tests/integration/test_sdlc_stall_auto_resume_e2e.py:78-82` — UPDATE: the `stalled_lane` fixture monkeypatches `_list_open_sdlc_prs` with a 3-key dict; retarget the name and add `closingIssuesReferences`. Consider flipping `_BRANCH` to a human-named branch so the e2e path proves the fix end to end.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — ADD: a resolver suite covering all four rungs, the two ambiguity cases (spike-3's real #2746 shape: two closing refs; and two ledger records for one `pr_number`), the `target_repo is None` path, and each rung's exception fall-through.
+
+No `xfail` markers relate to this bug — grep of `tests/` for `pytest.mark.xfail` / `pytest.xfail(` returns nothing tied to lane discovery, so there is no expected-failure conversion to do.
+
+## Rabbit Holes
+
+- **Backfilling `PipelineLedger` for historical lanes.** Tempting ("then rung 1 always works") and a trap: it means inferring identity for lanes that predate the field, which is the exact derivation-wearing-adoption's-clothes mistake `tools/lane_identity.py:36-42` was written to prevent. The ladder makes backfill unnecessary; the ledger densifies naturally as new lanes start.
+- **Making `pr_number` a second writer.** Discovery knows the PR number and could "helpfully" write it onto the ledger. Do not. `pr_number` is single-writer by design (`sdlc-tool meta-set`), and a reflection that writes identity during a read path is how #2718 happened.
+- **Reconciling the `session/` namespace with `.worktrees/` on disk.** A machine-local worktree listing would seem to enrich discovery. `lane_identity.py:43-46` already rejects this rung: a per-host answer is not an identity.
+- **Generalizing the resolver into a shared `tools/` helper for all three consumers.** `merge_predicate`, `sdlc_upvote_lanes`, and this module each resolve a slightly different question with different failure postures (fail-closed merge gate vs. fail-soft reflection). Unifying them is a separate design exercise; the shared *pattern* is enough here.
+- **Tuning the stall threshold because the corpus just grew.** The threshold is orthogonal. If the widened corpus proves noisy, the per-tick cap is the lever, not the threshold.
+
+## Risks
+
+### Risk 1: First-tick action burst on a suddenly-visible lane population
+**Impact:** spike-4 measured the corpus going from 0 to 5 lanes. If several are past the 4-hour threshold and not live, the first tick after deploy could steer/resume all of them at once — a batch of unexpected agent activity on lanes nobody asked about, from a detector with no track record on this population.
+**Mitigation:** the per-tick action cap (`SDLC_STALL_ACTIONS_MAX_PER_TICK`, provisional default 3) bounds it, with the deferred lanes reported as `action-cap:` findings so the backlog is visible rather than silent. The create brake (1/tick) and the per-`(slug, sha)` attempt budget and cooldown are unchanged beneath it. `SDLC_STALL_RESUME_ENABLED=false` remains the escape hatch: it degrades the tick to escalate-only.
+
+### Risk 2: Rung 3 binds a lane to the wrong issue
+**Impact:** a PR's `closingIssuesReferences` is authored by whoever wrote the PR body. A wrong or stale `Closes #N` binds the attempt budget, cooldown, escalation key, and any created session to an unrelated issue.
+**Mitigation:** rung 3 sits *below* both recorded-ledger rungs, so it only ever answers where recorded identity is silent. It requires a single distinct reference (spike-3 proved multi-ref PRs are real), and the corpus is already restricted to the `session/` namespace, so a hotfix branch's closing reference can never reach it. The gates downstream are unchanged: a wrong issue that is closed, or whose lock says live, still results in no action.
+
+### Risk 3: Ledger query failure degrades discovery silently
+**Impact:** a Redis outage makes rungs 1-2 return nothing. Discovery keeps working via rungs 3-4, which is correct — but if it degrades quietly, an operator cannot tell a healthy tick from a half-blind one.
+**Mitigation:** every rung's exception path logs at `warning` with the rung name and the slug. The tick never crashes (matching `merge_predicate` Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`), and the fall-through is a designed behavior with tests, not an accident.
+
+### Risk 4: The `session/` namespace stops being a clean lane boundary
+**Impact:** spike-4 confirmed it is clean today (hotfix work lives on `fix/*`). If someone later pushes a non-lane `session/*` branch, it enters the corpus, and if it happens to carry a `Closes #N` it could draw an action.
+**Mitigation:** accepted, and bounded by the same gates. The `session/` prefix is already the repo's declared lane namespace — `agent/worktree_manager.py` creates `session/{slug}` and `tools/lane_identity.py::lane_branch_name` is its single constructor. Documenting the namespace as load-bearing (in the Documentation section) is the durable mitigation.
+
+## Race Conditions
+
+### Race 1: Lane starts (or its slug is recorded) between the corpus fetch and the resolver
+**Location:** `reflections/sdlc_progress.py`, discovery loop at `:811-819`
+**Trigger:** `gh pr list` returns a snapshot; a lane can record its slug, take its issue lock, or push a fresh commit in the milliseconds after.
+**Data prerequisite:** none — the resolver reads whatever identity exists at read time; a later write simply makes the *next* tick more authoritative.
+**State prerequisite:** the lane must be genuinely stalled at action time, not merely at fetch time.
+**Mitigation:** already handled downstream and unchanged: `_lane_is_live` is read after the fetch, and the create rung re-reads the lock immediately before creating (`:691-703`). This plan adds no new window.
+
+### Race 2: Two ticks resolve the same lane concurrently
+**Location:** discovery loop plus `_action_cooldown_set` (`:887`)
+**Trigger:** overlapping project ticks at a 30-minute cadence.
+**Data prerequisite:** the `(slug, sha)` cooldown key.
+**State prerequisite:** exactly one tick may claim the action window.
+**Mitigation:** unchanged — `_action_cooldown_set` is the SETNX claim and is the existing overlapping-tick guard. The resolver is pure-read and idempotent, so concurrent resolution of the same lane yields the same answer. The new per-tick cap is per-call state, deliberately not in Redis, exactly like `creates_this_tick` (`:774-779`) — and carries the same documented non-atomicity.
+
+### Race 3: A lane's recorded slug appears while rung 3 is answering
+**Location:** `_resolve_lane_issue`, rungs 2 and 3
+**Trigger:** `adopt_lane_slug` writes the identity mid-tick.
+**Data prerequisite:** `PipelineLedger.slug`.
+**State prerequisite:** rung 2's answer and rung 3's answer must not disagree for the same lane.
+**Mitigation:** they cannot disagree destructively — rung 2 matches on the same branch slug rung 3's PR carries, and the ladder short-circuits at the first unique answer. The ledger write is conditional-on-empty and never overwrites, so a lane's identity is stable once recorded (`agent/pipeline_ledger.py:170-180`).
+
+## No-Gos (Out of Scope)
+
+Nothing deferred — every relevant item is in scope for this plan. The four acceptance-criteria bullets in the issue's Desired Outcome are all addressed: ledger-driven enumeration (rungs 1-2), `_issue_number_from_slug` demoted to a documented fallback (rung 4), human-named lane detection (rungs 2-3, proven against the live corpus), and `_SDLC_BRANCH_RE` removed outright.
+
+## Update System
+
+No update system changes required — this is a change to one reflection module's internal logic. No new dependency, no new config file, no new secret, no schema change, and therefore no migration. `scripts/update/migrations.py` is not touched: `PipelineLedger` gains no field (`slug` and `pr_number` both already exist and are already populated by their existing writers).
+
+The new `SDLC_STALL_ACTIONS_MAX_PER_TICK` env var is an *optional* override with a code default, matching every other threshold in the module (`:120-136`). It needs no `.env` entry, no `.env.example` placeholder, and no `config/settings.py` field — it follows the module's established `_env_float` convention, not the secrets convention.
+
+Standard post-merge propagation applies: `/update` on each machine, then a worker restart so the reflection scheduler picks up the new module.
+
+## Agent Integration
+
+No agent integration required — this is a reflection-internal change. `sdlc-progress-check` is already registered and scheduled; the agent reaches it through the existing reflection runner, not through a CLI entry point or a bridge import. No new `pyproject.toml [project.scripts]` entry, no MCP surface, no `bridge/telegram_bridge.py` change.
+
+The one agent-visible surface is unchanged in shape and improved in content: escalations still reach a human via `_send_alert`, and the findings list still flows into the reflection report. After this change that report will, for the first time, mention human-named lanes.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Update `docs/features/sdlc-lane-identity.md` — add a "Discovery reads identity" section covering the four-rung resolver, why rung 4 is last, and why a full-ledger enumeration was rejected (spike-1's 1-of-5 measurement). This doc is #2735's and is the natural home; the read direction belongs next to the write direction.
+- [ ] Update the stall-detector documentation to state that the `session/` namespace — not the `sdlc-<N>` shape — is the lane boundary, and to document `SDLC_STALL_ACTIONS_MAX_PER_TICK` alongside the existing thresholds. (Locate via `grep -rln "sdlc-progress-check\|SDLC_STALL_THRESHOLD_HOURS" docs/`; if no dedicated doc exists, create `docs/features/sdlc-stall-detection.md` and add it to the `docs/features/README.md` index table.)
+- [ ] Add an entry to `docs/features/README.md` if a new doc is created.
+
+### Inline Documentation
+- [ ] `_resolve_lane_issue` docstring: the rung order, the unique-match rule, the ambiguity outcome, and why rung 4 (the only deriving rung) is last.
+- [ ] `_issue_number_from_slug` docstring: rewrite to say it is the last-resort fallback and what supersedes it.
+- [ ] Rewrite the stale `target_repo` comment at `:762-770`, whose stated justification ("the branch filter admits only issue-derived names") this change invalidates.
+- [ ] Grain-of-salt comment on `_DEFAULT_ACTIONS_MAX_PER_TICK`, matching the module's existing provisional-constant block.
+
+## Success Criteria
+
+- [ ] A stalled lane on a human-named branch (`session/dev-<hash>`, `session/<words>`) is discovered and acted on, proven by a test using spike-4's real branch names.
+- [ ] `_SDLC_BRANCH_RE` no longer exists anywhere in `reflections/sdlc_progress.py`.
+- [ ] `_issue_number_from_slug` is reached only after all three read-based rungs decline, proven by a test that asserts it is not consulted when the ledger answers.
+- [ ] A PR with two closing references (the #2746 shape) produces a `gate-unknown: issue-ambiguous` finding and **no** action.
+- [ ] A ledger/Redis failure degrades to rungs 3-4 with a logged warning and never raises out of `_check_project_stalls`.
+- [ ] The per-tick action cap bounds steer + resume + create, with deferred lanes reported as findings.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (discovery)**
+  - Name: `discovery-builder`
+  - Role: rewrite the corpus filter and implement the four-rung resolver in `reflections/sdlc_progress.py`
+  - Agent Type: builder
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Builder (tests)**
+  - Name: `discovery-test-builder`
+  - Role: retarget the existing test surface and add the resolver suite
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator (discovery)**
+  - Name: `discovery-validator`
+  - Role: verify the acceptance criteria, especially the negative ones (regex gone, rung 4 not consulted when the ledger answers, ambiguity produces no action)
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `discovery-documentarian`
+  - Role: feature docs and index entry
+  - Agent Type: documentarian
+  - Resume: true
+
+### Available Agent Types
+
+Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/Popoto data` tag — paste the matching rules from `DOMAIN_FRAMING.md` into its assignment, particularly the never-raw-Redis rule (all `PipelineLedger` access goes through `Model.query.filter()` / `Model.load()`).
+
+## Step by Step Tasks
+
+### 1. Widen the corpus filter to the `session/` namespace
+- **Task ID**: build-corpus
+- **Depends On**: none
+- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Informed By**: spike-4 (5 of 7 open PRs are `session/*`; the 2 non-lane PRs are `fix/*` and are correctly excluded)
+- **Assigned To**: `discovery-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Delete `_SDLC_BRANCH_RE` and its comment block (`:116-118`).
+- Rename `_list_open_sdlc_prs` → `_list_open_lane_prs`; add `closingIssuesReferences` to the `--json` field list.
+- Express the namespace test through `_slug_from_branch` returning a non-empty slug — do not add a second site that knows the `session/` prefix.
+- Update every call site and the module docstring if it names the old filter.
+
+### 2. Implement the four-rung issue resolver
+- **Task ID**: build-resolver
+- **Depends On**: build-corpus
+- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Informed By**: spike-1 (ledger-only resolves 1 of 5 — a ladder is required, not a single read), spike-2 (`closingIssuesReferences` covers 5 of 5 at zero extra subprocess cost), spike-3 (multi-ref PRs are real; #2746 declares two)
+- **Assigned To**: `discovery-builder`
+- **Agent Type**: builder
+- **Domain**: Redis/Popoto data
+- **Parallel**: false
+- Add `_resolve_lane_issue(pr, slug, target_repo) -> tuple[int | None, str]` implementing rungs 1-4 in order, modeled on `tools/merge_predicate.py::_resolve_tracked_issue` (`:355-440`).
+- Ledger reads go through `PipelineLedger.query.filter(...)`, repo-scoped, each wrapped in a broad `except Exception` that logs at `warning` and falls through.
+- Skip rungs 1-2 entirely when `target_repo` is `None` — never issue an unscoped query.
+- Two-or-more candidates at any rung returns `(None, "ambiguous")` and does not fall through.
+- Demote `_issue_number_from_slug` to rung 4 and rewrite its docstring.
+- Rewrite the discovery loop (`:811-819`) to use the resolver and to append `gate-unknown: issue-unresolved {slug}` / `gate-unknown: issue-ambiguous {slug}` findings instead of a bare `continue`.
+- Rewrite the stale `target_repo` comment at `:762-770`.
+
+### 3. Add the per-tick action cap
+- **Task ID**: build-cap
+- **Depends On**: build-resolver
+- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
+- **Informed By**: spike-4 (corpus goes 0 → 5 lanes on the first tick after deploy)
+- **Assigned To**: `discovery-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `_DEFAULT_ACTIONS_MAX_PER_TICK` to the thresholds block with the module's grain-of-salt comment, plus `_actions_max_per_tick()` reading `SDLC_STALL_ACTIONS_MAX_PER_TICK` via `_env_float`.
+- Count steer + resume + create against the cap in `_check_project_stalls`; emit `action-cap: {slug} deferred to next tick` for deferred lanes, mirroring the `create-brake:` finding at `:897`.
+- Leave the existing create brake in place beneath the cap.
+
+### 4. Retarget and extend the test surface
+- **Task ID**: build-tests
+- **Depends On**: build-corpus, build-resolver, build-cap
+- **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`, `tests/integration/test_sdlc_stall_auto_resume_e2e.py`
+- **Informed By**: spike-3 (use #2746's real two-ref shape), spike-4 (use the real branch names)
+- **Assigned To**: `discovery-test-builder`
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Apply every disposition in the Test Impact section.
+- Add the resolver suite: one test per rung, rung-4-not-consulted-when-ledger-answers, both ambiguity shapes, `target_repo is None`, and per-rung exception fall-through.
+- Add the headline regression test: a stalled lane on `session/dev-41a59eee` is discovered and acted on.
+- Flip the e2e fixture's branch to a human-named one so the integration path proves the fix.
+
+### 5. Validate
+- **Task ID**: validate-discovery
+- **Depends On**: build-tests
+- **Assigned To**: `discovery-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row.
+- Confirm each negative criterion independently: regex absent, rung 4 not consulted when the ledger answers, ambiguity produces no action, no unscoped ledger query.
+- Confirm no raw Redis access was introduced.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-discovery
+- **Assigned To**: `discovery-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Apply every checkbox in the Documentation section.
+
+### 7. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: `discovery-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Re-run all Verification rows and confirm all Success Criteria.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Unit tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_sdlc_progress_check.py -q` | exit code 0 |
+| Integration e2e passes | `scripts/pytest-clean.sh tests/integration/test_sdlc_stall_auto_resume_e2e.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Branch-shape regex is gone | `grep -c '_SDLC_BRANCH_RE' reflections/sdlc_progress.py` | match count == 0 |
+| Old corpus function name is gone | `grep -rc '_list_open_sdlc_prs' reflections/ tests/` | match count == 0 |
+| Resolver exists | `grep -c '_resolve_lane_issue' reflections/sdlc_progress.py` | output > 1 |
+| Ledger is read by discovery | `grep -c 'PipelineLedger' reflections/sdlc_progress.py` | output > 0 |
+| Closing-reference rung is wired | `grep -c 'closingIssuesReferences' reflections/sdlc_progress.py` | output > 1 |
+| Per-tick cap is env-overridable | `grep -c 'SDLC_STALL_ACTIONS_MAX_PER_TICK' reflections/sdlc_progress.py` | output > 0 |
+| Ambiguity is reported, not guessed | `grep -c 'issue-ambiguous' reflections/sdlc_progress.py` | output > 0 |
+| No raw Redis on Popoto keys | `grep -nE '\.(hgetall\|hget\|scan_iter)\(' reflections/sdlc_progress.py` | match count == 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+
+---
+
+## Open Questions
+
+1. **Per-tick action cap default.** Provisional default of 3 (steer + resume + create combined), env-overridable. Given spike-4's measurement that the first tick after deploy will see roughly 5 previously-invisible lanes at once, is 3 the right first number, or should the first deploy run with `SDLC_STALL_RESUME_ENABLED=false` for one cycle to observe the finding list before any action fires?
+2. **Rung 3 trust level.** `closingIssuesReferences` is human-authored and is what covers 4 of the 5 live lanes today. It sits below both recorded-ledger rungs and requires a single distinct reference. Is that acceptable, or should rung 3 be gated behind an env flag until the ledger population matures enough for rungs 1-2 to dominate?
+3. **`session/` namespace as a documented contract.** This change makes the `session/` prefix load-bearing for automated action. Worth stating explicitly in `docs/features/sdlc-lane-identity.md` as "the `session/` namespace is reserved for SDLC lanes; do not push ad-hoc branches there" — or is that over-formalizing a convention that already holds?

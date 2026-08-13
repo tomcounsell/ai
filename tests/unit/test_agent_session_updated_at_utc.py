@@ -181,6 +181,39 @@ class TestSaveUpdateFieldsGuard:
 
         assert s.updated_at > old_ts, "Full save (update_fields=None) must stamp updated_at"
 
+    def test_preserve_updated_at_wins_even_with_a_full_save(self):
+        """preserve_updated_at=True skips the stamp unconditionally (#2660),
+        even on a full save (update_fields=None) that would otherwise always
+        stamp -- this is the primitive the archive restore relies on."""
+        s = _make_session_no_save()
+        archived_ts = datetime(2020, 1, 1, tzinfo=UTC)
+        s.updated_at = archived_ts
+
+        with patch.object(AgentSession.__bases__[0], "save", lambda self, *a, **kw: None):
+            AgentSession.save(s, preserve_updated_at=True)
+
+        assert s.updated_at == archived_ts, (
+            "preserve_updated_at=True must skip the stamp even on a full save"
+        )
+
+    def test_preserve_updated_at_beats_update_fields_omitting_it(self, caplog):
+        """Resolved Decision 2: preserve_updated_at=True wins over
+        update_fields, logs a WARNING naming the caller smell, and raises
+        nothing (fail-quiet, matching every other guard here)."""
+        s = _make_session_no_save()
+        archived_ts = datetime(2020, 1, 1, tzinfo=UTC)
+        s.updated_at = archived_ts
+
+        with caplog.at_level(logging.WARNING, logger="models.agent_session"):
+            with patch.object(AgentSession.__bases__[0], "save", lambda self, *a, **kw: None):
+                AgentSession.save(s, update_fields=["status"], preserve_updated_at=True)
+
+        assert s.updated_at == archived_ts, "preserve_updated_at must win over update_fields"
+        assert any(
+            "preserve_updated_at" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), "the combination must warn, naming the caller smell"
+
 
 # ---------------------------------------------------------------------------
 # Tests: save() liveness-field omission allowlist (DEBUG vs WARNING)
@@ -231,6 +264,10 @@ class TestSaveUpdatedAtOmissionAllowlist:
             ["exec_harness"],
             ["spawn_history"],
             ["current_tool_name", "last_tool_use_at"],
+            # #2660: the narrowed session-ensure run-lock bind. The bind runs
+            # before EVERY ensure_session() return, so a stage dispatch that
+            # only re-binds the run lock must not warn on every call.
+            ["active_run_id", "owned_run_ids"],
         ],
     )
     def test_allowlisted_liveness_fields_log_debug_not_warning(self, update_fields, caplog):
@@ -255,10 +292,22 @@ class TestSaveUpdatedAtOmissionAllowlist:
             # Mixed: one allowlisted + one not → still a genuine omission, WARN.
             ["last_turn_at", "status"],
             ["exec_pid", "status"],
+            # #2660: mixing the new active_run_id/owned_run_ids allowlist
+            # entries with a genuinely non-allowlisted field must still warn
+            # -- the allowlist check is `set(update_fields) <=
+            # _UPDATED_AT_OMISSION_OK_FIELDS`, so a single non-member field
+            # anywhere in the list still routes to WARNING.
+            ["active_run_id", "status"],
         ],
     )
     def test_non_allowlisted_omission_still_warns(self, update_fields, caplog):
-        """A non-allowlisted (or mixed) omission keeps the WARNING."""
+        """A non-allowlisted (or mixed) omission keeps the WARNING.
+
+        #2660 check: none of the pre-existing parameters above overlap with
+        the two new allowlist entries (active_run_id, owned_run_ids), so
+        adding them to _UPDATED_AT_OMISSION_OK_FIELDS moves nothing here
+        from WARNING to DEBUG.
+        """
         records = self._save_and_capture(update_fields, caplog)
 
         assert any(r.levelno == logging.WARNING and "updated_at" in r.message for r in records), (

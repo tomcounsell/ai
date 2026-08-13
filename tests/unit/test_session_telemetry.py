@@ -12,6 +12,7 @@ from agent.session_telemetry import (
     read_session_timeline,
     record_telemetry_event,
 )
+from tests.db_claim import subprocess_env
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -470,6 +471,7 @@ class TestStatusTransitionTextRenderer:
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
+                env=subprocess_env(project_root=str(repo_root)),
             )
             assert result.returncode == 0, f"stderr: {result.stderr}"
             assert "running" in result.stdout, f"Got: {result.stdout!r}"

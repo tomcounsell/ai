@@ -2,6 +2,7 @@
 
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from agent.worktree_manager import (
     WorktreeBranchMismatchError,
     _cleanup_stale_worktree,
     _find_worktree_for_branch,
+    _scan_worktree_sessions,
     _validate_slug,
     _worktree_has_live_process,
     cleanup_after_merge,
@@ -26,6 +28,7 @@ from agent.worktree_manager import (
     venv_python_version,
     verify_worktree_branch,
     worktree_busy_check,
+    worktree_busy_probe,
     worktree_interpreter_pin,
 )
 
@@ -721,6 +724,123 @@ class TestWorktreeBusyCheck:
             _make_session("", "running"),
         ]
         assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+
+class TestWorktreeBusyProbe:
+    """Tests for worktree_busy_probe — the fail-CLOSED wrapper (issue #2517).
+
+    These drive the real function. worktree_busy_check's tests cannot cover
+    this: that wrapper maps both "clear" and "error" to None, so an assertion
+    of ``is None`` passes whether the query succeeded or blew up. Asserting the
+    "error" STATE here is what makes the fail-closed posture observable, and is
+    the only thing that distinguishes the two wrappers.
+    """
+
+    @patch("models.agent_session.AgentSession")
+    def test_query_failure_reports_error_state(self, mock_as):
+        """A Redis outage must read as "error", never as "clear"."""
+        mock_as.query.all.side_effect = RuntimeError("redis down")
+        state, detail = worktree_busy_probe(Path("/fake/repo"), "sdlc-1218")
+        assert state == "error"
+        assert detail.startswith("query_failed:")
+        assert detail == "query_failed:RuntimeError"
+
+    def test_model_import_failure_reports_error_state(self):
+        """A broken deferred import is its own error branch, not "clear"."""
+        with patch.dict(sys.modules, {"models.agent_session": None}):
+            state, detail = worktree_busy_probe(Path("/fake/repo"), "sdlc-1218")
+        assert state == "error"
+        assert detail.startswith("model_import_failed:")
+
+    @patch("models.agent_session.AgentSession")
+    def test_live_session_in_lane_reports_busy(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218",
+                "running",
+                session_id="0_LIVE",
+                agent_session_id="agt-LIVE",
+            ),
+        ]
+        assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("busy", "0_LIVE")
+
+    @patch("models.agent_session.AgentSession")
+    def test_busy_falls_back_to_agent_session_id(self, mock_as):
+        """An empty session_id must not degrade the detail into a falsy blank."""
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218",
+                "running",
+                session_id="",
+                agent_session_id="agt-ONLY",
+            ),
+        ]
+        assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("busy", "agt-ONLY")
+
+    @patch("models.agent_session.AgentSession")
+    def test_unrelated_sessions_report_clear(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session("/fake/repo/.worktrees/sdlc-9999", "running"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218-other", "running"),
+            _make_session("/fake/repo", "running"),
+        ]
+        assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("clear", "")
+
+    @patch("models.agent_session.AgentSession")
+    def test_terminal_session_in_lane_reports_clear(self, mock_as):
+        """The probe's own terminal filtering, observable at the probe level."""
+        mock_as.query.all.return_value = [
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "completed"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "killed"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "failed"),
+        ]
+        assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("clear", "")
+
+    @patch("models.agent_session.AgentSession")
+    def test_no_sessions_reports_clear(self, mock_as):
+        mock_as.query.all.return_value = []
+        assert worktree_busy_probe(Path("/fake/repo"), "sdlc-1218") == ("clear", "")
+
+
+class TestScanWorktreeSessions:
+    """Direct 3-tuple contract of the shared scan behind both wrappers."""
+
+    @patch("models.agent_session.AgentSession")
+    def test_query_failure_tuple(self, mock_as):
+        mock_as.query.all.side_effect = ValueError("boom")
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == (
+            "error",
+            "query_failed:ValueError",
+            "",
+        )
+
+    def test_model_import_failure_tuple(self):
+        with patch.dict(sys.modules, {"models.agent_session": None}):
+            state, detail, extra = _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218")
+        assert state == "error"
+        assert detail.startswith("model_import_failed:")
+        assert extra == ""
+
+    @patch("models.agent_session.AgentSession")
+    def test_busy_tuple_carries_both_ids(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218/sub",
+                "running",
+                session_id="0_S",
+                agent_session_id="agt-S",
+            ),
+        ]
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == (
+            "busy",
+            "0_S",
+            "agt-S",
+        )
+
+    @patch("models.agent_session.AgentSession")
+    def test_clear_tuple(self, mock_as):
+        mock_as.query.all.return_value = []
+        assert _scan_worktree_sessions(Path("/fake/repo"), "sdlc-1218") == ("clear", "", "")
 
 
 class TestRemoveWorktreeBusyGuard:

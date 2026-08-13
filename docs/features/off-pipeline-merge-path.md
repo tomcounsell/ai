@@ -103,7 +103,7 @@ refuses the skip and preserves the evidence that a critique was attempted. What
 remains is the case where the pipeline genuinely never critiqued this issue,
 whoever wrote the diff.
 
-`docs/plans/` resolution order is in `tools/_sdlc_utils.py::find_plan_path`:
+`docs/plans/` resolution order is in `tools/lane_identity.py::find_plan_path`:
 `SDLC_TARGET_REPO`, then the cwd's git toplevel, then the `__file__`-relative
 fallback. If you see an unexpected skip on in-pipeline work, that ordering is
 where to look first.
@@ -135,10 +135,10 @@ caller's good intentions. Five properties hold together:
    side effect — which is the specific forgery this design has to refuse.
 5. **REVIEW's invariant got stronger, not weaker.**
    `verdict_invariant_satisfied("REVIEW", n)` requires a readable verdict, a
-   well-formed `REVIEW_CONTEXT head_sha=` trailer, **and** a posted GitHub
-   review artifact. The artifact conjunct is new (#2577): `finalize` records the
-   verdict and trailer *before* it checks for the artifact, so a run that
-   refused with `REVIEW_ARTIFACT_MISSING` left a verdict+trailer behind that the
+   resolvable head SHA, **and** a posted GitHub review artifact. The artifact
+   conjunct is new (#2577): `finalize` records the verdict and its head SHA
+   *before* it checks for the artifact, so a run that refused with
+   `REVIEW_ARTIFACT_MISSING` left both behind, which the
    backfill read as a satisfied invariant. It was unreachable while CRITIQUE
    blocked first; clearing CRITIQUE exposed it. Both call sites — the backfill
    and `write_marker`'s direct completed-path — now enforce the same three

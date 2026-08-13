@@ -2,7 +2,8 @@
 
 Covers the atomic finalize write+verify path, the shared
 check_review_persistence read-back, the read-only selfcheck path, the named
-error taxonomy, idempotent trailer append, and fail-closed behavior on
+error taxonomy, the #2769 head_sha field/verdict-token split (with its
+permanent legacy-trailer read fallback), and fail-closed behavior on
 gh/Redis errors. Mirrors the mock-at-the-lease-boundary conventions used in
 tests/unit/test_sdlc_verdict.py and tests/unit/test_sdlc_stage_marker.py.
 """
@@ -13,17 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Import-order barrier (#2469). `finalize()` lazily imports
-# `tools.sdlc_stage_marker` from inside the write path, and that module
-# snapshots `resolve_ledger_lease` / `revalidate_ledger_lease` into its own
-# globals with a `from` import. TestFinalize calls `finalize()` while
-# `tools._sdlc_utils.resolve_ledger_lease` is patched, so if that lazy import
-# is the FIRST one in the process the MagicMock is frozen into
-# sdlc_stage_marker's globals permanently -- inverting every lease assertion
-# in tests/unit/test_sdlc_stage_marker.py when the two files share a serial
-# worker. Binding the real functions here, before any patch is active, closes
-# it. `test_lease_helpers_are_not_leaked_test_doubles` asserts it held.
-import tools.sdlc_stage_marker  # noqa: F401  isort:skip
 from tools.sdlc_review_finalize import (
     HeadShaResolutionError,
     ReviewFinalizeError,
@@ -554,14 +544,19 @@ class TestFinalize:
             result = finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
 
         assert result["ok"] is True
-        # The trailer was appended once, idempotently, into the recorded call.
-        assert mock_record.call_args.kwargs["verdict"] == trailered
+        # #2769: the verdict token is recorded BARE and the head SHA rides in
+        # its own `head_sha=` kwarg. Concatenating them was the bug -- the
+        # writer's normalize_verdict mangled the trailer into the token.
+        assert mock_record.call_args.kwargs["verdict"] == "APPROVED"
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
+        assert "REVIEW_CONTEXT" not in mock_record.call_args.kwargs["verdict"]
         mock_marker.assert_called_once()
         assert mock_marker.call_args.kwargs["status"] == "completed"
 
-    def test_idempotent_trailer_append_when_already_present(self):
-        """A verdict string that already carries the trailer must not get a
-        second trailer appended."""
+    def test_already_trailered_input_is_split_into_bare_token_and_head_sha(self):
+        """#2769: an already-trailered input is STRIPPED to the bare verdict
+        token and its SHA lands in `head_sha=` exactly once -- never stored in
+        both places, and never left inside the verdict string."""
         already_trailered = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
         lease_ok, revalidate_ok = self._patch_lease_ok()
         with (
@@ -581,8 +576,9 @@ class TestFinalize:
             finalize(pr=1, issue_number=42, verdict=already_trailered, run_id="run-1")
 
         written_verdict = mock_record.call_args.kwargs["verdict"]
-        assert written_verdict == already_trailered
-        assert written_verdict.count("REVIEW_CONTEXT") == 1
+        assert written_verdict == "APPROVED"
+        assert "REVIEW_CONTEXT" not in written_verdict
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
 
     def test_non_approved_verdict_skips_marker_write(self):
         """CHANGES REQUESTED must not attempt a REVIEW completed marker write."""
@@ -891,3 +887,182 @@ class TestRecognizedVerdictVocabulary:
                 result = check_review_persistence(pr=1, issue_number=42)
             assert result["ok"] is False
             assert result["reason"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: check_review_persistence reads the head SHA through
+# `head_sha_of_record` -- field first, legacy in-token trailer second.
+# The legacy fallback is PERMANENT: pre-split ledgers are never migrated.
+# ---------------------------------------------------------------------------
+
+
+class TestCheckReviewPersistenceHeadShaShapes:
+    @pytest.fixture(autouse=True)
+    def _stub_repo_resolution(self):
+        with patch(
+            "tools.sdlc_review_finalize.resolve_target_repo_for_read",
+            return_value="o/r",
+        ):
+            yield
+
+    def _run(self, verdict_record):
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value=verdict_record),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            return check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+
+    def test_new_field_shape_passes_every_gate(self):
+        result = self._run({"verdict": "APPROVED", "head_sha": _HEAD_SHA})
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+
+    def test_legacy_mangled_shape_still_passes_every_gate(self):
+        """The pre-split record: normalize_verdict mangled the trailer into the
+        token. It must keep parsing forever -- no migration exists."""
+        result = self._run({"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_HEAD_SHA.upper()}"})
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+
+    def test_field_wins_over_a_disagreeing_legacy_trailer(self):
+        result = self._run(
+            {
+                "verdict": f"APPROVED REVIEW_CONTEXT head_sha={'b' * 40}",
+                "head_sha": _HEAD_SHA,
+            }
+        )
+        assert result["ok"] is True
+
+    def test_stale_field_fails_closed_even_with_a_fresh_legacy_trailer(self):
+        result = self._run(
+            {
+                "verdict": f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}",
+                "head_sha": "b" * 40,
+            }
+        )
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_read_helper_raising_still_fails_closed_with_a_preserved_reason(self):
+        """The outer `except Exception` is a deliberate fail-closed catch: an
+        exploding read helper must never read as a pass."""
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_finalize.head_sha_of_record",
+                side_effect=RuntimeError("ledger exploded"),
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_VERDICT_MISSING"
+
+    def test_head_sha_resolution_failure_fails_closed_with_its_own_reason(self):
+        """`_fetch_pr_head_sha` raising is a HANDLED branch with its own explicit
+        reason -- distinct from the `except Exception` path covered above."""
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": "APPROVED"},
+            ),
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha",
+                side_effect=HeadShaResolutionError("gh down"),
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+
+# ---------------------------------------------------------------------------
+# Issue #2740: the refusal must report what actually landed.
+#
+# `finalize` is a composite -- record_verdict commits, THEN write_marker runs.
+# When the marker write is refused, `write_marker` is locally correct that IT
+# wrote nothing, but it cannot see the verdict its caller already committed.
+# On the observed instance (issue #2711 / PR #2728) a reviewing agent read
+# "State NOT persisted", concluded finalize had lost its atomicity guarantee,
+# and nearly filed a duplicate issue. A wrong message on a refusal path costs
+# an investigation every time it fires.
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerRefusalReportsWhatPersisted:
+    def _refuse_marker(self, reason="STATE_MACHINE_REJECTED"):
+        return patch(
+            "tools.sdlc_stage_marker.write_marker",
+            return_value=(
+                {"error": reason.lower(), "reason": reason},
+                1,
+            ),
+        )
+
+    def _run_and_capture(self, reason="STATE_MACHINE_REJECTED"):
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch("tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}),
+            self._refuse_marker(reason),
+        ):
+            with pytest.raises(ReviewFinalizeError) as excinfo:
+                finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
+        return str(excinfo.value)
+
+    _patch_lease_ok = TestFinalize._patch_lease_ok
+
+    def test_message_does_not_claim_the_state_was_not_persisted(self):
+        message = self._run_and_capture()
+        assert "State NOT persisted" not in message
+        assert "NOT persisted" not in message
+
+    def test_message_states_the_verdict_did_persist(self):
+        """AC2: a reader must be able to determine what landed WITHOUT running
+        a separate stage-query."""
+        message = self._run_and_capture()
+        assert "ARE persisted" in message
+        assert "verdict" in message.lower()
+
+    def test_message_names_only_the_marker_as_missing(self):
+        message = self._run_and_capture()
+        assert "marker was not" in message.lower()
+
+    def test_message_names_the_idempotent_rerun_remedy(self):
+        """Risk 4: exactly ONE remedy, so the message stays skimmable."""
+        message = self._run_and_capture()
+        assert "idempotent" in message.lower()
+
+    def test_named_reason_stays_the_prefix(self):
+        """The /do-sdlc supervisor and existing tests match on the leading
+        taxon -- the rewording must not move it."""
+        for reason in ("STATE_MACHINE_REJECTED", "ISSUE_LOCKED", "REVIEW_MARKER_INCOMPLETE"):
+            assert self._run_and_capture(reason).startswith(f"{reason}: ")
+
+
+def test_no_module_in_tools_or_agent_claims_state_not_persisted():
+    """#2740 AC3 / the Verification anti-criterion, as a test rather than a
+    one-off grep: the overclaiming sentence is gone from all FOUR sites --
+    three inside `write_marker` plus `main()`'s non-zero-exit wrapper."""
+    import pathlib
+    import subprocess
+
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    hits = subprocess.run(
+        ["grep", "-rn", "State NOT persisted", "tools/", "agent/"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    assert hits.returncode == 1, f"overclaim survives at:\n{hits.stdout}"

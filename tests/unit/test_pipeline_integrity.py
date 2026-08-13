@@ -11,7 +11,10 @@ import os
 import subprocess
 import sys
 
+from tests.db_claim import subprocess_env
 from utils.github_patterns import construct_canonical_url as _construct_canonical_url
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestCanonicalUrlConstruction:
@@ -91,7 +94,8 @@ class TestMergeGuardHook:
             input=hook_input,
             capture_output=True,
             text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0, f"Hook failed: {result.stderr}"
         if result.stdout.strip():

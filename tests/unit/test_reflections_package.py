@@ -265,6 +265,87 @@ class TestMaintenanceCallables:
             result = run_async(run_analytics_rollup())
         assert result["status"] == "error"
 
+    @staticmethod
+    def _reclaim_report(**overrides):
+        report = {
+            "applied": False,
+            "sweeps": [],
+            "freed_bytes": 0,
+            "removed_count": 0,
+            "skipped_count": 0,
+            "errors": [],
+        }
+        report.update(overrides)
+        return report
+
+    def test_run_disk_reclaim_returns_valid(self):
+        """disk_reclaim.run() returns valid dict with nothing to reclaim."""
+        from reflections.housekeeping.disk_reclaim import run as run_disk_reclaim
+
+        with patch(
+            "reflections.housekeeping.disk_reclaim.reclaim",
+            return_value=self._reclaim_report(),
+        ):
+            result = run_async(run_disk_reclaim())
+        assert_valid_result(result)
+        assert result["findings"] == []
+        assert "dry-run" in result["summary"]
+
+    def test_run_disk_reclaim_truncates_long_removal_lists(self):
+        """Findings name at most five candidates, then elide."""
+        from reflections.housekeeping.disk_reclaim import run as run_disk_reclaim
+
+        sweep = {
+            "category": "transcripts",
+            "removed": [f"proj/t{i}.jsonl" for i in range(7)],
+            "skipped": [],
+            "freed_bytes": 0,
+            "errors": [],
+        }
+        with patch(
+            "reflections.housekeeping.disk_reclaim.reclaim",
+            return_value=self._reclaim_report(sweeps=[sweep], removed_count=7),
+        ):
+            result = run_async(run_disk_reclaim())
+        assert_valid_result(result)
+        assert len(result["findings"]) == 1
+        finding = result["findings"][0]
+        assert "7 reclaimable" in finding
+        assert "proj/t4.jsonl" in finding and "proj/t5.jsonl" not in finding
+        assert finding.endswith(", ...)")
+
+    def test_run_disk_reclaim_surfaces_sweep_errors(self):
+        """A sweep error flips status and becomes its own finding."""
+        from reflections.housekeeping.disk_reclaim import run as run_disk_reclaim
+
+        sweep = {
+            "category": "worktrees",
+            "removed": [],
+            "skipped": [],
+            "freed_bytes": 0,
+            "errors": ["lane: cleanup_after_merge raised OSError"],
+        }
+        with patch(
+            "reflections.housekeeping.disk_reclaim.reclaim",
+            return_value=self._reclaim_report(sweeps=[sweep], errors=sweep["errors"]),
+        ):
+            result = run_async(run_disk_reclaim())
+        assert_valid_result(result, expected_status="error")
+        assert result["status"] == "error"
+        assert "worktrees error" in result["findings"][0]
+
+    def test_run_disk_reclaim_error(self):
+        """A raising reclaim() returns an error dict rather than propagating."""
+        from reflections.housekeeping.disk_reclaim import run as run_disk_reclaim
+
+        with patch(
+            "reflections.housekeeping.disk_reclaim.reclaim",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = run_async(run_disk_reclaim())
+        assert_valid_result(result, expected_status="error")
+        assert result["status"] == "error"
+
 
 # ============================================================
 # reflections.auditing

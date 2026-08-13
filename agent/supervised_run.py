@@ -23,7 +23,34 @@ the single source of truth for "is this run still the owner."
 - Redis key ``session:supervisedrun:{issue_number}`` — the primary carrier,
   available to any process. Same non-Popoto raw-Redis idiom as the issue lock
   (``models/session_lifecycle.py``), given the same TTL and refreshed on every
-  acquire/renew so it never outlives the lease by more than the TTL.
+  acquire/renew so it never outlives the lease by more than the TTL. There are
+  FOUR writers — one acquirer and three renewers, matching the three paths that
+  extend the lease:
+
+  1. ``tools/sdlc_session_ensure.py`` — acquire.
+  2. ``tools/sdlc_lease_heartbeat.py`` — local-supervisor renew, on its
+     peek-confirmed ownership match.
+  3. ``agent/session_executor.py::_tick_issue_lock_renewal`` — worker renew
+     (60s), under an ``acquired`` result.
+  4. ``tools/_sdlc_utils.py::revalidate_ledger_lease`` — renewed by every
+     ledger-write gate, under an ``acquired`` result.
+
+  All three renewers write only after confirming they still own the lease, so a
+  signal is never republished over a successor's. The fourth writer matters
+  most for long runs, because the heartbeat's exit is no longer a single 4h
+  backstop (issue #2714): it exits within ~2 checks of its supervising
+  ``claude`` process dying (releasing the lease and clearing this signal), at
+  90 minutes when no supervisor identity resolved (leaving both to their own
+  TTL), and otherwise still at the unchanged 4h ceiling. After any of those the
+  ledger gate is the only renewer left.
+
+  Issue #2659: the renew half was missing for the first two years of this key's
+  life, so the signal expired 1800s into every pipeline while the lease was
+  renewed indefinitely, and from that moment every stage fork read a bare
+  ``ISSUE_LOCKED`` from its own supervisor's lock and stood down — a live lock,
+  a live heartbeat, and no error anywhere. **Keep this list exact.** It is the
+  canonical enumeration, and it lying for two years is precisely how the
+  original bug stayed invisible.
 - File ``{worktree}/.sdlc-run`` — a human/skill-visible marker written into
   the slug worktree (``.worktrees/{slug}/.sdlc-run``) when the session's
   ``working_dir`` resolves to one. Read as a fallback when Redis is

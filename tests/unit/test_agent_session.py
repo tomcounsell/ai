@@ -687,7 +687,9 @@ class TestRecentSentDraftsRoundtrip:
         try:
             import redis as redis_mod
 
-            r = redis_mod.Redis.from_url("redis://localhost:6379/0")
+            from tests.db_claim import redis_test_url
+
+            r = redis_mod.Redis.from_url(redis_test_url())
             r.ping()
         except Exception:
             pytest.skip("Redis not available — skipping Popoto roundtrip test")
@@ -779,7 +781,9 @@ class TestClusterARemoveCandidateEmpiricalRegression:
         try:
             import redis as redis_mod
 
-            r = redis_mod.Redis.from_url("redis://localhost:6379/0")
+            from tests.db_claim import redis_test_url
+
+            r = redis_mod.Redis.from_url(redis_test_url())
             r.ping()
         except Exception:
             pytest.skip("Redis not available — skipping Popoto roundtrip test")
