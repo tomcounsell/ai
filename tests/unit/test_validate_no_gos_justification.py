@@ -21,8 +21,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Hook scripts live in .claude/hooks/validators/
-VALIDATORS_DIR = Path(__file__).resolve().parent.parent.parent / ".claude" / "hooks" / "validators"
+# Hook scripts live in .claude/hooks/validators/ and import from .claude/hooks/hook_utils/
+HOOKS_DIR = Path(__file__).resolve().parent.parent.parent / ".claude" / "hooks"
+VALIDATORS_DIR = HOOKS_DIR / "validators"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
 if str(VALIDATORS_DIR) not in sys.path:
     sys.path.insert(0, str(VALIDATORS_DIR))
 
