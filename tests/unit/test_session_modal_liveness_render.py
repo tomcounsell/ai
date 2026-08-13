@@ -14,13 +14,14 @@ assert HTML substrings without spinning up the full app.
 
 from __future__ import annotations
 
-import datetime
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from jinja2 import Environment, FileSystemLoader
+
+from ui.app import _filter_format_timestamp, register_template_filters
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
 
@@ -30,27 +31,7 @@ def env():
     """Isolated Jinja env with the production filters registered."""
     template_dir = Path(__file__).resolve().parent.parent.parent / "ui" / "templates"
     env = Environment(loader=FileSystemLoader(str(template_dir)))
-
-    # Mirror the filters registered in ui/app.py::create_app
-    def _format_timestamp(ts):
-        if ts is None:
-            return "-"
-        return datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).strftime("%H:%M")
-
-    def _format_duration(seconds):
-        if seconds is None:
-            return "-"
-        return f"{int(seconds)}s"
-
-    def _freshness_age(ts):
-        if ts is None:
-            return None
-        age = time.time() - float(ts)
-        return age if age >= 0 else None
-
-    env.filters["format_timestamp"] = _format_timestamp
-    env.filters["format_duration"] = _format_duration
-    env.filters["freshness_age"] = _freshness_age
+    register_template_filters(env)
     return env
 
 
@@ -185,7 +166,9 @@ class TestModalLivenessSection:
 
     def test_renders_timestamps_via_format_filter(self, env):
         """Evidence + heartbeat are merged into a single "Last active" row
-        (max of the two), rendered through the format_timestamp filter."""
+        (max of the two), rendered through the production format_timestamp
+        filter. `ts = now - 60` is always >= 60s old, so the filter's
+        `< 60 -> "just now"` boundary never applies here."""
         tmpl = env.get_template("_partials/session_modal_content.html")
         ts = time.time() - 60
         pipeline = _make_pipeline(
@@ -194,9 +177,17 @@ class TestModalLivenessSection:
         )
         html = tmpl.render(pipeline=pipeline)
         assert "Last active" in html
-        # The merged value renders via the format_timestamp filter (HH:MM).
-        expected = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).strftime("%H:%M")
+        # Compute the expectation by calling the production filter directly
+        # (agreement with production, not a re-encoded format that can drift
+        # again) rather than hardcoding "1m ago" — several _filter_format_timestamp
+        # branches return a local-timezone-dependent strftime("%H:%M").
+        expected = _filter_format_timestamp(ts)
         assert expected in html
+        # Discriminating checks: the "1m ago"-shaped expected value is a short
+        # substring that could incidentally appear in a large HTML blob, so
+        # also assert the raw unfiltered timestamp is absent and the row
+        # structure is present.
+        assert str(int(ts)) not in html
 
 
 class TestModalPersonaBadge:
@@ -237,7 +228,9 @@ class TestModalMetadataSections:
             )
         )
         assert "token-strip" in html
-        assert "$1.2345" in html
+        # Ceil-to-cent per 96b0f65dd: production _filter_usd(1.2345) == "$1.24",
+        # not the retired 4-decimal "$1.2345".
+        assert "$1.24" in html
         assert "12,000" in html
 
     def test_token_strip_omitted_when_all_zero(self, env):
