@@ -73,7 +73,7 @@ The bare module form (`python -m tools.sdlc_stage_marker`) is the underlying ent
 
 ### Predecessor Backfill on the First Write (issue #1916)
 
-A fresh pipeline entering at PLAN — the first marker write of the whole pipeline, with ISSUE still at `ready` — now backfills ISSUE to `completed` automatically on the `in_progress` write, rather than failing with the old `PRESENT_WRITE_FAILED` diagnostic (`sdlc_stage_marker: FAILED to write PLAN=in_progress ... State NOT persisted.`).
+A fresh pipeline entering at PLAN — the first marker write of the whole pipeline, with ISSUE still at `ready` — now backfills ISSUE to `completed` automatically on the `in_progress` write, rather than failing with the old `PRESENT_WRITE_FAILED` diagnostic (`sdlc_stage_marker: FAILED to write PLAN=in_progress ...`).
 
 A `completed`-status write also backfills unrecorded predecessors, not just `in_progress` writes. This closes the asymmetry where a stage could be marked `completed` while its predecessors were never recorded, leaving ISSUE stuck at `ready` behind a completed later stage.
 

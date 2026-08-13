@@ -24,6 +24,19 @@ runs against an unchanged PR.
 | `agent/pipeline_state.py::classify_outcome` | Routes verdict writes through `sdlc_verdict.record_verdict()` — ONE writer to `_verdicts`. |
 | `.claude/skills/sdlc/SKILL.md` | Dispatch table rows cite the Python implementation; a parity test fails CI if markdown and Python drift. |
 
+### The `Blocked` escalation contract
+
+`Blocked(reason, guard_id)` tells the router to stop and surface to a human.
+`guard_id` is a short machine-matchable code saying **why**, and it does not
+imply "a numbered guard fired": alongside the `G1`–`G8` codes it carries the
+`NO_RULE` sentinel (`NO_RULE_GUARD_ID`) for the dispatch-table fallthrough,
+which is a genuine hole in the table rather than a guard verdict. A supervisor
+can therefore tell "the rules deliberately refused" from "no rule owned this
+state" without parsing the reason string.
+
+Consumers matching on specific guards must compare against the codes they care
+about, never merely test `guard_id is not None`.
+
 ## The Eight Guards
 
 Guards run **before** the dispatch table. The first tripped guard wins.
@@ -237,6 +250,7 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
     "critique_cycle_count": 1,
     "latest_critique_verdict": "NEEDS REVISION",
     "latest_review_verdict": null,
+    "latest_review_head_sha": null,
     "revision_applied": false,
     "pr_number": null,
     "pr_merge_state": null,
@@ -266,6 +280,29 @@ to the normal dispatch table.
 
 - `plan_exists` — `True` if a plan file is present on disk for the tracked issue. Computed by `_compute_meta()` in `tools/sdlc_stage_query.py`. Used by `_rule_plan_not_critiqued` to require an actual plan file before routing to `/do-plan-critique` (prevents routing to CRITIQUE when PLAN status reads `"ready"` but no file was ever written). Also widened `_rule_no_plan` to catch the bootstrap edge case `PLAN=="ready" AND issue_number AND NOT plan_exists` → routes to `/do-plan`.
 - `issue_number` — the resolved issue number (`int | None`) stored in `_meta`. Enables `_rule_no_plan` to distinguish a genuine bootstrap from a stale status string.
+
+**Head-SHA attribution (#2769):**
+
+- `latest_review_head_sha` — the PR head commit SHA the recorded REVIEW verdict
+  judges, or `null`. Computed by `_extract_head_sha()` in
+  `tools/sdlc_stage_query.py` and consumed by row 8f's head-staleness gate.
+
+  It needs its own `_meta` slot because `_extract_verdict_text()` flattens a
+  `_verdicts[stage]` record to its `verdict` string and drops every sibling key
+  — so the `head_sha` field would otherwise be invisible to the router, and row
+  8f's fail-closed default (`no resolvable head SHA` → stale) would declare
+  every approved verdict head-stale and re-dispatch `/do-pr-review` on every
+  lane until G4 escalated.
+
+  `_extract_head_sha()` branches three ways over the `_verdicts["REVIEW"]`
+  entry, mirroring `_extract_verdict_text()`: a `dict` goes to
+  `head_sha_of_record()`, a `str` to `head_sha_of_text()`, and anything else
+  (including the common `None` for an issue with no REVIEW verdict yet) to
+  `None`. The `str` arm is matched positively rather than as
+  `not isinstance(rec, dict)`, because the negated form routes that `None` into
+  the trailer regex, raising `TypeError` — which
+  `tools/sdlc_next_skill.py::_resolve_enriched`'s broad `except` swallows into
+  an empty ledger, making a fully-worked issue read as brand new.
 
 Pass `--format legacy` to get the old flat `{"ISSUE": "completed", ...}`
 shape for older callers.
@@ -301,6 +338,33 @@ A REVIEW verdict becomes stale when the pipeline has made forward progress after
 | No REVIEW verdict, REVIEW `completed` or `failed` (re-review subagent crashed before recording), last dispatch was `/do-pr-review` | False | Row 8d fires: `/do-pr-review` (re-review, crash-recovery twin, #1932) |
 | No REVIEW verdict, none of the above match | False | Falls through past row 9 (verdict gate, #1932) to later rows |
 
+**Row 8b owns every post-patch state whose verdict is untrustworthy.**
+`_rule_patch_applied_after_review` requires `pr_number` and `PATCH ==
+completed`, then matches on either of two disjuncts:
+
+1. `last_dispatched_skill == /do-patch` — the patch just ran.
+2. `_review_verdict_is_stale(stage_states)` — the recorded verdict predates the
+   latest `/do-patch` dispatch, whatever ran since.
+
+Disjunct 2 is what keeps a second review → patch cycle on the table. A
+`review → patch → review → patch → review` sequence lands on a stale verdict
+whose `last_dispatched_skill` is `/do-pr-review`, and disjunct 1 alone does not
+reach it: row 7 needs an absent verdict, row 8 steps aside precisely on
+staleness, and rows 8c/8d/8e all need an absent verdict.
+
+Rows 8 and 8b stay disjoint because row 8 returns False whenever the verdict is
+stale, so fresh findings still route to `/do-patch` and only stale ones reach
+8b. Disjointness from rows 8c/8d/8e holds by construction, which matters because
+row 8c *calls* this predicate as a step-aside rather than merely sitting beside
+it: `_review_verdict_is_stale` returns False whenever `recorded_at` is absent,
+and `recorded_at` is absent exactly when no verdict was recorded — `record_verdict`
+writes `verdict` and `recorded_at` together or not at all. Rows 8c/8d/8e all
+require the absence of a recorded verdict, so disjunct 2 is identically False on
+every state they own.
+
+G4 bounds the resulting loop: a permanently-stale verdict escalates to a human
+on `same_stage_dispatch_count` rather than spinning.
+
 All edge cases fail safe to "not stale":
 - `recorded_at` missing or unparseable
 - No prior `/do-patch` dispatch in the log
@@ -331,7 +395,7 @@ All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no p
 
 **Row 2c — the empty-verdict twin (#1668).** Row 2b requires a *recorded-but-stale* verdict (it gates on a `recorded_at` timestamp), so it deliberately does not fire when the critique skill ran but **never persisted any verdict at all** — `_verdicts.CRITIQUE` is `{}`, `latest_critique_verdict` is `None`, CRITIQUE marker is `in_progress`, and no PR exists yet. Before #1668 that state hit *every* rule and guard's gate and fell through to `Blocked('no matching dispatch rule')`. **Row 2c** (`_rule_critique_in_progress_no_verdict`, inserted after row 2b, before row 3) closes that hole: it re-dispatches `/do-plan-critique` when `CRITIQUE == in_progress` AND the critique verdict is absent AND no PR exists. It is narrowly gated so it cannot fire once a PR exists (defer to G3 / PR-stage rows), once any verdict is recorded (rows 2b/3/4a own it), or when CRITIQUE is not `in_progress`. Row 2b (stale verdict) and row 2c (empty verdict) are **disjoint** — 2b requires `recorded_at`, 2c requires the verdict be absent — so order between them is immaterial for correctness. Loop-bound: unlike row 2b's 2b↔3 alternation (bounded by G5), row 2c repeats the *same* skill (`/do-plan-critique`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — exactly mirroring the bounded manual recovery (re-run once; if it keeps failing, a human looks).
 
-**Row 8c — the REVIEW empty-verdict twin (#1687).** Row 8 requires a *recorded* review verdict (it gates on a non-empty `review_verdict`), and row 8b requires a *patch-applied* state (PATCH == completed AND last_dispatched_skill == /do-patch), so neither fires when the review skill ran but **never persisted any verdict at all** — `_verdicts.REVIEW` is `{}`, `latest_review_verdict` is `None`, REVIEW marker is `in_progress`, and row 8b's three-condition predicate does not match. Before #1687 that state fell through every REVIEW row (7, 8, 8b, 9, 10, 10b) to `Blocked('no matching dispatch rule')`. **Row 8c** (`_rule_review_in_progress_no_verdict`, inserted after row 8b, before row 9) closes that hole: it re-dispatches `/do-pr-review` when `REVIEW == in_progress` AND the review verdict is absent (`.strip()` falsy) AND a PR exists AND row 8b does not own the state. It is narrowly gated so it cannot fire without a PR (REVIEW only exists post-PR), once any verdict is recorded (rows 8/8b own it), or when REVIEW is not `in_progress`. The step-aside for 8b is gated on `_rule_patch_applied_after_review(...)` exactly (not a bare `PATCH == completed` check) — a PATCH-completed state whose `last_dispatched_skill != /do-patch` makes 8b return False, so a bare PATCH-completed check would create a Blocked leak; using the same three-condition predicate as 8b ensures proper disjointness. Loop-bound: unlike row 8 (which alternates `/do-patch` <=> `/do-pr-review`), row 8c repeats the *same* skill (`/do-pr-review`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — mirroring row 2c's bounding exactly.
+**Row 8c — the REVIEW empty-verdict twin (#1687).** Row 8 requires a *recorded* review verdict (it gates on a non-empty `review_verdict`), and row 8b requires a *patch-applied* state (PATCH == completed AND either `last_dispatched_skill == /do-patch` or a stale recorded verdict), so neither fires when the review skill ran but **never persisted any verdict at all** — `_verdicts.REVIEW` is `{}`, `latest_review_verdict` is `None`, REVIEW marker is `in_progress`, and row 8b's three-condition predicate does not match. Before #1687 that state fell through every REVIEW row (7, 8, 8b, 9, 10, 10b) to `Blocked('no matching dispatch rule')`. **Row 8c** (`_rule_review_in_progress_no_verdict`, inserted after row 8b, before row 9) closes that hole: it re-dispatches `/do-pr-review` when `REVIEW == in_progress` AND the review verdict is absent (`.strip()` falsy) AND a PR exists AND row 8b does not own the state. It is narrowly gated so it cannot fire without a PR (REVIEW only exists post-PR), once any verdict is recorded (rows 8/8b own it), or when REVIEW is not `in_progress`. The step-aside for 8b is gated on `_rule_patch_applied_after_review(...)` exactly (not a bare `PATCH == completed` check) — a PATCH-completed state that 8b does not own would make a bare PATCH-completed check create a Blocked leak; calling 8b's own predicate keeps the two disjoint by construction, and keeps 8c correct automatically as 8b's predicate evolves. Loop-bound: unlike row 8 (which alternates `/do-patch` <=> `/do-pr-review`), row 8c repeats the *same* skill (`/do-pr-review`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — mirroring row 2c's bounding exactly.
 
 **Row 8d — crashed re-review recovery (#1932).** Row 8c requires `REVIEW == in_progress`. If the `/do-pr-review` subagent crashes (or is killed) *after* it starts but *before* it records a verdict, REVIEW can land at `completed` or `failed` instead of staying `in_progress` — a state row 8c does not cover. Before #1932 that state either dead-ended (`REVIEW == failed` matched no row, fell through to `Blocked`) or silently misrouted to `/do-docs` (`REVIEW == completed` with no verdict used to satisfy row 9's old `REVIEW == completed`-only check). **Row 8d** (`_rule_review_crashed_after_dispatch`, inserted immediately after row 8c, before row 9) recovers both terminal markers: it re-dispatches `/do-pr-review` when `pr_number` is set, `PATCH == completed`, `REVIEW in (completed, failed)`, no REVIEW verdict is recorded, AND `last_dispatched_skill == /do-pr-review`. It is disjoint from row 7 and row 8b by construction (both require different `last_dispatched_skill`/PATCH states) and disjoint from row 8c structurally (8c requires `REVIEW == in_progress`; 8d requires `REVIEW in (completed, failed)`). Loop-bound: like row 8c, row 8d repeats the same skill against a state that is stable across crash retries, so it is bounded by **G4** — except when the terminal marker itself *alternates* between `completed` and `failed` on successive crashes, which resets G4's same-snapshot streak every turn (a known, deliberately out-of-scope gap; see `TestRow8dChurnLimitation` in the regression suite).
 

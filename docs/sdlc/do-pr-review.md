@@ -178,9 +178,8 @@ These are hard gates. No exceptions.
 
 ## Mandatory Finalize — Verdict + Marker Co-Write (#1642, atomized #2193)
 
-On the approval path, the REVIEW verdict record, the `REVIEW_CONTEXT head_sha=`
-trailer, and the REVIEW completion marker are now written by **one atomic
-`sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
+On the approval path, the REVIEW verdict record, its `head_sha` field, and the
+REVIEW completion marker are written by **one `sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
 hand-run, separable sequence. Never emit the OUTCOME block without a
 successful (exit 0) `finalize` call first. The atomicity is enforced in the
 tool itself (`tools/sdlc_review_finalize.py`, sharing `check_review_persistence`

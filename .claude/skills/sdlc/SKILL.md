@@ -232,7 +232,7 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 
 **Row 10 verdict gate (#2062):** row 10 (`/do-merge`) now requires a recorded `APPROVED` review verdict (mirroring row 9) AND head_sha freshness — `REVIEW == completed` alone is no longer merge-ready, so the no-verdict crash state can never fall through to `/do-merge`.
 
-**Head_sha staleness (row 8f + G6, #2062):** `next-skill` context assembly fetches the live PR head and the router compares it against the verdict's `REVIEW_CONTEXT head_sha=` trailer — the same freshness definition `tools/merge_predicate` enforces, ending the router↔predicate oscillation. An APPROVED verdict whose trailer mismatches the live head (post-approval commit), has no parseable trailer, or whose live-head lookup failed (fail-closed) routes to `/do-pr-review` at the new head via row 8f; G6 steps aside for the same signal. Re-review records a fresh verdict with the current head's trailer, so the loop converges (G4-bounded).
+**Head_sha staleness (row 8f + G6, #2062):** `next-skill` context assembly fetches the live PR head and the router compares it against the head SHA the verdict attributes to, surfaced as `_meta.latest_review_head_sha` — the same freshness definition `tools/merge_predicate` enforces, ending the router↔predicate oscillation. An APPROVED verdict that names a different head (post-approval commit), attributes to no resolvable head SHA, or whose live-head lookup failed (fail-closed) routes to `/do-pr-review` at the new head via row 8f; G6 steps aside for the same signal. Re-review records a fresh verdict against the current head, so the loop converges (G4-bounded).
 
 ```bash
 # Get the next dispatch decision
