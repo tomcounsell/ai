@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2714
-last_comment_id: 5277602180
+last_comment_id: 5278530522
 ---
 
 # Anchor the SDLC lease heartbeat to its supervisor's lifetime
