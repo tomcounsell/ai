@@ -316,7 +316,7 @@ keys and `subprocess_env(**extra)` only adds them:
   `env = subprocess_env()` then the existing `env.pop("SDLC_HOLDER_TOKEN", None)`.
   That pop is load-bearing: the test proves the env seam is gone.
 - `tests/unit/test_sdlc_dispatch.py:272` `_isolated_subprocess_env` (drives the
-  four sites at :375, :409, :462, :491) → body becomes `env = subprocess_env()`
+  four sites at :380, :424, :467, :496) → body becomes `env = subprocess_env()`
   then pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, and `active_run_id`. Those
   three removals are the #2144 run-identity seam; a naive one-line replacement
   re-inherits a live run identity from the parent and dissolves the
@@ -359,14 +359,28 @@ keys and `subprocess_env(**extra)` only adds them:
   argv (`[sys.executable, "-m", module, *argv]`, where `module` is a fixture
   parameter) reaches repo code and belongs in the conversion set even though a
   static scan cannot name the module.
+- **The assign-mutate-return shape is accepted.** Every fix this plan prescribes
+  produces `env = subprocess_env(); env.pop(...); return env` rather than a bare
+  call, because the strips are load-bearing (Group B's `clean_env` rebases,
+  Group C's two helpers) — and `tests/integration/test_bot_await_reply.py:33` is
+  already written that way and is already correct. A predicate that accepts only
+  a direct call therefore rejects the plan's own remedy and can never go green.
+  The third acceptance rule: an `env=` value that is an `ast.Name` counts as
+  clean when that name is bound in the enclosing scope by **exactly one**
+  `Assign` from `subprocess_env(...)`, every subsequent statement touching it is
+  a `.pop(<literal>, None)` or `.update(...)` on that same name, and it is never
+  rebound. The identical rule applies inside a delegator whose body ends
+  `return <name>`.
 - **Module-local delegators resolve one hop.** A function whose entire body is
   `return subprocess_env(...)` is a correct helper, not a violation. Two already
   exist and are already right — `tests/integration/test_agent_session_scheduler.py:24`
-  (which alone drives 23 call sites) and `tests/integration/test_bot_await_reply.py`
+  (which alone drives 22 call sites) and `tests/integration/test_bot_await_reply.py`
   — both landed with PR #2606. A guard that rejects them flags ~25 already-correct
   sites and would push a builder to "fix" working code. Resolution is exactly one
-  hop and only for a single-`return` body; anything with logic in it (the Group C
-  helpers) stays a violation until rebased.
+  hop, and the delegator's body must satisfy either the single-`return` form or
+  the assign-mutate-return rule above. A helper that derives its db from anything
+  other than `subprocess_env` — the two Group C helpers as they stand today —
+  stays a violation until rebased.
 - **The `env=` check resolves the value to an AST node, not to source text.** A
   substring test on "subprocess_env" passes `_isolated_subprocess_env()` and
   `_subprocess_env()` — the two helpers this plan exists to kill. The check
@@ -376,13 +390,13 @@ keys and `subprocess_env(**extra)` only adds them:
   `_isolated_subprocess_env`, `_subprocess_env`, and `clean_env` are violations.
 - Report every violation as `path:line` in one assertion message, not one
   failure per site.
-- **Two self-tests, paired**: one parses a synthetic snippet containing
-  `env=_my_subprocess_env()` (a name whose body re-derives the db) and asserts
-  the scanner **reports** it; the other parses `def _w(**k): return
-  subprocess_env(**k)` used as `env=_w()` and asserts the scanner **accepts** it.
-  Together they prove the predicate rejects the substring shape without
-  rejecting legitimate delegation — either test alone permits a scanner that is
-  uselessly strict or uselessly loose.
+- **Three self-tests, as a set**: (1) `env=_my_subprocess_env()` where the body
+  re-derives the db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` is
+  **reported**; (2) `def _w(**k): return subprocess_env(**k)` used as `env=_w()`
+  is **accepted**; (3) `def _w(): e = subprocess_env(); e.pop("X", None); return e`
+  used as `env=_w()` is **accepted**. Any one alone permits a scanner that is
+  uselessly strict or uselessly loose; together they pin the predicate to
+  "the db comes from `subprocess_env`, whatever else the helper does to the dict".
 
 ## Failure Path Test Strategy
 
@@ -427,7 +441,7 @@ the plain mechanical conversion with no per-file decision:
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: same.
 - [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same; the `clean_env` at :1179 rebases on `subprocess_env()` keeping its strips.
 - [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: same; the three `clean_env` sites (:444, :603, :624) set no `REDIS_URL` today and are live db0 writers.
-- [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :375, :409, :462, :491) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
+- [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :380, :424, :467, :496) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
 - [ ] `tests/unit/test_memory_search_cli.py` (2 sites) — UPDATE: same.
 - [ ] `tests/unit/test_session_telemetry.py` (1 site) — UPDATE: same.
 - [ ] `tests/unit/test_evaluate_build.py` (3 sites) — UPDATE: same, via the file's existing `_run` helper.
@@ -770,8 +784,10 @@ bridge import. The only consumer is `pytest`.
 | BLOCKER | Scope & Value, Risk & Robustness (elevated per cross-validation) | Appetite (`Small`, "PM check-ins: 0", "Review rounds: 1"), the 16-row Test Impact table, and Risk 4's "confirm it reports the ~30 known sites" are all sized against the stale recon snapshot. Running the plan's own corrected argv-gated predicate over `tests/` scans 766 files and reports **147 violations across ~60 files**. Whole suites appear nowhere in Group A/B/C or the task list: `tests/integration/test_agent_session_scheduler.py` alone contributes 23 sites, plus `test_youtube_search.py:219`, `test_worker_guard.py:52`, `test_venv_health.py:66`, `test_steering_mechanism.py` (3), `test_validate_no_uv_sync_in_worktree.py` (5), `test_pre_commit_hook.py` (3), `tests/e2e/test_telegram_flow.py:38`, and dozens more. Task 3 defers to the red-state list, but no gate re-derives appetite or team sizing from it. | Appetite re-derived to Medium (70 convert / 44 allowlist); Test Impact preamble; Risk 4 | Re-derive scope from the measured red state before build starts, not mid-sweep. Either (a) split: keep Groups A/B/C in #2763 and open a follow-up issue for the ~44 newly-surfaced files, with the guard shipping ALLOWLIST-suppressed for the deferred set; or (b) re-declare `appetite: Medium`/`Large` with more than one review round. Update Risk 4's mitigation to expect a red-state count of order 100+, not "~30", so a builder does not stop early believing Group B was near-complete. |
 | BLOCKER | Structural (cross-reference check) | The plan contradicts itself on `test_sdlc_tool_wrapper.py` lines 69/75/81. Technical Approach Group A says "Convert them too: `env=subprocess_env()`. This is cheaper and more honest than three exemption entries". Task 2's bullet list says "Leave lines 69/75/81 alone." Test Impact lists that file as "6 call sites: lines 87, 101, 129, 172, 189, 230" — excluding them. The ground-truth run confirms all three are `NOENV` violations under the argv predicate, so following Task 2 leaves the guard red in the very file the issue was filed against. | Task 2 bullet; Test Impact row (9 sites) | Task 2's builder follows the task list, not the prose. Delete "Leave lines 69/75/81 alone." from Task 2 and replace it with `Lines 69, 75, 81: env=subprocess_env()`, and change the Test Impact row to "9 call sites: lines 69, 75, 81, 87, 101, 129, 172, 189, 230". These three are `subprocess.run([str(WRAPPER)], ...)` and `[str(WRAPPER), "--help"]` with no `cwd` and no `env` — bare `subprocess_env()` with no `project_root` is correct; do not add `AI_REPO_ROOT`, which would break `test_wrapper_no_args_exits_2`'s usage-path assertion. |
 | CONCERN | Structural (cross-reference check) | Group D bullet 3 rejects any `env=` that is not literally a call to `subprocess_env`, naming `_isolated_subprocess_env` / `_subprocess_env` / `clean_env` as violations. But two *correct* thin delegating wrappers already exist whose entire body is `return subprocess_env(...)`: `tests/integration/test_agent_session_scheduler.py:25-37` and `tests/integration/test_bot_await_reply.py:33-43`. The predicate flags ~25 already-correct call sites, and Group C's claim that there are "Two helpers" that re-derive the db is wrong — there are four helpers, two broken and two already fixed by PR #2606. | Group D delegator bullet; Group C four-helper count | The anti-substring hardening from round 1 overshot. Resolve module-local helper names one hop: when `env=` is a `Call` to a bare `Name` defined in the same module, parse that function and accept it if its body's only `return` is a call to `subprocess_env`; otherwise it is a violation. This keeps `_isolated_subprocess_env` (which reads `POPOTO_REDIS_DB.connection_pool.connection_kwargs`) rejected while accepting the two legitimate delegators, and avoids a 25-entry ALLOWLIST that would read as noise. Add a second self-test asserting a synthetic `def _w(**k): return subprocess_env(**k)` delegator is ACCEPTED, paired with the existing one asserting `_my_subprocess_env()` is rejected. Also correct Group C's "Two helpers" count. |
-| CONCERN | History & Consistency | Group C, the Test Impact row, and Step 3 all cite `_isolated_subprocess_env`'s four driven call sites as `:375, :409, :462, :491`; the real lines in `tests/unit/test_sdlc_dispatch.py` are `:375, :409, :462, :491`. The helper itself is at `:272` as stated. This is the same stale-line-number class that produced round 1's History & Consistency BLOCKER on this exact helper — the Freshness Check re-verified `test_sdlc_tool_wrapper.py`'s lines but not this file's. | Line numbers corrected to :375, :409, :462, :491 in all three places | Correct the four numbers to `:375, :409, :462, :491` in all three places, or drop the line numbers entirely and cite the helper name plus "all call sites in the file" — the helper name is stable, the numbers are not. Task 3's red-state diff gate catches the miss, but only after a builder has already edited four wrong lines and burned a pass on a Small-appetite, single-review-round plan. |
-
+| CONCERN (r2, superseded) | History & Consistency | Round 2 flagged `_isolated_subprocess_env`'s driven call-site line numbers as stale and "corrected" them to the same values it was flagging, which then propagated a wrong set into the plan. | Round 3, verified by `grep -n` | The authoritative numbers are `:380, :424, :467, :496` (helper at `:272`). Round 2's suggested `:375, :409, :462, :491` was itself wrong; do not reintroduce it. |
+| BLOCKER (r3) | Risk & Robustness, Scope & Value | The guard predicate accepted only a direct `subprocess_env(...)` call or a single-`return` delegator, but every fix the plan prescribes produces `env = subprocess_env(); env.pop(...)` — and Group B's rebased `clean_env` sites pass an `ast.Name`, not a call at all. The already-correct `test_bot_await_reply.py:33` helper has that same shape. As specified the guard could never go green. | Group D acceptance rule (c); third self-test; delegator bullet reconciled | Accept an `env=` `Name` bound by exactly one `Assign` from `subprocess_env(...)` and thereafter only `.pop(<literal>, None)` / `.update(...)`, never rebound; same rule inside a delegator ending `return <name>`. |
+| CONCERN (r3) | History & Consistency | Line numbers for the four driven sites were wrong in all three places (Group C, Test Impact, Task 3). | Corrected to `:380, :424, :467, :496` in all six occurrences | Verified directly with `grep -n "_isolated_subprocess_env" tests/unit/test_sdlc_dispatch.py`, not from a critique report. |
+| NIT (r3) | History & Consistency | Delegator call-site count said 23. | Corrected to 22 | `grep -c "env=_subprocess_env" tests/integration/test_agent_session_scheduler.py` → 22. |
 ---
 
 ## Open Questions
