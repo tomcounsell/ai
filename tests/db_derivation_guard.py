@@ -168,18 +168,6 @@ ALLOWLIST: tuple[Exemption, ...] = (
 # below would reject at least one of them outright, which is the point.
 DEFERRED: tuple[Exemption, ...] = (
     Exemption(
-        path="integration/test_notify_isolation.py",
-        expr="int(kw.get('db', 0) or 0)",
-        reason=(
-            "Derives its db from another client's connection_kwargs — the exact route this "
-            "guard rejects. The one-line conversion to claim_test_db() is behaviour-preserving "
-            "(pub/sub delivery is server-global, per the docstring at :53-57) but this file is "
-            "under #2628's exclusive lock and #2628 is folding the conversion in directly."
-        ),
-        blocked_on="#2628",
-        expires="2026-11-06",
-    ),
-    Exemption(
         path="unit/test_conftest_isolation_guards.py",
         expr="divergent_db",
         reason=(
