@@ -101,6 +101,53 @@ class TestCollectIssues:
         assert items == []
 
 
+# --- _gh_issue_list argv shapes (#2717) --------------------------------------
+
+
+class TestGhIssueListArgvShapes:
+    """`_gh_issue_list` gained `extra_args` and `timeout` (#2717) — additive
+    only. The default call shape (no extra_args/timeout) must stay
+    byte-for-byte what `_collect_open_bugs` / `_collect_upvote_queue` relied
+    on, and the extended shape must be independently verifiable structurally
+    (asserting argv, not just that a stub returns sorted data)."""
+
+    def test_default_call_shape_unaffected(self, project_dict):
+        payload = _gh_issue_payload([])
+        with patch.object(collector, "_run", return_value=(0, payload, "")) as m:
+            collector._collect_open_bugs(project_dict)
+        cmd = m.call_args[0][0]
+        assert "--search" not in cmd
+        assert "createdAt" in cmd[cmd.index("--json") + 1]
+        assert "--limit" in cmd and "20" in cmd
+        # timeout kwarg not forced (default preserved: _run's own 30s default)
+        assert "timeout" not in m.call_args.kwargs
+
+    def test_extra_args_and_timeout_spliced(self, project_dict):
+        payload = _gh_issue_payload([])
+        with patch.object(collector, "_run", return_value=(0, payload, "")) as m:
+            collector._gh_issue_list(
+                "tomcounsell/ai",
+                ["upvote"],
+                cwd="/tmp",
+                limit=10,
+                extra_args=["--search", "sort:created-asc"],
+                timeout=45,
+            )
+        cmd = m.call_args[0][0]
+        assert "--search" in cmd
+        assert cmd[cmd.index("--search") + 1] == "sort:created-asc"
+        assert "--limit" in cmd and "10" in cmd
+        assert m.call_args.kwargs.get("timeout") == 45
+
+    def test_createdat_in_json_field_list(self, project_dict):
+        with patch.object(collector, "_run", return_value=(0, "[]", "")) as m:
+            collector._collect_upvote_queue(project_dict)
+        cmd = m.call_args[0][0]
+        json_fields = cmd[cmd.index("--json") + 1]
+        assert "createdAt" in json_fields
+        assert "number" in json_fields
+
+
 # --- collect() public API: angles filtering ---------------------------------
 
 

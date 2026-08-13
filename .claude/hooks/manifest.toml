@@ -76,17 +76,22 @@ exit_policy = "deny-only"
 # validate_no_inline_timeout, validate_merge_guard, validate_no_raw_redis_delete,
 # validate_no_uv_sync_in_worktree, validate_no_destructive_git_in_worktree,
 # validate_design_system_sync) with a single in-process dispatcher
-# (.claude/hooks/dispatch/pre_tool_use_bash.py) that runs 8 in-process
+# (.claude/hooks/dispatch/pre_tool_use_bash.py) that runs 9 in-process
 # predicates (the original 6 plus validate_no_destructive_git_in_shared_checkout,
-# added by issue #2448, and validate_no_broad_process_kill, added by issue
-# #2562) plus the 1 out-of-process subprocess call in the exact
-# order above, first-block-wins. exit_policy="propagate" matches
-# validate_merge_guard's pre-existing fail-closed semantics (no guard masking
-# its exit).
+# added by issue #2448; validate_no_broad_process_kill, added by issue #2562;
+# and validate_no_redis_flush, added by issue #2645 to block unconditional
+# `.flushdb()`/`.flushall()`/`redis-cli ... FLUSHDB`/`FLUSHALL` call shapes)
+# plus the 1 out-of-process subprocess call in the exact order above,
+# first-block-wins. exit_policy="propagate" matches validate_merge_guard's
+# pre-existing fail-closed semantics (no guard masking its exit).
 # timeout=20 covers the dispatcher's own out-of-process leg
 # (validate_design_system_sync's internal 15s subprocess timeout) plus
-# headroom for the 8 fast in-process predicates -- provisional/tunable, see
-# docs/plans/hook-registration-manifest-dispatcher.md.
+# headroom for the 9 fast in-process predicates -- provisional/tunable, see
+# docs/plans/hook-registration-manifest-dispatcher.md. Re-confirmed for the
+# 9th predicate (issue #2645): validate_no_redis_flush is a handful of regex
+# searches over the command string with no I/O, well inside the existing
+# headroom -- the budget increase risk is dominated entirely by the
+# out-of-process design-system-sync leg, unchanged by this addition.
 [[hook]]
 manifest_id = "dispatch_pre_tool_use_bash"
 event = "PreToolUse"

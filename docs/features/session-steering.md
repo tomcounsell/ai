@@ -6,6 +6,7 @@
 - [Mid-Session Steering](mid-session-steering.md) — Telegram reply-thread flow (user-facing)
 - [Steering Queue: Historical Spec](steering-implementation-spec.md) — Original Redis list design and bridge coalescing
 - [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn protocol. Fan-out completion invokes the completion-turn runner directly; it does not go through the steering inbox. The `[PIPELINE_COMPLETE]` content marker historically referenced in earlier docs was retired in issue #1058.
+- [PM Session Liveness § State-layer detection (`sdlc-progress-check`)](pm-session-liveness.md#state-layer-detection-sdlc-progress-check): this steering inbox is a consumer surface of the stall-auto-resume reflection. Rung 1 of its action ladder calls `steer_session(session_id, message)`, the same entry point used by Telegram reply-thread steering, to push a live eng session back onto `/sdlc`.
 
 External steering for `AgentSession` via the Redis steering list. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
 

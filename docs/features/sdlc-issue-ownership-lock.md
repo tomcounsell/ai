@@ -92,6 +92,8 @@ Ownership is decided **solely** by comparing the caller's `run_id` against the p
 
 Neither side ever assembles a `PipelineLedger` key with a `None` repo component -- see the ledger doc's Risk 5 discussion for the full writer/reader guard contract.
 
+**How writers bind the helpers.** The three writers that call the lease helpers at module scope -- `stage-marker`, `meta-set`, `dispatch record` -- reach `resolve_ledger_lease()` and `revalidate_ledger_lease()` through the module object: `from tools import _sdlc_utils`, then `_sdlc_utils.resolve_ledger_lease(...)`, never a module-level `from tools._sdlc_utils import resolve_ledger_lease`. A `from`-import snapshots the function into the writer's own globals at import time. If that first import happens to land while a test holds `tools._sdlc_utils.resolve_ledger_lease` patched, the `MagicMock` is frozen into those globals for the life of the process and every lease check in that writer reads back the leaked test's configured answer -- a lease check passing where it should refuse, which looks like corrupted Redis state rather than a binding problem. That is the #2469 root cause; #2637 closed the class across all three. `tests/unit/test_sdlc_lease_helper_binding.py` holds the shape with three independent checks: a per-writer globals assertion, an AST sweep over `agent/`, `bridge/`, `models/`, `tools/`, and `worker/` so a new writer is caught before it reopens the hazard, and a behavioral late-patch assertion per writer. The sweep reads top-level statements only; `try:`- and `if:`-wrapped and relative module-level imports are a known gap, tracked in issue #2762. Function-local imports inside a call body re-resolve on every call and are unaffected -- that is why `verdict record` (`tools/sdlc_verdict.py`), `tools/sdlc_review_finalize.py`, and `agent/pipeline_state.py` are correct as written.
+
 ### Behavior
 
 | Scenario | Result |
@@ -257,11 +259,10 @@ If a local supervisor loses track of its `run_id` (context compaction, crash of 
 
 **Self-recognition across a re-mint (issues #2446/#2451).** The scenario above -- a lease lapses and a fresh `session-ensure` re-mints a new `run_id` -- used to strand any fork still carrying the *prior* `run_id`: its own hand-off read as foreign and it stood down. `AgentSession.owned_run_ids` (an accumulated, capped set of every `run_id` this session's own binds have won) closes that gap. `_validated_reuse_candidate` recognizes a claim as self even when the live lock owner is a newer id from the same run (both ids are in `owned_run_ids`), and the bare-ensure `SUPERVISED_RUN_ACTIVE` refusal path recognizes its own anchor's signal the same way -- inheriting/renewing instead of refusing. This is purely additive: the set is self-written history only (never populated from a foreign lock or signal), so the no-adopt invariant and the foreign-holder `ISSUE_LOCKED` refusal above are unchanged. See [SDLC Run Self-Recognition](sdlc-run-self-recognition.md) for the full mechanism, including why the self-check is `run_id`-only and never widened by a `session_id` comparison (incident #1915).
 
-## The Two In-Process Renewal Paths
+## The In-Process Renewal Path
 
-Two call sites renew the lock without going through a `sdlc-tool` CLI subprocess. Both source their identity from `agent_session.active_run_id` -- the read-back of the identity *this same pipeline's own* `ensure_session()` established -- never a foreign adoption, so neither violates the no-adopt rule above.
+One call site renews the lock without going through a `sdlc-tool` CLI subprocess. It sources its identity from `agent_session.active_run_id` -- the read-back of the identity *this same pipeline's own* `ensure_session()` established -- never a foreign adoption, so it does not violate the no-adopt rule above.
 
-- **`tools/_sdlc_utils.py::renew_issue_lock_for_session(session, run_id=None)`** -- wired into `tools/sdlc_stage_marker.py::write_marker()`. Falls back to `session.active_run_id` when no explicit `run_id` is passed. Best-effort: logs and returns on any failure, never blocks or alters the marker write's outcome.
 - **`agent/session_executor.py::_tick_issue_lock_renewal()`** -- the worker's 60s heartbeat renewal for `session_type == "eng"` sessions with a resolved `issue_number`. Cycle-3 BLOCKER 2: the identity is **re-fetched from Redis on every tick** (`_fetch_live_active_run_id()`, one indexed Popoto query) -- the executor's in-memory `agent_session` snapshot was fetched once at session start, *before* the session-ensure subprocess wrote `active_run_id`, so reading the snapshot attribute is permanently stale (None on fresh runs → renewal skips forever and the lock lapses mid-stage; the previous run's id on resumed sessions → a lapsed lock gets re-acquired under a dead identity and renewed forever). Skips renewal for that tick (with a debug log) when the record carries no live `active_run_id` or the fetch fails -- an identity-less tick must never extend or mint a lock. When a renewal attempt comes back `not acquired` (a foreign run now holds the lock), it logs at **WARNING** -- no longer purely fire-and-forget -- so an out-from-under takeover is visible before the TTL lapses.
 
 ## The `issue_number` Mirror Field
@@ -302,11 +303,37 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 | `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | The caller's explicit `run_id` (CLI `--run-id`), falling back to `session.active_run_id` for in-process callers. An issue-scoped session with **no** run identity at all refuses the write outright. |
 | `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G8 guard evaluation | Read-only: peeks with the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews. |
 | `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `active_run_id` re-fetched from Redis each tick via `_fetch_live_active_run_id()` (read-back only; skips the tick if absent or fetch fails). Warns at WARNING on a not-owner result. |
-| `sdlc-tool stage-marker` write | `tools/sdlc_stage_marker.py` (via `tools/_sdlc_utils.py::renew_issue_lock_for_session()`) | Every stage-marker write (BUILD/TEST/REVIEW stage transitions) | The CLI's `--run-id`, falling back to `session.active_run_id`. Fires after the ownership guard and before the state-machine write; best-effort, never blocks or alters the write outcome on failure. |
+| `revalidate_ledger_lease()` pre-write gate | `tools/_sdlc_utils.py`, called by `sdlc_stage_marker.py` (3 sites), `sdlc_dispatch.py`, `sdlc_verdict.py`, `sdlc_meta_set.py`, `sdlc_review_finalize.py` | Immediately before every ledger mutation, closing the peek-to-write TOCTOU window | The caller's explicit `--run-id`. Non-peek, so it renews the TTL as a side effect of re-validating; also refreshes the supervised-run signal under an `acquired` result (#2659). |
 
-### Gated but not renewed: `verdict record`, `meta-set`
+### The supervised-run signal renews with the lease (issue #2659)
 
-`sdlc-tool verdict record` and `sdlc-tool meta-set` both **require** `--run-id` (a missing flag is `RUN_ID_REQUIRED`) and both **gate** their writes through `tools/_sdlc_utils.py::check_run_ownership()` -- a peek-only check that refuses the write with an `ISSUE_LOCKED` diagnostic when a foreign run holds the issue. Neither, however, **renews** the lock's TTL. Both fire during PLAN/CRITIQUE-stage bookkeeping or ad hoc metadata writes with no established recurrence path through an in-progress BUILD/TEST/REVIEW stage -- renewing there would be speculative rather than load-bearing. If operational experience later surfaces a concrete long-running gap through one of these two, add renewal there as a follow-up rather than pre-wiring it speculatively now.
+The companion key `session:supervisedrun:{N}` (`agent/supervised_run.py`) is what a stage fork reads to inherit its supervisor's `run_id` instead of contesting the lock. It carries the lease's TTL, so it must be re-stamped wherever the lease is.
+
+Three paths extend the lease, and all three refresh the signal, each only after confirming it still owns the lease:
+
+| Renewer | Ownership proof before the signal write |
+|---|---|
+| `tools/sdlc_lease_heartbeat.py` (local supervisor, not in the table above) | its peek-confirmed `owner_run_id == run_id` match |
+| `agent/session_executor.py::_tick_issue_lock_renewal` (worker, 60s) | an `acquired` result |
+| `tools/_sdlc_utils.py::revalidate_ledger_lease` (every ledger-write gate — see below) | an `acquired` result |
+
+The third matters more than it looks, and it reaches further than the two tools first associated with it. `revalidate_ledger_lease` is non-peek, so **all five of its callers** renew the lease on their own: `tools/sdlc_stage_marker.py` (three sites), `tools/sdlc_dispatch.py`, `tools/sdlc_verdict.py`, `tools/sdlc_meta_set.py`, and `tools/sdlc_review_finalize.py`. The local heartbeat self-exits at `MAX_LIFETIME_SECONDS` (4h), after which those gates are the only renewer left. Without the refresh there, a pipeline past ~4.5h would lose its signal under a lease those writes were holding up, reproducing the #2659 wedge exactly. The observed incidents were at roughly 3.5h, so that window is reachable rather than theoretical.
+
+Ownership-first ordering is the safety property. Writing the signal before the ownership check would republish a non-owner's `run_id` over a live successor's, which **denies the successor's forks their inheritance signal and re-creates the #2659 wedge**. It does not hand anyone the wrong `run_id`: `supervised_run_status` reports `live=True` only when the signal's `run_id` equals the lock peek's `owner_run_id`, so a mis-owned signal reads not-live and is never inherited. That liveness anchor is what bounds the damage to a stand-down rather than a takeover.
+
+`acquired` is a strong but not absolute ownership signal on the two non-peek paths: `touch_issue_lock` fails **open**, returning `acquired=True` from its outer `except`, so a Redis exception mid-call can let a non-owner tick through. Per the liveness anchor above the result is a not-live signal rather than a stolen one, and the true owner's next tick (60s worker, 600s local) overwrites it. The heartbeat path does not share this: its peek compares `owner_run_id != run_id` and exits, and the fail-open peek returns `owner_run_id=None`, which also exits.
+
+Before #2659 the signal was written only on acquire, so it expired 1800s into every pipeline while the lease was renewed indefinitely. From minute 30 onward every stage fork the supervisor dispatched got a bare `ISSUE_LOCKED` from its own supervisor's lock and stood down -- correctly, per the substrate-probe rule, since only `SUPERVISED_RUN_ACTIVE` means inherit-and-continue. The pipeline wedged with a live lock, a live heartbeat, and no error anywhere. Both carriers now share the renewers' lifetime: the signal cannot outlive the lease, and the lease cannot outlive the signal by more than one renewal interval.
+
+The worktree `.sdlc-run` file carrier is deliberately not refreshed on renew -- it has no TTL, and is cleared by `clear_supervised_run_signal` on the run's terminal transition.
+
+### Every ledger-write gate renews
+
+`sdlc-tool verdict record` and `sdlc-tool meta-set` both require `--run-id` (a missing flag is `RUN_ID_REQUIRED`) and gate their writes through `resolve_ledger_lease` followed by `revalidate_ledger_lease`. The second is a non-peek `touch_issue_lock`, so both **renew** the lease's TTL, exactly like the stage-marker, dispatch, and review-finalize paths. There is no ledger-write gate that checks ownership without also renewing.
+
+`check_run_ownership` (`tools/_sdlc_utils.py`) is a separate peek-only helper that refuses a write with an `ISSUE_LOCKED` diagnostic without touching the TTL. No ledger-write CLI uses it.
+
+The consequence is the one the table above states: a ledger write of any kind extends the lease, so the supervised-run signal is refreshed on the same gate. Otherwise a pipeline outliving the 4h heartbeat exit would lose fork inheritance under a lease its own writes were holding up (issue #2659).
 
 ## The `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` Shape
 

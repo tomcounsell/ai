@@ -92,11 +92,29 @@ def _collect_merges(project: dict) -> list[dict]:
     return items
 
 
-def _gh_issue_list(repo: str, labels: list[str], cwd: str, limit: int = 20) -> list[dict]:
+def _gh_issue_list(
+    repo: str,
+    labels: list[str],
+    cwd: str,
+    limit: int = 20,
+    extra_args: list[str] | None = None,
+    timeout: int | None = None,
+) -> list[dict]:
     """Run `gh issue list` for the given repo and labels; return parsed items.
 
-    Returns a list of dicts with keys: number, title, url, labels.
+    Returns a list of dicts with keys: number, title, url, labels, createdAt.
     Empty list on any failure (logged at WARNING).
+
+    ``extra_args`` is spliced into the ``gh`` argv verbatim, additively —
+    ``None`` (the default) keeps existing callers' behavior byte-for-byte.
+    ``reflections/sdlc_upvote_lanes.py`` passes
+    ``["--search", "sort:created-asc"]`` to get a **server-side** oldest-first
+    page; sorting an already-truncated newest-first page client-side would
+    starve the oldest issues above ``limit`` open candidates.
+
+    ``timeout`` forwards to ``_run`` (default ``None`` preserves that
+    function's own hardcoded 30s default); without this, a caller's own
+    configured timeout constant would silently not reach this one call.
     """
     label_args: list[str] = []
     for label in labels:
@@ -110,12 +128,16 @@ def _gh_issue_list(repo: str, labels: list[str], cwd: str, limit: int = 20) -> l
         "--state",
         "open",
         "--json",
-        "number,title,url,labels",
+        "number,title,url,labels,createdAt",
         "--limit",
         str(limit),
         *label_args,
+        *(extra_args or []),
     ]
-    rc, out, err = _run(cmd, cwd=cwd)
+    run_kwargs: dict[str, Any] = {"cwd": cwd}
+    if timeout is not None:
+        run_kwargs["timeout"] = timeout
+    rc, out, err = _run(cmd, **run_kwargs)
     if rc != 0:
         logger.warning(
             "gh issue list failed for %s (labels=%s): %s",

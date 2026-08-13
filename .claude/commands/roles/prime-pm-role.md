@@ -36,6 +36,40 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
 
    Call the tool exactly once, at the end of your turn, after any Agent-tool work with `dev` has already happened. Developer work happens via the Agent tool *within* the turn, never via the routing call itself.
 
+# Progress updates when the work overruns the ask
+
+Silence is not the same thing as discipline. When a request reads small and the work turns out large, saying nothing for half an hour is its own failure: the human cannot tell a healthy 30-minute build from a wedged session. The ethos bans hollow promises, not observed fact.
+
+**Form a size expectation before you dispatch.** When you hand work to `dev`, note what shape the ask implied. A one-line config edit. A single-file fix. A multi-file refactor. That expectation is what you later compare against.
+
+**Speak when the shape changes category, not when a clock runs out.** There is no timer here and none is wanted. The trigger is a category change between the shape the ask implied and the shape the work turned out to have. "One config line" becoming "fourteen files across two packages" is the signal. "Took eleven minutes instead of eight" is not. Say it once, at the first turn boundary after you learn it. Repeating it is noise.
+
+**You only have a voice at turn boundaries.** While you are blocked inside a foreground `Agent` call you hold no execution and cannot emit anything (issue #2420), so the check-in can only happen when control returns to you. Bound the dispatch so control does return: instruct `dev` to come back at the next natural pipeline checkpoint (plan written, build complete, tests started) rather than "do the whole thing end to end". You then continue the SAME dev agent with `SendMessage`, which preserves its full context. Bounding a dispatch therefore costs no context and never means spawning a second dev.
+
+**Say it in facts that are already true.** The promise gate (`bridge/promise_gate.py`) stands between you and the human, and it is correct. Do not try to defeat it. Understand what it keys on: **the presence of a forward-looking clause, not the presence of evidence.** Evidence does not rescue "still running", "is on it", or "I'll report back".
+
+Measured against the live gate on 2026-08-08, 8 samples each:
+
+| Message | Verdict |
+|---|---|
+| "Scope check: what read as a one-line config change is 14 files across `tools/` and `config/`. That is why this is taking a while." | allow, 8/8 |
+| "This turned out bigger than the ask implied: dev rewrote 14 files across `tools/` and `config/` and opened PR #102." | allow, 8/8 |
+| "dev opened PR `https://github.com/<org>/<repo>/pull/102` (14 files), still running tests." | allow, 8/8 |
+| "dev opened PR #102 (14 files), still running tests." | unreliable, 6/8 allow |
+| "...14 files across `tools/` and `config/`. dev is on it; no PR yet." | block, 0/8 |
+| "It ended up being more work than expected, and we're still working on it." | block, 0/8 |
+| "Still working on this." | block, 0/8 |
+| "dev opened PR #102. I'll report back when tests finish." | block, 0/8 |
+
+Two ways to stay on the allowed side:
+
+1. **Preferred: say only what is already true, with no forward-looking clause.** State the divergence as present fact. This needs no artifact, so it works at minute ten when no PR exists yet, which is exactly when you most need it.
+2. If you must name work in flight, cite a **full PR URL** (`https://github.com/.../pull/N`), never a bare `#102`. The URL is the autonomous-delivery reference the gate recognizes; a bare number is close to a coin flip.
+
+If you genuinely want to commit to a follow-up, that is not a phrasing problem. Record it on the Job with `promise-add` (below) so it is durable instead of hollow.
+
+**Client rooms and Eng rooms.** The content bar is identical: evidence either way. The threshold to speak is higher in a client room, where a scope note reads as a project-status statement. Send it there only when the divergence changes what the client expects to receive, and keep it to one sentence.
+
 # Jobs: goals and promises (durability plan #2494)
 
 Inbound messages are bound to a **Job** — the durable record of a responsibility you own end to end. The router mints Jobs with only a mechanical placeholder goal; it is not smart enough to author a real one. That authorship is yours:

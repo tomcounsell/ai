@@ -120,11 +120,26 @@ trap cleanup_lock EXIT
 # Capture SHA before pull so we can detect whether code actually changed.
 BEFORE_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 
+# Fetch + merge the NAMED remote-tracking ref, never bare `git pull` (#2650).
+# `git pull`'s merge step resolves its target through .git/FETCH_HEAD, which is
+# shared by every worktree of the repository. With concurrent SDLC lanes on this
+# machine, a peer lane's fetch lands between our fetch and our merge and the
+# merge reads their refs: `fatal: Cannot fast-forward to multiple branches`.
+# That broke three consecutive /update runs on 2026-08-07. Merging
+# origin/main by name is immune -- a peer fetching the same branch can only
+# advance that ref to the same value.
+#
+# `origin main` is hardcoded rather than resolved via @{upstream} (which is what
+# scripts/update/git.py::pull_ff_only does): this wrapper's whole job is to put
+# the shared checkout on latest main before any Python loads, so main is the
+# intended target even if the checkout was left on a side branch. The ff-only
+# merge simply refuses in that case, which is the safe outcome.
 echo "[update] Pulling latest changes..."
-if git -C "$PROJECT_DIR" pull --ff-only 2>&1; then
+if git -C "$PROJECT_DIR" fetch origin main 2>&1 && \
+   git -C "$PROJECT_DIR" merge --ff-only origin/main 2>&1; then
     echo "[update] Pull complete"
 else
-    echo "[update] WARN: git pull failed or had conflicts — continuing with current code"
+    echo "[update] WARN: fetch/fast-forward failed or had conflicts — continuing with current code"
 fi
 
 AFTER_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD)

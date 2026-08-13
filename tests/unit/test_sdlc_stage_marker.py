@@ -10,6 +10,12 @@ There is no session in this path anymore: ``find_session``,
 ``session_owns_issue``, and the AgentSession-ownership guard were removed.
 Ownership is decided SOLELY by the run_id-keyed issue lease
 (``models.session_lifecycle.touch_issue_lock``).
+
+Lease-helper patches here target ``tools._sdlc_utils``, the module that owns
+the helpers, because ``tools.sdlc_stage_marker`` calls them through the
+module object rather than snapshotting them into its own globals (#2637).
+The binding shape itself is guarded in
+``tests/unit/test_sdlc_lease_helper_binding.py``.
 """
 
 from __future__ import annotations
@@ -23,27 +29,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def test_lease_helpers_are_not_leaked_test_doubles():
-    """Guard the import-order hazard behind issue #2469.
-
-    ``tools.sdlc_stage_marker`` snapshots ``resolve_ledger_lease`` /
-    ``revalidate_ledger_lease`` into module globals with a ``from`` import.
-    If the module's FIRST import happens while another test file has
-    ``tools._sdlc_utils.resolve_ledger_lease`` patched, the mock is frozen
-    into those globals for the rest of the process and every lease assertion
-    in this file silently inverts. The known offender is
-    ``tests/unit/test_sdlc_review_finalize.py``, which now imports this module
-    at the top of the file (before any patch is active) as the barrier. If
-    this assertion ever fails, a NEW test file has re-opened the hazard: give
-    it the same top-of-file import.
-    """
-    import tools._sdlc_utils as sdlc_utils
-    import tools.sdlc_stage_marker as stage_marker
-
-    assert stage_marker.resolve_ledger_lease is sdlc_utils.resolve_ledger_lease
-    assert stage_marker.revalidate_ledger_lease is sdlc_utils.revalidate_ledger_lease
 
 
 class TestWriteMarker:
@@ -1303,7 +1288,7 @@ class TestMarkerWriteTelemetry:
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
             patch(
-                "tools.sdlc_stage_marker.resolve_ledger_lease",
+                "tools._sdlc_utils.resolve_ledger_lease",
                 return_value=(None, {"reason": "LEASE_ABSENT"}),
             ),
             patch("tools._sdlc_marker_telemetry.record_marker_write") as rec,
@@ -1325,7 +1310,7 @@ class TestMarkerWriteTelemetry:
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
             patch(
-                "tools.sdlc_stage_marker.resolve_ledger_lease",
+                "tools._sdlc_utils.resolve_ledger_lease",
                 return_value=(None, {"reason": "LEASE_ABSENT"}),
             ),
             patch(
@@ -1514,7 +1499,7 @@ class TestSkipMarkerWrite:
             patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
             patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
             patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
-            patch("tools.sdlc_stage_marker.revalidate_ledger_lease", return_value=False),
+            patch("tools._sdlc_utils.revalidate_ledger_lease", return_value=False),
         ):
             result, code = write_marker(
                 stage="CRITIQUE", status="skipped", issue_number=2577, run_id="run-r"

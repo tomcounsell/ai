@@ -199,6 +199,7 @@ tests/
 | unit | `test_pipeline_state.py` | 15 | Pipeline state transitions |
 | unit | `test_pipeline_state_machine.py` | 137 | `PipelineStateMachine` transitions, outcome classification, opt-in predecessor backfill (`_backfill_predecessors`, `_reaches_issue`) |
 | unit | `test_sdlc_stage_marker.py` | 25 | Stage marker writes via CLI (session resolution, issue-number fallback, opt-in predecessor backfill on `in_progress`/`completed`) |
+| unit | `test_sdlc_lease_helper_binding.py` | 10 | Lease helpers stay unsnapshotted in `sdlc_dispatch`/`sdlc_meta_set`/`sdlc_stage_marker`: per-module globals check, repo-wide AST sweep, and a behavioral late-patch assertion (#2469, #2637) |
 | unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
 | unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
 | unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |
@@ -215,6 +216,7 @@ tests/
 | unit | `test_continuation_pm.py` | 8 | Continuation PM creation, depth cap, dedup, steer failure fallback |
 | unit | `test_do_plan_critique_barrier.py` | — | Roster membership gate: terminal-fence detection, missing-critic gap surfacing, incomplete-roster STOP verdict (#1690) |
 | integration | `test_parent_child_round_trip.py` | 11 | Parent-child linkage, dev session completion steering, continuation PM round-trip |
+| unit | `test_pm_progress_updates.py` | 12 | Locks the PM role doc's evidence-bearing progress-update guidance (prompt-text anchors) and characterizes which taught phrasings clear `bridge/promise_gate.py::_evaluate_promise_heuristic` on the deterministic fallback branch (#2664) |
 
 ### `sessions` — Session lifecycle and health
 

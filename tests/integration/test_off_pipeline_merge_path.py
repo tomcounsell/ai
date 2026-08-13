@@ -313,7 +313,6 @@ class TestNoReviewStillCannotMerge:
     """Requirement 3: skipping PLAN/CRITIQUE weakens nothing about REVIEW."""
 
     def test_docs_marker_refused_without_a_review_verdict(self, monkeypatch, issue_number, cleanup):
-
         run_id = _mint_run_id(issue_number, monkeypatch)
         for _result, code in _record_skips(issue_number, run_id):
             assert code == 0
@@ -381,7 +380,6 @@ class TestCannotForgeAnApproval:
     """Requirement 4: no call sequence mints a REVIEW completion with no verdict."""
 
     def test_review_cannot_be_skipped(self, monkeypatch, issue_number, cleanup):
-
         run_id = _mint_run_id(issue_number, monkeypatch)
         for stage in ("REVIEW", "DOCS", "MERGE"):
             result, code = _marker(stage, "skipped", issue_number, run_id)

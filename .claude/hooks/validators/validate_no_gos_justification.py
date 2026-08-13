@@ -37,8 +37,34 @@ VALID_TAGS = ("[EXTERNAL]", "[ORDERED]", "[DESTRUCTIVE]", "[SEPARATE-SLUG")
 PUNT_PHRASES = [
     r"\bdeferred to (?:a )?follow-?up\b",
     r"\bfollow-?up (?:issue|pr|ticket)\b",
-    r"\boperator will\b",
-    r"\bhuman will\b",
+    # "operator/human will <do something>" is a punt. "operator will SEE the
+    # log line change" is a description of observable behavior, which every
+    # plan's impact section is made of (#2682). Only the action sense counts.
+    #
+    # The optional adverb slot is load-bearing: impact prose says "will *simply*
+    # see", "will *then* see", "will *now* observe", and without the slot each
+    # of those scores as a punt — a false positive that blocks an unrelated
+    # lane's write. The slot must live INSIDE the negative lookahead. Placed
+    # before it (``will\s+(?:\w+ly\s+)?(?!see\b|...)``) it does nothing: the
+    # group is optional, so when the lookahead fails with the adverb consumed
+    # the engine backtracks, matches the group as empty, re-tests the lookahead
+    # against the adverb itself ("simply" is not "see"), and the pattern matches
+    # anyway. Written as ``(?!<optional adverb><perception verb>)`` the
+    # assertion is what we actually mean: what follows is NOT an optionally
+    # adverb-prefixed perception verb.
+    #
+    # ``no longer`` stays a standalone alternative rather than an adverb,
+    # because it exempts ANY following verb ("will no longer rotate the key" is
+    # not a punt). Demoted into the adverb slot it would only exempt perception
+    # verbs, re-introducing a false positive.
+    #
+    # ``\w+ly`` deliberately over-matches a few verbs ("apply", "supply"), which
+    # is harmless: after "apply" the next token is not a perception verb, and
+    # "apply" is not one either, so the inner pattern fails and the line stays a
+    # punt. Pinned by ``test_action_sense_is_still_a_punt``.
+    r"\b(?:operator|human)\s+will\s+"
+    r"(?!(?:(?:\w+ly|then|now|also|still|already|just|soon|never)\s+)?"
+    r"(?:see|notice|observe|read|find|know|get|receive|experience)\b|no longer\b)",
     r"\bin v2\b",
     r"\bdefer(?:red)? to v\d\b",
     r"\bpunt(?:ed)? to\b",
@@ -90,47 +116,134 @@ this rule blocks.
 """
 
 
-def find_newest_plan_file(directory: str = "docs/plans") -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", f"{directory}/"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        new_files = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            status = line[:2]
-            filepath = line[3:].strip()
-            if status in ("??", "A ", " A", "AM", " M", "M ", "MM") and filepath.endswith(".md"):
-                new_files.append(filepath)
-        if not new_files:
-            return None
-        newest = None
-        newest_mtime = 0.0
-        for filepath in new_files:
-            path = Path(filepath)
-            if path.exists():
-                mtime = path.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = str(path)
-        return newest
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+def target_from_hook_input(hook_input: dict) -> str | None:
+    """The path the triggering Write actually targeted, or None.
+
+    None means "nothing to validate", never "go find something to validate".
+    The predecessor resolved the target by scanning ``git status docs/plans/``
+    and taking the newest dirty file, which gated a lane on a plan it had never
+    touched: a Write to ``docs/features/foo.md`` in one worktree was blocked by
+    another lane's in-progress plan, and the git query ran against whatever
+    checkout the hook process started in (#2682).
+    """
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
         return None
+    # The `or` already collapses an empty string to the next candidate, and
+    # then to None — so an empty path can never reach the caller as a target.
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    return path if isinstance(path, str) else None
+
+
+NO_GOS_HEADING = re.compile(r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+# The full run of fence characters is captured, not just its first three,
+# because a fence closes only on a marker of the SAME character at least as
+# long as the one that opened it — CommonMark's rule, and the only way to write
+# a fenced block that itself contains a fence. A bare open/close toggle treats
+# the inner ``` of a ````-wrapped example as a closer and stays inverted for the
+# rest of the document, so the code exemption evaporates and a punt phrase
+# quoted inside that example blocks an unrelated agent's write (#2682). The
+# false-positive direction is the dangerous one, hence the strict rule.
+#
+# Accepted cost: the strict rule widens the fail-open surface from *unterminated*
+# fences to ANY mismatched marker — a ````-opened block "closed" by ``` now
+# exempts everything to EOF, and that reach extends into ``## No-Gos``, the one
+# section where the quoted-context exemption deliberately does not apply. So a
+# typo'd fence anywhere above No-Gos silently disarms the gate for that document.
+# We take that trade knowingly: fail-open can never block a lane, and CommonMark
+# correctness is worth more than catching a malformed document. Pinned by
+# ``test_mismatched_fence_markers_fail_open_into_no_gos``.
+#
+# The ``^\s*`` allowance (rather than CommonMark's three-space cap) is
+# deliberate: plans nest fences inside list items at arbitrary depth.
+FENCE = re.compile(r"^\s*(?P<marker>`{3,}|~{3,})")
+
+# A leading pipe or angle bracket marks transcribed material rather than the
+# plan's own commitments: critique-findings tables, review verdict logs, and
+# "critic's suggested remedy, kept for the record" blocks all quote deferral
+# phrasing in order to discuss it. Scanning them means a plan gets *more*
+# likely to fail the more carefully it records its own review (#2682).
+QUOTED_CONTEXT_PREFIXES = ("|", ">")
 
 
 def extract_no_gos_section(content: str) -> str | None:
-    match = re.search(
-        r"^## No-Gos[^\n]*$(.*?)(?=^## |\Z)",
-        content,
-        re.MULTILINE | re.DOTALL,
-    )
+    match = NO_GOS_HEADING.search(content)
     return match.group(1).strip() if match else None
+
+
+def no_gos_line_span(content: str) -> tuple[int, int]:
+    """0-based ``[start, end)`` line range covering the No-Gos section.
+
+    Wider than the section *body* on both ends, deliberately. ``start`` is the
+    ``## No-Gos`` heading line itself, and ``end`` is one past the following
+    ``## `` heading (or at/past EOF when No-Gos is the last section). Both
+    headings land inside the range but cost nothing: the caller skips any line
+    beginning with ``#``.
+
+    The ``+ 1`` is what keeps a final *unterminated* line in range. ``end`` is
+    derived from a newline count, so when No-Gos is the last section and the
+    file has no trailing newline, the closing line contributes no newline and
+    would otherwise fall outside the scan — silently disarming the guard on the
+    one section where the quoted-context exemption does not apply. Pinned by
+    ``test_table_row_inside_no_gos_still_fails``'s no-trailing-newline case.
+
+    ``(-1, -1)`` when there is no such section.
+    """
+    match = NO_GOS_HEADING.search(content)
+    if not match:
+        return (-1, -1)
+    start = content.count("\n", 0, match.start(1))
+    end = content.count("\n", 0, match.end(1))
+    return (start, end + 1)
+
+
+def find_punt_lines(content: str) -> list[str]:
+    """Unjustified deferrals in the plan's own voice.
+
+    The whole body is scanned, not just No-Gos, because a punt hides in prose
+    anywhere. Two kinds of line are exempt outside the No-Gos section:
+    fenced code, and quoted/tabular context. Inside No-Gos nothing is exempt
+    but code fences — that section is where commitments are made, so a punt
+    written as a table row there must still fail.
+    """
+    lines = content.splitlines()
+    no_gos_start, no_gos_end = no_gos_line_span(content)
+    bad: list[str] = []
+    open_marker: str | None = None
+
+    for idx, raw_line in enumerate(lines):
+        fence = FENCE.match(raw_line)
+        if fence:
+            marker = fence.group("marker")
+            if open_marker is None:
+                open_marker = marker
+            # A shorter marker, or one of the other character, is fence
+            # content — an example block being quoted, not a closer. The
+            # ``elif`` is structural: an opener must never be tested against
+            # itself, or every fence would close on the line that opened it.
+            elif marker[0] == open_marker[0] and len(marker) >= len(open_marker):
+                open_marker = None
+            continue
+        if open_marker is not None:
+            continue
+
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("<!--"):
+            continue
+
+        inside_no_gos = no_gos_start <= idx < no_gos_end
+        if not inside_no_gos and line.startswith(QUOTED_CONTEXT_PREFIXES):
+            continue
+
+        if not line_is_punt(line):
+            continue
+        if line_is_justified(line):
+            continue
+        if line_is_explicit_none(line):
+            continue
+        bad.append(f"  {raw_line.rstrip()}")
+
+    return bad
 
 
 def line_is_punt(line: str) -> bool:
@@ -182,21 +295,7 @@ def validate(filepath: str) -> tuple[bool, str]:
     if section is None:
         return False, MISSING_SECTION_ERROR.format(file=filepath)
 
-    # Walk every body line of the entire plan looking for punt phrases —
-    # punts hide outside the No-Gos section too.
-    bad: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("<!--"):
-            continue
-        if not line_is_punt(line):
-            continue
-        if line_is_justified(line):
-            continue
-        if line_is_explicit_none(line):
-            continue
-        bad.append(f"  {raw_line.rstrip()}")
-
+    bad = find_punt_lines(content)
     if bad:
         return False, UNJUSTIFIED_PUNT_ERROR.format(file=filepath, lines="\n".join(bad[:10]))
 
@@ -214,21 +313,37 @@ def main():
     parser.add_argument("plan_file", nargs="?", help="Path to plan file")
     args = parser.parse_args()
 
-    try:
-        json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        pass
+    # An explicit path (CLI / tests) wins; otherwise take the path the hook's
+    # own tool input names. Never guess.
+    plan_file = args.plan_file
+    if not plan_file:
+        hook_input: dict = {}
+        try:
+            raw = sys.stdin.read()
+            if raw.strip():
+                hook_input = json.loads(raw)
+        except (json.JSONDecodeError, OSError, EOFError):
+            hook_input = {}
+        plan_file = target_from_hook_input(hook_input)
 
-    plan_file = args.plan_file or find_newest_plan_file()
     if not plan_file:
         sys.exit(0)
 
-    if not Path(plan_file).exists():
-        print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
-        sys.exit(2)
-
-    # Only enforce on plan docs; pass through anything else
+    # Only enforce on plan docs; pass through anything else. This has to come
+    # before the existence check, or a Write to any non-plan path that the hook
+    # cannot stat (a relative path resolved against a different cwd, a file in
+    # another worktree) exits 2 and blocks a write it has no business judging.
     if "docs/plans" not in plan_file.replace("\\", "/"):
+        sys.exit(0)
+
+    path = Path(plan_file)
+    if not path.exists():
+        # An explicit CLI argument that names nothing is a user error worth
+        # reporting. A hook-derived path we cannot resolve is not: there is no
+        # content to judge, so there is no finding to make.
+        if args.plan_file:
+            print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
+            sys.exit(2)
         sys.exit(0)
 
     success, message = validate(plan_file)

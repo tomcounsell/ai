@@ -36,6 +36,12 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+# Cheap, stdlib-only at module scope (heavy deps stay lazily imported inside
+# its functions) so this doesn't reintroduce the bootstrap cost `_run`'s
+# lazy `valor_session` import avoids. Shared with `valor_session.py`'s own
+# `--window` parser so a negative value is rejected identically by both.
+from tools.session_progress import window_arg_type  # noqa: E402
+
 
 @functools.cache
 def _build_parser() -> argparse.ArgumentParser:
@@ -123,6 +129,39 @@ def _build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("message", help="New message to inject.")
     p_resume.add_argument("--json", action="store_true")
 
+    p_progress = sub.add_parser(
+        "progress",
+        help="Is this session still working? Read-only liveness verdict.",
+        description=(
+            "Aggregate every liveness signal that already exists for a session — "
+            "the runner's hook-edge tool-activity marker (which ticks on tool "
+            "calls made from inside an in-process subagent, and works in foreign "
+            "repos), the newest background-task output mtime, the CLI "
+            "transcript, and the AgentSession's own liveness timestamps — then "
+            "emit ONE verdict line:\n"
+            "  PROGRESSING         some signal is fresher than the window\n"
+            "  NO RECENT ACTIVITY  signals exist but all are older than it\n"
+            "  UNKNOWN             no evidence, or the session is terminal\n\n"
+            "Read-only: never steers, kills, or writes. Absence of evidence "
+            "reports UNKNOWN, never a false 'wedged'. %CPU and child-process "
+            "count are deliberately NOT consulted — those readings produced the "
+            "misdiagnosis in issue #2662."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_progress.add_argument("id", help="Session ID (agent_session_id or session_id).")
+    p_progress.add_argument(
+        "--window",
+        type=window_arg_type,
+        default=None,
+        help=(
+            "Freshness window in seconds, >= 0 (default: the watchdog's own "
+            "SESSION_PROGRESS_DEADLINE_S, so this verb never disagrees with the "
+            "running system about what counts as progress)."
+        ),
+    )
+    p_progress.add_argument("--json", action="store_true", help="Emit JSON output.")
+
     p_inspect = sub.add_parser("inspect", help="Dump all raw session fields (debug).")
     p_inspect.add_argument("id", help="Session ID.")
     p_inspect.add_argument("--json", action="store_true")
@@ -186,6 +225,8 @@ def _run(args: argparse.Namespace) -> int:
         return valor_session.cmd_kill(_to_kill_namespace(args))
     if args.command == "resume":
         return valor_session.cmd_resume(_to_resume_namespace(args))
+    if args.command == "progress":
+        return valor_session.cmd_progress(_to_progress_namespace(args))
     if args.command == "inspect":
         return valor_session.cmd_inspect(_to_inspect_namespace(args))
     if args.command == "children":
@@ -212,6 +253,14 @@ def _to_create_namespace(args: argparse.Namespace) -> argparse.Namespace:
         model=args.model,
         needs_real_chrome=args.needs_real_chrome,
         json=args.json,
+        # The `valor` wrapper is a human-facing session launcher and
+        # deliberately does not expose --telegram-message-id (that anchor
+        # plumbing is internal, used by reflections/sdlc_upvote_lanes.py via
+        # tools.valor_session.create_session directly, and by the
+        # `python -m tools.valor_session create --telegram-message-id`
+        # debugging path -- see docs/features/upvote-autonomous-sdlc-pickup.md).
+        # A wrapper-launched session is never pre-anchored.
+        telegram_message_id=0,
     )
 
 
@@ -233,6 +282,10 @@ def _to_kill_namespace(args: argparse.Namespace) -> argparse.Namespace:
 
 def _to_resume_namespace(args: argparse.Namespace) -> argparse.Namespace:
     return _ns(id=args.id, message=args.message, json=args.json)
+
+
+def _to_progress_namespace(args: argparse.Namespace) -> argparse.Namespace:
+    return _ns(id=args.id, window=args.window, json=args.json)
 
 
 def _to_inspect_namespace(args: argparse.Namespace) -> argparse.Namespace:

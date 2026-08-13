@@ -57,8 +57,10 @@ Deploy blocked: PR #N is not merged. Run /do-merge first.
 ## Step 2: Confirm Local Machine Is Current
 
 ```bash
-# Pull latest main
-git checkout main && git pull
+# Fast-forward main. Not `git pull` (#2650): FETCH_HEAD is shared by every
+# worktree, so a concurrent lane's fetch can retarget a bare pull's merge --
+# and a deploy runs during exactly those multi-lane conditions.
+git checkout main && git fetch origin main && git merge --ff-only origin/main
 
 # Verify merge commit is present
 git log --oneline -1 $MERGE_COMMIT

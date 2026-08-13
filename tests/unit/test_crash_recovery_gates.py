@@ -6,8 +6,9 @@ the auto-resume feature:
 - ``_is_transient_clean_kill_to_failed`` — inline derivation of the known-transient
   tool-wedge shape (confirmed-dead clean kill to ``failed``) that the deterministic
   first-retry floor acts on (Gap 3a, critique C4).
-- ``_machine_owns_project`` — the single-machine ownership gate (Gap 3b): only the
-  machine that owns a session's project resumes it; everyone else proposes.
+- ``reflections.utilities.machine_owns_project`` — the single-machine ownership gate
+  (Gap 3b): only the machine that owns a session's project resumes it; everyone
+  else proposes. Shared by ``crash_recovery`` and ``sdlc_progress`` (#2696).
 
 Both helpers are fail-soft: any malformed input or lookup error resolves to the
 safe default (no floor / not-owned), never an exception.
@@ -15,14 +16,13 @@ safe default (no floor / not-owned), never an exception.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
 
-from reflections.crash_recovery import (
-    _is_transient_clean_kill_to_failed,
-    _machine_owns_project,
-)
+from reflections.crash_recovery import _is_transient_clean_kill_to_failed
+from reflections.utilities import machine_owns_project
 
 pytestmark = pytest.mark.sdlc
 
@@ -87,16 +87,16 @@ class TestIsTransientCleanKillToFailed:
 
 
 # ---------------------------------------------------------------------------
-# _machine_owns_project
+# machine_owns_project
 # ---------------------------------------------------------------------------
 
 
 class TestMachineOwnsProject:
     def test_none_project_key_is_not_owned(self):
-        assert _machine_owns_project(None) is False
+        assert machine_owns_project(None) is False
 
     def test_empty_project_key_is_not_owned(self):
-        assert _machine_owns_project("") is False
+        assert machine_owns_project("") is False
 
     def test_owned_project_returns_true(self):
         with (
@@ -106,7 +106,7 @@ class TestMachineOwnsProject:
                 return_value={"myproj": "my-machine"},
             ),
         ):
-            assert _machine_owns_project("myproj") is True
+            assert machine_owns_project("myproj") is True
 
     def test_project_owned_by_other_machine_returns_false(self):
         with (
@@ -116,7 +116,7 @@ class TestMachineOwnsProject:
                 return_value={"myproj": "some-other-box"},
             ),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
 
     def test_unknown_project_key_is_not_owned(self):
         with (
@@ -126,7 +126,25 @@ class TestMachineOwnsProject:
                 return_value={"otherproj": "my-machine"},
             ),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
+
+    def test_ownership_resolves_from_the_projects_config_path_override(self, tmp_path, monkeypatch):
+        """The actual delta of the extraction: the projects.json path is *resolved*.
+
+        Every other test here patches ``_load_project_machines``, which fences
+        exactly the code that changed — the swap of a hardcoded
+        ``config/projects.json`` for ``resolve_projects_config_path()``. This one
+        points ``PROJECTS_CONFIG_PATH`` at a real file and reads it end to end.
+        """
+        config = tmp_path / "projects.json"
+        config.write_text(
+            json.dumps({"projects": {"myproj": {"machine": "My-Machine"}}}),
+        )
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config))
+
+        with patch("config.machine.get_machine_name", return_value="My-Machine"):
+            assert machine_owns_project("myproj") is True
+            assert machine_owns_project("otherproj") is False
 
     def test_lookup_error_is_fail_soft_not_owned(self):
         """Any lookup exception resolves to not-owned (propose), never propagates."""
@@ -134,7 +152,7 @@ class TestMachineOwnsProject:
             "tools.reflection_machine_filter._load_project_machines",
             side_effect=RuntimeError("boom"),
         ):
-            assert _machine_owns_project("myproj") is False
+            assert machine_owns_project("myproj") is False
 
 
 # ---------------------------------------------------------------------------

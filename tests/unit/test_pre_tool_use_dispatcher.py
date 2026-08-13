@@ -369,3 +369,41 @@ class TestSharedCheckoutValidatorRegistered:
 
         entry = dispatcher._VALIDATORS[shared_checkout_idx]
         assert entry[2] is False, "shared-checkout guard must be fail-open"
+
+
+class TestRedisFlushValidatorRegistered:
+    """Registration guard for issue #2645: validate_no_redis_flush must be
+    present in ``_VALIDATORS`` (fail-open, immediately after
+    validate_no_broad_process_kill, the last of the original 8 in-process
+    predicates), so a future edit that silently drops the registration fails
+    CI instead of shipping a validator that blocks nothing (#2435)."""
+
+    def test_redis_flush_validator_is_registered_after_broad_process_kill(self, dispatcher):
+        names = [name for name, _fn, _fail_closed in dispatcher._VALIDATORS]
+
+        assert "validate_no_redis_flush" in names
+        assert "validate_no_broad_process_kill" in names
+        broad_kill_idx = names.index("validate_no_broad_process_kill")
+        redis_flush_idx = names.index("validate_no_redis_flush")
+        assert redis_flush_idx == broad_kill_idx + 1, (
+            "redis-flush guard must be declared immediately after validate_no_broad_process_kill"
+        )
+
+        entry = dispatcher._VALIDATORS[redis_flush_idx]
+        assert entry[2] is False, "redis-flush guard must be fail-open"
+
+    def test_redis_flush_validator_blocks_through_dispatch(self, dispatcher, bash_hook_input):
+        """First-block-wins integration: a real flush command reaching
+        dispatch() through the actual _VALIDATORS list (not a monkeypatched
+        stand-in) must be blocked, proving registration rather than just the
+        predicate's own logic."""
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "redis.Redis().flushdb()"},
+            "cwd": "/tmp",
+        }
+
+        result = dispatcher.dispatch(hook_input)
+
+        assert result is not None
+        assert "REDIS_PRODUCTION_FLUSH_OK=1" in result

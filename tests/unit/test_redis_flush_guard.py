@@ -53,7 +53,10 @@ def test_flushdb_on_own_test_db_is_allowed():
     # The redis_test_db fixture relies on being able to flush its own db; the
     # guard must not block that. The db number comes from the claim API and
     # nowhere else -- deriving it from the xdist worker id (the pre-#2606 rule)
-    # is what made this test flush a stranger's database (#2628).
+    # is what made this test flush a stranger's database (#2628). The old
+    # helper re-derived gw{N}+1, which stops being this process's claim as
+    # soon as any other pytest process on the machine holds a lower slot, so
+    # the flush landed on a database someone else owned (#2655).
     client = redis.Redis(db=claim_test_db())
     assert client.flushdb() is True
 

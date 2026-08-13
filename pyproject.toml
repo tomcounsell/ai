@@ -5,9 +5,9 @@ description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    "anthropic==0.120.2", # CRITICAL — pin exact, upgrade via /update only
+    "anthropic==0.121.0", # CRITICAL — pin exact, upgrade via /update only
     "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
-    "claude-agent-sdk==0.2.132", # CRITICAL — pin exact, upgrade via /update only
+    "claude-agent-sdk==0.2.137", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
@@ -20,7 +20,7 @@ dependencies = [
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
-    "pypdf>=6.14.2",  # floor tracks upstream SEC/ROB fixes; 6.10.0 patched the XMP metadata RAM-exhaustion CVE
+    "pypdf>=6.15.0",  # floor tracks upstream SEC/ROB fixes; 6.10.0 patched the XMP metadata RAM-exhaustion CVE
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
