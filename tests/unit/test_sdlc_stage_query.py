@@ -1371,7 +1371,7 @@ class TestLatestReviewHeadShaMeta:
 
         raw_states = {"ISSUE": "completed", "_verdicts": verdicts}
         with (
-            patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None),
+            patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
             patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
             patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
         ):
