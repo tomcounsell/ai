@@ -21,7 +21,7 @@ Non-obvious behavior that `--help` will not tell you:
 
 ## Manual Testing Hygiene
 
-Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`.
+Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`, which stands down only when the Bash call's cwd resolves inside a *different* git checkout (`~/src/popoto`, where raw Redis is legitimate) and only for commands that could actually execute. A cwd belonging to no repo at all, such as `/tmp`, keeps the guard armed: the Redis is machine-global. See [`docs/features/raw-redis-guard.md`](docs/features/raw-redis-guard.md).
 
 When creating AgentSessions manually to test worker or queue behavior, use a recognizable `project_key` prefix (`test-`, `dbg-`) and delete them afterward via the ORM, scoped by that key. Never run bulk operations unscoped.
 
