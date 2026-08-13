@@ -582,6 +582,19 @@ there is no ordering to get right because the value is fixed before `fork`.
 
 ## No-Gos (Out of Scope)
 
+- [SEPARATE-SLUG #2628] `tests/unit/test_youtube_search.py:219` is a real
+  convert-class violation, but PR #2683 deletes a trailing class starting at
+  `:226` in that file — close enough that both edits land in one merge hunk.
+  Allowlist it with a `[#2628]` reason and convert it when #2683 lands. (Checked
+  against #2683's diff at 2026-08-13T08:30Z; the PR is still OPEN.)
+- [SEPARATE-SLUG #2628] `tests/README.md` is in #2683's diff as well, so the
+  Documentation fallback below competes with it. If #2683 has not merged, append
+  the subprocess subsection as a new trailing section rather than editing an
+  existing one, to keep the merge a clean append.
+- [SEPARATE-SLUG #2628] #2683 introduces `tests/db_derivation_guard.py`. The
+  guard in this plan must not restate what that module enforces — it covers a
+  different seam (child process env, not in-process db derivation). Re-read it
+  before writing the guard if #2683 has landed by then.
 - [SEPARATE-SLUG #2628] Any modification to `tests/conftest.py`,
   `tests/db_claim.py`, `tests/unit/test_conftest_isolation_guards.py`, or
   `tests/unit/test_redis_flush_guard_prod.py`. The last two contain five real
