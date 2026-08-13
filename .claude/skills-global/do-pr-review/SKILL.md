@@ -185,7 +185,19 @@ on your behalf: if you skip this on any exit path, the router never sees the
 verdict and the pipeline stalls in a re-review loop.
 
 Follow the context file's exact invocation (this repo's is `sdlc-tool verdict
-finalize`). The invariant that must hold: on the **APPROVED** path, the
+finalize`).
+
+**The finding flags take integer COUNTS, never findings text.** If the
+invocation carries `--blocker-count` / `--tech-debt-count` (or their older
+spellings `--blockers` / `--tech-debt`), pass an integer: `--blocker-count 2`,
+not `--blocker-count "1) mkdocs build fails; 2) ..."`. Your actual findings
+belong in the review you posted to the PR in Step 4. Because this step is
+terminal and a non-zero exit means STOP, passing prose ends the review with the
+findings live on GitHub and absent from the ledger — the router then sees no
+verdict and stalls. Omit a flag to mean "not assessed"; pass `0` to mean
+"assessed, none found".
+
+The invariant that must hold: on the **APPROVED** path, the
 verdict record, its freshness trailer, AND the REVIEW completion marker are
 written by ONE atomic operation — never a hand-run sequence of separate
 calls that could partially complete, since a partial write is exactly what

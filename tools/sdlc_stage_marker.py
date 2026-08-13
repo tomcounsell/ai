@@ -562,9 +562,18 @@ def _write_marker_impl(
                 # the remedy; print it (issue #2554: this was routed to
                 # logger.debug, so the one actionable line never reached the
                 # operator and the failure looked like a bare exit 1).
+                # #2740: this says the MARKER write was refused and nothing
+                # more. `write_marker` cannot see writes its callers already
+                # committed — `finalize` records the verdict one step earlier —
+                # so asserting non-persistence here is a claim this
+                # function has no standing to make. Follow the
+                # STATE_MACHINE_RAISED precedent below: name the refusal, point
+                # at `stage-query`.
                 print(
                     f"[ERROR] STATE_MACHINE_REJECTED: start_stage({stage}) refused "
-                    f"for issue #{issue_number}: {e} State NOT persisted.",
+                    f"for issue #{issue_number}: {e} Marker write refused; other "
+                    "state may already have been persisted by the caller — re-read "
+                    "with `sdlc-tool stage-query`.",
                     file=sys.stderr,
                 )
                 return {
@@ -598,9 +607,13 @@ def _write_marker_impl(
                     ),
                 )
             except ValueError as e:
+                # #2740: scoped to the marker write, for the same reason as the
+                # start_stage site above.
                 print(
                     f"[ERROR] STAGE_RAN_NOT_SKIPPABLE: skip_stage({stage}) refused for "
-                    f"issue #{issue_number}: {e} State NOT persisted.",
+                    f"issue #{issue_number}: {e} Marker write refused; other state may "
+                    "already have been persisted by the caller — re-read with "
+                    "`sdlc-tool stage-query`.",
                     file=sys.stderr,
                 )
                 return {
@@ -713,10 +726,18 @@ def _write_marker_impl(
                 try:
                     sm._backfill_predecessors(stage)
                 except ValueError as e:
+                    # #2740: the site the issue reports. On the `finalize`
+                    # path the verdict and its head SHA are ALREADY durable
+                    # when this fires — only the marker is missing — so the
+                    # old non-persistence claim cost a fresh investigation
+                    # every time it printed. `finalize` re-narrates this
+                    # accurately for its own callers; here we claim only what
+                    # this function did.
                     print(
                         f"[ERROR] STATE_MACHINE_REJECTED: predecessor backfill for "
                         f"{stage} refused for issue #{issue_number}: {e} "
-                        "State NOT persisted.",
+                        "Marker write refused; other state may already have been "
+                        "persisted by the caller — re-read with `sdlc-tool stage-query`.",
                         file=sys.stderr,
                     )
                     return {
@@ -966,10 +987,18 @@ def main() -> None:
             # A clear stderr diagnostic so a forked sub-skill / operator sees
             # the genuine writeback failure instead of a silent no-op
             # (mirrors sdlc_dispatch's loud-failure path).
+            # #2740: the fourth site, and the one outside write_marker. It sits
+            # after `maybe_heal_after_write` may have retried the write, so it
+            # is an overclaim for the same reason as the three inside. Kept
+            # (not deleted) though currently unreachable — every error key
+            # write_marker returns is in _DIAGNOSED_ERRORS — because it is what
+            # a bare `sdlc-tool stage-marker` caller would see the moment an
+            # undiagnosed error key is added.
             print(
                 f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
                 "(lease resolved, but the state-machine write was rejected or "
-                "raised). State NOT persisted.",
+                "raised). Persisted state is INDETERMINATE; re-read with "
+                "`sdlc-tool stage-query`.",
                 file=sys.stderr,
             )
     elif result.get("status") == "degraded":

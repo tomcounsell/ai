@@ -549,10 +549,19 @@ def finalize(
             stage="REVIEW", status="completed", issue_number=issue_number, run_id=run_id
         )
         if marker_exit != 0:
+            # #2740: this branch is the ONLY layer that knows both facts --
+            # `record_verdict` committed above and `write_marker` refused here.
+            # `write_marker` cannot see the first and so must not narrate it;
+            # this must, because the reader is usually an agent that would
+            # otherwise need a separate `stage-query` to learn what landed.
+            # Named reason stays first: tooling and the /do-sdlc supervisor
+            # match on it. One remedy, not an inventory of fields (Risk 4).
             reason = marker_result.get("reason", "REVIEW_MARKER_INCOMPLETE")
             raise ReviewFinalizeError(
-                f"{reason}: REVIEW completion marker write failed for issue "
-                f"#{issue_number}: {marker_result}"
+                f"{reason}: the REVIEW verdict and its head SHA ARE persisted for "
+                f"issue #{issue_number}; only the REVIEW completion marker was not "
+                f"written: {marker_result}. Re-running this identical finalize "
+                f"command is idempotent and will land the marker."
             )
 
     result = check_review_persistence(pr, issue_number, run_id=run_id)

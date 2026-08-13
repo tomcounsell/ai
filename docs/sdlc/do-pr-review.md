@@ -84,29 +84,37 @@ local-pipeline stall. Always pass `--issue-number` (quoted) — it is the
 authoritative session selector:
 
 ```bash
-# ONE atomic call replaces the old 3-call sequence (verdict record +
-# stage-marker completed + verdict get readback). `finalize` computes the PR
-# head SHA itself, records the verdict with the `REVIEW_CONTEXT head_sha=`
-# trailer appended (idempotent if already present), writes the REVIEW
-# `completed` marker on the APPROVED path, and reads all three back —
-# it cannot partially complete.
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+# ONE call replaces the old 3-call sequence (verdict record + stage-marker
+# completed + verdict get readback). `finalize` computes the PR head SHA
+# itself, records the bare verdict token plus the SHA in its own `head_sha`
+# record field (#2769), writes the REVIEW `completed` marker on the APPROVED
+# path, and reads all three back.
+#
+# --blocker-count / --tech-debt-count take integer COUNTS, not findings text.
+# Findings go in the review posted to the PR. Omit for "not assessed"; 0 means
+# "assessed, none found".
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
 # Findings:
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blocker-count $BLOCKERS --tech-debt-count $TECH_DEBT --run-id "$RUN_ID"
 # Preflight short-circuits:
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "BLOCKED_ON_CONFLICT" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "PR_CLOSED" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
 # Multi-judge: same single finalize call after agent.sdlc_review_consensus.compute_consensus
 # (single-writer invariant preserved).
 ```
 
-`finalize` is **atomic and self-verifying**: it exits **non-zero with a named
-error** (`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`,
-`REVIEW_MARKER_INCOMPLETE`) if any of the three writes (verdict, trailer,
-marker) fails to read back — never a silent partial write. **Treat a non-zero
-exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block.** No
-separate `verdict get` readback call is needed — `finalize` already verifies
-persistence before returning 0.
+`finalize` is **self-verifying, and it is honest about partial state rather
+than free of it** (#2740). It exits **non-zero with a named error**
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
+if any of the three writes fails to read back. It is deliberately **not**
+transactional: the verdict is written before the marker is attempted (the
+ordering #2415/#2577 hardened the read sites around), so the marker write can be
+refused after the verdict has already landed durably. When that happens the
+error says so explicitly — it names the verdict as persisted and the marker as
+missing, and re-running the identical command is idempotent. **Treat a non-zero
+exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block** — but
+do not assume nothing was written. No separate `verdict get` readback call is
+needed; `finalize` already verifies persistence before returning 0.
 
 ### PRs with no plan document
 

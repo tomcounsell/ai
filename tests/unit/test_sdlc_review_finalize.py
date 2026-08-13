@@ -980,3 +980,87 @@ class TestCheckReviewPersistenceHeadShaShapes:
             result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
         assert result["ok"] is False
         assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+
+# ---------------------------------------------------------------------------
+# Issue #2740: the refusal must report what actually landed.
+#
+# `finalize` is a composite -- record_verdict commits, THEN write_marker runs.
+# When the marker write is refused, `write_marker` is locally correct that IT
+# wrote nothing, but it cannot see the verdict its caller already committed.
+# On the observed instance (issue #2711 / PR #2728) a reviewing agent read
+# "State NOT persisted", concluded finalize had lost its atomicity guarantee,
+# and nearly filed a duplicate issue. A wrong message on a refusal path costs
+# an investigation every time it fires.
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerRefusalReportsWhatPersisted:
+    def _refuse_marker(self, reason="STATE_MACHINE_REJECTED"):
+        return patch(
+            "tools.sdlc_stage_marker.write_marker",
+            return_value=(
+                {"error": reason.lower(), "reason": reason},
+                1,
+            ),
+        )
+
+    def _run_and_capture(self, reason="STATE_MACHINE_REJECTED"):
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch("tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}),
+            self._refuse_marker(reason),
+        ):
+            with pytest.raises(ReviewFinalizeError) as excinfo:
+                finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
+        return str(excinfo.value)
+
+    _patch_lease_ok = TestFinalize._patch_lease_ok
+
+    def test_message_does_not_claim_the_state_was_not_persisted(self):
+        message = self._run_and_capture()
+        assert "State NOT persisted" not in message
+        assert "NOT persisted" not in message
+
+    def test_message_states_the_verdict_did_persist(self):
+        """AC2: a reader must be able to determine what landed WITHOUT running
+        a separate stage-query."""
+        message = self._run_and_capture()
+        assert "ARE persisted" in message
+        assert "verdict" in message.lower()
+
+    def test_message_names_only_the_marker_as_missing(self):
+        message = self._run_and_capture()
+        assert "marker was not" in message.lower()
+
+    def test_message_names_the_idempotent_rerun_remedy(self):
+        """Risk 4: exactly ONE remedy, so the message stays skimmable."""
+        message = self._run_and_capture()
+        assert "idempotent" in message.lower()
+
+    def test_named_reason_stays_the_prefix(self):
+        """The /do-sdlc supervisor and existing tests match on the leading
+        taxon -- the rewording must not move it."""
+        for reason in ("STATE_MACHINE_REJECTED", "ISSUE_LOCKED", "REVIEW_MARKER_INCOMPLETE"):
+            assert self._run_and_capture(reason).startswith(f"{reason}: ")
+
+
+def test_no_module_in_tools_or_agent_claims_state_not_persisted():
+    """#2740 AC3 / the Verification anti-criterion, as a test rather than a
+    one-off grep: the overclaiming sentence is gone from all FOUR sites --
+    three inside `write_marker` plus `main()`'s non-zero-exit wrapper."""
+    import pathlib
+    import subprocess
+
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    hits = subprocess.run(
+        ["grep", "-rn", "State NOT persisted", "tools/", "agent/"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    assert hits.returncode == 1, f"overclaim survives at:\n{hits.stdout}"

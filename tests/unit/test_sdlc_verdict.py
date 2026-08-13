@@ -1247,3 +1247,71 @@ class TestReviewTrailerPresentReadsBothShapes:
             patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
         ):
             assert _review_trailer_present(2769) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #2767(a): `--blocker-count` / `--tech-debt-count`.
+#
+# The old bare `--blockers` had `type=int` and NO help text, on a call
+# /do-pr-review declares "mandatory and terminal". An agent passing findings
+# prose got `invalid int value:` and a hard STOP, leaving the review posted to
+# GitHub but absent from the ledger (observed on the popoto #537 pipeline).
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeCountFlagSpellings:
+    def _parse(self, argv):
+        from tools.sdlc_verdict import _build_parser
+
+        return _build_parser().parse_args(argv)
+
+    _BASE = ["finalize", "--pr", "1", "--issue-number", "42", "--verdict", "APPROVED"]
+
+    def test_new_spellings_parse(self):
+        args = self._parse(self._BASE + ["--blocker-count", "3", "--tech-debt-count", "5"])
+        assert args.blockers == 3
+        assert args.tech_debt == 5
+
+    def test_old_spellings_still_parse_to_the_same_dest(self):
+        """The cross-machine propagation window: a machine that has not yet run
+        /update still emits the old spellings against a merged sdlc-tool."""
+        args = self._parse(self._BASE + ["--blockers", "3", "--tech-debt", "5"])
+        assert args.blockers == 3
+        assert args.tech_debt == 5
+
+    def test_spellings_are_one_argument_not_two(self):
+        """Aliases on a single `add_argument`, so the last one wins rather than
+        two independent dests drifting apart."""
+        args = self._parse(self._BASE + ["--blockers", "3", "--blocker-count", "9"])
+        assert args.blockers == 9
+
+    def test_zero_survives_the_rename_and_is_not_conflated_with_absent(self):
+        """`0` means 'assessed, none found'; absent means 'not assessed'. The
+        `default=None` distinction must survive (record_verdict writes the key
+        only when the value is not None)."""
+        assert self._parse(self._BASE + ["--blocker-count", "0"]).blockers == 0
+        assert self._parse(self._BASE).blockers is None
+        assert self._parse(self._BASE).tech_debt is None
+
+    def test_prose_is_still_a_loud_failure_never_a_derived_count(self):
+        """Deliberately unchanged: a silently-wrong count corrupts the ledger,
+        which is strictly worse than the loud failure."""
+        with pytest.raises(SystemExit):
+            self._parse(self._BASE + ["--blocker-count", "1) mkdocs build --strict fails"])
+
+    def test_help_text_says_count_and_says_not_findings_text(self):
+        import contextlib
+        import io
+
+        from tools.sdlc_verdict import _build_parser
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+            _build_parser().parse_args(["finalize", "--help"])
+        # argparse hard-wraps help bodies, so compare against whitespace-
+        # normalized text rather than the raw column layout.
+        out = " ".join(buf.getvalue().split())
+        assert "--blocker-count" in out and "--tech-debt-count" in out
+        assert "--blockers" in out and "--tech-debt" in out
+        assert "COUNT" in out
+        assert "NOT the findings text" in out

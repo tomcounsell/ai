@@ -238,6 +238,13 @@ class TestWriteMarker:
         err = capsys.readouterr().err
         assert "STATE_MACHINE_REJECTED" in err
         assert "predecessor not completed" in err
+        # #2740: the taxon and the ValueError text still reach the operator
+        # (both above), but the message no longer claims non-persistence.
+        # write_marker cannot see writes its CALLER already committed --
+        # `finalize` records the verdict one step before calling it -- so this
+        # sentence was false on exactly the path that fires most often.
+        assert "State NOT persisted" not in err
+        assert "stage-query" in err
 
     def test_fresh_plan_in_progress_backfills_and_persists(self):
         """First-write-at-PLAN acceptance (#1916): a fresh ledger (ISSUE=ready)
