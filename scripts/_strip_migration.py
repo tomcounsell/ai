@@ -53,8 +53,10 @@ Safety properties:
   ``EXPIRE`` with ``Meta.ttl`` (popoto ``base.py:1186-1190``), so the 30-day
   backstop only fires on a record nothing writes for 30 days. Any record that
   keeps being written holds a perpetually-refreshed TTL -- true of
-  ``is_ledger=True`` SDLC anchors, which are re-saved continuously while their
-  pipeline is open. The cleanup pass above holds every healthy record's TTL at
+  ``is_ledger=True`` SDLC anchors, whose run-lock bind writes them on every
+  stage dispatch while their pipeline is open. That bind is a two-field
+  partial save since #2660, which is enough: popoto re-issues ``EXPIRE`` on
+  the ``update_fields`` path too. The cleanup pass above holds every healthy record's TTL at
   the ceiling too, but deliberately and without a field write, via
   ``AgentSession.refresh_ttl()`` (issue #2698 owns the decision to stop). A
   deferred row therefore keeps its stale fields until a later run finds it

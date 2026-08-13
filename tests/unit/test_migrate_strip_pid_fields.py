@@ -556,7 +556,13 @@ class TestDocstringCorrections:
         assert "cleanup_corrupted_agent_sessions" in (shared.__doc__ or "")
 
     def test_the_ttl_ageout_claim_is_corrected(self):
-        """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
+        """Deferred ``is_ledger`` rows keep a refreshed TTL, so they never age out.
+
+        Their run-lock bind is a two-field partial save since #2660, not the
+        whole-row re-save this bullet used to describe. The conclusion is
+        unchanged because popoto re-issues ``EXPIRE`` on the ``update_fields``
+        path as well (``base.py:1186-1188``).
+        """
         assert "Deferred rows do not age out" in (shared.__doc__ or "")
 
     def test_no_delegate_duplicates_the_narrative(self):
