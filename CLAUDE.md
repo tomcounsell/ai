@@ -25,6 +25,8 @@ Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_
 
 When creating AgentSessions manually to test worker or queue behavior, use a recognizable `project_key` prefix (`test-`, `dbg-`) and delete them afterward via the ORM, scoped by that key. Never run bulk operations unscoped.
 
+Never point a debug script at a test db with `os.environ.setdefault("REDIS_URL", ...)`. `setdefault` is a no-op when the key is already set, and this shell always carries a production `REDIS_URL`, so a script that means to "default" to a test db silently keeps the production one instead. Assign `REDIS_URL` explicitly and assert the resolved db number before any write. Every Python process started inside a repo venv also carries an ambient flush guard (`tools/redis_flush_guard.py`, #2645) that raises `RuntimeError` on `.flushdb()` against db 0 or any `.flushall()`; that error means the client resolved to production, not that the guard is malfunctioning. For a script that genuinely needs a test db, follow `tests/db_claim.py`'s `redis_test_url()` / `tests/conftest.py`'s `_redis_test_db_num()` idiom, which matches the per-process claimed db the `redis_test_db` fixture already picked. See [`docs/features/redis-flush-hardening.md`](docs/features/redis-flush-hardening.md).
+
 ## Development Principles
 
 1. **NO LEGACY CODE TOLERANCE** — overwrite, replace, delete. No commented-out code, no "temporary" bridges, no half-migrations, no parallel-run migrations, no historical artifacts in docs. Describe only the new status quo.

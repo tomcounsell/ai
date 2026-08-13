@@ -1236,6 +1236,32 @@ def provision_worktree_venv(worktree_dir: Path) -> bool:
         return False
 
     logger.info("Provisioned isolated worktree venv: %s", venv_dir)
+
+    # Ambient production-Redis flush guard (#2645): install the guard's
+    # `.pth` shim into this venv so it is armed before the worktree's first
+    # `python` call, rather than waiting for the next `/update`. This
+    # covers `.worktrees/{slug}/` only -- `.claude/worktrees/{agent}/` is
+    # harness-created and reaches neither `/update` nor this bootstrap
+    # path; it is covered instead by `tools/redis_flush_guard.py::arm()`'s
+    # own self-heal (D2b) via the `tools/__init__.py` trigger (D2b-i).
+    # Non-fatal: a failed install here must never fail provisioning itself.
+    try:
+        from scripts.update.redis_flush_guard_pth import install_into
+
+        rfg_result = install_into(venv_dir)
+        if rfg_result.get("status") == "skipped":
+            logger.warning(
+                "[worktree-venv-provision-failed] redis flush guard not installed into %s: %s",
+                venv_dir,
+                rfg_result.get("reason"),
+            )
+    except Exception as e:  # never let the guard installer fail provisioning
+        logger.warning(
+            "[worktree-venv-provision-failed] redis flush guard install raised for %s: %s",
+            venv_dir,
+            e,
+        )
+
     return True
 
 

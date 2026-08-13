@@ -110,6 +110,17 @@ def configure_resilient_redis() -> None:
     db_str = (parsed.path or "/0").lstrip("/")
     db = int(db_str) if db_str.isdigit() else 0
     password = parsed.password or None
+    # D9 (#2645, BLOCKER fix): client half of Layer 2, inert until the #2661
+    # REDIS_URL rotation. Once rotated to redis://valor-app:<pw>@host/0, popoto
+    # must authenticate AS valor-app, not default -- default is deliberately
+    # left nopass/flushdb-capable (D3), so without this a one-argument
+    # AUTH <pw> either targets default (defeating Layer 2 for the exact
+    # client that caused the incident) or errors outright (nopass rejects a
+    # password, taking bridge/worker/dashboard down fleet-wide). Removing
+    # this line re-breaks popoto's auth at rotation time. Pre-rotation,
+    # parsed.username is always None here, and username=None is redis-py's
+    # own default, so this is byte-identical to today's behavior until #2661.
+    username = parsed.username or None
 
     retry = Retry(
         ExponentialBackoff(cap=10, base=1),
@@ -123,6 +134,7 @@ def configure_resilient_redis() -> None:
             host=host,
             port=port,
             db=db,
+            username=username,
             password=password,
             retry=retry,
             retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],

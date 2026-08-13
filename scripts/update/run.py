@@ -159,6 +159,13 @@ class UpdateResult:
     ffmpeg_result: kokoro.FfmpegResult | None = None
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
+    # Untyped (`object`, not the concrete dataclass) so `run.py` never needs
+    # a module-level import of `scripts.update.redis_flush_guard_pth` or
+    # `scripts.update.redis_acl` -- both steps below import lazily so a
+    # missing module degrades to a warning, never an ImportError at
+    # `/update` start (#2645).
+    redis_flush_guard_install_results: object | None = None
+    redis_acl_result: object | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
@@ -1075,6 +1082,47 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             log("No dependency changes, skipping sync", v)
 
+    # Step 3.05: Install the ambient production-Redis flush guard's `.pth`
+    # shim into every repo venv (#2645). Unconditional and deliberately
+    # OUTSIDE the `if config.do_dep_sync:` block above: Step 3 is
+    # CONDITIONAL (only runs when dep files changed or `--force-dep-sync`),
+    # so gating this step on it would leave a venv `uv sync` just created
+    # unguarded until the next `/update` that happens to touch a dependency
+    # file. Placed AFTER dep sync (not before) precisely so a venv `uv sync`
+    # created or recreated moments ago in THIS run is guarded within the
+    # same run -- `uv sync` is what creates `.venv` when absent
+    # (scripts/update/deps.py::sync_dependencies), so installing before it
+    # would find "no venv yet" and skip, leaving the freshly created venv
+    # unguarded until the next `/update` (Risk 1). Idempotent + non-fatal:
+    # log, warn, continue -- same contract as Step 3.13/3.14.
+    log("Installing Redis flush-guard .pth into repo venvs...", v)
+    try:
+        from scripts.update import redis_flush_guard_pth
+
+        result.redis_flush_guard_install_results = redis_flush_guard_pth.install_fleet(project_dir)
+        for venv_result in result.redis_flush_guard_install_results:
+            status = venv_result.get("status")
+            venv_label = venv_result.get("venv")
+            if status in ("installed", "unchanged"):
+                log(f"Redis flush guard: {venv_label} — {status}", v)
+            else:
+                log(
+                    f"WARN: Redis flush guard: {venv_label} — skipped "
+                    f"({venv_result.get('reason')})",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}"
+                )
+    except Exception as _rfg_exc:
+        log(
+            f"WARN: Redis flush guard install step failed unexpectedly: {_rfg_exc}",
+            v,
+            always=True,
+        )
+        result.warnings.append(f"Redis flush guard install: unexpected error: {_rfg_exc}")
+
     # Step 3.5: Auto-bump critical deps from PyPI.
     #
     # Only the lockfile-maintainer machine (see Step 2.6) runs auto-bump.
@@ -1361,6 +1409,51 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
         result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
+
+    # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
+    # Immediately after Step 3.13 durability, before Step 3.14 replication.
+    # Calls apply_redis_acl() with NO ARGUMENTS -- never apply=True, never a
+    # forwarded params.apply, never any global apply flag. `/update` must
+    # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
+    # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
+    # mutation landing silently in an unrelated PR is exactly the failure
+    # Risk 8 exists to prevent. A regression test asserts this call site
+    # passes no `apply` argument, so keep the call literally
+    # `apply_redis_acl()`. Imported lazily so a missing module (this file
+    # can land before scripts/update/redis_acl.py does) degrades to a
+    # logged skip, never an ImportError at `/update` start. Same non-fatal
+    # contract as 3.13/3.14: log, warn, continue.
+    log("Checking Redis ACL drift (report-only)...", v)
+    try:
+        from scripts.update import redis_acl
+
+        result.redis_acl_result = redis_acl.apply_redis_acl()
+        ra = result.redis_acl_result
+        if ra.success:
+            if ra.drift:
+                log(
+                    "Redis ACL: drift detected — planned commands: "
+                    + "; ".join(ra.planned_commands),
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "Redis ACL drift detected — see docs/features/redis-flush-hardening.md "
+                    "for the apply runbook"
+                )
+            else:
+                log("Redis ACL: no drift", v)
+            if ra.warning:
+                log(f"WARN: Redis ACL: {ra.warning}", v, always=True)
+                result.warnings.append(f"Redis ACL: {ra.warning}")
+        else:
+            log(f"WARN: Redis ACL check: {ra.error}", v, always=True)
+            result.warnings.append(f"Redis ACL check: {ra.error}")
+    except ImportError:
+        log("Redis ACL: module not present yet, skipping", v)
+    except Exception as _acl_exc:
+        log(f"WARN: Redis ACL step failed unexpectedly: {_acl_exc}", v, always=True)
+        result.warnings.append(f"Redis ACL: unexpected error: {_acl_exc}")
 
     # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
     # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this

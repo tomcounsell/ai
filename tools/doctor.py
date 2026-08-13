@@ -885,6 +885,154 @@ def _check_redis_replication_health() -> CheckResult:
     )
 
 
+def _check_redis_flush_guard() -> CheckResult:
+    """Assert the ambient production-Redis flush guard is LIVE in every venv
+    on this machine (#2645, Risk 1).
+
+    This is a **subprocess-per-venv liveness probe**, never a ``test -f`` on
+    the ``.pth``. The boot shim swallows every exception (D2 -- an uncaught
+    startup exception would print a traceback into every ``python -c``,
+    launchd service, and hook invocation), so a broken install looks
+    identical to a working one from the filesystem alone -- exactly the
+    ``sitecustomize``-style silent-inert failure this check exists to
+    catch. It must also never run in-process: ``getattr(redis.Redis.flushdb,
+    "_prod_flush_guarded", False)`` reads False under pytest even when the
+    guard is armed, because ``tests/conftest.py``'s own wrapper does not
+    carry the sentinel attribute forward (D6a) -- only a freshly spawned
+    interpreter tells the truth.
+
+    Follows ``_check_worktree_interpreters`` for the venv-iteration pattern
+    and ``CheckResult`` shape.
+    """
+    name = "redis_flush_guard"
+    category = "Services"
+    try:
+        from agent.worktree_manager import main_checkout_venv
+        from scripts.update.redis_flush_guard_pth import discover_venvs
+
+        main_venv = main_checkout_venv(PROJECT_DIR)
+        checkout = main_venv.parent if main_venv else PROJECT_DIR
+        candidates = discover_venvs(checkout)
+
+        probe = 'import redis; print(getattr(redis.Redis.flushdb, "_prod_flush_guarded", False))'
+
+        unguarded: list[str] = []
+        checked = 0
+        for venv_dir in candidates:
+            python_bin = venv_dir / "bin" / "python"
+            if not python_bin.is_file():
+                continue
+            checked += 1
+            try:
+                proc = subprocess.run(
+                    [str(python_bin), "-c", probe],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.subprocess_default_s,
+                )
+                live = proc.returncode == 0 and proc.stdout.strip() == "True"
+            except Exception:
+                live = False
+            if not live:
+                unguarded.append(str(venv_dir))
+
+        if checked == 0:
+            return CheckResult(
+                name=name,
+                category=category,
+                passed=True,
+                message="no venvs discovered to check",
+            )
+
+        if unguarded:
+            # Per-venv remediation, not a bare `/update` -- an operator
+            # holding one unhealed harness worktree can heal just that one.
+            remediation = "; ".join(
+                f"python -m scripts.update.redis_flush_guard_pth --venv {v}" for v in unguarded
+            )
+            return CheckResult(
+                name=name,
+                category=category,
+                passed=False,
+                message=f"{len(unguarded)}/{checked} venv(s) unguarded: {', '.join(unguarded)}",
+                fix=remediation,
+            )
+
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"{checked} venv(s) guarded (redis.Redis.flushdb is live-patched)",
+        )
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"redis_flush_guard check failed: {e}",
+            fix="Investigate scripts/update/redis_flush_guard_pth.py",
+        )
+
+
+def _check_redis_acl() -> CheckResult:
+    """Report Redis ACL drift against the target ``valor-app`` rule set (#2645, D8).
+
+    Report-only, mirroring ``/update`` Step 3.135. ``/update`` cannot fix ACL
+    drift by design -- the apply is a human-signed runbook step -- so the
+    remediation here is the runbook, never ``/update``. Imports
+    ``scripts.update.redis_acl`` lazily: a missing module (this check can
+    land before that planner does) or an unreachable Redis is a non-fatal
+    skip, never a crash.
+    """
+    name = "redis_acl"
+    category = "Services"
+    try:
+        from scripts.update.redis_acl import apply_redis_acl
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"redis_acl planner not available yet: {e}",
+        )
+
+    try:
+        acl_result = apply_redis_acl()
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"redis_acl check could not run: {e}",
+        )
+
+    if not acl_result.success:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"redis_acl check skipped: {acl_result.error}",
+        )
+
+    if acl_result.drift:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=(
+                f"Redis ACL drift detected ({len(acl_result.planned_commands)} command(s) planned)"
+            ),
+            fix="See the apply runbook: docs/features/redis-flush-hardening.md",
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message="Redis ACL matches target rule set (no drift)",
+    )
+
+
 def _check_session_archive_freshness() -> CheckResult:
     """Check the AgentSession SQLite secondary store (data/session_archive.db).
 
@@ -1684,6 +1832,8 @@ def get_checks(
         _check_redis,
         _check_redis_durability,
         _check_redis_replication_health,
+        _check_redis_flush_guard,
+        _check_redis_acl,
         _check_session_archive_freshness,
         _check_agentsession_index_drift,
         _check_knowledge_zero_chunk_documents,
