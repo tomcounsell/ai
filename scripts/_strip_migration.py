@@ -31,12 +31,13 @@ Safety properties:
 - **Atomicity, not quiescence**: only records whose ``status`` is in
   ``models.session_lifecycle.TERMINAL_STATUSES`` are rewritten, but terminal
   rows are **not** quiescent.
-  ``agent.session_health.cleanup_corrupted_agent_sessions`` re-saves every
-  hydrated record -- terminal ones included -- as its "no-op save" corruption
-  probe, and ``/update`` invokes it at Step 5.5, as does worker startup and the
-  ``agent-session-cleanup`` reflection. Because ``AgentSession.save()``
-  restamps ``updated_at``, that pass moves every record's timestamp in one batch
-  at ``/update`` time. So the safety property here is **not** "nobody else
+  ``agent.session_health.cleanup_corrupted_agent_sessions`` sweeps every
+  hydrated record -- terminal ones included -- and ``/update`` invokes it at
+  Step 5.5, as does worker startup and the ``agent-session-cleanup``
+  reflection. That sweep classifies with ``is_valid()`` and issues only a
+  targeted ``EXPIRE`` keepalive per healthy row, so it writes no field value
+  and moves no record's ``updated_at`` (issue #2660). Other writers may still
+  touch a terminal row, so the safety property here is **not** "nobody else
   writes terminal rows"; it is that the delete + recreate is queued on ONE
   transactional Redis pipeline (MULTI/EXEC), so a crash or an interleaved
   writer can never lose a record. A concurrent write that lands between the
