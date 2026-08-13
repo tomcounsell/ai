@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HOOK = REPO_ROOT / ".claude" / "hooks" / "post_tool_use.py"
 
@@ -95,6 +97,7 @@ def _run_hook(event: dict) -> subprocess.CompletedProcess:
         input=json.dumps(event),
         text=True,
         capture_output=True,
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
 
 
@@ -137,6 +140,7 @@ def test_counter_only_call_does_not_import_popoto(clean_session):
         input=json.dumps(event),
         text=True,
         capture_output=True,
+        env=subprocess_env(project_root=str(REPO_ROOT)),
     )
     assert proc.returncode == 0, proc.stderr
     offenders = _heavy_import_offenders(proc.stderr)

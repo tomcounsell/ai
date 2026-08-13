@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from tests.db_claim import subprocess_env
+
 # A command line for the launchd worker joins to `<python> -m worker`. Require
 # BOTH a python-ish executable AND the `-m worker` token so an unrelated
 # process that merely mentions "worker" never trips the guard. `python -m

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).parent.parent.parent
 PYTHON = sys.executable
 

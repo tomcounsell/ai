@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent.session_telemetry import _get_telemetry_dir
+from tests.db_claim import subprocess_env
 
 # ---------------------------------------------------------------------------
 # Helpers

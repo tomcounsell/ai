@@ -10,10 +10,14 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
 from tools.memory_search import forget, save, timeline
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Unique project key for test isolation
 TEST_PROJECT_KEY = f"test-timeline-{uuid.uuid4().hex[:8]}"
@@ -230,6 +234,7 @@ class TestTimelineCLI:
             [sys.executable, "-m", "tools.memory_search", "timeline", "--help"],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         assert "timeline" in result.stdout.lower()
@@ -250,6 +255,7 @@ class TestTimelineCLI:
             ],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 
 @dataclass
 class TestMessage:

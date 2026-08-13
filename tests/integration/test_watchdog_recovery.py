@@ -65,6 +65,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from monitoring.worker_watchdog import HEARTBEAT_THRESHOLD, _handle_missing_worker, check, recover
+from tests.db_claim import subprocess_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.macos_only]
 
