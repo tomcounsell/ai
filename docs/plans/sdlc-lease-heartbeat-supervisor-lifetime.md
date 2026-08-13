@@ -1232,6 +1232,37 @@ and no longer claims ≤2h unconditionally.
 
 **Structural checks:** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive); task numbering PASS (1-11 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (20 of 24 exist; the 4 absent are the modules this plan creates); prerequisites PASS (psutil, Redis, `sdlc-tool` all verified live); cross-references PASS except the two gaps captured above. Plan file:line claims re-verified against `f614124110`: `_maybe_launch_lease_heartbeat` at `:143`, `MAX_LIFETIME_SECONDS` at `:79`, the single call site at `:576`, and `release_issue_lock` at `:1326` all hold.
 
+### Round 2 — READY TO BUILD (with concerns)
+
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 4 concerns. FULL war room
+(force-FULL: the plan edits `.claude/skills-global/`), roster 3/3 complete and grounded.
+
+**Round-1 disposition: all five findings verified closed.** The Task 0 `renew_only=True`
++ Lua CAS fix was independently confirmed against `models/session_lifecycle.py` — the
+`SET NX` at `:1222` and the `raw is None` branch at `:1230` are both real minting paths
+and both are structurally removed under `renew_only`. The tool-layer release leg is a
+genuine mechanism rather than the round-1 prose barrier, and correctly cites the #1654
+precedent it avoids. The run-intent beacon is deleted from every operative section
+(grep-verified: zero `runintent` / `touch_run_intent` / `read_run_intent` /
+`intent-builder` / `TestIntentStaleness` hits outside this history table). The
+Verification anti-criteria were re-run live in both the fixed and the round-1 broken
+form and behave exactly as the plan claims. The No-Gos per-path bound table is
+internally consistent with Risk 1, Risk 4, and the Success Criteria, and no surviving
+sentence outside this history table still asserts the retracted unconditional ≤2h claim.
+
+The four concerns below are all implementation-precision gaps, not design defects. None
+blocks the build; each carries an Implementation Note the revision pass embeds so the
+builder does not have to re-investigate.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness | L3's "select the bound once at startup" has no sentinel distinguishing "caller explicitly passed `max_lifetime`" from "caller left it default". `supervisor_pid` defaults to `None`, and every existing test calls `run_heartbeat` with an explicit small `max_lifetime` and no `supervisor_pid` — so the literal L3 rule silently replaces the caller's value with the 5400s unsupervised bound. Traced concretely: `test_renews_when_self_owned_payload_pid_is_dead` feeds a 3-value injected clock sized for `max_lifetime=2`; with the deadline bumped to 5400 the loop survives and a 4th `next(ticks)` raises `StopIteration` — breaking a test the plan's own Test Impact requires to keep passing unchanged. | pending | Give `max_lifetime` the same explicit-vs-default sentinel `interval` already uses: `max_lifetime: int \| None = None` on `run_heartbeat`, resolved internally to `MAX_LIFETIME_SECONDS` or `UNSUPERVISED_MAX_LIFETIME_SECONDS` ONLY when the caller left it unset. This must touch BOTH ends — `main()`'s `parser.add_argument("--max-lifetime", ..., default=MAX_LIFETIME_SECONDS)` must also become `default=None`, or the CLI path never passes `None` either and the sentinel is dead code. |
+| CONCERN | Risk & Robustness | L0's Lua CAS closes the two minting paths inside the function body, but `touch_issue_lock`'s outer `except Exception` handler wraps the ENTIRE body — including the new CAS `EVAL` — and returns `acquired=True, owner_run_id=run_id` on any error regardless of `renew_only`. That is the same "report ownership without holding the key" shape Race 1 is meant to structurally eliminate. A transient Redis blip on the extend call immediately after L1 released the lease tells the heartbeat it still owns the lease for one more tick, and it keeps calling `write_supervised_run_signal` for a lease it does not hold. Neither L0, Task 0, nor the Race 1 writeup mentions this path. | pending | `models/session_lifecycle.py:1310` `except Exception as e:` is the single catch-all for the whole function (acquire, peek, and renewal alike) and the `renew_only` flag is not threaded into it at all. Either add a `renew_only`-keyed branch inside that handler returning `IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)` (fail CLOSED for a renewer, since a renewer minting is the thing being prevented), or state explicitly in the plan why the one-tick self-heal (next peek reads the still-absent key and takes the lease-lost exit) is an accepted residual. Do NOT change the fail-open default for the non-`renew_only` callers — #2446 depends on it. |
+| CONCERN | Scope & Value | The Update System section still reads "the two new Redis keys are plain TTL'd strings that need no migration and self-populate on first use" — an uncorrected round-1 artifact from when L3 minted `session:runintent:{N}`. It directly contradicts Architectural Impact's correct "No new Redis key is introduced". This is the only surviving beacon residue in the document. | pending | Edit the bullet under `## Update System` beginning "**No new dependencies, config files, or migrations.**" — delete the "two new Redis keys" clause outright, or replace it with a statement consistent with zero new keys (the pre-existing `session:issuelock` / `session:supervisedrun` keys are unaffected by the update). Cross-check against the correct wording under `## Architectural Impact`. |
+| CONCERN | History & Consistency | The Documentation checklist omits `docs/features/sdlc-pipeline.md`, whose "Explicit release" bullet attributes lease release solely to `finalize_session` "on EVERY terminal transition" and frames the `orphaned_lock` self-heal as the crash backstop. Spike-3 found `finalize_session` never fires on a `/do-sdlc` supervisor exit (which is why L1 exists), and L2/L3 exist precisely to stop trusting `orphaned_lock`-manufactured freshness — so that doc will read as authoritative while describing the model this plan replaces. | pending | `grep -n "Explicit release" docs/features/sdlc-pipeline.md` locates the bullet. Add it to the Documentation → Feature Documentation checklist and treat it as in-scope for Task 10's `/do-docs` cascade: name the stage-marker MERGE leg and `session-release` alongside `finalize_session`, and soften the `orphaned_lock` self-heal claim per #2620 and this plan. |
+
+**Structural checks (round 2):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive); task numbering PASS (0-11 contiguous); dependencies PASS (all 12 `Depends On` IDs resolve, no cycles); file paths PASS (18 of 21 exist; the 3 absent — `tools/sdlc_session_release.py`, `tests/unit/test_sdlc_session_release.py`, `tools/sdlc_supervisor_identity.py` — are modules this plan creates); prerequisites PASS (psutil importable, Redis reachable via Popoto, `sdlc-tool` on PATH — all re-run live); cross-references PASS except the Update System contradiction captured above. Every round-2 file:line claim about `touch_issue_lock`, the heartbeat loop, `_maybe_launch_lease_heartbeat`, `_write_marker_impl`'s idempotent branch, `_sdlc_run_identity.py`'s terminal guard, and `scripts/sdlc-tool::ALLOWED_SUBCOMMANDS` was re-verified against the working checkout and holds.
+
 ---
 
 ## Open Questions
