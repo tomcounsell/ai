@@ -624,12 +624,12 @@ read absorbs it.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No promise API survives | `grep -rn "add_promise\|remove_promise\|open_promises\|has_open_promises" models/ agent/ bridge/ tools/ worker/ reflections/ --include="*.py" \| grep -v migrations` | exit code 1 |
 | Drafter collision resolved | `grep -rn "expectations" bridge/message_drafter.py bridge/redundancy_filter.py` | exit code 1 |
-| Reconciler registered | `grep -rn "expectation_reconciler" reflections/ \| wc -l` | output > 1 |
-| Migration registered | `grep -c "expectation" scripts/update/migrations.py` | output > 0 |
-| No history deletion (anti-criterion) | `grep -n "\"promises\"\].*=.*\[\]\|del data\[\"promises\"\]" scripts/update/migrations.py models/job.py` | match count == 0 |
-| Spawn chokepoint wired | `grep -c "expectation" tools/valor_session.py` | output > 0 |
-| sweep_to_rest caller survives | `grep -rn "sweep_to_rest()" agent/ reflections/ \| wc -l` | output > 0 |
-| Durability doc updated | `grep -c "obligation primitive" docs/features/durability-model.md` | output > 0 |
+| Reconciler registered | `grep -rq "run_expectation_reconciliation" reflections/` | exit code 0 |
+| Migration registered | `grep -q "expectation" scripts/update/migrations.py` | exit code 0 |
+| No history deletion (anti-criterion) | `grep -n "\"promises\"\].*=.*\[\]\|del data\[\"promises\"\]" scripts/update/migrations.py models/job.py` | exit code 1 |
+| Spawn chokepoint wired | `grep -q "expectation" tools/valor_session.py` | exit code 0 |
+| sweep_to_rest caller survives | `grep -rq "sweep_to_rest()" agent/ reflections/` | exit code 0 |
+| Durability doc updated | `grep -q "obligation primitive" docs/features/durability-model.md` | exit code 0 |
 
 ## Critique Results
 
