@@ -490,7 +490,13 @@ def _acquire_run_lock_and_bind(
         # active_run_id write; best-effort (never raises -- the post-save
         # readback below only asserts active_run_id, tolerating the list write).
         _append_owned_run_id(session, candidate)
-        session.save()
+        # Partial save, deliberately: this bind runs before EVERY ensure_session()
+        # return point, so a stage dispatch that changes nothing would otherwise
+        # restamp updated_at on the whole row -- this is the writer that kept the
+        # #2660 ledger anchors permanently fresh. Only active_run_id and
+        # owned_run_ids actually changed here; a stage that genuinely advances
+        # still refreshes updated_at via its own stage-state write (see #1676).
+        session.save(update_fields=["active_run_id", "owned_run_ids"])
     except Exception as e:
         release_issue_lock(issue_number, candidate)
         logger.debug(

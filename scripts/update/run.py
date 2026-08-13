@@ -193,43 +193,64 @@ RECENT_ACTIVITY_WINDOW = (
 )  # 30 minutes — session considered live if updated_at within this window
 
 
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int, int]:
+def _cleanup_stale_sessions(
+    project_dir: Path, age_minutes: int = 120
+) -> tuple[int, int, int, int, int]:
     """Finalize ``running`` sessions that have no live execution process.
 
-    Authoritative liveness check: the ``(exec_pid, pid_create_time)`` fence. When a
-    session records both halves, :func:`agent.pid_fence.fence_is_live` answers
-    "is the process we spawned still running?" directly, so a fence-live session is
-    skipped regardless of ``updated_at`` age and a fence-dead session is finalized
-    with a reason that says the fence verified it.
+    Liveness ladder, evaluated in this order (every rung below the first is
+    additive: it can only produce a skip, never a finalization):
 
-    Fallback liveness check: ``updated_at`` recency. Rows with no fence — legacy
-    records, and any row where ``pid_create_time`` was never recorded — keep the
-    previous behavior: sessions whose ``updated_at`` is within
-    ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped. Per the legacy-row rule in
-    ``agent/pid_fence.py``, an absent ``create_time`` means "unknown", so these
-    finalizations do not claim that liveness was checked.
-
-    Last-resort check: ``created_at`` age. When ``updated_at`` is None the session
-    falls back to the 120-minute ``created_at`` threshold so that very old sessions
-    created before the heartbeat feature existed are still cleaned up.
-
-    Secondary defense: sessions whose ``chat_id`` has a live entry in
-    ``_active_workers`` are always skipped (in-process invocations only; the registry
-    is empty when the update script runs as a standalone subprocess).
+    1. A live worker in ``_active_workers`` (in-process invocations only) → skip,
+       terminal.
+    2. ``is_ledger`` (#2042 CLI anchor rows, reusing ``agent.session_health._is_ledger``)
+       → skip, terminal, counted as ``skipped_ledger``. Checked before the fence so
+       no later rung can reach a ledger row: a ledger anchor has no subprocess by
+       construction, so the process-liveness reaper below is structurally the
+       wrong owner for it (see #2660, #2677 for the process-less reaper that is).
+    3. The authoritative ``(exec_pid, pid_create_time)`` fence. When a session
+       records both halves, :func:`agent.pid_fence.fence_is_live` answers "is the
+       process we spawned still running?" directly. Fence live → skip, terminal.
+       Fence dead → **does not** ``continue``; it only selects the finalization
+       reason string and falls through to the rungs below. This fall-through is
+       deliberate: a dead fence is strong evidence, but making it terminal would
+       let a session be finalized seconds after spawn, bypassing the 120-minute
+       ``created_at`` floor. The fence ADDS protection; it never subtracts it.
+    4. ``last_heartbeat_at`` recency, within ``RECENT_ACTIVITY_WINDOW`` → skip,
+       terminal, counted as ``skipped_heartbeat``. Written only by the executor's
+       heartbeat loop (T+0 and every 60s tick via
+       ``save(update_fields=["last_heartbeat_at"])``); no maintenance path ever
+       sets it, so it cannot be forged by a sweep. Unparseable/naive/float values
+       fall through to the next rung rather than being read as fresh.
+    5. ``updated_at`` recency, within ``RECENT_ACTIVITY_WINDOW`` → skip, counted as
+       ``skipped_recent``. Rows with no fence and no recent heartbeat — legacy
+       records, and any row where ``pid_create_time`` was never recorded — keep the
+       previous behavior. Per the legacy-row rule in ``agent/pid_fence.py``, an
+       absent ``create_time`` means "unknown", so these finalizations do not claim
+       that liveness was checked. This rung's live consumers are non-ledger rows:
+       the local Claude Code CLI session kept fresh by the PostToolUse hook, and
+       the enqueue window before a session's T+0 heartbeat lands.
+    6. ``created_at`` age ≥ ``age_minutes`` → finalize. Last-resort check for
+       sessions without an ``updated_at`` (created before the heartbeat feature
+       existed).
 
     Terminal sessions (killed/abandoned/failed/completed) are preserved
     for reflections to analyze — reflections handles its own 90-day expiry.
 
     Returns:
-        ``(killed_count, skipped_recent, skipped_fence_live)`` — sessions finalized,
-        sessions skipped on ``updated_at`` recency alone, and sessions skipped
-        because their fence positively resolved to a live process. The last count is
-        reported separately so an operator rolling ``/update`` across the fleet can
-        see the fence gate acting rather than inferring it from a total.
+        ``(killed_count, skipped_recent, skipped_fence_live, skipped_ledger,
+        skipped_heartbeat)`` — sessions finalized, sessions skipped on
+        ``updated_at`` recency alone, sessions skipped because their fence
+        positively resolved to a live process, sessions skipped as non-executable
+        ledger anchors, and sessions skipped on ``last_heartbeat_at`` recency. Each
+        count is reported separately so an operator rolling ``/update`` across the
+        fleet can see which signal drove each skip rather than inferring it from a
+        total.
     """
     import time
 
     from agent.pid_fence import fence_is_live
+    from agent.session_health import _is_ledger
     from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
@@ -252,6 +273,8 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     killed_count = 0
     skipped_recent = 0
     skipped_fence_live = 0
+    skipped_ledger = 0
+    skipped_heartbeat = 0
 
     # pending sessions are never stale — they were never started;
     # "pending" was added in PR #739 by mistake
@@ -264,6 +287,16 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                 worker = active_workers_registry[chat_id]
                 if worker is not None and not worker.done():
                     continue  # live worker exists — do not kill
+
+            # Ledger guard: a #2042 CLI anchor row has no subprocess by
+            # construction, so this process-liveness reaper is structurally the
+            # wrong owner for it. Checked before the fence so no later rung can
+            # reach a ledger row (the #2660 write-authorization fix removed the
+            # forged updated_at restamp that used to mask this gap). Scheduling
+            # the correct issue-lock-based reaper for these rows is #2677.
+            if _is_ledger(s):
+                skipped_ledger += 1
+                continue
 
             # Authoritative liveness check: the (exec_pid, pid_create_time) fence.
             # Checked ahead of recency so a fence-live session is skipped at any age,
@@ -278,6 +311,23 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     skipped_fence_live += 1
                     continue  # the process we spawned is still running
                 fence_verified_dead = True
+                # Deliberately no `continue` here. A dead fence selects the
+                # finalization reason below but still falls through the
+                # remaining rungs — the fence ADDS protection, it never
+                # subtracts it (making it terminal would bypass the
+                # `age_minutes` floor for a session seconds after spawn).
+
+            # last_heartbeat_at recency: written only by the executor's own
+            # heartbeat loop (T+0 and every 60s tick), never by any maintenance
+            # sweep, so it cannot be forged by a probe or a run-lock bind (#2660).
+            # to_unix_ts tolerates naive datetimes, floats, and unparseable
+            # strings by returning None, which falls through to the next rung.
+            heartbeat_ts = to_unix_ts(getattr(s, "last_heartbeat_at", None))
+            if heartbeat_ts is not None:
+                heartbeat_recency = now - heartbeat_ts
+                if heartbeat_recency < RECENT_ACTIVITY_WINDOW:
+                    skipped_heartbeat += 1
+                    continue  # recent heartbeat — treat as live
 
             # Fallback liveness check: updated_at recency
             updated_ts = to_unix_ts(getattr(s, "updated_at", None))
@@ -326,7 +376,7 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     exc,
                 )
 
-    return killed_count, skipped_recent, skipped_fence_live
+    return killed_count, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat
 
 
 def _cleanup_duplicate_sessions(project_dir: Path) -> int:
@@ -2074,13 +2124,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 
     try:
-        stale_killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions(project_dir)
+        stale_killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat = (
+            _cleanup_stale_sessions(project_dir)
+        )
         if stale_killed > 0:
             log(f"Cleaned up {stale_killed} stale session(s)", v)
         if skipped_fence_live > 0:
             log(f"Skipped {skipped_fence_live} live session(s) (fence verified)", v)
+        if skipped_ledger > 0:
+            log(f"Skipped {skipped_ledger} ledger anchor session(s) (non-executable)", v)
+        if skipped_heartbeat > 0:
+            log(f"Skipped {skipped_heartbeat} live session(s) (recent heartbeat)", v)
         if skipped_recent > 0:
-            log(f"Skipped {skipped_recent} live session(s) (recent heartbeat)", v)
+            log(f"Skipped {skipped_recent} live session(s) (recent updated_at)", v)
     except Exception as e:
         log(f"WARN: Session cleanup failed: {e}", v)
 
