@@ -54,7 +54,9 @@ def target_from_hook_input(hook_input: dict) -> str | None:
     tool_input = hook_input.get("tool_input")
     if not isinstance(tool_input, dict):
         return None
-    # The `or` already collapses an empty string to the next candidate, and
-    # then to None — so an empty path can never reach the caller as a target.
+    # The `or` collapses an empty `file_path` to the next candidate, but not to
+    # None: `"" or ""` is `""`, so a payload carrying both keys empty would hand
+    # back an empty string. The explicit `and path` is what makes the documented
+    # contract — empty string means nothing to validate — actually hold.
     path = tool_input.get("file_path") or tool_input.get("notebook_path")
-    return path if isinstance(path, str) else None
+    return path if isinstance(path, str) and path else None

@@ -66,6 +66,10 @@ class TestTargetFromHookInput:
             {"tool_input": []},
             {"tool_input": {}},
             {"tool_input": {"file_path": ""}},
+            # Both keys present and empty: the `or` chain yields "" here, not
+            # None, so the empty-string collapse needs its own guard.
+            {"tool_input": {"file_path": "", "notebook_path": ""}},
+            {"tool_input": {"notebook_path": ""}},
             {"tool_input": {"other_key": "docs/plans/x.md"}},
         ],
     )
