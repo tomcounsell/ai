@@ -87,6 +87,8 @@ from __future__ import annotations
 
 import ast
 import textwrap
+import tomllib
+from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +181,14 @@ ALLOWLIST: frozenset[str] = frozenset(
 # an allowlist of two names.
 _DISALLOWED_MUTATORS = frozenset({"setdefault", "clear", "popitem", "__setitem__"})
 
+# `.pop` and `.update` are permitted in general, but not when they touch the one
+# key this whole guard exists to protect. `env["REDIS_URL"] = ...` is already
+# rejected as a Subscript store; without this, `env.pop("REDIS_URL", None)` and
+# `env.update({"REDIS_URL": ...})` are the same write in quieter spelling and
+# would sail through, leaving the child on db0 under a green check.
+_PROTECTED_KEY = "REDIS_URL"
+_KEYED_MUTATORS = frozenset({"pop", "update"})
+
 
 # --------------------------------------------------------------------------
 # argv predicate
@@ -219,18 +229,37 @@ def _argv0_is_skipped(argv: ast.AST) -> bool:
     return False
 
 
+@lru_cache(maxsize=1)
+def _console_scripts() -> frozenset[str]:
+    """Repo console-script names from ``[project.scripts]``.
+
+    A bare ``["valor-session", "list"]`` argv names no interpreter and no
+    ``-m``, but the entry point imports repo packages and therefore popoto.
+    Reading pyproject keeps the predicate correct as entry points are added,
+    which a hardcoded list would not.
+    """
+    try:
+        data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return frozenset()
+    return frozenset(data.get("project", {}).get("scripts", {}))
+
+
 def _argv_reaches_python(argv: ast.AST) -> bool:
     """True when the first positional arg names a Python interpreter or repo entry point."""
     for ident in _identifiers(argv):
         upper = ident.upper()
         if ident == "executable" or "PYTHON" in upper or "WRAPPER" in upper:
             return True
+    scripts = _console_scripts()
     for s in _string_constants(argv):
         if s == "-m" or " -m " in s:
             return True
         if "scripts/" in s:
             return True
         if Path(s).name.lower().startswith("python"):
+            return True
+        if Path(s).name in scripts or s.split()[:1] and s.split()[0] in scripts:
             return True
     return False
 
@@ -243,7 +272,7 @@ def _is_subprocess_call(node: ast.Call, ctx: _ScanContext) -> bool:
         root = func.value
         while isinstance(root, ast.Attribute):
             root = root.value
-        return isinstance(root, ast.Name) and root.id == "subprocess"
+        return isinstance(root, ast.Name) and root.id in ctx.subprocess_modules
     if isinstance(func, ast.Name):
         return func.id in ctx.subprocess_names
     return False
@@ -262,6 +291,8 @@ class _ScanContext:
         self.path = path
         self.imports_db_claim = False
         self.subprocess_names: set[str] = set()
+        # `import subprocess as _sp` must not make a file invisible to the scan.
+        self.subprocess_modules: set[str] = {"subprocess"}
         self.module_funcs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         self.parents: dict[ast.AST, ast.AST] = {}
 
@@ -278,6 +309,8 @@ class _ScanContext:
                 for a in node.names:
                     if a.name.split(".")[-1] == "db_claim":
                         self.imports_db_claim = True
+                    if a.name == "subprocess":
+                        self.subprocess_modules.add(a.asname or a.name)
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
 
@@ -332,15 +365,18 @@ def _name_is_clean(name: str, scope: ast.AST | None, ctx: _ScanContext) -> bool:
         elif isinstance(node, ast.withitem):
             if isinstance(node.optional_vars, ast.Name) and node.optional_vars.id == name:
                 return False
+        elif isinstance(node, ast.NamedExpr):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                return False  # walrus rebind — "bound exactly once" no longer holds
         elif isinstance(node, ast.Call):
             func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == name
-                and func.attr in _DISALLOWED_MUTATORS
-            ):
-                return False
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if func.value.id != name:
+                    continue
+                if func.attr in _DISALLOWED_MUTATORS:
+                    return False
+                if func.attr in _KEYED_MUTATORS and _PROTECTED_KEY in _string_constants(node):
+                    return False
     if len(assigns) != 1:
         return False
     value = assigns[0].value
@@ -427,9 +463,15 @@ def scan_source(src: str, path: str = "<source>") -> list[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not _is_subprocess_call(node, ctx):
             continue
-        if not node.args:
+        # `subprocess.run(args=[...])` is valid and carries no positional args;
+        # skipping on `not node.args` alone would make it invisible.
+        argv = (
+            node.args[0]
+            if node.args
+            else next((k.value for k in node.keywords if k.arg == "args"), None)
+        )
+        if argv is None:
             continue
-        argv = node.args[0]
         if _argv0_is_skipped(argv):
             continue
         if not _argv_reaches_python(argv):
@@ -555,6 +597,51 @@ class TestThing:
 """
 
 
+_REJECTED_POPS_REDIS_URL = """
+import subprocess
+import sys
+
+from tests.db_claim import subprocess_env
+
+
+def test_thing():
+    env = subprocess_env()
+    env.pop("REDIS_URL", None)
+    subprocess.run([sys.executable, "-m", "tools.thing"], env=env)
+"""
+
+_REJECTED_UPDATES_REDIS_URL = """
+import subprocess
+import sys
+
+from tests.db_claim import subprocess_env
+
+
+def test_thing():
+    env = subprocess_env()
+    env.update({"REDIS_URL": "redis://localhost:6379/0"})
+    subprocess.run([sys.executable, "-m", "tools.thing"], env=env)
+"""
+
+_REJECTED_ALIASED_SUBPROCESS_IMPORT = """
+import subprocess as _sp
+import sys
+
+
+def test_thing():
+    _sp.run([sys.executable, "-m", "tools.thing"])
+"""
+
+_REJECTED_ARGS_KEYWORD = """
+import subprocess
+import sys
+
+
+def test_thing():
+    subprocess.run(args=[sys.executable, "-m", "tools.thing"])
+"""
+
+
 def test_self_test_rederived_helper_is_reported():
     """A helper that reads the db back out of the live client is NOT subprocess_env."""
     violations = scan_source(textwrap.dedent(_REJECTED_REDERIVED_HELPER), "fixture.py")
@@ -575,3 +662,27 @@ def test_self_test_assign_mutate_return_delegator_is_accepted():
 def test_self_test_staticmethod_delegator_is_accepted():
     """`env=self._w()` resolves through the enclosing class, one hop."""
     assert scan_source(textwrap.dedent(_ACCEPTED_STATICMETHOD_DELEGATOR), "fixture.py") == []
+
+
+def test_self_test_popping_redis_url_is_reported():
+    """Stripping the one key that carries the claim puts the child back on db0."""
+    violations = scan_source(textwrap.dedent(_REJECTED_POPS_REDIS_URL), "fixture.py")
+    assert len(violations) == 1, violations
+
+
+def test_self_test_updating_redis_url_is_reported():
+    """`.update({"REDIS_URL": ...})` is `env["REDIS_URL"] = ...` in quieter spelling."""
+    violations = scan_source(textwrap.dedent(_REJECTED_UPDATES_REDIS_URL), "fixture.py")
+    assert len(violations) == 1, violations
+
+
+def test_self_test_aliased_subprocess_import_is_reported():
+    """`import subprocess as _sp` must not make a file invisible to the scan."""
+    violations = scan_source(textwrap.dedent(_REJECTED_ALIASED_SUBPROCESS_IMPORT), "fixture.py")
+    assert len(violations) == 1, violations
+
+
+def test_self_test_args_keyword_is_reported():
+    """`subprocess.run(args=[...])` carries no positional argv and must still be seen."""
+    violations = scan_source(textwrap.dedent(_REJECTED_ARGS_KEYWORD), "fixture.py")
+    assert len(violations) == 1, violations

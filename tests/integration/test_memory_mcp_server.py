@@ -153,6 +153,13 @@ def test_fresh_shell_import_resolution():
     resolve modules through the activated venv and the test would pass for
     the wrong reason. ``subprocess_env`` still supplies REDIS_URL so the
     child's Popoto lands on this process's claimed test db, not db0 (#2763).
+
+    Every other interpreter-steering variable is stripped too. Building the env
+    from ``subprocess_env`` means the child inherits the parent's environment
+    rather than the three-key whitelist this test used before #2763, so the
+    strips are what keep the assertion's subject intact: with any of these left
+    in place the child could resolve modules through a channel other than
+    ``PYTHONPATH`` and the test would pass without proving anything.
     """
     import subprocess
 
@@ -160,8 +167,14 @@ def test_fresh_shell_import_resolution():
         PATH="/opt/homebrew/bin:/usr/bin:/bin",
         PYTHONPATH=_project_root(),
     )
-    env.pop("VIRTUAL_ENV", None)
-    env.pop("PYTHONHOME", None)
+    for steering_var in (
+        "VIRTUAL_ENV",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+    ):
+        env.pop(steering_var, None)
     result = subprocess.run(
         ["python3", "-m", "mcp_servers.memory_server", "--help"],
         capture_output=True,
