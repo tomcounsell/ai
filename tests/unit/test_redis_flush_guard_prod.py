@@ -296,7 +296,7 @@ def test_conftest_shaped_wrapper_on_top_does_not_grow_the_chain(guarded, monkeyp
         call_count += 1
         return layer1_flushdb(self, *args, **kwargs)
 
-    _conftest_shaped._db0_guarded = True
+    _conftest_shaped._flush_guarded = True
     redis.Redis.flushdb = _conftest_shaped
 
     rfg.install()  # redis.Redis already in _INSTALLED -> must be a no-op
