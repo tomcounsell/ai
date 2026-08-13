@@ -48,6 +48,7 @@ import pytest
 import scripts._strip_migration as shared
 import scripts.migrate_strip_pid_fields as strip
 from models.agent_session import AgentSession
+from tests.db_claim import subprocess_env
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -348,6 +349,7 @@ class TestLogsGoToStdout:
             capture_output=True,
             text=True,
             timeout=300,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
 
         assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"

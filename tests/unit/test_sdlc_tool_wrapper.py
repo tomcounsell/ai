@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = REPO_ROOT / "scripts" / "sdlc-tool"
 
@@ -66,29 +68,33 @@ class TestWrapperShellSemantics:
         assert os.access(WRAPPER, os.X_OK), f"wrapper not executable: {WRAPPER}"
 
     def test_wrapper_no_args_exits_2(self):
-        result = subprocess.run([str(WRAPPER)], capture_output=True, text=True)
+        result = subprocess.run(
+            [str(WRAPPER)], capture_output=True, text=True, env=subprocess_env()
+        )
         assert result.returncode == 2
         assert "Usage" in result.stderr
         assert "stage-query" in result.stderr  # subcommand list visible
 
     def test_wrapper_unknown_subcommand_exits_2(self):
-        result = subprocess.run([str(WRAPPER), "make-coffee"], capture_output=True, text=True)
+        result = subprocess.run(
+            [str(WRAPPER), "make-coffee"], capture_output=True, text=True, env=subprocess_env()
+        )
         assert result.returncode == 2
         assert "unknown subcommand" in result.stderr
         assert "make-coffee" in result.stderr
 
     def test_wrapper_help_flag_exits_0(self):
-        result = subprocess.run([str(WRAPPER), "--help"], capture_output=True, text=True)
+        result = subprocess.run(
+            [str(WRAPPER), "--help"], capture_output=True, text=True, env=subprocess_env()
+        )
         assert result.returncode == 0
 
     def test_wrapper_missing_ai_repo_root_exits_2(self, tmp_path):
-        env = os.environ.copy()
-        env["AI_REPO_ROOT"] = str(tmp_path / "does-not-exist")
         result = subprocess.run(
             [str(WRAPPER), "stage-query", "--issue-number", "0"],
             capture_output=True,
             text=True,
-            env=env,
+            env=subprocess_env(AI_REPO_ROOT=str(tmp_path / "does-not-exist")),
         )
         assert result.returncode == 2
         assert "AI_REPO_ROOT" in result.stderr
@@ -96,13 +102,11 @@ class TestWrapperShellSemantics:
 
     def test_wrapper_ai_repo_root_without_tools_exits_2(self, tmp_path):
         # Directory exists but has no tools/ subdir
-        env = os.environ.copy()
-        env["AI_REPO_ROOT"] = str(tmp_path)
         result = subprocess.run(
             [str(WRAPPER), "stage-query", "--issue-number", "0"],
             capture_output=True,
             text=True,
-            env=env,
+            env=subprocess_env(AI_REPO_ROOT=str(tmp_path)),
         )
         assert result.returncode == 2
         assert "tools/" in result.stderr
@@ -124,14 +128,16 @@ class TestWrapperDispatch:
         (fake_tools / "__init__.py").write_text("")
         # Deliberately do NOT create sdlc_stage_query.py here.
 
-        env = os.environ.copy()
-        env["AI_REPO_ROOT"] = str(REPO_ROOT)
+        # No project_root=: this test pins the wrapper's own module-resolution
+        # order against a decoy tools/ package, and prepending REPO_ROOT to
+        # PYTHONPATH would resolve the import for reasons other than the
+        # wrapper's doing. Only subprocess_env's REDIS_URL half is wanted here.
         result = subprocess.run(
             [str(WRAPPER), "stage-query", "--issue-number", "999999"],
             cwd=str(tmp_path),
             capture_output=True,
             text=True,
-            env=env,
+            env=subprocess_env(AI_REPO_ROOT=str(REPO_ROOT)),
             timeout=60,
         )
         assert result.returncode == 0, (
@@ -174,6 +180,7 @@ class TestVerdictAndDispatchLoudExit:
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 1, (
             f"sdlc_verdict.main() should exit 1 on inner raise, got "
@@ -200,6 +207,7 @@ class TestVerdictAndDispatchLoudExit:
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         assert json.loads(result.stdout.strip()) == {}
@@ -232,6 +240,7 @@ class TestVerdictAndDispatchLoudExit:
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 1, (
             f"sdlc_dispatch.main() should exit 1 on inner raise, got "

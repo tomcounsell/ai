@@ -22,7 +22,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
 from tools.critique_resume import find_reusable_run, main
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # Fence constants (mirror critique_roster_check)
@@ -477,6 +480,7 @@ class TestCLIHelp:
             [sys.executable, "-m", "tools.critique_resume", "--help"],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         assert "critique-resume-probe" in result.stdout

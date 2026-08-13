@@ -7,7 +7,13 @@ Covers:
 4. valor-session CLI — help output and basic argument parsing
 """
 
+from pathlib import Path
+
 import pytest
+
+from tests.db_claim import subprocess_env
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestOutputRouterExports:
@@ -337,6 +343,7 @@ class TestValorSessionCLI:
             [sys.executable, "-m", "tools.valor_session", "--help"],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         assert "valor-session" in result.stdout
@@ -350,6 +357,7 @@ class TestValorSessionCLI:
             [sys.executable, "-m", "tools.valor_session", "--help"],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         for cmd in ("create", "steer", "status", "list", "kill"):
             assert cmd in result.stdout, f"Subcommand '{cmd}' missing from help output"
@@ -364,6 +372,7 @@ class TestValorSessionCLI:
             [sys.executable, "-m", "tools.valor_session", "steer", "--id", "abc"],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode != 0
         assert "message" in result.stderr.lower() or "required" in result.stderr.lower()

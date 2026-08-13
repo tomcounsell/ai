@@ -474,3 +474,53 @@ Source modules with no test coverage. Priority targets for new tests.
 
 **Partially covered** (operational layer added in #936):
 - `bridge/email_bridge.py` — parsing, SMTP output, routing, and thread continuation have full coverage. Operational layer (`main()`, `_poll_imap()` batch cap, `_email_inbox_loop()` health timestamp) now covered via unit and integration tests.
+
+## Subprocess Test-DB Inheritance (issue #2763)
+
+Any test that shells out to a subprocess which can reach Popoto — a Python
+interpreter running a repo module, the sdlc-tool `WRAPPER`, or an inline `-c`
+script against a repo checkout — must pass `env=subprocess_env(...)` from
+`tests.db_claim`.
+
+**Why**: Popoto resolves `REDIS_URL` at *import time* and falls back to
+`redis://localhost:6379` — db0, production — when the variable is unset. The
+parent pytest process claims a test db from the pool `[1..15]` via
+`tests/db_claim.py`'s `fcntl.flock`, but that claim lives only in the parent's
+in-process Popoto client objects; `os.environ` is never mutated. The
+environment is therefore the only channel to a child, and `subprocess_env` is
+the bridge. A child launched without it silently reads and writes production
+db0.
+
+**How to use it**: `subprocess_env(*, project_root=None, **extra)`. Thread
+extra variables as keyword arguments (`subprocess_env(AI_REPO_ROOT=...)`)
+rather than hand-building a dict. If a site also needs keys removed, the
+accepted shape is `env = subprocess_env(); env.pop("NAME", None)` — assign,
+then mutate with `.pop(<literal>, None)` / `.update(...)`, never rebind.
+
+`project_root=` is **opt-in, not a default**. It prepends the path to the
+child's `PYTHONPATH`. Pass it when the child must resolve repo modules from
+this checkout; omit it when the test asserts something about import order or
+module resolution. `tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
+is the worked example of a deliberate omission — it pins the wrapper's own
+module-resolution order against a decoy `tools/` package, so prepending
+`REPO_ROOT` to `PYTHONPATH` would resolve the import for reasons other than
+the wrapper's doing.
+
+Never re-derive a db number by hand. Reading
+`POPOTO_REDIS_DB.connection_pool.connection_kwargs` to rebuild a `REDIS_URL`
+is the anti-pattern this work removed; `claim_test_db()` via `subprocess_env`
+is the only source.
+
+The enforcing guard is `tests/unit/test_subprocess_test_db_isolation.py`, an
+AST scan of `tests/**/*.py`. It matches in-scope call sites on **argv**
+(`sys.executable`, a `PYTHON`-containing identifier, a `"-m"` element,
+`WRAPPER`, or a `scripts/` string); `cwd=` is deliberately not part of the
+predicate, since what determines whether a child can import popoto is what is
+executed, not where it is executed from. Exemptions exist only as
+`SKIP_ARGV0 = {"git"}` (a `git` child never imports Python) and a commented
+`ALLOWLIST` of `path:line` entries, each carrying one of exactly two reasons:
+`[#2628]` (the file is owned by open PR #2683 — fix it there when it lands)
+or `[standalone-script]` (the child imports no repo package). **When
+reachability is unclear, convert the site — do not allowlist it.**
+
+When #2683 lands, this section folds into `docs/features/test-db-ownership.md`.

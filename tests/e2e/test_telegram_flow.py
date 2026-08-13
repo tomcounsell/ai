@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 
 @dataclass
 class TestMessage:
@@ -40,6 +42,7 @@ class TestTelegramE2EFlow:
             capture_output=True,
             text=True,
             cwd=Path(__file__).parent.parent.parent,
+            env=subprocess_env(),
         )
         return "RUNNING" in result.stdout
 

@@ -2,8 +2,12 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
+from tests.db_claim import subprocess_env
 from tools import venv_health
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestCheckModules:
@@ -68,6 +72,7 @@ class TestCliInvocation:
             capture_output=True,
             text=True,
             timeout=15,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 0
         assert "OK" in result.stdout

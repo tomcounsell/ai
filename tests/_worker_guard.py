@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from tests.db_claim import subprocess_env
+
 # A command line for the launchd worker joins to `<python> -m worker`. Require
 # BOTH a python-ish executable AND the `-m worker` token so an unrelated
 # process that merely mentions "worker" never trips the guard. `python -m
@@ -64,6 +66,11 @@ def _pgrep_worker_pids() -> set[int]:
             capture_output=True,
             text=True,
             timeout=5,
+            # `pgrep` cannot import popoto and does not need REDIS_URL. The env
+            # is here because the isolation guard's argv heuristic matches the
+            # word "python" inside the *pattern* string; passing it is cheaper
+            # and less brittle than an allowlist entry.
+            env=subprocess_env(),
         )
         return {int(tok) for tok in out.stdout.split() if tok.strip().isdigit()}
     except Exception:

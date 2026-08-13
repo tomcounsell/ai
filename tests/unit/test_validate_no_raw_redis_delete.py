@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATORS_DIR = REPO_ROOT / ".claude" / "hooks" / "validators"
 DISPATCH_SCRIPT = REPO_ROOT / ".claude" / "hooks" / "dispatch" / "pre_tool_use_bash.py"
@@ -267,6 +269,7 @@ class TestDispatcherIntegration:
             input=json.dumps(payload),
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
             timeout=30,
         )
         for line in (proc.stdout or "").splitlines():
