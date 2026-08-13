@@ -954,6 +954,82 @@ async def _check_jobs_at_rest_with_open_expectations() -> int:
     return flagged
 
 
+async def _check_expectation_drift_advisory() -> int:
+    """Drift advisory (#2708, Risks 1 & 4): spawned lanes with no recorded obligation.
+
+    Job resolution at the spawn chokepoint is best-effort, so a lane can be
+    created without an outbound expectation landing anywhere. This advisory
+    is the backstop: on the session-health cadence, surface to the OPERATOR
+    surface any live PM session whose live eng children are not covered by
+    a matching open outbound expectation on its bound Job. Advisory only —
+    no writes, no steering, no discharge. Returns the number of uncovered
+    (parent, child) pairs flagged.
+    """
+    flagged = 0
+    try:
+        from bridge.job_router import job_for_session  # noqa: PLC0415
+        from models.agent_session import AgentSession  # noqa: PLC0415
+        from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        rows = list(AgentSession.query.filter(session_type="eng"))
+        live = [r for r in rows if getattr(r, "status", None) in NON_TERMINAL_STATUSES]
+        parents_by_key: dict[str, object] = {}
+        for row in live:
+            for key in (
+                getattr(row, "id", None),
+                getattr(row, "agent_session_id", None),
+                getattr(row, "session_id", None),
+            ):
+                if key:
+                    parents_by_key[str(key)] = row
+
+        for child in live:
+            try:
+                parent_ref = getattr(child, "parent_agent_session_id", None)
+                if not parent_ref:
+                    continue
+                parent = parents_by_key.get(str(parent_ref))
+                if parent is None:
+                    continue  # parent not live — the reconciler's territory
+                job = job_for_session(parent)
+                if job is None:
+                    continue  # no bound Job resolves — nothing to compare against
+                owners = {
+                    str(e.get("owner") or "") for e in job.open_expectations(direction="outbound")
+                }
+                child_names = {
+                    str(v)
+                    for v in (
+                        getattr(child, "slug", None),
+                        getattr(child, "session_id", None),
+                        getattr(child, "agent_session_id", None),
+                    )
+                    if v
+                }
+                child_names |= {f"session/{n}" for n in set(child_names)}
+                if owners & child_names:
+                    continue  # covered
+                flagged += 1
+                logger.warning(
+                    "[expectation-drift] PM session %s has live child %s with NO "
+                    "matching open outbound expectation on Job %s — the lane's "
+                    "obligation is unrecorded and invisible to the reconciler. "
+                    "The PM should record it: python -m tools.job_tool "
+                    "expectation-add --job-id %s --direction outbound --owner %s "
+                    '--text "<what the lane delivers>"',
+                    getattr(parent, "session_id", "?"),
+                    getattr(child, "session_id", "?"),
+                    job.job_id,
+                    job.job_id,
+                    getattr(child, "slug", None) or getattr(child, "session_id", "?"),
+                )
+            except Exception as _child_err:  # noqa: BLE001 — one pair never stops the scan
+                logger.warning("[expectation-drift] per-child check failed: %s", _child_err)
+    except Exception as _scan_err:  # noqa: BLE001
+        logger.error("[expectation-drift] scan crashed (non-fatal): %s", _scan_err)
+    return flagged
+
+
 def _is_memory_tight() -> bool:
     """Return True if available system memory is below the OOM-backoff threshold.
 
@@ -4514,6 +4590,17 @@ async def _agent_session_health_check() -> None:
         logger.error(
             "[session-health] at-rest expectation alarm crashed (non-fatal): %s",
             _at_rest_expectation_err,
+        )
+
+    # === Expectation drift advisory (#2708 Risks 1 & 4) ===
+    # Live PM sessions with live eng children not covered by an open outbound
+    # expectation on the bound Job. Advisory only, operator surface only.
+    try:
+        await _check_expectation_drift_advisory()
+    except Exception as _drift_err:  # pragma: no cover - defensive
+        logger.error(
+            "[session-health] expectation drift advisory crashed (non-fatal): %s",
+            _drift_err,
         )
 
     # === Orphan subprocess reap pass (issue #1218) ===
