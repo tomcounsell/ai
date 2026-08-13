@@ -5499,10 +5499,10 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     """Delete AgentSession records with corrupted data that prevent .save().
 
     Detects sessions where the ID field has an invalid length (e.g., 60 chars
-    instead of the expected 32 for uuid4), or where ``.save()`` raises a
-    validation-type exception (``"invalid"`` or ``"validation"`` in the message).
-    These records jam the health check and startup recovery loops with repeated
-    errors because they can't be transitioned or finalized through normal ORM ops.
+    instead of the expected 32 for uuid4), or where ``.is_valid()`` returns
+    False or raises. These records jam the health check and startup recovery
+    loops with repeated errors because they can't be transitioned or
+    finalized through normal ORM ops.
 
     Before any iteration, the result of ``AgentSession.query.all()`` is passed
     through ``_filter_hydrated_sessions`` to drop phantom instances — records
@@ -5565,20 +5565,50 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
             )
             is_corrupt = True
 
-        # Check 2: Try a no-op save to detect other validation failures
+        # Check 2: is_valid() classification writes nothing to Redis (#1817 —
+        # a persisting probe here reshuffles the created_at-based sorted index
+        # on every OTHER record, the same defect _heal_future_updated_at hit).
+        # Note it mutates the in-memory instance via setattr() during type
+        # coercion (popoto/models/base.py:829-839), which is harmless because
+        # this instance is discarded at the end of the loop iteration.
         if not is_corrupt:
             try:
-                session.save()
+                valid = session.is_valid()
             except Exception as e:
-                if "invalid" in str(e).lower() or "validation" in str(e).lower():
+                logger.warning(
+                    "[agent-session-cleanup] Unsaveable session detected: "
+                    "id=%s, session_id=%s, error=%s",
+                    session_id_str[:20],
+                    getattr(session, "session_id", "?"),
+                    e,
+                )
+                is_corrupt = True
+            else:
+                if not valid:
                     logger.warning(
                         "[agent-session-cleanup] Unsaveable session detected: "
                         "id=%s, session_id=%s, error=%s",
                         session_id_str[:20],
                         getattr(session, "session_id", "?"),
-                        e,
+                        "is_valid() returned False",
                     )
                     is_corrupt = True
+
+        # Keepalive: hold Meta.ttl at the ceiling without writing any field.
+        # Deliberately a SEPARATE statement AFTER classification, in its own
+        # try/except that never touches is_corrupt — folding this into the
+        # classification try/except above would turn a transient Redis fault
+        # into a bulk delete of live session rows (the positive-classification
+        # branch below routes straight to session.delete()). See #2698.
+        if not is_corrupt:
+            try:
+                session.refresh_ttl()
+            except Exception as ttl_err:
+                logger.warning(
+                    "[agent-session-cleanup] TTL keepalive failed for %s: %s",
+                    session_id_str[:20],
+                    ttl_err,
+                )
 
         if is_corrupt:
             try:

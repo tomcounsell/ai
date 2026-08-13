@@ -84,8 +84,12 @@ def test_cold_boot_restore_then_rebuild_leaves_sessions_queryable(archive_db):
     # unrelated to the archive -- see tests/unit/test_session_archive.py's
     # datetime fidelity test for the same pattern). Capture THIS baseline so
     # the assertions below isolate the archive's round-trip fidelity from
-    # that unrelated behavior.
+    # that unrelated behavior. #2660: this also pins that updated_at --
+    # whatever real value save() stamped it with -- survives the real
+    # export_all() -> flush -> restore_if_empty() -> run_cleanup() sequence
+    # byte-identically, not just in the isolated unit-test path.
     baseline_parent = AgentSession.query.get(id=parent_id)
+    baseline_parent_updated_at = baseline_parent.updated_at
 
     # Archive both sessions from the live (pre-wipe) Redis into the isolated
     # SQLite file via the real export path.
@@ -132,6 +136,10 @@ def test_cold_boot_restore_then_rebuild_leaves_sessions_queryable(archive_db):
     assert restored_parent.id == parent_id
     assert restored_parent.created_at == baseline_parent.created_at
     assert restored_parent.completed_at == baseline_parent.completed_at
+    assert restored_parent.updated_at == baseline_parent_updated_at, (
+        "the real archived updated_at must survive the cold-boot restore -> "
+        "rebuild sequence byte-identically (#2660)"
+    )
 
     # The child's parent_agent_session_id must resolve back to the parent --
     # via a QUERY (KeyField secondary-index lookup), not just a dict access.

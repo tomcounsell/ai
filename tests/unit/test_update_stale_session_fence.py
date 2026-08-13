@@ -20,9 +20,11 @@ Two properties are pinned here, and they are different in kind:
 
 The return arity changed from ``(killed, skipped_live)`` to
 ``(killed, skipped_recent, skipped_fence_live)`` so an operator rolling the
-fleet sees the fence gate acting instead of inferring it from a total. The
-caller's unpack is asserted too — a two-value unpack against a three-tuple
-raises at runtime, and ``/update`` catches that exception and logs a bare
+fleet sees the fence gate acting instead of inferring it from a total, and
+widened again to a 5-tuple by #2660 (``skipped_ledger``, ``skipped_heartbeat``
+-- two new liveness rungs, see ``TestLedgerAndHeartbeatRungs`` below). The
+caller's unpack is asserted too — an unpack of too few values against a wider
+tuple raises at runtime, and ``/update`` catches that exception and logs a bare
 ``WARN: Session cleanup failed``, so the regression would be silent in practice.
 
 The legacy-row path (no ``pid_create_time`` recorded) is covered in
@@ -60,6 +62,8 @@ def _session(
     updated_at_seconds_ago=_WAY_PAST_THE_RECENCY_WINDOW,
     chat_id="chat-fence",
     session_id="sess-fence",
+    is_ledger=False,
+    last_heartbeat_at=None,
 ):
     """A ``running`` row with a fenced execution record.
 
@@ -79,6 +83,8 @@ def _session(
         status="running",
         created_at=created,
         updated_at=updated,
+        is_ledger=is_ledger,
+        last_heartbeat_at=last_heartbeat_at,
         live_fence=({"pid": pid, "create_time": create_time} if pid is not None else None),
         delete=MagicMock(),
         save=MagicMock(),
@@ -93,7 +99,9 @@ def _run_cleanup(sessions, *, live_ct, age_minutes=120):
     no real process behind them, so without it every fence read is "dead" and
     the fence-live branch is unreachable.
 
-    Returns ``(killed, skipped_recent, skipped_fence_live, finalize_mock)``.
+    Returns ``(killed, skipped_recent, skipped_fence_live, skipped_ledger,
+    skipped_heartbeat, finalize_mock)`` — the reaper's full 5-counter ladder
+    (#2660) plus the ``finalize_session`` mock.
     """
     from scripts.update.run import _cleanup_stale_sessions
 
@@ -112,13 +120,24 @@ def _run_cleanup(sessions, *, live_ct, age_minutes=120):
         original = getattr(queue_module, "_active_workers", {})
         try:
             queue_module._active_workers = {}
-            killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions(
-                Path("/tmp"), age_minutes=age_minutes
-            )
+            (
+                killed,
+                skipped_recent,
+                skipped_fence_live,
+                skipped_ledger,
+                skipped_heartbeat,
+            ) = _cleanup_stale_sessions(Path("/tmp"), age_minutes=age_minutes)
         finally:
             queue_module._active_workers = original
 
-    return killed, skipped_recent, skipped_fence_live, mock_finalize
+    return (
+        killed,
+        skipped_recent,
+        skipped_fence_live,
+        skipped_ledger,
+        skipped_heartbeat,
+        mock_finalize,
+    )
 
 
 class TestFenceLiveSessionIsProtected:
@@ -130,8 +149,8 @@ class TestFenceLiveSessionIsProtected:
         """
         session = _session()
 
-        killed, skipped_recent, skipped_fence_live, finalize = _run_cleanup(
-            [session], live_ct=_RECORDED_CT
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=_RECORDED_CT)
         )
 
         assert killed == 0
@@ -140,6 +159,8 @@ class TestFenceLiveSessionIsProtected:
             "separately so an operator can see the gate acting"
         )
         assert skipped_recent == 0, "the skip came from the fence, not from recency"
+        assert skipped_ledger == 0
+        assert skipped_heartbeat == 0
         finalize.assert_not_called()
 
     def test_fence_is_checked_ahead_of_recency(self):
@@ -151,7 +172,9 @@ class TestFenceLiveSessionIsProtected:
         """
         session = _session(updated_at_seconds_ago=60)
 
-        _, skipped_recent, skipped_fence_live, _ = _run_cleanup([session], live_ct=_RECORDED_CT)
+        _, skipped_recent, skipped_fence_live, _, _, _ = _run_cleanup(
+            [session], live_ct=_RECORDED_CT
+        )
 
         assert skipped_fence_live == 1
         assert skipped_recent == 0
@@ -161,7 +184,7 @@ class TestFenceLiveSessionIsProtected:
 
         session = _session()
 
-        killed, _, skipped_fence_live, _ = _run_cleanup(
+        killed, _, skipped_fence_live, _, _, _ = _run_cleanup(
             [session], live_ct=_RECORDED_CT + CREATE_TIME_TOLERANCE_S / 2
         )
 
@@ -173,11 +196,15 @@ class TestFenceDeadSession:
     def test_fence_dead_and_stale_is_killed_with_the_fence_reason(self):
         session = _session()
 
-        killed, skipped_recent, skipped_fence_live, finalize = _run_cleanup([session], live_ct=None)
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
 
         assert killed == 1
         assert skipped_fence_live == 0
         assert skipped_recent == 0
+        assert skipped_ledger == 0
+        assert skipped_heartbeat == 0
         finalize.assert_called_once_with(
             session, "killed", reason=_FENCE_REASON, skip_checkpoint=True
         )
@@ -186,7 +213,7 @@ class TestFenceDeadSession:
         """An alive pid under a different identity is not our process."""
         session = _session()
 
-        killed, _, skipped_fence_live, finalize = _run_cleanup(
+        killed, _, skipped_fence_live, _, _, finalize = _run_cleanup(
             [session], live_ct=_RECORDED_CT + 5000.0
         )
 
@@ -202,10 +229,21 @@ class TestFenceDeadSession:
         A fence-verified-dead row inside the recency window falls through to the
         recency gate and is spared. Killing here would make ``/update`` more
         aggressive than before, which is not what this change is for.
+
+        Assertions are pinned verbatim from before the reaper's 5-counter ladder
+        (#2660) — only the unpack widened. A red here on an ASSERTION (not the
+        unpack) means retention policy moved and is out of this plan's scope.
         """
         session = _session(updated_at_seconds_ago=60)
 
-        killed, skipped_recent, skipped_fence_live, finalize = _run_cleanup([session], live_ct=None)
+        (
+            killed,
+            skipped_recent,
+            skipped_fence_live,
+            _skipped_ledger,
+            _skipped_heartbeat,
+            finalize,
+        ) = _run_cleanup([session], live_ct=None)
 
         assert killed == 0, "a fence-dead verdict must not bypass the recency gate"
         assert skipped_recent == 1
@@ -213,12 +251,37 @@ class TestFenceDeadSession:
         finalize.assert_not_called()
 
     def test_fence_dead_but_young_by_created_at_is_still_spared(self):
-        """Same asymmetry against the last-resort ``created_at`` gate."""
+        """Same asymmetry against the last-resort ``created_at`` gate.
+
+        Assertions pinned verbatim (#2660) — only the unpack widened.
+        """
         session = _session(age_seconds=600, updated_at_seconds_ago=None)
 
-        killed, _, _, finalize = _run_cleanup([session], live_ct=None)
+        killed, _, _, _skipped_ledger, _skipped_heartbeat, finalize = _run_cleanup(
+            [session], live_ct=None
+        )
 
         assert killed == 0
+        finalize.assert_not_called()
+
+    def test_fence_dead_but_fresh_heartbeat_is_spared_by_the_new_rung(self):
+        """The new rung 4 is additive: a fence-dead row with a fresh heartbeat
+        is spared, the same asymmetry the two tests above assert for recency.
+        """
+        session = _session(
+            updated_at_seconds_ago=_WAY_PAST_THE_RECENCY_WINDOW,
+            last_heartbeat_at=datetime.now(UTC),
+        )
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0, "a fence-dead verdict must not bypass the heartbeat rung either"
+        assert skipped_heartbeat == 1
+        assert skipped_recent == 0
+        assert skipped_fence_live == 0
+        assert skipped_ledger == 0
         finalize.assert_not_called()
 
 
@@ -231,7 +294,7 @@ class TestLegacyRowsKeepTheOldPath:
         """
         session = _session(create_time=None)
 
-        killed, skipped_recent, skipped_fence_live, finalize = _run_cleanup(
+        killed, skipped_recent, skipped_fence_live, _, _, finalize = _run_cleanup(
             [session], live_ct=_RECORDED_CT
         )
 
@@ -244,7 +307,7 @@ class TestLegacyRowsKeepTheOldPath:
     def test_legacy_row_recent_is_skipped_and_counted_as_recent(self):
         session = _session(create_time=None, updated_at_seconds_ago=60)
 
-        killed, skipped_recent, skipped_fence_live, finalize = _run_cleanup(
+        killed, skipped_recent, skipped_fence_live, _, _, finalize = _run_cleanup(
             [session], live_ct=_RECORDED_CT
         )
 
@@ -256,7 +319,9 @@ class TestLegacyRowsKeepTheOldPath:
     def test_row_with_no_fence_at_all_takes_the_recency_path(self):
         session = _session(pid=None)
 
-        killed, _, skipped_fence_live, finalize = _run_cleanup([session], live_ct=_RECORDED_CT)
+        killed, _, skipped_fence_live, _, _, finalize = _run_cleanup(
+            [session], live_ct=_RECORDED_CT
+        )
 
         assert killed == 1
         assert skipped_fence_live == 0
@@ -267,11 +332,11 @@ class TestReasonStrings:
     def test_the_retracted_claim_is_gone_from_both_branches(self):
         """``"stale cleanup (no live process)"`` asserted something unchecked."""
         fenced_dead = _session()
-        _, _, _, finalize = _run_cleanup([fenced_dead], live_ct=None)
+        _, _, _, _, _, finalize = _run_cleanup([fenced_dead], live_ct=None)
         assert finalize.call_args.kwargs["reason"] == _FENCE_REASON
 
         legacy = _session(create_time=None)
-        _, _, _, finalize = _run_cleanup([legacy], live_ct=_RECORDED_CT)
+        _, _, _, _, _, finalize = _run_cleanup([legacy], live_ct=_RECORDED_CT)
         assert finalize.call_args.kwargs["reason"] == _RECENCY_REASON
 
         assert "no live process" not in _FENCE_REASON + _RECENCY_REASON
@@ -324,14 +389,135 @@ class TestMixedBatchCounting:
             finally:
                 queue_module._active_workers = original
 
-        assert counts == (1, 1, 1), "(killed, skipped_recent, skipped_fence_live)"
+        assert counts == (1, 1, 1, 0, 0), (
+            "(killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat)"
+        )
         assert finalize.call_count == 1
         assert finalize.call_args.args[0] is dead
 
 
-class TestCallerUnpacksThreeValues:
+class TestLedgerAndHeartbeatRungs:
+    """New rungs 2 (``is_ledger``) and 4 (``last_heartbeat_at``), #2660.
+
+    Rung 2 is placed ahead of the fence, so a ledger row is skipped before any
+    other rung can see it. Rung 5 (``updated_at`` recency) is unchanged, but its
+    only live consumers are non-ledger rows -- a ledger fixture proves nothing
+    about rung 5 because rung 2 returns first. Both are pinned here with a
+    non-ledger/ledger twin so the two rungs stay distinguishable.
+    """
+
+    def test_ledger_row_is_skipped_before_the_fence_even_runs(self):
+        """A ledger anchor is skipped at rung 2, never reaching the fence."""
+        session = _session(is_ledger=True, create_time=None, updated_at_seconds_ago=None)
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0
+        assert skipped_ledger == 1
+        assert skipped_recent == 0
+        assert skipped_fence_live == 0
+        assert skipped_heartbeat == 0
+        finalize.assert_not_called()
+
+    def test_non_ledger_recent_updated_at_is_spared_by_rung_five(self):
+        """The live local Claude Code CLI session shape (#2660 Success Criteria):
+        non-ledger, no fence, no heartbeat, fresh ``updated_at``, ``created_at``
+        past the 120-minute floor. Only rung 5 can spare this row -- a ledger
+        fixture would be spared at rung 2 and prove nothing about rung 5.
+        """
+        session = _session(
+            is_ledger=False,
+            pid=None,
+            create_time=None,
+            age_seconds=10800,
+            updated_at_seconds_ago=60,
+        )
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0
+        assert skipped_recent == 1
+        assert skipped_ledger == 0
+        assert skipped_fence_live == 0
+        assert skipped_heartbeat == 0
+        finalize.assert_not_called()
+
+    def test_ledger_twin_of_the_same_fixture_is_skipped_ledger_not_recent(self):
+        """Same shape as above, ``is_ledger=True``: must land in ``skipped_ledger``,
+        not ``skipped_recent`` -- pinning that rung 2 precedes rung 5.
+        """
+        session = _session(
+            is_ledger=True,
+            pid=None,
+            create_time=None,
+            age_seconds=10800,
+            updated_at_seconds_ago=60,
+        )
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0
+        assert skipped_ledger == 1
+        assert skipped_recent == 0
+        finalize.assert_not_called()
+
+    def test_fresh_heartbeat_spares_a_row_with_stale_updated_at(self):
+        """Rung 4: a mid-execution row whose ``updated_at`` is stale (the T+0/60s
+        heartbeat carve-out doesn't move it) is spared on ``last_heartbeat_at``
+        alone, and counted distinctly from ``skipped_recent``.
+        """
+        session = _session(
+            is_ledger=False,
+            pid=None,
+            create_time=None,
+            age_seconds=10800,
+            updated_at_seconds_ago=_WAY_PAST_THE_RECENCY_WINDOW,
+            last_heartbeat_at=datetime.now(UTC),
+        )
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0
+        assert skipped_heartbeat == 1
+        assert skipped_recent == 0
+        assert skipped_ledger == 0
+        finalize.assert_not_called()
+
+    def test_unparseable_heartbeat_falls_through_to_updated_at_rung(self):
+        """An unparseable ``last_heartbeat_at`` (naive datetime handled fine by
+        ``to_unix_ts``, but a raw non-ISO string is not) must not raise and must
+        not be read as fresh -- it falls through to rung 5.
+        """
+        session = _session(
+            is_ledger=False,
+            pid=None,
+            create_time=None,
+            age_seconds=10800,
+            updated_at_seconds_ago=60,
+            last_heartbeat_at="not-a-real-timestamp",
+        )
+
+        killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat, finalize = (
+            _run_cleanup([session], live_ct=None)
+        )
+
+        assert killed == 0
+        assert skipped_heartbeat == 0, "an unparseable heartbeat must not be read as fresh"
+        assert skipped_recent == 1, "must fall through to the updated_at rung instead"
+        finalize.assert_not_called()
+
+
+class TestCallerUnpacksFiveValues:
     def test_run_update_unpacks_the_new_arity(self):
-        """A two-value unpack raises, and ``/update`` swallows it into a WARN.
+        """A four-value unpack (or fewer) raises, and ``/update`` swallows it into a WARN.
 
         The failure would be silent in production: the whole cleanup step is
         wrapped in ``try/except Exception`` that logs
@@ -342,14 +528,18 @@ class TestCallerUnpacksThreeValues:
 
         source = inspect.getsource(run_module.run_update)
         assert (
-            "stale_killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions(" in source
-        ), "run_update must unpack all three return values"
+            "stale_killed, skipped_recent, skipped_fence_live, skipped_ledger, "
+            "skipped_heartbeat = (" in source
+        ), "run_update must unpack all five return values"
 
-    def test_function_signature_declares_a_three_tuple(self):
+    def test_function_signature_declares_a_five_tuple(self):
         from scripts.update.run import _cleanup_stale_sessions
 
         annotation = inspect.signature(_cleanup_stale_sessions).return_annotation
-        assert annotation in ("tuple[int, int, int]", tuple[int, int, int])
+        assert annotation in (
+            "tuple[int, int, int, int, int]",
+            tuple[int, int, int, int, int],
+        )
 
     def test_run_update_logs_the_fence_skip_distinctly(self):
         """The operator-facing half of the arity change."""
