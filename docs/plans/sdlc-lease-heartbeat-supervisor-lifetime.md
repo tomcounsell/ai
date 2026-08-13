@@ -263,8 +263,12 @@ Sources: [psutil #356](https://github.com/giampaolo/psutil/issues/356),
   shared seam through which every supervisor-or-stage write for a run passes.
   `/do-sdlc` additionally re-ensures identity at every stage seam (Step 3d.6).
 - **Confidence**: high
-- **Impact on plan**: makes L3 (intent-staleness) implementable with four
-  one-line call sites and no new plumbing in the skills.
+- **Impact on plan (round 1)**: made the intent-staleness beacon implementable
+  with four one-line call sites. **Superseded in round 2** — the beacon was
+  dropped on the Scope critique, so this seam is no longer used. The spike stands
+  as a correct finding about the codebase; it simply no longer has a consumer
+  here, and is retained because it is the natural place a future reviewer would
+  reach for if the ceiling proves too blunt.
 
 ## Data Flow
 
@@ -273,21 +277,21 @@ Sources: [psutil #356](https://github.com/giampaolo/psutil/issues/356),
 2. **`tools/sdlc_session_ensure.py`**: mints `run_id`, acquires
    `session:issuelock:{N}` via `touch_issue_lock` (payload stamps the *CLI's*
    pid — dead seconds later), writes `session:supervisedrun:{N}`, and **(new)**
-   resolves `(supervisor_pid, supervisor_create_time)` and writes
-   `session:runintent:{N}`.
+   resolves `(supervisor_pid, supervisor_create_time)`.
 3. **`_maybe_launch_lease_heartbeat`**: detached `Popen` of
    `python -m tools.sdlc_lease_heartbeat`, **(new)** carrying
    `--supervisor-pid` / `--supervisor-create-time`.
 4. **Heartbeat loop** (every 600s today; **(new)** supervisor check every 60s):
-   peek lease → if self-owned, extend TTL + refresh supervised-run signal.
-   **(new)** before each renew, evaluate supervisor liveness; on positive death
-   release the lease + clear the signal + exit; on unresolvable supervisor,
-   consult `session:runintent:{N}` and exit (without releasing) when stale.
-5. **Supervisor activity**: every `stage-marker` / `verdict` / `dispatch` /
-   `meta-set` write **(new)** refreshes `session:runintent:{N}` TTL.
-6. **Supervisor exit** (merged / blocked / HALT / cap reached): **(new)**
-   `sdlc-tool session-release --issue-number N --run-id X` →
-   `release_issue_lock` + `clear_supervised_run_signal`.
+   peek lease → if self-owned, extend TTL **(new: `renew_only=True`, which can
+   never mint)** + refresh supervised-run signal. **(new)** before each renew,
+   evaluate supervisor liveness; on positive death release the lease + clear the
+   signal + exit. **(new)** when the supervisor was never resolvable, the
+   lifetime ceiling is 90 min rather than 4h.
+5. **Run ends, tool-layer leg**: a successful `MERGE`/`completed` marker write in
+   `tools/sdlc_stage_marker.py` **(new)** calls `release_run()` →
+   `release_issue_lock` + `clear_supervised_run_signal`. No skill cooperation.
+6. **Run ends, skill-body leg** (HALT / blocked / cap reached — invisible to the
+   tool layer): **(new)** `sdlc-tool session-release --issue-number N --run-id X`.
 7. **Output**: on the next peek the heartbeat sees `owner_run_id is None` and
    exits 0 through its existing, unmodified path. A resuming supervisor's
    `session-ensure` finds a free lock and mints a fresh `run_id` with no
@@ -315,18 +319,21 @@ being the same measurement.
   `agent/session_health.py`.
 - **Interface changes**:
   - `run_heartbeat()` gains keyword-only `supervisor_pid`,
-    `supervisor_create_time`, `supervisor_check_interval`, and
-    `intent_staleness` parameters, all defaulting to the current behavior.
+    `supervisor_create_time`, and `supervisor_check_interval` parameters, all
+    defaulting to the current behavior.
+  - `touch_issue_lock()` gains keyword-only `renew_only: bool = False`. This is
+    the only change to a widely-called shared primitive in this plan; the default
+    preserves all ~dozen existing callers unchanged, and only the heartbeat's
+    extend call passes `True`.
   - New CLI `tools/sdlc_session_release.py` + one entry in
     `scripts/sdlc-tool::ALLOWED_SUBCOMMANDS`.
-  - New helpers `touch_run_intent()` / `read_run_intent()` in
-    `agent/supervised_run.py`.
 - **Coupling**: increases coupling from the heartbeat to the harness environment
   (`CLAUDE_PID`) by one clearly-isolated resolver function. Decreases coupling
   between "lease freshness" and "run liveness", which is the point.
-- **Data ownership**: `session:runintent:{N}` is a new key owned by the
-  state-mutating SDLC write path. The heartbeat is a strict *reader* of it — it
-  must never write it, or it recreates the self-proving loop this plan removes.
+- **Data ownership**: unchanged. No new Redis key is introduced (the round-1
+  `session:runintent:{N}` beacon was dropped — see the round-2 scope decision).
+  `tools/sdlc_stage_marker.py` gains a release responsibility on the MERGE
+  transition it already owns.
 - **Reversibility**: high. Every new signal is additive and each layer degrades
   to today's behavior when its input is unresolvable. Reverting is deleting the
   new module plus four call sites.
@@ -353,49 +360,161 @@ being the same measurement.
 
 ### Key Elements
 
-- **L1 — Explicit release at supervisor exit** (`sdlc-tool session-release`): a
-  new ownership-checked subcommand that frees the lease and clears the
-  supervised-run signal, invoked by `/do-sdlc` on **every** exit path. Covers the
-  deliberate stand-down case, which no process-liveness check can ever see
-  (a stood-down supervisor's `claude` process is still alive).
+- **L0 — Renewal must never mint** (`touch_issue_lock(..., renew_only=True)`):
+  the heartbeat's extend call currently `SET NX`s its way back into ownership of
+  a lock that was just released. Until this is fixed, L1 is self-defeating. This
+  is the round-1 critique BLOCKER and is a prerequisite for everything below.
+- **L1 — Explicit release when the run ends**, on two legs:
+  - **Tool-layer leg (primary, no model cooperation required):** a successful,
+    non-idempotent `MERGE`/`completed` marker write in
+    `tools/sdlc_stage_marker.py` releases the lease. This fires on the happy path
+    for *every* pipeline — local `/do-sdlc`, `/sdlc` router, and worker-driven
+    alike — because marking MERGE completed is the unavoidable tool-layer event
+    that means "the run is over".
+  - **Skill-body leg (exits the tool layer cannot see):** a new
+    ownership-checked `sdlc-tool session-release` subcommand, invoked by
+    `/do-sdlc` on the Step 3d.4 HALT and the Step 3e blocked / cap-reached exits.
+    Covers the deliberate stand-down, which no process-liveness check can ever
+    see (a stood-down supervisor's `claude` process is still alive).
 - **L2 — Supervisor-process liveness watch**: `session-ensure` records the
   supervisor's `(pid, create_time)` at mint and hands it to the heartbeat, which
   polls it and, on a *positively established* death, releases the lease and
   exits. Covers the killed/crashed supervisor.
-- **L3 — Intent-staleness backstop**: when the supervisor is unresolvable
-  (no `CLAUDE_PID`, no ancestry match — the shape the six March zombies have),
-  the heartbeat instead requires the run to have shown *any* SDLC write activity
-  within a bounded window, and stops renewing when it has not. Replaces the 4h
-  wall clock as the effective bound on that path.
+- **L3 — Unsupervised lifetime ceiling**: when the supervisor is unresolvable
+  (no `CLAUDE_PID`, no ancestry match), the heartbeat is bound by
+  `SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS` (default `5400`) instead of the 4h
+  `MAX_LIFETIME_SECONDS`, and exits **without releasing**. One constant and one
+  branch — no new Redis key, no new write call sites.
 - **L4 — Observability**: the heartbeat logs its decisions at INFO to
   `logs/sdlc_lease_heartbeat.log`, which is currently permanently empty.
 
-The three liveness layers are **mutually exclusive by evidence quality**, not
-stacked: L2 is consulted when the supervisor is resolvable, L3 only when it is
-not. This is deliberate — see Risk 1.
+L2 and L3 are **mutually exclusive by evidence quality**, not stacked: L2 is
+consulted when the supervisor is resolvable, L3's shortened ceiling applies only
+when it is not. This is deliberate — see Risk 1.
+
+**Round-2 scope decision (closes Open Questions 2 and 3).** The round-1 plan
+proposed L3 as a run-intent beacon: a new `session:runintent:{N}` Redis key, two
+helpers, five write call sites, a new tunable, a new test class, and a new race
+— all to bound a path spike-1 says never occurs on a healthy local run, while
+`MAX_LIFETIME_SECONDS` was retained as a backstop for that same path. The
+Scope critic was right that the plan built the expensive option without deciding
+against the cheap one. Decision: **drop the beacon.** A shortened ceiling on the
+unresolvable path buys the identical ≤2h bound (90 min + the lock's own 1800s
+TTL) for one constant.
+
+The global 4h `MAX_LIFETIME_SECONDS` is deliberately **not** lowered. Lowering it
+uniformly would make a live supervisor's long BUILD stage lapse its own lease at
+2h — reintroducing #2446 for the sake of tidiness. Gating the shorter ceiling on
+"supervisor unresolvable" gets the bound where the risk is and leaves the
+resolvable path's behavior unchanged.
 
 ### Flow
 
 **Supervisor mints run** → `session-ensure` resolves `CLAUDE_PID` + create_time,
-writes intent key, spawns heartbeat with `--supervisor-pid` →
-**Heartbeat ticking** → every 60s: supervisor alive? → yes → every 600s: peek +
-renew lease + signal → **Supervisor exits (any path)** →
-`sdlc-tool session-release` frees lease → **Heartbeat's next peek** →
-`owner_run_id is None` → exit 0 (existing code path, untouched) →
-**Resuming supervisor** → `session-ensure` finds a free lock → fresh `run_id`,
-no `--reuse-run-id`.
+spawns heartbeat with `--supervisor-pid` → **Heartbeat ticking** → every 60s:
+supervisor alive? → yes → every 600s: peek + `renew_only` extend + signal →
+**MERGE marked completed** → stage-marker calls `release_run()` → lease freed →
+**Heartbeat's next peek** → `owner_run_id is None` → exit 0 (existing code path,
+untouched) → **Resuming supervisor** → `session-ensure` finds a free lock →
+fresh `run_id`, no `--reuse-run-id`.
+
+Stand-down branch: **Supervisor HALTs / blocks / hits its cap** → Step 5
+`sdlc-tool session-release` frees lease → same heartbeat exit as above. Because
+the extend is `renew_only`, the heartbeat cannot re-mint the freed lease in the
+window before it notices.
 
 Crash branch: **Supervisor killed** → next 60s supervisor check → psutil
 `NoSuchProcess` (or `create_time` mismatch) on two consecutive checks →
 `release_issue_lock` + `clear_supervised_run_signal` → exit 0.
 
-Unresolvable branch: **No supervisor identity recorded** → intent key absent or
-foreign → stop renewing, exit 0 **without** releasing → lease lapses on its own
-1800s TTL.
+Unresolvable branch: **No supervisor identity recorded** → 90-minute ceiling
+instead of 4h → stop renewing, exit 0 **without** releasing → lease lapses on its
+own 1800s TTL, ≤2h total.
 
 ### Technical Approach
 
-**L1 — `tools/sdlc_session_release.py` + skill wiring**
+**L0 — `touch_issue_lock(..., renew_only=True)` (BLOCKER fix, do this first)**
+
+The round-1 plan asserted the renewal branch was "a plain `SET`" and asked a
+build task to confirm it. It was wrong in a way that breaks the plan's own happy
+path, and the real shape is worse than the critique's summary. Verified at
+`models/session_lifecycle.py`:
+
+- `:1222` — `acquired = _R.set(key, value, nx=True, ex=ttl)`. This runs **before**
+  any ownership comparison. On an absent key it *succeeds*, and the function
+  returns `acquired=True`. The docstring says so outright: "No existing key:
+  `SET NX EX` claims it carrying `run_id`." A heartbeat calling this a
+  millisecond after L1 released the lease does not renew — it **re-mints**.
+- `:1230` — the follow-up `raw is None` branch (SET-NX lost, key then expired)
+  *also* returns `acquired=True`. A second, independent path that reports
+  ownership of a key nobody holds.
+
+So the heartbeat re-acquires a released lease and, because its supervisor
+`claude` process is still alive on the stand-down path, L2 reports "alive"
+forever and L3 is never consulted. The lease then renews to the 4h ceiling —
+#2714's exact bug, reached through this plan's new happy path. Fixing this is a
+precondition for L1 being worth anything.
+
+- Add keyword-only `renew_only: bool = False` to `touch_issue_lock`. Default
+  `False` preserves every existing caller byte-for-byte.
+- When `renew_only=True`, **skip the `SET NX` entirely** and skip the `raw is
+  None` "treat as acquired" branch. Both are minting paths and a renewer must
+  have neither. An absent key returns
+  `IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)`,
+  which the heartbeat already handles as its lease-lost exit.
+- Make the surviving renewal write atomic. The existing renewal branch
+  (`:1253-1296`) is a read-then-`_R.set(key, ..., ex=ttl)` with a real TOCTOU
+  window: a release landing between the `GET` and the `SET` is undone by the
+  `SET`, which recreates the key. Replace the write under `renew_only` with a
+  compare-and-set Lua script mirroring the existing
+  `_RELEASE_IF_VALUE_MATCHES_LUA`:
+
+  ```lua
+  if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    return 1
+  end
+  return 0
+  ```
+
+  `ARGV[1]` is the exact raw value this call read, `ARGV[2]` the self-healed
+  payload. A `GET` on an absent key returns `false`, never equal to `ARGV[1]`, so
+  the script is structurally incapable of minting. Returns `0` → report
+  `acquired=False, owner_run_id=None`.
+- Do **not** add `xx=True` to the `_R.set(...)` at `:1222`. That statement is
+  also `ensure_session`'s acquire path and #2537's SET-NX contest is load-bearing
+  there.
+- Heartbeat passes `renew_only=True` on its extend call. Its peek call is
+  unchanged (`peek=True` already never mutates).
+
+**L1 — release path: tool-layer leg + `tools/sdlc_session_release.py` + skill wiring**
+
+*Tool-layer leg (primary).* The round-1 plan made a skill-body prose step the
+only release mechanism. The History critic was right to refuse that:
+`tools/sdlc_session_ensure.py:150` already records the opposite decision
+("Wiring stays in the tool layer -- NO `/do-sdlc` skill-body edit required"), and
+`docs/sdlc/do-plan-critique.md` records #1654 failing for exactly this reason (a
+barrier that "lived only in prose aimed at an LLM"). A grep proving the sentence
+exists is not evidence it ran.
+
+- In `tools/sdlc_stage_marker.py::_write_marker_impl`, on a **successful,
+  non-idempotent** `--stage MERGE --status completed` write, call
+  `release_run(issue_number, run_id)` best-effort (wrapped, never fails the
+  marker write). The already-completed idempotent branch (`:613`) must **not**
+  release — it does not own the transition.
+- This leg is path-agnostic: it fires for `/do-sdlc`, for the `/sdlc` router, and
+  for worker-driven pipelines, none of which need to cooperate. It is also
+  ordering-consistent with what already exists — after MERGE is completed,
+  `_pipeline_is_terminal` makes `reestablish_run_id` decline to re-mint
+  (`tools/_sdlc_run_identity.py:200-207`), so nothing downstream expects to still
+  hold the lease.
+- Route the existing terminal-guard release at
+  `tools/_sdlc_run_identity.py:204` through `release_run()` instead of bare
+  `release_issue_lock`, so that site also clears the supervised-run signal.
+  (This site is narrow — it only fires when something tries to re-establish a
+  run identity on a terminal pipeline — so it is a cleanup, not the primary leg.)
+
+*The subcommand.*
 
 - New module exposing `release_run(issue_number, run_id) -> dict` and a `main()`
   emitting typed JSON: `{"released": bool, "reason": str, "issue_number": int,
@@ -411,9 +530,11 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
   19) and in its `usage()` block. The dispatcher maps kebab → `tools.sdlc_session_release`
   automatically.
 - Wire into `.claude/skills-global/do-sdlc/SKILL.md` as a new **Step 5: Release
-  the run lease** placed after Step 4 (Final Report), stated to run on *every*
-  exit path enumerated in Step 3e (merged / blocked / cap reached) **and** on the
-  Step 3d.4 HALT. Concrete invocation goes in the repo addendum
+  the run lease** placed after Step 4 (Final Report), scoped to the exits the
+  tool layer cannot observe: the Step 3d.4 HALT and the Step 3e **blocked** and
+  **cap-reached** exits. The Step 3e *merged* exit is already covered by the
+  stage-marker leg, and the skill step is idempotent there anyway (a released
+  lease yields `no_lease`). Concrete invocation goes in the repo addendum
   `docs/sdlc/do-sdlc.md`, per the skill-context convention.
 - **Scoping decision (load-bearing):** do **not** wire release into
   `.claude/skills/sdlc/SKILL.md`. `/sdlc` is a single-stage router whose run must
@@ -450,28 +571,25 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
 - On confirmed death: `release_issue_lock` + `clear_supervised_run_signal`, log
   at INFO, `return 0`.
 
-**L3 — run-intent beacon (unresolvable-supervisor path only)**
+**L3 — unsupervised lifetime ceiling (unresolvable-supervisor path only)**
 
-- `agent/supervised_run.py` gains
-  `touch_run_intent(issue_number, run_id, ttl=None)` and
-  `read_run_intent(issue_number) -> str | None`, over a new raw-Redis key
-  `session:runintent:{N}` holding the bare `run_id`, `ex=SDLC_RUN_INTENT_TTL_SECONDS`
-  (default `5400` = 90 min, PROVISIONAL/TUNABLE per the magic-number convention).
-  Same raw-Redis idiom as the sibling keys in that module — these are **not**
-  Popoto-managed keys, so the raw-Redis guard does not apply and no Popoto
-  migration is required.
-- Written by: `tools/sdlc_session_ensure.py` at mint/rebind, and by the four
-  state-mutating CLIs (`sdlc_stage_marker`, `sdlc_verdict`, `sdlc_dispatch`,
-  `sdlc_meta_set`) at the `heal_missing_run_id` seam identified in spike-5.
-- **Never** written by `tools/sdlc_lease_heartbeat.py`. This is an anti-criterion
-  in Verification.
-- Heartbeat consults it **only when `supervisor_pid is None`**. Absent or
-  foreign `run_id` → stop renewing and `return 0` **without releasing**: absence
-  of a beacon is not positive proof of death, so the 1800s lease TTL — not a
-  delete — is the correct disposition.
-- `MAX_LIFETIME_SECONDS` stays at 4h as an unchanged absolute ceiling. With L2 or
-  L3 active it should never bind; leaving it in place costs nothing and keeps the
-  #2446 backstop intact if both new layers somehow no-op.
+- New module constant `UNSUPERVISED_MAX_LIFETIME_SECONDS = 90 * 60`, env
+  override `SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS`, marked GRAIN OF SALT /
+  provisional per the magic-number convention.
+- The heartbeat's existing max-lifetime comparison selects its bound once at
+  startup: `UNSUPERVISED_MAX_LIFETIME_SECONDS` when `supervisor_pid is None`,
+  else `MAX_LIFETIME_SECONDS`. One expression; the existing lifetime check and
+  its exit path are otherwise untouched.
+- On that exit: log INFO with reason `unsupervised_max_lifetime` and `return 0`
+  **without releasing**. Failure to resolve a supervisor is not
+  positive proof the run is dead, so the 1800s lease TTL — not a delete — is the
+  correct disposition. Worst case on this path is 90 min + 30 min = **2h**.
+- `MAX_LIFETIME_SECONDS` stays at 4h, unchanged, as the bound on the resolvable
+  path. See the round-2 scope decision above for why it is not lowered
+  uniformly.
+- **No new Redis key.** `session:runintent:{N}`, `touch_run_intent`,
+  `read_run_intent`, and the five write call sites from round 1 are all deleted
+  from this plan.
 
 **L4 — observability**
 
@@ -479,8 +597,8 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
   (`DEBUG` under `--verbose`).
 - Log one INFO line at startup (issue, run_id, supervisor pid/create_time or
   "unresolved", intervals) and one INFO line at every exit naming the reason:
-  `supervisor_dead` / `intent_stale` / `lease_lost` / `foreign_owner` /
-  `max_lifetime`.
+  `supervisor_dead` / `unsupervised_max_lifetime` / `lease_lost` /
+  `foreign_owner` / `max_lifetime`.
 
 ## Failure Path Test Strategy
 
@@ -494,9 +612,12 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
 - `tools/sdlc_session_ensure.py:203` — existing broad `except` around the spawn.
   New test: `resolve_supervisor_identity` raising must not prevent the heartbeat
   from being spawned (it just spawns without the supervisor flags).
-- New `resolve_supervisor_identity` and `touch_run_intent` are best-effort by
-  contract; each gets a test asserting the observable fallback (`(None, None)`,
-  and "no exception propagates to the caller") rather than `pass`-and-hope.
+- New `resolve_supervisor_identity` is best-effort by contract; it gets a test
+  asserting the observable fallback (`(None, None)`, and "no exception propagates
+  to the caller") rather than `pass`-and-hope.
+- `release_run` raising inside `tools/sdlc_stage_marker.py` must **not** fail the
+  MERGE marker write. Test with `release_run` patched to raise, asserting the
+  marker write still returns success.
 
 ### Empty/Invalid Input Handling
 
@@ -508,8 +629,9 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
   "dead". Test each.
 - `--supervisor-create-time` present without `--supervisor-pid` (and vice
   versa): treated as unresolved.
-- `read_run_intent` on an absent key returns `None`; on a corrupt/binary value
-  returns `None` rather than raising.
+- `SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS` set to a non-numeric or negative
+  value falls back to the `90 * 60` default rather than raising or selecting a
+  zero-length lifetime that exits on tick one.
 
 ### Error State Rendering
 
@@ -529,9 +651,11 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
 - [ ] `tests/unit/test_sdlc_session_ensure.py::test_stale_local_pipeline_no_heartbeat_still_listed` — UPDATE: same argv-shape check.
 - [ ] `tests/unit/test_sdlc_session_ensure.py::test_heartbeat_restores_a_signal_that_lapsed_under_a_live_lease` — UPDATE: must still pass; the restore path is unchanged when the supervisor is alive.
 - [ ] `tests/unit/test_sdlc_lease_heartbeat.py::TestSupervisorLiveness` — CREATE: dead supervisor releases + exits; live supervisor renews; unresolved supervisor never consults psutil; `create_time` mismatch counts as dead; single flake does not trip the 2-confirmation gate; psutil exception → keeps renewing.
-- [ ] `tests/unit/test_sdlc_lease_heartbeat.py::TestIntentStaleness` — CREATE: fresh intent renews; stale/absent intent stops renewing **without** releasing; intent path is skipped entirely when a supervisor pid is present.
+- [ ] `tests/unit/test_sdlc_lease_heartbeat.py::TestUnsupervisedCeiling` — CREATE: with `supervisor_pid=None` the selected bound is 5400s and the exit logs `unsupervised_max_lifetime` **without** releasing the lease; with a non-None `supervisor_pid` the selected bound is the unchanged 4h `MAX_LIFETIME_SECONDS`. The second case is the round-1 plan's load-bearing invariant that it asserted but never tested.
 - [ ] `tests/unit/test_sdlc_session_release.py` — CREATE: releases when owner; no-op `not_owner` on a foreign run_id; `no_lease` on an absent lease; clears the supervised-run signal; missing args; Redis error is swallowed into `{"released": false, "reason": "error"}`.
-- [ ] `tests/unit/test_supervised_run.py` (if present; else add to the heartbeat suite) — CREATE: `touch_run_intent` / `read_run_intent` round-trip, TTL applied, absent-key `None`, corrupt-value `None`.
+- [ ] **Issue-lock suite (`tests/unit/` — locate the existing `touch_issue_lock` tests)** — CREATE `TestRenewOnly`: `renew_only=True` on an absent key returns `acquired=False, owner_run_id=None` and **leaves the key absent** (the BLOCKER regression test); `renew_only=True` on a self-owned key still renews and still self-heals `target_repo` / `machine_id` / `renewed_at`; `renew_only=True` on a foreign key reports the foreign owner and does not write; `renew_only=False` (default) behavior is unchanged for every existing caller, including the `SET NX` acquire.
+- [ ] `tests/unit/test_sdlc_lease_heartbeat.py::TestReleaseRaceIsClosed` — CREATE: delete the lock key between the heartbeat's peek and its extend; assert the key is still absent afterward and the heartbeat takes its lease-lost exit. This is Race 1's structural proof.
+- [ ] **Stage-marker suite (`tests/unit/test_sdlc_stage_marker.py`)** — UPDATE: a successful `MERGE`/`completed` write calls `release_run`; a repeated (idempotent, already-completed) MERGE write does **not**; a `release_run` exception does not fail the marker write.
 
 ## Rabbit Holes
 
@@ -568,18 +692,20 @@ foreign → stop renewing, exit 0 **without** releasing → lease lapses on its 
 
 ## Risks
 
-### Risk 1: The intent-staleness backstop lapses a live lease mid-stage (#2446 regression)
-**Impact:** A BUILD stage running longer than the intent TTL with no SDLC writes
-would let the lease lapse mid-run — precisely the failure the heartbeat exists to
-prevent, and the worst possible regression here.
-**Mitigation:** L3 is consulted **only when the supervisor pid is unresolvable**.
-On every normal local run `CLAUDE_PID` resolves (spike-1), so L2 is authoritative
-and L3 never runs. Additionally L3 only *stops renewing* — it never deletes — so
-the lease still survives its full 1800s TTL, and `owned_run_ids` self-recognition
-(#2446) plus run-identity self-heal (#2144) already cover re-binding after a
-lapse. The 90-minute default is generously above the observed longest gap between
-SDLC writes within a stage. Verification includes a test asserting L3 is skipped
-whenever a supervisor pid is present.
+### Risk 1: The shortened unsupervised ceiling lapses a live lease mid-stage (#2446 regression)
+**Impact:** A run whose supervisor is unresolvable but genuinely alive, in a BUILD
+stage longer than 90 minutes, would let its lease lapse mid-run — precisely the
+failure the heartbeat exists to prevent, and the worst possible regression here.
+**Mitigation:** The 90-minute ceiling applies **only when the supervisor pid is
+unresolvable**. On every normal local run `CLAUDE_PID` resolves (spike-1), so the
+4h ceiling is what binds and today's behavior is unchanged. The shortened ceiling
+only *stops renewing* — it never deletes — so the lease still survives its full
+1800s TTL, and `owned_run_ids` self-recognition (#2446) plus run-identity
+self-heal (#2144) already cover re-binding after a lapse. Verification includes a
+test asserting the 4h bound is the one selected whenever a supervisor pid is
+present. This risk is strictly smaller than in round 1: the dropped beacon could
+also have gone stale under a *resolvable* supervisor if the write path missed a
+call site, whereas a lifetime ceiling has no such failure mode.
 
 ### Risk 2: `CLAUDE_PID` is an undocumented harness variable and may disappear
 **Impact:** If a Claude Code upgrade drops it, L2 silently stops resolving and
@@ -601,12 +727,20 @@ state is lost. The release is scoped to `/do-sdlc` only — `/sdlc`'s per-stage
 router, and the worker path, are untouched.
 
 ### Risk 4: A supervisor `claude` process that is alive but idle keeps the lease
-**Impact:** L2 cannot detect a stand-down; if L1's skill-body step is skipped
-(the model does not follow it), the lease is held until the 4h ceiling.
-**Mitigation:** L1 lives on the `/do-sdlc` exit path that already has a mandatory
-Step 4 (Final Report) on every exit, making it a natural, hard-to-miss
-attachment point. Verification greps the skill body for the release invocation.
-Residual exposure is the pre-existing 4h ceiling, i.e. no worse than today.
+**Impact:** L2 cannot detect a stand-down (the process is alive); if L1's
+skill-body leg is skipped because the model does not follow the prose step, the
+lease is held until the 4h ceiling.
+**Mitigation:** The happy path does not depend on the model at all — the
+stage-marker leg releases on MERGE completion in the tool layer. The skill-body
+leg is therefore only load-bearing for HALT / blocked / cap-reached exits, which
+are precisely the cases where a *human* is about to look at the run anyway. The
+skill step attaches to the mandatory Step 4 (Final Report) that already runs on
+every exit. Verification greps the skill body for the invocation, and a test
+asserts the tool-layer leg fires on the MERGE transition — the grep proves the
+text exists, the test proves the mechanism works.
+**Residual exposure:** a stood-down supervisor whose model skipped Step 5 holds
+the lease to the 4h ceiling — no worse than today, and no longer on the happy
+path. Honestly stated rather than claimed away.
 
 ### Risk 5: pid recycling makes a dead supervisor look alive
 **Impact:** A recycled pid could suppress the death signal, leaving the lease
@@ -621,19 +755,25 @@ dead, so the guard fails toward detection here rather than away from it.
 ### Race 1: Supervisor releases the lease while the heartbeat is mid-renew
 **Location:** `tools/sdlc_lease_heartbeat.py:139-158` vs
 `models/session_lifecycle.py:1326::release_issue_lock`
-**Trigger:** Step 5's release lands between the heartbeat's peek (owner matches)
-and its `touch_issue_lock` extend. The extend then re-`SET`s the key — the
-heartbeat re-mints a lease the supervisor just freed.
-**Data prerequisite:** the lock key must be absent at extend time for the harm to
-occur.
-**State prerequisite:** the run must be over.
-**Mitigation:** window is bounded by two adjacent Redis round-trips (single-digit
-ms). If it fires, the re-minted lease is owned by the *retiring* `run_id`, and
-the very next tick (≤60s) sees `supervisor_dead` or `intent_stale` and exits;
-worst case the lease lapses on its own TTL. A build task must additionally
-confirm `touch_issue_lock`'s renewal branch is a plain `SET` and record whether
-`XX`-guarding it is a safe tightening — do **not** change it speculatively, since
-`SET NX EX` semantics there are load-bearing for #2537.
+**Trigger:** the release lands between the heartbeat's peek (owner matches) and
+its `touch_issue_lock` extend.
+**Data prerequisite:** the lock key is absent at extend time.
+**State prerequisite:** the run is over.
+**Round-1 status:** this was the critique BLOCKER, and the round-1 mitigation was
+wrong twice over — the premise that the renewal branch is "a plain `SET`" is
+false (`:1222` is `SET NX`, which *acquires* on an absent key), and the stated
+escape ("the next tick sees `supervisor_dead` or `intent_stale`") cannot fire on
+the stand-down path, because the supervisor process is alive and so L3 is never
+consulted. The re-minted lease would renew to the 4h ceiling: #2714's own bug,
+on this plan's happy path.
+**Mitigation (round 2):** closed structurally by L0 rather than argued down.
+Under `renew_only=True` the extend performs no `SET NX` and no "absent key means
+acquired" inference, and its write is a Lua compare-and-set against the exact raw
+value just read. A `GET` on an absent key returns `false`, which never equals the
+expected value, so the script cannot recreate the key. The race becomes a no-op
+that reports `owner_run_id is None`, taking the heartbeat's existing lease-lost
+exit. Test: delete the lock key between the peek and the extend and assert the
+key is **still absent** afterward and the heartbeat exits.
 
 ### Race 2: Two heartbeats for the same issue after a re-mint
 **Location:** `tools/sdlc_session_ensure.py:576`
@@ -646,16 +786,20 @@ a foreign `owner_run_id` and it exits 0 without mutating (#2537). The new
 release path is likewise CAD-guarded on `run_id`, so an old heartbeat can never
 release a successor's lease.
 
-### Race 3: Intent key written by a stage fork after the supervisor died
-**Location:** the four `heal_missing_run_id` call sites
-**Trigger:** a stage subagent's write lands after the supervisor process is gone,
-refreshing the intent TTL for a dead run.
-**Data prerequisite:** the fork still carries the dead run's `run_id`.
-**State prerequisite:** supervisor unresolvable (only then is L3 consulted).
-**Mitigation:** in `/do-sdlc` the stage forks live *inside* the supervisor
-process, so this cannot outlive it. In the degenerate unresolvable case the
-window is one intent TTL and the disposition is only "keep renewing", never
-"release". Acceptable.
+### Race 3: MERGE-completed release lands while a later write still needs the lease
+**Location:** `tools/sdlc_stage_marker.py::_write_marker_impl` (MERGE/completed)
+vs any subsequent state-mutating SDLC write for the same run
+**Trigger:** the tool-layer leg frees the lease at MERGE completion; a straggling
+`verdict` / `meta-set` write for that run then finds no lease.
+**Data prerequisite:** a write attempt after MERGE is marked completed.
+**State prerequisite:** the pipeline is terminal.
+**Mitigation:** already the designed behavior, not a new hazard. Post-MERGE
+re-establishment is *already* refused: `_pipeline_is_terminal` makes
+`reestablish_run_id` decline a fresh mint and release the lease it just took
+(`tools/_sdlc_run_identity.py:200-207`). Releasing at MERGE completion makes the
+lease state agree with a terminal decision the ledger has already recorded. The
+idempotent already-completed marker branch (`:613`) does not release, so a
+repeated marker write cannot free a *successor* run's lease.
 
 ## No-Gos (Out of Scope)
 
@@ -669,12 +813,29 @@ window is one intent TTL and the disposition is only "keep renewing", never
 
 Investigating *why* six heartbeats were spawned on issues closed five months ago
 (the missing spawn-side terminal/closed-issue guard, and the off-pin `python@3.14`
-interpreter they ran under) is a genuinely different root cause. It is **not**
-deferred by this plan: the fix here bounds any such heartbeat's life to ≤2 hours
-regardless of how it was spawned, so the observed symptom is covered. A
-build-time task files it as a fresh investigation issue via
-`/do-investigation-issue` so the spawn-side gap is tracked on its own slug rather
-than promised here.
+interpreter they ran under) is a genuinely different root cause, and this plan
+**does not** cover the observed symptom as fully as round 1 claimed.
+
+The honest bound this fix delivers, per path:
+
+| Supervisor state | Bound after this fix |
+|---|---|
+| Resolvable, run reaches MERGE | released in the tool layer, seconds |
+| Resolvable, HALT/blocked/cap + Step 5 ran | released, seconds |
+| Resolvable, HALT/blocked/cap + Step 5 skipped | 4h `MAX_LIFETIME_SECONDS` (unchanged from today) |
+| Resolvable, killed | ≤ ~120s |
+| **Unresolvable** | ≤2h (90 min ceiling + 1800s lease TTL) |
+
+Round 1 asserted "≤2 hours regardless of how it was spawned". That is false and
+the round-1 plan disproved it in its own Risk 4. **≤2h holds only on the
+unresolvable-supervisor path.** A re-spawned heartbeat launched from inside a
+live `claude` session resolves `CLAUDE_PID`, so L2 reports its supervisor alive
+and it is bound by the unchanged 4h ceiling — better than nothing, but not the
+uniform guarantee round 1 advertised.
+
+Task 8 therefore files the spawn-side gap as its own investigation issue on the
+strength of it being a **different root cause**, not on the strength of a bound
+this plan does not deliver.
 
 ## Update System
 
@@ -719,8 +880,9 @@ than promised here.
       release-on-exit contract.
 - [ ] Update `docs/features/sdlc-issue-ownership-lock.md` — the renewer table
       (line ~316) and the file inventory (line ~384) must describe the new exit
-      conditions and the `session:runintent:{N}` key; add `session-release` as an
-      explicit release path alongside `finalize_session`.
+      conditions and the `renew_only` renewal contract (a renewer never mints);
+      add `session-release` and the stage-marker MERGE leg as explicit release
+      paths alongside `finalize_session`.
 - [ ] Update `docs/features/sdlc-run-self-recognition.md` — note that the
       heartbeat now has external liveness inputs, so self-recognition is a
       narrower fallback than before.
@@ -738,25 +900,38 @@ than promised here.
       max-lifetime is the death backstop" (lines 32-33), which this change makes
       false. Per the no-legacy rule, describe only the new status quo.
 - [ ] Docstrings for `resolve_supervisor_identity`, `_supervisor_is_dead`,
-      `touch_run_intent`, `read_run_intent`, `release_run`.
-- [ ] A comment at the L3 branch stating explicitly that it is consulted **only**
-      when the supervisor is unresolvable, and why (Risk 1).
-- [ ] `GRAIN OF SALT` comments marking `SDLC_RUN_INTENT_TTL_SECONDS`,
+      `release_run`.
+- [ ] Update the `touch_issue_lock` docstring's "Behavior (non-peek)" list, which
+      currently states "No existing key: `SET NX EX` claims it carrying
+      `run_id`". That must gain the `renew_only` exception explicitly — the
+      unqualified sentence is what made the round-1 plan's Race 1 analysis wrong.
+- [ ] A comment at the unsupervised-ceiling branch stating explicitly that the
+      shortened bound applies **only** when the supervisor is unresolvable, and
+      why (Risk 1).
+- [ ] `GRAIN OF SALT` comments marking `UNSUPERVISED_MAX_LIFETIME_SECONDS`,
       `SDLC_SUPERVISOR_CHECK_INTERVAL_SECONDS`, and
       `SDLC_SUPERVISOR_DEATH_CONFIRMATIONS` as provisional/tunable with env
       overrides, per the repo's magic-number convention.
 
 ## Success Criteria
 
-- [ ] A `/do-sdlc` supervisor that exits on any path (merged, blocked, HALT, cap
-      reached) leaves no held lease: `touch_issue_lock(N, None, peek=True)`
-      reports `owner_run_id is None`.
+- [ ] **A renewing heartbeat can never mint.** With the lock key absent,
+      `touch_issue_lock(N, run_id, renew_only=True)` leaves the key absent and
+      reports `owner_run_id is None`. (BLOCKER fix; without this every criterion
+      below is defeatable.)
+- [ ] A run that reaches MERGE leaves no held lease, with **no** skill
+      cooperation: after a `MERGE`/`completed` marker write,
+      `touch_issue_lock(N, None, peek=True)` reports `owner_run_id is None`.
+- [ ] A `/do-sdlc` supervisor that exits via HALT / blocked / cap-reached and runs
+      Step 5 likewise leaves no held lease.
 - [ ] A killed supervisor's heartbeat releases the lease and exits within
       `2 × SDLC_SUPERVISOR_CHECK_INTERVAL_SECONDS` (~120s default), verified by a
       unit test with injected clocks.
-- [ ] A heartbeat with no resolvable supervisor stops renewing within
-      `SDLC_RUN_INTENT_TTL_SECONDS`, so the lease is free within ≤2h total
-      (90 min + 30 min TTL) instead of 4h.
+- [ ] A heartbeat with no resolvable supervisor stops renewing at
+      `UNSUPERVISED_MAX_LIFETIME_SECONDS`, so the lease is free within ≤2h total
+      (90 min + 30 min TTL) instead of 4h — and does **not** release.
+- [ ] A heartbeat *with* a resolvable supervisor is still bound by the unchanged
+      4h `MAX_LIFETIME_SECONDS`, not the 90-minute one.
 - [ ] After a supervisor stops, `sdlc-tool session-ensure --issue-number N` mints
       a fresh `run_id` without `--reuse-run-id`.
 - [ ] #2446/#2451 preserved: a live supervisor's lease is renewed indefinitely; a
@@ -788,13 +963,7 @@ than promised here.
 
 - **Builder (release-path)**
   - Name: `release-builder`
-  - Role: `sdlc-tool session-release` subcommand, dispatcher registration, skill wiring
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (intent-beacon)**
-  - Name: `intent-builder`
-  - Role: `session:runintent:{N}` helpers + the four write-path call sites
+  - Role: `sdlc-tool session-release` subcommand, dispatcher registration, the stage-marker tool-layer release leg, skill wiring
   - Agent Type: builder
   - Resume: true
 
@@ -818,9 +987,37 @@ than promised here.
 
 ## Step by Step Tasks
 
+### 0. Renew-only lease extension (BLOCKER fix — land first)
+- **Task ID**: build-renew-only
+- **Depends On**: none
+- **Validates**: tests/unit/test_session_lifecycle.py (or the existing issue-lock
+  suite), tests/unit/test_sdlc_lease_heartbeat.py
+- **Informed By**: round-1 critique BLOCKER; verified at
+  `models/session_lifecycle.py:1222` (`SET NX` acquires on an absent key) and
+  `:1230` (the `raw is None` branch also returns `acquired=True`)
+- **Assigned To**: hb-liveness-builder
+- **Agent Type**: builder
+- **Domain**: Redis/concurrency
+- **Parallel**: false — every other task's correctness depends on this one
+- Add keyword-only `renew_only: bool = False` to `touch_issue_lock`; default
+  preserves all existing callers byte-for-byte.
+- Under `renew_only=True`: skip the `SET NX` at `:1222` and the `raw is None`
+  "treat as acquired" branch at `:1230`. Absent key → `acquired=False,
+  owner_run_id=None`.
+- Replace the renewal write with a Lua compare-and-set against the exact raw
+  value read in the same call, mirroring `_RELEASE_IF_VALUE_MATCHES_LUA`. Keep
+  the existing `target_repo` / `machine_id` / `renewed_at` self-heal in the
+  payload it sets.
+- Do **not** add `xx=True` to the `:1222` `SET NX` — that statement is also
+  `ensure_session`'s acquire path and #2537's contest is load-bearing there.
+- Heartbeat's extend call passes `renew_only=True`; its `peek=True` call is
+  unchanged.
+- Test: delete the lock key between peek and extend; assert the key remains
+  absent and the result reports `owner_run_id is None`.
+
 ### 1. Supervisor identity resolver
 - **Task ID**: build-supervisor-identity
-- **Depends On**: none
+- **Depends On**: build-renew-only
 - **Validates**: tests/unit/test_sdlc_lease_heartbeat.py (create `TestSupervisorLiveness`)
 - **Informed By**: spike-1 (confirmed: `CLAUDE_PID` is exported into every Bash tool call and matched the `claude` ancestor exactly), spike-2 (confirmed: `ppid=1` is NOT a death signal)
 - **Assigned To**: hb-liveness-builder
@@ -846,9 +1043,9 @@ than promised here.
 - On confirmed death: `release_issue_lock` + `clear_supervised_run_signal`, log INFO, `return 0`.
 - Keep every existing peek-first branch byte-for-byte reachable; new params default to today's behavior.
 
-### 3. `sdlc-tool session-release`
+### 3. `sdlc-tool session-release` + tool-layer release leg
 - **Task ID**: build-session-release
-- **Depends On**: none
+- **Depends On**: build-renew-only
 - **Validates**: tests/unit/test_sdlc_session_release.py (create)
 - **Informed By**: spike-3 (confirmed: `release_issue_lock` is an ownership-checked CAD; no release subcommand exists)
 - **Assigned To**: release-builder
@@ -857,20 +1054,37 @@ than promised here.
 - Create `tools/sdlc_session_release.py` with `release_run()` + `main()` emitting typed JSON `{released, reason, issue_number, run_id}`.
 - Wrap `release_issue_lock` then `clear_supervised_run_signal`. No raw Redis `DEL`.
 - Register `session-release` in `scripts/sdlc-tool::ALLOWED_SUBCOMMANDS` and its `usage()` block.
+- **Tool-layer leg** (round-1 History CONCERN — do not let prose be the only
+  mechanism): call `release_run()` from `tools/sdlc_stage_marker.py::_write_marker_impl`
+  on a successful, non-idempotent `MERGE`/`completed` write, wrapped best-effort
+  so it can never fail the marker write. The already-completed idempotent branch
+  (`:613`) must NOT release.
+- Route the existing bare `release_issue_lock` at `tools/_sdlc_run_identity.py:204`
+  through `release_run()` so that site also clears the supervised-run signal.
+- Test that `release_run` fires on the MERGE transition and does not fire on a
+  repeated (idempotent) MERGE marker write.
 
-### 4. Run-intent beacon
-- **Task ID**: build-intent-beacon
-- **Depends On**: none
-- **Validates**: tests/unit/test_sdlc_lease_heartbeat.py (create `TestIntentStaleness`)
-- **Informed By**: spike-5 (confirmed: all four state-mutating CLIs import from `tools/_sdlc_run_identity.py`), Risk 1
-- **Assigned To**: intent-builder
+### 4. Unsupervised lifetime ceiling
+- **Task ID**: build-unsupervised-ceiling
+- **Depends On**: build-supervisor-identity
+- **Validates**: tests/unit/test_sdlc_lease_heartbeat.py (create `TestUnsupervisedCeiling`)
+- **Informed By**: round-1 Scope CONCERN (build the cheap option, not both), Risk 1
+- **Assigned To**: hb-liveness-builder
 - **Agent Type**: builder
-- **Domain**: Redis/Popoto data
-- **Parallel**: true
-- Add `touch_run_intent` / `read_run_intent` to `agent/supervised_run.py` over `session:runintent:{N}` with `SDLC_RUN_INTENT_TTL_SECONDS` (default 5400, marked provisional/tunable).
-- Call `touch_run_intent` from `sdlc_session_ensure` at mint/rebind and from the four state-mutating CLIs at the `heal_missing_run_id` seam.
-- Wire the heartbeat's consult **only** under `supervisor_pid is None`; stale → stop renewing, `return 0`, **do not release**.
-- The heartbeat must never write the intent key.
+- **Parallel**: false
+- Add `UNSUPERVISED_MAX_LIFETIME_SECONDS = 90 * 60`, env override
+  `SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS`, GRAIN OF SALT comment.
+- Select the bound once at startup: unsupervised constant when `supervisor_pid
+  is None`, else the unchanged 4h `MAX_LIFETIME_SECONDS`. Do not lower
+  `MAX_LIFETIME_SECONDS`.
+- On that exit: log INFO `unsupervised_max_lifetime`, `return 0`, **do not
+  release**.
+- Test the invariant the round-1 plan asserted but never checked: with a non-None
+  `supervisor_pid`, assert the selected bound is `MAX_LIFETIME_SECONDS`, not the
+  90-minute one.
+- **Deleted from this plan** (round-2 scope decision): `session:runintent:{N}`,
+  `touch_run_intent`, `read_run_intent`, the five write call sites, and the
+  `intent-builder` team member.
 
 ### 5. `/do-sdlc` release-on-exit wiring
 - **Task ID**: build-skill-wiring
@@ -878,24 +1092,24 @@ than promised here.
 - **Assigned To**: release-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add "Step 5: Release the run lease" to `.claude/skills-global/do-sdlc/SKILL.md`, stated to run on every Step 3e exit path and on the Step 3d.4 HALT.
+- Add "Step 5: Release the run lease" to `.claude/skills-global/do-sdlc/SKILL.md`, scoped to the exits the tool layer cannot see: the Step 3d.4 HALT and the Step 3e blocked / cap-reached exits. The merged exit is covered by the stage-marker leg in Task 3.
 - Put the concrete invocation in `docs/sdlc/do-sdlc.md` per the skill-context convention; keep the global body generic.
 - Do **not** touch `.claude/skills/sdlc/SKILL.md` — the single-stage router's run must survive across invocations.
 
 ### 6. Heartbeat observability
 - **Task ID**: build-heartbeat-logging
-- **Depends On**: build-heartbeat-watch, build-intent-beacon
+- **Depends On**: build-heartbeat-watch, build-unsupervised-ceiling
 - **Informed By**: spike-4 (confirmed: `logs/sdlc_lease_heartbeat.log` has been 0 bytes since 2026-08-04)
 - **Assigned To**: hb-liveness-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - `logging.basicConfig(level=INFO)` unconditionally in `main()`; DEBUG under `--verbose`.
-- One INFO startup line (issue, run_id, supervisor source + pid, intervals) and one INFO exit line naming the reason (`supervisor_dead` / `intent_stale` / `lease_lost` / `foreign_owner` / `max_lifetime`).
+- One INFO startup line (issue, run_id, supervisor source + pid, intervals) and one INFO exit line naming the reason (`supervisor_dead` / `unsupervised_max_lifetime` / `lease_lost` / `foreign_owner` / `max_lifetime`).
 - Rewrite the module docstring to describe only the new status quo (delete the "max-lifetime is the death backstop" claim).
 
 ### 7. Tests
 - **Task ID**: build-tests
-- **Depends On**: build-heartbeat-watch, build-session-release, build-intent-beacon, build-heartbeat-logging
+- **Depends On**: build-renew-only, build-heartbeat-watch, build-session-release, build-unsupervised-ceiling, build-heartbeat-logging
 - **Validates**: tests/unit/test_sdlc_lease_heartbeat.py, tests/unit/test_sdlc_session_release.py (create), tests/unit/test_sdlc_session_ensure.py
 - **Assigned To**: hb-test-engineer
 - **Agent Type**: test-engineer
@@ -910,7 +1124,8 @@ than promised here.
 - **Assigned To**: release-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Use `/do-investigation-issue` to file the "six heartbeats spawned at 12:25:09 on issues closed in March, under an off-pin `python@3.14`" observation as its own issue, citing #2714 comment 5277602180.
+- Use `/do-investigation-issue` to file the "six heartbeats spawned at 12:25:09 on issues closed in March, under an off-pin `python@3.14`" observation as its own issue, citing #2714 comment 5277602180 and the live 4h-backstop observation posted to #2714 on 2026-08-13.
+- Justify the split on it being a **different root cause** (a missing spawn-side terminal/closed-issue guard), NOT on this plan bounding such a heartbeat to ≤2h — it does not, per the No-Gos table.
 - Do not attempt the spawn-side fix in this plan.
 
 ### 9. Guarantee validation
@@ -921,7 +1136,7 @@ than promised here.
 - **Parallel**: false
 - Prove #2446/#2451 survives: a live supervisor renews indefinitely; a dead payload pid never stops renewal.
 - Prove #2537 survives: peek-before-renew intact, foreign owner exits, never mints on a free key.
-- Prove L3 is unreachable whenever a supervisor pid is present.
+- Prove the shortened unsupervised ceiling is unreachable whenever a supervisor pid is present (the 4h bound is selected instead).
 - Run every row of the Verification table.
 
 ### 10. Documentation
@@ -949,30 +1164,71 @@ than promised here.
 | Session-ensure tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Subcommand registered | `grep -c "session-release" scripts/sdlc-tool` | output > 1 |
+| Issue-lock tests pass | `scripts/pytest-clean.sh <issue-lock suite> -q` | exit code 0 |
+| Stage-marker tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_stage_marker.py -q` | exit code 0 |
+| Subcommand registered | `grep -q "session-release" scripts/sdlc-tool` | exit code 0 |
 | Subcommand reachable | `sdlc-tool session-release --help` | exit code 0 |
-| Peek-first preserved (#2537) | `grep -c "peek=True" tools/sdlc_lease_heartbeat.py` | output > 0 |
-| Heartbeat still ignores orphaned_lock (#2620) | `grep -c "orphaned_lock" tools/sdlc_lease_heartbeat.py` | match count == 0 |
-| Heartbeat never writes the intent key | `grep -c "touch_run_intent" tools/sdlc_lease_heartbeat.py` | match count == 0 |
-| No ppid-based inference (spike-2 anti-criterion) | `grep -cE "getppid\|ppid" tools/sdlc_lease_heartbeat.py tools/sdlc_session_ensure.py` | match count == 0 |
-| No raw Redis DEL in the release path | `grep -cE "\.delete\(\|DEL " tools/sdlc_session_release.py` | match count == 0 |
-| Release wired into /do-sdlc exit | `grep -c "session-release" .claude/skills-global/do-sdlc/SKILL.md docs/sdlc/do-sdlc.md` | output > 1 |
-| /sdlc router NOT wired (scoping anti-criterion) | `grep -c "session-release" .claude/skills/sdlc/SKILL.md` | match count == 0 |
-| Pytest spawn guard intact | `grep -c "PYTEST_CURRENT_TEST" tools/sdlc_session_ensure.py` | output > 0 |
-| Stale docstring claim removed | `grep -c "max-lifetime is the death backstop" tools/sdlc_lease_heartbeat.py` | match count == 0 |
-| Docs updated | `grep -c "session-release" docs/features/sdlc-issue-ownership-lock.md` | output > 0 |
+| Peek-first preserved (#2537) | `grep -q "peek=True" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+| Renew-only wired (BLOCKER fix) | `grep -q "renew_only=True" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+| Tool-layer release leg exists | `grep -q "release_run" tools/sdlc_stage_marker.py` | exit code 0 |
+| Pytest spawn guard intact | `grep -q "PYTEST_CURRENT_TEST" tools/sdlc_session_ensure.py` | exit code 0 |
+| Docs updated | `grep -q "session-release" docs/features/sdlc-issue-ownership-lock.md` | exit code 0 |
+| Release wired into /do-sdlc exit | `grep -q "session-release" .claude/skills-global/do-sdlc/SKILL.md && grep -q "session-release" docs/sdlc/do-sdlc.md` | exit code 0 |
+
+**Anti-criteria** — every row below must fail by *exit code*, so a violation
+cannot be mistaken for a passing count. Round-1 expressed these as `grep -c ...`
+"match count == 0", which is unusable three ways: an escaped `\|` inside an ERE
+is a **literal pipe**, not alternation (measured: `grep -cE "getppid\|ppid"`
+returns `0` against a file containing `os.getppid()` — the check could never
+fail); `grep -c` over two files prints `path:count` per file rather than one
+integer; and `grep -c` exits `1` on zero matches, aborting any `set -e` harness
+on the *success* case.
+
+| Anti-criterion | Command | Expected |
+|---|---|---|
+| Heartbeat still ignores orphaned_lock (#2620) | `! grep -q "orphaned_lock" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+| `xx=True` NOT added to the shared acquire | `! grep -q "xx=True" models/session_lifecycle.py` | exit code 0 |
+| /sdlc router NOT wired (scoping) | `! grep -q "session-release" .claude/skills/sdlc/SKILL.md` | exit code 0 |
+| Stale docstring claim removed | `! grep -q "max-lifetime is the death backstop" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+
+The three anti-criteria needing ERE **alternation** are written below rather than
+in the table above, because a literal `|` inside a markdown table cell must be
+escaped as `\|` — and copying that escape into the shell is precisely how round 1
+produced a check that could never fail. Run these verbatim; each must exit 0:
+
+```bash
+! grep -qE 'getppid|ppid' tools/sdlc_lease_heartbeat.py tools/sdlc_session_ensure.py
+! grep -qE '\.delete\(|DEL ' tools/sdlc_session_release.py
+! grep -rqE 'runintent|touch_run_intent' tools/ agent/ models/
+```
 
 ## Critique Results
 
+### Round 1 — NEEDS REVISION (revised 2026-08-13; all 5 findings addressed)
+
 **Verdict:** NEEDS REVISION (1 blocker, 4 concerns) — FULL war room (force-FULL: plan edits `.claude/skills-global/`).
+
+**Revision summary.** The blocker was confirmed and found to be slightly worse
+than reported: `touch_issue_lock` mints via `SET NX` at `:1222` *before* any
+ownership comparison, and its `raw is None` branch at `:1230` independently
+returns `acquired=True`. Both are closed by a new `renew_only=True` mode with a
+Lua compare-and-set write (new Task 0, which everything else now depends on). The
+release path gained a tool-layer leg on the MERGE marker write so the happy path
+no longer depends on an LLM following prose. The run-intent beacon was **dropped
+entirely** — a new Redis key, two helpers, five call sites, a tunable, a test
+class, and a race, all replaced by one constant — and Open Questions 2 and 3 are
+closed as part of that decision. The Verification anti-criteria were rewritten to
+fail by exit code, with the alternation patterns moved out of the markdown table
+that caused the escaping defect. No-Gos now states the per-path bound honestly
+and no longer claims ≤2h unconditionally.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | Race 1's mitigation fails on its own primary trigger. The premise that `touch_issue_lock`'s renewal branch is "a plain SET" is wrong — `models/session_lifecycle.py:1222` is already `_R.set(key, value, nx=True, ex=ttl)`, and NX gives no protection when the key is absent, so the heartbeat re-mints the lease the supervisor just released. The stated escape ("next tick sees supervisor_dead or intent_stale") cannot fire on the L1 stand-down path: the supervisor process is alive, so L2 says alive and L3 is never consulted. The re-minted lease then renews to the 4h ceiling — the exact #2714 bug, on the plan's new happy path. | pending | Do NOT add `xx=True` to the `_R.set(...)` at `models/session_lifecycle.py:1222` — that statement is also `ensure_session`'s acquire path and #2537's SET-NX contest is load-bearing. Add keyword-only `renew_only: bool = False` to `touch_issue_lock`; when True and the pre-SET `_R.get(key)` is `None`, return `IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)` instead of minting. Heartbeat passes `renew_only=True` and treats `owner_run_id is None` as its existing lease-lost exit. Test: delete the lock key between peek and extend, assert the key stays absent. |
-| CONCERN | Risk & Robustness | Two Verification anti-criterion greps can never fail. In an ERE, an escaped pipe is a *literal* pipe, so the spike-2 row matches only the literal string, not `os.getppid()` (measured: escaped form returns 0 on a file containing `os.getppid()`; unescaped alternation returns 1). Same defect in the raw-Redis-DEL row. Three rows also run `grep -c` over two files, which prints `path:count` per file, so "output > 1" is not evaluable, and `grep -c` exits 1 on zero matches, aborting any `set -e` harness. | pending | Use unescaped ERE alternation in both anti-criterion rows (keep the `\(` escape, drop only the pipe escape). Express every "match count == 0" row as `! grep -qE '<pattern>' <files>` so a violation fails by exit code. Split the multi-file rows one-per-file, or use `grep -ho '<pattern>' f1 f2 \| wc -l` for a single integer. |
-| CONCERN | History & Consistency | L1 reverses a documented decision and reinstates a pattern already recorded as failed here. `tools/sdlc_session_ensure.py:150` states "Wiring stays in the tool layer -- NO `/do-sdlc` skill-body edit required"; the plan makes a skill-body prose step the primary release mechanism without refuting it. `docs/sdlc/do-plan-critique.md` records #1654's identical failure (a barrier that "lived only in prose aimed at an LLM"). Risk 4 concedes the exposure but mitigates only with a grep, which proves the text exists, not that it ran. | pending | Give L1 a tool-layer leg: `tools/_sdlc_run_identity.py:204` already calls `release_issue_lock` on its terminal-pipeline guard — route that site through the new `release_run()` so it also calls `clear_supervised_run_signal`, releasing on MERGE-stage completion with zero skill cooperation. Reserve skill-body Step 5 for exits the tool layer cannot see (3d.4 HALT, 3e blocked/cap). Add a test asserting `release_run` fires on the terminal transition. |
-| CONCERN | History & Consistency | No-Gos asserts a bound the plan disproves, and defers Task 8 on it. It claims the fix "bounds any such heartbeat's life to ≤2 hours regardless of how it was spawned"; Risk 4 says the resolvable-supervisor path is "held until the 4h ceiling". The ≤2h figure holds only on the L3 unresolvable path, and a re-spawned heartbeat is more likely to resolve a live `CLAUDE_PID` than not. | pending | Restate No-Gos as the honest split: ≤2h only with no resolvable supervisor; otherwise bounded by `MAX_LIFETIME_SECONDS`. To make ≤2h unconditional instead, close Open Question 3 by setting `MAX_LIFETIME_SECONDS` (`tools/sdlc_lease_heartbeat.py:79`) to `2 * 60 * 60` — but only alongside the Task 2 cadence split, since the ceiling then binds live long runs. Task 8's deferral must not rest on the unqualified claim. |
-| CONCERN | Scope & Value | L3 is a third backstop for a path spike-1 says never occurs, and it is the largest cost in a Medium plan: a new Redis key, two helpers, five write call sites, a new tunable, a new test class, and a new Race 3 — to move a never-observed path from 4h to 2h, while `MAX_LIFETIME_SECONDS` is retained as a backstop for the same path and Open Question 3 asks whether lowering it would suffice. The plan builds the expensive option without deciding against the one-line one. | pending | Resolve Open Question 3 before build. If dropping L3: delete Task 4 and default `SDLC_LEASE_HEARTBEAT_MAX_LIFETIME_SECONDS` to `5400` at `tools/sdlc_lease_heartbeat.py:79`, keeping the GRAIN OF SALT comment. If keeping L3: add the missing check for its load-bearing invariant (Task 4 states the heartbeat consults intent only when `supervisor_pid is None`, but no Verification row tests it) — in `TestIntentStaleness`, patch `read_run_intent` with a `Mock` and assert `call_count == 0` when `run_heartbeat` is called with a non-None `supervisor_pid`. |
+| BLOCKER | Risk & Robustness | Race 1's mitigation fails on its own primary trigger. The premise that `touch_issue_lock`'s renewal branch is "a plain SET" is wrong — `models/session_lifecycle.py:1222` is already `_R.set(key, value, nx=True, ex=ttl)`, and NX gives no protection when the key is absent, so the heartbeat re-mints the lease the supervisor just released. The stated escape ("next tick sees supervisor_dead or intent_stale") cannot fire on the L1 stand-down path: the supervisor process is alive, so L2 says alive and L3 is never consulted. The re-minted lease then renews to the 4h ceiling — the exact #2714 bug, on the plan's new happy path. | **Task 0 (`build-renew-only`)** + rewritten Race 1 + Solution §L0. Confirmed and extended: `:1230`'s `raw is None` branch is a second minting path the critique did not name. `renew_only=True` skips both and writes via Lua CAS, so minting is structurally impossible rather than argued-down. Success Criteria gained it as the first bullet; every other task now depends on Task 0. | Do NOT add `xx=True` to the `_R.set(...)` at `models/session_lifecycle.py:1222` — that statement is also `ensure_session`'s acquire path and #2537's SET-NX contest is load-bearing. Add keyword-only `renew_only: bool = False` to `touch_issue_lock`; when True and the pre-SET `_R.get(key)` is `None`, return `IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)` instead of minting. Heartbeat passes `renew_only=True` and treats `owner_run_id is None` as its existing lease-lost exit. Test: delete the lock key between peek and extend, assert the key stays absent. |
+| CONCERN | Risk & Robustness | Two Verification anti-criterion greps can never fail. In an ERE, an escaped pipe is a *literal* pipe, so the spike-2 row matches only the literal string, not `os.getppid()` (measured: escaped form returns 0 on a file containing `os.getppid()`; unescaped alternation returns 1). Same defect in the raw-Redis-DEL row. Three rows also run `grep -c` over two files, which prints `path:count` per file, so "output > 1" is not evaluable, and `grep -c` exits 1 on zero matches, aborting any `set -e` harness. | **Verification rewritten.** Independently reproduced the escaped-pipe defect (`grep -cE "getppid\|ppid"` returns 0 against a file containing `os.getppid()`). Every anti-criterion is now `! grep -q...`, failing by exit code. Root cause named in the plan: markdown tables require `\|`, so alternation patterns were moved out of the table into a fenced block to be run verbatim. Multi-file rows split or `&&`-chained. | Use unescaped ERE alternation in both anti-criterion rows (keep the `\(` escape, drop only the pipe escape). Express every "match count == 0" row as `! grep -qE '<pattern>' <files>` so a violation fails by exit code. Split the multi-file rows one-per-file, or use `grep -ho '<pattern>' f1 f2 \| wc -l` for a single integer. |
+| CONCERN | History & Consistency | L1 reverses a documented decision and reinstates a pattern already recorded as failed here. `tools/sdlc_session_ensure.py:150` states "Wiring stays in the tool layer -- NO `/do-sdlc` skill-body edit required"; the plan makes a skill-body prose step the primary release mechanism without refuting it. `docs/sdlc/do-plan-critique.md` records #1654's identical failure (a barrier that "lived only in prose aimed at an LLM"). Risk 4 concedes the exposure but mitigates only with a grep, which proves the text exists, not that it ran. | **L1 split into two legs (Task 3).** Accepted, with a stronger primary leg than proposed: release fires on the `MERGE`/`completed` marker write in `tools/sdlc_stage_marker.py`, an unavoidable tool-layer event on the happy path for *every* driver. The suggested `_sdlc_run_identity.py:204` site is also routed through `release_run` but noted as narrow cleanup, not the primary leg. Skill-body Step 5 is now scoped to HALT / blocked / cap only, and a test — not a grep — proves the mechanism. | Give L1 a tool-layer leg: `tools/_sdlc_run_identity.py:204` already calls `release_issue_lock` on its terminal-pipeline guard — route that site through the new `release_run()` so it also calls `clear_supervised_run_signal`, releasing on MERGE-stage completion with zero skill cooperation. Reserve skill-body Step 5 for exits the tool layer cannot see (3d.4 HALT, 3e blocked/cap). Add a test asserting `release_run` fires on the terminal transition. |
+| CONCERN | History & Consistency | No-Gos asserts a bound the plan disproves, and defers Task 8 on it. It claims the fix "bounds any such heartbeat's life to ≤2 hours regardless of how it was spawned"; Risk 4 says the resolvable-supervisor path is "held until the 4h ceiling". The ≤2h figure holds only on the L3 unresolvable path, and a re-spawned heartbeat is more likely to resolve a live `CLAUDE_PID` than not. | **No-Gos rewritten** with a per-path bound table; the unqualified ≤2h claim is retracted in the plan text. Open Question 3 closed the other way than the critique's suggestion: `MAX_LIFETIME_SECONDS` stays 4h because lowering it uniformly reintroduces #2446 for a live long BUILD. The shortened bound is gated on "supervisor unresolvable" instead. Task 8's deferral now rests on different-root-cause, not on the bound. | Restate No-Gos as the honest split: ≤2h only with no resolvable supervisor; otherwise bounded by `MAX_LIFETIME_SECONDS`. To make ≤2h unconditional instead, close Open Question 3 by setting `MAX_LIFETIME_SECONDS` (`tools/sdlc_lease_heartbeat.py:79`) to `2 * 60 * 60` — but only alongside the Task 2 cadence split, since the ceiling then binds live long runs. Task 8's deferral must not rest on the unqualified claim. |
+| CONCERN | Scope & Value | L3 is a third backstop for a path spike-1 says never occurs, and it is the largest cost in a Medium plan: a new Redis key, two helpers, five write call sites, a new tunable, a new test class, and a new Race 3 — to move a never-observed path from 4h to 2h, while `MAX_LIFETIME_SECONDS` is retained as a backstop for the same path and Open Question 3 asks whether lowering it would suffice. The plan builds the expensive option without deciding against the one-line one. | **Decided: L3 dropped.** The beacon, its Redis key, both helpers, all five write call sites, the tunable, `TestIntentStaleness`, Race 3, and the `intent-builder` team member are removed. Replaced by `UNSUPERVISED_MAX_LIFETIME_SECONDS` (Task 4), which buys the same ≤2h bound for one constant. The critique's "if keeping L3" branch is moot, but its underlying point — that the load-bearing invariant was asserted and never tested — is honored: `TestUnsupervisedCeiling` asserts a resolvable supervisor selects the 4h bound, not the 90-minute one. | Resolve Open Question 3 before build. If dropping L3: delete Task 4 and default `SDLC_LEASE_HEARTBEAT_MAX_LIFETIME_SECONDS` to `5400` at `tools/sdlc_lease_heartbeat.py:79`, keeping the GRAIN OF SALT comment. If keeping L3: add the missing check for its load-bearing invariant (Task 4 states the heartbeat consults intent only when `supervisor_pid is None`, but no Verification row tests it) — in `TestIntentStaleness`, patch `read_run_intent` with a `Mock` and assert `call_count == 0` when `run_heartbeat` is called with a non-None `supervisor_pid`. |
 
 **Structural checks:** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive); task numbering PASS (1-11 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (20 of 24 exist; the 4 absent are the modules this plan creates); prerequisites PASS (psutil, Redis, `sdlc-tool` all verified live); cross-references PASS except the two gaps captured above. Plan file:line claims re-verified against `f614124110`: `_maybe_launch_lease_heartbeat` at `:143`, `MAX_LIFETIME_SECONDS` at `:79`, the single call site at `:576`, and `release_issue_lock` at `:1326` all hold.
 
@@ -980,18 +1236,27 @@ than promised here.
 
 ## Open Questions
 
-1. **Is the `/do-sdlc`-only release scoping right?** L1 deliberately does not
-   touch `/sdlc`, because that router dispatches one stage and returns while the
-   run must continue. That means a bridge-PM-driven pipeline never gets an
-   explicit release — it relies on `finalize_session` at terminal transition
-   instead. Confirm that is the intended asymmetry, or name where the worker path
-   should release too.
-2. **Is 90 minutes the right intent-staleness default?** It only binds on the
-   unresolvable-supervisor path, so the #2446 risk is contained — but it also
-   sets how long a mystery heartbeat (like the six from March) can hold an issue.
-   Shorter is safer for zombies and riskier for the degenerate path. 90 min gives
-   a ≤2h worst case against today's 4h.
-3. **Should the 4h `MAX_LIFETIME_SECONDS` ceiling be lowered now that two earlier
-   layers exist?** The plan leaves it at 4h as an inert final backstop. Lowering
-   it to, say, 2h would make the guarantee uniform but adds a second thing that
-   can lapse a live lease if both new layers no-op.
+All three round-1 questions are **closed** with chosen defaults; none blocks
+build. Recorded here with their reasoning so a reviewer can reopen one on the
+merits rather than rediscovering it.
+
+1. **Is the `/do-sdlc`-only release scoping right?** — **CLOSED: the asymmetry is
+   gone, and the question is largely moot.** Round 1 made the skill body the only
+   release mechanism, which forced the question. The round-2 tool-layer leg
+   (release on the `MERGE`/`completed` marker write) is path-agnostic: it fires
+   for `/do-sdlc`, for the `/sdlc` router, and for worker-driven pipelines alike,
+   with no skill cooperation. What remains skill-scoped is only the HALT /
+   blocked / cap-reached exits, which are `/do-sdlc` concepts that no other
+   driver has. `/sdlc`'s SKILL.md is still deliberately not wired (its run must
+   survive across invocations) and that stays an explicit anti-criterion.
+2. **Is 90 minutes the right intent-staleness default?** — **CLOSED as obsolete.**
+   The intent beacon is dropped. The 90-minute figure survives as
+   `UNSUPERVISED_MAX_LIFETIME_SECONDS`, env-overridable and marked
+   provisional/tunable, binding only the unresolvable path.
+3. **Should the 4h `MAX_LIFETIME_SECONDS` be lowered?** — **CLOSED: no, not
+   uniformly.** Lowering it globally would make a live supervisor's >2h BUILD
+   stage lapse its own lease, reintroducing #2446 to buy tidiness. The shortened
+   bound is gated on "supervisor unresolvable", which puts it exactly where the
+   risk is and leaves the resolvable path's behavior unchanged. This is what
+   allowed L3 to collapse from a Redis key plus five call sites into one
+   constant.
