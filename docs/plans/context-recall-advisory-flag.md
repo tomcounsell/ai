@@ -344,8 +344,10 @@ Commands, taken from the verified argparse definitions (`N` = `CONTEXT_RECALL_HI
 - Telegram (`tools/valor_telegram.py:1316-1353`): `valor-telegram read --chat-id <real id> -n N`
 - Email (`tools/valor_email.py:798-810`): the `read` parser has **no per-peer flag** — only
   `--mailbox`, `--limit/-n`, `--search/-s`, `--since`, `--json`. So emit
-  `valor-email read --search "<peer address>" -n N` when the address passes the `"@"` check, and fall
-  back to `valor-email threads` when it does not. Never emit a placeholder.
+  `valor-email read --search "<peer address>" -n N` when the address passes the guard, and return
+  `None` when it does not. Never emit a placeholder. (The originally specified `valor-email threads`
+  fallback was dropped in review round 1 of PR #2695: returning `None` is the safer fail-open, and the
+  fallback function was deleted with it.)
 
 The `chat_id == session_id → None` criterion holds **incidentally**, not by design: session ids are
 non-numeric (`models/agent_session.py:155`), so `_numeric_peer` returns `None` for them and the Telegram
@@ -862,7 +864,9 @@ Standard Tier 1 pool. `delivery-builder` carries `Domain: untrusted-input` frami
 - Define `CONTEXT_RECALL_HISTORY_DEPTH` (env-overridable, default `10`, provisional-tunable comment) and
   use it for both media. No literal depth anywhere.
 - Telegram command `valor-telegram read --chat-id <id> -n <depth>`; email
-  `valor-email read --search "<addr>" -n <depth>` with a `valor-email threads` fallback.
+  `valor-email read --search "<addr>" -n <depth>`, returning `None` on a guard miss (the
+  `valor-email threads` fallback was dropped in PR #2695 review round 1 — fail open with no advisory
+  rather than emit a peer-less command).
 - **Branch the chat-id guard on `medium`**: `deliverable_telegram_peer` for telegram,
   `bool(chat_id) and "@" in str(chat_id)` for email. Never run the Telegram peer guard on an email
   `chat_id` — it rejects every one of them (`utils/peer.py:37-44` vs `bridge/email_bridge.py:1512`).
