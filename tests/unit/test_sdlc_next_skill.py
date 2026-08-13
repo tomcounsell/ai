@@ -38,7 +38,7 @@ def test_build_context_sets_current_plan_hash_when_plan_exists(tmp_path, monkeyp
 
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: plan,
+        lambda issue_number, **_kw: plan,
     )
 
     context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1639)
@@ -51,7 +51,7 @@ def test_build_context_omits_hash_when_no_plan(monkeypatch):
     """No plan file for the issue → current_plan_hash key is left unset (None-safe)."""
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: None,
+        lambda issue_number, **_kw: None,
     )
 
     context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=999999)
@@ -63,7 +63,7 @@ def test_build_context_omits_hash_when_plan_unreadable(monkeypatch):
     """find_plan_path returns a missing path → compute_plan_hash None → key unset."""
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: Path("/nonexistent/does-not-exist-plan.md"),
+        lambda issue_number, **_kw: Path("/nonexistent/does-not-exist-plan.md"),
     )
 
     context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1639)
@@ -78,7 +78,7 @@ def test_build_context_sets_issue_number_when_plan_exists(tmp_path, monkeypatch)
 
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: plan,
+        lambda issue_number, **_kw: plan,
     )
 
     context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1761)
@@ -99,13 +99,13 @@ def test_build_context_uses_body_hash_not_full_bytes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: plan_before,
+        lambda issue_number, **_kw: plan_before,
     )
     ctx_before = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1761)
 
     monkeypatch.setattr(
         "tools._sdlc_utils.find_plan_path",
-        lambda issue_number: plan_after,
+        lambda issue_number, **_kw: plan_after,
     )
     ctx_after = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1761)
 
@@ -139,7 +139,7 @@ class TestBranchExistsCanonicalShape:
     def test_true_when_canonical_slug_branch_exists(self, tmp_path, monkeypatch):
         plan = tmp_path / "my-feature-slug.md"
         plan.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan)
         monkeypatch.setattr(
             "subprocess.run",
             self._fake_git("  main\n  session/my-feature-slug\n"),
@@ -153,7 +153,7 @@ class TestBranchExistsCanonicalShape:
         """A `session/sdlc-{N}` branch must NOT count — that shape is never created."""
         plan = tmp_path / "my-feature-slug.md"
         plan.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan)
         monkeypatch.setattr(
             "subprocess.run",
             self._fake_git("  main\n  session/sdlc-2003\n"),
@@ -165,7 +165,7 @@ class TestBranchExistsCanonicalShape:
 
     def test_false_when_no_plan_resolvable(self, monkeypatch):
         """No plan → no slug → cannot affirm existence → False (never sdlc-{N})."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(
             "subprocess.run",
             self._fake_git("  main\n  session/sdlc-2003\n  session/other-slug\n"),
@@ -178,7 +178,7 @@ class TestBranchExistsCanonicalShape:
     def test_false_when_branch_absent(self, tmp_path, monkeypatch):
         plan = tmp_path / "my-feature-slug.md"
         plan.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan)
         monkeypatch.setattr("subprocess.run", self._fake_git("  main\n"))
 
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
@@ -257,7 +257,7 @@ class TestTargetRepoCwd:
         monkeypatch.setenv("SDLC_TARGET_REPO", str(target))
         monkeypatch.setattr(
             "tools._sdlc_utils.find_plan_path",
-            lambda issue_number: target / "docs" / "plans" / "sdlc-2078-fixture.md",
+            lambda issue_number, **_kw: target / "docs" / "plans" / "sdlc-2078-fixture.md",
         )
 
         context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2078)
@@ -496,7 +496,7 @@ class TestStageArtifactVerification:
     def test_no_claimed_artifact_is_a_noop(self, monkeypatch):
         """No stage claims completion → verification never runs a live check
         and leaves stage_artifacts_verified/unverified_stage unset."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         run_mock = MagicMock()
         monkeypatch.setattr("subprocess.run", run_mock)
 
@@ -521,7 +521,7 @@ class TestStageArtifactVerification:
         """BUILD claims completed but the claimed PR is not OPEN live →
         stage_artifacts_verified=False, unverified_stage='BUILD', and an
         observable warning names the stage and the missing artifact."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("CLOSED"))
 
         stage_states = {"BUILD": "completed"}
@@ -544,7 +544,7 @@ class TestStageArtifactVerification:
     def test_true_build_claim_leaves_context_unset(self, monkeypatch):
         """BUILD claims completed and the PR really is OPEN live → no-op
         (advances normally, g8 never fires)."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("OPEN"))
 
         stage_states = {"BUILD": "completed"}
@@ -566,7 +566,7 @@ class TestStageArtifactVerification:
         the strongest possible proof the BUILD artifact was real; treating
         it as unverified would re-dispatch /do-build forever on an issue
         that already shipped."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("MERGED"))
 
         stage_states = {"BUILD": "completed"}
@@ -589,7 +589,9 @@ class TestStageArtifactVerification:
         even run once the PR's live state proves MERGED."""
         plan_path = tmp_path / "my-slug.md"
         plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan_path)
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan_path
+        )
 
         ls_remote_calls = []
 
@@ -629,7 +631,9 @@ class TestStageArtifactVerification:
         strictly to state == "MERGED", not to "PR exists"."""
         plan_path = tmp_path / "my-slug.md"
         plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan_path)
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan_path
+        )
 
         def _fake_run(cmd, **kwargs):
             proc = MagicMock()
@@ -662,7 +666,7 @@ class TestStageArtifactVerification:
     def test_fails_open_on_infra_error(self, monkeypatch, caplog):
         """subprocess.TimeoutExpired/OSError from the gh/git call → advances
         (stage_artifacts_verified stays unset/True) with a warning logged."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
 
         def _raise_timeout(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
@@ -685,7 +689,7 @@ class TestStageArtifactVerification:
 
     def test_fails_open_on_os_error(self, monkeypatch, caplog):
         """OSError (e.g. gh binary missing) also fails open with a warning."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
 
         def _raise_os_error(cmd, **kwargs):
             raise OSError("gh: command not found")
@@ -710,7 +714,7 @@ class TestStageArtifactVerification:
         """A logic bug (TypeError from a malformed artifact spec) must NOT be
         swallowed by the narrowed fail-open catch -- it surfaces (raises)
         and is logged at error level, never silently advancing."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
 
         def _raise_type_error(cmd, **kwargs):
             raise TypeError("malformed artifact spec")
@@ -734,7 +738,7 @@ class TestStageArtifactVerification:
     def test_missing_stage_states_or_meta_skips_verification(self, monkeypatch):
         """Legacy callers that only pass proposed_skill/issue_number (no
         stage_states/meta) must not trigger verification at all."""
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         run_mock = MagicMock()
         monkeypatch.setattr("subprocess.run", run_mock)
 
@@ -742,6 +746,204 @@ class TestStageArtifactVerification:
 
         assert "stage_artifacts_verified" not in context
         run_mock.assert_not_called()
+
+
+class TestG8BranchResolution:
+    """Issue #2793: G8 falsely reported a pushed branch as missing.
+
+    Observed on popoto issue #530 / PR #553: G8 emitted "branch
+    session/docs_repositioning is not pushed" while the real, pushed branch
+    was ``bench/530-post-correction-refresh``. Two independent defects:
+
+    (a) the slug came from a bare-``#N`` textual match against a DIFFERENT
+        issue's plan that merely cross-references #530, and
+    (b) the branch name was reconstructed as ``session/{slug}`` rather than
+        read from the PR.
+
+    Fixing either alone leaves the state wedged, so both legs are covered
+    here plus the combination.
+    """
+
+    @staticmethod
+    def _fake_gh(*, state: str = "OPEN", head_ref: str | None = None, pushed: str = ""):
+        """Fake ``subprocess.run`` answering gh pr view (state + headRefName).
+
+        ``pushed`` is the branch name ``git ls-remote`` will report as
+        existing; anything else comes back empty (not pushed).
+        """
+
+        def _run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:3] == ["gh", "pr", "view"]:
+                payload: dict = {}
+                if "state" in cmd:
+                    payload["state"] = state
+                if "headRefName" in cmd and head_ref is not None:
+                    payload["headRefName"] = head_ref
+                proc.returncode = 0
+                proc.stdout = json.dumps(payload)
+            elif cmd[:2] == ["git", "ls-remote"]:
+                proc.returncode = 0
+                proc.stdout = (
+                    f"abc123\trefs/heads/{pushed}\n" if pushed and cmd[-1] == pushed else ""
+                )
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        return _run
+
+    def test_bench_branch_with_no_tracking_plan_passes_g8(self, monkeypatch):
+        """THE #2793 BUG: a pushed `bench/`-prefixed branch on an issue that no
+        plan tracks must verify clean, not report "branch not pushed".
+
+        This is the popoto #530 shape end to end: no tracking plan (so no
+        slug), and a real branch that does not follow the `session/` convention.
+        """
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            self._fake_gh(
+                head_ref="bench/530-post-correction-refresh",
+                pushed="bench/530-post-correction-refresh",
+            ),
+        )
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=530,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": 553},
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
+    def test_branch_check_uses_pr_head_ref_not_reconstructed_name(self, monkeypatch, tmp_path):
+        """Leg (b) alone: even with a CORRECTLY-resolved slug, a PR whose head
+        branch is not `session/{slug}` must verify against the real head ref."""
+        plan = tmp_path / "my-slug.md"
+        plan.write_text("---\ntracking: #530\n---\n\n# Plan\n", encoding="utf-8")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan)
+
+        ls_remote_args: list[str] = []
+        inner = self._fake_gh(
+            head_ref="bench/530-post-correction-refresh", pushed="bench/530-post-correction-refresh"
+        )
+
+        def _run(cmd, **kwargs):
+            if cmd[:2] == ["git", "ls-remote"]:
+                ls_remote_args.append(cmd[-1])
+            return inner(cmd, **kwargs)
+
+        monkeypatch.setattr("subprocess.run", _run)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=530,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": 553},
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert ls_remote_args == ["bench/530-post-correction-refresh"], (
+            "branch check must query the PR's head ref, never a reconstructed session/{slug}"
+        )
+
+    def test_cross_reference_plan_does_not_supply_a_slug(self, tmp_path, monkeypatch):
+        """Leg (a) at its source: a plan that merely mentions `#530` (while
+        tracking #511) must not resolve as #530's plan when the caller needs
+        an identity. The unqualified call still finds it (unchanged)."""
+        from tools import _sdlc_utils
+
+        plans = tmp_path / "docs" / "plans"
+        plans.mkdir(parents=True)
+        (plans / "docs_repositioning.md").write_text(
+            "---\ntracking: #511\n---\n\n# Plan\n\nSee also #530 for the bench refresh.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path))
+
+        # Unqualified: the bare-#N fallback still matches (behavior preserved).
+        assert _sdlc_utils.find_plan_path(530) == plans / "docs_repositioning.md"
+        # Identity-deriving caller: no authoritative tracking: match → None.
+        assert _sdlc_utils.find_plan_path(530, tracking_only=True) is None
+        # The plan that genuinely tracks #511 resolves either way.
+        assert (
+            _sdlc_utils.find_plan_path(511, tracking_only=True) == plans / "docs_repositioning.md"
+        )
+
+    def test_tracking_only_suppression_applies_with_target_repo_set(self, tmp_path, monkeypatch):
+        """The pre-existing CONCERN-3 suppression only fired on the step-3
+        __file__ path. With SDLC_TARGET_REPO set (step 1) it never ran — which
+        is exactly how #530 got a foreign slug. tracking_only must suppress on
+        this path too."""
+        from tools import _sdlc_utils
+
+        plans = tmp_path / "docs" / "plans"
+        plans.mkdir(parents=True)
+        (plans / "other.md").write_text("# Plan\n\nRefs #530.\n", encoding="utf-8")
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path))
+
+        assert _sdlc_utils.find_plan_path(530) == plans / "other.md"
+        assert _sdlc_utils.find_plan_path(530, tracking_only=True) is None
+
+    def test_genuinely_missing_branch_still_fails_closed(self, monkeypatch):
+        """The fix must not trade a false positive for a false negative: a PR
+        whose head branch really is absent from origin still fails G8."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            self._fake_gh(head_ref="bench/530-post-correction-refresh", pushed=""),
+        )
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=530,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": 553},
+        )
+
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+
+    def test_unresolvable_head_ref_fails_closed(self, monkeypatch, caplog):
+        """A PR whose head ref cannot be read (gh returns no headRefName) is
+        "could not determine" — and must NOT fall back to session/{slug}, nor
+        silently pass. It fails closed, mirroring the BUILD check's treatment
+        of an unresolvable state."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
+        monkeypatch.setattr("subprocess.run", self._fake_gh(head_ref=None))
+
+        with caplog.at_level(logging.WARNING):
+            context = sdlc_next_skill._build_context(
+                proposed_skill=None,
+                issue_number=530,
+                stage_states={"PATCH": "completed"},
+                meta={"pr_number": 553},
+            )
+
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+        assert any("could not be resolved" in record.message for record in caplog.records)
+
+    def test_pr_less_patch_claim_still_uses_session_convention(self, tmp_path, monkeypatch):
+        """With no PR there is no head ref to read, so the `session/{slug}`
+        convention remains the fallback — unchanged behavior."""
+        plan = tmp_path / "my-slug.md"
+        plan.write_text("---\ntracking: #530\n---\n", encoding="utf-8")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: plan)
+        monkeypatch.setattr("subprocess.run", self._fake_gh(pushed="session/my-slug"))
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=530,
+            stage_states={"PATCH": "completed"},
+            meta={},
+        )
+
+        assert "stage_artifacts_verified" not in context
 
 
 class TestPrHeadShaContext:
@@ -759,7 +961,7 @@ class TestPrHeadShaContext:
         }
 
     def test_head_sha_set_on_successful_lookup(self, monkeypatch):
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(
             sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: self._SHA
         )
@@ -778,7 +980,7 @@ class TestPrHeadShaContext:
         def _boom(pr_number, repo=None):
             raise RuntimeError("gh exploded")
 
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(sdlc_next_skill, "_fetch_pr_head_sha", _boom)
         context = sdlc_next_skill._build_context(
             proposed_skill=None,
@@ -790,7 +992,7 @@ class TestPrHeadShaContext:
         assert context["pr_head_sha_lookup_failed"] is True
 
     def test_lookup_returning_none_fails_closed(self, monkeypatch):
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(
             sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: None
         )
@@ -805,7 +1007,7 @@ class TestPrHeadShaContext:
 
     def test_no_pr_number_skips_lookup_and_omits_key(self, monkeypatch):
         called = []
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(
             sdlc_next_skill,
             "_fetch_pr_head_sha",
@@ -824,7 +1026,7 @@ class TestPrHeadShaContext:
         """No recorded verdict → no live call, key omitted (the router's
         no-verdict recovery rows own that state; the signal stays inert)."""
         called = []
-        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number, **_kw: None)
         monkeypatch.setattr(
             sdlc_next_skill,
             "_fetch_pr_head_sha",
@@ -861,7 +1063,7 @@ class TestLedgerDurabilityRecovery:
         from models.session_lifecycle import IssueLockResult
 
         monkeypatch.setattr(
-            "tools._sdlc_utils.find_session_by_issue", lambda issue_number: issue_session
+            "tools._sdlc_utils.find_session_by_issue", lambda issue_number, **_kw: issue_session
         )
         monkeypatch.setattr(
             "models.session_lifecycle.touch_issue_lock",
@@ -956,7 +1158,7 @@ class TestLedgerDurabilityRecovery:
 
         monkeypatch.setattr(
             "tools._sdlc_utils.find_session_by_issue",
-            lambda issue_number: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda issue_number, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         monkeypatch.setattr(
             "models.session_lifecycle.touch_issue_lock",
@@ -976,7 +1178,9 @@ class TestLedgerDurabilityRecovery:
     def test_recover_helper_returns_empty_when_no_session_found(self, monkeypatch):
         """Direct unit coverage of the helper: no issue session resolvable ->
         returns {} without raising."""
-        monkeypatch.setattr("tools._sdlc_utils.find_session_by_issue", lambda issue_number: None)
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_session_by_issue", lambda issue_number, **_kw: None
+        )
 
         result = sdlc_next_skill._recover_stage_states_from_durable_signals(9999)
 
@@ -986,7 +1190,7 @@ class TestLedgerDurabilityRecovery:
         """Direct unit coverage: derive_from_durable_signals raising is
         swallowed and {} is returned."""
         monkeypatch.setattr(
-            "tools._sdlc_utils.find_session_by_issue", lambda issue_number: MagicMock()
+            "tools._sdlc_utils.find_session_by_issue", lambda issue_number, **_kw: MagicMock()
         )
         monkeypatch.setattr(
             "agent.pipeline_state.PipelineStateMachine.derive_from_durable_signals",

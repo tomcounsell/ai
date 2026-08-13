@@ -148,15 +148,49 @@ def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
     return resolve_pr_head_sha(pr_number, repo=repo, repo_root=_target_repo_cwd())
 
 
-def _check_branch_pushed(slug: str) -> bool:
-    """Live-check (``git ls-remote``) that ``session/{slug}`` exists on origin.
+def _fetch_pr_head_ref(pr_number: int, repo: str | None = None) -> str | None:
+    """Read the PR's actual head BRANCH NAME via ``gh pr view --json headRefName``.
+
+    #2793: the branch-pushed check used to reconstruct ``session/{slug}`` from
+    a plan filename. That convention is real but not universal — a bench chore
+    or hotfix lands on ``bench/…``, ``fix/…``, etc. — so a correctly-slugged
+    issue on a non-``session/`` branch was reported as "not pushed" even though
+    ``git ls-remote`` would find the real branch instantly. The PR itself knows
+    its head ref; ask it rather than reconstructing a name.
+
+    Returns ``None`` when the call fails, the response is unparseable, or
+    ``headRefName`` is absent / not a non-empty string. As with
+    :func:`_fetch_pr_state`, callers must treat ``None`` as "could not
+    determine" and never as evidence of a false claim. May raise
+    ``subprocess.TimeoutExpired``/``SubprocessError``/``OSError`` — the caller
+    applies the narrowed fail-open catch; this helper swallows nothing itself.
+    """
+    cmd = ["gh", "pr", "view", str(pr_number), "--json", "headRefName"]
+    if repo:
+        cmd = ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "headRefName"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        return None
+    data = json.loads(proc.stdout or "{}")
+    head_ref = data.get("headRefName")
+    if not isinstance(head_ref, str) or not head_ref.strip():
+        return None
+    return head_ref.strip()
+
+
+def _check_branch_pushed(branch: str) -> bool:
+    """Live-check (``git ls-remote``) that ``branch`` exists on origin.
+
+    Takes a FULL branch name (#2793), not a slug to be expanded into
+    ``session/{slug}`` — see :func:`_fetch_pr_head_ref` for why the
+    reconstruction was wrong.
 
     Unlike the local ``git branch -a`` check elsewhere in this module (which
     can be satisfied by a stale remote-tracking ref), this queries the
     remote directly so a claimed "branch pushed" artifact is verified
     against the live world, not local ref cache staleness.
     """
-    cmd = ["git", "ls-remote", "--heads", "origin", f"session/{slug}"]
+    cmd = ["git", "ls-remote", "--heads", "origin", branch]
     proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
         return False
@@ -199,8 +233,12 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     """
     from tools._sdlc_utils import find_plan_path
 
+    # tracking_only (#2793): the slug is an IDENTITY here (it names both the
+    # plan file this issue owns and, absent a PR, its branch). A plan that
+    # merely cross-references `#N` must never supply it — that borrowed slug
+    # sends both checks below off to verify some other issue's artifacts.
     slug: str | None = None
-    plan_path = find_plan_path(issue_number)
+    plan_path = find_plan_path(issue_number, tracking_only=True)
     if plan_path is not None:
         slug = Path(plan_path).stem
 
@@ -215,7 +253,10 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     pr_number = meta.get("pr_number")
     repo = meta.get("_resolved_target_repo")
     build_claimed = stage_states.get("BUILD") == "completed"
-    patch_claimed = stage_states.get("PATCH") == "completed" and bool(slug)
+    # #2793: no longer gated on a resolvable slug — when a PR exists its head
+    # ref names the branch directly, so a plan-less issue (bench chore, hotfix)
+    # is now genuinely checkable instead of silently skipped.
+    patch_claimed = stage_states.get("PATCH") == "completed"
 
     # Resolve the live PR state at most once (used by both checks below) --
     # only when a claim that needs it is actually present, so an unclaimed
@@ -232,11 +273,34 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "BUILD"}
 
-    if patch_claimed:
-        if pr_state != "MERGED" and not _check_branch_pushed(slug):
+    if patch_claimed and pr_state != "MERGED":
+        # Branch resolution (#2793), most authoritative first:
+        #   1. the PR's own head ref — the branch that actually exists
+        #   2. session/{slug} — the convention, for a PR-less PATCH claim
+        # Never fall back from (1) to (2): the reconstructed name is wrong
+        # precisely in the case that motivated this fix, and a `session/…`
+        # guess that misses would re-report a pushed `bench/…` branch as
+        # missing. An unresolvable head ref on an existing PR is instead
+        # FAIL-CLOSED (unverified), matching how the BUILD check above already
+        # treats an unresolvable `gh` read — a gh outage must not let an
+        # unverifiable claim advance. Genuine infra faults (timeout, OSError)
+        # still fail open one level up in _verify_stage_artifacts.
+        branch: str | None = None
+        if pr_number:
+            branch = _fetch_pr_head_ref(pr_number, repo=repo)
+            if branch is None:
+                logger.warning(
+                    f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
+                    f"but PR #{pr_number}'s head branch could not be resolved"
+                )
+                return {"stage_artifacts_verified": False, "unverified_stage": "PATCH"}
+        elif slug:
+            branch = f"session/{slug}"
+
+        if branch and not _check_branch_pushed(branch):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
-                f"but branch session/{slug} is not pushed"
+                f"but branch {branch} is not pushed"
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "PATCH"}
 
@@ -347,12 +411,15 @@ def _build_context(
     # filename stem (#1915 slug-wins ownership; an issue-number-derived branch
     # form is fabricated — this repo never creates one). Without a resolvable
     # plan/slug we cannot affirm existence, so branch_exists stays False (#2003).
+    # tracking_only (#2793): the slug names a branch, so only an authoritative
+    # tracking: plan may supply it — a bare-#N cross-reference would probe some
+    # other issue's branch and report ITS existence as this issue's.
     if issue_number:
         context["branch_exists"] = False
         try:
             from tools._sdlc_utils import find_plan_path
 
-            plan_path = find_plan_path(issue_number)
+            plan_path = find_plan_path(issue_number, tracking_only=True)
             if plan_path is not None:
                 slug = Path(plan_path).stem
 
