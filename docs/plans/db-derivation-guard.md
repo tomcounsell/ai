@@ -311,11 +311,22 @@ nothing — which the mutation harness below exists to disprove.
 
 ## Test Impact
 
-| Area | Change |
-|---|---|
-| New | `tests/unit/test_db_derivation_guard.py` — guard-clean assertion, non-vacuity via planted offenders, invariant checks, stale-entry and expiry checks. |
-| Modified | `test_redis_flush_guard.py`, `test_conftest_isolation_guards.py`, `test_email_bridge.py` (unit), `test_email_history.py`, `test_agent_session.py`, `test_agent_catchup_recovery.py` — derivation conversions only, no assertion changes. |
-| Behavior | `test_flushall_is_blocked_even_on_test_db` and `test_flushdb_on_own_test_db_is_allowed` stop flushing a db this process may not own. Strict improvement. |
+- [ ] `tests/unit/test_db_derivation_guard.py` — UPDATE (new file, additive): guard-clean assertion,
+      non-vacuity via planted offenders, invariant checks, stale-entry and expiry checks, plus the
+      `**` splat coverage added in the #2700 review round.
+- [ ] `tests/unit/test_redis_flush_guard.py::test_flushall_is_blocked_even_on_test_db` — UPDATE:
+      derive its db via `claim_test_db()` instead of a self-derived pool slot; assertion unchanged.
+- [ ] `tests/unit/test_redis_flush_guard.py::test_flushdb_on_own_test_db_is_allowed` — UPDATE: same
+      derivation conversion; this pair stops flushing a db the process may not own — strict
+      improvement, not just a refactor.
+- [ ] `tests/unit/test_conftest_isolation_guards.py` (two sites) — UPDATE: derivation conversion
+      only, no assertion changes.
+- [ ] `tests/unit/test_email_bridge.py` — UPDATE: derivation conversion only, no assertion changes.
+- [ ] `tests/unit/test_email_history.py` — UPDATE: derivation conversion only, no assertion changes.
+- [ ] `tests/unit/test_agent_session.py` (two sites) — UPDATE: derivation conversion only, no
+      assertion changes.
+- [ ] `tests/unit/test_agent_catchup_recovery.py` — UPDATE: derivation conversion only, no assertion
+      changes.
 
 The guard's own tests never claim a pool db and never touch db 0: planted offenders are written to
 `tmp_path` and parsed, never executed.
@@ -377,9 +388,16 @@ The PR must contain zero changes to `tests/conftest.py`, `tests/db_claim.py`,
 
 ## Documentation
 
-- New: `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted shapes, how
-  to disposition a new site, and why the polarity is inverted.
-- `docs/features/README.md` — index entry.
+### Feature Documentation
+- [ ] Create `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted
+      shapes, how to disposition a new site, why the polarity is inverted, and which of
+      `check_dispositions`/`apply_dispositions` enforces the allowlist invariant.
+- [ ] Add entry to `docs/features/README.md` index table.
+
+### Inline Documentation
+- [ ] Module docstring on `tests/db_derivation_guard.py` names the two disposition tables and states
+      precisely which function enforces the "no allowlist entry may name a pool db" invariant.
+- [ ] `Exemption` docstring states matching is per-file-per-expression, not per-site.
 
 ## Success Criteria
 
@@ -424,11 +442,24 @@ byte-identical to its pre-mutation hash.
 
 ## Verification
 
-```bash
-export PYTHONPATH=/Users/tomcounsell/src/ai/.worktrees/db-derivation-guard
-cd "$PYTHONPATH"
-./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -p no:randomly -q
-./scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -p no:randomly -q
-python -m ruff check && python -m ruff format --check
-git diff --name-only origin/main...HEAD   # must exclude the four #2628 paths
-```
+Every command assumes `PYTHONPATH` is set to the worktree root and is run from there.
+
+This section was a bash block until the #2700 review. `parse_verification_table` returned **0 checks,
+0 malformed**, so the review step that runs a plan's verification table had nothing to run and passed
+vacuously — a gate that cannot fire, in a PR whose whole thesis is that a green check proving nothing
+is worse than no check. The commands were always right; nothing could read them.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Guard suite passes | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -q` | exit code 0 |
+| Coexistence: the db-0 flush guard's own suite is unaffected | `./scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
+| Converted sites still pass | `./scripts/pytest-clean.sh tests/unit/test_agent_session.py tests/unit/test_email_bridge.py tests/unit/test_email_history.py tests/unit/test_conftest_isolation_guards.py -q` | exit code 0 |
+| Tree is clean: no undispositioned site | `python -c "from tests.db_derivation_guard import *; r,_=apply_dispositions(scan_tree()); print(len(r))"` | output is `0` |
+| No stale exemption | `python -c "from tests.db_derivation_guard import *; _,s=apply_dispositions(scan_tree()); print(len(s))"` | output is `0` |
+| Disposition tables satisfy the invariant | `python -c "from tests.db_derivation_guard import check_dispositions; print(check_dispositions())"` | output is `[]` |
+| Guard is non-vacuous: it sees real sites | `python -c "from tests.db_derivation_guard import scan_tree; print(len(scan_tree().candidates))"` | output is `26` (17 `db=`, 9 `from_url`) |
+| The `ast.Attribute` branch is load-bearing | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -k attribute_qualified -q` | exit code 0; prints `{'Attribute': 17}` |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Anti-criterion: the four #2628-owned paths are untouched | `git diff --name-only origin/main...HEAD \| grep -c -e 'tests/conftest.py' -e 'tests/db_claim.py' -e 'tests/integration/test_notify_isolation.py' -e 'docs/features/test-db-ownership.md'` | printed number is `0` (`grep -c` exits 1 on zero matches; judge the number, not the exit status) |
+| Feature doc indexed | `grep -c 'test-db-derivation-guard' docs/features/README.md` | output > 0 |
