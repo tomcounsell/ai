@@ -106,7 +106,8 @@ def _flushdb_message(db: int) -> str:
         f"Refusing flushdb() on Redis db={db} (production). Set "
         "REDIS_PRODUCTION_FLUSH_OK=1 to override deliberately, or point the "
         "client at a non-zero test db instead (see tests/conftest.py's "
-        "redis_test_db fixture / redis_url helper). This guard exists because "
+        "redis_test_db fixture / tests/db_claim.py's redis_test_url helper). "
+        "This guard exists because "
         f"a db=0 flush wiped production on {_INCIDENT_DATES}."
     )
 
@@ -117,7 +118,8 @@ def _flushall_message() -> str:
         "(production). Set REDIS_PRODUCTION_FLUSH_OK=1 to override "
         "deliberately, or flush only your own db with flushdb() after "
         "pointing the client at a non-zero test db instead (see "
-        "tests/conftest.py's redis_test_db fixture / redis_url helper). This "
+        "tests/conftest.py's redis_test_db fixture / tests/db_claim.py's "
+        "redis_test_url helper). This "
         f"guard exists because a db=0 flush wiped production on {_INCIDENT_DATES}."
     )
 

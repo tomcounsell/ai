@@ -1092,11 +1092,11 @@ after writing and reports a mismatch rather than retrying.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/redis-flush-hardening.md` — the four layers, what each stops and what it
+- [x] Create `docs/features/redis-flush-hardening.md` — the four layers, what each stops and what it
   does not, both incident dates, the `REDIS_PRODUCTION_FLUSH_OK` override and when using it is
   legitimate, the `.pth` install mechanism and why `sitecustomize.py` is unusable here, the ACL user
   model and why the split is by identity rather than by db, and the recovery runbook pointer.
-- [ ] In that same doc, a section headed **"Applying the Redis ACL — requires human sign-off, not
+- [x] In that same doc, a section headed **"Applying the Redis ACL — requires human sign-off, not
   performed by this PR"**: the operator checklist — only on the machine being applied: record the
   real `REDIS_APP_PASSWORD` in the vault `.env`, `touch data/redis-acl-enabled`, run
   `REDIS_ACL_APPLY=true python -m scripts.update.redis_acl --apply`, add the staged `aclfile`
@@ -1104,26 +1104,26 @@ after writing and reports a mismatch rather than retrying.
   (`redis-cli ACL GETUSER valor-app`, `redis-cli ACL LIST`) that were removed from `## Verification`,
   and the rollback (`ACL SETUSER default … +@all`, `ACL DELUSER valor-app`). State plainly that
   `/update` never performs any of this.
-- [ ] Add the entry to the `docs/features/README.md` index table.
-- [ ] Cross-link from `docs/features/redis-flush-hardening.md` to #2628's
+- [x] Add the entry to the `docs/features/README.md` index table.
+- [x] Cross-link from `docs/features/redis-flush-hardening.md` to #2628's
   `docs/features/test-db-ownership.md` **as a link only** — that page is #2628's to write.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo has no external docs site.
+- [x] Not applicable — this repo has no external docs site.
 
 ### Inline Documentation
-- [ ] `CLAUDE.md` § Manual Testing Hygiene: a paragraph naming the `os.environ.setdefault` foot-gun
+- [x] `CLAUDE.md` § Manual Testing Hygiene: a paragraph naming the `os.environ.setdefault` foot-gun
   (it is a no-op when the key is already exported, so "defaulting" to a test URL silently keeps the
   production one), stating that the flush guard is ambient and what its error means, and giving the
   sanctioned idiom for pointing a script at a test db.
-- [ ] Docstrings on `tools/redis_flush_guard.py` carrying both incident dates and the reason the guard
+- [x] Docstrings on `tools/redis_flush_guard.py` carrying both incident dates and the reason the guard
   is installed at interpreter scope rather than in `conftest.py`.
-- [ ] A comment in `scripts/update/redis_acl.py` recording spike-1's finding that ACL selectors do
+- [x] A comment in `scripts/update/redis_acl.py` recording spike-1's finding that ACL selectors do
   **not** restrict `FLUSHDB` by db, so a future agent does not "improve" the rule into a no-op.
-- [ ] A comment beside the new `username=` kwarg in `config/redis_bootstrap.py` (D9) saying it is the
+- [x] A comment beside the new `username=` kwarg in `config/redis_bootstrap.py` (D9) saying it is the
   client half of Layer 2, inert until #2661 rotates `REDIS_URL`, and that removing it re-breaks
   popoto's auth at rotation time.
-- [ ] A comment on the `tools/__init__.py` `arm()` trigger (D2b-i) stating that it is cheap because
+- [x] A comment on the `tools/__init__.py` `arm()` trigger (D2b-i) stating that it is cheap because
   `arm()` imports no `redis`, and that the bare `except Exception: pass` is mandatory because nothing
   may break `import tools`.
 
