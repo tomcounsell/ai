@@ -296,19 +296,22 @@ result. A rejected fix must never be silently absorbed into `fixes_applied`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
       cases assert unanchored substring behavior; re-assert against word-anchored semantics.
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
       `agent/session_logs.py` regression as a hard assertion (currently reproduces in 3 lines,
       untested).
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
       introducing an absent path is rejected, reported, and not written; sibling valid fixes in
       the same file still apply.
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestRenamedSymbolFixesDegenerate`: a
+      rename hop that loops back to the original path yields no fix; a genuine hop still does.
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
       query cap only, unaffected.
 
-The three rename detectors have **zero** direct coverage today; the existence-invariant tests
-give them their first behavioral test through the shared apply path.
+The three rename detectors had **zero** direct coverage before this work;
+`_detect_renamed_symbol_fixes` now has direct cases, and the existence-invariant tests exercise
+all three through the shared apply path.
 
 ## Rabbit Holes
 
@@ -388,40 +391,42 @@ are needed.
 
 ## Documentation
 
-- [ ] Update `docs/features/docs-auditor.md` to document the existence invariant and the
+- [x] Update `docs/features/docs-auditor.md` to document the existence invariant and the
       word-anchored stale-term semantics, including that rejected fixes are reported rather than
       applied.
-- [ ] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
+- [x] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
       `agent/session_logs.py`.
-- [ ] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
-      `bridge/session_logs.py`.
-- [ ] Repoint the two `bridge/session_router.py` **path** references (#2713):
+- [x] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
+      `agent/session_logs.py`.
+- [x] Repoint the two `bridge/session_router.py` **path** references (#2713):
       `docs/features/nonharness-llm-wrapper.md:75`, `docs/features/durability-model.md:30`.
-- [ ] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
+- [x] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
       prose about who consumes the routing hint, so it names the successor authority
       (`bridge/job_router.py`), not a substituted filename.
-- [ ] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
+- [x] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
       as "output is correct": it must branch on `fixes_withheld > 0` and re-check before trusting
       the substrate's self-committed output.
 
 ## Success Criteria
 
-- [ ] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
+- [x] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
       `bridge/session_logs.py` (the #2711 regression, as a hard assertion).
-- [ ] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
+- [x] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
       working tree, while still applying valid sibling fixes in the same file.
-- [ ] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
+- [x] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
       writes nothing and still surfaces the withheld count.
-- [ ] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
+- [x] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
       `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name them).
-- [ ] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
+- [x] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
       `docs/research/`, and `site/` untouched.
-- [ ] The auditor's own detectors report zero findings over every doc this PR touches (the
-      PR #2528 verification method).
-- [ ] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
+- [x] The auditor's own detectors report zero findings over every doc this PR touches in
+      `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name
+      the dictionary in prose, same as the criterion above) — the PR #2528 verification
+      method, applied at its own stated width.
+- [x] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
       `tests/unit/test_docs_auditor_substrate.py`.
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Both #2711 and #2713 closed from the PR.
+- [x] Documentation updated (`/do-docs`).
+- [x] Both #2711 and #2713 closed from the PR.
 
 ## Team Orchestration
 
@@ -544,13 +549,19 @@ than it saves. The doc edits are folded into the builder's scope.
 
 ## Critique Results
 
+Round 2 (this pass) critiqued the post-revision plan; the round-1 rows are retained with their
+resolutions because the plan body cites them by number.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency + structural | The "No invented-module residue" Verification row and the matching Success Criterion grep `agent/agent_sessions.py`/`bridge/agent_sessions.py` across all of `docs/` and require 0, but this plan file (`docs/plans/docs-auditor-rename-guard.md`, 8 hits at lines 34, 35, 84, 347, 349, 363, 439, 473) is itself in `docs/` and the plan's own No-Gos forbid sweeping `docs/plans/`. The check can never pass while the plan exists on the branch. | pending | Scope the residue grep the way the `session_router.py` row already is scoped: `grep -rn "agent/agent_sessions.py\\|bridge/agent_sessions.py" docs/ --exclude-dir=plans --exclude-dir=research \| wc -l` → 0, and reword the Success Criterion to "zero references outside `docs/plans/` and `docs/research/`". Note `--exclude-dir=plans` also excludes `docs/plans/completed/`. |
-| BLOCKER | Risk & Robustness (Skeptic) | Technical Approach item 1 tells `_detect_stale_term_fixes` to emit "a regex-anchored replacement rather than a bare `(old, new)` string pair", but `audit()` (`reflections/docs_auditor.py:999-1005`) concatenates all four detectors into one `fixes: list[tuple[str, str]]` consumed by a single loop in `_apply_fixes_to_file` (`:503-517`). The other three detectors still emit plain string tuples, including the `new == ""` line-delete sentinel. The plan's Interface changes section never names this element-type change, so the builder either hits a `TypeError` or forks a second matching path — re-creating the detection/application semantics split that is half the present bug. | pending | Define one fix element type all four detectors emit (e.g. a `FixSpec` dataclass with `kind: Literal["literal","regex","line-delete"]`, `pattern`, `replacement`) and dispatch on `kind` inside `_apply_fixes_to_file`. `old in new_text` and `new_text.replace(old, new)` (`:513-516`) both break on a `re.Pattern`; the `new == ""` branch (`:504-512`) must keep its exact-line-equality semantics, not become a regex. Name the element-type change under Architectural Impact → Interface changes. |
-| CONCERN | Risk & Robustness (Operator) | Technical Approach item 3 surfaces rejected fixes only as a warning log plus a new field in the `audit()` result, and the Documentation task only asks that `.claude/skill-context/do-docs.md` "mention" withheld fixes. The cascade's parse block branches only on `status`, so an all-rejected run still reports `status: "ok"` and the cascade proceeds unchanged — the same "ok gave no signal to re-check" failure #2711 named, moved one level up the stack. | pending | Make the do-docs context change behavioral, not prose: add a third branch alongside the existing `status: "ok"` / `"error"` / `"disabled"` checks — if the result's rejected-fix list is non-empty, the cascade must echo the rejected paths into its own transcript output before Step 3. Pick the result key name in Task 2 and use the same literal in Task 4 so writer and reader cannot drift. |
-| CONCERN | Scope & Value (User) | The stated justification for bundling #2713 ("Splitting them would ship a doc correction that the unfixed auditor could re-corrupt on its next cascade") is unsupported for #2713's damage class: deleted-target references are handled by the advisory issue-filer (`reflections/docs_auditor.py:1017-1026`, "Editorial, not auto-fixable"), a path neither code change in this plan touches. The bundle may still be right, but the reason given is not the real one. | pending | `bridge/session_router.py` is a pure deletion, not a rename (`bridge/job_router.py:4` documents it as the successor, `bridge/telegram_bridge.py:1289` calls it "retired"), so `_git_log_follow_renames` returns `[]` and the rename detectors never fire on it. Replace the coupling claim with the accurate one: the docs sweep is the regression corpus for the invariant (Success Criterion "the auditor's own detectors report zero findings over every doc this PR touches"), not a re-corruption risk. |
-| CONCERN | structural (cross-reference) | The #2713 sweep is scoped to `docs/features/` only, but a live user-facing reference to the retired module survives outside it: `site/runtime.html:107` carries `file:bridge/session_router.py` in a `data-files` chip on the published site. The auditor's markdown-only write guard means that surface can never self-heal. Separately, `docs/features/message-drafter.md:168` is a prose *claim* about who consumes the routing hint, not a path reference — the PR #2528 precedent this plan adopts found 4 of 15 such cases needed a rewritten claim rather than a repointed path. | pending | Extend Task 3's sweep to `site/` and reword the Success Criterion to name both surfaces; the correct target is `bridge/job_router.py` (`bridge/job_router.py:4`: "``bridge/session_router.py`` semantic session router. Structure is modeled..."). For `message-drafter.md:168`, rewrite the sentence to name `job_router.py` as the routing reader rather than mechanically substituting the path inside a claim about behavior. |
-| NIT | structural | Tasks 3 (`build-docs-sweep`), 4 (`document-feature`), and 5 (`validate-all`) carry no `Validates:` field, so three of five tasks have no per-task validation command. Task numbering, `Depends On` references, and file paths all check out otherwise. | pending | n/a |
-| NIT | Scope & Value (Simplifier) | A `Small` / solo-dev plan allocates two builder agents plus a validator for a one-module change and a handful of doc corrections; Task 4 blocking on both builders is the only real coupling point. | pending | n/a |
-</content>
+| BLOCKER | History & Consistency + structural | The "No invented-module residue" Verification row and the matching Success Criterion grepped `agent/agent_sessions.py`/`bridge/agent_sessions.py` across all of `docs/` and required 0, but the plan file itself lives in `docs/` and its own No-Gos forbid sweeping `docs/plans/`. The check could never pass while the plan existed. | RESOLVED in revision: the Verification row and the Success Criterion are both scoped to `docs/features/` and `docs/guides/`, and the Success Criterion states the plan doc and `docs/plans/` legitimately name them. | Scope the residue grep the way the `session_router.py` row is scoped; note that `--exclude-dir=plans` also excludes `docs/plans/completed/`. |
+| BLOCKER | Risk & Robustness (Skeptic) | Technical Approach item 1 told `_detect_stale_term_fixes` to emit a regex-anchored replacement, but `audit()` (`reflections/docs_auditor.py:998-1005`) concatenates all four detectors into one `fixes: list[tuple[str, str]]` consumed by a single loop in `_apply_fixes_to_file` (`:499-516`) that also carries the `new == ""` line-delete sentinel. Emitting a `re.Pattern` there would either raise or fork a second matching path. | RESOLVED in revision: Technical Approach item 1 now routes anchored replacements on a separate homogeneous `regex_fixes: list[tuple[re.Pattern[str], str]]` channel applied by its own `pattern.subn()` loop; `fixes` keeps its type and sentinel semantics unchanged, and Architectural Impact names the interface change. | `old in new_text` and `new_text.replace(old, new)` (`:513-516`) both break on a `re.Pattern`; the `new == ""` branch (`:502-511`) must keep exact-line-equality semantics. |
+| CONCERN | Risk & Robustness (Operator) | Rejected fixes surfaced only as a warning log plus an unnamed result field, and the Documentation task only asked that `.claude/skill-context/do-docs.md` "mention" them. The cascade branches on `status` alone, so an all-rejected run still reads `ok` and proceeds. | RESOLVED in revision: Technical Approach item 3 pins the result keys `fixes_withheld` (int) and `withheld` (list) into `_ok_result`, and Task 4 wires the cascade to branch on `fixes_withheld > 0`, with the literal key name pinned so writer and reader cannot drift. | Pick the result key name in Task 2 and use the same literal in Task 4. |
+| CONCERN | Scope & Value (User) | The stated justification for bundling #2713 ("the unfixed auditor could re-corrupt it") was unsupported: deleted-target references go to the advisory issue-filer, a path neither code change touches. | RESOLVED in revision: the "Revised bundling rationale" block withdraws the false claim outright and restates the bundle on the accurate basis (shared defect family plus the swept docs serving as the Task 5 regression corpus). | `bridge/session_router.py` is a pure deletion, not a rename, so `_git_log_follow_renames` returns `[]` and the rename detectors never fire on it. |
+| CONCERN | structural (cross-reference) | The #2713 sweep was scoped to `docs/features/` only while a live reference survived in `site/runtime.html`, and `docs/features/message-drafter.md:168` is a prose claim rather than a path reference. | RESOLVED in revision: `site/` is explicitly excluded as a generated artifact and filed as #2727, and Technical Approach item 4 plus Task 3 require the `message-drafter.md:168` sentence to be rewritten to name `bridge/job_router.py` rather than substituted. | `site/assets/graph.js` is a generated code-graph artifact; hand-patching it is clobbered on regeneration. |
+| NIT | structural | Tasks 3, 4, and 5 carried no `Validates:` field. | RESOLVED in revision: all five tasks now carry a `Validates` field. | n/a |
+| NIT | Scope & Value (Simplifier) | A `Small`/solo-dev plan allocated two builder agents plus a validator for a one-module change and a handful of doc corrections. | RESOLVED in revision: Team Orchestration is trimmed to one builder (`auditor-guard-builder`) plus one validator, with the doc edits folded into the builder. | n/a |
+| CONCERN | Risk & Robustness (Adversary) | The existence-invariant regex pinned in Technical Approach item 2, `(?:[\w.-]+/)+[\w.-]+\.(?:py\|md)`, requires the directory group to match at least once, so a newly-introduced BARE-FILENAME reference (no `dir/` prefix, e.g. a substitution turning `` `session_log.py` `` into `` `agent_session.py` ``) is invisible to the before/after diff in both texts. That class is written and self-committed exactly as #2711 did, and word-anchoring does not cover it either, so the Desired outcome ("the auditor cannot introduce a reference to a path that does not exist on disk") is stated more broadly than the invariant delivers. | pending | The `+` quantifier on `(?:[\w.-]+/)+` is the exact place to fix or document. Making the directory group optional (`(?:(?:[\w.-]+/)+\|)[\w.-]+\.(?:py\|md)`) also starts matching every bare `*.md`/`*.py` mention in prose (e.g. `CLAUDE.md`), so it needs a companion filter such as only applying the bare-filename check to backtick-wrapped tokens, matching the existing detector convention. If instead the gap is accepted, record it explicitly under Risk 2 and add a `TestExistenceInvariant` case for the bare-filename reference so the gap is exercised and visible rather than silently unhandled. |
+| CONCERN | Scope & Value (Simplifier) | For a `Small`/solo-dev appetite, the heavier second defense (existence invariant, new `regex_fixes` channel through two signatures, two new result keys, a cascade branching change) is justified mainly by three latent, unreported defects that the plan then defers to #2725, while the plan's own text says word-anchoring "alone kills the reported corruption". Building the general guard to justify not fixing those defects now is a scope increase beyond "fix the fixer". | pending | Directly in tension with the Adversary CONCERN above, which argues the invariant is too NARROW. Resolve as a scope ruling, not mechanically. If descoping, apply the guard only on the `regex_fixes` channel (post `pattern.subn()`, before write) rather than as a filesystem diff over the whole candidate text at `_apply_fixes_to_file:486`; that drops the need to cover `renames[0][1]` and the doc-relative link path emitted into the untouched `fixes` channel. If keeping the broad guard, say plainly in Architectural Impact that the invariant is deliberately doing fail-safe duty for #2725's deferred defects. |
+| CONCERN | Scope & Value (User) | The existence invariant only rejects fixes introducing an absent `dir/file.{py,md}` token. Any other corruption class the self-committing auto-fixer can produce (a substitution landing on a real-but-wrong existing path, or a non-path-shaped textual corruption) still writes and self-commits with zero review, because #2726 is deferred. The Problem/Desired outcome framing does not concede this. | pending | No guard condition applies: the residual class is out of scope by design, so this is a problem-statement precision fix, not a code change. State in Problem/Desired outcome that the plan NARROWS rather than closes the self-commit exposure, and name the residual class (non-path-shaped, or existing-but-wrong-path corruptions) so #2726 inherits a concrete acceptance bar. |
+| NIT | History & Consistency (Archaeologist) | Prior Art says #2058 "added the markdown-only write guard (`:1013`) after the auditor wrote into non-`.md` files", implying a reactive fix after a real incident. Issue #2058 is actually "Bring the valorengels.com docs site into main as living documentation", and the guard landed in the same commit (`dfb781ca5`) that first brought `site/*.html` into the audit corpus; its comment is preventive, not a report of a past corruption. | pending | n/a |

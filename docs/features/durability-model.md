@@ -27,9 +27,9 @@ flip ships as its own release.
 ## Job routing (`bridge/job_router.py`)
 
 The **single routing authority** for inbound messages — it replaced the
-expectations-based semantic session router (`bridge/session_router.py`,
-deleted). Session-level routing is now purely mechanical: reply-to resumes a
-session, everything else is a fresh session.
+expectations-based semantic session router, now deleted. Session-level routing
+is now purely mechanical: reply-to resumes a session, everything else is a
+fresh session.
 
 - **Reply-to** routes through the **permanent reply index** —
   `reply:{chat_id}:{message_id}` → `{job_id, room_id}`, a standalone
@@ -112,15 +112,18 @@ seemingly-closed conversation can pick up where it left off weeks later.
 
 ## Index safety (#2207 discipline)
 
-Both `Room` and `Job` ship with their own guarded `repair_indexes()` and a
-`_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, so the
-generic `rebuild_indexes()` sweep never touches them; both register a
+Both `Room` and `Job` ship with their own guarded `repair_indexes()`, are
+registered in `_run_guarded_repairs()` so that repair path actually runs, and
+carry a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py` so the
+generic `rebuild_indexes()` sweep skips them instead; both register a
 `ModelDriftSpec` in `agent/index_drift.py` (drift detection never silently
-narrows). `Job` carries two IndexedFields, both low-cardinality: `status`
-(active/at-rest) and the derived boolean `has_open_promises` (Schema Gate
-Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp. The reply index
-is a plain string KV — no hash, no class set, no secondary index — so the
-identity-less-hash flood mechanism structurally cannot occur for it.
+narrows). Listing a model in `_GUARDED_ELSEWHERE` without registering it in
+`_run_guarded_repairs()` leaves it with no index hygiene at all — the gap
+that produced #2640. `Job` carries two IndexedFields, both low-cardinality:
+`status` (active/at-rest) and the derived boolean `has_open_promises` (Schema
+Gate Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp. The
+reply index is a plain string KV — no hash, no class set, no secondary index —
+so the identity-less-hash flood mechanism structurally cannot occur for it.
 
 The daily `has_open_promises` backfill (`Job.backfill_open_promises_index()`,
 run from `repair_indexes()` while the bridge and workers are live) writes

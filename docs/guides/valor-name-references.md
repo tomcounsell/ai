@@ -175,7 +175,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 | `~/Desktop/Valor/projects.json` | Mention triggers (private, iCloud-synced) |
 | `bridge/telegram_bridge.py` | 322: `"valor"` default for `ACTIVE_PROJECTS` |
 | `bridge/session_transcript.py` | 57: `"valor"` in docstring example |
-| `bridge/agent_sessions.py` | 81: `"valor"` in docstring example |
+| `agent/session_logs.py` | 92: `"valor"` in docstring example |
 | `tools/job_scheduler.py` | 37: `DEFAULT_PROJECT_KEY = "valor"` |
 
 **Total Category C: ~150+ references across ~145 files**

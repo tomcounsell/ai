@@ -1318,6 +1318,40 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_progress(args: argparse.Namespace) -> int:
+    """Read-only progress report for a session (issue #2663).
+
+    ``id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); see
+    :py:func:`_find_session`, which is the ORM-only resolver every other verb
+    uses. Nothing on this path writes, steers, or kills, so it is safe for any
+    agent to call against any session — including one it does not own.
+
+    Aggregation and the verdict rules live in :mod:`tools.session_progress`;
+    this function is the CLI seam only.
+    """
+    _load_env()
+    try:
+        from tools.session_progress import build_report
+
+        session = _find_session(args.id)
+        if session is None:
+            print(f"Session not found: {args.id}", file=sys.stderr)
+            return 1
+
+        window = getattr(args, "window", None)
+        report = build_report(session, window_s=float(window) if window is not None else None)
+
+        if getattr(args, "json", False):
+            print(json.dumps(report.to_dict(), indent=2, default=str))
+        else:
+            print(report.render())
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_children(args: argparse.Namespace) -> int:
     """List child sessions spawned by a parent session."""
     _load_env()
@@ -2082,6 +2116,41 @@ def main() -> int:
     inspect_parser.add_argument("--id", required=True, help="Session ID")
     inspect_parser.add_argument("--json", action="store_true", help="Output JSON")
 
+    # progress subcommand
+    progress_parser = subparsers.add_parser(
+        "progress",
+        help="Read-only progress report: is this session still working?",
+        description=(
+            "Aggregate every existing liveness signal for a session and emit one "
+            "verdict line: PROGRESSING, NO RECENT ACTIVITY, or UNKNOWN. Read-only "
+            "— it never steers, kills, or writes. Absence of evidence reports "
+            "UNKNOWN, never a false 'wedged'. %CPU and child-process count are "
+            "deliberately NOT consulted: those are the readings that produced the "
+            "misdiagnosis in issue #2662."
+        ),
+    )
+    progress_parser.add_argument(
+        "--id", required=True, help="Session ID (session_id or agent_session_id)"
+    )
+    # Shared with `tools/valor_cli.py`'s own `--window` parser (imported here
+    # rather than at module scope, matching `cmd_progress`'s own lazy import
+    # of `tools.session_progress`) so a negative value is rejected identically
+    # by both CLI entry points, at parse time, before any session lookup.
+    from tools.session_progress import window_arg_type  # noqa: PLC0415
+
+    progress_parser.add_argument(
+        "--window",
+        type=window_arg_type,
+        default=None,
+        help=(
+            "Freshness window in seconds, >= 0, for the PROGRESSING verdict. "
+            "Default is the watchdog's own SESSION_PROGRESS_DEADLINE_S, so this "
+            "CLI never disagrees with the running system about what counts as "
+            "progress."
+        ),
+    )
+    progress_parser.add_argument("--json", action="store_true", help="Output JSON")
+
     # children subcommand
     children_parser = subparsers.add_parser(
         "children", help="List child sessions spawned by a parent session"
@@ -2204,6 +2273,7 @@ def main() -> int:
         "wait-for-children": cmd_wait_for_children,
         "release": cmd_release,
         "inspect": cmd_inspect,
+        "progress": cmd_progress,
         "children": cmd_children,
         "telemetry": cmd_telemetry,
         "crash-signatures": cmd_crash_signatures,

@@ -287,7 +287,7 @@ No external documentation site in this repo — nothing to update.
 - [ ] `hook_utils/hook_target.py` exists and is imported by all five validators in the family (the four ported plus `validate_no_gos_justification.py`).
 - [ ] The #2689 reproducer passes: with `docs/plans/` containing a tracked anchor and another lane's untracked plan, a payload naming `docs/features/mine.md` exits 0 for all four ported validators. This currently exits 2 for three of them.
 - [ ] A payload naming a genuinely deficient plan doc still exits 2, for each of the four.
-- [ ] All 65 tests in `test_validate_no_gos_justification.py` pass unchanged.
+- [x] All tests in `test_validate_no_gos_justification.py` pass, with exactly one deliberate change. **Amended during the patch round.** The criterion originally read "all 65 pass unchanged", which review round 1 made unsatisfiable: Tech Debt 2 required unifying explicit-argv semantics across the family, and `test_non_plan_path_passes_even_when_it_does_not_exist` pinned the *old* behavior (an operator-supplied path outside `docs/plans` silently ignored). It was split into `test_hook_derived_non_plan_path_passes_even_when_it_does_not_exist`, which preserves the real intent — scope filter before existence check, on the payload path — and `test_explicit_cli_path_bypasses_the_scope_filter`, which pins the new unified rule. The regression-proof value of the file is intact; only the one assertion that encoded the inconsistency changed.
 - [ ] All 29 existing pure-function tests in the verification and test-impact files pass unchanged.
 - [ ] Tests pass (`/do-test`) with `POPOTO_TEST_DB=12` via `scripts/pytest-clean.sh`.
 - [ ] Documentation updated (`/do-docs`).

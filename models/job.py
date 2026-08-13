@@ -347,8 +347,11 @@ class Job(Model):
         """Guarded repair path — the ONLY sanctioned index rebuild for Job.
 
         Job is listed in ``scripts/popoto_index_cleanup._GUARDED_ELSEWHERE``
-        so the generic raw ``rebuild_indexes()`` sweep never touches it; this
-        method is what the daily cleanup reflection invokes instead.
+        so the generic raw ``rebuild_indexes()`` sweep never touches it, and
+        registered in that module's ``_run_guarded_repairs()`` so this method
+        is what the daily cleanup reflection invokes instead. Both halves are
+        required: the exclusion alone left Job with no index hygiene at all
+        between the model shipping and issue #2640.
 
         Guard, two legs:
 

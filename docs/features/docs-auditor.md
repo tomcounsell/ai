@@ -54,7 +54,110 @@ writes the SDLC stage marker and updates the plan frontmatter.
 | Renamed markdown links | `[label](old/path.md)` after a rename | `git log --follow --diff-filter=R` |
 | Renamed paths/symbols | `` `old/module.py` `` after a rename | `git log --follow --diff-filter=R` |
 | README broken entries | Index entries pointing at deleted files | filesystem check + rename probe |
-| Stale-term dictionary | `SessionLog`, `RedisJob`, `session_log`, `redis_job` | `STALE_TERMS` dict at module top |
+| Stale-term dictionary | `SessionLog`, `RedisJob`, `session_log`, `redis_job` | `STALE_TERMS` dict at module top, matched on word boundaries |
+
+The dictionary's current entries are model and field renames: `SessionLog` and
+`RedisJob` were renamed to AgentSession; the `session_log` and `redis_job`
+fields were renamed to agent_session. Stating the mapping in that form is also
+what keeps this page immune to its own detector — see the `migration_context`
+escape hatch below.
+
+#### Stale terms are word-anchored
+
+A `STALE_TERMS` key is matched with `\b` anchors, so it never matches inside a
+longer run of word characters: `session_log` does not match inside
+`agent/session_logs.py` or `session_log_writer`, and `SessionLog` does not match
+inside `SessionLogs`.
+
+That is the whole guarantee, and it stops short of "never rewrites a path".
+`/`, `.`, and `-` are all word boundaries, so a key that *equals* an entire path
+segment still matches and is still rewritten — `models/session_log.py` becomes
+`models/agent_session.py`. The existence invariant below is the only thing that
+catches such a rewrite, and only when the rewritten path is absent from the
+working tree; if both paths happen to exist, the rewrite is accepted.
+
+Detection and application share one matching semantics: `_detect_stale_term_fixes`
+returns compiled `(pattern, replacement)` pairs on a dedicated `regex_fixes`
+channel, applied by `_apply_fixes_to_file` through `pattern.subn()`. The literal
+`fixes` channel used by the three rename detectors is untouched, so the
+`new == ""` line-delete sentinel keeps its exact-line-equality semantics.
+
+The `migration_context` escape hatch is unchanged: a doc that already says
+"renamed to X", "replaced by X", "now X", "formerly Y", or "replaces Y" gets no
+fix for that term.
+
+#### The existence invariant
+
+Every auto-fix, regardless of detector, is subject to one post-condition before
+anything is written: **the auditor may not introduce a slash-shaped `.py`/`.md`
+repo-path reference that is absent from the working tree.**
+
+That is the exact shape `_PATH_REF_RE` matches, and it is narrower than "any
+reference to a file". Two forms are deliberately **not** covered: paths with
+other extensions (`.sh`, `.ts`, `.json`), and the dotted module form
+(`bridge.session_log`) — the same class as the #2711 incident. A fix that
+introduces only those forms passes the invariant with `withheld=0`.
+
+`_apply_fixes_to_file` simulates each fix, collects the `dir/file.{py,md}`-shaped
+references the candidate text would newly introduce, and resolves each against
+`repo_root`. If any is absent, that fix is rejected.
+
+- **Attributed per term, not per occurrence.** Only the offending fix is
+  dropped; valid sibling fixes in the same file still apply, and the file is
+  never abandoned wholesale. But a fix is one `(old, new)` pair applied to the
+  whole document — `str.replace` and `pattern.subn()` both rewrite *every*
+  occurrence — so a single path-shaped hit withholds that term's legitimate
+  prose hits in the same file too.
+- **References already present in the document are never re-validated.** The
+  invariant constrains what the auditor *adds*, so it cannot reject a fix over
+  pre-existing prose that names a long-gone module. The residual hole: if a
+  doc already mentions an absent path somewhere, that path is in the original
+  reference set, so a fix that rewrites a *valid* path into that same absent
+  one passes the invariant. No live instance is known; the reachable route to
+  it is the rename-target selection defect tracked as **#2725**, and closing it
+  requires span-level (rather than document-level) attribution.
+- **Rejections are reported, not silently discarded.** Each one logs a warning
+  naming the offending path and lands in the result contract.
+- **An all-rejected run writes nothing** — no file write, therefore no empty
+  commit.
+
+Rejected fixes surface on the `audit()` result:
+
+| Result key | Type | Meaning |
+|---|---|---|
+| `fixes_withheld` | `int` | count of fixes rejected by the existence invariant |
+| `withheld` | `list[dict]` | one entry per rejection: `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"` |
+
+`old` is whatever the emitting channel matched on: a literal string for the
+three rename detectors, but the **regex source** for a stale-term rejection
+(`\bsession_log\b`, not `session_log`). A caller that echoes `old` verbatim —
+`.claude/skill-context/do-docs.md` does — will show the pattern, which is the
+accurate thing to show, since that is what was withheld.
+
+The rotation caller (`run_docs_auditor`) is the one path with no human review —
+it opens a PR the branch sweeper can auto-merge — so it threads the withheld set
+into its `findings`, its `summary`, and its Telegram message, and stamps
+`WITHHELD_PR_MARKER` plus the rejection list into the PR body.
+`_pr_is_auto_merge_eligible` refuses any PR carrying that marker, so a run that
+withheld a fix always requires a human merge. It also passes the count to
+`_write_liveness` as a keyword `fixes_withheld`, emitted into the Redis summary
+only when non-zero. That last surface is the load-bearing one: the reflection
+scheduler consumes only `projects` from a function reflection's return, so
+`findings` and `summary` reach no human, and without the liveness field a
+withheld run would be byte-identical to a clean one in Redis.
+
+Because the marker disqualification is permanent, a withheld PR nobody reviews
+reaches the sweeper's stale-close at `STALE_PR_AGE_DAYS` and is closed with
+`--delete-branch`, discarding the fixes that did pass the invariant; the next
+rotation onto that slug re-proposes and re-opens the same PR. This is strictly
+safer than auto-merging suspect output, and the escalation (exempt from
+stale-close, or notify before closing) is an open gap tracked by
+[#2729](https://github.com/tomcounsell/ai/issues/2729), not a shipped behavior.
+
+`status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
+caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
+is correct"; `.claude/skill-context/do-docs.md` wires that branch for the
+cascade.
 
 ### File-as-issue (judgment required)
 
@@ -285,7 +388,8 @@ hook, and the `/do-docs` thin-caller contract. `TestIsSecretsPath` and
 `TestVaultSiteDrift` cover the vault↔site/docs drift detector (mixed-case,
 near-miss, symlink-into-secrets, out-of-vault exclusion; compared-count
 correctness; issue-cap enforcement); `TestWriteLivenessVaultParam` covers
-the `_write_liveness` 4-arg/5-arg contract; `TestVaultDeadCodeRemoved`
+the `_write_liveness` 4-arg/5-arg positional contract (`fixes_withheld` is a
+trailing keyword param, so that contract is unchanged); `TestVaultDeadCodeRemoved`
 asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
 
 ```bash

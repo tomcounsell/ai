@@ -144,12 +144,29 @@ The substrate applies fixes to the working tree, commits them to the **current b
 a new branch), fires the memory-refresh hook after the commit, and files deduped GitHub
 issues for cases needing human judgment (deleted targets, stub docs, orphan plans).
 
-Parse the JSON output:
-- `status: "ok"` — proceed to Step 3 for any remaining manual edits.
+Parse the JSON output. `status` alone does **not** mean the output is correct — check
+`fixes_withheld` too:
+
+- `status: "ok"` and `fixes_withheld == 0` — proceed to Step 3 for any remaining manual edits.
+- `fixes_withheld > 0` (with any `status`) — the existence invariant rejected one or more
+  fixes because they would have introduced a path that does not exist on disk. Before
+  trusting the substrate's self-committed output:
+  1. **Echo every `withheld` entry into your transcript output** — one line per entry giving
+     `doc`, `old`, `new`, and `reason` — so the rejection is visible in the stage record and
+     not buried in a log file.
+  2. Re-check each named `doc` by hand in Step 3. The withheld fix means the doc has a stale
+     reference the substrate declined to guess at; either correct it manually or leave it and
+     say so.
+  3. Only then continue. Do not treat `status: "ok"` as a pass on those docs.
 - `status: "error"` — abort and report; do NOT write the completion stage marker.
 - `status: "disabled"` — auth probe failed; proceed in skill-only mode (no auto-fixes).
 
-Do not re-commit the substrate's changes — it commits them itself.
+Result keys that carry the withheld set: `fixes_withheld` (int) and `withheld`
+(list of `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"`).
+
+Do not re-commit the substrate's changes — it commits them itself. Withheld fixes were never
+written, so there is nothing of theirs to commit; any correction you make in Step 3 is your
+own commit.
 
 ## Index-table maintenance (Step 3)
 

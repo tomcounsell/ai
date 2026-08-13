@@ -74,6 +74,26 @@ STUB_DOC_LINE_THRESHOLD = 5
 STALE_BRANCH_AGE_DAYS = 7
 STALE_PR_AGE_DAYS = 14
 
+# Marker stamped into a docs-audit PR body when the existence invariant withheld
+# any fix on the run that opened it. The rotation path is the one path with no
+# human review — it opens the PR and the branch sweeper can auto-merge it — so
+# `_pr_is_auto_merge_eligible` refuses any PR carrying this marker. A withheld
+# fix means the auditor wanted to write something wrong; that needs a human read.
+#
+# This is a *conditional* instance of the "review requirement" option that #2726
+# defers — it applies only on the withheld path, leaves clean-run commit/staging
+# behavior untouched, and becomes a no-op if #2726 later adopts a wholesale
+# stage-and-report or explicit-path-list policy. Recorded on #2726 itself so the
+# owner rules with the shipped partial gate in view, not against a blank slate.
+#
+# NOTE: The marker lives in the PR body with no cross-check, so a human
+# `gh pr edit` that rewrites the body re-enables auto-merge. A
+# `do-not-auto-merge` label would be sturdier, but the label does not exist in
+# this repo and `gh pr create --label` fails outright when it is missing — a
+# worse failure than the human-only path this guards. No automation here runs
+# `gh pr edit`.
+WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
+
 # Redis key namespace for state/locks/liveness.
 REDIS_LAST_RUN_HASH = "docs_audit:last_run"
 REDIS_RUNNING_KEY = "docs_audit:running:global"
@@ -95,15 +115,25 @@ def _ok_result(
     fixes_applied: int = 0,
     issues_filed: int = 0,
     pr_url: str | None = None,
+    fixes_withheld: int = 0,
+    withheld: list[dict] | None = None,
     extras: dict | None = None,
 ) -> dict:
-    """Build the standard substrate return value."""
+    """Build the standard substrate return value.
+
+    ``fixes_withheld`` / ``withheld`` carry fixes the existence invariant rejected.
+    ``status`` stays ``"ok"`` for a withheld fix — it is not an error — which is
+    exactly why callers must branch on ``fixes_withheld > 0`` rather than trust
+    ``status`` alone.
+    """
     res: dict = {
         "status": status,
         "files_touched": files_touched or [],
         "fixes_applied": fixes_applied,
         "issues_filed": issues_filed,
         "pr_url": pr_url,
+        "fixes_withheld": fixes_withheld,
+        "withheld": withheld or [],
     }
     if extras:
         res.update(extras)
@@ -426,7 +456,7 @@ def _detect_renamed_symbol_fixes(content: str, repo_root: Path) -> list[tuple[st
         if (repo_root / path).exists():
             continue
         renames = _git_log_follow_renames(path, repo_root)
-        if renames:
+        if renames and renames[0][1] != path:
             fixes.append((path, renames[0][1]))
     return fixes
 
@@ -464,11 +494,28 @@ def _detect_readme_broken_entries(
     return fixes
 
 
-def _detect_stale_term_fixes(content: str) -> list[tuple[str, str]]:
-    """Detect stale terms from STALE_TERMS dict that lack migration context."""
-    fixes: list[tuple[str, str]] = []
+def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
+    """Detect stale terms from STALE_TERMS dict that lack migration context.
+
+    Matching is **word-anchored** with ``\\b``: a key never matches inside a
+    longer run of word characters, so ``session_log`` does not match inside
+    ``agent/session_logs.py`` or ``session_log_writer`` (#2711). That is the
+    whole guarantee — it stops short of "never rewrites a path". ``/``, ``.``
+    and ``-`` are all word boundaries, so a key that *equals* an entire path
+    segment still matches and is still rewritten (``models/session_log.py`` →
+    ``models/agent_session.py``). Only the existence invariant in
+    ``_apply_fixes_to_file`` catches that, and only when the rewritten path is
+    absent from the working tree.
+
+    Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
+    so detection and application share one matching semantics. These are passed
+    to ``_apply_fixes_to_file`` as ``regex_fixes``, never mixed into the literal
+    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel).
+    """
+    fixes: list[tuple[re.Pattern[str], str]] = []
     for old_term, new_term in STALE_TERMS.items():
-        if old_term not in content:
+        pattern = re.compile(rf"\b{re.escape(old_term)}\b")
+        if not pattern.search(content):
             continue
         migration_context = (
             f"renamed to {new_term}" in content
@@ -479,23 +526,72 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[str, str]]:
             or f"replaces {old_term}" in content
         )
         if not migration_context:
-            fixes.append((old_term, new_term))
+            fixes.append((pattern, new_term))
     return fixes
 
 
-def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str]]) -> int:
-    """Apply (old, new) text replacements to a file. Returns count of fixes applied."""
+# Path-shaped reference: ``dir/file.py`` or ``dir/file.md``, one or more segments.
+_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py|md)")
+
+
+def _absent_new_path_refs(original_refs: set[str], candidate: str, repo_root: Path) -> list[str]:
+    """Path refs a candidate rewrite would newly introduce that are absent from disk.
+
+    References already present in the original document are never re-validated —
+    the invariant constrains only what the auditor *adds*.
+    """
+    return sorted(
+        ref
+        for ref in set(_PATH_REF_RE.findall(candidate)) - original_refs
+        if not (repo_root / ref).exists()
+    )
+
+
+def _apply_fixes_to_file(
+    path: Path,
+    repo_root: Path,
+    fixes: list[tuple[str, str]],
+    regex_fixes: list[tuple[re.Pattern[str], str]] | None = None,
+) -> tuple[int, list[dict]]:
+    """Apply text replacements to a file, subject to the existence invariant.
+
+    ``fixes`` are literal ``(old, new)`` pairs; ``new == ""`` deletes the whole
+    line that exactly equals ``old``. ``regex_fixes`` are ``(pattern, replacement)``
+    pairs applied via ``pattern.subn()`` in their own loop.
+
+    **Existence invariant:** a fix may not introduce a ``dir/file.{py,md}``-shaped
+    reference that does not exist under ``repo_root``. Violating fixes are rejected
+    individually — valid sibling fixes in the same file still apply — logged at
+    warning level, and returned for the caller to surface.
+
+    Returns ``(applied_count, withheld)`` where ``withheld`` is a list of
+    ``{"doc", "old", "new", "reason"}`` dicts.
+    """
+    regex_fixes = regex_fixes or []
     full = repo_root / path
-    if not full.exists() or not fixes:
-        return 0
+    if not full.exists() or (not fixes and not regex_fixes):
+        return 0, []
     try:
         text = full.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         logger.warning(f"docs_auditor: cannot read {path}: {e}")
-        return 0
+        return 0, []
 
+    original_refs = set(_PATH_REF_RE.findall(text))
     new_text = text
     applied = 0
+    withheld: list[dict] = []
+
+    def _reject(old: str, new: str, absent: list[str]) -> None:
+        logger.warning(
+            "docs_auditor: withheld fix in %s (%r -> %r) — introduces absent path(s): %s",
+            path,
+            old,
+            new,
+            ", ".join(absent),
+        )
+        withheld.append({"doc": str(path), "old": old, "new": new, "reason": "target-absent"})
+
     for old, new in fixes:
         if not old:
             continue
@@ -505,23 +601,41 @@ def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str
             # inside an unrelated line.
             lines = new_text.splitlines(keepends=True)
             kept = [ln for ln in lines if ln.rstrip("\n\r") != old.rstrip("\n\r")]
-            removed = len(lines) - len(kept)
-            if removed > 0:
-                new_text = "".join(kept)
-                applied += removed
+            count = len(lines) - len(kept)
+            if count == 0:
+                continue
+            candidate = "".join(kept)
         else:
-            if old in new_text:
-                count = new_text.count(old)
-                new_text = new_text.replace(old, new)
-                applied += count
+            if old not in new_text:
+                continue
+            count = new_text.count(old)
+            candidate = new_text.replace(old, new)
+
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        if absent:
+            _reject(old, new, absent)
+            continue
+        new_text = candidate
+        applied += count
+
+    for pattern, new in regex_fixes:
+        candidate, count = pattern.subn(new, new_text)
+        if count == 0:
+            continue
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        if absent:
+            _reject(pattern.pattern, new, absent)
+            continue
+        new_text = candidate
+        applied += count
 
     if new_text != text:
         try:
             full.write_text(new_text, encoding="utf-8")
         except Exception as e:
             logger.warning(f"docs_auditor: cannot write {path}: {e}")
-            return 0
-    return applied
+            return 0, withheld
+    return applied, withheld
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +1099,7 @@ def audit(
     total_fixes = 0
     issues_filed = 0
     issue_findings: list[dict] = []
+    withheld: list[dict] = []
 
     for path in files:
         full = root / path
@@ -1002,7 +1117,9 @@ def audit(
         else:
             fixes.extend(_detect_renamed_link_fixes(path, content, root))
             fixes.extend(_detect_renamed_symbol_fixes(content, root))
-        fixes.extend(_detect_stale_term_fixes(content))
+        # Anchored stale terms travel on their own homogeneous channel — a
+        # compiled pattern must never land in the literal `fixes` list.
+        regex_fixes = _detect_stale_term_fixes(content)
 
         # Apply-mode writes are markdown-only (#2058). The detectors above are
         # markdown-regex based (bare-term renames, backtick link/symbol fixes),
@@ -1010,8 +1127,9 @@ def audit(
         # site/*.html doc page — must never be auto-rewritten inside tags,
         # attributes, or inline <script>. Reporting still runs; only the
         # write-back is guarded.
-        if fixes and apply_mode == "apply" and str(path).endswith(".md"):
-            applied = _apply_fixes_to_file(path, root, fixes)
+        if (fixes or regex_fixes) and apply_mode == "apply" and str(path).endswith(".md"):
+            applied, rejected = _apply_fixes_to_file(path, root, fixes, regex_fixes=regex_fixes)
+            withheld.extend(rejected)
             if applied > 0:
                 total_fixes += applied
                 touched.append(str(path))
@@ -1066,6 +1184,8 @@ def audit(
         files_touched=touched,
         fixes_applied=total_fixes,
         issues_filed=issues_filed,
+        fixes_withheld=len(withheld),
+        withheld=withheld,
     )
 
 
@@ -1215,12 +1335,18 @@ def _record_daily_pr(repo_root: Path) -> None:
         logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
 
 
-def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
+def _push_branch_and_pr(
+    slug: str, repo_root: Path, withheld: list[dict] | None = None
+) -> str | None:
     """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
 
     Always returns the repo to the main branch afterward, even on error.
     Skips PR creation if an open PR for the same slug already exists or if
     the daily cap (1 PR per calendar day) has been reached.
+
+    ``withheld`` is the run's existence-invariant rejections. When non-empty the
+    PR body lists them and carries ``WITHHELD_PR_MARKER``, which disqualifies the
+    PR from the sweeper's auto-merge path.
     """
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
@@ -1266,6 +1392,20 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             cwd=str(repo_root),
             check=True,
         )
+        body = "Automated docs auditor pass."
+        if withheld:
+            rejected = "\n".join(
+                f"- `{w.get('doc')}`: `{w.get('old')}` → `{w.get('new')}` "
+                f"({w.get('reason', 'unknown')})"
+                for w in withheld
+            )
+            body += (
+                f"\n\n{WITHHELD_PR_MARKER}\n"
+                f"⚠️ **{len(withheld)} fix(es) withheld** by the existence invariant — "
+                "the auditor tried to introduce a path that is absent from the working "
+                "tree. Not eligible for auto-merge; review the surviving fixes before "
+                f"merging.\n\n{rejected}"
+            )
         pr_result = subprocess.run(
             [
                 "gh",
@@ -1274,7 +1414,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
                 "--title",
                 f"Docs auditor: {slug}",
                 "--body",
-                "Automated docs auditor pass.",
+                body,
             ],
             capture_output=True,
             text=True,
@@ -1309,6 +1449,7 @@ def _write_liveness(
     pr_url: str | None,
     files_touched: int,
     vault_narratives_compared: int | None = None,
+    fixes_withheld: int = 0,
 ) -> None:
     """Persist liveness signals for PM monitoring (Phase 2).
 
@@ -1316,6 +1457,13 @@ def _write_liveness(
     (i.e. only from the rotation call site that actually ran the vault drift
     comparison), so "detector ran, found zero drift" is distinguishable from
     "narrative→page mapping is silently empty/broken".
+
+    ``fixes_withheld`` is emitted only when non-zero, mirroring the same pattern.
+    This is the only durable, queryable surface the rotation produces — the
+    scheduler consumes just ``projects`` from a function reflection's return, so
+    without this a withheld run would be byte-identical to a clean one in Redis.
+    Both extras are keyword params with defaults, so the positional 4-arg/5-arg
+    call contract asserted by ``TestWriteLivenessVaultParam`` is unchanged.
     """
     try:
         r = _get_redis()
@@ -1329,6 +1477,8 @@ def _write_liveness(
         }
         if vault_narratives_compared is not None:
             summary["vault_narratives_compared"] = vault_narratives_compared
+        if fixes_withheld:
+            summary["fixes_withheld"] = fixes_withheld
         r.set(REDIS_LAST_COMPLETED_SUMMARY_KEY, json.dumps(summary))
     except Exception as e:
         logger.warning(f"docs_auditor: liveness write failed: {e}")
@@ -1619,20 +1769,42 @@ def run_docs_auditor() -> dict:
         )
 
         files_touched: list[str] = result.get("files_touched", [])
+        # Existence-invariant rejections. This is the one caller with no human in
+        # the loop — it opens a PR the sweeper may auto-merge — so the withheld
+        # count must reach every surface this function produces, not just a log
+        # line: findings, summary, Telegram, the PR body (auto-merge gate) and
+        # the Redis liveness summary, which is the only durable queryable one.
+        # Telegram has two mutually exclusive senders, and a run can also reach
+        # neither. Three cases: files were touched — step 9 sends the pass
+        # summary; nothing was touched but fixes were withheld — the zero-diff
+        # early return sends the withheld alert, the loudest case and one step 9
+        # can never reach; nothing was touched and nothing was withheld — a clean
+        # zero-diff run, which stays silent.
+        withheld: list[dict] = result.get("withheld", [])
+        fixes_withheld: int = result.get("fixes_withheld", 0)
+        withheld_note = (
+            f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
+        )
 
         # 6. Zero-diff gate
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
-            _write_liveness(slug, "skipped", None, 0)
+            _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
+            if fixes_withheld:
+                _send_telegram_notification(
+                    f"docs-auditor pass for {slug}: zero-diff, no PR"
+                    f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                    "nothing was written and no PR was opened to review them"
+                )
             return {
                 "status": "ok",
-                "findings": [f"docs-auditor: zero-diff for {primary}"],
-                "summary": f"docs-auditor: zero-diff ({slug})",
+                "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
+                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
             }
 
         # 7. Memory refresh hook (fire-and-forget) — fired after commit
         # 8. Push branch + PR
-        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT)
+        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, withheld=withheld)
 
         try:
             refresh_docs_in_memory(files_touched)
@@ -1643,6 +1815,12 @@ def run_docs_auditor() -> dict:
         msg = (
             f"docs-auditor pass for {slug}: "
             f"{len(files_touched)} files, {result.get('fixes_applied', 0)} fixes"
+            + (
+                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                "PR is not auto-merge eligible"
+                if fixes_withheld
+                else ""
+            )
             + (f"\nPR: {pr_url}" if pr_url else "")
         )
         _send_telegram_notification(msg)
@@ -1651,12 +1829,28 @@ def run_docs_auditor() -> dict:
         _update_rotation_hash(project_key, files_touched)
 
         # 11. Liveness signal (threads the vault-drift compared count — the only
-        # call site that ran the vault comparison; the other 4 stay 4-arg).
-        _write_liveness(slug, "ok", pr_url, len(files_touched), vault_narratives_compared)
+        # call site that ran the vault comparison; the other 3 stay 4-arg — plus
+        # the withheld count, so Redis distinguishes a withheld run from a clean one).
+        _write_liveness(
+            slug,
+            "ok",
+            pr_url,
+            len(files_touched),
+            vault_narratives_compared,
+            fixes_withheld=fixes_withheld,
+        )
 
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
         )
+        if fixes_withheld:
+            findings.append(
+                f"{fixes_withheld} fix(es) withheld by the existence invariant "
+                "(target-absent); PR is not auto-merge eligible"
+            )
+            findings.extend(
+                f"withheld: {w.get('doc')} {w.get('old')!r} -> {w.get('new')!r}" for w in withheld
+            )
         if pr_url:
             findings.append(f"PR: {pr_url}")
 
@@ -1665,7 +1859,8 @@ def run_docs_auditor() -> dict:
             "findings": findings,
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
-                f"{result.get('fixes_applied', 0)} fixes, PR={pr_url or 'none'}"
+                f"{result.get('fixes_applied', 0)} fixes{withheld_note}, "
+                f"PR={pr_url or 'none'}"
             ),
         }
 
@@ -1695,6 +1890,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
     - ≤ 50 net lines changed (additions + deletions)
     - No reviews, review requests, or comments
     - PR is between 1 and 7 days old (not brand-new, not stale)
+    - The opening run withheld no fixes (no ``WITHHELD_PR_MARKER`` in the body)
     """
     try:
         meta_res = subprocess.run(
@@ -1704,7 +1900,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
                 "view",
                 str(pr_number),
                 "--json",
-                "files,reviews,reviewRequests,comments,createdAt,additions,deletions",
+                "files,reviews,reviewRequests,comments,createdAt,additions,deletions,body",
             ],
             capture_output=True,
             text=True,
@@ -1714,6 +1910,26 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
         if meta_res.returncode != 0:
             return False
         meta = json.loads(meta_res.stdout or "{}")
+
+        # Withheld fixes disqualify: the run that opened this PR proposed at least
+        # one rewrite to a nonexistent path, so its surviving output is suspect.
+        #
+        # KNOWN ESCALATION GAP — tracked by #2729:
+        # this disqualification is permanent, so a withheld PR nobody reviews
+        # falls through to the sweeper's stale-close at STALE_PR_AGE_DAYS —
+        # closed with --delete-branch, discarding the fixes that *did* pass the
+        # invariant, and the next rotation onto the same slug re-proposes,
+        # re-opens and re-closes it forever. Nothing pages a human: the only
+        # record is a `findings` entry, and the scheduler reads only `projects`
+        # from a function reflection. Still strictly safer than auto-merging
+        # suspect output. Ownership of the escalation (exempt from stale-close,
+        # or notify before closing) is deliberately out of scope here and needs
+        # an owner ruling; see #2729.
+        if WITHHELD_PR_MARKER in (meta.get("body") or ""):
+            logger.info(
+                "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number
+            )
+            return False
 
         # No reviewer activity
         if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
