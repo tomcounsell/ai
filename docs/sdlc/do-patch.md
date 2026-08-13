@@ -7,15 +7,23 @@ For cross-project work, the `GH_REPO` environment variable is set automatically
 by `sdk_client.py`. The `gh` CLI natively respects it, so all `gh` commands
 target the correct repository — no `--repo` flags or manual parsing needed.
 
-## Branch → Slug → Plan-Doc Convention (Build Context Recovery)
+## Branch → Issue → Plan-Doc Resolution (Build Context Recovery)
 
-To recover the plan when the caller didn't pass a path: the branch is
-`session/{slug}`; the plan lives at `docs/plans/{slug}.md`:
+To recover the plan when the caller didn't pass a path: the branch name is the
+lane's `{slug}` (`session/{slug}`), but the plan document is **not**
+necessarily at `docs/plans/{slug}.md` — a human-named plan may track an
+issue-derived lane, or the reverse (see
+[`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md)).
+Resolve the plan through `find_plan_path`, keyed on the issue number, not by
+guessing a filename from the branch:
 
 ```bash
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-PLAN_PATH="docs/plans/${SLUG}.md"
+PLAN_PATH=$(python -c "
+from tools.lane_identity import find_plan_path
+p = find_plan_path($ISSUE_NUMBER)
+print(p or '')
+")
 ```
 
 ## Trace & Verify Reference

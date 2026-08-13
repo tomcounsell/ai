@@ -486,7 +486,7 @@ class TestCannotForgeAnApproval:
         plan = tmp_path / "some-plan.md"
         plan.write_text(f"tracking: #{issue_number}\n")
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+        with patch("tools.lane_identity.find_plan_path", return_value=plan):
             result, code = _marker("CRITIQUE", "skipped", issue_number, run_id)
         assert code == 1
         assert result["reason"] == "PLAN_EXISTS_NOT_SKIPPABLE"
@@ -569,7 +569,7 @@ class TestImplicitSkipIsBoundedTheSameWayAsTheExplicitOne:
         run_id = _mint_run_id(issue_number, monkeypatch)
         plan = f"docs/plans/fake-{issue_number}.md"
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+        with patch("tools.lane_identity.find_plan_path", return_value=plan):
             result, code = _marker("DOCS", "completed", issue_number, run_id)
 
         assert code == 1

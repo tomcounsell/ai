@@ -140,7 +140,7 @@ class TestSdlcTargetRepoEnvVar:
         """
         from pathlib import Path
 
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         target_repo = tmp_path / "client-repo"
         plans_dir = target_repo / "docs" / "plans"
@@ -163,7 +163,7 @@ class TestSdlcTargetRepoEnvVar:
 
     def test_sdlc_target_repo_unset_uses_git_toplevel(self, tmp_path, monkeypatch):
         """When SDLC_TARGET_REPO is not set, git-toplevel drives resolution."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
         plan = self._write_plan(plans_dir, "f.md", "tracking: #99\n")

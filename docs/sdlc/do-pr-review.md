@@ -7,6 +7,14 @@ The leaned body refers to these abstractly. The Multi-Judge Consensus and the
 verdict+marker finalize block are documented in their own sections below; this
 section adds what they don't cover.
 
+**Plan resolution.** The generic body's priority list includes "extract the
+slug from the branch name and read `docs/plans/{slug}.md`." In this repo that
+guess is unreliable: the branch is the lane's recorded `{slug}`, but the plan
+document is not required to share that name (see
+[`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md)).
+Prefer `find_plan_path(issue_number)` (`tools/lane_identity.py`), keyed on the
+tracking issue, over a filename guess derived from the branch.
+
 **Review identity (bot account, opt-in per machine).** Pipeline-driven reviews
 MAY post under a dedicated service account. Set `SDLC_AGENT_GH_TOKEN` only on the
 dedicated bot machine; standard machines leave it blank and post under the

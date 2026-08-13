@@ -788,7 +788,7 @@ class TestEnrichedPayload:
             "---\n\n# Plan\n"
         )
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -804,7 +804,7 @@ class TestEnrichedPayload:
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("---\nstatus: Ready\nrevision_applied: true\n---\n\n# Plan\n")
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -819,7 +819,7 @@ class TestEnrichedPayload:
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("---\nstatus: Ready\nrevision_applied_at: not-a-date\n---\n\n# Plan\n")
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -1115,14 +1115,16 @@ class TestResolveTargetRepo:
         assert result == "tomcounsell/ai"
 
     def test_compute_meta_resolves_repo_once(self, monkeypatch):
-        """_resolve_target_repo called exactly once per _compute_meta invocation."""
+        """_resolve_target_repo_fallback called exactly once per _compute_meta."""
         call_count = []
 
         def fake_resolve():
             call_count.append(1)
             return "tomcounsell/ai"
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", side_effect=fake_resolve):
+        with patch(
+            "tools.sdlc_stage_query._resolve_target_repo_fallback", side_effect=fake_resolve
+        ):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
@@ -1133,7 +1135,42 @@ class TestResolveTargetRepo:
                         mock_session.slug = None
                         _compute_meta({}, mock_session, None)
         assert len(call_count) == 1, (
-            f"_resolve_target_repo called {len(call_count)} times, expected 1"
+            f"_resolve_target_repo_fallback called {len(call_count)} times, expected 1"
+        )
+
+    def test_meta_and_lane_slug_share_one_repo_resolution(self, monkeypatch):
+        """One tick, one `gh repo view`.
+
+        `_compute_meta` and `resolve_lane_slug` each need the target repo. The
+        CLI wraps the tick in `cached_target_repo_resolution()` so the two
+        collapse to a single underlying resolution; without the scope this is
+        two `gh repo view` subprocesses per tick whenever GH_REPO is unset.
+        """
+        import tools._sdlc_utils as sdlc_utils
+        from tools._sdlc_utils import cached_target_repo_resolution
+
+        call_count = []
+
+        def fake_resolve():
+            call_count.append(1)
+            return "tomcounsell/ai"
+
+        monkeypatch.setattr(sdlc_utils, "_resolve_target_repo", fake_resolve)
+        monkeypatch.delenv("GH_REPO", raising=False)
+
+        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    from tools.sdlc_stage_query import _compute_meta
+
+                    mock_session = MagicMock()
+                    mock_session.pr_number = None
+                    mock_session.slug = None
+                    with cached_target_repo_resolution():
+                        _compute_meta({}, mock_session, 927356)
+
+        assert len(call_count) == 1, (
+            f"target repo resolved {len(call_count)} times inside one cached scope, expected 1"
         )
 
 
@@ -1334,7 +1371,7 @@ class TestLatestReviewHeadShaMeta:
 
         raw_states = {"ISSUE": "completed", "_verdicts": verdicts}
         with (
-            patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None),
+            patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
             patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
             patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
         ):

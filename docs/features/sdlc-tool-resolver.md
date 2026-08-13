@@ -78,14 +78,14 @@ Two distinct env vars now govern where things live:
 
 **Fail-loud head-SHA resolution (#2377 + absorbed #2394).** `_fetch_pr_head_sha` no longer returns a silent `None` on failure — it raises the named `HeadShaResolutionError` carrying the concrete cause (missing `gh`, non-zero exit + stderr, timeout, or empty output), logged at `error` level. A silent `None` had produced a false-negative REVIEW gate whose root cause was buried at `debug`. The write path (`finalize`) re-raises it as `ReviewFinalizeError` prefixed `REVIEW_TRAILER_MISSING:` with the cause attached (loud, non-zero exit); the read path (`check_review_persistence`/`selfcheck`) catches it and fails **closed** without raising (reports `reason: REVIEW_TRAILER_MISSING`, exit-0), preserving the read-only contract.
 
-### `find_plan_path` hardening
+### `find_plan_path` (`tools/lane_identity.py`)
 
 Three-level plan-dir resolution (unchanged precedence):
 1. `SDLC_TARGET_REPO` env var — explicit override.
 2. `_git_toplevel()` — cwd's git root (falls through on non-git cwd).
 3. `__file__`-relative fallback — `~/src/ai/docs/plans`.
 
-**New guard (level 3 only):** when resolution fell back to the `__file__` path (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual match is likely a foreign plan that merely *mentions* the issue number. `find_plan_path` now returns `None` instead of the foreign plan — a recoverable signal (router surfaces "plan not found / re-run /do-plan") rather than silent corruption. The `tracking:` match remains authoritative on all resolution levels and is never suppressed.
+**Ownership is one rung on every level:** a `tracking:` frontmatter line naming the issue. A plan that merely *mentions* `#N` in prose does not own N — and a "Not building #N" No-Gos line is the opposite of ownership. There is no textual-mention fallback and no `_is_ai_repo_fallback` suppression flag; both were deleted with #2735, along with the entire class of confident-wrong answers they produced (a scan of `docs/plans/` found 309 issue numbers with no owning plan that nonetheless resolved to one). An issue with no owning plan resolves to `None`, which callers treat as "no plan" rather than probing a guess.
 
 ### G5 transparent-rewrite migration
 

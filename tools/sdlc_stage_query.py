@@ -48,11 +48,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from tools._sdlc_utils import _resolve_target_repo, head_sha_of_record, head_sha_of_text
-from tools._sdlc_utils import find_plan_path as _find_plan_path
+from tools._sdlc_utils import (
+    _resolve_target_repo_fallback,
+    cached_target_repo_resolution,
+    head_sha_of_record,
+    head_sha_of_text,
+)
 from tools._sdlc_utils import is_pipeline_ledger as _is_pipeline_ledger
 from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_repo_for_read
 from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
+from tools.lane_identity import find_plan_path as _find_plan_path
+from tools.lane_identity import lane_branch_name, resolve_lane_slug
 
 logger = logging.getLogger(__name__)
 
@@ -344,12 +350,12 @@ def _lookup_pr(
        #{issue_number}``) to the exact issue. Fuzzy search matches alone are
        NOT trusted (they can surface an unrelated PR whose text merely contains
        the digits); validation runs in :func:`_gh_pr_search_issue_ref`.
-    2. Branch-head fallback (``gh pr list --head session/{slug}``) — recovers
-       out-of-band PRs whose body never referenced the issue. Uses the
-       canonical SDLC branch shape ``session/{slug}`` (NOT a fabricated
-       ``session/sdlc-{issue_number}`` form this repo never creates); an exact
-       head-ref match needs no body validation. Only runs when a slug is
-       available.
+    2. Branch-head fallback (``gh pr list --head <lane branch>``) — recovers
+       out-of-band PRs whose body never referenced the issue. The branch is
+       named by the lane's RECORDED slug, minted once at lane start: both the
+       issue-derived shape and human-named shapes exist on this remote, so the
+       name is read rather than derived. An exact head-ref match needs no body
+       validation. Only runs when a slug is available.
 
     Args:
         state: ``gh pr list --state`` value, threaded into both resolution legs.
@@ -366,8 +372,9 @@ def _lookup_pr(
         if pr is not None:
             return pr
 
-    if slug:
-        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", state], repo=repo)
+    branch = lane_branch_name(slug)
+    if branch:
+        pr = _gh_pr_list(["--head", branch, "--state", state], repo=repo)
         if pr is not None:
             return pr
 
@@ -495,7 +502,10 @@ def _compute_meta(
     #   None (degrades to current-repo behavior).
     # The resolved slug is threaded into _fetch_pr_merge_state and _gh_pr_list
     # via their ``repo=`` param; neither function calls _resolve_target_repo itself.
-    resolved_repo = _resolve_target_repo()
+    # Routed through the memoized wrapper, not `_resolve_target_repo` directly:
+    # `resolve_lane_slug` below resolves the repo too, and inside the CLI's
+    # `cached_target_repo_resolution()` scope both collapse to one `gh repo view`.
+    resolved_repo = _resolve_target_repo_fallback()
 
     verdicts = raw_states.get("_verdicts") or {}
     if not isinstance(verdicts, dict):
@@ -515,7 +525,23 @@ def _compute_meta(
     # Closes/Fixes/Resolves body reference), then the `session/{slug}`
     # branch-head fallback — both inside _lookup_pr.
     session_pr = getattr(session, "pr_number", None) if session is not None else None
-    slug = getattr(session, "slug", None) if session is not None else None
+    # The lane's RECORDED slug, read with healing OFF. `_compute_meta` runs for
+    # any issue number the router, the dashboard, or an operator names -- most
+    # of which are not lanes -- so it must never mint, never create a ledger,
+    # and never write. `target_repo` is deliberately NOT threaded from
+    # `resolved_repo` above: that is the env ladder, and the resolver's own
+    # lease-first read is the convention readers use.
+    slug = resolve_lane_slug(issue_number) if issue_number else None
+    slug_source = "recorded" if slug else None
+    if not slug:
+        # Rung 2: a pre-cutover lane has no recorded slug but may still have an
+        # `AgentSession` carrying one (`_resolve_issue_record`'s session rung
+        # returns an AgentSession, which does have `slug`). Dropping this leg
+        # would retire the branch-head PR recovery for exactly the cold-path
+        # lanes that never heal.
+        raw = getattr(session, "slug", None) if session is not None else None
+        slug = raw.strip() if isinstance(raw, str) and raw.strip() else None
+        slug_source = "session" if slug else "unresolved"
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr
     else:
@@ -578,6 +604,11 @@ def _compute_meta(
         "plan_hash_at_build_start": plan_hash_at_build_start,
         "plan_exists": plan_exists,
         "issue_number": issue_number,
+        # The lane's identity, and how it was answered. `unresolved` lets an
+        # operator tell "the branch check was skipped because no identity is
+        # recorded" from "the branch check ran and verified clean".
+        "slug": slug,
+        "slug_source": slug_source,
         "_resolved_target_repo": resolved_repo,
         # Completion-guard refusal counter (issue #2158). Persisted on the
         # ledger keyed by issue_number so the refusal ladder does not restart
@@ -610,6 +641,8 @@ def _default_meta() -> dict:
         "plan_hash_at_build_start": None,
         "plan_exists": False,
         "issue_number": None,
+        "slug": None,
+        "slug_source": "unresolved",
         "_resolved_target_repo": None,
         "completion_refusal_count": 0,
     }
@@ -786,16 +819,20 @@ Legacy output (--format legacy):
             sys.exit(0)
 
     try:
-        if args.format == "legacy":
-            result = query_stage_states(
-                session_id=args.session_id,
-                issue_number=args.issue_number,
-            )
-        else:
-            result = query_enriched(
-                session_id=args.session_id,
-                issue_number=args.issue_number,
-            )
+        # One tick, one repo resolution. `_compute_meta` and `resolve_lane_slug`
+        # both need the target repo; without this scope each pays its own
+        # `gh repo view` whenever GH_REPO is unset.
+        with cached_target_repo_resolution():
+            if args.format == "legacy":
+                result = query_stage_states(
+                    session_id=args.session_id,
+                    issue_number=args.issue_number,
+                )
+            else:
+                result = query_enriched(
+                    session_id=args.session_id,
+                    issue_number=args.issue_number,
+                )
         print(json.dumps(result))
     except Exception:
         # Never crash — always return format-appropriate empty JSON

@@ -27,6 +27,26 @@ from tests.db_claim import subprocess_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_LANE_IDENTITY_CLASS = "TestLaneSlugMintedAtLaneStart"
+
+
+@pytest.fixture(autouse=True)
+def _stub_lane_identity(request):
+    """Neutralize lane-slug resolution (#2735) outside the class that tests it.
+
+    ``ensure_session`` mints the lane's identity on entry, which peeks the issue
+    lock for the pinned target repo and writes a ``PipelineLedger``. That is
+    correct behavior and ``TestLaneSlugMintedAtLaneStart`` asserts it -- but for
+    every other test in this file it is noise: it adds a ``touch_issue_lock``
+    call that the lock-wiring assertions count, and it leaves a real ledger
+    record per test.
+    """
+    if request.cls is not None and request.cls.__name__ == _LANE_IDENTITY_CLASS:
+        yield
+        return
+    with patch("tools.sdlc_session_ensure.resolve_lane_slug", return_value=None):
+        yield
+
 
 class TestEnsureSession:
     """Tests for the ensure_session function."""
@@ -1100,6 +1120,92 @@ def _make_orphan_session(
     s.issue_url = None
     s.issue_number = issue_number
     return s
+
+
+class TestLaneSlugMintedAtLaneStart:
+    """``ensure_session`` is the single minter of the lane slug (#2735).
+
+    It is the one component that runs on every lane-start path before any
+    plan or any stage exists, so it is where the lane's identity is created
+    and recorded on the ``PipelineLedger`` -- once, conditional-on-empty.
+    """
+
+    _TEST_REPO = "test-owner/test-repo"
+    _ISSUE = 927360
+
+    def _cleanup(self):
+        from agent.pipeline_ledger import PipelineLedger
+
+        for record in PipelineLedger.query.filter(ledger_key=f"{self._TEST_REPO}:{self._ISSUE}"):
+            record.delete()
+
+    def setup_method(self):
+        self._cleanup()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def test_ensure_session_records_the_lane_slug(self, monkeypatch):
+        """After ensure_session(N) on a clean Redis a ledger exists for N with
+        a non-empty slug -- the mint has a write target."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=self._ISSUE)
+
+        ledger = PipelineLedger.get(self._TEST_REPO, self._ISSUE)
+        assert ledger is not None
+        assert ledger.slug == f"sdlc-{self._ISSUE}"
+
+    def test_invalid_issue_number_mints_nothing(self, monkeypatch):
+        """The validity guard runs first: no ledger for a bogus issue number."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+        with patch("tools.sdlc_session_ensure.resolve_lane_slug") as mock_resolve:
+            assert ensure_session(issue_number=0) == {}
+            assert ensure_session(issue_number=-1) == {}
+        mock_resolve.assert_not_called()
+
+    def test_slug_resolution_failure_never_fails_the_ensure(self, monkeypatch):
+        """A Redis or git failure inside identity resolution must not convert a
+        successful ensure into ``return {}``."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("GH_REPO", self._TEST_REPO)
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = f"sdlc-local-{self._ISSUE}"
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch(
+                "tools.sdlc_session_ensure.resolve_lane_slug",
+                side_effect=RuntimeError("redis down"),
+            ),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=self._ISSUE)
+
+        assert result["session_id"] == f"sdlc-local-{self._ISSUE}"
+        assert result["created"] is True
 
 
 class TestKillOrphans:

@@ -52,6 +52,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
+from tools.lane_identity import mint_lane_slug
 
 logger = logging.getLogger(__name__)
 
@@ -88,23 +89,25 @@ _GITHUB_ISSUE_URL_RE = re.compile(
 _ENRICHMENT_HEADER_RE = re.compile(r"^(?:SESSION_ID|PROJECT|FROM|TASK_SCOPE|SCOPE):")
 
 
-def _derive_slug_from_message(message: str) -> str | None:
-    """Extract the first issue number from ``message`` and return ``sdlc-{N}``.
+def _issue_number_from_message(message: str) -> int | None:
+    """Extract the first issue number referenced in ``message``, or ``None``.
 
-    Returns None if no issue reference is present. Used by ``cmd_create`` to
-    auto-provision a worktree for PM-role sessions targeting a specific issue.
+    Used by ``cmd_create`` to auto-provision a worktree for eng-role sessions
+    targeting a specific issue. It reports only *which issue* the message names;
+    turning that into a lane slug is ``tools.lane_identity.mint_lane_slug``'s
+    job, which is the sole home of that literal.
 
     Examples:
-        "handle issue #1109"       -> "sdlc-1109"
-        "Start the pipeline for issue 735" -> "sdlc-735"
-        "do something generic"     -> None
+        "handle issue #1109"                -> 1109
+        "Start the pipeline for issue 735"  -> 735
+        "do something generic"              -> None
     """
     if not message:
         return None
     match = _ISSUE_REF_RE.search(message)
     if not match:
         return None
-    return f"sdlc-{match.group(1)}"
+    return int(match.group(1))
 
 
 def _derive_sdlc_metadata(
@@ -113,7 +116,7 @@ def _derive_sdlc_metadata(
     """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
 
     Detection is anchored to issue references only — the same signal
-    ``_derive_slug_from_message`` uses — so it stays consistent with slug
+    ``_issue_number_from_message`` uses — so it stays consistent with slug
     derivation and avoids over-classifying conversational sessions (plan
     Rabbit Holes / Risk 1). Precedence:
 
@@ -585,9 +588,18 @@ def create_session(
         # downstream by the worker if a slugless eng session somehow reaches
         # the executor (future programmatic spawn site).
         if not slug and role != "teammate":
-            derived = _derive_slug_from_message(message)
-            if derived:
-                slug = derived
+            # This is a CONVERSATIONAL seam, not a lane start: the branch fires
+            # for any eng session whose --message merely mentions an issue in
+            # prose. So it reads nothing and records nothing -- no resolver
+            # call, no ledger, no recorded identity. Adopting a live lane's
+            # recorded slug here would drop a conversational session into that
+            # lane's worktree and branch, which is the shared-slug contention
+            # #1915 Defect 2 fixed. The session gets its own worktree; if a real
+            # lane later starts for the issue, ensure_session's ladder reaches
+            # this same name anyway.
+            issue_number = _issue_number_from_message(message)
+            if issue_number:
+                slug = mint_lane_slug(issue_number)
                 notes.append(f"  Auto-derived slug: {slug} (from 'issue #N' in message)")
             else:
                 return CreateResult(

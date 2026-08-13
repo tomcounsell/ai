@@ -99,7 +99,7 @@ Work is DONE when:
 
 Fresh messages create new sessions scoped by Telegram thread ID or local session ID; reply-to messages resume the original session and its context. Sessions pause only for genuine open questions. The full 14-state lifecycle is in [`docs/features/session-lifecycle.md`](docs/features/session-lifecycle.md).
 
-Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc conversations get ephemeral thread-scoped lists; planned work created via `/do-plan {slug}` gets a durable slug-scoped list, and the slug ties together the task list, branch, worktree, plan doc, and GitHub issue. Filesystem isolation for planned work lives in `agent/worktree_manager.py` (`.worktrees/{slug}/`, branch `session/{slug}`). See [`docs/features/session-isolation.md`](docs/features/session-isolation.md).
+Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc conversations get ephemeral thread-scoped lists; planned work created via `/do-plan {slug}` gets a durable slug-scoped list, and the lane slug ties together the task list, branch, and worktree. The plan doc is linked by `tracking:` frontmatter, not by name, and may carry a different filename than the lane's recorded slug — see [`docs/features/sdlc-lane-identity.md`](docs/features/sdlc-lane-identity.md). Filesystem isolation for planned work lives in `agent/worktree_manager.py` (`.worktrees/{slug}/`, branch `session/{slug}`). See [`docs/features/session-isolation.md`](docs/features/session-isolation.md).
 
 ## Self-Healing
 

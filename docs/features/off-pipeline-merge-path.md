@@ -103,7 +103,7 @@ refuses the skip and preserves the evidence that a critique was attempted. What
 remains is the case where the pipeline genuinely never critiqued this issue,
 whoever wrote the diff.
 
-`docs/plans/` resolution order is in `tools/_sdlc_utils.py::find_plan_path`:
+`docs/plans/` resolution order is in `tools/lane_identity.py::find_plan_path`:
 `SDLC_TARGET_REPO`, then the cwd's git toplevel, then the `__file__`-relative
 fallback. If you see an unexpected skip on in-pipeline work, that ordering is
 where to look first.

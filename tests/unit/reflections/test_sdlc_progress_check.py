@@ -217,6 +217,9 @@ class _Lab:
         self.steers: list[tuple[str, str]] = []
         self.resumes: list[tuple] = []
         self.creates: list[dict] = []
+        # (issue_number, slug, target_repo) per adopt_lane_slug call. Fenced
+        # like every other boundary: adoption is a real Popoto write.
+        self.adopts: list[tuple] = []
         self.steer_result: dict = {"success": True, "session_id": "s1", "error": None}
         self.resume_result = _Result(True)
         self.create_result = _Result(True)
@@ -284,9 +287,14 @@ def lab(fake_redis, fake_query, owns_project, monkeypatch):
             raise RuntimeError("create blew up")
         return lab.create_result
 
+    def _adopt(issue_number, slug, *, target_repo=None):
+        lab.adopts.append((issue_number, slug, target_repo))
+        return slug
+
     monkeypatch.setattr("agent.session_executor.steer_session", _steer)
     monkeypatch.setattr("tools.valor_session.resume_session", _resume)
     monkeypatch.setattr("tools.valor_session.create_session", _create)
+    monkeypatch.setattr(sdlc_progress, "adopt_lane_slug", _adopt)
     return lab
 
 
@@ -566,6 +574,91 @@ def test_no_sessions_at_all_is_the_create_rung(lab, stub_workdir, stalled_pr):
     assert "issue #1395" in kwargs["message"]
     assert "1 created" in result["summary"]
     assert lab.attempts() == 1
+
+
+# ---------------------------------------------------------------------------
+# Lane identity on the create rung (#2735 / #2718)
+#
+# The rung used to build `slug=f"sdlc-{issue_number}"` for itself. It now
+# adopts and passes through the caller's slug, derived from the real pushed
+# branch by `_check_project_stalls` at `_slug_from_branch(branch)`. Re-deriving
+# at either site is the #2718 divergence: the session gets a name the branch
+# this tick is looking at does not have.
+# ---------------------------------------------------------------------------
+
+
+def test_create_rung_adopts_and_passes_through_the_callers_slug(lab, stub_workdir, stalled_pr):
+    """One name, recorded and used. `_PROJECT` has no github block, so
+    `target_repo` is None end to end -- the tolerated case."""
+    sdlc_progress._check_project_stalls(_PROJECT)
+
+    assert lab.adopts == [(1395, "sdlc-1395", None)]
+    assert lab.creates[0]["slug"] == "sdlc-1395"
+    assert lab.adopts[0][1] == lab.creates[0]["slug"], "adoption and creation must agree"
+
+
+def test_create_rung_threads_the_projects_repo_into_adoption(lab, stub_workdir, stalled_pr):
+    """This process's cwd is always `ai`; only the project dict knows better.
+
+    Without the thread, a non-`ai` project's lane records under this repo's
+    ledger key.
+    """
+    project = {
+        "slug": "widgets",
+        "working_directory": "/tmp/fake-widgets-repo",
+        "github": {"org": "acme", "repo": "widgets"},
+    }
+
+    sdlc_progress._check_project_stalls(project)
+
+    assert lab.adopts == [(1395, "sdlc-1395", "acme/widgets")]
+
+
+def test_create_rung_records_a_human_named_slug_verbatim(lab, fake_redis):
+    """#2718's shape at the rung itself: the branch name survives the rung.
+
+    `_attempt_action` is exercised directly because the caller's own branch
+    filter (`_SDLC_BRANCH_RE` in `_list_open_sdlc_prs`, then
+    `_issue_number_from_slug`) admits only `session/sdlc-<N>` today. The
+    pass-through is what keeps that filter the only thing standing between a
+    human-named lane and a correctly-named session.
+    """
+    outcome = sdlc_progress._attempt_action(
+        "create",
+        None,
+        slug="session-liveness-tick-counter",
+        sha="abc123def456",
+        issue_number=2716,
+        project_key="valor",
+        target_repo="acme/widgets",
+        message="go",
+    )
+
+    assert outcome.dispatched and outcome.success
+    assert lab.adopts == [(2716, "session-liveness-tick-counter", "acme/widgets")]
+    assert lab.creates[0]["slug"] == "session-liveness-tick-counter"
+    assert lab.creates[0]["slug"] != "sdlc-2716", "the rung re-derived instead of passing through"
+
+
+def test_create_rung_charges_the_budget_on_the_callers_one_name(lab, fake_redis):
+    """Attempts/cooldown/escalation stay on the caller's binding.
+
+    They are charged in the caller against the slug it derived; the create must
+    not introduce a second name for the same lane to split the budget across.
+    """
+    sdlc_progress._attempt_action(
+        "create",
+        None,
+        slug="session-liveness-tick-counter",
+        sha="abc123def456",
+        issue_number=2716,
+        project_key="valor",
+        target_repo=None,
+        message="go",
+    )
+
+    assert lab.attempts(slug="session-liveness-tick-counter") == 1
+    assert lab.attempts(slug="sdlc-2716") == 0
 
 
 # ---------------------------------------------------------------------------

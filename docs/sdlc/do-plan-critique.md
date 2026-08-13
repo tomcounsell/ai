@@ -10,7 +10,12 @@ Step 5.5 verdict-record + completion-marker block are documented in their own
 sections below — this section adds the invocations not covered there.
 
 **Plan resolution** also accepts the repo convention: plans live at
-`docs/plans/{slug}.md`; the slug derives from the plan filename or the issue.
+`docs/plans/{slug}.md`, where `{slug}` here names the *plan document*, not the
+lane. The plan actually owning issue N is resolved by `find_plan_path(N)`
+(`tools/lane_identity.py`), which matches `tracking:` frontmatter only — never
+a filename guess and never a bare `#N` mention in prose. The lane's own
+identity (worktree, branch, task list) is a separate, independently recorded
+value; see [`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md).
 
 **Start-of-skill stage marker (in_progress).** Write at the very start, before triage:
 
@@ -153,7 +158,7 @@ through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6).
 **2. Resolve the plan path through the SAME resolver the checker uses, then write + commit on `main`.** Do NOT hand-resolve or hard-code the path — the writer and the `_cli_record` checker MUST share one resolver implementation (`find_plan_path`) so there is no prose-path-vs-Python-path drift (Risk 1 / concern 6):
 
 ```bash
-PLAN_MAIN=$("${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -c "from tools._sdlc_utils import find_plan_path; p=find_plan_path($ISSUE_NUMBER); print(p or '')")
+PLAN_MAIN=$("${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -c "from tools.lane_identity import find_plan_path; p=find_plan_path($ISSUE_NUMBER); print(p or '')")
 ```
 
 Write the rendered `## Critique Results` table into `$PLAN_MAIN`, then commit + push on `main` targeting that checkout. Plans and md docs commit directly on `main`, not on a feature branch.
