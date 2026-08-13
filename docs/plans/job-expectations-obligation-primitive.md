@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -7,7 +7,7 @@ created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2708
 last_comment_id: 5236176220
 revision_applied: true
-revision_applied_at: 2026-08-13T12:40:52Z
+revision_applied_at: 2026-08-13T12:51:01Z
 ---
 
 # Expectations as the Single Obligation Primitive on Job, with a Reconciler for Orphaned Lanes
@@ -352,8 +352,10 @@ null-fallback at the session-create chokepoint records an obligation whenever a 
 guaranteed: `bridge/job_router.py::job_for_session` "almost always misses" outside
 Telegram-triggered sessions (its own docstring, `:126-127`), which is exactly the
 local/`sdlc-local-N` PM shape that spawns most lanes. The create core therefore resolves
-the Job by a chain: explicit `--job-id` argument → the creating/parent AgentSession's own
-Job linkage (via `parent_agent_session_id` walk) → `job_for_session` → skip-and-log. The
+the Job by a chain: explicit `--job-id` argument → walk `parent_agent_session_id`
+ancestors, calling `job_for_session` on each until one resolves → skip-and-log
+(AgentSession stores no job_id field; the walk-and-resolve wording is deliberate and
+identical in Agent Integration and Task 3 — round-2 critique concern 1). The
 **drift advisory is the real backstop** for unresolved cases: a PM with live children
 whose Job carries no matching open outbound expectation surfaces on the health cadence to
 the operator surface. Test: a Job with no expectations is never asserted complete by any
@@ -362,8 +364,11 @@ new code path.
 ### Risk 2: Respawn loop on a permanently-failing lane
 **Impact:** reconciler recreates a lane that dies the same way, forever.
 **Mitigation:** per-(job, expectation) attempt cap + cooldown + escalate-once, copied from
-`reflections/sdlc_progress.py` (already field-proven); attempts keyed in Redis with TTL
-longer than the cadence.
+`reflections/sdlc_progress.py` (already field-proven); attempts keyed in Redis with
+**TTL floored at the escalation TTL** — `max(configured, escalation_ttl)` exactly as
+`reflections/sdlc_progress.py::_attempts_ttl_seconds()` does — never merely "longer than
+the cadence": an attempts key that expires while the escalation key still suppresses
+paging turns "escalate once and stop" into "act forever, silently."
 
 ### Risk 3: Rename breaks the guarded index-repair path mid-flight
 **Impact:** daily maintenance restamps a field that no longer exists, or leaves stale
@@ -455,13 +460,17 @@ read absorbs it.
   `expectation-remove` (`--expectation-id`), and `show`/`list` output switching to
   expectations. Same CLI surface the PM already uses — no new `pyproject.toml` entry point.
 - `tools/valor_session.py` create core records the outbound expectation as a
-  null-fallback placeholder (new `--expect-what` optional PM-authored override and
-  `--job-id` explicit binding; the fallback `what` is the session's initial instruction
-  summary, entry marked placeholder) only when no open outbound expectation with
-  `owner == <this lane>` already exists on the bound Job (per-lane check, Race-2-of-#2494
-  safe). Job resolution chain: `--job-id` → parent AgentSession linkage →
-  `job_for_session` → skip-and-log (never blocks session creation; the drift advisory is
-  the backstop for unresolved cases).
+  null-fallback (new `--expect-what` optional PM-authored override and `--job-id`
+  explicit binding) only when no open outbound expectation with `owner == <this lane>`
+  already exists on the bound Job (per-lane check, Race-2-of-#2494 safe). The
+  `placeholder` marker derives from **provenance**, mirroring `goal_is_placeholder()`'s
+  author-keyed pattern (`models/job.py:186-199`): `--expect-what` present ⇒
+  `placeholder=False` (the prime's refine nudge skips deliberately authored text);
+  absent ⇒ `placeholder=True` with the fallback `what` = the session's initial
+  instruction summary. Both cases unit-tested. Job resolution chain: explicit `--job-id`
+  argument → walk `parent_agent_session_id` ancestors, calling `job_for_session` on each
+  until one resolves → skip-and-log (never blocks session creation; the drift advisory
+  is the backstop for unresolved cases).
 - PM prime (`.claude/commands/roles/prime-pm-role.md`) updated: goal-authoring mandate
   extends to expectation hygiene (record on spawn if the mechanical write was skipped;
   discharge on delivery); promise vocabulary replaced.
@@ -555,11 +564,13 @@ read absorbs it.
 - **Agent Type**: builder
 - **Parallel**: true
 - `tools/valor_session.py` create-core null-fallback expectation write per the owner
-  ruling — per-lane trigger: write the placeholder only when no open expectation with
+  ruling — per-lane trigger: write the fallback only when no open expectation with
   `direction == "outbound" and owner == <new lane id/slug>` exists (never a bare
-  any-exists check); Job resolution chain: explicit `--job-id` → parent AgentSession
-  linkage → `job_for_session` → skip-and-log; never block creation. Sweep other
-  eng-child creation sites.
+  any-exists check); `placeholder` marker derived from provenance (`--expect-what`
+  present ⇒ `False`, absent ⇒ `True`; both cases tested); Job resolution chain: explicit
+  `--job-id` argument → walk `parent_agent_session_id` ancestors, calling
+  `job_for_session` on each until one resolves → skip-and-log; never block creation.
+  Sweep other eng-child creation sites.
 - `bridge/promise_gate.py` advisory copy → expectations (no verdict/regex changes).
 - `MessageDraft.expectations` → `open_questions` across drafter/redundancy
   filter/output_handler/session_completion.
@@ -624,9 +635,9 @@ read absorbs it.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Rung 2 of the Job-resolution chain ("parent AgentSession linkage") names a mechanism that does not exist: AgentSession has no stored Job/job_id field (models/agent_session.py:393 shows only parent_agent_session_id), and job_for_session resolves only from a Telegram reply-index. A builder implementing rung 2 literally must either invent an undocumented schema field or hit a no-op. | pending | Either add an explicit bound-job field (e.g. a job_id KeyField on AgentSession, listed in Interface changes) or collapse rung 2 into rung 3 as "walk parent_agent_session_id ancestors and call job_for_session on each until one resolves"; use identical wording in Risk 1, Agent Integration, and Task 3. Grep models/agent_session.py for job_id before assuming rung 2 is a field read. |
-| CONCERN | Risk & Robustness | Risk 2's "attempts keyed in Redis with TTL longer than the cadence" drops the load-bearing invariant from sdlc_progress.py: attempts TTL must be floored at the escalation TTL. Without the floor, an expired attempts key re-arms the budget while the escalation key still suppresses paging — "escalate once and stop" becomes "act forever, silently." | pending | The reconciler's attempts-TTL helper must apply the same max() floor as reflections/sdlc_progress.py::_attempts_ttl_seconds() (line 158-167: max(configured, _escalation_ttl_seconds())); restate Risk 2 as "attempts TTL >= escalation TTL (not merely > cadence)." |
-| CONCERN | Scope & Value | The rev-1-added --expect-what flag injects PM-authored text into the create-core fallback write, yet the plan marks every fallback entry "placeholder" regardless of provenance — so the PM prime's refine nudge would fire on text the PM deliberately authored, blurring the owner ruling's authored-vs-mechanical split with no suppression rule. | pending | Derive the placeholder marker from provenance: --expect-what present => placeholder=False (nudge skips it); absent => placeholder=True. Mirror goal_is_placeholder()'s author-keyed pattern (models/job.py:186-199) and test both cases. Alternatively drop --expect-what and keep PM authoring solely in job_tool expectation-add. |
+| CONCERN | Risk & Robustness | Rung 2 of the Job-resolution chain ("parent AgentSession linkage") names a mechanism that does not exist: AgentSession has no stored Job/job_id field (models/agent_session.py:393 shows only parent_agent_session_id), and job_for_session resolves only from a Telegram reply-index. A builder implementing rung 2 literally must either invent an undocumented schema field or hit a no-op. | Resolved rev-2: rung 2 collapsed into the ancestor-walk form (walk parent_agent_session_id ancestors calling job_for_session until one resolves) with identical wording in Risk 1, Agent Integration, Task 3; no new schema field | Either add an explicit bound-job field (e.g. a job_id KeyField on AgentSession, listed in Interface changes) or collapse rung 2 into rung 3 as "walk parent_agent_session_id ancestors and call job_for_session on each until one resolves"; use identical wording in Risk 1, Agent Integration, and Task 3. Grep models/agent_session.py for job_id before assuming rung 2 is a field read. |
+| CONCERN | Risk & Robustness | Risk 2's "attempts keyed in Redis with TTL longer than the cadence" drops the load-bearing invariant from sdlc_progress.py: attempts TTL must be floored at the escalation TTL. Without the floor, an expired attempts key re-arms the budget while the escalation key still suppresses paging — "escalate once and stop" becomes "act forever, silently." | Resolved rev-2: Risk 2 restated as attempts TTL floored at escalation TTL via max(configured, escalation_ttl), mirroring _attempts_ttl_seconds() | The reconciler's attempts-TTL helper must apply the same max() floor as reflections/sdlc_progress.py::_attempts_ttl_seconds() (line 158-167: max(configured, _escalation_ttl_seconds())); restate Risk 2 as "attempts TTL >= escalation TTL (not merely > cadence)." |
+| CONCERN | Scope & Value | The rev-1-added --expect-what flag injects PM-authored text into the create-core fallback write, yet the plan marks every fallback entry "placeholder" regardless of provenance — so the PM prime's refine nudge would fire on text the PM deliberately authored, blurring the owner ruling's authored-vs-mechanical split with no suppression rule. | Resolved rev-2: placeholder derived from provenance (--expect-what present => False, absent => True), goal_is_placeholder()-style, both cases unit-tested; stated in Agent Integration and Task 3 | Derive the placeholder marker from provenance: --expect-what present => placeholder=False (nudge skips it); absent => placeholder=True. Mirror goal_is_placeholder()'s author-keyed pattern (models/job.py:186-199) and test both cases. Alternatively drop --expect-what and keep PM authoring solely in job_tool expectation-add. |
 
 ---
 
@@ -645,10 +656,11 @@ read absorbs it.
 
 ## Open Questions
 
-1. **Naming: `expectation-add`/`expectation-remove` vs. `expect`/`discharge`** in
-   `job_tool` — plan uses the former for symmetry with the retired promise verbs; cheap to
-   change now, expensive later.
+None remaining.
 
-*(Resolved: the former Open Question on the at-rest backstop's survival is settled by the
-round-1 critique blocker disposition — rename-and-keep as the surviving `sweep_to_rest()`
-caller with invariant-alarm semantics; see Architectural Impact.)*
+*(Resolved: the at-rest backstop's survival is settled by the round-1 critique blocker
+disposition — rename-and-keep as the surviving `sweep_to_rest()` caller with
+invariant-alarm semantics; see Architectural Impact. The `job_tool` verb naming is
+settled as `expectation-add`/`expectation-remove` — explicit, greppable, symmetric with
+the retired promise verbs; `discharge` survives as the model method name
+`discharge_expectation`, where the domain term earns its precision.)*
