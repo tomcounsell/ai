@@ -62,6 +62,85 @@ class TestGuardedElsewhereExclusion:
         assert "AgentSession" not in model_names
 
 
+class TestJobGuardedRepairIsScheduled:
+    """Issue #2640: `_GUARDED_ELSEWHERE` membership is only half the contract.
+
+    It removes a model from the generic `rebuild_indexes()` sweep; the
+    `_run_guarded_repairs()` registry is what puts that model's own guarded
+    path back on the schedule. `Job` was listed in the first and absent from
+    the second, so it received no index hygiene of any kind in production --
+    no identity-less-hash quarantine, no `$IndexF:Job:*` clear, no
+    `$SortF:Job:last_active_at:*` partition rebuild, no daily
+    `backfill_open_promises_index()`.
+
+    The load-bearing assertions below are behavioural: a `run_cleanup()` pass
+    must actually reap a manufactured `$SortF` orphan and delete a planted
+    identity-less `Job:*` hash. Deleting the `"Job"` entry from
+    `_run_guarded_repairs()` turns them red.
+    """
+
+    def test_job_excluded_from_generic_sweep(self):
+        assert "Job" not in {m.__name__ for m in _get_all_models()}
+
+    def test_run_cleanup_reaps_job_sortf_orphan_and_identity_less_hash(self):
+        import uuid
+
+        from popoto import SortedField
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.job import Job
+
+        room_id = f"test-cleanupsweep-{uuid.uuid4().hex[:8]}|telegram:1"
+        sorted_key = SortedField.get_sortedset_db_key(Job, "last_active_at", room_id).redis_key
+        phantom_key = f"Job:test-phantom-{uuid.uuid4().hex[:8]}"
+
+        # A single stub keeps the generic sweep trivial. It cannot be an empty
+        # list: run_cleanup() returns "no_models" and short-circuits before
+        # _run_guarded_repairs() ever runs.
+        stub = MagicMock()
+        stub.__name__ = "StubModel"
+        stub.rebuild_indexes.return_value = 0
+
+        try:
+            # (a) A textbook $SortF partition orphan. Mint alone so the
+            # partition holds exactly one member, capture it, then delete the
+            # backing hash raw -- the same bypass of on_delete's ZREM that
+            # repair leg 1's quarantine performs.
+            Job.mint(room_id, "orphan probe")
+            members = POPOTO_REDIS_DB.zrange(sorted_key, 0, -1)
+            assert len(members) == 1, "unique room should hold exactly one member"
+            orphan = members[0].decode() if isinstance(members[0], bytes) else members[0]
+            survivor = Job.mint(room_id, "survivor")
+            POPOTO_REDIS_DB.delete(orphan)
+            assert POPOTO_REDIS_DB.zscore(sorted_key, orphan) is not None, (
+                "harness suspect: the orphan was not manufactured"
+            )
+
+            # (b) An identity-less Job hash -- repair leg 1's quarantine target.
+            POPOTO_REDIS_DB.hset(phantom_key, mapping={"status": "active"})
+
+            with (
+                patch("scripts.popoto_index_cleanup._get_all_models", return_value=[stub]),
+                patch("scripts.popoto_index_cleanup._count_orphans", return_value=0),
+            ):
+                result = run_cleanup()
+
+            assert POPOTO_REDIS_DB.zscore(sorted_key, orphan) is None, (
+                "run_cleanup() must reap the $SortF partition orphan -- it does not "
+                "unless Job is registered in _run_guarded_repairs()"
+            )
+            assert POPOTO_REDIS_DB.exists(phantom_key) == 0, (
+                "run_cleanup() must quarantine the identity-less Job hash"
+            )
+            # The healthy record survives the rebuild and stays queryable.
+            assert any(j.job_id == survivor.job_id for j in Job.query.filter(room_id=room_id))
+            assert result["guarded_repairs"]["Job"]["status"] == "ok"
+        finally:
+            POPOTO_REDIS_DB.delete(phantom_key)
+            for job in Job.query.filter(room_id=room_id):
+                job.delete()
+
+
 class TestRebuildTimeoutAbandonment:
     """Un-wedge fix: a per-model rebuild that overruns
     POPOTO_INDEX_CLEANUP_REBUILD_TIMEOUT_SECONDS must be abandoned (daemon
