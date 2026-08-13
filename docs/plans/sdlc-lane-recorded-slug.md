@@ -444,9 +444,31 @@ that is what produced the wedge.
    (see "Rung 2 uniqueness" below).
 3. `git ls-remote --heads origin refs/heads/session/sdlc-{N}` exact probe → adopt
    `sdlc-{N}`.
-4. `docs/plans/` scan for a `tracking:` frontmatter match on issue N → adopt that plan's
-   filename stem.
-5. Mint `sdlc-{N}`.
+4. Mint the issue-derived slug.
+
+**The `docs/plans/` stem rung is DROPPED (revision cycle 6, found at build time).** An
+earlier draft had a rung between 3 and 4: scan `docs/plans/` for a `tracking:` match on
+issue N and adopt that plan's filename stem. It is removed because it **derives a lane
+slug from a plan filename**, which is the precise defect this lane exists to close — and
+recording the result makes it *worse* than the status quo, not better, because the write
+is no-overwrite and a wrong adoption can never be corrected.
+
+The distinction the ladder is built on: rungs 2 and 3 **adopt an identity that exists in
+the world** — a pushed branch, a PR's head ref. Those are things something already
+created and is already using. A plan document is not an identity; it is a document that
+mentions an issue. Reading its filename is derivation wearing adoption's clothes.
+
+Concretely: at genuine lane start `ensure_session` runs *before any plan exists* (owner
+direction), so the stem rung could only ever fire on a migration lane that has a plan but
+no pushed branch and no PR. In exactly that state it would record `sdlc-lane-recorded-slug`
+for issue #2735 — while every reflection, every existing convention, and the owner's own
+stated expectation for this lane say the recorded slug is `sdlc-2735`. The lane would then
+create a branch no other component would look for.
+
+This also makes the `.stem` anti-criterion honest. It reads "**zero** hits where the
+`.stem` of a plan path becomes a slug or a branch name"; the stem rung required carving a
+sanctioned exception into it. An anti-criterion that needs an exception carved for the fix
+itself is measuring the wrong thing or the fix is wrong. Here it was the fix.
 
 **Rung 1 branches on `allow_heal` — this is the whole write-target question.** The two
 modes fetch the ledger differently, and that difference is the only reason the minter has
