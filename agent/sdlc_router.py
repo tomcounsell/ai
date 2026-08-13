@@ -146,10 +146,24 @@ class Dispatch:
 
 @dataclass(frozen=True)
 class Blocked:
-    """An escalation decision. The router should stop and surface to the human."""
+    """An escalation decision. The router should stop and surface to the human.
+
+    ``guard_id`` is a short machine-matchable code identifying WHY the router
+    escalated. It does not imply "a numbered guard fired" (#2767b): alongside
+    the ``G1``–``G8`` guard codes it also carries the ``NO_RULE`` sentinel for
+    the dispatch-table fallthrough — a genuine hole in the table rather than a
+    guard verdict. Callers matching on specific guards must compare against the
+    codes they care about, never merely test for presence.
+    """
 
     reason: str
     guard_id: str | None = None
+
+
+# Sentinel ``guard_id`` for the dispatch-table fallthrough (#2767b). Short-code
+# form matches the ``G2``/``G4``/``G7`` convention so downstream consumers can
+# match it without parsing the reason string.
+NO_RULE_GUARD_ID = "NO_RULE"
 
 
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
@@ -1181,14 +1195,54 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Patch applied after review findings — re-review is required."""
+    """Owns every post-patch state whose REVIEW verdict is no longer trustworthy.
+
+    Two disjuncts, both meaning "a patch landed and the standing verdict does
+    not describe the current code":
+
+    1. ``last_dispatched_skill == /do-patch`` — the patch just ran.
+    2. ``_review_verdict_is_stale(stage_states)`` — the recorded verdict
+       predates the latest ``/do-patch`` dispatch, whatever ran since.
+
+    Disjunct 2 is the #2767(b) widening. Before it, a review → patch → review →
+    patch → review sequence could land on a **stale** verdict with
+    ``last_dispatched_skill == /do-pr-review``, which no row owned: row 7 needs
+    an absent verdict, row 8 steps aside precisely on staleness, rows 8c/8d/8e
+    all need an absent verdict — so the router returned
+    ``Blocked('no matching dispatch rule')``.
+
+    Rows 8 and 8b stay disjoint: row 8 (``_rule_review_has_findings``) returns
+    False whenever ``_review_verdict_is_stale`` is True, so fresh findings still
+    route to ``/do-patch`` at row 8 and only stale ones reach here.
+
+    Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
+    2, and one of which — 8c — actually *calls* this predicate):
+
+        ``_review_verdict_is_stale`` returns False whenever ``recorded_at`` is
+        absent, and ``recorded_at`` is absent exactly when no verdict was
+        recorded — ``tools.sdlc_verdict.record_verdict`` refuses to write a
+        record at all for an empty/non-string verdict, so the two fields are
+        written together or not at all. Rows 8c/8d/8e all require the ABSENCE
+        of a recorded verdict, therefore disjunct 2 is identically False on
+        every state they own.
+
+    No defensive step-asides are added on the strength of that proof.
+
+    Loop-bound by G4 (``same_stage_dispatch_count``): a verdict that stays
+    permanently stale escalates to a human rather than spinning on
+    ``/do-pr-review``.
+    """
     if not meta.get("pr_number"):
         return False
     # PATCH completed after REVIEW failed — need to re-review.
     if stage_states.get("PATCH") != STATUS_COMPLETED:
         return False
     last = meta.get("last_dispatched_skill") or ""
-    return last == SKILL_DO_PATCH
+    if last == SKILL_DO_PATCH:
+        return True
+    # #2767(b): the patch may have been followed by other dispatches. A verdict
+    # older than the latest /do-patch is stale no matter what ran since.
+    return _review_verdict_is_stale(stage_states)
 
 
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1408,7 +1462,10 @@ _rule_branch_exists_no_pr.__doc__ = "Branch exists, no PR"
 _rule_tests_failing.__doc__ = "Tests failing"
 _rule_pr_exists_no_review.__doc__ = "PR exists, no review"
 _rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR tech debt)"
-_rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
+_rule_patch_applied_after_review.__doc__ = (
+    "Patch applied after review findings (last dispatch was /do-patch, "
+    "OR the recorded review verdict is stale against the latest /do-patch)"
+)
 _rule_review_in_progress_no_verdict.__doc__ = (
     "Review in_progress, no verdict recorded (stalled) — re-review"
 )
@@ -1670,7 +1727,7 @@ def decide_next_dispatch(
             )
         return Blocked(
             reason="no matching dispatch rule",
-            guard_id=None,
+            guard_id=NO_RULE_GUARD_ID,
         )
 
     return primary
