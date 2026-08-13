@@ -13,6 +13,7 @@ object, and every filesystem root is injectable.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -524,6 +525,48 @@ def test_valor_session_rejects_negative_window_at_parse_time(monkeypatch, capsys
 
     monkeypatch.setattr(
         "sys.argv", ["valor-session", "progress", "--id", "abc123", "--window", "-5"]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        valor_session.main()
+    assert exc_info.value.code == 2
+    assert "--window must be >= 0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad_value", ["nan", "inf", "1e400"])
+def test_window_arg_type_rejects_nonfinite_values(bad_value):
+    """``nan``/``inf`` compare false to everything and slip past ``< 0`` (round-4 finding).
+
+    ``nan < 0`` is ``False`` (all ``nan`` comparisons are), so a ``nan``
+    window silently reported "no recent activity" against a threshold the
+    caller never passed. ``inf`` is not ``< 0`` either, and ``format_age``
+    cannot render it (``int(inf)`` raises ``OverflowError``), violating this
+    module's "never raises" contract. ``1e400`` parses to ``float('inf')``
+    and must be caught the same way as a literal ``"inf"``.
+    """
+    from tools.session_progress import window_arg_type
+
+    with pytest.raises(argparse.ArgumentTypeError, match="--window must be >= 0"):
+        window_arg_type(bad_value)
+
+
+@pytest.mark.parametrize("bad_value", ["nan", "inf", "1e400"])
+def test_valor_cli_rejects_nonfinite_window_at_parse_time(bad_value, capsys):
+    """Same round-4 finding, exercised through the ``valor`` CLI parser."""
+    from tools.valor_cli import _build_parser
+
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["progress", "abc123", "--window", bad_value])
+    assert exc_info.value.code == 2
+    assert "--window must be >= 0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad_value", ["nan", "inf", "1e400"])
+def test_valor_session_rejects_nonfinite_window_at_parse_time(bad_value, monkeypatch, capsys):
+    """Same round-4 finding, other entry point: ``valor-session progress --window nan``."""
+    from tools import valor_session
+
+    monkeypatch.setattr(
+        "sys.argv", ["valor-session", "progress", "--id", "abc123", "--window", bad_value]
     )
     with pytest.raises(SystemExit) as exc_info:
         valor_session.main()

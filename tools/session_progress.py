@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import pathlib
 import time
@@ -136,16 +137,23 @@ def window_arg_type(value: str) -> float:
     than the -5s window"). Zero is a legitimate, if aggressive, "only if
     strictly fresh right now" probe and is left alone.
 
+    ``nan`` and infinite values (``inf``, ``-inf``, or a literal like
+    ``1e400`` that overflows to ``inf``) are rejected for the same reason:
+    ``nan`` compares false to everything, including ``age <= window_s``, so
+    it silently reports "no recent activity" against a threshold the caller
+    never passed, and ``format_age(inf)`` cannot even render a reason line —
+    it raises, which this module's "never raises" contract forbids.
+
     Defined once here and imported by both CLI entry points
-    (``tools/valor_cli.py`` and ``tools/valor_session.py``) so a negative
-    ``--window`` fails identically — and at parse time, before any session
-    lookup — no matter which one is invoked.
+    (``tools/valor_cli.py`` and ``tools/valor_session.py``) so a negative or
+    non-finite ``--window`` fails identically — and at parse time, before any
+    session lookup — no matter which one is invoked.
     """
     try:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
-    if parsed < 0:
+    if not math.isfinite(parsed) or parsed < 0:
         raise argparse.ArgumentTypeError(f"--window must be >= 0 seconds, got {value!r}")
     return parsed
 
