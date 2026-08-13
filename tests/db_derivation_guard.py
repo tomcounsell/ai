@@ -343,13 +343,23 @@ def _splat_candidate(
 
     Two shapes, judged differently:
 
-    - **a dict literal with a ``"db"`` key** -- callee-agnostic, like the rest
-      of route 1. The value is visible, so it is judged exactly as a written-out
-      ``db=`` would be. A dict literal with no ``"db"`` key AND no nested ``**``
-      unpack is provably safe and yields no candidate. A dict literal that DOES
-      contain a nested unpack (``**{**base_kw, "host": "x"}``) cannot be proven
-      safe that way -- the unpacked entries are invisible to a static scan -- and
-      falls through to the opaque-leg treatment below instead.
+    - **a dict literal, entirely provable** -- callee-agnostic, like the rest
+      of route 1. A dict literal is provably safe, and yields no candidate,
+      iff EVERY one of its keys is an ``ast.Constant`` and none of them is
+      ``"db"``. Any key that fails that test is opaque -- a nested ``**``
+      unpack (``key is None``, e.g. ``**{**base_kw, "host": "x"}``) or a
+      computed key (e.g. ``**{k: v}``) -- because its contents are invisible
+      to a static scan, so the dict cannot be proven safe even if no OTHER
+      key here is literally ``"db"``. The whole dict is scanned before
+      deciding, rather than returning the instant a ``"db"`` key is found,
+      because a Python dict literal lets a later entry silently overwrite an
+      earlier one: an opaque entry that comes AFTER the ``"db"`` key
+      (``**{"db": claim_test_db(), **overrides}``) can overwrite it at
+      runtime, so that shape falls through to the opaque-leg treatment below
+      instead of being accepted on the visible value alone. An opaque entry
+      that comes BEFORE the ``"db"`` key (``**{**base_kw, "db": 9}``) cannot
+      overwrite it -- the literal ``"db"`` entry is the one that wins -- so
+      that shape is still judged directly on the visible value.
     - **an opaque ``**name``** -- undecidable, so a violation, but *only* for a
       callee that looks like a Redis construction.
 
@@ -370,32 +380,54 @@ def _splat_candidate(
     callee-agnostic.
     """
     if isinstance(value, ast.Dict):
-        has_opaque_entry = False
+        db_val: ast.AST | None = None
+        any_opaque = False
+        opaque_after_db = False
+        # Scan every entry before deciding -- classify first, decide once --
+        # rather than returning from inside the loop the instant a "db" key
+        # is seen. That is what lets the ordering below be judged correctly:
+        # whether an opaque entry can overwrite the "db" key depends on
+        # whether it comes before or after it, and that is only knowable
+        # once the whole dict has been looked at.
         for key, val in zip(value.keys, value.values, strict=False):
-            if key is None:
-                # A nested ** unpack inside the dict literal, e.g.
-                # **{**base_kw, "host": "x"}. Its entries are invisible to a
-                # static scan, so this dict cannot be proven safe even if no
-                # OTHER key here is literally "db" -- fall through to the
-                # opaque-leg treatment below instead of returning None.
-                has_opaque_entry = True
+            if key is None or not isinstance(key, ast.Constant):
+                # A nested ** unpack (key is None, e.g.
+                # **{**base_kw, "host": "x"}) or a computed key (e.g.
+                # **{k: v}). Either way this entry's contents are invisible
+                # to a static scan, so the dict cannot be proven safe on
+                # this entry alone.
+                any_opaque = True
+                if db_val is not None:
+                    opaque_after_db = True
                 continue
-            if isinstance(key, ast.Constant) and key.value == "db":
-                return Candidate(
-                    path=rel_path,
-                    lineno=call.lineno,
-                    kind="db-kwarg",
-                    expr=ast.unparse(val),
-                    callee=callee,
-                    ok=_is_claim_call(val),
-                    detail=(
-                        "db passed through a ** dict literal; value is not a "
-                        "call to claim_test_db()/claim_scratch_test_db()"
-                    ),
-                    pool_db=None if _is_claim_call(val) else _first_pool_db(_int_literals(val)),
-                )
-        if not has_opaque_entry:
+            if key.value == "db":
+                db_val = val
+
+        if db_val is not None and not opaque_after_db:
+            # The "db" key is visible and nothing after it can silently
+            # overwrite it, so judge it exactly as a written-out db= would
+            # be judged.
+            return Candidate(
+                path=rel_path,
+                lineno=call.lineno,
+                kind="db-kwarg",
+                expr=ast.unparse(db_val),
+                callee=callee,
+                ok=_is_claim_call(db_val),
+                detail=(
+                    "db passed through a ** dict literal; value is not a "
+                    "call to claim_test_db()/claim_scratch_test_db()"
+                ),
+                pool_db=None if _is_claim_call(db_val) else _first_pool_db(_int_literals(db_val)),
+            )
+        if db_val is None and not any_opaque:
+            # Every key is a constant and none of them is "db" -- provably
+            # safe.
             return None
+        # Either there is no visible "db" key but an opaque entry could be
+        # carrying one, or a "db" key is visible but a later opaque entry
+        # could overwrite it. Both fall through to the opaque-leg treatment
+        # below.
 
     if callee not in REDIS_CONSTRUCTORS:
         return None

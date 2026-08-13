@@ -414,6 +414,41 @@ class TestSplatHandling:
         )
         assert result.candidates == []
 
+    def test_a_dict_literal_splat_with_a_computed_key_falls_through_to_opaque(self):
+        """A non-constant key is exactly as invisible to a static scan as a
+        nested ** unpack -- it cannot be proven not to be "db" any more than
+        an unpacked entry can."""
+        result = scan_source("import redis\ndef t(k):\n    redis.Redis(**{k: 7})\n", "t.py")
+        assert len(result.violations) == 1
+        assert "cannot see" in result.violations[0].detail
+
+    def test_a_dict_literal_splat_with_a_computed_key_into_an_unrelated_helper_is_ignored(self):
+        """The callee scoping still applies on the computed-key fall-through."""
+        result = scan_source("def t(k):\n    make_session(**{k: 7})\n", "t.py")
+        assert result.candidates == []
+
+    def test_an_opaque_entry_after_the_db_key_is_not_blessed_by_it(self):
+        """A "db" key that is visible and a claim call is not enough -- a
+        later entry in the same dict literal can silently overwrite it at
+        runtime, so this must NOT be accepted on the visible value alone."""
+        result = scan_source(
+            "import redis\nfrom tests.db_claim import claim_test_db\n"
+            'def t(overrides):\n    redis.Redis(**{"db": claim_test_db(), **overrides})\n',
+            "t.py",
+        )
+        assert len(result.violations) == 1
+        assert "cannot see" in result.violations[0].detail
+
+    def test_an_opaque_entry_before_the_db_key_does_not_shadow_it(self):
+        """The mirror case: an opaque entry BEFORE the "db" key cannot
+        overwrite it -- the literal "db" entry is the one that wins in a
+        Python dict literal -- so this is still judged on the visible value."""
+        result = scan_source(
+            'import redis\ndef t(base_kw):\n    redis.Redis(**{**base_kw, "db": 9})\n', "t.py"
+        )
+        assert len(result.violations) == 1
+        assert result.violations[0].pool_db == 9
+
     def test_the_dict_literal_leg_ignores_the_callee(self):
         """Polarity preserved where the value is visible."""
         result = scan_source('def t():\n    Whatever(**{"db": 15})\n', "t.py")
