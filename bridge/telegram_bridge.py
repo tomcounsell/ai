@@ -843,6 +843,42 @@ def _build_completed_resume_text(
     return f"{summary_block}\n\n{follow_up_text}"
 
 
+def _build_context_recall_advisory_for_intent(
+    intent_result: dict, chat_id, project_name: str = ""
+) -> str | None:
+    """Build the #2694 context-recall advisory for a classified new_work intent.
+
+    Returns None (fail-quiet) when the classifier did not advise it, or when
+    the build itself raises.
+    """
+    if not intent_result.get("context_recall_advised"):
+        return None
+    try:
+        from bridge.context_recall import build_context_recall_advisory
+
+        return build_context_recall_advisory(
+            chat_id=chat_id,
+            medium="telegram",
+            reason=intent_result.get("context_recall_reason") or None,
+        )
+    except Exception as _adv_err:
+        logger.warning(
+            f"[{project_name}] context-recall advisory build failed (non-fatal): {_adv_err}"
+        )
+        return None
+
+
+def _merge_context_recall_into_extra_overrides(
+    extra_overrides: dict | None, advisory: str | None
+) -> dict | None:
+    """Merge the #2694 context-recall advisory into extra_overrides for the
+    new_work branch. Returns extra_overrides unchanged when advisory is falsy,
+    so the no-advisory case stays byte-identical to pre-#2694 behavior."""
+    if not advisory:
+        return extra_overrides
+    return {**(extra_overrides or {}), "context_recall_advisory": advisory}
+
+
 # Sentinel substituted upstream (bridge/telegram_bridge.py:1027) when a
 # media-only message arrives with no caption. The steering helper treats
 # this as "no real caption" and replaces it with the media description
@@ -2202,20 +2238,9 @@ async def main():
                     # reaches the session instead of dying in the log line
                     # above. Fail-quiet — an advisory that cannot be built is
                     # simply not attached.
-                    if intent_result.get("context_recall_advised"):
-                        try:
-                            from bridge.context_recall import build_context_recall_advisory
-
-                            _ctx_recall_advisory = build_context_recall_advisory(
-                                chat_id=telegram_chat_id,
-                                medium="telegram",
-                                reason=intent_result.get("context_recall_reason") or None,
-                            )
-                        except Exception as _adv_err:
-                            logger.warning(
-                                f"[{project_name}] context-recall advisory build "
-                                f"failed (non-fatal): {_adv_err}"
-                            )
+                    _ctx_recall_advisory = _build_context_recall_advisory_for_intent(
+                        intent_result, telegram_chat_id, project_name
+                    )
 
                     if intent == "interjection":
                         # Re-check session status (Race 1 mitigation: session may
@@ -2467,11 +2492,9 @@ async def main():
         # extra_overrides stays None in the no-advisory case, preserving
         # today's behavior byte-for-byte. `or {}` is required — the seed above
         # is None whenever there is no injection context.
-        if _ctx_recall_advisory:
-            extra_overrides = {
-                **(extra_overrides or {}),
-                "context_recall_advisory": _ctx_recall_advisory,
-            }
+        extra_overrides = _merge_context_recall_into_extra_overrides(
+            extra_overrides, _ctx_recall_advisory
+        )
         if message.reply_to_msg_id and not is_reply_to_valor and not _prehydration_disabled:
             reply_chain_context: str | None = None
             try:

@@ -133,6 +133,12 @@ class TestOutboundBounce:
         """The headline case: needs_self_draft=False, yet the message is held."""
         handler = _make_handler()
         self._advise(monkeypatch)
+        # Pin the exact advisory text so the assertion below is load-bearing:
+        # a broken advisory-wiring path (e.g. the advisory silently dropped
+        # before reaching the pushed instruction) must fail this test.
+        monkeypatch.setattr(
+            "bridge.context_recall.build_context_recall_advisory", lambda **_: ADVISORY
+        )
         pushed = []
 
         with (
@@ -149,7 +155,7 @@ class TestOutboundBounce:
         handler._redis.rpush.assert_not_called()
         assert len(pushed) == 1
         instruction = pushed[0][0][1]
-        assert ADVISORY.split("]")[0] in instruction or "context-recall" in instruction
+        assert ADVISORY in instruction
 
     def test_instruction_does_not_claim_a_validator_violation(self, monkeypatch):
         """SELF_DRAFT_INSTRUCTION's wire-format claim is false for this bounce."""
@@ -498,9 +504,60 @@ class TestExtraContextSeed:
         ],
     )
     def test_merge_semantics(self, seed, advisory, expected):
-        # Mirrors the merge in bridge/telegram_bridge.py. The `or {}` is
-        # required because the seed is None whenever there is no injection ctx.
-        extra_overrides = seed
-        if advisory:
-            extra_overrides = {**(extra_overrides or {}), "context_recall_advisory": advisory}
-        assert extra_overrides == expected
+        from bridge.telegram_bridge import _merge_context_recall_into_extra_overrides
+
+        assert _merge_context_recall_into_extra_overrides(seed, advisory) == expected
+
+
+class TestBuildContextRecallAdvisoryForIntent:
+    """Direct coverage of the #2694 build-site helper (mutation-verified)."""
+
+    def test_returns_none_and_does_not_call_the_builder_when_not_advised(self, monkeypatch):
+        from bridge.telegram_bridge import _build_context_recall_advisory_for_intent
+
+        def explode(**_kwargs):
+            raise AssertionError("build_context_recall_advisory must not be called")
+
+        monkeypatch.setattr("bridge.context_recall.build_context_recall_advisory", explode)
+
+        result = _build_context_recall_advisory_for_intent(
+            {"context_recall_advised": False}, chat_id="-1001", project_name="p"
+        )
+        assert result is None
+
+    def test_calls_through_with_the_right_args_and_returns_the_advisory(self, monkeypatch):
+        from bridge.telegram_bridge import _build_context_recall_advisory_for_intent
+
+        calls = []
+
+        def fake(**kwargs):
+            calls.append(kwargs)
+            return ADVISORY
+
+        monkeypatch.setattr("bridge.context_recall.build_context_recall_advisory", fake)
+
+        result = _build_context_recall_advisory_for_intent(
+            {"context_recall_advised": True, "context_recall_reason": "referent clarification"},
+            chat_id="-1001",
+            project_name="p",
+        )
+
+        assert result == ADVISORY
+        assert calls == [
+            {"chat_id": "-1001", "medium": "telegram", "reason": "referent clarification"}
+        ]
+
+    def test_returns_none_fail_quiet_when_the_builder_raises(self, monkeypatch):
+        from bridge.telegram_bridge import _build_context_recall_advisory_for_intent
+
+        def explode(**_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("bridge.context_recall.build_context_recall_advisory", explode)
+
+        result = _build_context_recall_advisory_for_intent(
+            {"context_recall_advised": True, "context_recall_reason": "r"},
+            chat_id="-1001",
+            project_name="p",
+        )
+        assert result is None

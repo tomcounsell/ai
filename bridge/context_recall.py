@@ -30,6 +30,12 @@ import os
 
 from pydantic import BaseModel, Field
 
+# Shared with bridge/injection_inspection.py on purpose: both modules embed an
+# LLM-authored, attacker-influenceable "reason" string into a trusted prompt
+# prefix, and this reuses that module's sanitizer instead of growing a second
+# implementation that could drift from the first.
+from bridge.injection_inspection import _sanitize_reason
+
 logger = logging.getLogger(__name__)
 
 # Number of recent messages the emitted command asks for. GRAIN OF SALT:
@@ -136,8 +142,10 @@ def build_context_recall_advisory(
         chat_id: the session's ``chat_id``. A numeric Telegram peer, or an
             email address when ``medium == "email"``.
         medium: ``"telegram"`` or ``"email"``.
-        reason: optional judgment reason, appended verbatim for the PM's
-            benefit.
+        reason: optional judgment reason. Sanitized (whitespace-collapsed and
+            length-clamped via ``_sanitize_reason``) before being appended, since
+            it is attacker-influenceable text destined for a trusted prompt
+            prefix.
 
     Returns:
         The advisory text, or ``None`` on any guard miss or failure.
@@ -159,7 +167,10 @@ def build_context_recall_advisory(
             "Decide for yourself whether you need it — nothing reads it for you."
         )
         if reason:
-            advisory += f"\nWhy this was flagged: {reason}"
+            # `if reason:` above already filters out None/empty, so
+            # `_sanitize_reason`'s "possible prompt-injection" fallback text
+            # (injection-specific wording) is unreachable at this call site.
+            advisory += f"\nWhy this was flagged: {_sanitize_reason(reason)}"
 
         logger.info(
             "[context-recall] advisory built (medium=%s, command=%s)",
@@ -171,21 +182,6 @@ def build_context_recall_advisory(
         # Fail open: no advisory is always safe.
         logger.warning("[context-recall] advisory build failed (non-fatal): %s", e)
         return None
-
-
-def build_email_fallback_advisory() -> str:
-    """Advisory for an email session whose peer address is unresolvable.
-
-    ``valor-email read`` has no per-peer flag — only ``--search`` — so with no
-    address to search there is nothing to interpolate. Point at
-    ``valor-email threads`` instead, which is still a fully-formed command.
-    """
-    return (
-        "[context-recall] This message may depend on earlier conversation "
-        "you cannot see. Read the recent threads before answering:\n"
-        "    valor-email threads\n"
-        "Decide for yourself whether you need it — nothing reads it for you."
-    )
 
 
 def _prefilter(text: str | None) -> bool:
