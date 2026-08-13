@@ -220,7 +220,16 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
 
     if stage_states.get("PLAN") == "completed" and plan_path is not None:
         try:
-            rel_plan_path = str(Path(plan_path).relative_to(_target_repo_cwd() or Path.cwd()))
+            # `git show main:<path>` paths are ALWAYS repo-root-relative,
+            # whatever cwd the subprocess runs in, so the process cwd is never
+            # the right base. `find_plan_path` resolves against the repo root
+            # too; rebasing on cwd makes the two ladders disagree from any
+            # subdirectory and reports a committed plan as unverified -- the
+            # #2718 symptom through a different door.
+            import tools._sdlc_utils as _sdlc_utils
+
+            repo_root = _target_repo_cwd() or _sdlc_utils._git_toplevel() or str(Path.cwd())
+            rel_plan_path = str(Path(plan_path).relative_to(repo_root))
         except ValueError:
             # Plan resolved outside the target checkout (a cross-repo
             # SDLC_TARGET_REPO override). `git show main:<abs>` is meaningless

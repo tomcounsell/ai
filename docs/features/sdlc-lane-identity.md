@@ -123,6 +123,16 @@ The lane would then get a respawned session under an identity nothing else
 would recognize. `adopt_lane_slug` avoids this because it takes no ladder; it
 just records the caller-supplied value, conditional-on-empty.
 
+One caveat on that example, so it is not read as a live failure being fixed:
+the human-named branch cannot presently reach this call site. The respawn's
+candidate list is filtered by `_SDLC_BRANCH_RE` and then by
+`_issue_number_from_slug`, which requires `^sdlc-(\d+)$`, so a human-named lane
+branch is dropped before the rung runs. The pass-through is correct regardless
+and is tested by calling `_attempt_action` directly. Whether that reflection
+should admit human-named lane branches at all is an open question: widening the
+filter needs another source for the issue number, because a human-named branch
+does not carry one.
+
 `adopt_lane_slug` shares the same conditional-on-empty write path, the same
 `None`-repo guard, and the same `PipelineLedger.get_or_create` as the healing
 arm of `resolve_lane_slug`. It walks no ladder because the caller is not

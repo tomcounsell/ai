@@ -388,7 +388,7 @@ def adopt_lane_slug(
     a pushed branch name has already adopted the identity from the world, and it
     is strictly better evidence than anything the ladder could re-derive. The
     ladder's branch rung probes only the issue-derived name, so for a lane whose
-    branch is human-named it misses and mints ``sdlc-{N}`` -- a name that
+    branch is human-named it misses and mints ``sdlc-<issue>`` -- a name that
     diverges from the branch the caller is looking at. That divergence is the
     defect this module closes, so re-deriving here would reintroduce it at the
     site meant to fix it.

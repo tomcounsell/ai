@@ -706,7 +706,7 @@ def _attempt_action(
         # lane's identity, adopted from the world. Record it rather than asking
         # the resolver to re-derive it: the resolver's branch rung probes only
         # the issue-derived name, so for a human-named lane it would miss, mint
-        # `sdlc-{N}`, and create the session under a name that diverges from the
+        # `sdlc-<issue>`, and create the session under a name that diverges from the
         # branch this tick is looking at. `slug` is therefore passed through
         # untouched, keeping the attempts, cooldown and escalation keys (all
         # charged against the caller's binding) on one name.
@@ -762,8 +762,12 @@ def _check_project_stalls(project: dict) -> dict:
     # The authoritative repo slug for THIS project. This process's own cwd
     # belongs to `ai` regardless of which project the tick is acting on -- only
     # subprocesses get `wd` -- so lane identity must be keyed explicitly or a
-    # non-`ai` project's lane records under the wrong repo. `None` is tolerated:
-    # `resolve_lane_slug` falls back to its own lease-first resolution.
+    # non-`ai` project's lane records under the wrong repo. `None` here is NOT
+    # a safe default: `adopt_lane_slug` would fall back to lease-first
+    # resolution and, with no live lease, to this process's cwd -- recording the
+    # lane under `ai`. Unreachable today (an SDLC-capable project carries a
+    # `github` block, and the branch filter admits only issue-derived names),
+    # but it is a gap rather than a tolerance, and the write is permanent.
     target_repo = _project_repo(project)
     findings: list[str] = []
     counts = {"steered": 0, "resumed": 0, "created": 0, "escalated": 0}

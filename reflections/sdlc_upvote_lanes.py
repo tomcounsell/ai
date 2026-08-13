@@ -340,11 +340,10 @@ def _has_pr_on_branch(repo: str, issue_number: int, cwd: str) -> dict | None:
     a MERGED pr on an issue that's still open means the implementation PR
     lacked `Closes #N` and this gate must stop the lane from restarting.
     """
+    # The mint always yields a non-empty slug, so `head` is never None here.
     head = lane_branch_name(
         resolve_lane_slug(issue_number, target_repo=repo) or mint_lane_slug(issue_number)
     )
-    if head is None:
-        return None
     try:
         proc = subprocess.run(
             [

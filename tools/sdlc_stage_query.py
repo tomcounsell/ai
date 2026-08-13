@@ -539,7 +539,8 @@ def _compute_meta(
         # returns an AgentSession, which does have `slug`). Dropping this leg
         # would retire the branch-head PR recovery for exactly the cold-path
         # lanes that never heal.
-        slug = getattr(session, "slug", None) if session is not None else None
+        raw = getattr(session, "slug", None) if session is not None else None
+        slug = raw.strip() if isinstance(raw, str) and raw.strip() else None
         slug_source = "session" if slug else "unresolved"
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr

@@ -240,6 +240,40 @@ class TestTargetRepoCwd:
             sdlc_next_skill._check_plan_committed_on_main("docs/plans/sdlc-2078-fixture.md") is True
         )
 
+    def test_plan_path_relativizes_against_the_repo_root_not_cwd(self, tmp_path, monkeypatch):
+        """G8 must not read a committed plan as unverified from a subdirectory.
+
+        `git show main:<path>` paths are always repo-root-relative whatever cwd
+        the subprocess runs in, and `find_plan_path` resolves against the repo
+        root too. Rebasing on the process cwd makes the two disagree from any
+        subdirectory, producing a false negative that routes a healthy lane back
+        to /do-plan -- the #2718 symptom through a different door.
+        """
+        target = tmp_path / "target"
+        target.mkdir()
+        self._init_fixture_repo(target, "sdlc-2078-fixture")
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        # cwd is a SUBDIRECTORY of the repo, not its root.
+        monkeypatch.chdir(target / "docs")
+
+        stage_states = {"PLAN": "completed"}
+        with patch.object(
+            sdlc_next_skill,
+            "_check_plan_committed_on_main",
+            return_value=True,
+        ) as checked:
+            with patch(
+                "tools.lane_identity.find_plan_path",
+                return_value=target / "docs" / "plans" / "sdlc-2078-fixture.md",
+            ):
+                with patch("tools.lane_identity.resolve_lane_slug", return_value=None):
+                    sdlc_next_skill._verify_stage_artifacts_live(stage_states, {}, 2078)
+
+        assert checked.call_args is not None, "the PLAN-committed check never ran"
+        assert checked.call_args[0][0] == "docs/plans/sdlc-2078-fixture.md", (
+            f"plan path relativized against cwd, not the repo root: {checked.call_args[0][0]!r}"
+        )
+
     def test_plan_committed_check_false_when_plan_absent_in_target(self, tmp_path, monkeypatch):
         target = tmp_path / "target"
         target.mkdir()
