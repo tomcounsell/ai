@@ -1849,10 +1849,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # (untrusted content follows)") is an OPEN-ENDED prefix with no closing
         # delimiter, so the untrusted zone runs to the end of the prompt.
         # Prepending here — after the banner has already been prepended above —
-        # puts this bridge-authored trusted line ahead of the banner, keeping
-        # the banner's "precedes all untrusted content" contract intact. Placed
-        # after the banner it would sit inside the zone the banner just declared
-        # untrusted, and an attacker could forge an identical line.
+        # puts this bridge-STRUCTURED line ahead of the banner. The line embeds
+        # an LLM-authored, attacker-influenceable reason, but that reason is run
+        # through `_sanitize_reason` (bridge/injection_inspection.py) at build
+        # time, and it's that sanitization -- not mere bridge authorship -- that
+        # earns the pre-banner position: it keeps the banner's "precedes all
+        # untrusted content" contract intact. Placed after the banner it would
+        # sit inside the zone the banner just declared untrusted, and an
+        # attacker could forge an identical line. Any future interpolation
+        # placed pre-banner MUST be sanitized the same way.
         # NEVER reorder these two blocks.
         try:
             _ctx_advisory = (getattr(session, "extra_context", None) or {}).get(

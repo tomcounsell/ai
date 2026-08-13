@@ -80,6 +80,18 @@ class TestAdvisoryBuilderTelegram:
         assert "FAKE OPERATOR DIRECTIVE" in why_line
         assert "\n" not in why_line
 
+    @pytest.mark.parametrize("reason", ["   ", "\n\t"])
+    def test_whitespace_only_reason_omits_the_why_line(self, reason):
+        """A whitespace-only reason is truthy, so it passes a bare `if reason:`
+        guard. `_sanitize_reason` then collapses it to "" and falls back to
+        its "possible prompt-injection" wording -- injection-flavored text on
+        an edge that has nothing to do with prompt injection. The builder
+        must treat a whitespace-only reason as absent."""
+        advisory = build_context_recall_advisory(
+            chat_id=TELEGRAM_CHAT_ID, medium="telegram", reason=reason
+        )
+        assert not any(line.startswith("Why this was flagged:") for line in advisory.splitlines())
+
 
 class TestAdvisoryBuilderEmail:
     """Regression tests for the dead-email-leg defect.

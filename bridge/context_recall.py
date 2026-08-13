@@ -166,10 +166,14 @@ def build_context_recall_advisory(
             f"    {command}\n"
             "Decide for yourself whether you need it — nothing reads it for you."
         )
-        if reason:
-            # `if reason:` above already filters out None/empty, so
-            # `_sanitize_reason`'s "possible prompt-injection" fallback text
-            # (injection-specific wording) is unreachable at this call site.
+        if reason and reason.strip():
+            # `_sanitize_reason` clamps and collapses whitespace but doesn't
+            # decide relevance, so `if reason:` alone isn't enough: a
+            # whitespace-only reason is truthy, and `_sanitize_reason` would
+            # collapse it to "" and trigger its "possible prompt-injection"
+            # fallback text on an edge that has nothing to do with prompt
+            # injection. The `.strip()` check above keeps that fallback text
+            # unreachable at this call site.
             advisory += f"\nWhy this was flagged: {_sanitize_reason(reason)}"
 
         logger.info(
