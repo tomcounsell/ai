@@ -262,7 +262,7 @@ as a library:
 # Standalone script — sys.path mutation is safe (never imported as library).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hook_utils.hook_target import read_hook_input, target_from_hook_input  # noqa: E402
+from hook_utils.hook_target import in_scope, read_hook_input, target_from_hook_input  # noqa: E402
 ```
 
 `Path(__file__).resolve()` is what makes this CWD-independent — the script's
