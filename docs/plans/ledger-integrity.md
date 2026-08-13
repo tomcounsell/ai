@@ -104,6 +104,94 @@ Note also that #2731's own sketch proposes a `dispatcher: {holder_id, pid, pid_c
 
 **Active plans overlapping this area:** `docs/plans/simulated-bridge-dispatch-harness.md` mentions dispatch but targets a bridge test harness, not the ledger. No file-level collision found. `tools/sdlc_stage_query.py` is under active work by the lane-identity lane — this plan deliberately requires no edit there (see the boundary note above), which must be re-verified at BUILD start.
 
+## Spike Results (round 1, post-critique)
+
+Run by the plan author with a shell after the critique, to settle the four
+blockers empirically rather than by argument. All four critique blockers are
+confirmed; two NEW findings emerged that change the fix location and the fence.
+
+### spike-1: Does the #2730(b) evidence show a defect? — NO
+
+- **Method:** called `compute_same_stage_count` directly against the real
+  `706fc4da0` ledger, both with and without the live snapshot.
+- **Finding:**
+  ```
+  backward walk only:        (1, '/do-build')
+  with live snapshot (real): (0, '/do-build')
+  ```
+  The reported `0` comes from the **D5 self-clearing branch**
+  (`agent/sdlc_router.py:1888-1894`), not the skill break at `:1874`. The
+  recorded snapshots settle it further — adjacent plan/critique pairs share an
+  identical snapshot, while each *cycle* differs:
+
+  | entries | skills | snapshot |
+  |---|---|---|
+  | 2,3 | `/do-plan`, `/do-plan-critique` | identical |
+  | 4,5 | same pair | identical, differs from above |
+  | 6,7 | same pair | identical, differs again |
+
+  The snapshot advanced every round because the plan genuinely changed each
+  round. Those four critique rounds were **productive work, and G4 correctly
+  declined to escalate.**
+- **Confidence:** high — direct execution against the real ledger.
+- **Impact on plan:** #2730(b) as written is **withdrawn**. The structural
+  property is real (the skill break does cap alternation at 1), but there is no
+  evidence of a harmful unbounded alternating loop, and a fix keyed on an
+  *unchanged* snapshot would target a near-null state — a new gate that cannot
+  fire. Re-file as its own investigation issue if wanted; do not build it here.
+
+### spike-2: What is the real #2730 mechanism? — A THIRD marker writer nobody named
+
+- **Method:** traced every production caller of `PipelineStateMachine.start_stage()`.
+- **Finding:** exactly two callers, and **the plan's fix location covers only one**:
+
+  | caller | path | reaches `write_marker`? |
+  |---|---|---|
+  | `tools/sdlc_stage_marker.py:576` | skill bodies via `sdlc-tool stage-marker` | yes |
+  | `agent/hooks/pre_tool_use.py:334` | **PreToolUse hook, on every `Skill(do-*)` call** | **no — bypasses it entirely** |
+
+  `agent/hooks/post_tool_use.py:62` is the `complete_stage` counterpart. Per
+  `docs/features/sdlc-local-supervision.md`, on the bridge "stage markers are
+  written in-session by the Skill hooks," so the hook path is the **dominant**
+  marker writer there, and it never touches `write_marker`.
+- **Confidence:** high.
+- **Impact on plan:** Task 2's fix location is wrong — putting the dispatch
+  record in `write_marker` would be a **no-op on the bridge**, the very place
+  the divergence was observed. `PipelineStateMachine.start_stage()` /
+  `complete_stage()` (`agent/pipeline_state.py:870`) is the true universal choke
+  point every actor funnels through. **This moves the fix into
+  `agent/pipeline_state.py`, which is outside this lane's stated fence** — the
+  fence needs extending before BUILD.
+- **Side finding:** there are at least **three** stage↔skill maps, not one —
+  `agent/pipeline_graph.py:62` (`STAGE_TO_SKILL`),
+  `tools/sdlc_stage_marker.py:143` (`_SKIP_STAGE_SKILL`), and
+  `agent/hooks/pre_tool_use.py:59` (`_SKILL_TO_STAGE`, the inverse). This is
+  #2491's "hardcoded duplicates" family.
+
+### spike-3: The #2731 collision topology — two topologies exist, and they need different discriminators
+
+- **Method:** `docs/features/sdlc-local-supervision.md` "Relationship to `/sdlc`"
+  table, `tools/sdlc_supervisor_identity.py:20-25`, plus an attempt to recover
+  #2629's run data (unrecoverable — its dispatch history is *also* empty, itself
+  another #2730 instance, and the `sdlc-local-2629` anchor no longer resolves).
+- **Finding:** settled structurally rather than forensically. #2731 names
+  `/do-sdlc` explicitly, and the two pipelines have different process shapes:
+
+  | pipeline | execution | two concurrent stage agents are... | pid fence discriminates? |
+  |---|---|---|---|
+  | `/do-sdlc` | subagents in the local session | **one `claude` process** — same `CLAUDE_PID`, create_time, ancestry, worktree, `run_id`, `session_id` | **no** |
+  | `/sdlc` | child eng `AgentSession`s via the worker | separate OS processes | yes |
+
+- **Confidence:** high for the structural claim; the specific #2629 run data is
+  permanently lost.
+- **Impact on plan:** confirms the critique. In the `/do-sdlc` topology the only
+  thing that differs between two forks is **something a fork mints itself**, so
+  neither a lease read (Option A) nor a pid fence (Option B) can gate it. A
+  workable gate needs a self-minted claim token plus TTL and explicit release —
+  which reverts Risk 4 from "inverted lock hazard" to an ordinary wedge hazard
+  and is a materially larger design than either option costed. Q1 as posed
+  offers two options that both fail; it must be re-posed.
+
 ## Prior Art
 
 - **#2012 task 2** — re-pointed `dispatch record` at the issue-keyed `PipelineLedger`, making the run_id-keyed lease the sole authorization. Established the writer shape this plan extends.
