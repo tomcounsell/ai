@@ -724,6 +724,52 @@ Success Criterion maps to a task; no No-Go or Rabbit Hole appears in the Solutio
 planned work. Round-2's own Verification-table note is discharged (the split `grep -q`
 rows landed). No structural finding this round.
 
+### Round 4 — READY TO BUILD (no concerns)
+
+War room run 2026-08-13 (round 4, confirmation pass), FULL depth (force-FULL: the
+plan edits `.claude/skills-global/` and `agent/sdlc_router.py`; roster: Risk &
+Robustness, Scope & Value, History & Consistency, 3/3 complete and grounded).
+Verdict: **READY TO BUILD (no concerns)** — 0 blockers, 0 concerns, 3 nits.
+
+**Round-3 disposition: all 3 findings verified substantively closed in commit
+`3b50d46ea`,** independently confirmed by all three critics against real source.
+The `_verdicts["REVIEW"]` guard is now three-way at Technical Approach §2 / Task 2
+(`dict` → `head_sha_of_record`, `str` → `head_sha_of_text`, `else` → `None`), with the
+negation gotcha stated explicitly ("guard with `isinstance(rec, str)`, never with
+`not isinstance(rec, dict)`"), and the shape mirrors the real `_extract_verdict_text`
+at `tools/sdlc_stage_query.py:443-451` exactly. Test Impact now requires four
+`_verdicts["REVIEW"]` shapes including the no-`REVIEW`-key common path; the live
+ledger for #2740 currently reads `"latest_review_verdict": null`, confirming that
+path is production-normal rather than a legacy edge case. Appetite now counts four
+proofs and names the bare-`str`/absent-REVIEW guard. The Failure Path Test Strategy
+`STATE_MACHINE_RAISED` bullet reads "the other four sites", resolving round 3's
+ambiguity. Risk & Robustness additionally traced row 8f's behavior when
+`latest_review_head_sha` is present-but-`None` through `agent/sdlc_router.py:942-953`
+and confirmed it converges on the documented stale=True contract — no bug.
+
+The three nits are doc-precision residue. None blocks the build; none requires a
+revision pass. BUILD may sweep them opportunistically.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| NIT | Scope & Value; History & Consistency | The round-3 edit that appended the fourth Test Impact case left a stray sentence break at Test Impact line ~339: "...and a **bare `str`** record. and a `_verdicts` payload with **no `"REVIEW"` key at all**." A period followed by a lowercase "and" breaks the four-shape list into a fragment. Comprehension is unaffected; the requirement still reads as four. | n/a (nit) | Replace the period after "record" with a comma so the four shapes read as one list. Cosmetic only — no code, test, or task impact. |
+| NIT | History & Consistency | Technical Approach §2 (plan line ~526) cites `_extract_verdict_text` as `(`:442-450`)`, contradicting `(`:443-451`)` at plan lines ~277 and ~524. Verified against `tools/sdlc_stage_query.py`: the `def` is at line 443 and the function's final `return None` is at line 451, so `:443-451` is correct and `:442-450` is off by one at both ends. | n/a (nit) | Change `:442-450` to `:443-451` at plan line ~526. BUILD reads the real file anyway, so this cannot mislead an implementer; it is plan-internal precision. |
+| NIT | History & Consistency (Risk & Robustness noted, judged below bar) | Solution > Key Elements (plan line ~241) reads "`write_marker` stops asserting a fact it cannot know at all three `State NOT persisted.` sites." The subject is `write_marker`, which genuinely holds three of the four sites, so the sentence is defensible — but it is the same contested-count ambiguity round 3 flagged at line ~314, and it survived both the round-2 and round-3 sweeps. | n/a (nit) | Either leave it (it is literally true of `write_marker`) or extend to "...at all three `State NOT persisted.` sites inside it; `main()`'s `:969-974` wrapper is corrected alongside." Technical Approach §1 and Task 3 are unambiguous at four, so BUILD cannot be misled. |
+
+**Structural checks (round 4):** required sections PASS (Documentation carries a
+`docs/features/` checkbox item; Update System, Agent Integration, and Test Impact all
+present and substantive; no Popoto model changes, so no `scripts/update/migrations.py`
+migration obligation). Task numbering PASS (1-8 contiguous). Dependencies PASS (every
+`Depends On` ID resolves; no cycles). File paths PASS — `grep -rn "State NOT persisted"
+tools/ agent/` returns exactly the 4 sites the plan claims (`tools/sdlc_stage_marker.py:567`,
+`:603`, `:719`, `:972`), and `_extract_verdict_text` / `_compute_meta` /
+`_resolve_enriched` all exist as cited (one off-by-one line reference captured as a nit
+above). Prerequisites PASS (`gh auth status` OK; venv 3.14.3 matches the `.python-version`
+pin). Cross-references PASS: every Success Criterion maps to a task; no No-Go or Rabbit
+Hole appears in the Solution as planned work. The only "three sites" strings remaining in
+the plan are inside the historical round-1/2/3 Critique Results tables, which are immutable
+records. No structural finding this round.
+
 ---
 
 ## Open Questions
