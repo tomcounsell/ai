@@ -1241,10 +1241,18 @@ on the *success* case.
 
 | Anti-criterion | Command | Expected |
 |---|---|---|
-| Heartbeat still ignores orphaned_lock (#2620) | `! grep -q "orphaned_lock" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+| Heartbeat still ignores orphaned_lock (#2620) | `! grep -q "\.orphaned_lock" tools/sdlc_lease_heartbeat.py` | exit code 0 |
 | `xx=True` NOT added to the shared acquire | `! grep -q "xx=True" models/session_lifecycle.py` | exit code 0 |
 | /sdlc router NOT wired (scoping) | `! grep -q "session-release" .claude/skills/sdlc/SKILL.md` | exit code 0 |
 | Stale docstring claim removed | `! grep -q "max-lifetime is the death backstop" tools/sdlc_lease_heartbeat.py` | exit code 0 |
+
+The `orphaned_lock` row is anchored to the leading dot on purpose. The bare
+token `orphaned_lock` is over-broad in the opposite direction from round 1's
+`\|` bug: it matches the module docstring and the peek-site comment that *state*
+the invariant — the two places most worth keeping, since they are the only
+record of why #2537 forbids consulting the flag. `orphaned_lock` is a field on
+`IssueLockResult`, so consumption is necessarily an attribute access; `.`-anchoring
+makes the check fail on use and pass on explanation.
 
 The three anti-criteria needing ERE **alternation** are written below rather than
 in the table above, because a literal `|` inside a markdown table cell must be
