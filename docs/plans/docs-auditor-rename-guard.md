@@ -296,17 +296,17 @@ result. A rejected fix must never be silently absorbed into `fixes_applied`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
       cases assert unanchored substring behavior; re-assert against word-anchored semantics.
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
       `agent/session_logs.py` regression as a hard assertion (currently reproduces in 3 lines,
       untested).
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
       introducing an absent path is rejected, reported, and not written; sibling valid fixes in
       the same file still apply.
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestRenamedSymbolFixesDegenerate`: a
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestRenamedSymbolFixesDegenerate`: a
       rename hop that loops back to the original path yields no fix; a genuine hop still does.
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
       query cap only, unaffected.
 
 The three rename detectors had **zero** direct coverage before this work;

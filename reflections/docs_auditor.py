@@ -1774,10 +1774,12 @@ def run_docs_auditor() -> dict:
         # count must reach every surface this function produces, not just a log
         # line: findings, summary, Telegram, the PR body (auto-merge gate) and
         # the Redis liveness summary, which is the only durable queryable one.
-        # Telegram has two mutually exclusive senders: step 9 below (files were
-        # touched) and the zero-diff early return (nothing was touched, which is
-        # where an all-withheld run lands — the loudest case, and one step 9 can
-        # never reach). Exactly one of the two fires per run.
+        # Telegram has two mutually exclusive senders, and a run can also reach
+        # neither. Three cases: files were touched — step 9 sends the pass
+        # summary; nothing was touched but fixes were withheld — the zero-diff
+        # early return sends the withheld alert, the loudest case and one step 9
+        # can never reach; nothing was touched and nothing was withheld — a clean
+        # zero-diff run, which stays silent.
         withheld: list[dict] = result.get("withheld", [])
         fixes_withheld: int = result.get("fixes_withheld", 0)
         withheld_note = (
