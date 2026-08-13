@@ -211,8 +211,43 @@ Both guards now check `meta.get("pr_number")` first and return `None` (step asid
 ### G4 state machine
 
 `stage_states._sdlc_dispatches` is a bounded FIFO list (max 10 entries) of
-`{skill, at, stage_snapshot}` records. The record is written **before** the
-sub-skill launches (so oscillation on crashing skills is still detected).
+`{skill, at, stage_snapshot, stage, confirmed}` records.
+
+**Two writers, one record per stage entry.** The router records **before** the
+sub-skill launches, so oscillation on a skill that crashes before it starts is
+still detected. That record is an *unconfirmed slot* (`confirmed: false`).
+`PipelineStateMachine._activate_stage` — the single point every `start_stage`
+branch funnels through — upgrades that slot in place when the stage actually
+starts, and appends its own confirmed record when no slot exists.
+
+The second writer is what makes the history unbypassable. Only the router used
+to write it, while stage markers were written by the stage itself, so any stage
+reached without the router left a marker and no ledger entry and G4 had nothing
+to count. Two such paths exist: a skill-to-skill chain (`/do-build` routes
+failures straight to `/do-patch`), and the PreToolUse hook, which calls
+`start_stage()` on every `Skill(do-*)` call and never touches `write_marker` —
+on the bridge that hook is how markers get written at all.
+
+The upsert slot is what keeps the two writers from double-counting a single
+dispatch, which would halve G4's effective threshold. A genuine **re-entry**
+still appends a second record: that is the entire G4 signal, and deduplicating
+it would disarm the guard.
+
+`last_dispatched_skill` is `history[-1]["skill"]`, so it now names the skill
+that actually ran rather than whichever one the router last saw — after a
+`/do-build` → `/do-patch` chain it reads `/do-patch`. Rows 8b and 8d gate on
+that value; G1, G3 and G7 also read it, and rows 8 and 2b read
+`_latest_dispatch_at`.
+
+The record is applied inside `_save()` **after** the preserved-metadata merge.
+`_save()` re-reads `_sdlc_dispatches` from the backing store and merges that
+copy over anything in memory, so a record written before the merge is silently
+discarded; applying it after means it sees the freshest history and rides the
+same single write.
+
+`stage` and `confirmed` live on the record and **never** in `stage_snapshot` —
+G4 compares snapshots, and a per-dispatch-varying field there would stop every
+comparison from ever matching, silently disabling oscillation detection.
 
 The `stage_snapshot` projection is deliberately narrow to prevent spurious
 churn:

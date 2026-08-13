@@ -17,6 +17,21 @@ Both paths share the exact same `StageStates` Pydantic validation and the `_load
 
 **Write authority.** A caller may only write the issue-keyed ledger while it holds the per-issue run_id lease (`models/session_lifecycle.py::touch_issue_lock`, see [`docs/features/sdlc-issue-ownership-lock.md`](sdlc-issue-ownership-lock.md)). The lease also carries the pinned `target_repo` component of the ledger key, resolved once at lease-acquire time — writers never re-resolve it per call. Takeover of an issue is simply acquiring that same lease; the ledger itself never moves, because it never lived on either session.
 
+
+### Stage entry records a dispatch
+
+Starting a stage records an entry in `_sdlc_dispatches`, not just a marker.
+`PipelineStateMachine._activate_stage` is the single point every `start_stage`
+branch and every actor funnels through — the skill bodies via `sdlc-tool
+stage-marker`, the PreToolUse hook (which calls `start_stage()` directly and
+never touches `write_marker`), and `/do-sdlc`'s backfills.
+
+The router still records before invoking a sub-skill, as an *unconfirmed slot*
+that the stage entry upgrades in place; a stage reached without the router
+appends its own confirmed record. One record per stage entry from either path,
+and a genuine re-entry appends another, which is what G4 counts. See
+[SDLC Router Oscillation Guard](sdlc-router-oscillation-guard.md#g4-state-machine).
+
 ## How Stage State Is Written
 
 Two complementary paths write stage markers:
