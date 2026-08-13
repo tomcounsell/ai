@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2738
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-13T03:39:48Z
 ---
 
 # Hook Validator Target Resolution
@@ -108,7 +110,7 @@ No relevant external findings — proceeding with codebase context. This is a ch
 ## Architectural Impact
 
 - **New dependencies**: none. One new stdlib-only module under `.claude/hooks/hook_utils/`.
-- **Interface changes**: four validators lose their private target-selection helpers and gain a shared import. `validate_file_contains.py`'s `validate()` signature changes from directory-based to target-based; its CLI flags stay compatible.
+- **Interface changes**: four validators lose their private target-selection helpers and gain a shared import. `validate_file_contains.py`'s `validate()` signature changes from directory-based to target-based; its CLI flags stay compatible except `--max-age`, which is removed since target selection no longer depends on mtime.
 - **Coupling**: decreases. Four copies of a subtle predicate collapse to one tested implementation.
 - **Data ownership**: the hook payload becomes the single source of truth for "what file is being judged". Git working-tree state stops being an input to that decision entirely.
 - **Reversibility**: high. Each validator is an independent script; a revert is file-local.
@@ -117,7 +119,7 @@ No relevant external findings — proceeding with codebase context. This is a ch
 
 **Size:** Medium
 
-**Team:** Solo dev, PM, code reviewer
+**Team:** Solo dev, PM, code reviewer, plus a test-engineer and a documentarian (see Team Orchestration — the roster is three agents, matching this line)
 
 **Interactions:**
 - PM check-ins: 1-2 (the scope change — dropping #2638/#2641/#2736, adding `validate_file_contains.py` — needs acknowledgement)
@@ -150,6 +152,8 @@ Agent writes a plan doc → harness emits payload → validator resolves target 
 The port is not a one-line substitution. PR #2688 shipped three coupled behaviors, and dropping any one turns a fail-open guess into a fail-closed block:
 
 1. **Resolve from the payload.** `tool_input.file_path`, falling back to `tool_input.notebook_path`. Non-dict `tool_input`, non-string path, and empty string all collapse to `None`.
+
+   **Both functions must guard a syntactically-valid non-dict payload.** Swallowing `json.JSONDecodeError` is not enough: stdin of `null`, `[1,2]`, or `"str"` parses cleanly and yields a non-dict, and `target_from_hook_input`'s verbatim source does `hook_input.get("tool_input")` as its first act — an `AttributeError`, i.e. a traceback out of a hook that gates every write. The 65 inherited tests do not cover this, so the gap would survive the "65 pass unchanged" gate untouched. Therefore `read_hook_input()` is `parsed = json.loads(raw); return parsed if isinstance(parsed, dict) else {}`, never a bare `return json.loads(raw)`; and `target_from_hook_input` opens with `if not isinstance(hook_input, dict): return None`, because the plan documents the two as separately callable.
 2. **Filter to the watched scope before touching the filesystem.** A write to a non-plan path must exit 0 *before* any `Path.exists()` call. Today all three siblings stat first and exit 2 on an unresolvable path — a relative path resolved against a different worktree's CWD would block a write they have no business judging.
 3. **Distinguish an explicit CLI argument from a hook-derived path.** A CLI path that names nothing is a user error worth reporting (exit 2). A hook-derived path that cannot be resolved is not a finding at all (exit 0).
 
@@ -178,6 +182,7 @@ The `run_hook` subprocess helper is duplicated per test file rather than shared.
 
 ### Empty/Invalid Input Handling
 - [ ] `target_from_hook_input` is tested against: missing `tool_input`, `tool_input: None`, `tool_input: "string"`, `tool_input: {}`, `file_path: ""`, and non-string paths (`int`, `dict`, `list`, `bool`). All return `None`.
+- [ ] **Syntactically-valid non-dict top-level payloads** — stdin of `null`, `[1,2]`, `"str"`, and `42` — return `None` from `target_from_hook_input` and `{}` from `read_hook_input`, and produce exit 0 (not a traceback) from every ported validator. These cases are absent from the 65 inherited tests and must be added to `test_hook_target.py` and to each validator's targeting class as `run_hook("null", cwd)` / `run_hook("[1,2]", cwd)`.
 - [ ] Every ported validator exits 0 on `None`, `""`, `"not json"`, and `{"tool_input": {}}` as stdin.
 - [ ] Not applicable: agent-output processing / silent loops. These validators produce a single exit code per invocation.
 
@@ -291,25 +296,13 @@ No external documentation site in this repo — nothing to update.
 
 ## Team Orchestration
 
-Builders write disjoint file sets so their commits never interleave inside the single `.worktrees/hook-validator-target-resolution` worktree.
+**There is exactly one builder, and Tasks 1-3 run sequentially.** An earlier draft split the port across three parallel builders. That was wrong twice over: the three ports are the same mechanical change across files that differ only in a section name and a regex, so a split buys no wall-clock; and this session owns a single worktree, so concurrent `git add` / `git commit` from parallel agents race on `.git/index.lock`. "Commits never interleave" is not an outcome a plan can assert — it needs either a serialization mechanism or no concurrency. This plan chooses no concurrency. The only genuinely independent work is test authoring and documentation, which follow the build.
 
 ### Team Members
 
-- **Builder (shared module + no-gos port)**
-  - Name: `helper-builder`
-  - Role: Create `hook_utils/hook_target.py` and port `validate_no_gos_justification.py` onto it without behavior change
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (three section validators)**
-  - Name: `section-builder`
-  - Role: Port the three sibling section validators and delete all three `find_newest_plan_file` copies
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (file-contains validator)**
-  - Name: `contains-builder`
-  - Role: Port `validate_file_contains.py`, delete its guesser and git-history fallback, drop `--max-age`
+- **Builder**
+  - Name: `hook-builder`
+  - Role: Tasks 1-3 in order — create `hook_utils/hook_target.py`, port `validate_no_gos_justification.py` onto it without behavior change, port the three section validators, then port `validate_file_contains.py`
   - Agent Type: builder
   - Resume: true
 
@@ -319,11 +312,13 @@ Builders write disjoint file sets so their commits never interleave inside the s
   - Agent Type: test-engineer
   - Resume: true
 
-- **Validator**
-  - Name: `hook-validator-check`
-  - Role: Verify the reproducer, the criteria, and that no hook was left disabled
-  - Agent Type: validator
+- **Documentarian**
+  - Name: `hook-doc-writer`
+  - Role: Feature doc, features README index row, hook-manifest convention note, `tests/README.md` table
+  - Agent Type: documentarian
   - Resume: true
+
+Final validation (Task 6) is performed by the code reviewer named in the Appetite line, not by a separate roster member — it runs the Verification table and reports, which needs no standing agent.
 
 ## Step by Step Tasks
 
@@ -332,10 +327,10 @@ Builders write disjoint file sets so their commits never interleave inside the s
 - **Depends On**: none
 - **Validates**: tests/unit/test_hook_target.py (create), tests/unit/test_validate_no_gos_justification.py
 - **Informed By**: spike-1 (confirmed: `sys.path.insert(0, parent.parent)` + `from hook_utils.…` is the proven precedent in three sibling validators)
-- **Assigned To**: helper-builder
+- **Assigned To**: hook-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `.claude/hooks/hook_utils/hook_target.py` with `target_from_hook_input(hook_input) -> str | None` moved verbatim from `validate_no_gos_justification.py:119-135`, plus `read_hook_input() -> dict` that parses stdin and returns `{}` on any failure.
+- Create `.claude/hooks/hook_utils/hook_target.py` with `target_from_hook_input(hook_input) -> str | None` moved from `validate_no_gos_justification.py:119-135` — verbatim except for a new leading `if not isinstance(hook_input, dict): return None` — plus `read_hook_input() -> dict` that parses stdin, returns `{}` on any exception, and **also** returns `{}` when the parsed value is not a dict.
 - Port `validate_no_gos_justification.py` to import both and delete its private copy. Behavior must not change.
 - Add the `.claude/hooks` `sys.path` insert to `tests/unit/test_validate_no_gos_justification.py` per `test_validate_sdlc_on_stop.py:12-17`.
 - Run `POPOTO_TEST_DB=12 scripts/pytest-clean.sh tests/unit/test_validate_no_gos_justification.py` — all 65 must pass before anything else starts.
@@ -345,9 +340,9 @@ Builders write disjoint file sets so their commits never interleave inside the s
 - **Depends On**: build-hook-target
 - **Validates**: tests/unit/test_validate_verification_section.py, tests/unit/test_validate_test_impact.py, tests/unit/test_validate_documentation_section.py (create)
 - **Informed By**: spike-2 (three verbatim copies), spike-4 (single coherent Write per file, never partial edits)
-- **Assigned To**: section-builder
+- **Assigned To**: hook-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - Rewrite each of the three validators' `main()` to use `read_hook_input` + `target_from_hook_input`.
 - Delete all three `find_newest_plan_file` definitions and their `subprocess` imports if now unused.
 - Apply the plan-path scope filter **before** any `Path.exists()` call.
@@ -356,12 +351,12 @@ Builders write disjoint file sets so their commits never interleave inside the s
 
 ### 3. Port the file-contains validator
 - **Task ID**: build-file-contains
-- **Depends On**: build-hook-target
+- **Depends On**: build-section-validators
 - **Validates**: tests/unit/test_validate_file_contains.py (create)
 - **Informed By**: spike-2 (payload read at `:266` is an early-exit only; `find_newest_file` at `:150` still selects the target)
-- **Assigned To**: contains-builder
+- **Assigned To**: hook-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - Use the resolved payload target as the file to check; keep `--directory` / `--extension` as the scope filter.
 - Delete `find_newest_file`, `get_git_new_files`, `get_recent_files`, `get_git_committed_files`, `get_committed_file_content`.
 - Remove the `--max-age` flag and its plumbing; it is not passed by the manifest registration and is meaningless once mtime stops selecting the target.
@@ -377,6 +372,7 @@ Builders write disjoint file sets so their commits never interleave inside the s
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Create `tests/unit/test_hook_target.py`: `file_path`, `notebook_path`, empty string, missing/non-dict `tool_input`, non-string path types, and malformed stdin.
+- Cover the syntactically-valid non-dict payloads explicitly — `null`, `[1,2]`, `"str"`, `42` — at both levels: `read_hook_input` returns `{}`, `target_from_hook_input` returns `None`, and `run_hook("null", cwd)` / `run_hook("[1,2]", cwd)` exit 0 rather than raising `AttributeError`. This is the gap the 65 inherited tests do not close.
 - Create `tests/unit/test_validate_documentation_section.py` and `tests/unit/test_validate_file_contains.py` from scratch, each with its own `run_hook` helper.
 - Add a targeting class plus the `.claude/hooks` `sys.path` insert to the verification and test-impact test files.
 - Every new test file builds the reproducer fixture with a **tracked** anchor file in `docs/plans/` — without it the fixture false-passes against unfixed code and proves nothing.
@@ -386,31 +382,35 @@ Builders write disjoint file sets so their commits never interleave inside the s
 ### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-tests
-- **Assigned To**: hook-test-engineer
+- **Validates**: `validate_features_readme_sort.py` must pass on the edited `docs/features/README.md`; no test file owns this task's output, so the Verification table's lint/format rows and the sort validator are its proof.
+- **Assigned To**: hook-doc-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/hook-target-resolution.md`; add the sorted index row in `docs/features/README.md`.
 - Update `docs/features/hook-manifest.md` with the shared-module convention.
 - Update the validation table in `tests/README.md` with new counts and new rows.
-- Rerun `python scripts/sync_claude_to_opencode.py` to refresh `.opencode/SYNC_MANIFEST.json`.
+- Do **not** regenerate `.opencode/SYNC_MANIFEST.json` here — Task 6 owns it, after the last code edit lands.
 
 ### 6. Final validation
 - **Task ID**: validate-all
 - **Depends On**: build-hook-target, build-section-validators, build-file-contains, build-tests, document-feature
-- **Assigned To**: hook-validator-check
+- **Validates**: the Verification table itself — this task authors no code, so the table is its acceptance criterion rather than a test file.
+- **Assigned To**: code reviewer (per the Appetite line; no standing roster member)
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every row in the Verification table and report pass/fail per row.
+- Rerun `python scripts/sync_claude_to_opencode.py` **after the last code edit has landed**, then assert `git diff --exit-code .opencode/SYNC_MANIFEST.json` is clean. Ordering is load-bearing: regenerating before the final edit leaves silent hash drift, which is why this lives here and not in Task 5.
 - Confirm no hook was disabled and none is left disabled.
 - Confirm the diff touches none of PR #2686's three files.
+- Confirm the PR body states that #2638 and #2641 belong to PR #2686 and that #2736 is sequenced behind it. This criterion has no other owner — it is authored here, not left to the builder's memory at PR time.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Guesser fully deleted | `grep -rc "find_newest_plan_file" .claude/hooks/` | match count == 0 |
-| Contains-guesser deleted | `grep -rc "find_newest_file" .claude/hooks/validators/` | match count == 0 |
-| Mtime selection gone | `grep -rc "newest_mtime" .claude/hooks/validators/` | match count == 0 |
+| Guesser fully deleted | `grep -rl "find_newest_plan_file" .claude/hooks/ \| wc -l` | match count == 0 |
+| Contains-guesser deleted | `grep -rl "find_newest_file" .claude/hooks/validators/ \| wc -l` | match count == 0 |
+| Mtime selection gone | `grep -rl "newest_mtime" .claude/hooks/validators/ \| wc -l` | match count == 0 |
 | Shared module exists | `test -f .claude/hooks/hook_utils/hook_target.py` | exit code 0 |
 | All five import the helper | `grep -rl "from hook_utils.hook_target import" .claude/hooks/validators/ \| wc -l` | output contains 5 |
 | No stdin discarded | `grep -rn "^\s*json.load(sys.stdin)$" .claude/hooks/validators/` | exit code 1 |
@@ -420,24 +420,30 @@ Builders write disjoint file sets so their commits never interleave inside the s
 | Format clean | `python -m ruff format --check .claude/hooks/ tests/unit/` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_hook_target.py tests/unit/test_validate_documentation_section.py tests/unit/test_validate_file_contains.py` | exit code 1 |
 | PR #2686 files untouched | `git diff --name-only main... -- .claude/hooks/validators/validate_no_raw_redis_delete.py .claude/hooks/dispatch/pre_tool_use_bash.py tests/unit/test_validate_no_raw_redis_delete.py` | output does not contain .py |
-| Anti-criterion: no git target selection | `grep -rc "git\", \"status\", \"--porcelain\", f\"{directory}" .claude/hooks/validators/` | match count == 0 |
+| Anti-criterion: no git target selection | `grep -rl "porcelain" .claude/hooks/validators/ \| wc -l` | match count == 0 |
+| Non-dict payload never raises | `printf 'null' \| .venv/bin/python .claude/hooks/validators/validate_documentation_section.py` | exit code 0 |
+| Sync manifest regenerated and clean | `python scripts/sync_claude_to_opencode.py && git diff --exit-code .opencode/SYNC_MANIFEST.json` | exit code 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | **`read_hook_input()`'s contract guards exceptions but not a syntactically-valid non-dict payload.** The plan specifies it swallows `json.JSONDecodeError` / `OSError` / `EOFError`, but stdin of `null` or `[1,2]` parses cleanly and yields a non-dict. `target_from_hook_input`'s verbatim source (`validate_no_gos_justification.py:129`, `tool_input = hook_input.get("tool_input")`) then raises `AttributeError`. None of the 65 acceptance tests or the plan's Failure Path Test Strategy cases feed a non-dict top-level JSON value through `main()`, so the gap survives the "65 tests pass unchanged" gate untouched. | pending | `read_hook_input()` must be `parsed = json.loads(raw); return parsed if isinstance(parsed, dict) else {}` — not a bare `return json.loads(raw)`. Independently, `target_from_hook_input` needs `if not isinstance(hook_input, dict): return None` before the first `.get`, because the plan documents the two functions as separately callable. Add `run_hook("null", cwd)` and `run_hook("[1,2]", cwd)` cases to `test_hook_target.py` and to each ported validator's targeting class. |
-| CONCERN | Risk & Robustness | **The `.opencode/SYNC_MANIFEST.json` refresh is a manual step with no Verification row.** Task 5 says to rerun `python scripts/sync_claude_to_opencode.py`, but nothing in Success Criteria or the Verification table asserts the manifest hashes actually match the landed files. If the step is skipped, interrupted, or run before the last edit lands, the drift is silent. | pending | Add a Verification row `python scripts/sync_claude_to_opencode.py && git diff --exit-code .opencode/SYNC_MANIFEST.json` with expected "exit code 0", and add it to Task 6's checklist for `hook-validator-check`. Ordering is load-bearing: the regeneration must run after the last code edit, so the row belongs in Task 6, not Task 5. |
-| CONCERN | Scope & Value, Risk & Robustness | **The Team Orchestration roster contradicts the declared team and is heavier than the work.** Appetite says "Team: Solo dev, PM, code reviewer" (`:120`) while Team Orchestration names five agents (`:298-326`); three of them (`helper-builder`, `section-builder`, `contains-builder`) perform the same mechanical port across files that are near-identical outside their section name and regex. Separately, Tasks 2 and 3 are both `Parallel: true` inside the single shared worktree, and "commits never interleave" is asserted as an outcome with no serialization mechanism named — concurrent `git add`/`git commit` in one working tree races on `.git/index.lock`. | pending | Collapse `helper-builder` / `section-builder` / `contains-builder` into a single `builder` running Tasks 1-3 sequentially (`Parallel: false`); there is one worktree, so parallelism buys no wall-clock and costs an index-lock race. Keep `hook-test-engineer`; fold Task 6's checklist into it or into the Appetite line's code reviewer. If parallelism is kept instead, the plan must name the serialization mechanism (a retryable commit with lock backoff, or an existing SDLC lease step) rather than asserting the outcome. |
-| CONCERN | History & Consistency | **Task 5 names an assignee whose declared type contradicts the task's own `Agent Type`.** `document-feature` sets `Assigned To: hook-test-engineer` but `Agent Type: documentarian`; Team Members declares `hook-test-engineer` as `Agent Type: test-engineer` with a single test-authoring role, and no `documentarian` member exists in the roster. | pending | Dispatch resolves `Assigned To` against the Team Members table, so Task 5's `Agent Type: documentarian` is either dead text or is silently overridden to `test-engineer` at dispatch time. Pick one: add a `hook-doc-writer` member with `Agent Type: documentarian` and reassign Task 5 to it, or change Task 5's `Agent Type` to `test-engineer`. Do not leave the two fields disagreeing. |
-| CONCERN | History & Consistency | **Three Verification rows state an expectation the command cannot produce.** "Guesser fully deleted", "Contains-guesser deleted", and "Mtime selection gone" use `grep -rc "<pattern>" <dir>` with Expected "match count == 0", but `grep -rc` over a directory prints one `path:count` line per scanned file (including zero-match files), never a bare aggregate. A validator reading the row verbatim gets multi-line `path:0` output with no single number to compare. | pending | Rewrite each of the three rows as `grep -rl "<pattern>" <dir> \| wc -l` with Expected `0` — the aggregate form the "All five import the helper" row two lines below already uses correctly. The exit-code reading happens to be correct today (`grep -rc` exits 1 only when no file matches), so this is a row-legibility defect, not a false pass — but a checker asserting on stdout will misread it. |
-| NIT | Scope & Value | **Architectural Impact overstates CLI compatibility.** Line 111 says `validate_file_contains.py`'s "CLI flags stay compatible", which contradicts Technical Approach `:168` and Task 3 `:367`, both of which delete `--max-age` and its plumbing. | pending | Edit `:111` to read "its CLI flags stay compatible except `--max-age`, which is removed since target selection no longer depends on mtime." |
-| NIT | Structural check | **Tasks 5 and 6 carry no `Validates:` field.** Every other task names the tests that prove it. `document-feature` and `validate-all` produce docs and a report respectively, so the omission may be deliberate, but it is undeclared. | pending | Either add a `Validates:` line to each (Task 5 can point at `validate_features_readme_sort.py` and the docs checks; Task 6 at the Verification table itself) or state inline that these two tasks are validated by the Verification table rather than by a test file. |
-| NIT | Structural check | **One Success Criterion maps to no task.** "The PR body states that #2638 and #2641 belong to PR #2686 and that #2736 is sequenced behind it" has no owning step — Task 6 validates the diff and the criteria but does not author the PR body. | pending | Add the PR-body statement to Task 6's checklist, or to whichever step opens the PR, so the criterion has an owner rather than depending on the builder remembering it at PR time. |
+| CONCERN | Risk & Robustness | **`read_hook_input()`'s contract guards exceptions but not a syntactically-valid non-dict payload.** The plan specifies it swallows `json.JSONDecodeError` / `OSError` / `EOFError`, but stdin of `null` or `[1,2]` parses cleanly and yields a non-dict. `target_from_hook_input`'s verbatim source (`validate_no_gos_justification.py:129`, `tool_input = hook_input.get("tool_input")`) then raises `AttributeError`. None of the 65 acceptance tests or the plan's Failure Path Test Strategy cases feed a non-dict top-level JSON value through `main()`, so the gap survives the "65 tests pass unchanged" gate untouched. | Applied in the post-critique revision | `read_hook_input()` must be `parsed = json.loads(raw); return parsed if isinstance(parsed, dict) else {}` — not a bare `return json.loads(raw)`. Independently, `target_from_hook_input` needs `if not isinstance(hook_input, dict): return None` before the first `.get`, because the plan documents the two functions as separately callable. Add `run_hook("null", cwd)` and `run_hook("[1,2]", cwd)` cases to `test_hook_target.py` and to each ported validator's targeting class. |
+| CONCERN | Risk & Robustness | **The `.opencode/SYNC_MANIFEST.json` refresh is a manual step with no Verification row.** Task 5 says to rerun `python scripts/sync_claude_to_opencode.py`, but nothing in Success Criteria or the Verification table asserts the manifest hashes actually match the landed files. If the step is skipped, interrupted, or run before the last edit lands, the drift is silent. | Applied in the post-critique revision | Add a Verification row `python scripts/sync_claude_to_opencode.py && git diff --exit-code .opencode/SYNC_MANIFEST.json` with expected "exit code 0", and add it to Task 6's checklist for `hook-validator-check`. Ordering is load-bearing: the regeneration must run after the last code edit, so the row belongs in Task 6, not Task 5. |
+| CONCERN | Scope & Value, Risk & Robustness | **The Team Orchestration roster contradicts the declared team and is heavier than the work.** Appetite says "Team: Solo dev, PM, code reviewer" (`:120`) while Team Orchestration names five agents (`:298-326`); three of them (`helper-builder`, `section-builder`, `contains-builder`) perform the same mechanical port across files that are near-identical outside their section name and regex. Separately, Tasks 2 and 3 are both `Parallel: true` inside the single shared worktree, and "commits never interleave" is asserted as an outcome with no serialization mechanism named — concurrent `git add`/`git commit` in one working tree races on `.git/index.lock`. | Applied in the post-critique revision | Collapse `helper-builder` / `section-builder` / `contains-builder` into a single `builder` running Tasks 1-3 sequentially (`Parallel: false`); there is one worktree, so parallelism buys no wall-clock and costs an index-lock race. Keep `hook-test-engineer`; fold Task 6's checklist into it or into the Appetite line's code reviewer. If parallelism is kept instead, the plan must name the serialization mechanism (a retryable commit with lock backoff, or an existing SDLC lease step) rather than asserting the outcome. |
+| CONCERN | History & Consistency | **Task 5 names an assignee whose declared type contradicts the task's own `Agent Type`.** `document-feature` sets `Assigned To: hook-test-engineer` but `Agent Type: documentarian`; Team Members declares `hook-test-engineer` as `Agent Type: test-engineer` with a single test-authoring role, and no `documentarian` member exists in the roster. | Applied in the post-critique revision | Dispatch resolves `Assigned To` against the Team Members table, so Task 5's `Agent Type: documentarian` is either dead text or is silently overridden to `test-engineer` at dispatch time. Pick one: add a `hook-doc-writer` member with `Agent Type: documentarian` and reassign Task 5 to it, or change Task 5's `Agent Type` to `test-engineer`. Do not leave the two fields disagreeing. |
+| CONCERN | History & Consistency | **Three Verification rows state an expectation the command cannot produce.** "Guesser fully deleted", "Contains-guesser deleted", and "Mtime selection gone" use `grep -rc "<pattern>" <dir>` with Expected "match count == 0", but `grep -rc` over a directory prints one `path:count` line per scanned file (including zero-match files), never a bare aggregate. A validator reading the row verbatim gets multi-line `path:0` output with no single number to compare. | Applied in the post-critique revision | Rewrite each of the three rows as `grep -rl "<pattern>" <dir> \| wc -l` with Expected `0` — the aggregate form the "All five import the helper" row two lines below already uses correctly. The exit-code reading happens to be correct today (`grep -rc` exits 1 only when no file matches), so this is a row-legibility defect, not a false pass — but a checker asserting on stdout will misread it. |
+| NIT | Scope & Value | **Architectural Impact overstates CLI compatibility.** Line 111 says `validate_file_contains.py`'s "CLI flags stay compatible", which contradicts Technical Approach `:168` and Task 3 `:367`, both of which delete `--max-age` and its plumbing. | Applied in the post-critique revision | Edit `:111` to read "its CLI flags stay compatible except `--max-age`, which is removed since target selection no longer depends on mtime." |
+| NIT | Structural check | **Tasks 5 and 6 carry no `Validates:` field.** Every other task names the tests that prove it. `document-feature` and `validate-all` produce docs and a report respectively, so the omission may be deliberate, but it is undeclared. | Applied in the post-critique revision | Either add a `Validates:` line to each (Task 5 can point at `validate_features_readme_sort.py` and the docs checks; Task 6 at the Verification table itself) or state inline that these two tasks are validated by the Verification table rather than by a test file. |
+| NIT | Structural check | **One Success Criterion maps to no task.** "The PR body states that #2638 and #2641 belong to PR #2686 and that #2736 is sequenced behind it" has no owning step — Task 6 validates the diff and the criteria but does not author the PR body. | Applied in the post-critique revision | Add the PR-body statement to Task 6's checklist, or to whichever step opens the PR, so the criterion has an owner rather than depending on the builder remembering it at PR time. |
 
----
+### Note on the grep-row finding
 
-## Open Questions
+One critique finding is recorded as applied but was overstated, and the record should say so. The claim was that `grep -rc <pattern> <dir>` with Expected `match count == 0` cannot produce a comparable value. The template's own spec for that expectation explicitly supports the shape — "passes when every non-blank stdout line is `0` **or ends with `:0`** (supports `grep -c`, `grep -rc`, and `grep -r … | wc -l` shapes)" — and an empirical check confirms `grep -rc` emits exactly the `path:0` lines the spec accommodates. The critique itself conceded this was "a row-legibility defect, not a false pass." The rows were rewritten to the `grep -rl … | wc -l` form regardless, because a single aggregate number is easier for a human reviewer to read and the change costs nothing. No behavior depended on it.
 
-1. The tracking issue was written on the assumption that this lane might absorb #2638, #2641, and #2736. The Freshness Check establishes that PR #2686 is a live lane actively holding `validate_no_raw_redis_delete.py`, and that #2736's fix is not implementable from `main` because it builds on a gate that exists only on that branch. This plan therefore closes #2689 only. Confirm that narrowing, or say the word and this lane will instead wait on #2686 and take #2736 as a second PR.
-2. The sweep found `validate_file_contains.py` carrying the same defect, live and registered, which the issue did not know about. It is folded into scope here on the grounds that it is the same class in the same blast radius and the highest-severity instance. Confirm, or split it out.
+## Resolved Questions
+
+Both questions raised at draft time are settled; neither blocks build.
+
+1. **Scope narrowing to #2689 only — confirmed.** The Freshness Check establishes that PR #2686 is a live lane holding `validate_no_raw_redis_delete.py` (a commit and a re-review comment both landed within the hour before planning), and that #2736's fix is not implementable from `main` at all because it builds on an `_EXECUTABLE_CONTEXT` gate that exists only on that branch. Duplicating #2638/#2641 here would produce a conflicting diff in a file another lane owns. The routing brief for this lane explicitly permitted resolving fewer than four issues provided the PR explains which and why, and the PR will. #2736 and the other two are tagged `[SEPARATE-SLUG]` in No-Gos.
+2. **Folding in `validate_file_contains.py` — confirmed.** It is the same bug class, in the same directory, in the same review blast radius, and it is the highest-severity instance: proven by direct reproduction to block a *compliant* `docs/plans/lane-a.md` write with an error naming a different lane's `docs/plans/zzz-other-lane.md`. Splitting it out would leave the class alive in a registered, live hook while shipping a PR that claims to have eliminated it. It goes in.
