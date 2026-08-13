@@ -857,6 +857,13 @@ in its own plan; it is a hard rule here.
   parsing the `cumulative` field of the `_redis_flush_guard_boot` line from `python -X importtime -c pass`, best of five trials, asserting it is under `_STARTUP_BUDGET_MS`. Mark `slow` for the
   subprocess spawns. This is what makes `_STARTUP_BUDGET_MS` a live constant rather than PR-body
   decoration.
+- [x] `tests/unit/test_post_tool_use_fast_path.py` — **UPDATE**:
+  `test_counter_only_call_does_not_import_popoto` scanned `-X importtime` stderr for the bare
+  substring `"redis"`, which false-positives once Layer 1's `.pth` guard is installed — its own
+  module names `tools.redis_flush_guard` and `_redis_flush_guard_boot` both contain that substring
+  without importing the real `redis` package. Fixed to parse each importtime line's module-name field
+  and match `heavy` entries at a dotted-path boundary (`n == m or n.startswith(m + ".")`) instead of
+  raw substring containment.
 
 ## Rabbit Holes
 

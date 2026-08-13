@@ -75,7 +75,21 @@ def test_counter_only_call_does_not_import_popoto(clean_session):
     )
     assert proc.returncode == 0, proc.stderr
     heavy = ("popoto", "redis", "config.settings", "models.memory", "models.agent_session")
-    offenders = [m for m in heavy if m in proc.stderr]
+    # Parse the actual imported module names out of `-X importtime` lines
+    # (format: "import time: self | cumulative | indented.module.name") and
+    # match at a dotted-path boundary. A bare substring check against the raw
+    # stderr blob would false-positive on unrelated modules that merely
+    # contain a heavy module's name, e.g. `tools.redis_flush_guard` or
+    # `_redis_flush_guard_boot` both contain the substring "redis" without
+    # importing the real `redis` package.
+    imported = set()
+    for line in proc.stderr.splitlines():
+        if not line.startswith("import time:"):
+            continue
+        _, _, tail = line.partition("|")
+        _, _, name = tail.partition("|")
+        imported.add(name.strip())
+    offenders = [m for m in heavy if any(n == m or n.startswith(m + ".") for n in imported)]
     assert not offenders, f"counter-only path imported heavy modules: {offenders}"
 
 
