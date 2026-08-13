@@ -970,9 +970,19 @@ class TestExistenceInvariant:
         assert withheld == []
         assert "vanished_module.py" in p.read_text()
 
-    def test_regex_channel_is_also_guarded(self, repo, doc):
+    def test_regex_channel_is_also_guarded(self, repo):
+        # The fixture's match must sit in ordinary prose, NOT inside a path token:
+        # path-token suppression (#2744) refuses an in-token rewrite before the
+        # existence invariant ever sees it, so a fixture like ``\breal\b`` over
+        # ``agent/real.py`` would withhold nothing and prove nothing here. Do not
+        # "simplify" this back to rewriting a word inside a path.
+        p = repo / "docs" / "features" / "regex_inv.md"
+        p.write_text("The runtime lives in the real handler.\n")
         applied, withheld = docs_auditor._apply_fixes_to_file(
-            doc, repo, [], regex_fixes=[(re.compile(r"\breal\b"), "ghost")]
+            Path("docs/features/regex_inv.md"),
+            repo,
+            [],
+            regex_fixes=[(re.compile(r"\breal\b"), "agent/ghost.py")],
         )
         assert applied == 0
         assert len(withheld) == 1

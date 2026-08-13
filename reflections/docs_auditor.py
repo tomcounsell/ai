@@ -452,6 +452,12 @@ def _detect_renamed_symbol_fixes(content: str, repo_root: Path) -> list[tuple[st
     longer exists but git history shows a rename, queue a replacement.
     """
     fixes: list[tuple[str, str]] = []
+    # Deliberately narrower than `_PATH_REF_RE`, which was widened to `*` for #2759.
+    # This is a *detector* pattern governing what the auditor proposes, not the write
+    # path the existence invariant guards. Widening it to bare names enlarges the
+    # candidate set and spends the GIT_LOG_FOLLOW_CAP per-run `git log --follow`
+    # budget on names that resolve to no single path anyway — a scope and volume
+    # change with its own failure modes, not a safety fix. Ruled unchanged in #2759.
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
         if (repo_root / path).exists():
@@ -627,21 +633,110 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     return fixes
 
 
-# Path-shaped reference: ``dir/file.py`` or ``dir/file.md``, one or more segments.
-_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py|md)")
+# Path-shaped reference: ``dir/file.{py,md}`` *or* a bare ``file.{py,md}``. The
+# directory segment is optional (`*`, not `+`) so bare filenames enter the existence
+# invariant (#2759) — the #2711 corruption shape minus its directory prefix.
+_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
+
+# Basename -> number of owning paths, built once per repo root from the git index.
+# Keyed on the resolved ``repo_root`` so distinct checkouts (and distinct test
+# ``tmp_path`` roots) never share an index. Cleared at the top of every ``audit()``
+# run so a long-lived process does not answer from a stale snapshot.
+_BASENAME_INDEX_CACHE: dict[Path, dict[str, int]] = {}
 
 
-def _absent_new_path_refs(original_refs: set[str], candidate: str, repo_root: Path) -> list[str]:
+def _repo_basename_index(repo_root: Path) -> dict[str, int]:
+    """Map every tracked-or-untracked file's basename to how many paths own it.
+
+    Built from ``git ls-files --cached --others --exclude-standard``: one
+    subprocess, ``.gitignore`` respected for free, and files added but not yet
+    committed still counted (a doc may reference a file added in the same change).
+
+    On any subprocess failure the index degrades to empty and a warning is logged;
+    bare-name resolution then falls back to the doc-relative check alone.
+    """
+    key = repo_root.resolve()
+    cached = _BASENAME_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    index: dict[str, int] = {}
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=key,
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "docs_auditor: git ls-files failed in %s (rc=%s): %s — bare-name "
+                "existence falls back to doc-relative resolution only",
+                key,
+                proc.returncode,
+                (proc.stderr or "").strip(),
+            )
+        else:
+            for line in proc.stdout.splitlines():
+                name = line.rsplit("/", 1)[-1]
+                if name:
+                    index[name] = index.get(name, 0) + 1
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(
+            "docs_auditor: git ls-files errored in %s: %s — bare-name existence "
+            "falls back to doc-relative resolution only",
+            key,
+            e,
+        )
+
+    _BASENAME_INDEX_CACHE[key] = index
+    return index
+
+
+def _absent_new_path_refs(
+    original_refs: set[str], candidate: str, repo_root: Path, doc_path: Path
+) -> list[str]:
     """Path refs a candidate rewrite would newly introduce that are absent from disk.
 
     References already present in the original document are never re-validated —
-    the invariant constrains only what the auditor *adds*.
+    the invariant constrains only what the auditor *adds*. Because ``original_refs``
+    is computed with the same pattern, widening that pattern widens both sides
+    symmetrically and costs no new withholds on already-written prose.
+
+    Resolution order:
+
+    - A ref containing ``/`` resolves against ``repo_root`` alone, exactly as before.
+    - A **bare** ref (no ``/``, #2759) resolves first against the doc's own directory
+      (``repo_root / doc_path.parent / ref``), because a bare name in prose is most
+      often a sibling; then against the ``git ls-files`` basename index.
+
+    **Ambiguity is not a withhold.** ``>=1`` owner means the name exists and the fix
+    passes; ``>1`` owners is logged at DEBUG and allowed through. The invariant asks
+    "does this name denote something real", not "is it unambiguous" — ambiguity never
+    produced the #2711 corruption, which was a name existing nowhere. Only ``0``
+    owners is absent.
     """
-    return sorted(
-        ref
-        for ref in set(_PATH_REF_RE.findall(candidate)) - original_refs
-        if not (repo_root / ref).exists()
-    )
+    absent: list[str] = []
+    for ref in sorted(set(_PATH_REF_RE.findall(candidate)) - original_refs):
+        if "/" in ref:
+            if not (repo_root / ref).exists():
+                absent.append(ref)
+            continue
+        if (repo_root / doc_path.parent / ref).exists():
+            continue
+        owners = _repo_basename_index(repo_root).get(ref, 0)
+        if owners == 0:
+            absent.append(ref)
+        elif owners > 1:
+            logger.debug(
+                "docs_auditor: bare ref %r in %s resolves to %d paths — ambiguous "
+                "but present, allowed through",
+                ref,
+                doc_path,
+                owners,
+            )
+    return absent
 
 
 # A file-path-shaped token. Generalizes the single-segment shape to any number of
@@ -727,8 +822,9 @@ def _apply_fixes_to_file(
     and is — derived from the live, already-mutated text at match time rather
     than from any index computed at detection time.
 
-    **Existence invariant:** a fix may not introduce a ``dir/file.{py,md}``-shaped
-    reference that does not exist under ``repo_root``. Violating fixes are rejected
+    **Existence invariant:** a fix may not introduce a ``file.{py,md}``-shaped
+    reference — bare or ``dir/``-prefixed (#2759) — that does not exist under
+    ``repo_root``; see ``_absent_new_path_refs``. Violating fixes are rejected
     individually — valid sibling fixes in the same file still apply — logged at
     warning level, and returned for the caller to surface.
 
@@ -779,7 +875,7 @@ def _apply_fixes_to_file(
             count = new_text.count(old)
             candidate = new_text.replace(old, new)
 
-        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root, path)
         if absent:
             _reject(old, new, absent)
             continue
@@ -795,7 +891,7 @@ def _apply_fixes_to_file(
         # and avoids a pointless existence-invariant pass over unchanged text.
         if count <= 0 or candidate == new_text:
             continue
-        absent = _absent_new_path_refs(original_refs, candidate, repo_root)
+        absent = _absent_new_path_refs(original_refs, candidate, repo_root, path)
         if absent:
             _reject(pattern.pattern, new, absent)
             continue
@@ -931,6 +1027,11 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
     findings: list[dict] = []
     lines = content.splitlines()
     in_fence, heading_for_line = _build_line_context(content)
+    # Deliberately narrower than `_PATH_REF_RE` (widened to `*` for #2759), for the
+    # same reason as `_detect_renamed_symbol_fixes`: this is a detector pattern
+    # governing what the auditor *proposes*, not the write path. Widening it would
+    # spend the per-run issue cap on bare names not resolvable to a single path.
+    # Ruled unchanged in #2759.
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
         if _is_placeholder_path(path):
@@ -1236,6 +1337,9 @@ def audit(
     """
     global _RENAME_QUERY_COUNT
     _RENAME_QUERY_COUNT = 0  # reset per-run cap
+    # The bare-name existence oracle is a per-*run* snapshot: a long-lived process
+    # must not answer from an index built before the last commit (#2759).
+    _BASENAME_INDEX_CACHE.clear()
 
     root = (repo_root or PROJECT_ROOT).resolve()
 
