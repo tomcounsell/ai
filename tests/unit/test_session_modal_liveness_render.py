@@ -229,7 +229,7 @@ class TestModalMetadataSections:
         )
         assert "token-strip" in html
         # Ceil-to-cent per 96b0f65dd: production _filter_usd(1.2345) == "$1.24",
-        # not the retired 4-decimal "$1.2345".
+        # not the retired 4-decimal-places rendering.
         assert "$1.24" in html
         assert "12,000" in html
 
