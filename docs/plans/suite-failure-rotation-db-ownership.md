@@ -895,7 +895,7 @@ locking — but writing it as one step is what makes it true.
   gets its own issue rather than expanding this plan's scope. Three writers are in scope (unowned
   `flushdb`, unrestored module reload, popoto plugin's db-15 flush) and each has a deterministic
   proof; the soak is diagnostic, not a merge gate.
-- [SEPARATE-SLUG #2628] **Upstream popoto PR: make the bundled `pytest11` plugin's flush honour an
+- [TRACKED → #2770] **Upstream popoto PR: make the bundled `pytest11` plugin's flush honour an
   env-pinned db by default.** This is the more durable form of spike-4's fix — no downstream consumer
   could then collide with a claim pool — and there is precedent for landing changes upstream (popoto
   PR #518 is already in flight). It is deliberately **not built here**: it needs a popoto release plus
@@ -903,14 +903,14 @@ locking — but writing it as one step is what makes it true.
   pure-`tests/` PR. This plan takes the downstream repoint (Task 2), which lands in one commit, is
   fully under this repo's control, and — critically — is **already popoto-upgrade-durable** on its
   own: it drives the plugin through its documented `POPOTO_TEST_DB` resolution input and carries a
-  drift-detecting assertion, so a future popoto cannot silently re-open the hole. File the upstream
-  change as its own issue. Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s
-  four `db == 15` assertions belong to that upstream change, not to this one.
-- [SEPARATE-SLUG #2628] Consolidating the two owners of "which db popoto is on" — dropping
+  drift-detecting assertion, so a future popoto cannot silently re-open the hole. Filed as **#2770**.
+  Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s four `db == 15` assertions
+  belong to that upstream change, not to this one.
+- [TRACKED → #2771] Consolidating the two owners of "which db popoto is on" — dropping
   `redis_test_db`'s replace-and-repatch loop (`tests/conftest.py:616,626-628,640-641`) now that the
   plugin's in-place `_swap_db` already covers submodule bindings. Deferred: `tests/conftest.py:631`
   is what points `_POPOTO_ASYNC_REDIS_DB` at the test db in the sync setup phase, so removing the
-  fixture is a separate blast radius from this PR (round-4 concern 2).
+  fixture is a separate blast radius from this PR (round-4 concern 2). Filed as **#2771**.
 - [ORDERED] A general "no write on an unclaimed db" guard covering every mutating command rather
   than just `flushdb` (Resolved Question 2). Deferred: it costs a per-command wrapper on both sync
   and async clients paid by every test, and the AST recurrence guard (#2655) will block *construction*

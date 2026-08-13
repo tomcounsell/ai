@@ -6,7 +6,7 @@ Organized by test level and tagged by feature. Run `pytest --collect-only -q` fo
 
 ```bash
 # By level (parallel by default — `-n auto --dist=loadfile` from pyproject.toml)
-pytest tests/unit/               # Unit tests (~12 min parallel; a full run is bounded by --timeout=420)
+pytest tests/unit/               # Unit tests (~20 min parallel; --timeout=420 is pytest-timeout's per-test budget, not a run bound)
 pytest tests/integration/        # Integration tests (~125s parallel, ~330s serial; needs Redis)
 pytest -m e2e                    # E2E tests
 pytest -m slow                   # Performance benchmarks
