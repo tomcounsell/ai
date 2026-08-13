@@ -10,19 +10,26 @@ module is that missing renewer, launched detached by
 ``tools/sdlc_session_ensure._acquire_run_lock_and_bind`` on a fresh local mint.
 
 **Peek-first, renew-only (BLOCKER 1 -- the load-bearing safety property).**
-``touch_issue_lock`` has NO renew-only mode: passing a ``run_id`` against an
-*absent* key in a non-peek call does ``SET NX EX`` and makes the caller the
-owner (``models/session_lifecycle.py`` ~lines 1100-1123). A naive renew loop
+A DEFAULT ``touch_issue_lock`` call passing a ``run_id`` against an *absent*
+key does ``SET NX EX`` and makes the caller the owner. A naive renew loop
 would therefore let a zombie heartbeat *re-acquire* a lapsed lease under its
 stale id and block a legitimate successor with ``ISSUE_LOCKED`` -- the exact
-lease-theft Risk 2 forbids. So every tick PEEKS first
+lease-theft Risk 2 forbids. Two independent guards close that:
+
+**The extend is ``renew_only=True``** (issue #2714), which skips both of
+``touch_issue_lock``'s minting branches and writes through a compare-and-set
+Lua script. This is the structural half: minting is impossible for this
+caller, not merely avoided by convention, so even a release landing between
+the peek and the extend cannot be undone by the extend.
+
+**Every tick PEEKS first**
 (``touch_issue_lock(issue, run_id, peek=True)`` -- a peek never mutates,
 whatever run_id it carries) and:
 
 - ``peek.owner_run_id is None`` (lease absent/lapsed) -> EXIT 0 immediately.
 - ``peek.owner_run_id != run_id`` (a successor owns it) -> EXIT 0 immediately.
 - ``peek.owner_run_id == run_id`` -> ONLY THEN call the mutating
-  ``touch_issue_lock(issue, run_id, ...)`` to extend the TTL.
+  ``touch_issue_lock(issue, run_id, ..., renew_only=True)`` to extend the TTL.
 
 This is deliberately an OWNERSHIP check, never a pid-liveness one (issue
 #2537 review): the payload's ``pid`` is stamped by the short-lived
@@ -150,11 +157,19 @@ def run_heartbeat(
                 )
                 return 0
             # Self-owned: extend the TTL under our own identity only.
+            # `renew_only=True` (issue #2714) makes that structural rather
+            # than conventional: the extend skips both of `touch_issue_lock`'s
+            # minting branches and writes through a compare-and-set, so a
+            # release landing between the peek above and this call cannot be
+            # undone by it. Without it the extend re-minted the lease the
+            # supervisor had just given up and renewed it to the max-lifetime
+            # ceiling with nothing behind it.
             touch_issue_lock(
                 issue_number,
                 run_id,
                 session_id=session_id,
                 ttl=ISSUE_LOCK_TTL_SECONDS,
+                renew_only=True,
             )
             # Refresh the companion supervised-run signal on the same tick
             # (issue #2659). The signal carries the lock's TTL but was written
