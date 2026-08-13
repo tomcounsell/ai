@@ -426,3 +426,540 @@ class TestReleaseRaceIsClosed:
         assert calls["n"] == 2  # tick 1 renewed nothing; tick 2 saw it gone
         # The extend did NOT recreate the released key.
         assert _R.get(self.KEY) is None
+
+
+class TestSupervisorIdentityResolution:
+    """Issue #2714 L2: three-tier supervisor identity (env -> ancestry -> none).
+
+    spike-1 measured ``CLAUDE_PID`` exported into every Claude Code Bash tool
+    call, matching the ``claude`` ancestor exactly -- even from a subagent.
+    spike-2 proved ``ppid``-based inference is unsound (a HEALTHY heartbeat is
+    reparented to pid 1 within seconds of spawn), so the resolver must never
+    consult it.
+    """
+
+    def test_env_var_resolves_pid_and_create_time(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.setenv("CLAUDE_PID", "32886")
+        proc = MagicMock()
+        proc.create_time.return_value = 111.5
+
+        with patch("agent.session_health._psutil_process_for_pid", return_value=proc):
+            detailed = si.resolve_supervisor_identity_detailed()
+            # The 2-tuple form is the same resolution minus the source label.
+            assert si.resolve_supervisor_identity() == (32886, 111.5)
+
+        assert detailed == (si.SOURCE_ENV, 32886, 111.5)
+
+    def test_env_var_that_does_not_resolve_falls_through_to_ancestry(self, monkeypatch):
+        """A stale/garbage CLAUDE_PID must degrade to the walk, not to nothing."""
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.setenv("CLAUDE_PID", "not-a-number")
+
+        ancestor = MagicMock()
+        ancestor.pid = 999
+        ancestor.exe.return_value = "/opt/homebrew/bin/claude"
+        ancestor.create_time.return_value = 222.5
+        me = MagicMock()
+        me.parents.return_value = [MagicMock(pid=1, **{"exe.return_value": "/bin/zsh"}), ancestor]
+
+        with patch.object(si, "_self_process", return_value=me):
+            assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_ANCESTRY, 999, 222.5)
+
+    def test_ancestry_matches_node_process_whose_cmdline_mentions_claude(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.delenv("CLAUDE_PID", raising=False)
+        ancestor = MagicMock()
+        ancestor.pid = 777
+        ancestor.exe.return_value = "/usr/local/bin/node"
+        ancestor.cmdline.return_value = ["node", "/x/@anthropic-ai/claude-code/cli.js"]
+        ancestor.create_time.return_value = 333.0
+        me = MagicMock()
+        me.parents.return_value = [ancestor]
+
+        with patch.object(si, "_self_process", return_value=me):
+            assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_ANCESTRY, 777, 333.0)
+
+    def test_no_env_and_no_claude_ancestor_is_unresolved(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.delenv("CLAUDE_PID", raising=False)
+        other = MagicMock()
+        other.pid = 5
+        other.exe.return_value = "/bin/zsh"
+        other.cmdline.return_value = ["zsh"]
+        me = MagicMock()
+        me.parents.return_value = [other]
+
+        with patch.object(si, "_self_process", return_value=me):
+            assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_UNRESOLVED, None, None)
+            assert si.resolve_supervisor_identity() == (None, None)
+
+    def test_any_exception_resolves_to_none_never_raises(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.delenv("CLAUDE_PID", raising=False)
+        with patch.object(si, "_self_process", side_effect=RuntimeError("psutil exploded")):
+            assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_UNRESOLVED, None, None)
+
+    def test_module_never_consults_the_parent_pid_syscall(self):
+        """spike-2 anti-criterion: ``ppid``/``getppid`` is not a death signal."""
+        import inspect
+
+        from tools import sdlc_supervisor_identity as si
+
+        src = inspect.getsource(si)
+        assert "getppid" not in src
+
+
+def _alive_proc(create_time):
+    p = MagicMock()
+    p.create_time.return_value = create_time
+    return p
+
+
+def _self_owned_touch():
+    """A touch_issue_lock double that always reports self-ownership."""
+
+    def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        if peek:
+            return _peek_result(run_id)
+        return MagicMock()
+
+    return fake_touch
+
+
+class TestSupervisorLiveness:
+    """Issue #2714 L2: a positively-dead supervisor drops the lease.
+
+    The evidence bar is deliberately high (Risk 5 + #2446): a pid that psutil
+    cannot find, or one whose ``create_time`` no longer matches, counts as
+    dead -- but only after ``SDLC_SUPERVISOR_DEATH_CONFIRMATIONS`` consecutive
+    such observations, and ANY exception counts as NOT dead so a psutil flake
+    can never lapse a live run's lease.
+    """
+
+    def test_dead_supervisor_releases_the_lease_and_exits(self, caplog):
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+            patch("agent.supervised_run.clear_supervised_run_signal") as clear,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        release.assert_called_once()
+        clear.assert_called_once()
+        assert any("supervisor_dead" in r.getMessage() for r in caplog.records if r.levelno >= 20)
+
+    def test_live_supervisor_keeps_renewing(self):
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        renews = []
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+            if peek:
+                return _peek_result("mine")
+            renews.append(run_id)
+            return MagicMock()
+
+        ticks = iter([0.0, 1.0, 2.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=_alive_proc(99.0)),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=10,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert len(renews) >= 2
+        release.assert_not_called()
+
+    def test_unresolved_supervisor_never_consults_psutil(self):
+        """No recorded identity -> the watch is inert; nothing is probed."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        ticks = iter([0.0, 1.0, 2.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid") as probe,
+            patch("models.session_lifecycle.release_issue_lock") as release,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=10,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert probe.call_count == 0
+        release.assert_not_called()
+
+    def test_partial_or_invalid_identity_is_unresolved_never_dead(self):
+        """pid 0/negative/non-numeric, or one half missing -> unresolved."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        for pid, create_time in [
+            (0, 99.0),
+            (-5, 99.0),
+            ("not-a-pid", 99.0),
+            (4242, None),
+            (None, 99.0),
+            (4242, "not-a-time"),
+        ]:
+            ticks = iter([0.0, 1.0, 999.0])
+            with (
+                patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+                patch("agent.supervised_run.write_supervised_run_signal"),
+                patch("agent.session_health._psutil_process_for_pid") as probe,
+                patch("models.session_lifecycle.release_issue_lock") as release,
+            ):
+                rc = run_heartbeat(
+                    issue_number=2714,
+                    run_id="mine",
+                    interval=1,
+                    max_lifetime=10,
+                    supervisor_pid=pid,
+                    supervisor_create_time=create_time,
+                    supervisor_check_interval=1,
+                    _sleep=lambda s: None,
+                    _monotonic=lambda: next(ticks),
+                )
+            assert rc == 0, (pid, create_time)
+            assert probe.call_count == 0, (pid, create_time)
+            release.assert_not_called()
+
+    def test_create_time_mismatch_counts_as_dead(self, caplog):
+        """Risk 5: the OS recycled the pid -- alive, but not our supervisor."""
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=_alive_proc(123.456),  # recorded was 99.0
+            ),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+            patch("agent.supervised_run.clear_supervised_run_signal"),
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        release.assert_called_once()
+        assert any("supervisor_dead" in r.getMessage() for r in caplog.records)
+
+    def test_single_flake_does_not_trip_the_confirmation_gate(self):
+        """One dead observation followed by a live one must NOT release."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        seq = [None, _alive_proc(99.0), _alive_proc(99.0), _alive_proc(99.0)]
+
+        def probe(_pid):
+            return seq.pop(0) if seq else _alive_proc(99.0)
+
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid", side_effect=probe),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        release.assert_not_called()
+
+    def test_psutil_exception_keeps_renewing_never_releases(self):
+        """#2446: an unverifiable probe fails TOWARD holding the lease, and the
+        tick's renew still fires -- the watch must never break the renewer."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        renews = []
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+            if peek:
+                return _peek_result("mine")
+            renews.append(run_id)
+            return MagicMock()
+
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                side_effect=RuntimeError("psutil exploded"),
+            ),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        release.assert_not_called()
+        assert len(renews) >= 3  # the raising probe never stopped the renewer
+
+
+class TestUnsupervisedCeiling:
+    """Issue #2714 L3: an unresolvable supervisor gets a 90-minute bound.
+
+    Risk 1: the shortened bound applies ONLY on the unresolvable path, and it
+    only STOPS RENEWING -- it never releases, because failing to resolve a
+    supervisor is not positive proof the run is dead. The lease's own 1800s
+    TTL is the correct disposition there.
+    """
+
+    def _run(self, ticks, **kwargs):
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        it = iter(ticks)
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=_alive_proc(99.0)),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+            patch("agent.supervised_run.clear_supervised_run_signal") as clear,
+        ):
+            rc = run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(it),
+                **kwargs,
+            )
+        return rc, release, clear
+
+    def test_unresolved_supervisor_selects_the_ninety_minute_bound(self, caplog):
+        import logging
+
+        from tools.sdlc_lease_heartbeat import UNSUPERVISED_MAX_LIFETIME_SECONDS
+
+        assert UNSUPERVISED_MAX_LIFETIME_SECONDS == 90 * 60
+
+        caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+        # Inside the 5400s bound, then past it.
+        rc, release, clear = self._run([0.0, 5399.0, 5401.0])
+
+        assert rc == 0
+        assert any("unsupervised_max_lifetime" in r.getMessage() for r in caplog.records)
+        # Risk 1: stop renewing, but NEVER release -- the TTL is the backstop.
+        release.assert_not_called()
+        clear.assert_not_called()
+
+    def test_resolvable_supervisor_keeps_the_unchanged_four_hour_bound(self, caplog):
+        """The invariant the round-1 plan asserted and never tested.
+
+        A tick at 5401s -- past the unsupervised ceiling -- must still renew,
+        proving the 4h bound is the one selected whenever a supervisor pid is
+        present. Lowering MAX_LIFETIME_SECONDS uniformly would lapse a live
+        supervisor's long BUILD stage and reintroduce #2446.
+        """
+        import logging
+
+        from tools.sdlc_lease_heartbeat import MAX_LIFETIME_SECONDS
+
+        assert MAX_LIFETIME_SECONDS == 4 * 60 * 60
+
+        caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+        rc, release, _clear = self._run(
+            [0.0, 5401.0, 14401.0],
+            supervisor_pid=4242,
+            supervisor_create_time=99.0,
+            supervisor_check_interval=1,
+        )
+
+        assert rc == 0
+        assert not any("unsupervised_max_lifetime" in r.getMessage() for r in caplog.records)
+        assert any("max_lifetime" in r.getMessage() for r in caplog.records)
+        release.assert_not_called()
+
+    def test_explicit_max_lifetime_overrides_both_defaults(self):
+        """The sentinel: an explicitly-passed bound is never silently replaced."""
+        rc, _release, _clear = self._run([0.0, 3.0], max_lifetime=2)
+        assert rc == 0  # exited at the caller's bound, not at 5400
+
+    def test_invalid_env_override_falls_back_to_the_default(self, monkeypatch):
+        import importlib
+
+        for bad in ("not-a-number", "-1", "0", ""):
+            monkeypatch.setenv("SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS", bad)
+            import tools.sdlc_lease_heartbeat as hb
+
+            hb = importlib.reload(hb)
+            assert hb.UNSUPERVISED_MAX_LIFETIME_SECONDS == 90 * 60, bad
+
+        monkeypatch.delenv("SDLC_HEARTBEAT_UNSUPERVISED_MAX_SECONDS", raising=False)
+        import tools.sdlc_lease_heartbeat as hb
+
+        importlib.reload(hb)
+
+
+class TestHeartbeatObservability:
+    """Issue #2714 L4 / spike-4: the log file has been 0 bytes since 2026-08-04.
+
+    ``main()`` only configured logging under ``--verbose`` and every call site
+    was ``logger.debug``, so the six observed zombie heartbeats produced zero
+    diagnostics. Every decision now emits an assertable INFO record.
+    """
+
+    def test_startup_line_names_the_supervisor_source_and_intervals(self, caplog):
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+        with patch(
+            "models.session_lifecycle.touch_issue_lock",
+            side_effect=lambda *a, **k: _peek_result(None),
+        ):
+            run_heartbeat(
+                issue_number=2714,
+                run_id="mine",
+                interval=1,
+                max_lifetime=10,
+                supervisor_source="env",
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                _sleep=lambda s: None,
+            )
+
+        startup = [r.getMessage() for r in caplog.records if "starting" in r.getMessage()]
+        assert startup, [r.getMessage() for r in caplog.records]
+        assert "env" in startup[0]
+        assert "4242" in startup[0]
+
+    def test_lease_lost_and_foreign_owner_exits_are_named(self, caplog):
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        for owner, reason in [(None, "lease_lost"), ("successor", "foreign_owner")]:
+            caplog.clear()
+            caplog.set_level(logging.INFO, logger="tools.sdlc_lease_heartbeat")
+            with patch(
+                "models.session_lifecycle.touch_issue_lock",
+                side_effect=lambda *a, _o=owner, **k: _peek_result(_o),
+            ):
+                rc = run_heartbeat(
+                    issue_number=2714,
+                    run_id="mine",
+                    interval=1,
+                    max_lifetime=10,
+                    _sleep=lambda s: None,
+                )
+            assert rc == 0
+            assert any(
+                reason in r.getMessage() for r in caplog.records if r.levelno >= logging.INFO
+            ), reason
+
+    def test_main_configures_info_logging_without_verbose(self):
+        """spike-4's root cause: basicConfig ran only under --verbose."""
+        import sys
+
+        from tools import sdlc_lease_heartbeat as hb
+
+        argv = ["sdlc_lease_heartbeat", "--issue-number", "2714", "--run-id", "mine"]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(hb, "run_heartbeat", return_value=0),
+            patch.object(hb.logging, "basicConfig") as basic_config,
+            patch.object(hb.sys, "exit"),
+        ):
+            hb.main()
+
+        basic_config.assert_called_once()
+        assert basic_config.call_args.kwargs["level"] == hb.logging.INFO
+
+    def test_cli_passes_none_max_lifetime_so_the_sentinel_is_live(self):
+        """Round-2 CONCERN: --max-lifetime must default to None at BOTH ends."""
+        import sys
+
+        from tools import sdlc_lease_heartbeat as hb
+
+        argv = ["sdlc_lease_heartbeat", "--issue-number", "2714", "--run-id", "mine"]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(hb, "run_heartbeat", return_value=0) as run,
+            patch.object(hb.logging, "basicConfig"),
+            patch.object(hb.sys, "exit"),
+        ):
+            hb.main()
+
+        assert run.call_args.kwargs["max_lifetime"] is None
+
+    def test_docstring_no_longer_claims_max_lifetime_is_the_death_backstop(self):
+        from tools import sdlc_lease_heartbeat as hb
+
+        assert "max-lifetime is the death backstop" not in (hb.__doc__ or "")
