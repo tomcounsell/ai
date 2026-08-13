@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
 
+from tests.db_claim import subprocess_env
+
 # Resolve the repo root for subprocess cwd
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -440,8 +442,9 @@ class TestCLIOutput:
         # AGENT_SESSION_ID when no args are given, so inheriting the parent
         # env would cause a real Redis query and a non-empty result when
         # this test runs inside an SDLC session.
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [sys.executable, "-m", "tools.sdlc_stage_query", "--format", "legacy"],
             capture_output=True,
@@ -458,6 +461,7 @@ class TestCLIOutput:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--session-id" in result.stdout
@@ -599,8 +603,9 @@ class TestEnrichedPayload:
 
     def test_legacy_flat_shape_preserved(self):
         """--format legacy returns the old flat shape."""
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [
                 sys.executable,
@@ -620,8 +625,9 @@ class TestEnrichedPayload:
 
     def test_default_json_shape_includes_stages_and_meta(self):
         """Default (no --format flag) returns the enriched shape."""
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [sys.executable, "-m", "tools.sdlc_stage_query"],
             capture_output=True,

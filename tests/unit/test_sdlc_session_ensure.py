@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -235,6 +237,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--issue-number" in result.stdout
@@ -246,6 +249,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode != 0
 
@@ -1448,7 +1452,6 @@ class TestKillOrphans:
         assert result["orphans"] == []
 
     def test_cli_dry_run_exits_zero_with_valid_json(self):
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
             [
                 sys.executable,
@@ -1460,7 +1463,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
-            env=env,
+            env=subprocess_env(project_root=REPO_ROOT, PYTHONDONTWRITEBYTECODE="1"),
         )
         assert result.returncode == 0
         # stdout must be parseable JSON
@@ -1481,6 +1484,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         # argparse .error() exits 2
         assert result.returncode != 0

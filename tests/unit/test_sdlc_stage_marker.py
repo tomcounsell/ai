@@ -28,6 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -1158,6 +1160,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--issue-number" in result.stdout
@@ -1168,22 +1171,18 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         # Missing required --stage and --status
         assert result.returncode != 0
 
     def test_with_issue_number_outputs_json(self):
-        import popoto.redis_db as rdb
-
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
-        # Isolate the subprocess to the per-worker test Redis db -- unit tests
-        # must never touch production Redis.
-        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
-        clean_env["REDIS_URL"] = (
-            f"redis://{kwargs.get('host') or 'localhost'}:"
-            f"{kwargs.get('port') or 6379}/{kwargs.get('db', 1)}"
-        )
+        # subprocess_env() points the child at this pytest process's claimed
+        # test db. The strips keep the child from inheriting a live bridge run
+        # identity, which is what the assertions below turn on.
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [
                 sys.executable,

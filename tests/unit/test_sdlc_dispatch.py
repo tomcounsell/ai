@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -270,30 +272,23 @@ class TestDispatchGetResetReader:
 
 
 def _isolated_subprocess_env():
-    """Env for CLI subprocesses: Redis isolated to the per-worker test db.
+    """Env for CLI subprocesses: Redis isolated to this process's claimed test db.
 
     The autouse redis_test_db fixture patches the IN-PROCESS popoto client;
-    a subprocess re-resolves REDIS_URL at import, so point it explicitly at
-    the same test db -- unit tests must never touch production Redis.
+    a subprocess re-resolves REDIS_URL at import, so ``subprocess_env()``
+    hands it the same claimed db -- unit tests must never touch production
+    Redis.
 
-    Also strips the run-identity env vars the #2144 self-heal path consults
+    Strips the run-identity env vars the #2144 self-heal path consults
     (``VALOR_SESSION_ID`` / ``AGENT_SESSION_ID`` — read by
     ``tools.sdlc_session_ensure``). A CLI subprocess test must never inherit a
     LIVE run identity from the parent process, or the healable/unhealable
     boundary these tests assert would depend on the ambient environment.
     """
-    import popoto.redis_db as rdb
-
-    kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
-    host = kwargs.get("host") or "localhost"
-    port = kwargs.get("port") or 6379
-    db = kwargs.get("db", 1)
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("VALOR_SESSION_ID", "AGENT_SESSION_ID", "active_run_id")
-    }
-    env["REDIS_URL"] = f"redis://{host}:{port}/{db}"
+    env = subprocess_env()
+    env.pop("VALOR_SESSION_ID", None)
+    env.pop("AGENT_SESSION_ID", None)
+    env.pop("active_run_id", None)
     return env
 
 

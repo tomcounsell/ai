@@ -25,6 +25,7 @@ from models.session_lifecycle import (
     finalize_session,
     transition_status,
 )
+from tests.db_claim import subprocess_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1600,13 +1601,7 @@ class TestRunIdentityAcrossProcesses:
 
     @staticmethod
     def _subprocess_env():
-        import popoto.redis_db as rdb
-
-        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
-        host = kwargs.get("host") or "localhost"
-        port = kwargs.get("port") or 6379
-        db = kwargs.get("db", 1)
-        env = {**os.environ, "REDIS_URL": f"redis://{host}:{port}/{db}"}
+        env = subprocess_env()
         env.pop("SDLC_HOLDER_TOKEN", None)  # the env seam is GONE -- prove it
         return env
 
