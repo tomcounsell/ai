@@ -41,3 +41,29 @@ sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 `SDLC_TARGET_REPO` (set once in Step 2) must stay exported for the lifetime of the loop — `sdlc-tool`
 forces its own cwd to `~/src/ai` and relies on this env var to locate the target repo's plans and
 worktree when the target repo is not `ai` itself.
+
+## `session-release` invocation, this repo's path (Step 5)
+
+Step 5's release runs through the same `sdlc-tool` entry point as `session-ensure` (installed to
+`~/.local/bin` by `/update`; cwd-independent per `docs/features/sdlc-tool-resolver.md`):
+
+```bash
+sdlc-tool session-release --issue-number {issue_number} --run-id {run_id}
+```
+
+`{run_id}` is the value this run is carrying — the one Step 3d.6 passes as `--reuse-run-id`, rebound
+if any refusal in the Step 2 table made you re-ensure. Pass the *current* value; a stale one is
+refused as a foreign release and leaves the lease held.
+
+Output is typed JSON, exit code always 0:
+
+| `reason` | Meaning |
+|---|---|
+| `released` | The lease and the supervised-run signal are both gone. |
+| `no_lease` | Nothing to release — already released (the merged path's tool-layer leg got there first) or the lease lapsed. Not an error. |
+| `not_owner` | A live lease is held by a *different* run; nothing was touched. Report this — it means the `run_id` you carried is not the one that owns this issue. |
+| `missing_args` | You passed an empty/absent issue number or `run_id`. |
+| `error` | The Redis substrate raised; the lease may still be held and will lapse on its own TTL. |
+
+Never let any of these change the outcome you reported in Step 4. The release is a courtesy that
+shortens the *next* run's wait, not part of this run's result.
