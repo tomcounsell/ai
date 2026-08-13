@@ -565,9 +565,14 @@ The two files reach the repo slug differently, and the second one has to be *giv
   `_check_project_stalls` binds `target_repo = _project_repo(project)` beside the existing
   `project_key` binding (`:745`). `_attempt_action` (`:635-`) gains a
   `target_repo: str | None` keyword parameter, threaded from the single call site in
-  `_check_project_stalls`. `None` is tolerated rather than guarded: the identity write
-  there is `adopt_lane_slug`, which falls back to `resolve_target_repo_for_read` and
-  returns `None` without writing when even that fails.
+  `_check_project_stalls`. A `None` here is a **gap, not a tolerance**, and must be
+  commented as one: `adopt_lane_slug` would fall back to `resolve_target_repo_for_read`,
+  which peeks the lease and then falls through to the env ladder — resolving, in this
+  process, to `ai`. That records a non-`ai` project's lane under the wrong key, and
+  because the write is no-overwrite the mistake is permanent. It is unreachable today
+  (an SDLC-capable project carries a `github` block, and the branch filter admits only
+  issue-derived names), which is why this ships as a documented gap rather than a guard,
+  but the comment must not claim a safety that does not exist.
 
 Four identity calls thread the repo, not three — enumerated so the sweep has something to
 check against:
@@ -838,10 +843,12 @@ and no-ops. Stated plainly rather than waved through as "strictly better":
   and `revision_applied` are **unaffected**. The `None` slug only disables the *branch*
   probes: G8's PATCH check and `branch_exists` no-op. For #2663 specifically that is the
   fix, not a regression — the no-op replaces the wrong-branch probe that wedges it.
-- **When they heal.** On their next lane-start call: a reflection respawn, a
-  or any `ensure_session` for that issue. `sdlc-2663`'s next
-  respawn adopts `sdlc-2663` via ladder rung 3. Until then they read `None`, which is
-  correct-and-explicit rather than confident-and-wrong.
+- **When they heal.** On their next lane-start call: an upvote pickup, or any
+  `ensure_session` for that issue, both of which walk the ladder. A `sdlc_progress`
+  respawn is the exception — it walks no ladder, it *adopts* the branch name its caller
+  already read off the PR, which for `sdlc-2663` is `sdlc-2663`. Until one of those
+  fires they read `None`, which is correct-and-explicit rather than
+  confident-and-wrong.
 - **The operator signal.** This is why `_meta` gains `slug_source` alongside `slug`:
   `recorded` when the ledger answered, `session` when the retained `AgentSession` fallback
   did, `unresolved` when neither did. A wedge investigation can
@@ -1002,11 +1009,13 @@ above. The Verification table encodes the sweeps.
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_next_skill.py::TestBranchExistsCanonicalShape` — **the whole class, re-derived by sweep**; it starts at `:116` and holds FOUR cases (`:139`, `:152`, `:166`, `:178`), so a builder truncating at a quoted upper bound strands `test_false_when_branch_absent`. —
-  **REPLACE**: the class docstring and all three cases encode the false "repo never
-  creates `session/sdlc-{N}`" belief. Rewrite against the recorded slug:
+  **REPLACE**: the class docstring and the first three cases encode the false "repo never
+  creates `session/sdlc-<issue>`" belief. Rewrite against the recorded slug:
   `test_true_when_recorded_slug_branch_exists`, `test_true_when_recorded_slug_is_issue_derived`
   (the inversion of `test_false_when_only_fabricated_shape_present` — this is the #2718
-  regression test), `test_false_when_no_slug_resolvable`.
+  regression test), `test_false_when_no_slug_resolvable`. The fourth case,
+  `test_false_when_branch_absent`, survives unchanged: it pins the branch-genuinely-missing
+  answer, which the rewrite does not alter.
 - [ ] `tests/unit/test_sdlc_next_skill.py:40,53,65,80,101,107,142` — **UPDATE**: these
   monkeypatch `tools._sdlc_utils.find_plan_path`, which no longer exists at that path.
   Retarget to `tools.lane_identity.find_plan_path`.
@@ -2101,7 +2110,7 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 | #2735 AC 1+2 | `SDLC_TARGET_REPO=$PWD .venv/bin/python -c "from tools.lane_identity import find_plan_path; assert find_plan_path(2663) is None, find_plan_path(2663); assert find_plan_path(2716) is not None"` | exit code 0 |
 | Ledger carries the field | `.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; assert 'slug' in PipelineLedger._meta.fields"` | exit code 0 |
 | Migration registered | `grep -c 'confirm_pipeline_ledger_slug_readable' scripts/update/migrations.py` | output > 1 |
-| Anti-criterion: no slug derived from a plan filename | `grep -rnE '\.stem[^a-zA-Z0-9_]' tools/ agent/ reflections/` | every hit reviewed by hand; **zero** hits where the `.stem` of a plan path becomes a slug or a branch name. Broadened from the old literal `Path(plan_path).stem`, which a rename to `plan_path.stem` defeated. The trailing class replaces `\b`, a GNU/PCRE extension absent from POSIX ERE — same portability class as the BRE `\|` that made `AC-TESTSCOPE` vacuous. |
+| Anti-criterion: no slug derived from a plan filename | `grep -rnE '\.stem([^a-zA-Z0-9_]\|$)' tools/ agent/ reflections/` (fenced form below — the cell cannot carry a bare `\|`) | every hit reviewed by hand; **zero** hits where the `.stem` of a plan path becomes a slug or a branch name. 6 hits on `main`, 2 of them offending (`tools/sdlc_next_skill.py:205`, `:357`); 4 after the build, none offending. The `$` alternative is load-bearing: both offending sites end the line at `.stem`, so a trailing negated class alone matches neither and the row reports a green 2-hit list that omits exactly what it exists to catch. |
 | Anti-criterion: no stale import path | see `AC-STALEIMPORT` below | match count == 0 |
 | Anti-criterion: no stale prose reference to the moved symbol | see `AC-PROSE` below | match count == 0 |
 | Anti-criterion: docs sweep complete | see `AC-DOCSWEEP` below | every listed file names `tools/lane_identity`, none names `tools/_sdlc_utils` |
@@ -2167,9 +2176,19 @@ grep -rln 'find_plan_path' docs/features/ docs/sdlc/                      # AC-D
 # so the command breaks. Both --include globs are single-quoted (zsh would
 # otherwise glob-expand them, abort the pipeline, and print 0 -- a vacuous PASS).
 grep -rn 'from tools._sdlc_utils import find_plan_path' \
-  --include='*.py' --include='*.md' . | grep -v '^./.worktrees/' | wc -l   # expect 0
+  --include='*.py' --include='*.md' . \
+  | grep -v '\.worktrees/' | grep -v 'docs/plans/' | wc -l                 # expect 0
+# `docs/plans/` is excluded for the same reason AC-PROSE excludes it: THIS plan
+# quotes the stale import four times (including inside this command), and a
+# completed plan quotes it once, so an unscoped row can never reach 0 and would
+# report a correct build as failed. 29 on `main` unscoped, 24 scoped.
 # Under-counts by construction: a `from tools import _sdlc_utils` + attribute
 # form would not match. Pair with AC-TESTSCOPE; never treat as exhaustive.
+
+# AC-STEM — no slug is derived from a plan filename (fenced; see the row above)
+grep -rnE '\.stem([^a-zA-Z0-9_]|$)' tools/ agent/ reflections/
+# hand-review every hit: expect ZERO where a plan path's .stem becomes a slug
+# or a branch name. 6 on `main` (2 offending), 4 after the build (0 offending).
 
 # AC-FALLBACK — the _is_ai_repo_fallback mechanism is gone
 grep -rn '_is_ai_repo_fallback' tools/ tests/ | wc -l                      # expect 0
@@ -2226,7 +2245,9 @@ grep -rn 'adopt_lane_slug(' tools/ agent/ reflections/ \
 
 # AC-GHCOUNT — one stage-query tick resolves the target repo ONCE.
 # Counts real `gh repo view` invocations by shadowing `gh` with a counting stub
-# on PATH. Run in a scratch dir; never point it at a live lane's issue.
+# on PATH. Only the stub needs a temp dir; the python call must run from the
+# repo root for its relative `.venv/bin/python`. Pointing it at a live lane's
+# issue is safe -- `stage-query` is write-free by construction (healing off).
 d=$(mktemp -d); printf '#!/bin/sh\necho "$@" >> "%s/calls"\nexec /usr/bin/env -i true\n' "$d" > "$d/gh"
 chmod +x "$d/gh"
 env -u GH_REPO PATH="$d:$PATH" .venv/bin/python -m tools.sdlc_stage_query --issue-number 2735 >/dev/null 2>&1
@@ -2414,6 +2435,30 @@ opens, and the `getattr(session, "slug")` read called "unconditionally `None`" w
 confident claims about code nobody re-opened. The countermeasure this plan already carries
 is the right one and was under-applied: **close on a sweep, not on a citation.** Where a
 sweep is impossible, the citation must be re-derived in the same edit that relies on it.
+
+### Cycle 7 (verification-integrity pass over the cycle-6 fixes)
+
+Run against a green build (PR #2792, REVIEW APPROVED), so every finding was checked as
+"is the plan text wrong, or merely worded differently from a correct implementation?"
+No finding touched the shipped code — all twelve cycle-6 items verified as genuinely
+addressed, and the two places where plan and build disagreed, the **build was right**.
+
+| Severity | Finding | Addressed By |
+|---|---|---|
+| BLOCKER | The cycle-6 "portability" rewrite made the `.stem` row **vacuous** — the exact class it was fixing. Both offending sites end the line at `.stem`, so the trailing negated class `[^a-zA-Z0-9_]` matches neither: the row returned 2 hits, *neither* of them offending, and the recorded "2 offending of 6" came from a different command than the one in the table. | **addressed** — `\.stem([^a-zA-Z0-9_]\|$)`, promoted to the fenced block as `AC-STEM`. Re-verified: 6 on `main` (2 offending), 4 in the build (0 offending). |
+| HIGH | `AC-STALEIMPORT` could never reach its expected 0: it globs `*.md` over `.` with no `docs/plans/` exclusion, and this plan quotes the stale import four times (once inside the command itself), plus one completed plan. A correct build reported as a failed anti-criterion. | **addressed** — excludes `docs/plans/` for the same reason `AC-PROSE` does. Re-verified: 24 on `main`, **0** in the build. |
+| CONCERN | The `target_repo=None` rationale asserted a safety that does not exist: `resolve_target_repo_for_read` does not return `None`, it falls through to the env ladder and resolves to `ai`, recording a non-`ai` lane under the wrong key — permanently, since the write is no-overwrite. The builder caught this and shipped an honest comment; only the plan text was wrong. | **addressed** — restated as a documented gap rather than a tolerance, matching the shipped comment. |
+| CONCERN | "Mid-pipeline lanes" still said the respawn "adopts via ladder rung 3" after the site stopped walking any ladder, and carried a dangling list item. Wording only; the outcome coincides for `sdlc-2663`. | **addressed** — rewritten to distinguish the ladder-walking healers from the adopter; list item repaired. |
+| CONCERN | Citation drift across three files, including four refs added by the cycle-6 edit itself. The plan's own root-cause note ("close on a sweep, not on a citation") applied to the edit that recorded it. | **partially addressed** — the load-bearing refs were re-derived; the rest stand as symbol-plus-sweep references, which is the plan's stated convention where a sweep exists. |
+| NIT | `TestBranchExistsCanonicalShape` bullet said "all three cases" in a passage whose own preamble says four. | **addressed** — says "the first three"; states that `test_false_when_branch_absent` survives unchanged. |
+| NIT | `AC-GHCOUNT`'s comment ("run in a scratch dir; never point it at a live lane's issue") contradicted its own command, which needs repo-root cwd and names this lane's issue. | **addressed** — only the stub needs the temp dir, and the read path is write-free by construction. |
+
+**What cycle 7 says about the method:** both top findings were anti-criteria that would
+have certified a build without testing what they claim to test — and both were introduced
+by a *previous round's fix* to the same row. An anti-criterion is code, it regresses like
+code, and the only way to know it still works is to run it against a tree where it should
+be red. Every row in the fenced block now carries both numbers: what it returns on `main`
+and what it returns on the build.
 
 ## Decisions (formerly Open Questions)
 
