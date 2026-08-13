@@ -18,7 +18,7 @@ sessions.
 This in-process loop is not the only reaper that decides `running`-session
 liveness. `/update`'s `_cleanup_stale_sessions` runs a separate,
 out-of-process, one-shot pass every time `/update` executes — see
-[`/update`'s liveness ladder](#update-liveness-ladder-issue-2660) below and
+[`/update`'s liveness ladder](#updates-liveness-ladder-issue-2660) below and
 [AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md)
 for the full authorship rules that ladder depends on.
 

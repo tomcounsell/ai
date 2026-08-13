@@ -220,8 +220,9 @@ def _cleanup_stale_sessions(
        terminal, counted as ``skipped_heartbeat``. Written only by the executor's
        heartbeat loop (T+0 and every 60s tick via
        ``save(update_fields=["last_heartbeat_at"])``); no maintenance path ever
-       sets it, so it cannot be forged by a sweep. Unparseable/naive/float values
-       fall through to the next rung rather than being read as fresh.
+       sets it, so it cannot be forged by a sweep. Naive datetimes and raw floats
+       are normalized by ``to_unix_ts`` and read as real heartbeats; only a
+       missing or unparseable value falls through to the next rung.
     5. ``updated_at`` recency, within ``RECENT_ACTIVITY_WINDOW`` → skip, counted as
        ``skipped_recent``. Rows with no fence and no recent heartbeat — legacy
        records, and any row where ``pid_create_time`` was never recorded — keep the
@@ -320,8 +321,11 @@ def _cleanup_stale_sessions(
             # last_heartbeat_at recency: written only by the executor's own
             # heartbeat loop (T+0 and every 60s tick), never by any maintenance
             # sweep, so it cannot be forged by a probe or a run-lock bind (#2660).
-            # to_unix_ts tolerates naive datetimes, floats, and unparseable
-            # strings by returning None, which falls through to the next rung.
+            # to_unix_ts normalizes both naive datetimes (popoto strips tzinfo,
+            # so hydrated values are always naive) and raw floats into a unix
+            # timestamp, so those are read as real heartbeats. It returns None
+            # only for a missing or unparseable value, which falls through to
+            # the next rung rather than being read as fresh.
             heartbeat_ts = to_unix_ts(getattr(s, "last_heartbeat_at", None))
             if heartbeat_ts is not None:
                 heartbeat_recency = now - heartbeat_ts

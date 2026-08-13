@@ -54,9 +54,11 @@ Safety properties:
   backstop only fires on a record nothing writes for 30 days. Any record that
   keeps being written holds a perpetually-refreshed TTL -- true of
   ``is_ledger=True`` SDLC anchors, which are re-saved continuously while their
-  pipeline is open, and true of every record on every tick of the cleanup pass
-  above. A deferred row therefore keeps its stale fields until a later run
-  finds it terminal.
+  pipeline is open. The cleanup pass above holds every healthy record's TTL at
+  the ceiling too, but deliberately and without a field write, via
+  ``AgentSession.refresh_ttl()`` (issue #2698 owns the decision to stop). A
+  deferred row therefore keeps its stale fields until a later run finds it
+  terminal.
 - **TTL note**: the atomic rewrite refreshes the record's ``Meta.ttl`` (30-day
   backstop) -- acceptable for a one-time migration; stale terminal sessions
   remain subject to the cleanup CLI.
