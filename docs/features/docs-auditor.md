@@ -89,8 +89,8 @@ fix for that term.
 #### The existence invariant
 
 Every auto-fix, regardless of detector, is subject to one post-condition before
-anything is written: **the auditor may not introduce a repo-path reference that
-is absent from the working tree.**
+anything is written: **the auditor may not introduce a slash-shaped `.py`/`.md`
+repo-path reference that is absent from the working tree.**
 
 `_apply_fixes_to_file` simulates each fix, collects the `dir/file.{py,md}`-shaped
 references the candidate text would newly introduce, and resolves each against
@@ -114,6 +114,11 @@ references the candidate text would newly introduce, and resolves each against
   naming the offending path and lands in the result contract.
 - **An all-rejected run writes nothing** — no file write, therefore no empty
   commit.
+- **The matcher's shape is the coverage boundary.** `_PATH_REF_RE` only matches
+  slash-shaped `.py`/`.md` references, so a dotted-module reference (e.g.
+  `bridge.session_log` — the shape the #2711 incident itself produced) or a
+  path with a different extension (`.sh`, `.ts`, `.json`, ...) is invisible to
+  the invariant and can still be introduced unchecked.
 
 Rejected fixes surface on the `audit()` result:
 

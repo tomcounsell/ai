@@ -513,17 +513,21 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     ``fixes`` list (which carries the ``new == ""`` line-delete sentinel).
     """
     fixes: list[tuple[re.Pattern[str], str]] = []
+    # NOTE(#2745): the corpus writes migration prose in inline code spans (e.g.
+    # "formerly `RedisJob`"), so strip backticks before the substring tests below
+    # or the escape hatch never fires on that (dominant) form.
+    stripped = content.replace("`", "")
     for old_term, new_term in STALE_TERMS.items():
         pattern = re.compile(rf"\b{re.escape(old_term)}\b")
         if not pattern.search(content):
             continue
         migration_context = (
-            f"renamed to {new_term}" in content
-            or f"replaced by {new_term}" in content
-            or f"now {new_term}" in content
-            or f"formerly {old_term}" in content
-            or f"Replaces {old_term}" in content
-            or f"replaces {old_term}" in content
+            f"renamed to {new_term}" in stripped
+            or f"replaced by {new_term}" in stripped
+            or f"now {new_term}" in stripped
+            or f"formerly {old_term}" in stripped
+            or f"Replaces {old_term}" in stripped
+            or f"replaces {old_term}" in stripped
         )
         if not migration_context:
             fixes.append((pattern, new_term))
@@ -1772,8 +1776,11 @@ def run_docs_auditor() -> dict:
         # Existence-invariant rejections. This is the one caller with no human in
         # the loop — it opens a PR the sweeper may auto-merge — so the withheld
         # count must reach every surface this function produces, not just a log
-        # line: findings, summary, Telegram, the PR body (auto-merge gate) and
-        # the Redis liveness summary, which is the only durable queryable one.
+        # line: Telegram is reached on both the all-withheld zero-diff path (below)
+        # and the normal non-zero-diff path (further down), plus the PR body
+        # (auto-merge gate) and the Redis liveness summary. `findings`/`summary`
+        # are return-value fields only — the scheduler reads just `projects` from
+        # a function reflection's return (see `_write_liveness`'s docstring).
         withheld: list[dict] = result.get("withheld", [])
         fixes_withheld: int = result.get("fixes_withheld", 0)
         withheld_note = (
@@ -1784,6 +1791,11 @@ def run_docs_auditor() -> dict:
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
             _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
+            if fixes_withheld:
+                _send_telegram_notification(
+                    f"docs-auditor pass for {slug}: 0 files touched, "
+                    f"{fixes_withheld} fix(es) withheld (target-absent); nothing written"
+                )
             return {
                 "status": "ok",
                 "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
