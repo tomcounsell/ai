@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2744
-last_comment_id: none
+last_comment_id: 5277752954
 ---
 
 # Docs Auditor: Migration-Context Hatch and Bare-Path Existence Invariant
