@@ -88,6 +88,17 @@ CLAIM_FUNCS = frozenset({"claim_test_db", "claim_scratch_test_db"})
 # the same-named pytest fixture in conftest, which returns its value.
 CLAIM_URL_NAMES = frozenset({"redis_test_url"})
 
+# The sanctioned source of a raw db NUMBER returned by a pytest fixture whose
+# body the guard cannot see into. ``scratch_test_db`` (tests/conftest.py) calls
+# claim_scratch_test_db() and returns the int; a test that receives it as a
+# fixture PARAMETER and rebinds it to a local name (``divergent_db =
+# scratch_test_db``) cannot be resolved by :func:`_resolve_one_hop` the way
+# ``local = claim_test_db()`` can, because the bound value is a bare
+# ``ast.Name`` referencing a function argument, not a call. This mirrors
+# CLAIM_URL_NAMES / the ``redis_test_url`` leg of Route 2 exactly: the
+# identifier itself is the sanctioned source.
+CLAIM_FIXTURE_NAMES = frozenset({"scratch_test_db"})
+
 # Used ONLY to scope the opaque-``**``-splat leg (see `_splat_candidate`). Every
 # other route in this module is deliberately callee-agnostic; this is the one
 # place an enumeration is the lesser evil, because `**` forwarding is ubiquitous
@@ -159,20 +170,6 @@ ALLOWLIST: tuple[Exemption, ...] = (
         reason=(
             "Same db-0 guard tests, via the from_url route: the guard must also refuse a "
             "db-0 client that was built from a URL rather than a db= keyword."
-        ),
-    ),
-    Exemption(
-        path="unit/test_conftest_isolation_guards.py",
-        expr="divergent_db",
-        reason=(
-            "A second pool slot, independently claimed via claim_scratch_test_db() (the "
-            "scratch_test_db fixture), assigned to this local name rather than referenced "
-            "directly at the call site. The scan cannot resolve a bare fixture-parameter "
-            "binding to a literal pool slot -- it finds no integer in the subtree -- so "
-            "Candidate.pool_db is None here, and apply_dispositions's 'cand.pool_db is None' "
-            "gate is exactly what makes an ALLOWLIST entry (rather than DEFERRED) the correct "
-            "disposition for this site. Was DEFERRED under #2628 pending claim_scratch_test_db() "
-            "existing; #2628 added it, so this is no longer a temporary exemption."
         ),
     ),
 )
@@ -307,7 +304,8 @@ def _resolve_one_hop(
     enclosing_fn: ast.AST | None,
     bindings: dict[ast.AST, dict[str, list[ast.AST]]],
 ) -> tuple[bool, str, ast.AST | None]:
-    """Shape S2: a name bound exactly once in this function to a claim call."""
+    """Shape S2: a name bound exactly once in this function to a claim call,
+    or to a sanctioned fixture-parameter name (``CLAIM_FIXTURE_NAMES``)."""
     if enclosing_fn is None:
         return False, f"{name.id!r} is not a local name in any function scope", None
     bound = bindings.get(enclosing_fn, {}).get(name.id)
@@ -315,9 +313,12 @@ def _resolve_one_hop(
         return False, f"{name.id!r} has no local binding in the enclosing function", None
     if len(bound) > 1:
         return False, f"{name.id!r} is rebound {len(bound)} times in the enclosing function", None
-    if _is_claim_call(bound[0]):
-        return True, f"{name.id!r} = {ast.unparse(bound[0])}", bound[0]
-    return False, f"{name.id!r} = {ast.unparse(bound[0])}, which is not a claim call", bound[0]
+    value = bound[0]
+    if _is_claim_call(value):
+        return True, f"{name.id!r} = {ast.unparse(value)}", value
+    if isinstance(value, ast.Name) and value.id in CLAIM_FIXTURE_NAMES:
+        return True, f"{name.id!r} = {ast.unparse(value)}, a sanctioned fixture parameter", value
+    return False, f"{name.id!r} = {ast.unparse(value)}, which is not a claim call", value
 
 
 def _splat_candidate(
