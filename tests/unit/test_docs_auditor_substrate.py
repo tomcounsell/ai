@@ -669,8 +669,27 @@ class TestStaleTermDictionary:
             assert isinstance(pattern, re.Pattern)
             assert isinstance(new, str)
 
-    def test_absent_key_emits_no_fix(self):
-        assert docs_auditor._detect_stale_term_fixes("Nothing stale here at all.") == []
+    def test_cue_word_inside_a_larger_word_does_not_exempt(self):
+        """Tier-2 cue words are word-anchored, not substring tests (plan Risk 1).
+
+        ``old`` is a substring of ``threshold``, ``placeholder``, ``holds``,
+        ``bold`` — all common in this corpus. With an unanchored test, tier 2
+        degenerates into "the document mentions the new term somewhere", which is
+        exactly the over-exemption the anti-over-exemption guard claims to
+        prevent. Measured live: ``docs/guides/summarizer-output-audit.md`` was
+        exempted for ``RedisJob`` solely because it contains ``threshold``.
+        """
+        content = (
+            "The summarize_threshold controls how many turns are batched.\n"
+            "`AgentSession` rows are written once per turn.\n"
+            "The SessionLog is queried directly by the dashboard.\n"
+        )
+        assert docs_auditor._detect_stale_term_fixes(content) != []
+
+    @pytest.mark.parametrize("content", ["", "   \n\n  ", "Nothing stale here at all."])
+    def test_absent_key_emits_no_fix(self, content):
+        """Empty, whitespace-only, and stale-term-free content all yield no fix."""
+        assert docs_auditor._detect_stale_term_fixes(content) == []
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1018,90 @@ class TestExistenceInvariant:
         )
         assert (applied, withheld) == (0, [])
         assert p.read_text() == body
+
+    # -- degraded `git ls-files`, the only new failure surface ---------------
+
+    @pytest.fixture()
+    def clear_basename_cache(self):
+        """The index is memoized per repo root; assert against a live call, not a hit."""
+        docs_auditor._BASENAME_INDEX_CACHE.clear()
+        yield
+        docs_auditor._BASENAME_INDEX_CACHE.clear()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda: MagicMock(returncode=1, stdout="", stderr="fatal: not a git repository"),
+                id="nonzero-rc",
+            ),
+            pytest.param(
+                lambda: (_ for _ in ()).throw(OSError("git: command not found")),
+                id="oserror",
+            ),
+        ],
+    )
+    def test_ls_files_failure_warns_and_yields_empty_index(
+        self, repo, caplog, clear_basename_cache, failure
+    ):
+        """Plan Risk 3 / Failure Path Test Strategy: the forced-failure case.
+
+        A failed index must be loud (``logger.warning``) and empty, never a
+        partially-populated dict that silently answers "absent" for real names.
+        """
+        with (
+            patch.object(docs_auditor.subprocess, "run", side_effect=lambda *a, **k: failure()),
+            caplog.at_level("WARNING", logger="reflections.docs_auditor"),
+        ):
+            index = docs_auditor._repo_basename_index(repo)
+
+        assert index == {}
+        assert any(
+            r.levelname == "WARNING" and "git ls-files" in r.getMessage() for r in caplog.records
+        ), "a degraded basename index must warn"
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda: MagicMock(returncode=1, stdout="", stderr="fatal: not a git repository"),
+                id="nonzero-rc",
+            ),
+            pytest.param(
+                lambda: (_ for _ in ()).throw(OSError("git: command not found")),
+                id="oserror",
+            ),
+        ],
+    )
+    def test_dir_prefixed_decisions_unaffected_by_degraded_index(
+        self, repo, doc, clear_basename_cache, failure
+    ):
+        """Degradation is scoped to bare names; ``dir/file.py`` never consults the index.
+
+        The fallback must not leak into the path class that already worked, in
+        either direction: an absent dir-prefixed target still withholds and a
+        present one still applies.
+        """
+        (repo / "agent" / "renamed.py").write_text("")
+        with patch.object(docs_auditor.subprocess, "run", side_effect=lambda *a, **k: failure()):
+            applied, withheld = docs_auditor._apply_fixes_to_file(
+                doc,
+                repo,
+                [("agent/real.py", "agent/ghost.py"), ("agent/other.py", "agent/renamed.py")],
+            )
+
+        assert applied == 1
+        assert withheld == [
+            {
+                "doc": str(doc),
+                "old": "agent/real.py",
+                "new": "agent/ghost.py",
+                "reason": "target-absent",
+            }
+        ]
+        text = (repo / doc).read_text()
+        assert "agent/renamed.py" in text
+        assert "agent/ghost.py" not in text
 
     def test_ok_result_carries_withheld_keys(self):
         res = docs_auditor._ok_result("ok")

@@ -535,6 +535,15 @@ _MIGRATION_CUE_WORDS = (
     "supersedes",
 )
 
+# Word-anchored alternation over the cue words. Anchoring is load-bearing, not
+# cosmetic: an unanchored substring test fires inside unrelated words ("old" is a
+# substring of threshold, holds, placeholder, bold, household), which collapses
+# tier 2 of ``_has_migration_context`` into "the document mentions the new term"
+# and exempts whole documents by accident.
+_MIGRATION_CUE_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _MIGRATION_CUE_WORDS) + r")\b"
+)
+
 
 def _migration_cues(old_term: str, new_term: str) -> tuple[str, ...]:
     """Directed migration cues for one ``(old_term, new_term)`` pair, normalized.
@@ -569,21 +578,30 @@ def _has_migration_context(normalized: str, old_term: str, new_term: str) -> boo
 
     1. A *directed* cue naming both (or the specific) terms — ``renamed to X``,
        ``formerly Y``, ``Y = X``, ``Y -> X``, ``Y → X``, ``alias Y`` …
-    2. A generic migration cue word (``replacing``, ``earlier``, ``old`` …)
-       **plus** the new term appearing somewhere in the document. Tier 2 is what
-       catches real corpus prose whose cue and term sit in different clauses, e.g.
+    2. A generic migration cue word (``replacing``, ``earlier``, ``old`` …),
+       matched **word-anchored** via ``_MIGRATION_CUE_WORD_RE``, **plus** the new
+       term appearing somewhere in the document. Tier 2 is what catches real
+       corpus prose whose cue and term sit in different clauses, e.g.
        *"`AgentSession` lands, replacing both the earlier `SessionLog` and
        `RedisJob` models"* — where no directed cue names ``RedisJob`` at all.
 
-    Requiring the new term for tier 2 is the guard against over-exemption: prose
-    that merely mentions a stale name without ever naming its successor is not a
-    migration record and still queues a fix.
+    Two things make tier 2 a guard rather than a rubber stamp, and both are
+    load-bearing:
+
+    - **The new term must appear.** Prose that merely mentions a stale name
+      without ever naming its successor is not a migration record.
+    - **The cue words are word-anchored.** A bare ``in`` substring test fires
+      inside unrelated words — ``old`` sits inside *threshold*, *holds*,
+      *placeholder*, *bold*, *household* — and with that, tier 2 degenerates into
+      "the document mentions the new term somewhere". Measured on the live corpus:
+      ``docs/guides/summarizer-output-audit.md`` was exempted for ``RedisJob``
+      solely because it contains ``summarize_threshold``.
     """
     if any(cue in normalized for cue in _migration_cues(old_term, new_term)):
         return True
     new = _normalize_prose(new_term)
     if new and new in normalized:
-        return any(word in normalized for word in _MIGRATION_CUE_WORDS)
+        return bool(_MIGRATION_CUE_WORD_RE.search(normalized))
     return False
 
 
@@ -741,6 +759,9 @@ def _absent_new_path_refs(
 
 # A file-path-shaped token. Generalizes the single-segment shape to any number of
 # directory segments so a stale term matching the *first* segment is suppressed too.
+# Byte-identical to ``_PATH_REF_RE`` today, and deliberately kept separate: it answers
+# a different question (apply-time "is this match inside a path token?" suppression vs.
+# that one's write-path existence oracle) and either may diverge without the other.
 _PATH_TOKEN_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
 
 

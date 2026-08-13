@@ -126,13 +126,24 @@ Two tiers of cue:
    conclusive alone. Generating them from the pair means adding a `STALE_TERMS`
    entry costs no edit here.
 2. **Generic cue words** (`_MIGRATION_CUE_WORDS`: `renamed`, `replaced`,
-   `replacing`, `formerly`, `earlier`, `old`, `alias`, `superseded`, …) that
-   fire **only when the new term also appears somewhere in the document**. That
-   second condition is the anti-over-exemption guard: prose mentioning a stale
-   name without ever naming its successor is not a migration record and still
-   queues a fix. Tier 2 is what catches real corpus phrasing whose cue and term
-   sit in different clauses, such as *"replacing both the earlier `SessionLog`
-   and `RedisJob` models"* for `RedisJob`, which no directed cue names.
+   `replacing`, `formerly`, `earlier`, `old`, `alias`, `superseded`, …), matched
+   **word-anchored** through the precompiled `_MIGRATION_CUE_WORD_RE`
+   alternation, that fire **only when the new term also appears somewhere in the
+   document**. Tier 2 is what catches real corpus phrasing whose cue and term sit
+   in different clauses, such as *"replacing both the earlier `SessionLog` and
+   `RedisJob` models"* for `RedisJob`, which no directed cue names.
+
+   **Both halves of tier 2 are the anti-over-exemption guard, and both are
+   load-bearing.** Requiring the new term means prose that mentions a stale name
+   without ever naming its successor is not a migration record and still queues a
+   fix. Word-anchoring the cue words means a cue cannot fire from inside an
+   unrelated word: `old` is a substring of *threshold*, *holds*, *placeholder*,
+   *bold* and *household*, all common in this corpus, and with a bare substring
+   test tier 2 collapses into "the document mentions the new term somewhere".
+   That was not hypothetical — `docs/guides/summarizer-output-audit.md` was
+   exempted for `RedisJob` solely because it contains `summarize_threshold`.
+   `TestStaleTermDictionary::test_cue_word_inside_a_larger_word_does_not_exempt`
+   pins it.
 
 **The scope is the document, deliberately.** Line-scoping (one exemption
 decision per occurrence) was measured and is strictly worse: it re-exposes 8
