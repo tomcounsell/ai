@@ -859,7 +859,7 @@ def session_owns_issue(session, issue_number) -> bool:
         return False
 
 
-def find_plan_path(issue_number: int) -> Path | None:
+def find_plan_path(issue_number: int, *, tracking_only: bool = False) -> Path | None:
     """Locate the plan file tracking this issue.
 
     Walks ``docs/plans/`` and returns the first ``.md`` file referencing the
@@ -885,6 +885,22 @@ def find_plan_path(issue_number: int) -> Path | None:
     cross-reference or No-Gos entry referencing a foreign (target-repo) issue,
     not the plan that actually owns it.  The ``tracking:`` match is always
     authoritative and is returned immediately regardless of resolution path.
+
+    **``tracking_only`` (#2793):** when True, the bare-``#N`` textual fallback
+    is suppressed on EVERY resolution path, not just the step-3 ``__file__``
+    one — only an authoritative ``tracking:`` match resolves. Callers that
+    derive an *identity* from the plan filename (a branch slug, a
+    ``docs/plans/{slug}.md`` ownership check) must pass this: a plan that
+    merely cross-references ``#N`` yields some other issue's slug, and a slug
+    that belongs to another issue is worse than no slug at all — it sends a
+    live check off to verify an artifact nobody claimed. The default (False)
+    preserves the historical behavior for callers that only need *a* plausible
+    plan document (e.g. the G5 plan-hash probe), where a near-miss is
+    harmless.
+
+    Note the CONCERN-3 suppression above is NOT sufficient for those callers:
+    it only fires when resolution reached step 3, so with ``SDLC_TARGET_REPO``
+    set (step 1) a bare-``#N`` cross-reference still won.
     """
     if not issue_number:
         return None
@@ -935,6 +951,11 @@ def find_plan_path(issue_number: int) -> Path | None:
                 fallback = entry
     except Exception as e:
         logger.debug(f"find_plan_path walk failed: {e}")
+
+    # tracking_only (#2793): an identity-deriving caller accepts ONLY an
+    # authoritative tracking: match, on every resolution path.
+    if tracking_only:
+        return None
 
     # When plan resolution fell back to the ai-repo __file__ path
     # (SDLC_TARGET_REPO unset, not in a git repo), a bare-#N textual match is
