@@ -23,6 +23,7 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=str(WORKTREE),
+        env=subprocess_env(project_root=str(WORKTREE)),
     )
 
 

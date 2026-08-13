@@ -64,6 +64,7 @@ def _pgrep_worker_pids() -> set[int]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=subprocess_env(),
         )
         return {int(tok) for tok in out.stdout.split() if tok.strip().isdigit()}
     except Exception:

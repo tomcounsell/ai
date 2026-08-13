@@ -94,6 +94,7 @@ def _spawn_fake_worker() -> subprocess.Popen:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=subprocess_env(),
     )
 
 
