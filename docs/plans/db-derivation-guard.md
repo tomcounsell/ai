@@ -389,15 +389,15 @@ The PR must contain zero changes to `tests/conftest.py`, `tests/db_claim.py`,
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted
+- [x] Create `docs/features/test-db-derivation-guard.md` — what the rule is, the two accepted
       shapes, how to disposition a new site, why the polarity is inverted, and which of
       `check_dispositions`/`apply_dispositions` enforces the allowlist invariant.
-- [ ] Add entry to `docs/features/README.md` index table.
+- [x] Add entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] Module docstring on `tests/db_derivation_guard.py` names the two disposition tables and states
+- [x] Module docstring on `tests/db_derivation_guard.py` names the two disposition tables and states
       precisely which function enforces the "no allowlist entry may name a pool db" invariant.
-- [ ] `Exemption` docstring states matching is per-file-per-expression, not per-site.
+- [x] `Exemption` docstring states matching is per-file-per-expression, not per-site.
 
 ## Success Criteria
 
