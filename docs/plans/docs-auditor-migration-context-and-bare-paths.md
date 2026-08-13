@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2744
 last_comment_id: 5277752954
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-08-13T08:59:44Z
 ---
 
 # Docs Auditor: Migration-Context Hatch and Bare-Path Existence Invariant
@@ -385,19 +386,26 @@ against the on-disk `content` is stale the moment a line is deleted ahead of it.
 an error. That is precisely the corruption class this lane exists to close, so the design
 must not reintroduce it.
 
-**Correct mechanism.** Pass a *callable* replacement to `pattern.sub()` instead of a
-string. Inside the callable, `match.string` **is** the text currently being rewritten and
-`match.start()` is the live offset into it, so fence / heading / deletion-prose context is
-re-derived from the actual apply-time text on every match. There is no index to go stale
-and nothing to thread through from detection.
+**Correct mechanism — the callable is built INSIDE `_apply_fixes_to_file`, and the
+detector's channel contract does not change at all.** `_detect_stale_term_fixes` keeps
+returning `(re.Pattern, str)` exactly as today. In `_apply_fixes_to_file`'s regex loop,
+wrap the plain `str` replacement in a locally-constructed callable and hand *that* to
+`pattern.sub()`. Inside the callable, `match.string` **is** the text currently being
+rewritten and `match.start()` is the live offset into it, so fence / heading /
+deletion-prose context is re-derived from the actual apply-time text on every match. There
+is no index to go stale and nothing to thread through from detection.
 
-**Channel-shape consequences the build must honor:**
+**Why the callable must not live on the channel** (cycle-2 critique blocker, verified
+against source): `TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel`
+(`tests/unit/test_docs_auditor_substrate.py:613-618`) asserts **both**
+`isinstance(pattern, re.Pattern)` *and* `isinstance(new, str)` on the second element.
+Widening the detector's return to `str | Callable` would break it. Building the callable at
+the apply site keeps the contract and that test genuinely untouched — which is what this
+plan wanted in the first place. **Do not widen the channel type, and do not weaken the
+`Regex-channel purity` Verification row to only check the pattern half.**
 
-- The tuple becomes `(re.Pattern, str | Callable[[re.Match], str])`. This is a **widening,
-  not a break**: `re.sub`/`re.subn` accept either, and
-  `TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`:613`) asserts the
-  *first* element is a `re.Pattern`, which is unchanged. That test must still pass
-  unmodified. Update `_apply_fixes_to_file`'s docstring to state the widened type.
+**Consequences the build must honor:**
+
 - **`subn`'s count becomes wrong and must be corrected.** A suppressed match returns
   `match.group(0)` unchanged, but `subn` still counts it as a substitution. Taking that
   count as-is would inflate `fixes_applied` with rewrites that never happened. The callable
@@ -407,6 +415,12 @@ and nothing to thread through from detection.
   while `count > 0`. Without a `if candidate == new_text: continue` guard, the loop runs
   `_absent_new_path_refs` pointlessly and adds a nonzero `applied` for a no-op. Add the
   guard.
+- **The withheld record must stay human-readable.** `_reject(pattern.pattern, new, absent)`
+  (`:634`) stores `new` verbatim, and it surfaces in the PR body (`:1398`), the findings
+  summary (`:1852`), and the warning log (`:587`). Keeping the callable local to the apply
+  loop means `_reject` still receives the original replacement *string*; a callable there
+  would render as `<function ... at 0x...>` on all three surfaces. Pass the string
+  explicitly if the loop is ever restructured.
 
 **3. Path-token suppression (#2744).** A match whose surrounding token matches a file-path
 shape (`[\w.-]*/?[\w.-]+\.(?:py|md)`) is not rewritten. This is the rule that saves
@@ -507,7 +521,7 @@ accommodate.
 - [ ] `::TestWithheldBlocksAutoMerge` (`:837`) — **UPDATE**: add a bare-name withhold case proving propagation to PR body / Telegram / liveness.
 - [ ] `::TestNonMarkdownApplyGuard` (`:489`) — **KEEP**: unaffected; verify still green (the `.md`-only write guard at `:1130` is untouched).
 - [ ] `::TestStaleTermWordBoundary` — **ADD** a `README.md` line-shift fixture: a broken index entry deleted via the `new == ""` sentinel on an earlier line plus a stale term with adjacent deletion prose on a later line. Proves apply-time suppression survives the literal loop's line deletions. Assert on resulting content — detection-time indices fail this silently, not loudly.
-- [ ] `::TestWithheldRateNonRegression` — **NEW**: the `withheld-rate-non-regression` row. See "How `withheld-rate-non-regression` must be implemented" under Verification; it must drive `_apply_fixes_to_file` directly with snapshot/restore, not `audit(apply_mode="dry-run")`.
+- [ ] `::TestWithheldRateNonRegression` — **NEW**: the `withheld-rate-non-regression` row. See "How `withheld-rate-non-regression` must be implemented" under Verification; it drives `_apply_fixes_to_file` directly inside a disposable detached `git worktree` (never the live checkout), self-baselining narrow-vs-widened `_PATH_REF_RE` in one run. `audit(apply_mode="dry-run")` cannot be used.
 - [ ] No `xfail`/`xpass` markers exist anywhere in `tests/unit/test_docs_auditor_substrate.py` — verified by grep at plan time. **No xfail conversions required.**
 
 ## Rabbit Holes
@@ -650,8 +664,10 @@ keep their exact signatures and their `_ok_result` return contract
       (#2759 AC2).
 - [ ] All three patterns audited; `:454` and `:761` left unchanged **with the reason
       recorded in a code comment** (#2759 AC3).
-- [ ] Withheld-fix count over `docs/features/*.md` in dry-run is **not greater** after the
-      change than before (#2759 AC4).
+- [ ] Withheld-fix count over `docs/features/*.md`, measured via
+      `TestWithheldRateNonRegression`, is **not greater** after the change than before
+      (#2759 AC4). See "How `withheld-rate-non-regression` must be implemented" under
+      Verification — `apply_mode="dry-run"` **cannot** be used for this measurement.
 - [ ] Every behavioral fix has a test demonstrated **red against `main`** before the fix and
       green after; the red output is pasted into the PR description as the paper trail.
 - [ ] The diff touches **only** `reflections/docs_auditor.py`,
@@ -736,10 +752,11 @@ keep their exact signatures and their `_ok_result` return contract
 - **Parallel**: false
 - Add `_normalize_prose` (strip backticks, collapse whitespace, lowercase). Use it for cue matching only, never for output.
 - Replace the six literal arms at `:520-527` with a generated, case-insensitive cue list per `(old_term, new_term)`. Keep the hatch **document-scoped**; record that ruling and spike-2's measurement in the docstring.
-- Wire `_build_line_context` / `_is_documented_deletion` (`:689-747`) into stale-term suppression **at apply time**, via a callable replacement passed to `pattern.sub()`. Re-derive context from `match.string` and `match.start()` on every match. **Do not precompute line indices at detection time** — the literal `fixes` loop runs first and its `new == ""` line-delete sentinel invalidates them silently (see Technical Approach step 2).
+- Wire `_build_line_context` / `_is_documented_deletion` (`:689-747`) into stale-term suppression **at apply time**, via a callable built **inside `_apply_fixes_to_file`'s regex loop** that wraps the channel's plain `str` replacement. Re-derive context from `match.string` and `match.start()` on every match. **Do not precompute line indices at detection time** — the literal `fixes` loop runs first and its `new == ""` line-delete sentinel invalidates them silently (see Technical Approach step 2).
+- **Do NOT change `_detect_stale_term_fixes`'s `(re.Pattern, str)` return type.** `test_fixes_travel_on_the_regex_channel` (`tests/unit/test_docs_auditor_substrate.py:613-618`) asserts `isinstance(new, str)` on the second element as well as `isinstance(pattern, re.Pattern)` on the first. It must pass unmodified, and the `Regex-channel purity` Verification row must keep checking both halves.
 - Add path-token suppression: a match inside a `[\w.-]*/?[\w.-]+\.(?:py|md)` token is never rewritten.
 - Correct the substitution count: a suppressed match still increments `subn`'s counter, so tally suppressions in a closure cell and report `subn_count - suppressed_count` as `applied`. Add a `if candidate == new_text: continue` guard for the all-suppressed case.
-- Widen the channel's second element to `str | Callable[[re.Match], str]` and say so in `_apply_fixes_to_file`'s docstring. This is a widening, not a break — `test_fixes_travel_on_the_regex_channel` asserts only that the first element is a `re.Pattern` and must pass unmodified.
+- Keep `_reject` (`:634`) receiving the original replacement **string**, so the withheld record stays readable in the PR body (`:1398`), findings summary (`:1852`), and warning log (`:587`) rather than rendering as `<function ... at 0x...>`.
 - Rewrite the `_detect_stale_term_fixes` docstring: the "stops short of never rewrites a path" sentence is now false.
 - **FILE FENCE**: touch only `reflections/docs_auditor.py`. If anything else seems required, stop and report a blocker.
 
@@ -767,7 +784,8 @@ keep their exact signatures and their `_ok_result` return contract
 - Confirm `git diff --name-only main...HEAD` lists exactly `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`.
 - Run the detector + apply over the three named docs in a scratch copy; assert zero byte changes for the first two and at most one occurrence for the third.
 - Land `TestWithheldRateNonRegression` (the `withheld-rate-non-regression` Verification row). **`audit(apply_mode="dry-run")` cannot be used** — see the row's note; `_apply_fixes_to_file` is gated on `apply_mode == "apply"` (`:1130`), so dry-run reports `fixes_withheld == 0` unconditionally. Drive `_apply_fixes_to_file` directly, per the row.
-- Measure the withheld count over `docs/features/*.md` at `main` first, pin it in the test as `MAIN_WITHHELD_BASELINE` with a comment recording the SHA it was measured at, then assert the post-change count is `<=` it.
+- The test is **self-baselining**: measure both arms in the same run over the same corpus snapshot — `_PATH_REF_RE` monkeypatched to the narrow `+` form vs. the shipped widened `*` form — and assert `after <= before`. No pinned constant; nothing to rot as the corpus changes.
+- Run it in a **disposable `git worktree add --detach`**, torn down in a `finally`. Never point `_apply_fixes_to_file` at the live checkout: it writes, and a restore that misses under the thread timeout would corrupt a concurrent lane's docs.
 - **Qualitative check — confirm the quieter detector is quiet, not dead.** The detector is deliberately made to propose fewer fixes, so the daily rotation's auto-fix volume visibly drops after this ships. Eyeball the diff the auditor would now produce over the three named corpus docs and confirm what *survives* is genuine stale-term modernization rather than the detector having gone decorative. Pair it with the `Detector still detects` Verification row (which proves a no-migration-context doc still queues a fix) so the drop is attributable to suppression working, not to detection breaking.
 - Confirm each red test from tasks 1 and 2 now passes, and that its captured red output is in the PR description.
 - Run the full `POPOTO_TEST_DB=9 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q`.
@@ -803,7 +821,7 @@ keep their exact signatures and their `_ok_result` return contract
 | popoto doc clean | `.venv/bin/python -c "from reflections.docs_auditor import _detect_stale_term_fixes as f; from pathlib import Path; print(len(f(Path('docs/features/popoto-redis-expansion.md').read_text())))"` | output contains 0 |
 | migration-audit doc clean | `.venv/bin/python -c "from reflections.docs_auditor import _detect_stale_term_fixes as f; from pathlib import Path; print(len(f(Path('docs/guides/agent-session-migration-audit.md').read_text())))"` | output contains 0 |
 | Detector still detects | `.venv/bin/python -c "from reflections.docs_auditor import _detect_stale_term_fixes as f; print(len(f('The SessionLog holds per-turn state and is queried directly.')))"` | output > 0 |
-| Regex-channel purity (anti-criterion) | `.venv/bin/python -c "import re; from reflections.docs_auditor import _detect_stale_term_fixes as f; print(sum(0 if isinstance(p, re.Pattern) else 1 for p,_ in f('The SessionLog tracks state.')))"` | output contains 0 |
+| Regex-channel purity — **both halves** (anti-criterion) | `.venv/bin/python -c "import re; from reflections.docs_auditor import _detect_stale_term_fixes as f; print(sum(0 if (isinstance(p, re.Pattern) and isinstance(n, str)) else 1 for p,n in f('The SessionLog tracks state.')))"` | output contains 0 |
 | No sweeper-region edits (anti-criterion) | `git diff main...HEAD -- reflections/docs_auditor.py \| grep -c '_pr_is_auto_merge_eligible\|_push_branch_and_pr\|_commit_current_branch\|run_docs_branch_sweeper'` | match count == 0 |
 | File fence honored (anti-criterion) | `git diff --name-only main...HEAD \| grep -v -E '^(reflections/docs_auditor\.py\|tests/unit/test_docs_auditor_substrate\.py\|docs/)' \| wc -l \| tr -d ' '` | output contains 0 |
 | No swallowed exceptions introduced (anti-criterion) | `git diff main...HEAD -- reflections/docs_auditor.py \| grep '^+' \| grep -c 'except Exception: *pass'` | match count == 0 |
@@ -827,27 +845,42 @@ regardless of the change's real effect:
    dry-run it never runs and `withheld` stays empty. Verified against source during this
    revision.
 
-**The mechanism that works.** Drive `_apply_fixes_to_file` directly, against the real
-`repo_root` (the existence oracle and the `git ls-files` basename index both need a real
-git checkout — a `tmp_path` mirror makes every reference read as absent and the measurement
-becomes meaningless). Because that function writes, the test must snapshot each
-`docs/features/*.md` before the call and restore it in a `finally`, then assert
-`git diff --quiet -- docs/features/` to prove the corpus was left pristine.
+**The mechanism that works.** Drive `_apply_fixes_to_file` directly. It needs a real git
+checkout — the existence oracle and the `git ls-files` basename index both do, and a
+`tmp_path` mirror makes every reference read as absent, which turns the measurement into
+noise.
+
+**Run it in a disposable `git worktree add --detach`, never against the live checkout.**
+`_apply_fixes_to_file` calls `full.write_text` (`:632`), so pointing it at the working
+repo means the test rewrites 267 tracked docs and relies on a `finally` block to put them
+back. On this machine several agents test concurrently and `pytest-clean.sh` runs under a
+thread timeout (`--timeout=420 --timeout-method=thread`), so a restore that does not run is
+a realistic outcome, not a theoretical one — and its blast radius is another lane's
+checkout. A detached worktree gives the real git checkout the oracle needs with none of
+that exposure; tear it down in a `finally`.
+
+**Make the baseline self-measuring, not a pinned constant.** A hard-coded
+`MAIN_WITHHELD_BASELINE` pins a number against a corpus the auditor rewrites daily, so it
+rots into either a false pass or an unexplained failure with no way to tell which. Instead
+measure both arms inside the same test run, over the same corpus snapshot: once with
+`_PATH_REF_RE` monkeypatched back to the narrow `+` form (the "before"), once with the
+shipped widened `*` form (the "after"), asserting `after <= before`. That is the property
+AC4 actually claims — *widening costs no new withholds* — stated so it stays true whatever
+the corpus becomes, and it is what makes the "#2759 does not block on #2729" ruling
+mechanically checkable rather than a snapshot of one afternoon.
 
 Live as `tests/unit/test_docs_auditor_substrate.py::TestWithheldRateNonRegression`, which
-keeps it inside the file fence. The `main` baseline is measured once during Task 5 and
-pinned in the test as `MAIN_WITHHELD_BASELINE` with a comment naming the SHA it came from;
-the assertion is `after <= MAIN_WITHHELD_BASELINE`.
+keeps it inside the file fence.
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, History & Consistency | Technical Approach step 2 and Task 3 both assert that widening the regex channel to `(re.Pattern, str \| Callable[[re.Match], str])` is "a widening, not a break" because `TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`tests/unit/test_docs_auditor_substrate.py:613-618`) "asserts the *first* element is a `re.Pattern`" and "must still pass unmodified". That characterization is factually wrong: the test loops `for pattern, new in fixes` and asserts **both** `isinstance(pattern, re.Pattern)` **and** `isinstance(new, str)`. If `_detect_stale_term_fixes` returns a callable as the second element, the test fails. The plan's own new `Regex-channel purity` Verification row checks only the pattern half, silently dropping the `str` assertion the real test still enforces — so the plan's stated guard for Risk 2 does not match the test it names. | pending | Do NOT widen `_detect_stale_term_fixes`'s return type. Keep it `list[tuple[re.Pattern[str], str]]` returning the plain replacement string, and build the suppressing callable inside `_apply_fixes_to_file`'s own `regex_fixes` loop: `repl = _make_suppressing_repl(new, path, ...)` then `candidate, count = pattern.subn(repl, new_text)`. Only `_apply_fixes_to_file`'s local variable is a callable; the channel contract and `test_fixes_travel_on_the_regex_channel:613-618` are both untouched, and `_apply_fixes_to_file`'s docstring (not the detector's return type) is what documents the callable. If instead the plan genuinely intends the detector to emit callables, it must reclassify that test as UPDATE in Test Impact, delete the "must still pass unmodified" sentence from Technical Approach step 2 and Task 3, and extend the `Regex-channel purity` row to assert the new second-element type — Risk 2's mitigation currently depends on the opposite. |
-| CONCERN | Risk & Robustness | On the withhold path, `_apply_fixes_to_file` calls `_reject(pattern.pattern, new, absent)` (`reflections/docs_auditor.py:634`) and `_reject` stores `new` verbatim into the withheld dict (`:593`) with no stringification. If `new` is a callable, that object is rendered into the PR body (`:1398`, `` `{w.get('new')}` ``), the findings summary (`:1852`, `{w.get('new')!r}`), and the warning log (`:587`) as `<function ... at 0x...>` — a non-deterministic memory address instead of the replacement term. The plan's own Error State Rendering checklist requires a withheld fix to reach every surface legibly, and this silently degrades all three. | pending | Whatever shape the callable takes, the withheld record must carry the human-readable replacement term, never the callable. Either resolve the BLOCKER by keeping the detector's second element a `str` (then `_reject` is unaffected), or, if a callable does reach the regex loop, capture the term explicitly and pass it: `_reject(pattern.pattern, new_term_str, absent)` where `new_term_str` is the `STALE_TERMS` value the callable closes over. Add an assertion to the bare-name case in `TestWithheldBlocksAutoMerge` (`:837`) that `withheld[0]["new"]` is a `str` and appears verbatim in the PR body, so the regression is caught at the surface the plan cares about. |
-| CONCERN | Risk & Robustness, Scope & Value | The `withheld-rate-non-regression` mechanism (Verification, "How ... must be implemented") prescribes driving `_apply_fixes_to_file` directly against the **real** `repo_root`, snapshotting each `docs/features/*.md` and restoring in a `finally`. `_apply_fixes_to_file` writes with `full.write_text` (`reflections/docs_auditor.py:632`), so for the duration of the test the live checkout's 267 tracked docs are mutated. Per CLAUDE.md several agents test on this machine at once against this checkout, and `scripts/pytest-clean.sh` runs under `--timeout=420 --timeout-method=thread` with xdist — a hard kill, a SIGKILLed controller, or a concurrent run reading mid-window leaves real tracked docs corrupted. That is the exact corruption class this lane exists to prevent, inflicted by its own verification. | pending | Do not write into the live checkout. Materialize a disposable checkout for the measurement: `git worktree add --detach <tmp> HEAD` (or `git clone --shared --no-checkout` + `git checkout`), pass that path as `repo_root`, and `git worktree remove --force` in the `finally`. A worktree is a real git checkout, so `git ls-files --cached --others --exclude-standard` and the doc-relative existence oracle both still resolve correctly — the plan's stated reason for needing a real repo ("a `tmp_path` mirror makes every reference read as absent") is satisfied without touching the working tree. Keep the `git diff --quiet -- docs/features/` assertion as a belt-and-braces check that the live tree was never touched. |
-| CONCERN | Scope & Value, History & Consistency | Success Criteria still reads: "Withheld-fix count over `docs/features/*.md` **in dry-run** is not greater after the change than before (#2759 AC4)." The revision's own new subsection explicitly rules dry-run out — `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `reflections/docs_auditor.py:1130`, so a dry-run run reports `fixes_withheld == 0` unconditionally. A validator executing the Success Criterion literally at Task 7 would run the measurement that provably cannot fail, and would conclude AC4 passed. | pending | Delete the words "in dry-run" from that Success Criteria bullet and point it at the mechanism instead: "Withheld-fix count over `docs/features/*.md` measured via `TestWithheldRateNonRegression` is not greater after the change than before (#2759 AC4); see 'How `withheld-rate-non-regression` must be implemented' — `apply_mode="dry-run"` cannot be used." This is the single remaining occurrence of the stale wording; the Verification row, Task 5, and Test Impact were all corrected in cycle 1's revision. |
-| CONCERN | Scope & Value | `MAIN_WITHHELD_BASELINE` is pinned as a constant measured once at a named SHA, but the quantity it pins is a function of the **live, mutable** `docs/features/*.md` corpus (267 tracked files that the auditor itself rewrites daily). Any future unrelated docs edit changes the measured "after" number, so the assertion `after <= MAIN_WITHHELD_BASELINE` can flip red for reasons entirely unconnected to this lane's code, with no documented re-pin procedure. If the baseline is 0 (spike-4's measured value), the test also forbids any future legitimate withhold anywhere in `docs/features/`. | pending | Make the comparison self-baselining rather than time-pinned: inside the same test, measure the withheld count twice against the disposable checkout — once with the widened `_PATH_REF_RE` and once with the pre-change pattern monkeypatched back (`monkeypatch.setattr(docs_auditor, "_PATH_REF_RE", re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py\|md)"))`) — and assert `widened <= narrow`. That is the property #2759 AC4 actually claims (the widening adds no withholds) and it holds regardless of how the corpus drifts. If the pinned constant is kept instead, add an explicit re-pin instruction naming who re-measures it and when. |
+| BLOCKER | Risk & Robustness, History & Consistency | Technical Approach step 2 and Task 3 both assert that widening the regex channel to `(re.Pattern, str \| Callable[[re.Match], str])` is "a widening, not a break" because `TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`tests/unit/test_docs_auditor_substrate.py:613-618`) "asserts the *first* element is a `re.Pattern`" and "must still pass unmodified". That characterization is factually wrong: the test loops `for pattern, new in fixes` and asserts **both** `isinstance(pattern, re.Pattern)` **and** `isinstance(new, str)`. If `_detect_stale_term_fixes` returns a callable as the second element, the test fails. The plan's own new `Regex-channel purity` Verification row checks only the pattern half, silently dropping the `str` assertion the real test still enforces — so the plan's stated guard for Risk 2 does not match the test it names. | **ADDRESSED (cycle 2)** — critic is right; verified `isinstance(new, str)` at `tests/unit/test_docs_auditor_substrate.py:617` myself. Took the recommended narrow fix: `_detect_stale_term_fixes` keeps its `(re.Pattern, str)` return type unchanged, and the suppressing callable is built inside `_apply_fixes_to_file`'s regex loop wrapping the plain `str`. Channel contract and `test_fixes_travel_on_the_regex_channel` are genuinely untouched. Technical Approach step 2 and Task 3 rewritten; the `Regex-channel purity` row now asserts **both** halves. | Do NOT widen `_detect_stale_term_fixes`'s return type. Keep it `list[tuple[re.Pattern[str], str]]` returning the plain replacement string, and build the suppressing callable inside `_apply_fixes_to_file`'s own `regex_fixes` loop: `repl = _make_suppressing_repl(new, path, ...)` then `candidate, count = pattern.subn(repl, new_text)`. Only `_apply_fixes_to_file`'s local variable is a callable; the channel contract and `test_fixes_travel_on_the_regex_channel:613-618` are both untouched, and `_apply_fixes_to_file`'s docstring (not the detector's return type) is what documents the callable. If instead the plan genuinely intends the detector to emit callables, it must reclassify that test as UPDATE in Test Impact, delete the "must still pass unmodified" sentence from Technical Approach step 2 and Task 3, and extend the `Regex-channel purity` row to assert the new second-element type — Risk 2's mitigation currently depends on the opposite. |
+| CONCERN | Risk & Robustness | On the withhold path, `_apply_fixes_to_file` calls `_reject(pattern.pattern, new, absent)` (`reflections/docs_auditor.py:634`) and `_reject` stores `new` verbatim into the withheld dict (`:593`) with no stringification. If `new` is a callable, that object is rendered into the PR body (`:1398`, `` `{w.get('new')}` ``), the findings summary (`:1852`, `{w.get('new')!r}`), and the warning log (`:587`) as `<function ... at 0x...>` — a non-deterministic memory address instead of the replacement term. The plan's own Error State Rendering checklist requires a withheld fix to reach every surface legibly, and this silently degrades all three. | **ADDRESSED (cycle 2)** — resolved by the blocker fix: keeping the callable local to the apply loop means `_reject` still receives the original replacement string. Recorded explicitly in Technical Approach step 2 and as a Task 3 bullet naming the three surfaces (`:1398`, `:1852`, `:587`) so a future restructure does not silently reintroduce it. | Whatever shape the callable takes, the withheld record must carry the human-readable replacement term, never the callable. Either resolve the BLOCKER by keeping the detector's second element a `str` (then `_reject` is unaffected), or, if a callable does reach the regex loop, capture the term explicitly and pass it: `_reject(pattern.pattern, new_term_str, absent)` where `new_term_str` is the `STALE_TERMS` value the callable closes over. Add an assertion to the bare-name case in `TestWithheldBlocksAutoMerge` (`:837`) that `withheld[0]["new"]` is a `str` and appears verbatim in the PR body, so the regression is caught at the surface the plan cares about. |
+| CONCERN | Risk & Robustness, Scope & Value | The `withheld-rate-non-regression` mechanism (Verification, "How ... must be implemented") prescribes driving `_apply_fixes_to_file` directly against the **real** `repo_root`, snapshotting each `docs/features/*.md` and restoring in a `finally`. `_apply_fixes_to_file` writes with `full.write_text` (`reflections/docs_auditor.py:632`), so for the duration of the test the live checkout's 267 tracked docs are mutated. Per CLAUDE.md several agents test on this machine at once against this checkout, and `scripts/pytest-clean.sh` runs under `--timeout=420 --timeout-method=thread` with xdist — a hard kill, a SIGKILLed controller, or a concurrent run reading mid-window leaves real tracked docs corrupted. That is the exact corruption class this lane exists to prevent, inflicted by its own verification. | **ADDRESSED (cycle 2)** — measurement moved into a disposable `git worktree add --detach`, torn down in a `finally`; the live checkout is never written. Rationale recorded (thread timeout + concurrent lanes make a missed restore realistic, and its blast radius is another lane's checkout). | Do not write into the live checkout. Materialize a disposable checkout for the measurement: `git worktree add --detach <tmp> HEAD` (or `git clone --shared --no-checkout` + `git checkout`), pass that path as `repo_root`, and `git worktree remove --force` in the `finally`. A worktree is a real git checkout, so `git ls-files --cached --others --exclude-standard` and the doc-relative existence oracle both still resolve correctly — the plan's stated reason for needing a real repo ("a `tmp_path` mirror makes every reference read as absent") is satisfied without touching the working tree. Keep the `git diff --quiet -- docs/features/` assertion as a belt-and-braces check that the live tree was never touched. |
+| CONCERN | Scope & Value, History & Consistency | Success Criteria still reads: "Withheld-fix count over `docs/features/*.md` **in dry-run** is not greater after the change than before (#2759 AC4)." The revision's own new subsection explicitly rules dry-run out — `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `reflections/docs_auditor.py:1130`, so a dry-run run reports `fixes_withheld == 0` unconditionally. A validator executing the Success Criterion literally at Task 7 would run the measurement that provably cannot fail, and would conclude AC4 passed. | **ADDRESSED (cycle 2)** — the words "in dry-run" deleted from the Success Criteria bullet, which now points at `TestWithheldRateNonRegression` and states outright that `apply_mode="dry-run"` cannot be used. | Delete the words "in dry-run" from that Success Criteria bullet and point it at the mechanism instead: "Withheld-fix count over `docs/features/*.md` measured via `TestWithheldRateNonRegression` is not greater after the change than before (#2759 AC4); see 'How `withheld-rate-non-regression` must be implemented' — `apply_mode="dry-run"` cannot be used." This is the single remaining occurrence of the stale wording; the Verification row, Task 5, and Test Impact were all corrected in cycle 1's revision. |
+| CONCERN | Scope & Value | `MAIN_WITHHELD_BASELINE` is pinned as a constant measured once at a named SHA, but the quantity it pins is a function of the **live, mutable** `docs/features/*.md` corpus (267 tracked files that the auditor itself rewrites daily). Any future unrelated docs edit changes the measured "after" number, so the assertion `after <= MAIN_WITHHELD_BASELINE` can flip red for reasons entirely unconnected to this lane's code, with no documented re-pin procedure. If the baseline is 0 (spike-4's measured value), the test also forbids any future legitimate withhold anywhere in `docs/features/`. | **ADDRESSED (cycle 2)** — pinned constant dropped entirely. The test is now self-baselining: it measures narrow (`+`, monkeypatched) vs. widened (`*`, shipped) `_PATH_REF_RE` in the same run over the same corpus snapshot and asserts `after <= before`. That is AC4's actual claim and it cannot rot as the corpus changes. | Make the comparison self-baselining rather than time-pinned: inside the same test, measure the withheld count twice against the disposable checkout — once with the widened `_PATH_REF_RE` and once with the pre-change pattern monkeypatched back (`monkeypatch.setattr(docs_auditor, "_PATH_REF_RE", re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py\|md)"))`) — and assert `widened <= narrow`. That is the property #2759 AC4 actually claims (the widening adds no withholds) and it holds regardless of how the corpus drifts. If the pinned constant is kept instead, add an explicit re-pin instruction naming who re-measures it and when. |
 
 ---
 
