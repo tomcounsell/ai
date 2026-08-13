@@ -232,6 +232,35 @@ class TestTargetIsTheFileTheWriteNamed:
         payload = {"tool_name": "Write", "tool_input": {"file_path": "docs/plans/mine.md"}}
         assert run_hook(payload, cwd=tmp_path) == 2
 
+    def test_process_cwd_never_selects_the_target(self, tmp_path):
+        """The hook process's cwd must not decide which file gets judged.
+
+        Lane B holds a COMPLIANT plan at the same relative path lane A's
+        deficient one occupies, and the hook process starts in lane B. The
+        payload names lane A's file by absolute path and carries no ``cwd``
+        key — the shape ``.opencode/plugins/valor-bridge.ts`` actually sends.
+
+        A validator that resolves the target against its own cwd reads lane B's
+        compliant plan and exits 0, clearing a write it never opened. The three
+        sibling section validators pin this via the shared ``cross_lane_repo``
+        fixture; this one keeps its own two-lane setup because its other
+        targeting tests are already ``tmp_path``-based.
+        """
+        lane_a, lane_b = tmp_path / "laneA", tmp_path / "laneB"
+        deficient = write_plan(lane_a, "mine.md", BAD_PLAN)
+        write_plan(lane_b, "mine.md", plan_with_body("Nothing notable."))
+
+        proc = subprocess.run(
+            [sys.executable, str(VALIDATOR)],
+            input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(deficient)}}),
+            capture_output=True,
+            text=True,
+            cwd=str(lane_b),
+            timeout=30,
+        )
+        assert proc.returncode == 2
+        assert str(deficient) in proc.stderr, "the refusal must cite lane A's plan, not lane B's"
+
     @pytest.mark.parametrize("payload", [None, "", "not json", {"tool_input": {}}])
     def test_absent_or_malformed_input_passes_through(self, payload, tmp_path):
         write_plan(tmp_path, "other-lane.md", BAD_PLAN)
