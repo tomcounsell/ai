@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2708
 last_comment_id: 5236176220
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-08-13T12:40:52Z
 ---
 
 # Expectations as the Single Obligation Primitive on Job, with a Reconciler for Orphaned Lanes
@@ -152,9 +153,16 @@ moment of creation and an owner-authored release path.
 - **Interface changes:** `Job.add_promise/remove_promise/open_promises/all_promises` are
   **replaced** by `add_expectation/discharge_expectation/open_expectations/all_expectations`
   (no legacy aliases — NO LEGACY CODE). `has_open_promises` → `has_open_expectations`.
-  `at_rest_with_open_promises` → `open_expectations_with_gone_owner` (reconciler query) +
-  `at_rest_with_open_expectations` retained as the operator backstop during the transition
-  of meaning — see Solution. `MessageDraft.expectations` → `MessageDraft.open_questions`.
+  **Backstop disposition (single, resolved per critique blocker):** rename-and-keep.
+  `at_rest_with_open_promises` → `at_rest_with_open_expectations`, and
+  `_check_jobs_at_rest_with_open_promises` → the renamed session-health check that
+  **remains the caller of `Job.sweep_to_rest()`** on the same cadence (it is today the
+  only call site, `agent/session_health.py:913`/`:4505` — deleting it would silently stop
+  Jobs aging to rest). Its flagged-set meaning shifts: with `status` chokepoint-maintained
+  the intersection is empty in steady state, so any hit is an **invariant-violation alarm**
+  (drift/migration edge) surfaced to the operator, asserted empty by a regression test.
+  The reconciler's `open_expectations_with_gone_owner` is a separate, additive query in a
+  separate reflection. `MessageDraft.expectations` → `MessageDraft.open_questions`.
 - **Coupling:** the reconciler couples reflections ↔ Job ↔ AgentSession graph ↔ git/GitHub
   read-only checks; writes go only through the ORM and steering.
 - **Data ownership:** Job owns all obligations; AgentSession owns none (status quo after
@@ -195,10 +203,13 @@ reflections runner are already required by the repo).
   degrades to today's behavior, never to a false "done").
 - **Spawn enforcement point (SETTLED — owner ruling 2026-08-13):** PM-authored is
   canonical, with a nudge to complete it; the spawn core stamps the mechanical form
-  **only as a null-fallback**. When a lane is created and no PM-authored outbound
-  expectation exists yet on the bound Job, the session-create core writes a mechanical
-  placeholder entry (owner = lane id/slug, what = spawn-instruction summary, marked
-  placeholder) so the obligation is never unrecorded; the PM prime's nudge drives
+  **only as a null-fallback**, scoped **per lane**: the fallback fires unless the bound
+  Job already carries an open expectation with `direction == "outbound"` and
+  `owner == <this new lane's id/slug>` (a Job-wide "any expectation exists" check would
+  skip the fallback for a second lane and reproduce the #2494 silent-loss shape). When it
+  fires, the session-create core writes a mechanical placeholder entry (owner = lane
+  id/slug, what = spawn-instruction summary, marked placeholder) so the obligation is
+  never unrecorded; the PM prime's nudge drives
   authoring/refining the real entry, exactly mirroring the router's mechanical
   `Job.goal` placeholder + PM-authored goal v1 pattern. This satisfies both the
   2026-07-31 advisory-only ruling (no classifier-driven writes; the fallback is
@@ -220,10 +231,13 @@ reflections runner are already required by the repo).
 - **Schema:** amend `docs/plans/durability-room-job-agentrun.md` in place with **Schema
   Gate Amendment 2**: `has_open_promises` is renamed `has_open_expectations`; still a
   two-valued derived `IndexedField(type=bool)`; the governing cardinality rule is
-  unchanged. The at-rest-with-open-promise intersection ruling is superseded: `status` is
-  now chokepoint-maintained and cannot coexist at-rest with an open expectation, so the
-  backstop query's steady-state answer is structurally empty; the operator backstop
-  becomes the reconciler's orphaned-owner surface.
+  unchanged. The at-rest-with-open-promise intersection ruling is amended, not deleted:
+  the renamed query and its session-health caller survive (still the `sweep_to_rest()`
+  call site), but because `status` is now chokepoint-maintained and cannot coexist
+  at-rest with an open expectation, the intersection's steady-state answer is empty and
+  its meaning shifts from "owed work backstop" to "invariant-violation alarm." The owed
+  work surface the old backstop provided is taken over by the reconciler's orphaned-owner
+  query (additive, separate reflection).
 - **Superseded #2494 acceptance criteria (named per directive):** the promise-model ACs —
   "the promise gate is advisory... PM-authored promises append/remove as `Job.goal`
   versions; the at-rest backstop surfaces open promises to the operator surface" (plan line
@@ -245,8 +259,9 @@ tick → owner gone → git/GitHub check → (shipped? steer PM with PR link for
 - Goal JSON schema v2: `{"versions": [...], "expectations": [{"id", "ts", "direction",
   "holder", "owner", "what", "removed_ts"}]}`. Migration rewrites `promises` entries as
   `direction:"inbound", holder:"requester", owner:"pm"` preserving ids/timestamps.
-- `_goal_data()` setdefaults `expectations`; a lingering `promises` key is migrated on
-  read (self-healing) and the offline migration sweeps the population once.
+- `_goal_data()` setdefaults `expectations`; a lingering `promises` key is **merged on
+  every read** (id-deduplicated into `expectations` — never a one-shot; see Race 4) and
+  the offline migration sweeps the population once.
 - Rename `backfill_open_promises_index` → `backfill_open_expectations_index`; keep the
   `update_fields` write-scoping and no-timestamp convergence invariants verbatim
   (PR #2653's guarantees).
@@ -301,9 +316,11 @@ tick → owner gone → git/GitHub check → (shipped? steer PM with PR link for
 - [ ] `tests/unit/test_redundancy_filter.py`, `tests/unit/test_message_drafter.py`,
       `tests/unit/test_drafter_validators.py` — UPDATE: `expectations` param/field renamed
       `open_questions`; behavior identical.
-- [ ] `agent/session_health.py` at-rest backstop tests (in its test module) — REPLACE:
-      `_check_jobs_at_rest_with_open_promises` becomes the expectation-form backstop; the
-      sweep-then-scan ordering assertion stays.
+- [ ] `agent/session_health.py` at-rest backstop tests (in its test module) — UPDATE:
+      `_check_jobs_at_rest_with_open_promises` is renamed to its expectation form and
+      **kept as the `Job.sweep_to_rest()` caller**; the sweep-then-scan ordering
+      assertion stays, and a new assertion covers the invariant-alarm semantics
+      (steady-state empty flagged set).
 - [ ] `tests/unit/test_relay_job_record.py`, `tests/unit/test_job_router.py` — UPDATE only
       if they touch promise fields (audit at build; expected minimal).
 
@@ -330,10 +347,16 @@ tick → owner gone → git/GitHub check → (shipped? steer PM with PR link for
 **Impact:** an unrecorded lane's Job rests by age and reads as done; the reconciler never
 looks.
 **Mitigation:** rest stays age-gated (never instant-on-empty); the spawn-time
-null-fallback at the session-create chokepoint guarantees an obligation is recorded even
-when the PM has not yet authored one (owner ruling 2026-08-13); a drift advisory (PM has
-live children but its Job has no open outbound expectation) surfaces on the health cadence
-to the operator surface. Test: a Job with no expectations is never asserted complete by any
+null-fallback at the session-create chokepoint records an obligation whenever a Job
+*resolves* (owner ruling 2026-08-13) — but Job resolution itself is best-effort, NOT
+guaranteed: `bridge/job_router.py::job_for_session` "almost always misses" outside
+Telegram-triggered sessions (its own docstring, `:126-127`), which is exactly the
+local/`sdlc-local-N` PM shape that spawns most lanes. The create core therefore resolves
+the Job by a chain: explicit `--job-id` argument → the creating/parent AgentSession's own
+Job linkage (via `parent_agent_session_id` walk) → `job_for_session` → skip-and-log. The
+**drift advisory is the real backstop** for unresolved cases: a PM with live children
+whose Job carries no matching open outbound expectation surfaces on the health cadence to
+the operator surface. Test: a Job with no expectations is never asserted complete by any
 new code path.
 
 ### Risk 2: Respawn loop on a permanently-failing lane
@@ -371,15 +394,34 @@ EVAL-only write, per-row re-fetch, no timestamps; consumers re-verify against
 ### Race 2: Reconciler respawns while the lane is being recreated by another actor
 **Trigger:** `reflections/sdlc_progress.py` (PR-based) and the expectation reconciler both
 act on the same slug in one window.
-**Mitigation:** shared per-slug action cooldown namespace (reuse `sdlc_progress`'s cooldown
-key shape); the reconciler checks for an open PR / fresh branch first (shipped-work guard
-doubles as the collision guard); both rungs are steer-first, and a double-steer is benign
+**Mitigation:** the **shipped-work guard is the sole collision guard** — `sdlc_progress`'s
+cooldown is keyed by (slug, **sha**) and the reconciler has no natural sha, so a "shared
+cooldown namespace" would never actually collide and is not claimed. Before any respawn
+the reconciler re-reads git/GitHub (open PR, fresh branch commit) and declines when
+another actor's work is visible; the reconciler's own cooldown is keyed
+(job_id, expectation_id). Both systems are steer-first, and a double-steer is benign
 (idempotent instruction, PM reads both).
 
 ### Race 3: Discharge vs. reconciler tick
 **Trigger:** PM discharges while a reconciler pass holds a stale open-expectation snapshot.
 **Mitigation:** re-fetch the Job by KeyFields immediately before acting on any expectation;
 act only if still open (`removed_ts is None`) — same re-fetch idiom as the backfill.
+
+### Race 4: Migration vs. in-flight old code
+**Location:** `scripts/update/migrations.py` sweep vs. any unrestarted process still
+importing pre-cutover `models/job.py`.
+**Trigger:** the migration rewrites `promises` → `expectations`; an old-code process then
+calls `add_promise`, re-creating a `promises` key that new code would never read.
+**Data prerequisite:** goal JSON must present one truth to both generations during the
+update window.
+**State prerequisite:** no obligation written by either generation may become invisible.
+**Mitigation:** `_goal_data()`'s self-heal is a **merge on every read**, not a one-shot:
+any `promises` key found at read time is converted into inbound expectation entries and
+merged (id-deduplicated) into `expectations` before use, so a post-migration old-code
+write is absorbed on the next new-code read; the daily backfill restamps the flag. The
+`/update` flow restarts services in the same run that applies migrations, bounding the
+window; a unit test writes a stray `promises` key post-migration and asserts the next
+read absorbs it.
 
 ## No-Gos (Out of Scope)
 
@@ -413,11 +455,14 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
   `expectation-remove` (`--expectation-id`), and `show`/`list` output switching to
   expectations. Same CLI surface the PM already uses — no new `pyproject.toml` entry point.
 - `tools/valor_session.py` create core records the outbound expectation as a
-  null-fallback placeholder (new `--expect-what` optional PM-authored override; the
-  fallback `what` is the session's initial instruction summary, entry marked placeholder)
-  only when no PM-authored outbound expectation already covers the lane on the bound Job;
-  silently skips (logged) when no Job resolves — never blocks session creation.
-- PM prime (`.claude/skills/roles/prime-pm-role/SKILL.md`) updated: goal-authoring mandate
+  null-fallback placeholder (new `--expect-what` optional PM-authored override and
+  `--job-id` explicit binding; the fallback `what` is the session's initial instruction
+  summary, entry marked placeholder) only when no open outbound expectation with
+  `owner == <this lane>` already exists on the bound Job (per-lane check, Race-2-of-#2494
+  safe). Job resolution chain: `--job-id` → parent AgentSession linkage →
+  `job_for_session` → skip-and-log (never blocks session creation; the drift advisory is
+  the backstop for unresolved cases).
+- PM prime (`.claude/commands/roles/prime-pm-role.md`) updated: goal-authoring mandate
   extends to expectation hygiene (record on spawn if the mechanical write was skipped;
   discharge on delivery); promise vocabulary replaced.
 - `bridge/promise_gate.py` advisory copy rewritten to expectation vocabulary; verdict
@@ -510,14 +555,18 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 - **Agent Type**: builder
 - **Parallel**: true
 - `tools/valor_session.py` create-core null-fallback expectation write per the owner
-  ruling (placeholder only when no PM-authored entry covers the lane; skip-and-log on no
-  Job; never block creation); sweep other eng-child creation sites.
-- PM prime nudge: author/refine placeholder outbound expectations (mirrors the
-  goal-authoring mandate keyed on `goal_is_placeholder()`).
+  ruling — per-lane trigger: write the placeholder only when no open expectation with
+  `direction == "outbound" and owner == <new lane id/slug>` exists (never a bare
+  any-exists check); Job resolution chain: explicit `--job-id` → parent AgentSession
+  linkage → `job_for_session` → skip-and-log; never block creation. Sweep other
+  eng-child creation sites.
 - `bridge/promise_gate.py` advisory copy → expectations (no verdict/regex changes).
 - `MessageDraft.expectations` → `open_questions` across drafter/redundancy
   filter/output_handler/session_completion.
-- PM prime expectation-hygiene mandate.
+- PM prime (`.claude/commands/roles/prime-pm-role.md`; check whether the
+  `.opencode/commands/` sibling is generated or needs a tandem edit): expectation-hygiene
+  mandate — author/refine placeholder outbound expectations (mirrors the goal-authoring
+  mandate keyed on `goal_is_placeholder()`, `models/job.py:186`).
 
 ### 4. Expectation reconciler reflection
 - **Task ID**: build-reconciler
@@ -528,8 +577,11 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 - **Agent Type**: builder
 - **Parallel**: false
 - `reflections/expectation_reconciler.py` per the Data Flow §5 ladder; cooldown/attempt/
-  escalate machinery mirroring `sdlc_progress.py`; shared per-slug cooldown namespace;
-  session_health backstop function swapped to expectation form.
+  escalate machinery mirroring `sdlc_progress.py`, keyed (job_id, expectation_id); the
+  shipped-work guard is the sole cross-actor collision guard (Race 2).
+- session_health backstop renamed to expectation form and **kept as the
+  `Job.sweep_to_rest()` caller** (critique blocker disposition: rename-and-keep);
+  flagged set becomes an invariant-violation alarm, regression-tested steady-state empty.
 
 ### 5. Validate all
 - **Task ID**: validate-all
@@ -561,18 +613,19 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 | Migration registered | `grep -c "expectation" scripts/update/migrations.py` | output > 0 |
 | No history deletion (anti-criterion) | `grep -n "\"promises\"\].*=.*\[\]\|del data\[\"promises\"\]" scripts/update/migrations.py models/job.py` | match count == 0 |
 | Spawn chokepoint wired | `grep -c "expectation" tools/valor_session.py` | output > 0 |
+| sweep_to_rest caller survives | `grep -rn "sweep_to_rest()" agent/ reflections/ \| wc -l` | output > 0 |
 | Durability doc updated | `grep -c "obligation primitive" docs/features/durability-model.md` | output > 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency, Scope & Value | The plan gives three irreconcilable dispositions for the at-rest operator backstop: Architectural Impact says `at_rest_with_open_expectations` is "retained as the operator backstop," Reconciling-the-durability-plan says its steady-state answer is structurally empty and it "becomes" the reconciler's orphaned-owner surface, and Open Question 2 says the plan "deletes `_check_jobs_at_rest_with_open_promises`'s query form." Critically, `agent/session_health.py:890-917` shows that function is today the ONLY caller of `Job.sweep_to_rest()` (invoked at `:4505`); following the deletion reading removes `sweep_to_rest`'s only call site and Jobs silently stop aging to rest, defeating the plan's own rest-derivation success criterion. | pending | Pick ONE disposition and state it in Architectural Impact, the durability-plan amendment, AND Task 4: either (a) rename-and-keep the backstop function as the code path that still calls `sweep_to_rest()` on the session-health cadence (its flagged-set query expected empty in steady state, asserted by a regression test), or (b) delete the query form but explicitly relocate the `sweep_to_rest()` call to a named surviving caller on the same ~session-health cadence. Build-time check: `grep -rn "sweep_to_rest()" agent/ reflections/` must show at least one call site after the change. |
-| CONCERN | Risk & Robustness | Risk 1's mitigation claims the spawn-time null-fallback "guarantees an obligation is recorded," but the only shown Job-resolution mechanism, `bridge/job_router.py::job_for_session`, is documented in its own docstring as almost always missing outside Telegram-triggered sessions (id ending `_<message_id>` with numeric `chat_id`) — the very session shapes (local Claude Code, `sdlc-local-N`) that spawn most lanes. The central-risk mitigation leans on a lookup its own codebase flags as usually failing. | pending | In `tools/valor_session.py`'s create core, resolve the PM's bound Job via the parent `AgentSession` row's own linkage (or an explicit `job_id` parameter threaded from the caller), not `job_for_session`'s trailing-digits/chat_id heuristic; alternatively downgrade Risk 1's "guarantees" language and name the drift advisory as the actual backstop for non-chat-anchored PMs. |
-| CONCERN | Risk & Robustness | Solution ("no PM-authored outbound expectation exists yet on the bound Job" — Job-wide check) and Agent Integration ("no PM-authored outbound expectation already covers the lane" — per-lane check) disagree on the null-fallback trigger scope. Under the Job-wide reading, spawning Lane B while Lane A's expectation is still open skips the fallback for Lane B entirely — reproducing the #2494 silent-loss failure mode with just one open expectation present. | pending | State the per-lane reading in both sections: the create-core check must filter `open_expectations()` by `direction == "outbound" and owner == <new lane id/slug>` before deciding to write the placeholder. A bare `if not open_expectations():` (any-exists check) reproduces the multi-lane coverage gap. |
-| CONCERN | Risk & Robustness | No Race Conditions entry covers the migration running (during `/update`, before service restart) concurrently with an in-flight old-code process still calling `add_promise`, which does `data.setdefault("promises", [])` and appends — recreating a `promises` key the new code's `open_expectations()` never reads, silently losing that obligation. | pending | Make `_goal_data()`'s self-heal run on EVERY read (not one-shot) and MERGE a reappearing non-empty `promises` key into `expectations` (preserving ids/timestamps) rather than ignoring or overwriting it; add this as Race 4 in the plan. The offline migration alone cannot close the rollout window. |
-| CONCERN | History & Consistency | Race 2's mitigation claims a "shared per-slug action cooldown namespace" with `sdlc_progress`, but the shipped cooldown key is keyed on (slug, sha); the reconciler's unit of action `(job, expectation)` has no natural head sha, so "reusing the shape" while dropping `{sha}` produces a key `sdlc_progress` never writes — the claimed collision guard would never fire. | pending | Either resolve `sha` via the same `git ls-remote refs/heads/session/{slug}` read the shipped-work guard already performs before formatting the cooldown key (falling back to a documented slug-only namespace for unpushed lanes, which is distinct, not "shared"), or drop the shared-namespace framing and name the shipped-work guard (open PR / fresh branch check) as the sole collision guard. |
-| CONCERN | Structural | The plan cites `.claude/skills/roles/prime-pm-role/SKILL.md` (Agent Integration and Task 3), but that path does not exist — the PM prime lives at `.claude/commands/roles/prime-pm-role.md` (with an `.opencode/commands/` sibling). A builder following the plan verbatim would create a new orphan skill file instead of editing the live prime. | pending | Correct the path to `.claude/commands/roles/prime-pm-role.md` in both places; the goal-authoring mandate region to extend is the one keyed on `goal_is_placeholder()` (`models/job.py:186`). Check whether the `.opencode/commands/prime-pm-role.md` sibling is generated or must be edited in tandem. |
+| BLOCKER | History & Consistency, Scope & Value | The plan gives three irreconcilable dispositions for the at-rest operator backstop: Architectural Impact says `at_rest_with_open_expectations` is "retained as the operator backstop," Reconciling-the-durability-plan says its steady-state answer is structurally empty and it "becomes" the reconciler's orphaned-owner surface, and Open Question 2 says the plan "deletes `_check_jobs_at_rest_with_open_promises`'s query form." Critically, `agent/session_health.py:890-917` shows that function is today the ONLY caller of `Job.sweep_to_rest()` (invoked at `:4505`); following the deletion reading removes `sweep_to_rest`'s only call site and Jobs silently stop aging to rest, defeating the plan's own rest-derivation success criterion. | Resolved rev-1: disposition (a) rename-and-keep stated in Architectural Impact, durability-plan amendment, Task 4, Test Impact; sweep_to_rest Verification row added | Pick ONE disposition and state it in Architectural Impact, the durability-plan amendment, AND Task 4: either (a) rename-and-keep the backstop function as the code path that still calls `sweep_to_rest()` on the session-health cadence (its flagged-set query expected empty in steady state, asserted by a regression test), or (b) delete the query form but explicitly relocate the `sweep_to_rest()` call to a named surviving caller on the same ~session-health cadence. Build-time check: `grep -rn "sweep_to_rest()" agent/ reflections/` must show at least one call site after the change. |
+| CONCERN | Risk & Robustness | Risk 1's mitigation claims the spawn-time null-fallback "guarantees an obligation is recorded," but the only shown Job-resolution mechanism, `bridge/job_router.py::job_for_session`, is documented in its own docstring as almost always missing outside Telegram-triggered sessions (id ending `_<message_id>` with numeric `chat_id`) — the very session shapes (local Claude Code, `sdlc-local-N`) that spawn most lanes. The central-risk mitigation leans on a lookup its own codebase flags as usually failing. | Resolved rev-1: Risk 1 rewritten — resolution chain (--job-id -> parent linkage -> job_for_session -> skip-and-log), 'guarantees' softened, drift advisory named the real backstop | In `tools/valor_session.py`'s create core, resolve the PM's bound Job via the parent `AgentSession` row's own linkage (or an explicit `job_id` parameter threaded from the caller), not `job_for_session`'s trailing-digits/chat_id heuristic; alternatively downgrade Risk 1's "guarantees" language and name the drift advisory as the actual backstop for non-chat-anchored PMs. |
+| CONCERN | Risk & Robustness | Solution ("no PM-authored outbound expectation exists yet on the bound Job" — Job-wide check) and Agent Integration ("no PM-authored outbound expectation already covers the lane" — per-lane check) disagree on the null-fallback trigger scope. Under the Job-wide reading, spawning Lane B while Lane A's expectation is still open skips the fallback for Lane B entirely — reproducing the #2494 silent-loss failure mode with just one open expectation present. | Resolved rev-1: per-lane trigger (direction==outbound and owner==new lane) stated in Solution, Agent Integration, Task 3 | State the per-lane reading in both sections: the create-core check must filter `open_expectations()` by `direction == "outbound" and owner == <new lane id/slug>` before deciding to write the placeholder. A bare `if not open_expectations():` (any-exists check) reproduces the multi-lane coverage gap. |
+| CONCERN | Risk & Robustness | No Race Conditions entry covers the migration running (during `/update`, before service restart) concurrently with an in-flight old-code process still calling `add_promise`, which does `data.setdefault("promises", [])` and appends — recreating a `promises` key the new code's `open_expectations()` never reads, silently losing that obligation. | Resolved rev-1: Race 4 added; _goal_data() merge-on-every-read with id-dedup; unit test named | Make `_goal_data()`'s self-heal run on EVERY read (not one-shot) and MERGE a reappearing non-empty `promises` key into `expectations` (preserving ids/timestamps) rather than ignoring or overwriting it; add this as Race 4 in the plan. The offline migration alone cannot close the rollout window. |
+| CONCERN | History & Consistency | Race 2's mitigation claims a "shared per-slug action cooldown namespace" with `sdlc_progress`, but the shipped cooldown key is keyed on (slug, sha); the reconciler's unit of action `(job, expectation)` has no natural head sha, so "reusing the shape" while dropping `{sha}` produces a key `sdlc_progress` never writes — the claimed collision guard would never fire. | Resolved rev-1: shared-namespace claim dropped; shipped-work guard named sole collision guard; reconciler cooldown keyed (job_id, expectation_id) | Either resolve `sha` via the same `git ls-remote refs/heads/session/{slug}` read the shipped-work guard already performs before formatting the cooldown key (falling back to a documented slug-only namespace for unpushed lanes, which is distinct, not "shared"), or drop the shared-namespace framing and name the shipped-work guard (open PR / fresh branch check) as the sole collision guard. |
+| CONCERN | Structural | The plan cites `.claude/skills/roles/prime-pm-role/SKILL.md` (Agent Integration and Task 3), but that path does not exist — the PM prime lives at `.claude/commands/roles/prime-pm-role.md` (with an `.opencode/commands/` sibling). A builder following the plan verbatim would create a new orphan skill file instead of editing the live prime. | Resolved rev-1: path corrected to .claude/commands/roles/prime-pm-role.md in Agent Integration and Task 3; .opencode sibling check noted | Correct the path to `.claude/commands/roles/prime-pm-role.md` in both places; the goal-authoring mandate region to extend is the one keyed on `goal_is_placeholder()` (`models/job.py:186`). Check whether the `.opencode/commands/prime-pm-role.md` sibling is generated or must be edited in tandem. |
 
 ---
 
@@ -594,7 +647,7 @@ act only if still open (`removed_ts is None`) — same re-fetch idiom as the bac
 1. **Naming: `expectation-add`/`expectation-remove` vs. `expect`/`discharge`** in
    `job_tool` — plan uses the former for symmetry with the retired promise verbs; cheap to
    change now, expensive later.
-2. **Does the at-rest operator backstop survive?** With status chokepoint-maintained, the
-   old intersection is structurally empty; this plan replaces it with the reconciler's
-   gone-owner surface and deletes `_check_jobs_at_rest_with_open_promises`'s query form.
-   Confirm no residual operator report depends on the old shape.
+
+*(Resolved: the former Open Question on the at-rest backstop's survival is settled by the
+round-1 critique blocker disposition — rename-and-keep as the surviving `sweep_to_rest()`
+caller with invariant-alarm semantics; see Architectural Impact.)*
