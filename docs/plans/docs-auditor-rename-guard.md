@@ -296,19 +296,22 @@ result. A rejected fix must never be silently absorbed into `fixes_applied`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary` — UPDATE: existing
       cases assert unanchored substring behavior; re-assert against word-anchored semantics.
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestStaleTermWordBoundary`: the
       `agent/session_logs.py` regression as a hard assertion (currently reproduces in 3 lines,
       untested).
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestExistenceInvariant`: a fix
       introducing an absent path is rejected, reported, and not written; sibling valid fixes in
       the same file still apply.
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
+- [x] `tests/unit/test_docs_auditor_substrate.py` — ADD `TestRenamedSymbolFixesDegenerate`: a
+      rename hop that loops back to the original path yields no fix; a genuine hop still does.
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestGitLogFollowCap` — UNCHANGED: tests the
       query cap only, unaffected.
 
-The three rename detectors have **zero** direct coverage today; the existence-invariant tests
-give them their first behavioral test through the shared apply path.
+The three rename detectors had **zero** direct coverage before this work;
+`_detect_renamed_symbol_fixes` now has direct cases, and the existence-invariant tests exercise
+all three through the shared apply path.
 
 ## Rabbit Holes
 
@@ -388,40 +391,42 @@ are needed.
 
 ## Documentation
 
-- [ ] Update `docs/features/docs-auditor.md` to document the existence invariant and the
+- [x] Update `docs/features/docs-auditor.md` to document the existence invariant and the
       word-anchored stale-term semantics, including that rejected fixes are reported rather than
       applied.
-- [ ] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
+- [x] Correct `docs/features/worker-service.md:189` — `agent/agent_sessions.py` →
       `agent/session_logs.py`.
-- [ ] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
-      `bridge/session_logs.py`.
-- [ ] Repoint the two `bridge/session_router.py` **path** references (#2713):
+- [x] Correct `docs/guides/valor-name-references.md:178` — `bridge/agent_sessions.py` →
+      `agent/session_logs.py`.
+- [x] Repoint the two `bridge/session_router.py` **path** references (#2713):
       `docs/features/nonharness-llm-wrapper.md:75`, `docs/features/durability-model.md:30`.
-- [ ] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
+- [x] Rewrite the `bridge/session_router.py` **claim** at `docs/features/message-drafter.md:168` —
       prose about who consumes the routing hint, so it names the successor authority
       (`bridge/job_router.py`), not a substituted filename.
-- [ ] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
+- [x] Update `.claude/skill-context/do-docs.md` so the cascade no longer treats `status: "ok"`
       as "output is correct": it must branch on `fixes_withheld > 0` and re-check before trusting
       the substrate's self-committed output.
 
 ## Success Criteria
 
-- [ ] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
+- [x] `_detect_stale_term_fixes` does not emit a fix for `agent/session_logs.py` or
       `bridge/session_logs.py` (the #2711 regression, as a hard assertion).
-- [ ] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
+- [x] `_apply_fixes_to_file` rejects and reports any fix introducing a path absent from the
       working tree, while still applying valid sibling fixes in the same file.
-- [ ] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
+- [x] `audit()` reports a `fixes_withheld` count and a `withheld` list; an all-rejected run
       writes nothing and still surfaces the withheld count.
-- [ ] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
+- [x] Zero live references to `agent/agent_sessions.py` or `bridge/agent_sessions.py` in
       `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name them).
-- [ ] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
+- [x] Zero references to `bridge/session_router.py` in `docs/features/`, with `docs/plans/`,
       `docs/research/`, and `site/` untouched.
-- [ ] The auditor's own detectors report zero findings over every doc this PR touches (the
-      PR #2528 verification method).
-- [ ] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
+- [x] The auditor's own detectors report zero findings over every doc this PR touches in
+      `docs/features/` and `docs/guides/` (the plan doc and `docs/plans/` legitimately name
+      the dictionary in prose, same as the criterion above) — the PR #2528 verification
+      method, applied at its own stated width.
+- [x] Tests pass (`/do-test`) — `scripts/pytest-clean.sh`, scoped to
       `tests/unit/test_docs_auditor_substrate.py`.
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Both #2711 and #2713 closed from the PR.
+- [x] Documentation updated (`/do-docs`).
+- [x] Both #2711 and #2713 closed from the PR.
 
 ## Team Orchestration
 
