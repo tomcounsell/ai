@@ -19,6 +19,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
@@ -127,6 +128,24 @@ def _filter_usd(amount: float | None) -> str:
     return f"${cents / 100:.2f}"
 
 
+def register_template_filters(env: Environment) -> None:
+    """Single source of truth for dashboard Jinja2 filter registration.
+
+    Registers the six dashboard filters (`format_timestamp`, `format_duration`,
+    `format_interval_filter`, `format_relative`, `freshness_age`, `usd`) on any
+    `jinja2.Environment`. Registers filters and nothing else — callers own their
+    own loader, autoescape, and globals. Production (`create_app`) and every test
+    fixture call this so a new filter added here is picked up everywhere
+    automatically, instead of being hand-copied per env.
+    """
+    env.filters["format_timestamp"] = _filter_format_timestamp
+    env.filters["format_duration"] = _filter_format_duration
+    env.filters["format_interval_filter"] = _filter_format_interval
+    env.filters["format_relative"] = _filter_format_relative
+    env.filters["freshness_age"] = _filter_freshness_age
+    env.filters["usd"] = _filter_usd
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -146,12 +165,7 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     # Register Jinja2 filters for template use
-    templates.env.filters["format_timestamp"] = _filter_format_timestamp
-    templates.env.filters["format_duration"] = _filter_format_duration
-    templates.env.filters["format_interval_filter"] = _filter_format_interval
-    templates.env.filters["format_relative"] = _filter_format_relative
-    templates.env.filters["freshness_age"] = _filter_freshness_age
-    templates.env.filters["usd"] = _filter_usd
+    register_template_filters(templates.env)
 
     # Store templates in app state for access by routers
     app.state.templates = templates
