@@ -884,7 +884,7 @@ class TelegramRelayOutputHandler:
                     delivery_text,
                     _draft_artifacts,
                     _recent_drafts,
-                    getattr(draft, "expectations", None) if draft is not None else None,
+                    getattr(draft, "open_questions", None) if draft is not None else None,
                     getattr(session, "status", None),
                 )
 
@@ -1100,7 +1100,7 @@ class TelegramRelayOutputHandler:
         # ── Record the sent draft for future redundancy checks ────────────────
         # Append AFTER a successful rpush so a Redis failure does not pollute
         # the dedup baseline. The helper uses update_fields= to avoid clobbering
-        # concurrent writes to other session fields (context_summary, expectations).
+        # concurrent writes to other session fields (context_summary).
         if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
             try:
                 session.record_recent_sent_draft(delivery_text, _draft_artifacts)
@@ -1291,10 +1291,10 @@ class TelegramRelayOutputHandler:
         ``draft.context_summary`` is consumed by conversation routing. Silent
         failure: persistence errors MUST NOT block delivery.
 
-        Durability plan #2494: the write-only AgentSession expectations field
-        is deleted (spike-4: zero non-empty rows across all live sessions), so
-        the drafter's ``expectations`` is no longer persisted here. Job routing
-        (Milestone 3) replaces the expectations-based semantic router.
+        Only ``context_summary`` persists. The drafter's ``open_questions``
+        (its own transient concept — verbatim questions for the human) is
+        never persisted to the session row; Job expectations (#2708) are the
+        durable obligation record and live on the Job, not here.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)
