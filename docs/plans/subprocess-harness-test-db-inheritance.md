@@ -180,7 +180,10 @@ into the child's env, and step 4 resolves to db `n`.
 
 **Interactions:**
 - PM check-ins: 0
-- Review rounds: 1
+- Review rounds: 2 — pass 1 covers the guard predicate and the red-state/green
+  diff; pass 2 is the per-site `project_root` audit Risk 2 delegates to a human.
+  The four self-tests prove the predicate handles four AST shapes; nothing in
+  them proves 70 individual conversions each chose `project_root` correctly.
 
 **Re-derived from the corrected predicate, not from the round-1 recon snapshot.**
 Running the argv-gated predicate with one-hop delegator resolution over the real
@@ -196,18 +199,22 @@ tree gives **766 files scanned, 114 violations across 54 files**, which splits a
 (The two file counts sum to 57, not 54: three files contain both a
 convert-class and an allowlist-class site and are counted in each bucket.)
 
-**Line-number convention.** Where this plan cites a call site by line, it names
-the line of the `env=` keyword, not the line the `subprocess.run(` call opens on.
-The two differ by a few lines in multi-line calls and the difference has
-re-triggered a spurious "stale line numbers" finding in three consecutive
-critique rounds. `_isolated_subprocess_env`'s four driven sites are cited by
-call-start line — `:380, :424, :467, :496` — because that is what
-`grep -n "_isolated_subprocess_env"` returns for the reader who goes looking.
+**Line-number convention.** Line numbers in this plan name the
+`subprocess.run(` call-start line, **except** the four `_isolated_subprocess_env`
+sites (`:380, :424, :467, :496`), which name the `env=` kwarg line because that
+is what `grep -n "_isolated_subprocess_env"` returns; call-start for those four
+is `:375, :409, :462, :491`. The two conventions differ by a few lines in
+multi-line calls, and conflating them has produced a spurious "stale line
+numbers" finding in three consecutive critique rounds.
 
 That is roughly twice the round-1 estimate of "~30 sites / 16 files", which is
 why the appetite moves from Small to **Medium**. The work stays one issue rather
 than splitting: every conversion is the same mechanical kwarg, the risk is
-uniform, and a second lane would duplicate the guard. The genuine thinking is
+uniform, and a second lane would duplicate the guard — and the 44 allowlist
+entries cannot be deferred either, because Task 3's acceptance gate (guard green
+AND red-state diff empty) requires every red-state site to be converted or
+allowlisted in this PR; there is no partial-allowlist state that leaves the guard
+green. The genuine thinking is
 concentrated in four places — the two helpers that re-derive a db (Group C), the
 one call site that must omit `project_root` (line 129), and the allowlist
 adjudication rule below.
@@ -302,7 +309,9 @@ guard's own red-state output, per the acceptance step on Task 3:
 
 Several of these pass a locally-built `clean_env` dict that strips
 `VALOR_SESSION_ID` / `AGENT_SESSION_ID` — `test_sdlc_stage_query.py:444,603,624`
-and `test_sdlc_stage_marker.py:1179`. Only the stage_marker one sets `REDIS_URL`;
+and `test_sdlc_stage_marker.py:1179`. Only the stage_marker one sets `REDIS_URL` — by hand, from
+`POPOTO_REDIS_DB.connection_pool.connection_kwargs`, which is the Group C
+anti-pattern and gets deleted rather than preserved;
 **the three stage_query sites set nothing**, so they run `python -m
 tools.sdlc_stage_query` against production db0 on every run today. That is a
 second live instance of the filed defect, not a stylistic wart. Convert them to
@@ -359,9 +368,11 @@ keys and `subprocess_env(**extra)` only adds them:
 - **Allowlist adjudication rule** — an entry is permitted for exactly two
   reasons, and the reason is written in the comment:
   1. `[#2628]` — the site lives in a file this plan's No-Gos forbid touching
-     because open PR #2683 owns it. There are five such sites:
-     `tests/unit/test_redis_flush_guard_prod.py:54,555,579,648` and
-     `tests/unit/test_conftest_isolation_guards.py:463`. Allowlisting them in the
+     because open PR #2683 owns it or edits adjacent lines. There are six such
+     sites:
+     `tests/unit/test_redis_flush_guard_prod.py:54,555,579,648`,
+     `tests/unit/test_conftest_isolation_guards.py:463`, and
+     `tests/unit/test_youtube_search.py:219`. Allowlisting them in the
      *new* guard file touches no forbidden file, which is what breaks the
      otherwise-unsatisfiable deadlock between "guard green" and "no #2683-owned
      file in the diff". Each entry carries a note to remove it and convert the
@@ -388,7 +399,7 @@ keys and `subprocess_env(**extra)` only adds them:
   `return <name>`.
 - **Method delegators resolve through the enclosing class.** Group C's own
   remedy for `tests/unit/test_session_lifecycle.py` leaves a `@staticmethod`
-  invoked at `:1614` as `env=self._subprocess_env()` — an `ast.Attribute`, so the
+  invoked at `:1619` as `env=self._subprocess_env()` — an `ast.Attribute`, so the
   bare-`Name` clauses above do not reach it and the guard would stay red at a
   file Group C claims to fix. A `self.<name>()` or `cls.<name>()` value resolves
   to a method of the enclosing `ClassDef` (unwrapping `@staticmethod` /
@@ -468,12 +479,12 @@ the plain mechanical conversion with no per-file decision:
 `test_memory_timeline.py`, `test_room_resolution.py`,
 `test_sdlc_fork_issue_number.py`, `test_session_lifecycle_consolidation.py`,
 `test_session_progress.py`, `test_steering_mechanism.py`, `test_stop_detach.py`,
-`test_venv_health.py`, `test_worker_guard.py`, `test_youtube_search.py`.
+`test_venv_health.py`, `test_worker_guard.py`.
 
 - [ ] `tests/unit/test_sdlc_tool_wrapper.py` (9 call sites: lines 69, 75, 81, 87, 101, 129, 172, 189, 230) — UPDATE: pass `env=subprocess_env(...)`; assertions unchanged.
 - [ ] `tests/unit/test_sdlc_meta_set.py` — UPDATE: add `env=subprocess_env(project_root=str(REPO_ROOT))`.
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: same.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same; the `clean_env` at :1179 rebases on `subprocess_env()` keeping its strips.
+- [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: same; the `clean_env` at :1179 rebases on `subprocess_env()` and its manual `REDIS_URL` re-derivation at :1182-1186 is DELETED (see Group B).
 - [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: same; the three `clean_env` sites (:444, :603, :624) set no `REDIS_URL` today and are live db0 writers.
 - [ ] `tests/unit/test_sdlc_dispatch.py::_isolated_subprocess_env` (line 272, drives :380, :424, :467, :496) — REPLACE: `subprocess_env()` plus pops of `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, `active_run_id`.
 - [ ] `tests/unit/test_memory_search_cli.py` (2 sites) — UPDATE: same.
@@ -486,8 +497,8 @@ the plain mechanical conversion with no per-file decision:
 - [ ] `tests/integration/test_sdlc_dispatch.py` (2 env-less sites, :321 and :344) — UPDATE: add `env=subprocess_env(...)`.
 - [ ] `tests/integration/test_design_system_pipeline.py` — UPDATE: same.
 - [ ] `tests/integration/test_session_telemetry_e2e.py` — UPDATE: `project_root=str(WORKTREE)`.
-- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard, including its `ALLOWLIST` (5 `[#2628]` entries + the `[standalone-script]` class).
-- [ ] `tests/unit/test_redis_flush_guard_prod.py` (:54, :555, :579, :648) and `tests/unit/test_conftest_isolation_guards.py` (:463) — NOT TOUCHED: real violations, allowlisted with a `[#2628]` reason because open PR #2683 owns both files.
+- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard, including its `ALLOWLIST` (6 `[#2628]` entries + the `[standalone-script]` class).
+- [ ] `tests/unit/test_redis_flush_guard_prod.py` (:54, :555, :579, :648), `tests/unit/test_conftest_isolation_guards.py` (:463), and `tests/unit/test_youtube_search.py` (:219) — NOT TOUCHED: real violations, allowlisted with a `[#2628]` reason because open PR #2683 owns or collides with all three.
 
 No assertions change meaning anywhere. Every edit is additive to the subprocess
 invocation; the tests' subjects and expectations are untouched.
@@ -763,7 +774,14 @@ bridge import. The only consumer is `pytest`.
   `test_session_lifecycle.py::_subprocess_env` on `subprocess_env()` preserving
   its `SDLC_HOLDER_TOKEN` pop.
 - Rebase the `clean_env` dicts in `test_sdlc_stage_query.py` (:444, :603, :624)
-  and `test_sdlc_stage_marker.py` (:1179) the same way, keeping their strips.
+  and `test_sdlc_stage_marker.py` (:1179) the same way, keeping their strips —
+  rewritten as `.pop(..., None)` calls so Group D's assign-mutate-return clause
+  accepts them. **`test_sdlc_stage_marker.py` additionally re-derives `REDIS_URL`
+  by hand from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` at
+  :1182-1186: delete that block outright**, since `subprocess_env()` already sets
+  `REDIS_URL` from the parent's claim and keeping it leaves a `Subscript`
+  assignment the guard rejects. The three `test_sdlc_stage_query.py` sites have
+  no such block.
 - Touch none of the four files named in the No-Gos.
 - Run each touched file individually via `scripts/pytest-clean.sh`.
 
@@ -849,12 +867,12 @@ bridge import. The only consumer is `pytest`.
 | NIT (r4) | History & Consistency (raised as BLOCKER, refuted on ground truth) | Critic read the SOURCE_FILES scan header (`violations=147 files=62`) as contradicting Appetite's "114 violations across 54 files". That scan was published with delegator resolution and the `git` skip **disabled**; applying both yields **113 violations / 54 files**, confirming Appetite within one. The genuine defect is smaller: Appetite's own sub-counts do not add up — 32 convert-files + 25 allowlist-files = 57, not the stated 54. | Appetite: 57-vs-54 overlap explained; counts reconciled at 113-114 / 54 | Reconcile the file arithmetic in `## Appetite`: either state the overlap explicitly ("3 files contain both convert and allowlist sites") or restate as "54 files total, of which 32 contain at least one site that must be converted". Also change "114 violations" to "113" to match the measured value, or mark it "~113" — the one-site delta is `test_sdlc_next_skill.py:209`'s unresolvable starred argv0. |
 | NIT (r4) | History & Consistency | Group C opens "Four module-local env helpers exist in the suite" — an unqualified suite-wide claim contradicted by the plan's own No-Gos, which name a fifth (`_subprocess_env` in `tests/unit/test_redis_flush_guard_prod.py`, live at `:555`). It is out of scope, which is not the same as not existing. | Group C reworded to 'in scope here' + fifth-helper note | Reword to "Four module-local env helpers exist in the suite *that this plan touches* (a fifth, in `tests/unit/test_redis_flush_guard_prod.py`, is out of scope — see No-Gos and its `[#2628]` ALLOWLIST entry)." Wording only; no task or code change. |
 | NIT (r4) | Scope & Value | Task 3's **Validates** says "the 12 files listed in Test Impact Group B"; the enumeration lists 14. | Task 3 Validates de-numbered | Change to "the 14 files listed in Test Impact Group B", or drop the number entirely — Task 3's real gate is the guard's red-state diff, not this count. |
-| CONCERN (r5) | Risk & Robustness | `tests/unit/test_sdlc_stage_marker.py:1178-1186` is the one `clean_env` site of the four named (`:444, :603, :624, :1179`) that ALSO manually re-derives `REDIS_URL` from `rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs` via a `Subscript` assignment (verified by direct read this round). Group B/Task 3 say only "rebase the `clean_env` dicts the same way, keeping their strips" — which never instructs deleting that block. A literal reading produces `env = subprocess_env(); env.pop(...); env.pop(...); env["REDIS_URL"] = f"redis://..."`, and Group D's assign-mutate-return rule accepts only `.pop(<literal>, None)` / `.update(...)` as follow-up statements, so the guard rejects a site that looks converted. Behaviorally harmless today (the manual value equals `subprocess_env()`'s), and self-correcting on the guard's first red/green pass, hence CONCERN not BLOCKER. | pending | In Group B and Task 3, change the `test_sdlc_stage_marker.py` bullet to: "the `clean_env` site at `:1178` also manually re-derives `REDIS_URL` from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` at lines 1180-1186 — **delete that block**, do not keep it; `subprocess_env()` already sets `REDIS_URL` from the parent's claim. Keep only the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` strips, rewritten as `.pop(..., None)` calls so the guard's assign-mutate-return clause accepts them." Note the three `test_sdlc_stage_query.py` sites have no such extra block — this instruction applies to `test_sdlc_stage_marker.py` alone. |
-| CONCERN (r5) | History & Consistency | The "Line-number convention" paragraph in `## Appetite` — landed as round 4's accepted NIT remedy — states both halves backwards. Measured ground truth (`grep -n "_isolated_subprocess_env" tests/unit/test_sdlc_dispatch.py`) gives `380/424/467/496` as the `env=` KWARG lines and `375/409/462/491` as the `subprocess.run(` call-start lines; and every wrapper-file citation (`69, 75, 81, 87, 101, 129, 172, 189, 230`) is a call-start line, verified by `grep -n`. The paragraph asserts the general rule is the `env=` keyword line and that the four dispatch sites are cited by call-start — the inverse of both facts. It also landed in `## Appetite` rather than at the top of Group C as the r4 remedy specified. Left as-is this is the exact text that re-triggers the line-number flip in a future round. | pending | Replace the paragraph body with the r4-accepted sense, verbatim: "Line numbers in this plan name the `subprocess.run(` call-start line, except the four `_isolated_subprocess_env` sites (`:380, :424, :467, :496`) which name the `env=` kwarg line; call-start for those is `:375, :409, :462, :491`." Keep it in `## Appetite` and add the same sentence (or a one-line pointer to it) at the top of `## Solution` → Group C, where the four sites are actually enumerated. |
-| CONCERN (r5) | Scope & Value | `## Appetite` still declares "Review rounds: 1" for a 70-site / 32-file sweep plus a 44-entry allowlist plus a new AST scanner whose predicate needed five critique rounds to converge. Task 1/3's four mandatory self-tests prove only that the *predicate* handles the four documented AST shapes; nothing proves the 70 real conversions were each applied correctly — specifically Risk 2's per-site `project_root` inclusion/omission, which the plan explicitly delegates to a human ("Reviewers check that every `project_root=` argument names the checkout the test is actually exercising"). The appetite's review budget and the risk mitigation's reliance on review are not consistent. | pending | Either change `## Appetite` → Interactions → "Review rounds: 1" to "Review rounds: 2" (pass 1: guard predicate + red/green diff; pass 2: per-site `project_root` audit per Risk 2), or keep 1 and add a sentence under Risk 2's Mitigation naming the concrete artifact that stands in for the second pass (the pasted red-state diff plus an explicit reviewer checklist item enumerating which sites take `project_root` and which deliberately omit it — currently only `:129` and `test_session_telemetry_e2e.py` are named). Do not leave the budget implicit. |
-| NIT (r5) | Scope & Value | Open Question 2's rationale for keeping everything in one issue ("a second lane would duplicate the guard") explains the 70 convert-sites but not the 44 allowlist-only sites, which receive zero code change here. The real reason they cannot be deferred goes unstated. | pending | In `## Appetite`, after "a second lane would duplicate the guard," add: "and the 44 allowlist entries cannot be deferred, because Task 3's acceptance gate (guard green AND the red-state diff empty) requires every red-state site to be either converted or allowlisted in this PR — there is no partial-allowlist state that leaves the guard green." |
-| NIT (r5) | Structural (cross-reference check) | Commit `3f3aadb87` (landed mid-critique) added a No-Go allowlisting `tests/unit/test_youtube_search.py:219` because PR #2683 deletes an adjacent class at `:226`. `## Test Impact` line 471 still lists `test_youtube_search.py` among the files that "take the plain mechanical conversion with no per-file decision". The two statements now contradict: one says convert, one says allowlist and defer. | pending | Remove `test_youtube_search.py` from the `## Test Impact` "plain mechanical conversion" enumeration at line 471, and add it to the NOT-TOUCHED checklist row alongside the `test_redis_flush_guard_prod.py` / `test_conftest_isolation_guards.py` entry, with the same `[#2628]` reason. The `ALLOWLIST` entry count in the Test Impact CREATE row for the guard file then becomes "6 `[#2628]` entries", not 5 — update that number too. |
-| NIT (r5) | History & Consistency | Group D's method-delegator bullet cites `tests/unit/test_session_lifecycle.py:1614` for `env=self._subprocess_env()`. Measured: `grep -n` gives `1602: def _subprocess_env():` and `1619: env=self._subprocess_env(),`. Group C and Test Impact already cite `:1602` correctly and no task keys off `:1614`, so this is prose-only. | pending | Edit the Group D bullet from "invoked at `:1614`" to "invoked at `:1619`". Leave the r4 Critique Results row unchanged — it is the historical record of what round 4 wrote. |
+| CONCERN (r5) | Risk & Robustness | `tests/unit/test_sdlc_stage_marker.py:1178-1186` is the one `clean_env` site of the four named (`:444, :603, :624, :1179`) that ALSO manually re-derives `REDIS_URL` from `rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs` via a `Subscript` assignment (verified by direct read this round). Group B/Task 3 say only "rebase the `clean_env` dicts the same way, keeping their strips" — which never instructs deleting that block. A literal reading produces `env = subprocess_env(); env.pop(...); env.pop(...); env["REDIS_URL"] = f"redis://..."`, and Group D's assign-mutate-return rule accepts only `.pop(<literal>, None)` / `.update(...)` as follow-up statements, so the guard rejects a site that looks converted. Behaviorally harmless today (the manual value equals `subprocess_env()`'s), and self-correcting on the guard's first red/green pass, hence CONCERN not BLOCKER. | Group B stage_marker bullet; Task 3; Test Impact row — delete the manual block | In Group B and Task 3, change the `test_sdlc_stage_marker.py` bullet to: "the `clean_env` site at `:1178` also manually re-derives `REDIS_URL` from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` at lines 1180-1186 — **delete that block**, do not keep it; `subprocess_env()` already sets `REDIS_URL` from the parent's claim. Keep only the `VALOR_SESSION_ID` / `AGENT_SESSION_ID` strips, rewritten as `.pop(..., None)` calls so the guard's assign-mutate-return clause accepts them." Note the three `test_sdlc_stage_query.py` sites have no such extra block — this instruction applies to `test_sdlc_stage_marker.py` alone. |
+| CONCERN (r5) | History & Consistency | The "Line-number convention" paragraph in `## Appetite` — landed as round 4's accepted NIT remedy — states both halves backwards. Measured ground truth (`grep -n "_isolated_subprocess_env" tests/unit/test_sdlc_dispatch.py`) gives `380/424/467/496` as the `env=` KWARG lines and `375/409/462/491` as the `subprocess.run(` call-start lines; and every wrapper-file citation (`69, 75, 81, 87, 101, 129, 172, 189, 230`) is a call-start line, verified by `grep -n`. The paragraph asserts the general rule is the `env=` keyword line and that the four dispatch sites are cited by call-start — the inverse of both facts. It also landed in `## Appetite` rather than at the top of Group C as the r4 remedy specified. Left as-is this is the exact text that re-triggers the line-number flip in a future round. | Appetite paragraph rewritten to the r4-accepted sense; pointer added | Replace the paragraph body with the r4-accepted sense, verbatim: "Line numbers in this plan name the `subprocess.run(` call-start line, except the four `_isolated_subprocess_env` sites (`:380, :424, :467, :496`) which name the `env=` kwarg line; call-start for those is `:375, :409, :462, :491`." Keep it in `## Appetite` and add the same sentence (or a one-line pointer to it) at the top of `## Solution` → Group C, where the four sites are actually enumerated. |
+| CONCERN (r5) | Scope & Value | `## Appetite` still declares "Review rounds: 1" for a 70-site / 32-file sweep plus a 44-entry allowlist plus a new AST scanner whose predicate needed five critique rounds to converge. Task 1/3's four mandatory self-tests prove only that the *predicate* handles the four documented AST shapes; nothing proves the 70 real conversions were each applied correctly — specifically Risk 2's per-site `project_root` inclusion/omission, which the plan explicitly delegates to a human ("Reviewers check that every `project_root=` argument names the checkout the test is actually exercising"). The appetite's review budget and the risk mitigation's reliance on review are not consistent. | Appetite: Review rounds 2, with the split named | Either change `## Appetite` → Interactions → "Review rounds: 1" to "Review rounds: 2" (pass 1: guard predicate + red/green diff; pass 2: per-site `project_root` audit per Risk 2), or keep 1 and add a sentence under Risk 2's Mitigation naming the concrete artifact that stands in for the second pass (the pasted red-state diff plus an explicit reviewer checklist item enumerating which sites take `project_root` and which deliberately omit it — currently only `:129` and `test_session_telemetry_e2e.py` are named). Do not leave the budget implicit. |
+| NIT (r5) | Scope & Value | Open Question 2's rationale for keeping everything in one issue ("a second lane would duplicate the guard") explains the 70 convert-sites but not the 44 allowlist-only sites, which receive zero code change here. The real reason they cannot be deferred goes unstated. | Appetite: allowlist-cannot-be-deferred sentence added | In `## Appetite`, after "a second lane would duplicate the guard," add: "and the 44 allowlist entries cannot be deferred, because Task 3's acceptance gate (guard green AND the red-state diff empty) requires every red-state site to be either converted or allowlisted in this PR — there is no partial-allowlist state that leaves the guard green." |
+| NIT (r5) | Structural (cross-reference check) | Commit `3f3aadb87` (landed mid-critique) added a No-Go allowlisting `tests/unit/test_youtube_search.py:219` because PR #2683 deletes an adjacent class at `:226`. `## Test Impact` line 471 still lists `test_youtube_search.py` among the files that "take the plain mechanical conversion with no per-file decision". The two statements now contradict: one says convert, one says allowlist and defer. | Test Impact: moved to NOT-TOUCHED row; allowlist count 5→6 | Remove `test_youtube_search.py` from the `## Test Impact` "plain mechanical conversion" enumeration at line 471, and add it to the NOT-TOUCHED checklist row alongside the `test_redis_flush_guard_prod.py` / `test_conftest_isolation_guards.py` entry, with the same `[#2628]` reason. The `ALLOWLIST` entry count in the Test Impact CREATE row for the guard file then becomes "6 `[#2628]` entries", not 5 — update that number too. |
+| NIT (r5) | History & Consistency | Group D's method-delegator bullet cites `tests/unit/test_session_lifecycle.py:1614` for `env=self._subprocess_env()`. Measured: `grep -n` gives `1602: def _subprocess_env():` and `1619: env=self._subprocess_env(),`. Group C and Test Impact already cite `:1602` correctly and no task keys off `:1614`, so this is prose-only. | Group D bullet now cites :1619 | Edit the Group D bullet from "invoked at `:1614`" to "invoked at `:1619`". Leave the r4 Critique Results row unchanged — it is the historical record of what round 4 wrote. |
 ---
 
 ## Open Questions
