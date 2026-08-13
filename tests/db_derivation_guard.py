@@ -343,41 +343,46 @@ def _splat_candidate(
 
     Two shapes, judged differently:
 
-    - **a dict literal, entirely provable** -- callee-agnostic, like the rest
-      of route 1. A dict literal is provably safe, and yields no candidate,
-      iff EVERY one of its keys is an ``ast.Constant`` and none of them is
-      ``"db"``. Any key that fails that test is opaque -- a nested ``**``
-      unpack (``key is None``, e.g. ``**{**base_kw, "host": "x"}``) or a
-      computed key (e.g. ``**{k: v}``) -- because its contents are invisible
-      to a static scan, so the dict cannot be proven safe even if no OTHER
-      key here is literally ``"db"``. The whole dict is scanned before
-      deciding, rather than returning the instant a ``"db"`` key is found,
-      because a Python dict literal lets a later entry silently overwrite an
-      earlier one: an opaque entry that comes AFTER the ``"db"`` key
-      (``**{"db": claim_test_db(), **overrides}``) can overwrite it at
-      runtime, so that shape falls through to the opaque-leg treatment below
-      instead of being accepted on the visible value alone. An opaque entry
-      that comes BEFORE the ``"db"`` key (``**{**base_kw, "db": 9}``) cannot
+    - **a dict literal with a visible ``"db"`` key** -- callee-agnostic,
+      like the rest of route 1, no matter what else is in the dict. Every
+      key is inspected before deciding, rather than returning the instant a
+      ``"db"`` key is found, because a Python dict literal lets a later
+      entry silently overwrite an earlier one: an opaque entry that comes
+      AFTER the ``"db"`` key (``**{"db": claim_test_db(), **overrides}``) can
+      overwrite it at runtime, so that shape is judged on the visible value
+      but can never be accepted (``ok=False``) -- the guard can prove there
+      is a ``db`` in plain sight AND that something later can silently
+      replace it, and both facts land in the message. An opaque entry that
+      comes BEFORE the ``"db"`` key (``**{**base_kw, "db": 9}``) cannot
       overwrite it -- the literal ``"db"`` entry is the one that wins -- so
-      that shape is still judged directly on the visible value.
-    - **an opaque ``**name``** -- undecidable, so a violation, but *only* for a
-      callee that looks like a Redis construction.
+      that shape is judged directly on the visible value and accepted when
+      that value is a claim call. Either way, a visible ``"db"`` key is
+      **never** gated on the callee: a pool slot written in plain sight must
+      not vanish just because the callee is not in ``REDIS_CONSTRUCTORS``.
+    - **no visible ``"db"`` key, but an opaque entry that could be carrying
+      one invisibly** -- a nested ``**`` unpack (``key is None``, e.g.
+      ``**{**base_kw, "host": "x"}``) or a computed key (e.g. ``**{k: v}``).
+      Undecidable, so a violation, but *only* for a callee that looks like a
+      Redis construction.
 
     That callee scoping is a deliberate, bounded exception to the module's
-    otherwise callee-agnostic polarity, and it is worth naming. Route 1 can
-    afford to ignore the callee because every one of the 17 ``db=`` sites in
-    this tree is a Redis construction. ``**`` is not like that: it is the
-    ordinary way test helpers forward kwargs, and flagging it everywhere
-    produced **183 violations across 100+ unrelated files** on the first
-    attempt. A guard that fires on every test helper in the repo does not get
-    fixed, it gets deleted -- and then the real hole is open again with no
-    guard at all.
+    otherwise callee-agnostic polarity, and it applies **only** to the fully
+    opaque case above -- never to a dict where a ``"db"`` key is visible.
+    Route 1 can afford to ignore the callee wherever a value is visible
+    because every one of the 17 ``db=`` sites in this tree is a Redis
+    construction. A fully opaque ``**`` is not like that: it is the ordinary
+    way test helpers forward kwargs, and flagging it everywhere regardless of
+    callee produced **183 violations across 100+ unrelated files** on the
+    first attempt. A guard that fires on every test helper in the repo does
+    not get fixed, it gets deleted -- and then the real hole is open again
+    with no guard at all.
 
     So the enumeration here buys usability at a known cost: a Redis client
-    constructed through an alias nobody listed, receiving an opaque splat, is
-    invisible. Today that costs nothing (the tree has 191 ``**`` call sites and
-    zero are Redis constructions), and the dict-literal leg above stays fully
-    callee-agnostic.
+    constructed through an alias nobody listed, receiving an opaque splat
+    with no visible ``"db"`` key anywhere in it, is invisible. Today that
+    costs nothing (the tree has 191 ``**`` call sites and none carries a
+    ``"db"`` key together with an opaque entry), and the visible-``"db"``
+    leg above stays fully callee-agnostic, with no exception.
     """
     if isinstance(value, ast.Dict):
         db_val: ast.AST | None = None
@@ -424,10 +429,35 @@ def _splat_candidate(
             # Every key is a constant and none of them is "db" -- provably
             # safe.
             return None
-        # Either there is no visible "db" key but an opaque entry could be
-        # carrying one, or a "db" key is visible but a later opaque entry
-        # could overwrite it. Both fall through to the opaque-leg treatment
-        # below.
+        if db_val is not None:
+            # opaque_after_db (the only way to reach here with a visible
+            # "db" key): the value is visible, but a later entry in the
+            # same dict literal (a nested ** unpack or a computed key) can
+            # silently overwrite it at runtime. Judge this callee-agnostically
+            # -- like every other visible db= site -- rather than gating it
+            # on REDIS_CONSTRUCTORS: a db slot written in plain sight must
+            # not vanish just because the callee is not one the guard
+            # recognizes as a Redis construction. Never accepted (ok=False)
+            # even if the visible value is itself a claim call, because the
+            # guard cannot prove nothing downstream overwrites it.
+            return Candidate(
+                path=rel_path,
+                lineno=call.lineno,
+                kind="db-kwarg",
+                expr=ast.unparse(db_val),
+                callee=callee,
+                ok=False,
+                detail=(
+                    'a "db" key is visible in this ** dict literal, but a later '
+                    "entry in the same literal (a nested ** unpack or a computed "
+                    "key) can silently overwrite it at runtime"
+                ),
+                pool_db=_first_pool_db(_int_literals(db_val)),
+            )
+        # No visible "db" key, but an opaque entry (nested ** unpack or
+        # computed key) could be carrying one invisibly. Undecidable, so a
+        # violation, but only for a callee that looks like a Redis
+        # construction -- see the opaque-leg docstring above.
 
     if callee not in REDIS_CONSTRUCTORS:
         return None

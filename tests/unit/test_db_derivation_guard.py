@@ -437,7 +437,32 @@ class TestSplatHandling:
             "t.py",
         )
         assert len(result.violations) == 1
-        assert "cannot see" in result.violations[0].detail
+        assert "silently overwrite" in result.violations[0].detail
+
+    def test_a_visible_db_with_a_trailing_nested_unpack_is_flagged_for_any_callee(self):
+        """Round-4 regression (#2700): a callee not in REDIS_CONSTRUCTORS must
+        not make a visible "db" key with a trailing opaque entry disappear.
+        Round 3's restructure sent this down the REDIS_CONSTRUCTORS-scoped
+        opaque leg, so `Whatever(...)` produced NO candidate at all -- a pool
+        slot written in plain sight vanished silently."""
+        result = scan_source('def t(ov):\n    Whatever(**{"db": 15, **ov})\n', "t.py")
+        assert len(result.violations) == 1
+        assert result.violations[0].pool_db == 15
+        assert "silently overwrite" in result.violations[0].detail
+
+    def test_a_future_redis_like_constructor_with_a_visible_db_and_overrides_is_flagged(self):
+        """The PR body's own headline example of what the inverted polarity
+        buys: a constructor the guard does not recognize by name must still
+        be caught when the db value is visible."""
+        result = scan_source('def t(ov):\n    SomeFutureRedisLike(**{"db": 8, **ov})\n', "t.py")
+        assert len(result.violations) == 1
+        assert result.violations[0].pool_db == 8
+
+    def test_a_visible_db_followed_by_a_computed_key_is_flagged_regardless_of_callee(self):
+        """Same defect, computed-key shape instead of a nested unpack."""
+        result = scan_source('def t(k):\n    Whatever(**{"db": 15, k: 1})\n', "t.py")
+        assert len(result.violations) == 1
+        assert result.violations[0].pool_db == 15
 
     def test_an_opaque_entry_before_the_db_key_does_not_shadow_it(self):
         """The mirror case: an opaque entry BEFORE the "db" key cannot
