@@ -21,7 +21,7 @@ Non-obvious behavior that `--help` will not tell you:
 
 ## Manual Testing Hygiene
 
-Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`.
+Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`, which stands down only when the Bash call's cwd resolves inside a *different* git checkout (`~/src/popoto`, where raw Redis is legitimate) and only for commands that could actually execute. A cwd belonging to no repo at all, such as `/tmp`, keeps the guard armed: the Redis is machine-global. See [`docs/features/raw-redis-guard.md`](docs/features/raw-redis-guard.md).
 
 When creating AgentSessions manually to test worker or queue behavior, use a recognizable `project_key` prefix (`test-`, `dbg-`) and delete them afterward via the ORM, scoped by that key. Never run bulk operations unscoped.
 
@@ -101,7 +101,7 @@ Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc con
 
 ## Self-Healing
 
-The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. The crash-storm signal and the restart throttle are computed independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. The watchdog records to `logs/watchdog.log`; it pushes no notification anywhere. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
+The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. A wedge verdict needs positive evidence that something was missed (`bridge:last_missed_recovery`, stamped by the reconciler), not just an absence of inbound messages, and its silence clock runs from the bridge process's start time so a restart clears the verdict that caused it. The crash-storm signal and the restart throttle are computed independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. The watchdog records to `logs/watchdog.log`; it pushes no notification anywhere. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
 
 Recovery entry points: `./scripts/valor-service.sh restart`, `worker-restart`, and `python scripts/telegram_login.py` for Telegram auth.
 
@@ -150,6 +150,7 @@ When reconciling a secret between `.env` and the vault, verify the credential ag
 | `dashboard` | The web UI dashboard (`ui/`) |
 | `bridge` | The Telegram bridge |
 | `testing` | The test suite |
+| `upvote` | Pre-approved for autonomous SDLC pickup — a scheduled reflection may start a lane on this issue without further human input. |
 
 Do NOT use a `feature` label; it adds no signal.
 

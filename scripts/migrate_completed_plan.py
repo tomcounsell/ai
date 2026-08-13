@@ -324,7 +324,13 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
             f"[WARN] git push rejected for {plan_path.name} "
             f"(attempt {attempt}/{max_attempts}): {push_result.stderr.strip()}"
         )
-        pull_result = _run_git(["pull", "--rebase", "origin", "main"], cwd=repo_root, timeout=60)
+        # Fetch, then rebase onto the NAMED ref (#2650). `git pull --rebase`
+        # takes its onto-target from `.git/FETCH_HEAD`, which every worktree of
+        # the repo shares -- and this script runs on the shared main checkout
+        # while concurrent lanes are fetching, which is exactly when a peer's
+        # fetch can retarget the rebase.
+        _run_git(["fetch", "origin", "main"], cwd=repo_root, timeout=60)
+        pull_result = _run_git(["rebase", "origin/main"], cwd=repo_root, timeout=60)
         conflict_text = (pull_result.stdout + pull_result.stderr).lower()
         if pull_result.returncode != 0 and (
             _rebase_in_progress(repo_root) or "conflict" in conflict_text

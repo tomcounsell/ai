@@ -206,7 +206,7 @@ When the floor field is greater than 0, the session's `auto_resume_attempts` is 
 
 ## Machine-ownership gate
 
-Auto mode resumes a session only when this machine owns the session's project: `projects.<project_key>.machine == computer_name()` in `projects.json`. `reflections/crash_recovery.py::_machine_owns_project(project_key)` resolves ownership and falls soft to not-owned on an unknown or unresolvable project key, so a non-owner proposes rather than resumes.
+Auto mode resumes a session only when this machine owns the session's project: `projects.<project_key>.machine == computer_name()` in `projects.json`. `reflections/utilities.py::machine_owns_project(project_key)` (shared with `sdlc-progress-check`) resolves ownership and falls soft to not-owned on an unknown or unresolvable project key, so a non-owner proposes rather than resumes.
 
 This makes the single-machine invariant structural. Even with `FEATURES__CRASH_AUTORESUME_ENABLED=1` set fleet-wide, exactly one machine acts on a given session, which removes the reliance on an operator setting the enable flag on exactly one box and scales to any number of machines. Combined with the pre-resume status re-read, it closes the double-resume race.
 

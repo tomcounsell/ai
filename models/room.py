@@ -36,8 +36,8 @@ import threading
 from popoto import Field, KeyField, Model
 
 from utils.peer import (
-    _numeric_peer,  # used below at _numeric_peer(raw)
     deliverable_telegram_peer,  # noqa: F401 (re-exported for back-compat)
+    numeric_peer,  # used below at numeric_peer(raw)
 )
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def addressee_for_session(session) -> str:
     chat_id = getattr(session, "chat_id", None)
     if chat_id:
         raw = str(chat_id).strip()
-        numeric = _numeric_peer(raw)
+        numeric = numeric_peer(raw)
         if numeric is not None:
             if numeric == 0:
                 return SYSTEM_ADDRESSEE

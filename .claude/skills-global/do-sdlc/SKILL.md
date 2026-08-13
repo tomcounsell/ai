@@ -132,6 +132,12 @@ sdlc-tool dispatch record --skill {skill} --issue-number {issue_number} --run-id
 
 ### 3c. Spawn the stage subagent
 
+**One writer per artifact — enumerate live children before you dispatch.** Every stage you dispatch is a writer on a shared artifact, and the plan doc in particular is a single file on the shared main checkout that no worktree isolates. Before spawning, account for the children you already have out: if a child is still holding the plan doc, do not dispatch a second one onto it, and do not edit it yourself while it does. Wait for the outstanding child to report, then dispatch.
+
+This is not hypothetical. On 2026-08-07 one plan doc took two concurrent revision children twice over (#2650, shape 3) — a writer watched its line count grow from 62 to 111 between its own reads and had to stop and ask who owned the file — and a supervisor patched a plan task while its own dispatched child held the doc, then had to warn the child mid-flight to re-read before committing (shape 4). Both were recovered only because an agent happened to notice the file moving underneath it.
+
+Since Hard Rule 6 already requires `run_in_background: false`, the ordinary loop has exactly one child out at a time and satisfies this for free. The rule bites when you are tempted to fan out, or to "just fix one line" in a doc a child is revising. Neither is safe; the second is the one that feels harmless.
+
 Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). Prompt template:
 
 ```

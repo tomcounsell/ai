@@ -388,3 +388,76 @@ class TestReconcilerPersonaResolution:
         assert any(
             "[reconciler] persona resolution failed" in r.getMessage() for r in caplog.records
         )
+
+
+class TestMissedRecoveryStamp:
+    """The reconciler is the watchdog's only non-circular wedge evidence (#2475).
+
+    ``bridge:last_missed_recovery`` is what lets the detector tell "the update
+    loop stopped" from "nobody sent anything", so it must be stamped exactly
+    when a scan recovers something, and never when a scan finds nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stamps_when_messages_were_missed(self):
+        # Distinct chat and message ids: claim_message() writes a real,
+        # cross-test Redis key, so reusing another test's ids loses the claim
+        # and silently recovers nothing.
+        dialog = _make_dialog("Agent Builders Chat", entity_id=2475)
+        messages = [_make_message(24750 + i, minutes_ago=8 - i) for i in range(7, 0, -1)]
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=messages)
+
+        async def mock_is_duplicate(chat_id, message_id):
+            return message_id <= 24755
+
+        with (
+            patch("bridge.reconciler.is_duplicate_message", side_effect=mock_is_duplicate),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+            patch("bridge.liveness.record_missed_recovery") as mock_stamp,
+        ):
+            recovered = await reconcile_once(
+                client=client,
+                monitored_groups=["agent builders chat"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=AsyncMock(),
+                find_project_fn=MagicMock(
+                    return_value={"_key": "builders", "working_directory": "/tmp/builders"}
+                ),
+            )
+
+        assert recovered == 2
+        mock_stamp.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_stamp_when_nothing_was_missed(self):
+        """A clean scan is the healthy case and must leave no wedge evidence."""
+        dialog = _make_dialog("Agent Builders Chat", entity_id=500)
+        messages = [_make_message(i, minutes_ago=8 - i) for i in range(7, 0, -1)]
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=messages)
+
+        with (
+            patch("bridge.reconciler.is_duplicate_message", new_callable=AsyncMock) as dup,
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+            patch("bridge.liveness.record_missed_recovery") as mock_stamp,
+        ):
+            dup.return_value = True  # everything already processed
+            recovered = await reconcile_once(
+                client=client,
+                monitored_groups=["agent builders chat"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=AsyncMock(),
+                find_project_fn=MagicMock(
+                    return_value={"_key": "builders", "working_directory": "/tmp/builders"}
+                ),
+            )
+
+        assert recovered == 0
+        mock_stamp.assert_not_called()

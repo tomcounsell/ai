@@ -146,7 +146,15 @@ class TestCmdSend:
     """Tests for the Redis-queue-based cmd_send() implementation."""
 
     def _make_args(
-        self, chat="-123456", message="hello", file=None, image=None, audio=None, reply_to=None
+        self,
+        chat="-123456",
+        message="hello",
+        file=None,
+        image=None,
+        audio=None,
+        reply_to=None,
+        session_id=None,
+        ack_sent_id=False,
     ):
         """Build a mock Namespace matching what argparse produces for 'send'."""
         ns = argparse.Namespace(
@@ -156,6 +164,8 @@ class TestCmdSend:
             image=image,
             audio=audio,
             reply_to=reply_to,
+            session_id=session_id,
+            ack_sent_id=ack_sent_id,
         )
         return ns
 
@@ -195,6 +205,52 @@ class TestCmdSend:
         captured = capsys.readouterr()
         assert "Message queued" in captured.out
         assert "chars" in captured.out
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_session_id_overrides_synthetic_default(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """--session-id (issue #2717) overrides the synthetic cli-<epoch> id
+        used for both the outbox key and the payload's session_id."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(
+            chat="Dev: Valor", message="picking up an issue", session_id="upvote-valor-42-1000"
+        )
+        result = cmd_send(args)
+
+        assert result == 0
+        call_args = mock_redis.rpush.call_args
+        key = call_args[0][0]
+        payload = json.loads(call_args[0][1])
+        assert key == "telegram:outbox:upvote-valor-42-1000"
+        assert payload["session_id"] == "upvote-valor-42-1000"
+        assert "ack_sent_id" not in payload
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_ack_sent_id_flag_sets_payload_flag(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """--ack-sent-id (issue #2717) sets ack_sent_id=True in the payload."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(
+            chat="Dev: Valor",
+            message="picking up an issue",
+            session_id="upvote-valor-42-1000",
+            ack_sent_id=True,
+        )
+        result = cmd_send(args)
+
+        assert result == 0
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["ack_sent_id"] is True
 
     @patch("tools.valor_telegram.resolve_chat", return_value=None)
     def test_unknown_chat_returns_error(self, mock_resolve, capsys):

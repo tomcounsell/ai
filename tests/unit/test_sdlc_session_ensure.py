@@ -2356,6 +2356,59 @@ class TestSupervisedRunModule:
         clear_supervised_run_signal(issue_number, "owner-run")
         assert read_supervised_run_signal(issue_number) is None
 
+    def test_heartbeat_restores_a_signal_that_lapsed_under_a_live_lease(self):
+        """Issue #2659 acceptance: a pipeline outliving the signal TTL still
+        lets its stage forks inherit.
+
+        This is the wedge that was observed twice on 2026-08-07 (#2642, #2629).
+        The signal shares the lease's 1800s TTL but was written only at
+        acquire, while ``tools/sdlc_lease_heartbeat.py`` renewed the lease
+        forever. Thirty minutes in, the signal lapsed under a live lease and
+        every stage fork the supervisor dispatched got a bare ``ISSUE_LOCKED``
+        from its own supervisor's lock -- and stood down, correctly, per the
+        substrate-probe rule. Live lock, live heartbeat, no error anywhere.
+
+        ``clear_supervised_run_signal`` stands in for the TTL lapsing: both
+        leave a held lease with no signal, which is the state that matters.
+        """
+        from agent.supervised_run import (
+            clear_supervised_run_signal,
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+        from models.session_lifecycle import touch_issue_lock
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        issue_number = 2659
+        run_id = "runsig-2659"
+
+        # Supervisor acquires the lease and publishes the signal.
+        assert touch_issue_lock(issue_number, run_id, session_id="s").acquired is True
+        write_supervised_run_signal(issue_number, run_id, session_id="s")
+        assert supervised_run_status(issue_number).live is True
+
+        # 30 minutes pass: the signal lapses, the lease does not.
+        clear_supervised_run_signal(issue_number, run_id)
+        assert supervised_run_status(issue_number).live is False  # the wedge
+
+        # One heartbeat tick against the still-held lease.
+        ticks = iter([0.0, 1.0, 999.0])
+        rc = run_heartbeat(
+            issue_number=issue_number,
+            run_id=run_id,
+            session_id="s",
+            interval=1,
+            max_lifetime=2,
+            _sleep=lambda s: None,
+            _monotonic=lambda: next(ticks),
+        )
+
+        assert rc == 0
+        # Inheritance is restored: a stage fork now reads SUPERVISED_RUN_ACTIVE.
+        status = supervised_run_status(issue_number)
+        assert status.live is True
+        assert status.run_id == run_id
+
     def test_operations_fail_open_on_redis_error(self):
         """Every op degrades to a safe default (never raises) on Redis error."""
         from agent.supervised_run import (

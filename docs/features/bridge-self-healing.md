@@ -97,7 +97,7 @@ The mechanism was a `claude` session spawned to transmit a string that was alrea
 
 Any future push notification must originate from a transport that does not depend on the worker or an LLM turn.
 
-- **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely. A **wedge-dominated** storm always leaves this False, so the wedge detector's already-capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling — restarting is cheap and idempotent, and throttling it would recreate the exact livelock this fix removes.
+- **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely. A **wedge-dominated** storm always leaves this False, so the wedge detector's already-capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling — throttling it would recreate the exact livelock this fix removes. The exemption rests on a wedge verdict being trustworthy, which is why the detector now requires positive recovery evidence and resets its silence clock on restart (#2475): each restart is a SIGKILL plus a full startup dialog scan, so an un-throttled loop over a *false* verdict is anything but cheap.
 
 Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
@@ -105,38 +105,51 @@ Zombie cleanup is integrated into recovery levels 2+ to free memory before resta
 
 **Problem**: Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is manually restarted.
 
-**Solution**: Two positive liveness signals written to Redis, read by the watchdog on every 60-second tick:
+**Solution**: Three liveness signals written to Redis, read by the watchdog on every 60-second tick:
 
 | Redis Key | Writer | Meaning |
 |-----------|--------|---------|
 | `bridge:last_update_received` | NewMessage handler in `bridge/telegram_bridge.py`, before dedup | A Telethon update event was delivered to the bridge |
 | `bridge:last_probe_ok` | Reconciler in `bridge/reconciler.py`, after successful `get_dialogs()` | The Telegram API/TCP layer is reachable |
+| `bridge:last_missed_recovery` | Reconciler in `bridge/reconciler.py`, when a scan recovers ≥1 message | Telegram had messages the live update path never delivered |
 
-Both keys are managed by `bridge/liveness.py` (freeform Redis keys, not Popoto-managed; raw get/set is correct). Both writers are best-effort — any exception logs a WARNING and never raises, matching the safety contract from `bridge.dedup.record_last_event`.
+All three are managed by `bridge/liveness.py` (freeform Redis keys, not Popoto-managed; raw get/set is correct). Every writer is best-effort — any exception logs a WARNING and never raises, matching the safety contract from `bridge.dedup.record_last_event`.
 
 **Detection logic** (`assess_update_flow()` in `monitoring/bridge_watchdog.py`):
 
-The PRIMARY rule fires when all four conditions are true simultaneously:
-1. Bridge process is alive
+The PRIMARY rule fires when all of these hold:
+1. Bridge process is alive and its start time is readable
 2. `bridge:last_probe_ok` is fresh (API/TCP layer is healthy)
-3. `bridge:last_update_received` is older than `UPDATE_STALENESS_CEILING` (or absent)
+3. The live update path has delivered nothing for `UPDATE_STALENESS_CEILING`, measured from the **later** of `bridge:last_update_received` and the bridge process's own start time
 4. Bridge is past the startup grace window (`STARTUP_GRACE_SECONDS`)
+5. `bridge:last_missed_recovery` is within the same window **and postdates this process's startup grace** — the reconciler actually recovered a message the live path missed, and did so after the window in which a restart's own backfill lands
 
-When these conditions hold, `last_probe_ok` being fresh rules out the simple disconnect case — the API layer is up, but Telethon has stopped delivering events. This is the wedge signature.
-
-A SECONDARY accelerator fires at `UPDATE_STALENESS_WARN` (before the ceiling) to give an earlier signal on clearly active bridges.
+A SECONDARY accelerator applies the same shape at `UPDATE_STALENESS_WARN`, requiring the recovery evidence to be that recent too.
 
 **Key design decisions**:
-- **PRIMARY ceiling-based trigger**: no per-chat precondition. The ceiling fires regardless of whether any specific group has seen traffic. This avoids false negatives on quiet-but-monitored bridges.
+- **Silence is not evidence** (#2475). Conditions 2–4 alone describe a quiet account just as well as a wedged one: the reconciler refreshes `last_probe_ok` every 180s, so it is always fresh on a connected bridge, and four hours with nobody sending anything is routine. The detector ran on exactly that shape and produced 36 crash-tracker events in 72h on one machine and 164 in 24h on another, all the same reason.
+- **The corroborating signal must come from outside the handler under suspicion.** `bridge:last_update_received` and the per-chat `bridge:last_event:*` keys are both written by the `NewMessage` handler, so neither can testify that the handler has stopped — their silence is equally consistent with an idle account. (The per-chat scan the secondary accelerator used for corroboration was circular for this reason and has been removed.) The reconciler reaches Telegram over an independent API path, so a message it recovers is proof the live path missed one, and a genuinely quiet account produces no such evidence.
+- **The evidence is bounded to this process too.** The evidence window and the silence window are the same length, so a stamp made just before a routine restart would stay admissible for a full ceiling afterwards. That matters because every restart *creates* a gap and catchup plus the reconciler recover it on the way back up — a restart reliably stamps this key inside its own grace window. Four quiet hours after any restart would then yield one spurious verdict. Requiring the stamp to postdate `start_ts + STARTUP_GRACE_SECONDS` excludes the restart's own backfill, on the same principle as the silence clock: bound the verdict to the process it accuses.
+- **Measuring silence from process start.** Nothing seeds `bridge:last_update_received` on restart, so a verdict measured from the beacon alone survives the restart meant to cure it and re-fires on the first tick past the grace window — one SIGKILL every ~6 minutes (5-minute grace, 60-second tick), indefinitely. That cadence, not a recurring Telethon fault, is what the storm's own "every 5 minutes" log signature recorded. Taking the later of the beacon and process start means a restart clears the accusation and a real recurrence still re-fires after another full ceiling of silence.
 - **`last_probe_ok` as disconfirmation guard**: if the probe itself is stale, the bridge may be disconnected. A disconnect should be recovered by level 1 (process dead) or resolved by Telethon's reconnect — not treated as a wedge. Restarting on disconnect when Telethon is mid-reconnect would interrupt the reconnection attempt. The wedge detector only fires when probe is fresh.
 - **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
-- **`None` process-start = fail-safe**: if `get_bridge_process_start_ts()` returns `None` (process info unavailable), the detector treats the verdict as inconclusive and suppresses the restart. This avoids a restart based on incomplete information.
+- **What this detector can no longer see, and why we took that trade.** Requiring positive evidence buys the end of the storm at the cost of a real blind spot, and the old text here claimed the opposite ("avoids false negatives on quiet-but-monitored bridges"), so it is worth stating plainly.
+
+  `record_probe_ok()` fires at `bridge/reconciler.py:149`, straight after `get_dialogs()` and **before** the per-chat scan loop at `:151`, whose body ends in `except Exception ... continue` (`:403-405`). So a **half-wedged client** — dialogs resolve, but every per-chat history fetch throws — keeps `last_probe_ok` fresh, recovers nothing, and stamps no evidence. The detector sees fresh probe + silence + no evidence, which is byte-identical to a quiet account, and stays quiet. `test_quiet_account_past_ceiling_is_not_wedged` passes on that state for exactly that reason. Before #2475 that state restarted at the 4-hour mark; now it never does.
+
+  No cleverer detector removes this. Any signal the wedged component itself produces is circular, and the only independent observer we have is the reconciler — when *it* is the thing failing, there is nothing left to ask. Some false negative is the unavoidable price of refusing to treat silence as evidence, and a blind spot in one failure mode is a better trade than a SIGKILL every six minutes across every quiet night. Note also that the pre-#2475 behavior in this state was not a working recovery: the restart re-armed the same verdict six minutes later, so unless the restart happened to cure the fault it produced the storm rather than a fix.
+
+  What bounds the exposure today: **nothing does, automatically.** Nothing monitors the scan loop, so the state persists for as long as the fault does — until some unrelated cause happens to restart the bridge, which is luck rather than a mechanism. The failure is loud but unwatched: `[reconciler] Error scanning %s` at ERROR with a traceback, once per chat per 180-second scan, which means the evidence is sitting in the logs the whole time with nothing reading it. Treat that as the honest status, not as a safety net. Turning that log signal into a monitored one is [#2691](https://github.com/tomcounsell/ai/issues/2691), which also holds the open design question of whether persistent all-chat scan failure should re-enter the restart rule as positive evidence in its own right, or should only page. That question deserves deliberate treatment rather than being folded in here.
+
+  The evidence floor in the bullet above narrows the admissible window further, so it is worth being honest about its cost on this side too: in practice it is small. A genuinely wedged bridge that is still receiving traffic gets its evidence re-stamped by every 180-second scan, so the floor only discards the first stamp and evidence returns within a scan or two of the grace window closing. The floor delays nothing in the half-wedge case, where no stamp is ever written at all.
+
+- **Unreadable process age = fail-safe**: if there is no bridge pid, or `get_process_start_ts()` returns `None`, the detector treats the verdict as inconclusive and suppresses the restart. Process age is not merely the grace window — it is the floor for the silence measurement, so without it the verdict cannot be bounded to the current process.
 
 **Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window. This level-2 cap is now honored end to end: previously, a wedge that recurred faster than the crash-count window could re-cross while the crash-count check was still active, silently overriding this capped restart with the level-5 no-op (issue #2396). Because that override no longer exists, a recurring wedge always gets its capped restart on every tick — the crash-count storm this produces (all `bridge_update_loop_wedged`-reason crashes) is wedge-dominated, so `restart_circuit_open` stays False and the restart is never throttled.
 
 **Log signals**:
 ```
-[WARNING] bridge_update_loop_wedged: update loop stopped delivering events while process is running and API layer is healthy. Issue: update loop wedged: last_update_received=2.3h ago, last_probe_ok=2m ago — Telethon stopped delivering events while API layer is healthy
+[WARNING] bridge_update_loop_wedged: update loop stopped delivering events while process is running and API layer is healthy. Issue: update loop wedged: no live update for 262m (threshold 240m, last_update_received=310m ago), last_probe_ok=2m ago, and the reconciler recovered missed messages 4m ago — Telethon stopped delivering events while the API layer is healthy
 ```
 
 **Observable via**:
@@ -360,7 +373,7 @@ These mechanical scanners address message **ingestion** gaps (a message that was
 
 **Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
-2. Runs `git pull --ff-only` directly in bash (before invoking Python), so the orchestrator and all update scripts are loaded fresh from disk
+2. Fast-forwards `main` directly in bash (`git fetch origin main` + `git merge --ff-only origin/main`, never a bare `git pull` — see #2650), so the orchestrator and all update scripts are loaded fresh from disk
 3. Invokes `scripts/update/run.py --cron --no-pull` (the `--no-pull` flag skips the redundant internal pull since bash already pulled)
 4. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
 5. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
@@ -1031,7 +1044,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
 | `monitoring/bridge_watchdog.py` | External health monitor (bridge process); includes `assess_update_flow()` and wedged-update-loop recovery |
-| `bridge/liveness.py` | Positive liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()` |
+| `bridge/liveness.py` | Liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()`, `record_missed_recovery()`, `get_last_missed_recovery()` |
 | `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |

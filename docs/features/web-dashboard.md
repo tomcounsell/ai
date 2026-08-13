@@ -100,7 +100,8 @@ When metadata exists, hovering over the project name reveals a popover showing t
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DASHBOARD_RETENTION_HOURS` | `48` | How many hours of inactive sessions to show on the dashboard. Active sessions are always shown regardless of age. Set via environment variable. |
+| `DASHBOARD_RETENTION_HOURS` | `48` | How many hours of inactive sessions to show on the dashboard. Active sessions are exempt from this window (but not from `DASHBOARD_MAX_AGE_HOURS` below). Set via environment variable. |
+| `DASHBOARD_MAX_AGE_HOURS` | `240` (10 days) | Hard cap on session age, overriding even the active-session exemption. A session wedged in `pending`/`running` does not get infinite dashboard visibility just because it never reached a terminal status. |
 | `UI_PORT` | `8500` | Port for the FastAPI server (inherited from web-ui infrastructure). |
 
 ### Setting Retention
