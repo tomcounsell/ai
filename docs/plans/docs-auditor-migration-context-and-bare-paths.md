@@ -844,6 +844,22 @@ regardless of the change's real effect:
    wrong. `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `:1130`, so in
    dry-run it never runs and `withheld` stays empty. Verified against source during this
    revision.
+3. **Filtering the fix set through `_detect_stale_term_fixes`** — discovered at build time,
+   recorded here as a plan/code reconciliation. After this lane's #2744 hatch fix, the
+   hatch exempts *every* doc in the live corpus that mentions a `STALE_TERMS` key, so the
+   detector proposes nothing over `docs/features/*.md` and the measurement collapses to
+   `0 == 0` with `_absent_new_path_refs` never invoked. The #2744 fix would silently
+   hollow out #2759's proof. **The shipped test therefore builds its fix set directly from
+   `STALE_TERMS`**, deliberately bypassing the hatch, so real corpus text keeps flowing
+   through the guard AC4 is actually about.
+
+**Non-vacuity must be asserted, not assumed.** All three failure modes above return a
+passing-looking zero, so the test asserts positively that it did real work before it
+asserts the property: the widened arm must make strictly more refs visible than the narrow
+arm (otherwise `after <= before` is one pattern measured twice), and
+`_absent_new_path_refs` must have been invoked at least once in each arm (otherwise the
+measurement is vacuous rather than clean). Only then does it assert
+`after["withheld"] <= before["withheld"]`.
 
 **The mechanism that works.** Drive `_apply_fixes_to_file` directly. It needs a real git
 checkout — the existence oracle and the `git ls-files` basename index both do, and a
