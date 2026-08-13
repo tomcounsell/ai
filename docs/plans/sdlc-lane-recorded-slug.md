@@ -7,7 +7,7 @@ created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2735
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-08-13T09:24:16Z
+revision_applied_at: 2026-08-13T09:33:20Z
 ---
 
 # SDLC Lane Identity: One Recorded Slug, Minted Once
@@ -453,44 +453,64 @@ modes fetch the ledger differently, and that difference is the only reason the m
 somewhere to write:
 
 ```
-if allow_heal:
-    # Writer convention: the env ladder, same helper every lane-start path uses.
-    target_repo = _resolve_target_repo()                    # tools/_sdlc_utils.py
-    ledger = PipelineLedger.get_or_create(target_repo, issue_number)
-else:
-    # READER convention: lease-first. Must match how every other reader in the
-    # repo builds the ledger key, or the recorded slug reads back as None.
-    target_repo = resolve_target_repo_for_read(issue_number)  # tools/_sdlc_utils.py:134
-    ledger = PipelineLedger.get(target_repo, issue_number)    # agent/pipeline_ledger.py:293
+def resolve_lane_slug(issue_number, *, allow_heal=False, target_repo=None):
+    if target_repo is None:
+        target_repo = resolve_target_repo_for_read(issue_number)  # tools/_sdlc_utils.py:134
+    if not target_repo:
+        return None            # NEVER assemble a `None:{issue}` key -- both arms.
+    if allow_heal:
+        ledger = PipelineLedger.get_or_create(target_repo, issue_number)  # :178
+    else:
+        ledger = PipelineLedger.get(target_repo, issue_number)            # :293, may be None
 ```
 
-**The two paths use DIFFERENT repo resolvers, deliberately (revision cycle 4).** A cycle-3
-draft used `_resolve_target_repo()` for both and hand-rolled
-`PipelineLedger.load(ledger_key=_build_key(...))` for the read. Both halves were wrong:
+**ONE repo resolver on both arms, plus a mandatory passthrough (revision cycle 5).**
+Cycles 3 and 4 both got this wrong, in opposite directions, and the second attempt is
+what forced the collapse to a single rule:
 
-- **Key mismatch would silently no-op the whole feature.** Every reader in this repo
-  resolves the ledger key with `resolve_target_repo_for_read(issue_number)`, which is
-  lease-first (`tools/sdlc_stage_query.py:612`, `tools/_sdlc_run_identity.py:125`,
-  `tools/sdlc_verdict.py:634`, `tools/sdlc_review_finalize.py:275`, `ui/data/sdlc.py:891`).
-  A resolver reading through the *env* ladder can therefore build a different
-  `ledger_key` than the heal path wrote, and the recorded slug reads back as `None` — the
-  feature appears to do nothing, with no error anywhere. This is the failure that would
-  have survived a green test suite, because tests set the env explicitly and the two
-  ladders agree under that condition.
-- **`_resolve_target_repo()` shells out.** It runs `gh repo view` whenever `GH_REPO` is
-  unset (`tools/_sdlc_utils.py:94-131`), which falsifies the Success Criterion
-  "`resolve_lane_slug(N)` (heal off) issues no git subprocess" and Risk 5's "a single
-  direct-key `HGETALL`, no git at all", and adds a second `gh` call per `stage-query`
-  (`_compute_meta` already resolves the repo at `tools/sdlc_stage_query.py:468`).
-- **Do not hand-roll the key.** `PipelineLedger.get(target_repo, issue_number)`
-  (`agent/pipeline_ledger.py:293-324`) is the existing read accessor and, like `load()`,
-  never creates. Use it.
+- Cycle 3 used `_resolve_target_repo()` (the env ladder) for both arms. That shells out to
+  `gh repo view` whenever `GH_REPO` is unset (`tools/_sdlc_utils.py:94-131`), and it is not
+  the convention readers use.
+- Cycle 4 split them — `resolve_target_repo_for_read` for the read arm,
+  `_resolve_target_repo` for the heal arm — which created a **divergence class**: the two
+  ladders can answer differently, so the heal arm could write under one key and the read
+  arm look under another, and the recorded slug would read back as `None` with no error
+  anywhere.
+- Cycle 5 collapses it. `resolve_target_repo_for_read` peeks the issue lease first and
+  **falls back to `_resolve_target_repo()`'s env ladder** when no live lease exists
+  (`tools/_sdlc_utils.py:134-166`), so it is a strict **superset** of the writer ladder,
+  not a competing one. Using it on both arms makes divergence impossible by construction
+  rather than something a test has to chase. Its env fallback is memoized within a
+  `cached_target_repo_resolution()` scope (#2122), so the read path does not pay for a
+  `gh` call per tick.
 
-`resolve_lane_slug` takes an optional `target_repo: str | None = None` so a caller that
-has already resolved it — `_compute_meta` is the one that matters — passes it through
-instead of paying for a second resolution. The Success Criterion is restated as "the read
-path issues **no subprocess beyond target-repo resolution**, and none at all when the
-caller passes `target_repo` or `GH_REPO` is set".
+**A caller holding an authoritative repo slug MUST pass `target_repo=` — this is not
+optional (cycle 5, BLOCKER).** Both reflection callers iterate *projects*:
+`reflections/sdlc_upvote_lanes.py:440` binds `repo = _project_repo(project)` and
+`sdlc_progress.py` does the same. Only *subprocesses* get the project `cwd`; the Python
+process's own cwd and env never change. So an unpassed `target_repo` resolves through the
+reflections process's own git root — `tomcounsell/ai` — and a non-`ai` project's lane
+would be recorded under the wrong repo while its own gates read the right one. Gate 3
+(`:511`) has already excluded live leases by the time these run, so the lease peek cannot
+rescue it either. Both sites pass `target_repo=repo`.
+
+**Never build a key from a `None` repo.** Both resolvers can return `None`
+(`tools/_sdlc_utils.py:112-113, 126-131, 147-149`), and `_build_key`
+(`agent/pipeline_ledger.py:122-134`) explicitly pushes that check to callers — a `None`
+would mint a phantom `None:{issue}` key, and on the heal arm it would **create** that
+phantom record. The guard is `if not target_repo: return None` above the branch, matching
+the established reader convention at `tools/sdlc_stage_query.py:612-614`.
+
+**`_compute_meta` does NOT pass `target_repo` through.** A cycle-4 draft had it do so,
+citing `tools/sdlc_stage_query.py:468` — but `:468` is `resolved_repo = _resolve_target_repo()`,
+the env ladder, so passing it would hand the read path exactly the resolver this fix
+exists to keep out of it. `_compute_meta` calls `resolve_lane_slug(N)` with no
+`target_repo` and lets it resolve lease-first; the memoized fallback keeps the cost at one
+resolution.
+
+The Success Criterion is restated as "the read path issues **no subprocess beyond
+target-repo resolution**, which is memoized per scope, and none at all when the caller
+passes `target_repo` or `GH_REPO` is set".
 
 - **Read path (`allow_heal=False`)**: `load()` is a direct-key `HGETALL` and **never
   creates a ledger**. When no ledger exists the function returns `None` immediately, so a
@@ -555,7 +575,7 @@ branch no longer exists on origin — and must be a clean fall-through, never an
 
 **Conditional-on-empty write.** Popoto has no compare-and-set. The write reuses the
 short-lived SETNX pattern `PipelineLedger.get_or_create` already uses for its create
-race (`agent/pipeline_ledger.py:211`): take a SETNX on a dedicated non-Popoto key, then
+race (`agent/pipeline_ledger.py:248` (`_acquire_create_lock`)): take a SETNX on a dedicated non-Popoto key, then
 `load()` the ledger fresh (direct-key `HGETALL`, index-independent — the #1720 hazard
 does not apply), and write only if `slug` is still empty. `save(update_fields=["slug"])`
 so `stage_states_json` is never touched. A lost race is not an error: the loser re-reads
@@ -720,8 +740,13 @@ def _issue_number_from_message(message: str) -> int | None:
 
 ```python
 issue_number = _issue_number_from_message(message)
-slug = resolve_lane_slug(issue_number, allow_heal=True) if issue_number else None
+slug = mint_lane_slug(issue_number) if issue_number else None
 ```
+
+**No resolver call, no healing** — see Task 3 for why (`cmd_create` fires on any prose
+issue mention, and adopting a live lane's recorded slug would drop a conversational
+session into that lane's worktree, #1915 Defect 2). `AC-HEAL` requires **zero**
+`allow_heal=True` hits in `tools/valor_session.py`.
 
 Behavior is preserved exactly at both ends: `"handle issue #1109"` still yields a slug
 (now `sdlc-1109` from the resolver's mint rung rather than from a format string, and the
@@ -877,9 +902,10 @@ above. The Verification table encodes the sweeps.
   `tests/unit/test_sdlc_utils.py`, `tests/unit/test_sdlc_env_vars.py`,
   `tests/integration/test_off_pipeline_merge_path.py`,
   `tests/integration/test_sdlc_cross_repo_resolution.py` — **UPDATE**: patch targets and
-  imports move to `tools.lane_identity`. `test_sdlc_verdict.py` and
-  `test_sdlc_stage_marker.py` additionally need cases for the newly fail-**closed**
-  branches (Concern-3 fix). These six are why the Verification test row became
+  imports move to `tools.lane_identity`. `test_sdlc_verdict.py` additionally needs cases
+  for the newly fail-**closed** CRITIQUE branch (Concern-3 fix). `test_sdlc_stage_marker.py`
+  needs **no** fail-closed cases — that half was dropped in cycle 4; its change is an
+  import retarget only. These six are why the Verification test row became
   sweep-driven (`AC-TESTSCOPE`) — a fixed file list would have certified a red suite.
 - [ ] `reflections/` tests covering `_has_pr_on_branch` — **UPDATE**: the `--head` argument
   is now derived from the recorded slug when there is one. The no-recorded-slug case must
@@ -1028,7 +1054,7 @@ recorded slug issues **zero** subprocess calls.
 tooling) both read an empty `PipelineLedger.slug` for the same issue and both walk the
 ladder.
 **Data prerequisite:** The `PipelineLedger` record must exist (`get_or_create` already
-serializes its own create race via SETNX at `agent/pipeline_ledger.py:211`).
+serializes its own create race via SETNX at `agent/pipeline_ledger.py:248` (`_acquire_create_lock`)).
 **State prerequisite:** `slug` empty at read time.
 **Mitigation:** SETNX on a dedicated non-Popoto key serializes the write. The winner
 re-`load()`s (direct-key, index-independent) and writes only if still empty, with
@@ -1230,17 +1256,23 @@ No new agent integration required.
 - [ ] `resolve_lane_slug(N)` (heal off) for an issue with no ledger creates no ledger, and
   issues no subprocess when given `target_repo` or with `GH_REPO` set. Read paths stay
   inert. *(cycle-1 blocker 1, must not regress)*
-- [ ] The read path and the heal path resolve the **same** ledger key for the same issue.
-  A test writes via the heal path and reads it back via the read path with the lease held,
-  proving the `resolve_target_repo_for_read` / `_resolve_target_repo` split does not
-  strand the recorded value. *(cycle-4 concern)*
+- [ ] The read path and the heal path resolve the **same** ledger key by construction —
+  both call `resolve_target_repo_for_read`. A test still pins it, and to be non-vacuous it
+  must pin a lease whose `target_repo` **differs** from the env-ladder answer, then write
+  via heal and read back via read. *(cycle-4 concern; made structural in cycle 5)*
+- [ ] `resolve_lane_slug` returns `None` and writes nothing when `target_repo` resolves to
+  `None`. No `None:{issue}` key is ever created on either arm. *(cycle-5 concern)*
+- [ ] Both reflection callers pass `target_repo=repo`, so a non-`ai` project's lane is
+  recorded under its own repo. A test with a non-`ai` project config asserts the key.
+  *(cycle-5 blocker)*
 - [ ] `_derive_slug_from_message` no longer exists anywhere in `tools/`; the "generic
   message → `None` slug" behavior is still pinned by
   `tests/unit/test_pm_session_refuse_no_issue.py`, and `resolve_lane_slug` is not called
   on that path. *(cycle-2 blocker 2)*
 - [ ] A `NEEDS REVISION` CRITIQUE verdict with an unresolvable plan **raises**
   `CRITIQUE_PLAN_UNRESOLVABLE`; the same write at `READY TO BUILD` / `MAJOR REWORK` does
-  not. A stage skip with an unresolvable plan is refused. *(concern 3)*
+  not. *(concern 3)* — the stage-skip half of this criterion was **removed in cycle 4**;
+  see Task 4 for why refusing there deletes stage skipping entirely.
 - [ ] `_meta` carries `slug` and `slug_source` (`recorded` / `unresolved`), so an operator
   can tell "skipped because unresolvable" from "verified clean". *(concern 4)*
 - [ ] `AC-TESTSCOPE` exits 0 — the sweep-driven test scope, including
@@ -1330,7 +1362,7 @@ No new agent integration required.
   dropped in cycle 3; `_is_ai_repo_fallback` and the bare-`#N`
   fallback deleted entirely). Preserve the plans-dir resolution ladder verbatim.
 - Implement the conditional-on-empty healing write, modeled on the SETNX pattern at
-  `agent/pipeline_ledger.py:211`. Use `save(update_fields=["slug"])`. Take no lease.
+  `agent/pipeline_ledger.py:248` (`_acquire_create_lock`). Use `save(update_fields=["slug"])`. Take no lease.
   Treat `""` and whitespace-only as empty.
 - **Import `_git_toplevel` and `_resolve_target_repo` as module attributes, not as bound
   names (cycle 4).** Fourteen existing tests monkeypatch the literal
@@ -1417,9 +1449,14 @@ No new agent integration required.
   existing slug readers see the same identity. The ledger remains authoritative; the
   `AgentSession` copy is a documented convenience mirror (see Open Questions, resolved).
 - Remove the mint from `reflections/sdlc_upvote_lanes.py:489` and
-  `reflections/sdlc_progress.py:707`. **`sdlc_progress.py:707`** is a straight in-place
-  substitution to `resolve_lane_slug(issue_number, allow_heal=True)`: it sits at the
-  respawn site for an issue already known to be a lane.
+  `reflections/sdlc_progress.py:707`. **`sdlc_progress.py:707`** substitutes in place to
+  `resolve_lane_slug(issue_number, allow_heal=True, target_repo=repo)` — it sits at the
+  respawn site for an issue already known to be a lane. **Assign the result to the
+  surrounding `slug` variable**, not just to the `create_session` argument: `slug` is
+  already in scope from the PR branch (`:788`) and is charged against `_bump_attempts`
+  (`:728`) and the escalation/cooldown keys (`:824`, `:861`). Substituting only at the
+  create rung would create the session under one name while attempts and cooldowns accrue
+  under another.
 - **`sdlc_upvote_lanes.py:489` is NOT an in-place substitution — the heal call moves
   (revision cycle 4, BLOCKER).** Line `:489` is the top of the candidate loop, *above*
   gate 1 (`:493`), gate 1.5 (`:502`), gate 1.6 (`:505`), gate 2 (`:508`), gate 3 (`:511`),
@@ -1430,15 +1467,32 @@ No new agent integration required.
   lane ever starts. That contradicts three of this plan's own commitments: "minted exactly
   once at lane start", "non-lane issue → no ledger created", and "read paths never mint".
   Required shape:
-  - At `:489`, keep a **probe-only** local, heal off:
-    `slug = resolve_lane_slug(issue_number) or mint_lane_slug(issue_number)`. The gates
-    below need a name to look sessions up by; none of them may record one.
+  - At `:489`, resolve **once**, heal off, and let every gate below use that value:
+    `slug = resolve_lane_slug(issue_number, target_repo=repo) or mint_lane_slug(issue_number)`.
+    The gates need a name to look sessions up by; none of them may record one.
   - Move the healing call **past every gate**, after the Race-1 re-check at `:553-566`
     and immediately before `create_session(... slug=slug ...)` at `:577` — the first
     point at which the reflection has actually committed to starting a lane:
-    `slug = resolve_lane_slug(issue_number, allow_heal=True) or slug`.
+    `resolve_lane_slug(issue_number, allow_heal=True, target_repo=repo)`.
+  - **The healed value must equal the probed value, so the heal call does not reassign
+    `slug` (cycle 5).** Rung 1 returns the recorded slug and the probe already read it, so
+    they agree; when nothing was recorded, the heal mints the same `sdlc-{N}` the probe
+    fell back to. Reassigning would risk gates 1 (`:493`), 1.6 (`:505`) and the Race-1
+    re-check (`:554`) having tested `_non_terminal_session_for` under one name while the
+    session is created under another — silently losing duplicate-lane protection for a
+    candidate that has a recorded human-named slug but no recorded stages (gate 2 only
+    tests `stage_states_json`). Resolving once at `:489` is what makes them agree.
+  - Both calls pass `target_repo=repo` (`:440`). Without it the reflection records a
+    non-`ai` project's lane under `tomcounsell/ai` — see "ONE repo resolver" above.
   The distinction is the same one Task 4 draws: scanning is a search and may guess;
   starting a lane is a write and must record.
+  - **Accepted exception:** healing at `:577` runs before `create_session`, which can
+    itself fail (`:592-602`), leaving a ledger and a recorded identity for a lane that
+    never started. This is a real but narrow departure from "non-lane issue → no ledger
+    created". It is acceptable because by `:577` the issue is a *committed pickup target*
+    that passed every gate, and the next tick retries it under the same recorded slug —
+    which is the identity-stability property this whole lane exists to create. Recorded
+    rather than hidden so a reviewer does not read it as an oversight.
 - **Remove the third minter — by deletion, not by demotion.** `tools/valor_session.py:107`'s
   `_derive_slug_from_message` returns `f"sdlc-{N}"` and never calls `ensure_session`, so
   `valor-session create "handle issue #N"` mints a competing identity today. **Delete the
@@ -1543,9 +1597,11 @@ No new agent integration required.
   `git show main:docs/plans/{slug}.md`. The PLAN/PATCH split hands it a plan path from
   `find_plan_path`, which returns an **absolute** `Path` — `git show` needs a
   repo-relative one. Change the signature to take a repo-relative path and do the
-  conversion at the call site with `plan_path.relative_to(_target_repo_cwd())`, guarding
-  the `ValueError` for a plan resolved outside the target repo (skip the check rather than
-  raise). Without this the PLAN artifact check breaks in a new way while fixing the old
+  conversion at the call site with `Path(plan_path).relative_to(_target_repo_cwd())` —
+  spell the `Path()` cast: `find_plan_path`'s return is consumed as
+  `Path(plan_path).stem` at `tools/sdlc_next_skill.py:203-205`, so callers do not assume
+  it is already a `Path`. Guard the `ValueError` for a plan resolved outside the target
+  repo (skip the check rather than raise). Without this the PLAN artifact check breaks in a new way while fixing the old
   one.
 - Delete the false-belief comments at `tools/sdlc_next_skill.py:346-349` and
   `tools/sdlc_stage_query.py:347-350`; replace with the true statement.
@@ -1740,12 +1796,12 @@ decision an exit criterion for this lane. Cut to three one-line backfills plus o
 | Ledger carries the field | `.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; assert 'slug' in PipelineLedger._meta.fields"` | exit code 0 |
 | Migration registered | `grep -c 'confirm_pipeline_ledger_slug_readable' scripts/update/migrations.py` | output > 1 |
 | Anti-criterion: no slug derived from a plan filename | `grep -rnE '\.stem\b' tools/ agent/ reflections/` | every hit reviewed by hand; **zero** hits where the `.stem` of a plan path becomes a slug or a branch name. Broadened from the old literal `Path(plan_path).stem`, which a rename to `plan_path.stem` defeated. |
-| Anti-criterion: no stale import path | `grep -rn 'from tools._sdlc_utils import find_plan_path' --include='*.py' --include='*.md' . \| grep -v '^./.worktrees/' \| wc -l` | match count == 0 |
+| Anti-criterion: no stale import path | see `AC-STALEIMPORT` below | match count == 0 |
 | Anti-criterion: no stale prose reference to the moved symbol | see `AC-PROSE` below | match count == 0 |
 | Anti-criterion: docs sweep complete | see `AC-DOCSWEEP` below | every listed file names `tools/lane_identity`, none names `tools/_sdlc_utils` |
 | Anti-criterion: false belief deleted | see `AC-BELIEF` below | match count == 0 |
-| Anti-criterion: fallback mechanism deleted | `grep -rn '_is_ai_repo_fallback' tools/ tests/ \| wc -l` | match count == 0 |
-| Anti-criterion: no hardcoded prefix in probes | `grep -rnE '"session/\|f"session/\|session/\{' tools/ reflections/` | `lane_branch_name` in `tools/lane_identity.py` is the ONLY permitted hit. Broadened in cycle 4: the old `ls-remote.*session/` form was vacuous for two sites this plan keeps and makes newly functional — `branch_exists`'s `f"session/{slug}" in branch_names` (`tools/sdlc_next_skill.py:367`, a `git branch -a` probe, not `ls-remote`) and `_lookup_pr`'s `--head", f"session/{slug}"` (`tools/sdlc_stage_query.py:369`). Both must route through `lane_branch_name`. |
+| Anti-criterion: fallback mechanism deleted | see `AC-FALLBACK` below | match count == 0 |
+| Anti-criterion: no hardcoded prefix in probes | see `AC-PREFIX` below | **hand-review row, not a count row** (21 hits on `main`, mostly test fixtures and prose). Every hit in `tools/` and `reflections/` that constructs a branch name to *act on* must route through `lane_branch_name`; `tools/lane_identity.py` is the only place the literal prefix may appear in constructing code. |
 | Anti-criterion: no holder/pid/liveness field added | see `AC-LIVENESS` below | match count == 0 |
 | Anti-criterion: no eager slug backfill in migration | see `AC-BACKFILL` below | match count == 0 |
 | Anti-criterion: no read path heals | see `AC-HEAL` below | hits are **exactly** the three sanctioned lane-start callers; zero hits in `tools/valor_session.py`, `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, `tools/sdlc_verdict.py`, `tools/sdlc_stage_marker.py` |
@@ -1790,6 +1846,34 @@ grep -rln 'find_plan_path' docs/features/ docs/sdlc/                      # AC-D
 # have moved. Verified at cycle-2 revision time: 8 files under docs/features/
 # and docs/sdlc/. Two are called out under ## Documentation because they are
 # load-bearing rather than descriptive; the rest are found by the sweep.
+
+# AC-STALEIMPORT — no live importer still names the symbol's old home.
+# Lives here, not in a table cell: the cell form needed `\|` for the shell
+# pipes, and in a shell `\|` is an escaped LITERAL pipe passed as an argument,
+# so the command breaks. Both --include globs are single-quoted (zsh would
+# otherwise glob-expand them, abort the pipeline, and print 0 -- a vacuous PASS).
+grep -rn 'from tools._sdlc_utils import find_plan_path' \
+  --include='*.py' --include='*.md' . | grep -v '^./.worktrees/' | wc -l   # expect 0
+# Under-counts by construction: a `from tools import _sdlc_utils` + attribute
+# form would not match. Pair with AC-TESTSCOPE; never treat as exhaustive.
+
+# AC-FALLBACK — the _is_ai_repo_fallback mechanism is gone
+grep -rn '_is_ai_repo_fallback' tools/ tests/ | wc -l                      # expect 0
+
+# AC-PREFIX — the `session/` literal appears in constructing code exactly once.
+# HAND-REVIEW row: 21 hits on main, most of them test fixtures and prose that
+# legitimately name a branch. The question each hit must answer is "does this
+# BUILD a branch name that something then acts on?" -- if yes it routes through
+# lane_branch_name(). The cycle-4 form of this row was itself vacuous: it lived
+# in a table cell as `'"session/\|f"session/\|session/\{'`, and inside an ERE a
+# `\|` is a literal pipe, not alternation, so it searched for one impossible
+# string and returned 0 on any tree.
+grep -rnE '"session/|f"session/|session/\{' tools/ reflections/
+# Two sites the cycle-3 row (`ls-remote.*session/`) missed, both kept and made
+# newly functional by this plan, both of which MUST route through lane_branch_name:
+#   tools/sdlc_next_skill.py:367  branch_exists  f"session/{slug}" in branch_names
+#                                                (a `git branch -a` probe, not ls-remote)
+#   tools/sdlc_stage_query.py:369 _lookup_pr     "--head", f"session/{slug}"
 
 # AC-BELIEF — the false "repo never creates session/sdlc-{N}" comments are gone
 grep -rnE 'never creates one|this repo never creates' tools/ tests/ | wc -l   # expect 0
@@ -1879,25 +1963,23 @@ row. `AC-LIVENESS` **and `AC-BACKFILL`** are the deliberate exceptions among zer
 rows — it guards
 against *adding* something, so it is green on `main` and must stay green; its value is
 that the fixed ERE can now actually fire, which the fixed spelling is verified to do
-against a synthetic `holder = ...` line. Verified red at revision time (cycle 2, re-run
-after the edits above): `AC-TRACKING` (3 files, after the `NON_LANE_PLANS` exclusion),
-the `.stem` sweep (2 offending hits, `tools/sdlc_next_skill.py:205,357`, out of 6 total —
-the other 4 are unrelated `.stem` uses that a hand review must pass), `AC-BELIEF` (2),
-`AC-MINT` (8), `AC-PROSE` (3), the stale-import row (**29**, re-verified cycle 3 —
-`main` has moved since the 28 recorded in cycle 2), `_is_ai_repo_fallback` (4), and
-the hardcoded-`session/`-prefix row (2). `AC-DOCSWEEP` lists 8 files.
+against a synthetic `holder = ...` line. **Every count below was re-derived in cycle 5 using the exact command forms now in the
+fenced block**, after three recorded counts were traced to commands that differed from the
+ones in the table. Re-derive again at build time: `main` moves, and two of these have
+already drifted twice.
 
-**Quote both `--include` globs.** Under zsh an unquoted `--include=*.py` is glob-expanded,
-matches no file, and zsh **aborts the pipeline** with `no matches found`; `wc -l` then
-prints `0` and the stale-import row reports PASS on unmodified `main`. That is the same
-vacuous-anti-criterion class as `AC-LIVENESS`'s escaped pipe, and the cycle-2 count of 28
-could only have come from the quoted form — i.e. from a different command than the one a
-builder running the table would have executed. The row is now quoted on both globs.
-It still **under-counts** the real blast radius: the symbol is also imported as
-`from tools._sdlc_utils import find_plan_path as _find_plan_path`
-(`tools/sdlc_stage_query.py:51`, `tools/sdlc_verdict.py:104`), which this exact-string row
-happens to match, but a `from tools import _sdlc_utils` + attribute access would not.
-Treat it as paired with `AC-TESTSCOPE`, never as exhaustive.
+| Row | Count on `main` (cycle 5) | Note |
+|---|---|---|
+| `AC-STALEIMPORT` | **30** | was 28 (cycle 2), 29 (cycle 4) — drifts with `main` |
+| `AC-PREFIX` | **21** | hand-review row, not a zero row; the cycle-3 "2" came from the narrower `ls-remote` form and the cycle-4 form was vacuous |
+| `AC-FALLBACK` (`_is_ai_repo_fallback`) | **4** | stable |
+| `AC-BELIEF` | **2** | stable |
+| `AC-MINT` | **8** | stable |
+| `AC-PROSE` | **3** | stable |
+| `AC-TRACKING` | **3 files** | `sdlc-1111.md`, `session-type-pm-rename.md`, `keyfield-migration-fix.md` |
+| `.stem` sweep | **2 offending of 6 total** | `tools/sdlc_next_skill.py:205,357`; the other 4 are unrelated `.stem` uses a hand review must pass |
+| `AC-DOCSWEEP` | **8 files** | positive criterion |
+
 `AC-TESTSCOPE` is a positive criterion, red on `main` for a different reason
 (`tests/unit/test_lane_identity.py` does not exist yet). Every count re-verified against
 `main` at cycle-2 revision time — quote the counts, not just "red", so a later drift is
@@ -1938,6 +2020,31 @@ visible.
 | NIT | Line-ref drift (`migrations.py:999`→`:1033`; 29 plans→33) and `test_sdlc_utils.py` suppression cases marked UPDATE when they need DELETE. | **addressed** | Refreshed; DELETE stated. |
 | NIT | `build-backfill` marked `Parallel: true` under `identity-tester`, which also owns `test-red`. | **addressed** | Set to `Parallel: false`; `Depends On: none` retained. |
 | NIT | Rung 1 pseudocode was a `NameError` (`target_repo` assigned only in the `if` arm). | **addressed** | Resolved by the two-resolver rewrite. |
+
+### Cycle 5 (focused re-critique of the cycle-4 fixes)
+
+| Severity | Finding | Addressed By |
+|----------|---------|--------------|
+| BLOCKER | The `cmd_create` snippet in Technical Approach still read `resolve_lane_slug(issue_number, allow_heal=True)`, contradicting Task 3, the three-caller table and `AC-HEAL`. Cycle 4 claimed "struck; three everywhere"; it was not. | **addressed** — snippet now `mint_lane_slug`, with the reason inline |
+| BLOCKER | Both reflection callers would build the wrong ledger key for non-`ai` projects: they iterate projects and pass the project `cwd` only to *subprocesses*, so an unpassed `target_repo` resolves through the reflections process's own git root (`tomcounsell/ai`). Gate 3 has already excluded live leases, so the lease peek cannot rescue it. | **addressed** — `target_repo=repo` is mandatory at all three reflection sites; new success criterion with a non-`ai` project test |
+| BLOCKER | The cycle-4-broadened `session/`-prefix row was vacuous by the plan's own rule: it lived in a table cell using `\|`, which inside an ERE is a *literal pipe*, so it searched for one impossible string. | **addressed** — moved to the fenced block as `AC-PREFIX`, converted to a hand-review row (21 hits on `main`, not 2) |
+| HIGH | The cycle-4 drop of the `sdlc_stage_marker` change was not propagated: Success Criteria still required "a stage skip with an unresolvable plan is refused" and Test Impact still demanded fail-closed cases for that file. Task 7 validates every AC, so a correct build would fail validation. | **addressed** — both struck |
+| HIGH | The `target_repo=` passthrough was incoherent: it named `_compute_meta` as the caller, but `tools/sdlc_stage_query.py:468` is `_resolve_target_repo()` — the env ladder — so passing it through would hand the read path the resolver the fix banned. | **addressed** — `_compute_meta` does not pass through; resolves lease-first, memoized |
+| HIGH | No `None`-repo guard on either arm; `_build_key` explicitly pushes that check to callers, and the heal arm would *create* a phantom `None:{issue}` record. | **addressed** — `if not target_repo: return None` above the branch, plus a success criterion |
+| MEDIUM | The upvote probe slug and the healed slug could diverge, so gates 1/1.6 and the Race-1 re-check would test one name while the session is created under another — losing duplicate-lane protection for a candidate with a recorded human-named slug but no recorded stages. | **addressed** — resolve once at `:489`; the heal call does not reassign `slug` |
+| MEDIUM | Two more Verification rows were unrunnable (`\|` as a shell pipe inside table cells). | **addressed** — moved to the fenced block as `AC-STALEIMPORT` / `AC-FALLBACK` |
+| MEDIUM | The cycle-4 key-agreement criterion was vacuous: it passes trivially whenever the env ladder and the lease agree, which is the default in any test that sets `SDLC_TARGET_REPO`. | **addressed** — divergence removed structurally (one resolver); the test must now pin a lease whose `target_repo` differs from the env answer |
+| LOW | `sdlc_progress.py:707` substituted in place would desync from the surrounding `slug`, which is charged against `_bump_attempts` and the escalation/cooldown keys. | **addressed** — assign to `slug`, not just the argument |
+| LOW | Healing at `:577` precedes `create_session`, which can fail, recording an identity for a lane that never started. | **addressed** — recorded as an accepted, reasoned exception rather than hidden |
+| NIT | Citation drift (`pipeline_ledger.py:211` is docstring prose, not the SETNX call) and an unspecified `Path()` cast in the `_check_plan_committed_on_main` relativization. | **addressed** |
+
+**Root cause of the cycle-4 → cycle-5 churn, recorded so it is not repeated:** cycles 3
+and 4 both tried to specify *which* repo resolver each arm uses, and each attempt fixed one
+failure while opening another. The resolution was not a better split but the removal of the
+split — `resolve_target_repo_for_read` is a strict superset of the writer ladder
+(lease-first, env-fallback), so using it everywhere makes the divergence class unreachable
+instead of something a test has to chase. When two mechanisms must be kept in sync, prefer
+deleting one.
 
 ## Decisions (formerly Open Questions)
 
