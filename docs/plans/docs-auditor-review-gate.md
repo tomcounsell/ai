@@ -58,7 +58,9 @@ somebody actually reads.
 
 **Baseline commit:** `48feedf318a768f6f38d364dc998a67a69f16027` (main)
 **Issue filed at:** 2026-08-13T03:27:43Z
-**Disposition:** Minor drift — one issue claim is materially **wrong in our favour** (see Spike Results, spike-1). All other claims hold.
+**Disposition:** Minor drift — every issue claim holds. The issue's item-2 *framing*
+("newest hop, not the final hop") is imprecise about the mechanism; the defect is real
+but structurally different from described (see Spike Results, spike-1).
 
 **File:line references re-verified.** All line numbers in issue #2739 are against
 `main`. This plan builds on `origin/session/docs-auditor-rename-guard` (PR #2728),
@@ -80,9 +82,9 @@ so every reference below is re-anchored to **that branch's** version of
 | Liveness `status="ok"` `:1653-1655` | `:1822-1829` | Holds |
 | `_send_telegram_notification` `:904` | `:1018` | Holds; one production call site (`:1814`), success-path only |
 | Scheduler reads only `projects` `agent/reflection_scheduler.py:509` | `:510-515` | **Confirmed** — `findings` and `summary` are discarded |
-| `_detect_renamed_symbol_fixes` `renames[0][1]` `:417-431` | `:447-461` | Present, but **unreachable** — see spike-1 |
-| `_detect_readme_broken_entries` frame mismatch `:434` | `:464-494` | Present, but unreachable |
-| `_detect_renamed_link_fixes` frame mismatch `:387/:412` | `:417-444` | Present, but unreachable |
+| `_detect_renamed_symbol_fixes` `renames[0][1]` `:417-431` | `:447-461` | Executes, but #2728's `!= path` guard rejects every candidate — see spike-1 |
+| `_detect_readme_broken_entries` frame mismatch `:434` | `:464-494` | Holds; output is always withheld post-#2728 |
+| `_detect_renamed_link_fixes` frame mismatch `:387/:412` | `:417-444` | Holds; output is always withheld post-#2728 |
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -110,8 +112,8 @@ so every reference below is re-anchored to **that branch's** version of
 - No other active plan touches `reflections/docs_auditor.py`.
 
 **Bug reproduction:** items 1, 3 and 4 were re-read on the #2728 branch and the
-defective code paths are all present and unchanged. Item 2 was reproduced
-**and disproved** — see spike-1.
+defective code paths are all present and unchanged. Item 2 was reproduced against real
+git and found to be **real but mis-described** — see spike-1.
 
 ## Prior Art
 
@@ -125,10 +127,11 @@ defective code paths are all present and unchanged. Item 2 was reproduced
 - **`docs/plans/docs-auditor-rename-guard.md`**: records the reasoning for deferring
   — *"a workflow decision about the `/do-docs` contract, not a bug fix, and it would
   change how every cascade behaves."* This plan makes that decision.
-- **`reflections/merged_branch_cleanup.py` + `tests/unit/reflections/test_merged_branch_cleanup.py`**:
-  the closest in-repo precedent for the test strategy this plan needs — a real git
-  repo on disk, a `gh` dispatcher as `subprocess.run` side-effect, and
-  `git status --porcelain` asserted empty to prove the code committed its own work.
+- **`reflections/housekeeping/merged_branch_cleanup.py` + `tests/unit/reflections/test_merged_branch_cleanup.py`**:
+  the closest in-repo *structural* precedent for the test strategy this plan needs — a
+  real git repo on disk, `PROJECT_ROOT` monkeypatched, and `git status --porcelain`
+  asserted. Note its dispatcher patches `asyncio.create_subprocess_exec` because that
+  module is async, so it is not directly reusable here (see **Test Impact**).
 - No prior attempt to remove the self-commit exists. This is the first pass, so
   there is no **Why Previous Fixes Failed** section.
 
@@ -144,97 +147,114 @@ results below.
 
 ## Spike Results
 
-### spike-1: Are the three rename detectors actually capable of producing a fix?
+### spike-1: What do the three rename detectors actually produce?
+
+> **Correction.** An earlier revision of this plan claimed `git log --follow` only
+> follows a path that exists at HEAD, and concluded the detectors were unreachable
+> dead code. **That claim was false** and has been removed. It was produced by
+> sampling only paths that were absent at HEAD *and had never been a rename
+> destination*, plus a positive control that was present at HEAD — which misses the
+> reachable case entirely. The corrected finding below is stronger, and it changes
+> what Task 1 is.
 
 - **Assumption being tested:** issue #2739 item 2 asserts the detectors "pick the
-  wrong target" — `renames[0][1]`, the newest rename hop. That presumes they
-  produce a target at all.
+  wrong target" — `renames[0][1]`, the newest rename hop.
 - **Method:** prototype — real git repos, both a purpose-built temp repo and the
   actual `ai` repo history. git 2.50.1 (Apple Git-155).
-- **Finding: the detectors are structurally incapable of producing any fix.
-  `renames[0][1]` is unreachable code.**
+- **Finding: the detectors do execute, and `renames[0][1]` is always the query path
+  itself. Their output is therefore always frame-mismatched and never a rename fix.**
 
-  `_git_log_follow_renames` runs `git log --follow --diff-filter=R --name-status
-  --format= -- <old_path>`. **`git log --follow` only follows a path that exists at
-  HEAD.** All three detectors call it *exclusively* for paths they have just
-  confirmed do **not** exist — each one `continue`s when
-  `(repo_root / path).exists()`. So the query is only ever handed inputs for which
-  it returns zero `R` lines.
-
-  Temp repo, `pkg/alpha.py → pkg/beta.py → pkg/gamma.py`:
+  `git log --follow` walks **backwards** from HEAD and emits the rename records that
+  created the queried path. A path absent at HEAD still returns records, provided it
+  was at some point a rename **destination**. Temp repo,
+  `pkg/alpha.py → pkg/beta.py → pkg/gamma.py`:
 
   ```
+  $ git log --follow --diff-filter=R --name-status --format= -- pkg/beta.py
+  R100  pkg/alpha.py  pkg/beta.py        # beta.py is ABSENT at HEAD, and it returns
   $ git log --follow --diff-filter=R --name-status --format= -- pkg/alpha.py
-  (empty)
-  $ git log --follow --diff-filter=R --name-status --format= -- pkg/gamma.py
-  R100  pkg/beta.py   pkg/gamma.py
-  R100  pkg/alpha.py  pkg/beta.py
+  (empty)                                 # absent AND never a destination
   ```
 
-  Only the path present at HEAD returns anything. Adding `-M`, `--find-renames=40%`,
-  or dropping `--follow` while keeping the pathspec all still return empty for the
-  absent path.
-
-  Reproduced against real repo history with a rename that landed days ago:
+  Confirmed on real repo history:
 
   ```
-  $ git log --diff-filter=R --name-status --format= -M -50 | head -1
-  R100  docs/plans/upvote-autonomous-sdlc-pickup.md  docs/plans/completed/upvote-autonomous-sdlc-pickup.md
-  $ git log --follow --diff-filter=R --name-status --format= -- docs/plans/upvote-autonomous-sdlc-pickup.md
-  (empty)
+  $ git log --follow --diff-filter=R --name-status --format= -- docs/cursor-lessons.md
+  R100  docs/improvements/cursor-lessons.md  docs/cursor-lessons.md
   ```
 
-  Corollary: the bad rename in #2711 did **not** come from these detectors. It came
-  from the `STALE_TERMS` channel (`_detect_stale_term_fixes`), which is exactly what
-  PR #2728 word-anchors.
+  **The decisive structural consequence:** because the walk goes backward *from the
+  query path*, the newest record it emits is the one that **created** the query path.
+  So `renames[0][1] == rel` — the destination is always the queried path itself,
+  never a later hop. And every detector queries `rel` only after confirming
+  `(repo_root / rel).exists()` is `False`.
 
-- **Confidence:** high. Two independent repos, an explicit positive control (the
-  HEAD-present path *does* return rename data), and three query variants ruled out.
-- **Impact on plan:** inverts Q6. Neither "walk the chain" nor "the existence
-  invariant already handles it" is the right answer — the code is dead. This plan
-  deletes it (see Q6 in Technical Approach) and files the rebuild question as
-  **#2741**.
+  So each detector's "fix" is: *replace this reference with the repo-root-relative
+  spelling of the same nonexistent path.* Never a rename correction. Concretely:
 
-### spike-2: Would a working query make chain-walking necessary?
+  | Detector | Post-#2728 outcome |
+  |---|---|
+  | `_detect_renamed_symbol_fixes` | Fully disabled. #2728 added `if renames and renames[0][1] != path`, and `renames[0][1] == path` always, so the guard rejects **every** candidate. |
+  | `_detect_renamed_link_fixes` | Emits `(target, str(rel))` — a doc-relative link replaced by a repo-root-relative path. `str(rel)` does not exist, so `_absent_new_path_refs` withholds it. **Always withheld, on every run.** |
+  | `_detect_readme_broken_entries` | Same substitution, same permanent withhold. |
 
-- **Assumption:** "newest rename commit, not the final hop" (issue framing) — i.e.
-  that `renames[0][1]` picks an intermediate node.
-- **Method:** prototype, same temp repo.
-- **Finding:** the issue's framing is backwards for a live chain, and would become
-  correct only under a repaired query. `git log` emits newest-first, so for
-  `A → B → C` queried on the HEAD-present path, `renames[0]` is `(B, C)` and
-  `renames[0][1]` is `C` — the **final** hop. But the working query for an absent
-  path is a pathspec-free scan matched on the rename *source*:
+  Pre-#2728 this wrote a broken link. Post-#2728 the existence invariant catches it
+  — but as a **permanent** `fixes_withheld > 0` generator.
 
-  ```
-  $ git log --diff-filter=R -M --name-status --format= | awk -F'\t' '$1 ~ /^R/ && $2=="pkg/alpha.py" {print $3}'
-  pkg/beta.py
-  ```
+  Corollary, unchanged from the earlier revision and still true: the bad rename in
+  #2711 came from the `STALE_TERMS` channel (`_detect_stale_term_fixes`), not from
+  these detectors.
 
-  which yields the **first** hop. So chain-walking is genuinely required, but only
-  *after* the query is repaired — it is not a fix that can be applied to today's code.
+- **Confidence:** high. Both branches of the absent-path case tested (was-a-destination
+  and never-a-destination), plus real repo history.
+- **Impact on plan:** the Q6 conclusion (delete the channel) survives and is better
+  supported, but the *reason* changes completely, and so does Task 1 — see spike-2.
+
+### spike-2: The operational cost of leaving the channel in place
+
+- **Assumption:** deleting the rename detectors is an isolated dead-code removal that
+  can be sequenced independently of the rest of the plan.
+- **Method:** trace spike-1's "always withheld" result through this plan's own Q5.
+- **Finding: false, and the two interact badly.** Q5 makes `fixes_withheld > 0` file
+  a deduped GitHub issue. spike-1 shows `_detect_renamed_link_fixes` and
+  `_detect_readme_broken_entries` withhold on **every** run against any doc holding a
+  reference to a path that is absent-but-once-a-rename-destination. That is a
+  permanent withheld generator, so Q5 would file an escalation issue on essentially
+  every rotation touching such a doc — the dedup only damps the volume, it does not
+  stop the signal being permanently untrustworthy.
+
+  Deleting the channel is therefore **load-bearing for Q5's signal quality**, not an
+  optional tidy-up. Withheld must mean "something surprising happened", not "the
+  auditor ran".
 - **Confidence:** high.
-- **Impact on plan:** confirms the rebuild is a feature, not a bug fix. Recorded in
-  #2741 as prerequisite 2 of 3.
+- **Impact on plan:** Task 1 is re-described as a prerequisite of Q5 rather than an
+  isolated deletion, and is no longer marked `Parallel: true`.
 
 ### spike-3: Does PR #2728's existence invariant catch the doc-relative frame mismatch?
 
 - **Assumption (issue Q6):** the existence invariant may already reduce the rename
   defects to acceptable "declines to write" behavior.
 - **Method:** code-read of `_absent_new_path_refs` (`:537-547`) against
-  `_detect_renamed_link_fixes` (`:417-444`).
-- **Finding: no — the invariant is blind to the frame mismatch.** For a doc at
-  `docs/features/x.md` linking `(./old.md)`, the detector resolves against the repo
-  root and substitutes `docs/features/new.md` into a doc-relative link, producing a
-  link that resolves to `docs/features/docs/features/new.md`. `_absent_new_path_refs`
-  validates the raw string `docs/features/new.md` with `(repo_root / ref).exists()`,
-  which is **True**, so the invariant passes and a broken link is written. The
-  invariant only catches targets absent at the repo root; a frame-mismatched target
-  is present at the repo root by construction.
+  `_detect_renamed_link_fixes` (`:417-444`), informed by spike-1's corrected result.
+- **Finding: the invariant does withhold, but for the wrong reason, and it is a
+  partial answer at best.** Given spike-1 (`renames[0][1] == rel`, and `rel` is known
+  absent), the substituted string is a path that does not exist at the repo root, so
+  `_absent_new_path_refs` returns it and the fix is withheld. So on today's code the
+  invariant *does* stop the bad write.
+
+  But it stops it as a *nonexistent-path* violation, not as a *frame* violation, and
+  that distinction matters for any future repair: the moment a repaired detector
+  proposes a target that genuinely exists at the repo root, the invariant passes it
+  and the frame mismatch is written unchecked. A doc at `docs/features/x.md` linking
+  `(./old.md)` rewritten to `docs/features/new.md` resolves to
+  `docs/features/docs/features/new.md`, while `_absent_new_path_refs` validates the
+  raw string against the repo root, where it exists. The invariant is structurally
+  blind to the frame; it only happens to catch today's output because today's output
+  is also a nonexistent path.
 - **Confidence:** high.
-- **Impact on plan:** removes the "invariant already handles it" option from Q6 —
-  it would not have. Reinforces deletion over repair, and is recorded as
-  prerequisite 3 of 3 in #2741.
+- **Impact on plan:** the invariant is a safety net for the current broken output,
+  not a reason to keep the channel — and it would not protect a repaired one. Recorded
+  as prerequisite 3 of 3 in #2741.
 
 ### spike-4: Which reporting channel does a function reflection actually have?
 
@@ -453,9 +473,32 @@ Deleting it is the Principle-1 outcome and removes ~80 lines.
 The sweeper keeps its two legitimate jobs: deleting stale `docs-audit/*` branches
 whose PRs are already closed, and closing stale PRs (modified per Q5).
 
+**Who actually gets told — the mechanism already exists.** Removing auto-merge only
+works if a human learns the PR is there. Nothing automated merges a `docs-audit/*` PR:
+`sdlc_progress.py:116`'s `_SDLC_BRANCH_RE` is `^session/sdlc-\d+$`, and
+`pr_review_audit` only inspects already-merged PRs. But the notification route is
+already wired and was overlooked in the first revision of this plan:
+`run_docs_auditor` calls `_send_telegram_notification` with the PR URL to chat
+`Eng: Valor` on **every** rotation PR (`:1814` on the #2728 branch). That is Q2's
+named gate mechanism — a human is notified at creation and merges via `/do-merge`.
+
+Two changes to make it carry the weight now placed on it:
+
+1. Strengthen the message to state that **review is required** and that the PR will be
+   **closed unmerged** if nobody acts.
+2. State plainly, in this plan and in `docs/features/docs-auditor.md`, that a rotation
+   PR nobody reviews is closed unmerged at `STALE_PR_AGE_DAYS = 14`. That is a
+   legitimate "nobody cared" outcome, not a silent loss — *provided* the withheld case
+   still files its deduped issue per Q5, which is what distinguishes "nobody thought
+   this was worth merging" from "the auditor tried to write something wrong".
+
 Volume objection, addressed: without auto-merge, docs PRs accumulate. They do not —
 `_daily_pr_cap_reached` bounds rotation to **1 PR per calendar day**, and the sweeper
 still closes non-withheld PRs at 14 days.
+
+Whether the rotation reflection should stay `enabled: true` at all, given that its
+output now requires human attention it may never get, is a question for the owner and
+is recorded in **Open Questions**. It is not a blocker for this plan.
 
 ---
 
@@ -487,20 +530,35 @@ verification fixes the rest.
    `push`, and `gh pr create` can all fail after the substrate has written.
    `_push_branch_and_pr` records the starting ref via
    `git rev-parse --abbrev-ref HEAD` at entry, and on every exit path:
-   `git checkout -f <starting ref>` with the return code **checked**, delete the
-   created branch if it exists, then assert `not _git_dirty(repo_root)`.
-3. **A failed restore is a hard error.** If the tree is still dirty or HEAD is not on
-   the starting ref, `_push_branch_and_pr` signals failure and `run_docs_auditor`
-   returns `status="error"` and escalates via Q5's channel. It must not write
-   liveness `"ok"`, must not stamp the rotation hash, and must not send a success
-   Telegram.
+   - `git checkout <starting ref>` with the return code **checked**;
+   - `git checkout -- <files_touched>` to discard the auditor's own edits;
+   - delete the created branch if it exists.
+
+   **The restore is scoped to `files_touched` and must never be a whole-tree
+   operation.** No `git checkout -f`, no `git reset --hard`, no `git clean`. The
+   auditor runs in the shared main checkout, where other lanes routinely hold
+   uncommitted work — at the time of writing, three files belonging to a different
+   lane. A whole-tree force-restore would destroy them. This is the same constraint
+   as Race 1, and the two must not drift apart again.
+3. **A failed restore is a hard error, judged on scoped state.** The postcondition is
+   **(a)** HEAD is back on the starting ref, and **(b)** no path in `files_touched` is
+   dirty. It is explicitly **not** `not _git_dirty(repo_root)` — foreign dirt is
+   expected to survive by design, so a whole-tree dirtiness check would fire a
+   spurious `status="error"` on every run that coincides with another lane's work.
+   If either scoped condition fails, `_push_branch_and_pr` signals failure and
+   `run_docs_auditor` returns `status="error"` and escalates via Q5's channel. It must
+   not write liveness `"ok"`, must not stamp the rotation hash, and must not send a
+   success Telegram.
 4. **Outcome routing in `run_docs_auditor`.** Because the guards moved,
    `pr_url is None` after `audit()` now unambiguously means failure, not "a guard
    fired". The three outcomes become distinct: `ok` (PR created), `skipped`
    (guard fired, nothing written), `error` (write happened, PR did not).
 
-Note the restore must use `checkout -f`. A plain `git checkout main` is exactly what
-fails today when local edits conflict, and the current code discards that failure.
+On the failure mode this replaces: today's plain `git checkout main` fails when local
+edits conflict, and the current code discards that failure. The fix is **not** to add
+`-f` — that trades a wedged checkout for destroyed foreign work. The fix is to discard
+the auditor's own paths first (`git checkout -- <files_touched>`), which removes the
+conflict without touching anything else, and then to **check** the return code.
 
 ---
 
@@ -535,39 +593,63 @@ migration Principle 1 forbids. Its removal is scoped in No-Gos as **#2743**.
 
 ---
 
-**Q6 — Rename targets → delete all three detectors. The bug is unreachable; the code is dead.**
+**Q6 — Rename targets → delete the rename channel. Its output is always frame-mismatched, never a rename fix.**
 
-This contradicts the issue's framing, which offers only "walk the chain" or "the
-existence invariant already handles it". spike-1 shows neither applies, and spike-3
-shows the invariant would *not* have handled it.
+This still contradicts the issue's framing, but not the way the first revision of
+this plan claimed. The detectors **do** execute. The reason to delete them is that
+they cannot produce a correct answer, not that they produce none.
 
-`_git_log_follow_renames` uses `git log --follow`, which only follows a path that
-exists at HEAD. All three detectors call it exclusively for paths they have just
-confirmed are absent. The query therefore returns zero `R` lines for every input it
-is ever given, in the temp-repo control and against real repo history alike.
-`renames[0][1]` has never executed in production.
+From spike-1: `git log --follow` walks backward from the query path, so the newest
+record it emits is the one that *created* that path, and `renames[0][1] == rel`
+always. Every detector reaches that line only when `(repo_root / rel).exists()` is
+`False`. So the entire channel's output is a single degenerate transform — *replace
+this reference with the repo-root-relative spelling of the same nonexistent path*.
+It is never a rename correction, in any repository, for any input. Pre-#2728 that
+wrote a broken link; post-#2728 the existence invariant withholds it permanently.
 
 Deleting:
 
 - `_detect_renamed_link_fixes` (`:417-444`) — entirely rename-driven. Deleted.
-- `_detect_renamed_symbol_fixes` (`:447-461`) — entirely rename-driven. Deleted.
+- `_detect_renamed_symbol_fixes` (`:447-461`) — entirely rename-driven, and already
+  fully disabled by #2728's `renames[0][1] != path` guard, which rejects every
+  candidate because the inequality never holds. Deleted.
 - `_git_log_follow_renames` (`:372-414`), `GIT_LOG_FOLLOW_CAP`, the
   `_RENAME_QUERY_COUNT` global and its per-run reset in `audit():1064-1065`. Deleted.
-- `_detect_readme_broken_entries` (`:464-494`) — **kept**, with only its rename
-  branch removed. A broken index entry unconditionally becomes the existing
-  line-delete fix `(line, "")`. Since `renames` is always empty today, this is
-  provably a **zero-behavior-change** edit.
+- `_detect_readme_broken_entries` (`:464-494`) — **kept**, rename branch removed. See
+  the behavior change below; this is **not** a no-op edit.
+
+**`_detect_readme_broken_entries` is a real behavior change — stated, not hidden.**
+An earlier revision of this plan called it "provably zero-behavior-change". That was
+wrong. Today a broken index entry *with* rename history produces a substitution that
+the existence invariant withholds, so **the line survives**. After the edit it
+produces `(line, "")`, and the invariant only validates *newly introduced* refs — a
+deletion introduces none — so **the line is deleted**.
+
+Accepting the change, with reasons:
+
+- It makes README handling uniform. A broken entry *without* rename history is
+  already line-deleted today; the survival of the with-history case is an accident of
+  a broken generator, not a designed safeguard. Bifurcating README behavior on
+  whether a git rename happens to exist in history is not a property worth preserving.
+- It is **not** an unreviewed destructive write, because of Q2 in this same plan.
+  Rotation output now lands in a PR with auto-merge deleted, so a human or
+  `/do-pr-review` reads the deleted line before it reaches `main`. The objection that
+  this adds unreviewed deletion to a plan about reducing unreviewed writes is answered
+  by the plan's own gate.
+- The alternative — keeping the rename branch — retains a permanent withheld
+  generator, which spike-2 shows poisons Q5's escalation signal.
+
+This is covered by a required real-git test and by **Risk 6**.
 
 Why deletion rather than repair. Repair needs three independent fixes together — a
-working query, chain-walking with cycle protection, and frame-correct
-re-relativization — which is a feature, not a bug fix, and it would introduce a new
-class of automated write at exactly the moment this plan is building a review gate
-around automated writes. The capability is not silently lost: the
-`_detect_deleted_target_issues` file-as-issue detector already reports broken
-references to a human, which is the conservative direction this whole plan moves in.
+query that resolves forward rather than backward, chain-walking with cycle
+protection, and frame-correct re-relativization — which is a feature, not a bug fix,
+and it would introduce a new class of automated write at exactly the moment this plan
+is building a review gate around automated writes. The capability is not silently
+lost: `_detect_deleted_target_issues` already reports broken references to a human.
 And #2725 is genuinely closed — a wrong-target bug cannot occur in deleted code.
-The rebuild question, with all three prerequisites written up and the spike evidence
-attached, is filed as **#2741**.
+The rebuild question, with all three prerequisites and the corrected spike evidence,
+is filed as **#2741**.
 
 ## Failure Path Test Strategy
 
@@ -610,14 +692,33 @@ attached, is filed as **#2741**.
 
 ## Test Impact
 
-Real-git tests in a temp repo are **required** for the git surface. More
+Real-git tests in a temp repo are **required** for the git surface. Blanket
 `unittest.mock.patch` over `subprocess.run` is explicitly not an acceptable strategy
 for `_push_branch_and_pr`, the staging set, the restore path, or the sweeper's close
-path. The house precedent is `tests/unit/reflections/test_merged_branch_cleanup.py`:
-a real repo on disk, `monkeypatch.setattr(module, "PROJECT_ROOT", repo)`, a
-`cmd[0] == "gh"` dispatcher as `subprocess.run` side-effect that **falls through to
-the real `subprocess.run` for `git`**, and `git status --porcelain` asserted empty.
-`tests/unit/test_validate_docs_changed.py` supplies the `git_repo` fixture shape.
+path — every `git` command in those paths must actually run.
+
+**Sanctioned pattern, since no in-repo precedent exists for it.** Use
+`monkeypatch.setattr(docs_auditor.subprocess, "run", dispatcher)` — module-scoped, not
+a global `patch("subprocess.run")` — where `dispatcher` intercepts **only**
+`cmd[0] == "gh"` and returns a canned `CompletedProcess`, and delegates **everything
+else to the real `subprocess.run`**. That is what satisfies both the "real git"
+requirement and the Verification row forbidding a blanket mock; the two are consistent
+only under this shape, so do not substitute a broader patch.
+
+Precedent corrections, so nobody loses time hunting:
+
+- `tests/unit/reflections/test_merged_branch_cleanup.py` is the nearest *structural*
+  model (real repo on disk, `monkeypatch.setattr(module, "PROJECT_ROOT", repo)`,
+  `git status --porcelain` asserted), **but it patches
+  `asyncio.create_subprocess_exec`, not `subprocess.run`** — its module is async. Its
+  dispatcher is not reusable here.
+- That module lives at `reflections/housekeeping/merged_branch_cleanup.py`, **not**
+  `reflections/merged_branch_cleanup.py`.
+- There is therefore **no in-repo precedent for a synchronous `gh` dispatcher**. It
+  must be written from scratch. Budget for that.
+- `tests/unit/test_validate_docs_changed.py` supplies the `git_repo` fixture shape and
+  the `_git` helper convention. There is no shared git fixture in `tests/conftest.py`;
+  every file rolls its own.
 
 Existing tests in `tests/unit/test_docs_auditor_substrate.py` (81 tests today):
 
@@ -655,6 +756,15 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       `gh pr create` returning non-zero, `git add --` on a missing path) and assert
       HEAD is back on the starting ref, the created branch is gone, and
       `git status --porcelain` matches the pre-call state byte for byte.
+- [ ] **Foreign dirt survives (Race 1 / B4).** Seed an unrelated modified file that the
+      auditor never touches, force a failure, and assert the file is **still modified**
+      after the restore and that the run did **not** report `status="error"` merely
+      because the tree was dirty. This is the regression test for the scoped-restore
+      postcondition; a whole-tree `checkout -f` or a `not _git_dirty(repo_root)`
+      assertion both fail it.
+- [ ] **README line deletion (B2 / Risk 6).** A README index entry pointing at a path
+      that is absent but has rename history: assert the line is now **deleted**. Pins
+      the stated behavior change so it cannot drift again silently.
 - [ ] Failed-restore reporting: make `checkout` fail and assert the function reports
       failure and `run_docs_auditor` returns `status="error"`.
 - [ ] Guard hoisting: with the daily cap set, assert `audit()` is never called and
@@ -722,10 +832,27 @@ skill-context declares the new ownership.
 ### Risk 2: Deleting the rename detectors removes a capability someone believes in
 
 **Impact:** a reviewer reads "deleted three detectors" as a regression.
-**Mitigation:** spike-1 is reproducible in two lines against real repo history and is
-recorded in both this plan and #2741. The `_detect_readme_broken_entries` edit is
-provably zero-behavior-change. Present the positive control (a HEAD-present path
-*does* return rename data) so the finding is not mistaken for a broken experiment.
+**Mitigation:** spike-1 is reproducible in a few lines against real repo history and
+is recorded in both this plan and #2741. Lead the review with the structural argument
+(`renames[0][1] == rel` always, because the walk runs backward from the query path),
+not with an empirical "it returns nothing" claim — the first revision of this plan
+made exactly that claim and it was false. Show both absent-path branches
+(was-a-destination and never-a-destination) so the finding cannot be mistaken for a
+sampling error.
+
+### Risk 6: The README index line-deletion behavior change (B2)
+
+**Impact:** broken README index entries that today survive — because the rename
+substitution is withheld by the existence invariant — will now be deleted outright.
+If a target was merely moved and a future repair would have fixed the link, the index
+row is gone instead.
+**Mitigation:** three layers. (1) The deletion lands in a rotation PR with auto-merge
+removed (Q2), so a human reads it before it reaches `main`. (2) A required real-git
+test pins the new behavior explicitly, so it cannot change again silently. (3) The
+change is stated in `docs/features/docs-auditor.md` as the status quo, and called out
+in the PR description rather than buried in the diff. If the owner rejects the
+trade-off, the fallback is keeping the rename branch and accepting the permanent
+withheld-generator noise that spike-2 describes — recorded in Open Questions.
 
 ### Risk 3: Landing while a rotation is in flight
 
@@ -763,14 +890,16 @@ already rendered for other producers, so the surface is not new.
 through `_push_branch_and_pr:1436-1443` (restore).
 **Trigger:** rotation passes the dirty-tree guard, then another process writes to
 `/Users/valorengels/src/ai` before `git add`. With `git add -A` that foreign work is
-committed into a docs PR; with the narrowed staging it is not, but a `checkout -f`
-restore could still discard it.
+committed into a docs PR; with the narrowed staging it is not, but a whole-tree
+force-restore would still destroy it.
 **Data prerequisite:** `files_touched` must be resolved before staging.
 **State prerequisite:** the restore must not touch paths outside `files_touched`.
-**Mitigation:** stage an explicit path list (Q3), and scope the restore — `checkout -f`
-the starting **ref** while `git checkout -- <files_touched>` handles the auditor's own
-paths, so foreign dirt is preserved rather than destroyed. Assert in a real-git test
-that an unrelated dirty file survives both the commit and the restore.
+**Mitigation:** stage an explicit path list (Q3), and scope the restore exactly as Q4
+specifies — `git checkout <starting ref>` (no `-f`) plus
+`git checkout -- <files_touched>`, with the postcondition asserted only over
+`files_touched`, never `_git_dirty(repo_root)`. Foreign dirt is preserved by design.
+Assert in a real-git test that an unrelated dirty file survives the commit **and** the
+restore, and that its presence does **not** produce `status="error"`.
 
 ### Race 2: Two machines run the sweeper simultaneously
 
@@ -802,10 +931,11 @@ the exact structure this plan is removing.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2741] Rebuilding rename detection correctly — repaired query,
-  chain-walking with cycle protection, and frame-correct re-relativization. This plan
-  deletes the dead code; #2741 carries the spike evidence and the decision about
-  whether the capability is worth having at all.
+- [SEPARATE-SLUG #2741] Rebuilding rename detection correctly — a forward-resolving
+  query, chain-walking with cycle protection, and frame-correct re-relativization.
+  This plan deletes the channel because its output is always the same degenerate,
+  always-withheld transform; #2741 carries the corrected spike evidence and the
+  decision about whether the capability is worth having at all.
 - [SEPARATE-SLUG #2743] Deleting `_write_liveness` and its two zero-reader Redis keys.
   This plan routes the same information to the dashboard via `output_summary`;
   removing the dead channel is a clean follow-up and keeping both would be the
@@ -863,6 +993,13 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       and `:300` — the real path is `.claude/skills-global/do-docs/SKILL.md`.
 - [ ] Update the `## Branch Sweeper` section (`:164`) to remove auto-merge and
       describe the withheld-PR exemption.
+- [ ] State plainly that a rotation PR is announced by Telegram to `Eng: Valor` at
+      creation, is merged only by a human via `/do-merge`, and is **closed unmerged at
+      14 days** if nobody acts (B3). Frame that as the intended "nobody cared" outcome,
+      not a failure mode.
+- [ ] State the README index behavior (B2 / Risk 6): a broken index entry is deleted,
+      uniformly, regardless of rename history. Describe only the new status quo — no
+      "previously withheld" note.
 - [ ] Update the `## Tests` section (`:279-289`) to name the new real-git test file.
 - [ ] `docs/features/reflections.md:147-152` and the registry row at `:205` — update
       the Caller B contract note.
@@ -931,9 +1068,10 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
   - Agent Type: builder
   - Resume: true
 
-- **Builder (dead code removal)**
+- **Builder (rename channel removal)**
   - Name: `deadcode-builder`
-  - Role: Q6 deletion of the three rename detectors
+  - Role: Q6 deletion of the rename channel, including the stated README
+    line-deletion behavior change (B2 / Risk 6)
   - Agent Type: builder
   - Resume: true
 
@@ -971,21 +1109,29 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - Do not enter any worktree other than `.worktrees/docs-auditor-review-gate`, and
   never `.worktrees/docs-auditor-rename-guard`.
 
-### 1. Delete dead rename detection (Q6)
+### 1. Delete the rename channel (Q6)
 
 - **Task ID**: build-deadcode
 - **Depends On**: preflight
 - **Validates**: tests/unit/test_docs_auditor_substrate.py
-- **Informed By**: spike-1 (detectors provably never fire), spike-2, spike-3
+- **Informed By**: spike-1 (`renames[0][1] == rel` always, so output is always
+  frame-mismatched), spike-2 (this is a **prerequisite of Q5**, not a tidy-up),
+  spike-3
 - **Assigned To**: deadcode-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
+- **This is not an isolated dead-code deletion.** The detectors execute. Leaving them
+  in place makes `fixes_withheld > 0` permanent, which would have Q5 file an
+  escalation issue on essentially every rotation. Q5's signal quality depends on this
+  task landing.
 - Delete `_detect_renamed_link_fixes`, `_detect_renamed_symbol_fixes`,
   `_git_log_follow_renames`, `GIT_LOG_FOLLOW_CAP`, the `_RENAME_QUERY_COUNT` global
   and its reset in `audit()`, and the two call sites in `audit()`'s detector loop.
 - In `_detect_readme_broken_entries`, remove the rename branch: a broken entry
-  unconditionally yields `(line, "")`. Verify by inspection that this is
-  zero-behavior-change given `renames` is always empty.
+  unconditionally yields `(line, "")`. **This is a real behavior change** — entries
+  with rename history are currently withheld and survive; they will now be deleted.
+  Do not describe it as a no-op. It needs the real-git test from task 4 and the
+  `docs/features/docs-auditor.md` statement from task 5.
 - Delete `TestGitLogFollowCap` (both tests).
 - Sequenced first and alone so the deletion diff is reviewable in isolation.
 
@@ -1038,10 +1184,13 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - **Domain**: testing — real integrations, no mocks over the subject under test
-- Create `tests/unit/reflections/test_docs_auditor_git_surface.py` following
-  `test_merged_branch_cleanup.py`: real `git init` repo, `PROJECT_ROOT` monkeypatched,
-  a `cmd[0] == "gh"` dispatcher as `subprocess.run` side-effect that falls through to
-  real `subprocess.run` for `git`.
+- Create `tests/unit/reflections/test_docs_auditor_git_surface.py`: real `git init`
+  repo, `PROJECT_ROOT` monkeypatched, and a **synchronous** `gh`-only dispatcher via
+  `monkeypatch.setattr(docs_auditor.subprocess, "run", ...)` that delegates every
+  non-`gh` command to the real `subprocess.run`. Read the precedent corrections in
+  **Test Impact** first — `test_merged_branch_cleanup.py` patches
+  `asyncio.create_subprocess_exec` and is **not** reusable; this dispatcher has no
+  in-repo precedent and must be written from scratch.
 - Cover every bullet in the "New coverage required" list under **Test Impact**.
 - Apply every disposition in the existing-test list under **Test Impact**.
 - Update the `tests/README.md` index row.
@@ -1080,15 +1229,17 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No `git add -A` in the auditor | `grep -c '"-A"' reflections/docs_auditor.py` | match count == 0 |
-| Self-commit helper gone | `grep -rc '_commit_current_branch' reflections/ .claude/ docs/features/` | match count == 0 |
-| Auto-merge predicate gone | `grep -rc '_pr_is_auto_merge_eligible' reflections/` | match count == 0 |
+| Self-commit helper gone | `grep -rh -c '_commit_current_branch' reflections/ .claude/ docs/features/ \| paste -sd+ - \| bc` | output contains `0` |
+| Auto-merge predicate gone | `grep -c '_pr_is_auto_merge_eligible' reflections/docs_auditor.py` | match count == 0 |
 | Sweeper never merges | `grep -c '"merge"' reflections/docs_auditor.py` | match count == 0 |
-| Old contract instruction gone | `grep -rn 'commits them itself' .claude/ docs/` | exit code 1 |
-| Dead rename query gone | `grep -rc '_git_log_follow_renames\|--follow' reflections/docs_auditor.py` | match count == 0 |
+| Old contract instruction gone | `grep -rn 'commits itself\|commits them itself' .claude/ docs/features/` | exit code 1 |
+| Rename channel gone | `grep -c '_git_log_follow_renames\|--follow' reflections/docs_auditor.py` | match count == 0 |
+| No whole-tree force restore | `grep -c 'checkout", "-f\|reset", "--hard\|"clean"' reflections/docs_auditor.py` | match count == 0 |
 | New commit ownership declared | `grep -c 'files_touched' .claude/skill-context/do-docs.md` | output > 0 |
 | Scheduler wires the summary | `grep -c 'output_summary' agent/reflection_scheduler.py` | output > 0 |
-| No new subprocess mocking of the git surface | `grep -c 'patch("subprocess.run"' tests/unit/reflections/test_docs_auditor_git_surface.py` | match count == 0 |
+| Git surface is never blanket-mocked | `grep -c 'patch("subprocess.run"\|patch.object(subprocess' tests/unit/reflections/test_docs_auditor_git_surface.py` | match count == 0 |
 | Real git in the new test file | `grep -c '"init"' tests/unit/reflections/test_docs_auditor_git_surface.py` | output > 0 |
+| Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_docs_auditor_git_surface.py` | output > 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_docs_auditor_git_surface.py` | exit code 1 |
 | Shared checkout clean after run | `git -C /Users/valorengels/src/ai status --porcelain` | output does not contain `docs/features` |
 
@@ -1102,11 +1253,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 
 ## Open Questions
 
-1. **Q6 / #2741 — confirm the deletion.** spike-1 proves the three rename detectors
-   have never produced a fix, so this plan deletes them rather than repairing a
-   target-selection bug in unreachable code. The rebuild question is filed as #2741
-   with all three prerequisites written up. This is the one resolution that
-   contradicts the issue's framing outright — confirm, or say the word and the
+1. **Q6 / #2741 — confirm the deletion.** spike-1 shows the rename channel executes
+   but can only ever emit one degenerate transform (`renames[0][1] == rel` always,
+   because `--follow` walks backward from the query path), so its output is never a
+   rename fix and post-#2728 is permanently withheld. This plan deletes it rather than
+   repairing it; the rebuild is filed as #2741. Confirm, or say the word and the
    rebuild folds back into this slug (it would push the appetite to Large).
 2. **Q2 — confirm unreviewed auto-merge dies.** The predicate is inverted today
    (any review disqualifies), and repairing it yields "merge approved PRs", which
@@ -1118,3 +1269,15 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
    merging; closing it keeps the PR list tidy. This plan chooses leaving it open,
    because an open PR with an open issue is the loudest available signal and the
    silent loop is the actual defect.
+4. **Should the `docs-auditor` rotation reflection stay `enabled: true`?** With
+   auto-merge gone, every rotation PR needs a human to act on a Telegram notification
+   or it is closed unmerged at 14 days. That is a defensible "nobody cared" outcome,
+   but if in practice nobody ever acts, the reflection is generating PRs and
+   notifications for nothing and should be disabled rather than left to churn. Owner
+   call; not a blocker. Worth revisiting after one or two weeks of post-merge data.
+5. **B2 / Risk 6 — accept README index line deletion?** Removing the rename branch
+   from `_detect_readme_broken_entries` means broken entries with rename history are
+   deleted rather than withheld-and-preserved. This plan accepts it (uniform README
+   handling, and Q2's PR gate means a human reads the deletion). The fallback is
+   keeping the rename branch and living with the permanent withheld-generator noise
+   spike-2 describes. Confirm the trade.
