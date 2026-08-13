@@ -905,8 +905,15 @@ class TestG8BranchResolution:
             meta={"pr_number": 553},
         )
 
-        assert context["stage_artifacts_verified"] is False
-        assert context["unverified_stage"] == "PATCH"
+        # .get() rather than [] so an ABSENT key fails as a legible assertion
+        # instead of a bare KeyError. This is not a relaxation: None is not
+        # False, so a missing key still fails. Absence would itself be the bug
+        # (the verifier advancing a claim it could not verify), and the router
+        # reads this with `.get(...) is not False`, so it must be present.
+        assert context.get("stage_artifacts_verified") is False, (
+            f"missing branch must fail closed; got context={context!r}"
+        )
+        assert context.get("unverified_stage") == "PATCH", f"context={context!r}"
 
     def test_unresolvable_head_ref_fails_closed(self, monkeypatch, caplog):
         """A PR whose head ref cannot be read (gh returns no headRefName) is
@@ -924,8 +931,10 @@ class TestG8BranchResolution:
                 meta={"pr_number": 553},
             )
 
-        assert context["stage_artifacts_verified"] is False
-        assert context["unverified_stage"] == "PATCH"
+        assert context.get("stage_artifacts_verified") is False, (
+            f"unresolvable head ref must fail closed; got context={context!r}"
+        )
+        assert context.get("unverified_stage") == "PATCH", f"context={context!r}"
         assert any("could not be resolved" in record.message for record in caplog.records)
 
     def test_pr_less_patch_claim_still_uses_session_convention(self, tmp_path, monkeypatch):
