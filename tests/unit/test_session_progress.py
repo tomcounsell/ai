@@ -496,6 +496,41 @@ def test_valor_cli_registers_the_progress_verb():
     assert args.json is True
 
 
+def test_valor_cli_rejects_negative_window_at_parse_time(capsys):
+    """A negative ``--window`` has no honest reading (round-2 finding, half fixed).
+
+    Before this, a negative window sailed through to ``compute_verdict`` and
+    the reason line reported a threshold the caller never passed, e.g.
+    "older than the -5s window". Reject it in the parser itself so the
+    error is immediate and unambiguous, and never reaches session lookup.
+    """
+    from tools.valor_cli import _build_parser
+
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["progress", "abc123", "--window", "-5"])
+    assert exc_info.value.code == 2
+    assert "--window must be >= 0" in capsys.readouterr().err
+
+
+def test_valor_session_rejects_negative_window_at_parse_time(monkeypatch, capsys):
+    """Same guard, other entry point: ``valor-session progress --window -5``.
+
+    Pins parity with ``tools/valor_cli.py`` — both parsers share
+    ``tools.session_progress.window_arg_type`` so a negative value fails
+    identically (and before any session lookup) no matter which CLI is
+    invoked.
+    """
+    from tools import valor_session
+
+    monkeypatch.setattr(
+        "sys.argv", ["valor-session", "progress", "--id", "abc123", "--window", "-5"]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        valor_session.main()
+    assert exc_info.value.code == 2
+    assert "--window must be >= 0" in capsys.readouterr().err
+
+
 def test_valor_cli_dispatches_progress_to_valor_session(monkeypatch):
     from tools import valor_cli, valor_session
 

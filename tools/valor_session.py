@@ -2095,14 +2095,21 @@ def main() -> int:
     progress_parser.add_argument(
         "--id", required=True, help="Session ID (session_id or agent_session_id)"
     )
+    # Shared with `tools/valor_cli.py`'s own `--window` parser (imported here
+    # rather than at module scope, matching `cmd_progress`'s own lazy import
+    # of `tools.session_progress`) so a negative value is rejected identically
+    # by both CLI entry points, at parse time, before any session lookup.
+    from tools.session_progress import window_arg_type  # noqa: PLC0415
+
     progress_parser.add_argument(
         "--window",
-        type=float,
+        type=window_arg_type,
         default=None,
         help=(
-            "Freshness window in seconds for the PROGRESSING verdict. Default is "
-            "the watchdog's own SESSION_PROGRESS_DEADLINE_S, so this CLI never "
-            "disagrees with the running system about what counts as progress."
+            "Freshness window in seconds, >= 0, for the PROGRESSING verdict. "
+            "Default is the watchdog's own SESSION_PROGRESS_DEADLINE_S, so this "
+            "CLI never disagrees with the running system about what counts as "
+            "progress."
         ),
     )
     progress_parser.add_argument("--json", action="store_true", help="Output JSON")

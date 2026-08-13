@@ -61,6 +61,7 @@ Verdict vocabulary
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -123,6 +124,30 @@ def default_window_s() -> int:
             return int(os.environ.get("SESSION_PROGRESS_DEADLINE_S", _WINDOW_FALLBACK_S))
         except (TypeError, ValueError):
             return _WINDOW_FALLBACK_S
+
+
+def window_arg_type(value: str) -> float:
+    """``argparse`` ``type=`` callable for ``--window``: reject negatives at parse time.
+
+    A negative window has no honest reading. ``compute_verdict`` compares
+    ``age <= window_s``, so a negative bound makes every signal — even one
+    with age ``0.0`` — read as older than the window, and the reason line
+    then reports a threshold the caller never actually passed (e.g. "older
+    than the -5s window"). Zero is a legitimate, if aggressive, "only if
+    strictly fresh right now" probe and is left alone.
+
+    Defined once here and imported by both CLI entry points
+    (``tools/valor_cli.py`` and ``tools/valor_session.py``) so a negative
+    ``--window`` fails identically — and at parse time, before any session
+    lookup — no matter which one is invoked.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"--window must be >= 0 seconds, got {value!r}")
+    return parsed
 
 
 @dataclass(frozen=True)

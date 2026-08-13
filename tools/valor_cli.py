@@ -36,6 +36,12 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+# Cheap, stdlib-only at module scope (heavy deps stay lazily imported inside
+# its functions) so this doesn't reintroduce the bootstrap cost `_run`'s
+# lazy `valor_session` import avoids. Shared with `valor_session.py`'s own
+# `--window` parser so a negative value is rejected identically by both.
+from tools.session_progress import window_arg_type  # noqa: E402
+
 
 @functools.cache
 def _build_parser() -> argparse.ArgumentParser:
@@ -146,10 +152,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_progress.add_argument("id", help="Session ID (agent_session_id or session_id).")
     p_progress.add_argument(
         "--window",
-        type=float,
+        type=window_arg_type,
         default=None,
         help=(
-            "Freshness window in seconds (default: the watchdog's own "
+            "Freshness window in seconds, >= 0 (default: the watchdog's own "
             "SESSION_PROGRESS_DEADLINE_S, so this verb never disagrees with the "
             "running system about what counts as progress)."
         ),
