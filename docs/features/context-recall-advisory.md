@@ -12,6 +12,19 @@ The gap is symmetric.
 
 **Outbound.** The PM writes `"which PR do you mean?"` and sends it. That burns a full human round trip asking for context sitting in a message store the PM could have read itself. Nothing inspected outbound text for this.
 
+## Scope and known limitation
+
+**The inbound advisory does not fire on every incoming message, and this is a deliberate boundary rather than an oversight.** It fires only when the chat already holds a live-or-recent session carrying a non-empty `context_summary`. Two gates enforce that, and both sit upstream of any model call:
+
+| Gate | Where | Effect |
+|------|-------|--------|
+| `if active_sessions:` | `bridge/telegram_bridge.py` (encloses both the `classify_message_intent_async` call and the `_build_context_recall_advisory_for_intent` call that follows it) | A chat with no `running` / `active` / `dormant` session — and no `pending` session inside `PENDING_MERGE_WINDOW_SECONDS`, currently 8 — never reaches the classifier at all, so no inbound advisory is possible |
+| `if not session_context:` | `tools/classifier.py` | Hard-returns `{"intent": "new_work", "reason": "No active session context", "context_recall_advised": False, ...}` before any model call, so a session whose `context_summary` is empty yields no context-recall verdict either |
+
+So the canonical motivating case — a bare `"yes"` arriving into a chat with a live session — is covered, while the same `"yes"` arriving cold into a quiet chat is not.
+
+**Why universal coverage was rejected.** Removing either gate would put a granite call on *every* inbound message rather than only those with a session to interject into. That is a per-message cost on the bridge's hot path bought for a judgment that, in the cold case, has no conversation context to reason against anyway. The gates predate this feature and are load-bearing for the intake classifier's own latency budget; #2694 rides the existing pass rather than widening it (plan decision D4).
+
 ## Architecture
 
 ```
@@ -65,7 +78,9 @@ Both are worth naming because both reach a trusted position.
 
 ## Inbound edge
 
-Ships **dark**. See [Intake Classifier §Context-recall advisory](intake-classifier.md#context-recall-advisory-2694) for the delivery mechanics, the per-branch table, and why the local 3B model's judgment has not yet cleared an accuracy bar.
+Ships **dark**. See [Intake Classifier §Context-recall advisory](intake-classifier.md#context-recall-advisory-2694) for the delivery mechanics and the per-branch table.
+
+**What would justify flipping `CONTEXT_RECALL_INBOUND_ENABLED` on.** A scored fixture corpus, at least 20 positives and 20 negatives drawn from real traffic, on which the granite prompt clears the bar in both directions at once. Both failure modes are already observed and they trade against each other: the first prompt scored 5/10 and missed every canonical positive, and a few-shot revision fixed all 8 positives but then over-triggered on 5 of 6 self-contained messages. Recall alone is not sufficient evidence — an over-triggering advisory trains the PM to ignore it, which is worse than silence. Building that corpus is descoped from #2694 (plan Task 6); nothing in the shipped code reads it, and its only consumer is this decision. A named fallback if granite cannot be tuned to acceptable precision: move the inbound judgment to Haiku, as the outbound edge already does.
 
 ## Outbound edge
 
@@ -106,9 +121,9 @@ All four must also be added to the vault `~/Desktop/Valor/.env`, or `check_env_c
 
 ## Testing
 
-`tests/unit/test_context_recall.py` covers the builder and the outbound verdict: the no-placeholder contract, medium-aware chat-id validation, reason sanitization including the whitespace-only case, shell-metacharacter neutralization, and fail-open for a raising check, a failing import, a provider error, kill-switch-off, prefilter reject, and an unusable chat id.
+`tests/unit/test_context_recall.py` covers the builder and the outbound verdict: the no-placeholder contract, medium-aware chat-id validation, reason sanitization including the whitespace-only case, shell-metacharacter neutralization, and fail-open for a provider error, kill-switch-off, prefilter reject, and an unusable chat id.
 
-`tests/unit/test_context_recall_wiring.py` covers the seams: both inbound delivery branches, banner ordering, abort survival, budget exhaustion, and a failing advisory steering push. Two pins are worth knowing about. `TestEmittedCommandIsRunnable` parses the emitted command with `valor_telegram`'s own argparse via `build_parser()`, so the advisory cannot silently rot if `read`'s flags change. `TestCallSitesWireUpBeforeDispatch` is a source-index pin asserting both `bridge/telegram_bridge.py::main()` call sites exist and precede the dispatch that consumes them — earlier rounds of this feature had helpers that were unit-tested while the call sites themselves could be deleted with the suite still green.
+`tests/unit/test_context_recall_wiring.py` covers the seams: both inbound delivery branches, banner ordering, abort survival, budget exhaustion, a failing advisory steering push, and fail-open for a raising check and a failing import (`TestPersistRoutingFieldsSurvivesAFailingCheck`, plus `test_raising_check_sends_the_message`). Two pins are worth knowing about. `TestEmittedCommandIsRunnable` parses the emitted command with `valor_telegram`'s own argparse via `build_parser()`, so the advisory cannot silently rot if `read`'s flags change. `TestCallSitesWireUpBeforeDispatch` is a source-index pin asserting both `bridge/telegram_bridge.py::main()` call sites exist and precede the dispatch that consumes them — earlier rounds of this feature had helpers that were unit-tested while the call sites themselves could be deleted with the suite still green.
 
 **Pytest guard.** `tests/conftest.py` carries an autouse fixture that stubs the outbound check inert, so the suite makes no live Haiku calls. Without it, any `send()` test whose drafted text is a short question issued a real billed request, and the multi-second network await reordered a concurrency test into a coin flip. It mirrors the `SENTRY_DSN=""` pre-seed in the same file, which exists for the identical class of problem — a module-import side effect leaking real traffic out of the suite. Production code is untouched and the feature still defaults to enabled in production. Set `CONTEXT_RECALL_OUTBOUND_STUB=0` to run the real check and reproduce the original symptom.
 
