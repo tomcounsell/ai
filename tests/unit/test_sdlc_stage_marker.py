@@ -1546,3 +1546,85 @@ class TestSkipMarkerWrite:
         assert code == 1
         assert result["reason"] == "STAGE_RAN_NOT_SKIPPABLE"
         assert "STAGE_RAN_NOT_SKIPPABLE" in capsys.readouterr().err
+
+
+class TestMergeCompletedReleasesLease:
+    """The tool-layer release leg (issue #2714 L1, round-1 History CONCERN).
+
+    A skill-body prose step cannot be the only release mechanism -- #1654
+    failed for exactly that reason. The happy path therefore releases from the
+    tool layer, on the MERGE/completed marker write itself, so it fires for
+    ``/do-sdlc``, the ``/sdlc`` router, and worker-driven pipelines alike with
+    zero skill cooperation.
+    """
+
+    @staticmethod
+    def _live_lock():
+        from models.session_lifecycle import IssueLockResult
+
+        return MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="run-m", target_repo="o/r"
+            )
+        )
+
+    def _write(self, states, release_mock, stage="MERGE", status="completed"):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = states
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools._sdlc_utils.revalidate_ledger_lease", return_value=True),
+            patch("tools.sdlc_session_release.release_run", release_mock),
+        ):
+            return write_marker(stage=stage, status=status, issue_number=2714, run_id="run-m")
+
+    def test_successful_merge_completion_releases_the_run(self):
+        release_mock = MagicMock(return_value={"released": True, "reason": "released"})
+
+        result, code = self._write({"MERGE": "in_progress"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_called_once_with(2714, "run-m")
+
+    def test_idempotent_merge_completion_does_not_release(self):
+        """Race 3: the already-completed branch does not own the transition,
+        so releasing there could free a SUCCESSOR run's lease."""
+        release_mock = MagicMock()
+
+        result, code = self._write({"MERGE": "completed"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_not_called()
+
+    def test_non_merge_completion_does_not_release(self):
+        release_mock = MagicMock()
+
+        _, code = self._write({"DOCS": "in_progress"}, release_mock, stage="DOCS")
+
+        assert code == 0
+        release_mock.assert_not_called()
+
+    def test_merge_in_progress_does_not_release(self):
+        release_mock = MagicMock()
+
+        _, code = self._write({"MERGE": "pending"}, release_mock, status="in_progress")
+
+        assert code == 0
+        release_mock.assert_not_called()
+
+    def test_release_failure_never_fails_the_marker_write(self):
+        """Best-effort: a raising release must not turn a good write into an error."""
+        release_mock = MagicMock(side_effect=RuntimeError("redis down"))
+
+        result, code = self._write({"MERGE": "in_progress"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_called_once_with(2714, "run-m")

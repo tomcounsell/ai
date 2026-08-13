@@ -491,6 +491,24 @@ def write_marker(
     return result, exit_code
 
 
+def _release_run_best_effort(issue_number: int | None, run_id: str | None) -> None:
+    """Hand back the issue lease + supervised-run signal. Never raises.
+
+    Fully exception-isolated on purpose: this sits inside the marker write's
+    body, so an un-swallowed failure here would be caught by the outer
+    STATE_MACHINE_RAISED handler and turn a persisted, successful MERGE
+    completion into a reported exit 1. Releasing is a courtesy that shortens a
+    lease's life; the marker write is the load-bearing operation.
+    """
+    try:
+        from tools.sdlc_session_release import release_run
+
+        result = release_run(issue_number, run_id)
+        logger.debug("sdlc_stage_marker: MERGE-completed lease release -> %s", result)
+    except Exception as e:
+        logger.debug("sdlc_stage_marker: MERGE-completed lease release failed: %s", e)
+
+
 def _write_marker_impl(
     stage: str,
     status: str,
@@ -725,6 +743,21 @@ def _write_marker_impl(
                     }, 1
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
+
+            if stage == "MERGE":
+                # Tool-layer release leg (issue #2714 L1). This transition --
+                # not a skill-body prose step -- is the happy-path release: it
+                # fires for /do-sdlc, the /sdlc router, and worker-driven
+                # pipelines alike, with zero skill cooperation. It is
+                # ordering-consistent with what already exists: once MERGE is
+                # completed, `_pipeline_is_terminal` makes `reestablish_run_id`
+                # decline to re-mint, so nothing downstream expects to still
+                # hold the lease.
+                #
+                # Deliberately NOT in the already-completed idempotent branch
+                # above: that branch does not own the transition, and releasing
+                # there could free a SUCCESSOR run's lease (Race 3).
+                _release_run_best_effort(issue_number, run_id)
 
         return {"stage": stage, "status": status}, 0
 

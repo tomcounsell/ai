@@ -199,9 +199,15 @@ def reestablish_run_id(
         # the just-acquired lease so it does not linger.
         if new_run_id != candidate and _pipeline_is_terminal(issue_number):
             try:
-                from models.session_lifecycle import release_issue_lock
+                # Routed through release_run (issue #2714) so this site also
+                # clears the supervised-run signal, not just the lease --
+                # otherwise a bare `session-ensure` could still inherit the
+                # dead run's identity from a signal nobody dropped. Local
+                # import: tools.sdlc_session_release is only needed on this
+                # narrow terminal-guard path.
+                from tools.sdlc_session_release import release_run
 
-                release_issue_lock(issue_number, new_run_id)
+                release_run(issue_number, new_run_id)
             except Exception as e:  # pragma: no cover - fail-open
                 logger.debug("reestablish_run_id: terminal-guard release failed: %s", e)
             return None

@@ -103,17 +103,18 @@ standalone worker's in-process 60s tick
 (`agent/session_executor.py::_tick_issue_lock_renewal`), so its lease could
 lapse mid-stage. `tools/sdlc_lease_heartbeat.py` is the missing renewer:
 
-- **Peek-first, renew-only (the load-bearing safety property).**
-  `touch_issue_lock` has no renew-only mode -- passing a `run_id` against an
-  *absent* key does `SET NX EX` and makes the caller the owner. A naive renew
-  loop would therefore let a zombie heartbeat *re-acquire* a lapsed lease
-  under its stale id and block a legitimate successor with `ISSUE_LOCKED`.
-  So every tick peeks first (`touch_issue_lock(issue, run_id, peek=True)` --
-  a peek never mutates, whatever run_id it carries) and:
+- **Peek-first, renew-only (the load-bearing safety property).** Every tick
+  peeks first (`touch_issue_lock(issue, run_id, peek=True)` -- a peek never
+  mutates, whatever run_id it carries) and:
   - `peek.owner_run_id is None` (lease absent/lapsed) -> exit 0 immediately.
   - `peek.owner_run_id != run_id` (a successor owns it) -> exit 0 immediately.
-  - `peek.owner_run_id == run_id` -> only then calls the mutating
-    `touch_issue_lock(issue, run_id, ...)` to extend the TTL.
+  - `peek.owner_run_id == run_id` -> only then calls
+    `touch_issue_lock(issue, run_id, ..., renew_only=True)` to extend the
+    TTL. `renew_only=True` (issue #2714) makes the "never mint" guarantee
+    structural rather than conventional: it skips both of
+    `touch_issue_lock`'s minting branches and writes through a
+    compare-and-set Lua script, so a release landing between the peek and
+    the extend is a no-op rather than something the extend could undo.
 
   The exit conditions are deliberately **ownership checks, never pid-liveness
   inference** (issue #2537 review): the lease payload's `pid` is stamped by
@@ -121,25 +122,47 @@ lapse mid-stage. `tools/sdlc_lease_heartbeat.py` is the missing renewer:
   before the detached heartbeat's first tick, so the peek's pid-keyed
   `orphaned_lock` signal reads every locally-minted lease as orphaned and
   must not gate the renew -- gating on it would lapse the lease mid-stage,
-  the exact failure this heartbeat exists to prevent. Run-liveness is the
-  heartbeat's own existence; its bounded max-lifetime is the death backstop.
-  Issue #2620 then fixed the signal itself at its source: each renewal below
-  re-stamps `renewed_at` on the payload, and `_lock_owner_is_live` treats a
-  fresh stamp as proof of life, so *this loop's own ticking* is what now keeps
-  the lease reading live to every other consumer. The exit conditions here
-  stay pure ownership checks regardless -- see
+  the exact failure this heartbeat exists to prevent. Issue #2620 then fixed
+  the signal itself at its source: each renewal re-stamps `renewed_at` on
+  the payload, and `_lock_owner_is_live` treats a fresh stamp as proof of
+  life, so *this loop's own ticking* is what keeps the lease reading live to
+  every other consumer -- `orphaned_lock` freshness is therefore
+  manufactured by the heartbeat itself, not an independent crash signal. The
+  exit conditions here stay pure ownership checks regardless -- see
   [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md).
   This mirrors `touch_issue_lock`'s own "no run_id supplied: never mutates"
   special case at the caller layer: the heartbeat can only ever *extend* a
   lease it already owns, never mint on a free key nor steal one from a
   successor.
+- **Run liveness is the supervisor's liveness (issue #2714).** The
+  heartbeat's own existence proves nothing about whether a supervisor is
+  still driving the run, so `session-ensure` resolves the supervising
+  `claude` process's `(pid, create_time)` at mint time and hands it to the
+  heartbeat, which polls it every `SDLC_SUPERVISOR_CHECK_INTERVAL_SECONDS`
+  (default 60s). Two consecutive positive-death observations release the
+  lease and the supervised-run signal and exit -- a killed supervisor's
+  lease is gone in roughly two minutes. When a supervisor identity resolves,
+  the unchanged 4h `MAX_LIFETIME_SECONDS` remains a backstop, not the
+  primary detector. When no identity resolves, a tighter 90-minute
+  `UNSUPERVISED_MAX_LIFETIME_SECONDS` ceiling applies and that exit stops
+  renewing **without** releasing (an unresolvable supervisor is not proof of
+  death), leaving the lease to lapse on its own TTL.
 - Renews every `ISSUE_LOCK_TTL_SECONDS // 3` by default (so ~3 renews per TTL
-  window), overridable via `--interval`. Self-terminates after a bounded
-  `--max-lifetime` (default 4h, env-overridable via
-  `SDLC_LEASE_HEARTBEAT_MAX_LIFETIME_SECONDS`) regardless of ownership state,
-  so a crashed supervisor's heartbeat can never outlive an unbounded window.
+  window), overridable via `--interval`, decoupled from the supervisor-check
+  cadence above.
 - Best-effort throughout: every tick is wrapped in try/except; a Redis hiccup
   is swallowed and retried next tick.
+
+**Self-recognition is now a narrower fallback.** Before issue #2714 the
+heartbeat had no way to detect a dead supervisor directly, so a lapsed lease
+under a live pipeline was the case `owned_run_ids` self-recognition existed
+to recover from. The heartbeat now has an external liveness input -- the
+polled supervisor identity -- so most crash scenarios are caught and released
+by the heartbeat itself well before the lease lapses. Self-recognition
+remains the recovery path for what the supervisor watch cannot see: a Redis
+hiccup that drops the lease despite a live supervisor and a healthy
+heartbeat, or any lapse on the unsupervised path where the ceiling
+deliberately declines to release.
 
 **Why a detached subprocess, not an in-turn thread.** An LLM turn (a `claude
 -p` subprocess) cannot reliably host a background thread across its own
@@ -225,7 +248,8 @@ completes -> at run end, `run-health` reports "0 never-landed writes" ->
 |---|---|
 | `models/agent_session.py` | `owned_run_ids` field |
 | `tools/sdlc_session_ensure.py` | `_read_owned_run_ids`, `_append_owned_run_id`, `_validated_reuse_candidate` (widened), `_acquire_run_lock_and_bind` (accumulation + supervised-self check + heartbeat launch), `_maybe_launch_lease_heartbeat` |
-| `tools/sdlc_lease_heartbeat.py` | Peek-first renew-only detached lease-heartbeat CLI/loop (`run_heartbeat`) |
+| `tools/sdlc_lease_heartbeat.py` | Peek-first, `renew_only=True`-extending detached lease-heartbeat CLI/loop (`run_heartbeat`); polls the supervisor identity and releases on confirmed death (issue #2714) |
+| `tools/sdlc_supervisor_identity.py` | `resolve_supervisor_identity_detailed()` -- the supervisor `(pid, create_time)` resolver handed to the heartbeat at mint time (issue #2714) |
 | `tools/_sdlc_marker_telemetry.py` | Per-run ok/fail marker-write counters (`record_marker_write`, `read_marker_counters`, `marker_ok_write_count`) |
 | `tools/sdlc_stage_marker.py` | `write_marker` -- calls `record_marker_write` on every write outcome |
 | `tools/sdlc_run_health.py` | Read-only `run-health` disposition report (`clean` / `transient_recovered` / `never_landed`) |

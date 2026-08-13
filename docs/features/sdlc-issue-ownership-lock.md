@@ -313,11 +313,11 @@ Three paths extend the lease, and all three refresh the signal, each only after 
 
 | Renewer | Ownership proof before the signal write |
 |---|---|
-| `tools/sdlc_lease_heartbeat.py` (local supervisor, not in the table above) | its peek-confirmed `owner_run_id == run_id` match |
+| `tools/sdlc_lease_heartbeat.py` (local supervisor, not in the table above) | its peek-confirmed `owner_run_id == run_id` match, then a `renew_only=True` extend |
 | `agent/session_executor.py::_tick_issue_lock_renewal` (worker, 60s) | an `acquired` result |
 | `tools/_sdlc_utils.py::revalidate_ledger_lease` (every ledger-write gate — see below) | an `acquired` result |
 
-The third matters more than it looks, and it reaches further than the two tools first associated with it. `revalidate_ledger_lease` is non-peek, so **all five of its callers** renew the lease on their own: `tools/sdlc_stage_marker.py` (three sites), `tools/sdlc_dispatch.py`, `tools/sdlc_verdict.py`, `tools/sdlc_meta_set.py`, and `tools/sdlc_review_finalize.py`. The local heartbeat self-exits at `MAX_LIFETIME_SECONDS` (4h), after which those gates are the only renewer left. Without the refresh there, a pipeline past ~4.5h would lose its signal under a lease those writes were holding up, reproducing the #2659 wedge exactly. The observed incidents were at roughly 3.5h, so that window is reachable rather than theoretical.
+The third matters more than it looks, and it reaches further than the two tools first associated with it. `revalidate_ledger_lease` is non-peek, so **all five of its callers** renew the lease on their own: `tools/sdlc_stage_marker.py` (three sites), `tools/sdlc_dispatch.py`, `tools/sdlc_verdict.py`, `tools/sdlc_meta_set.py`, and `tools/sdlc_review_finalize.py`. The local heartbeat's own renew loop stops at `MAX_LIFETIME_SECONDS` (4h, on a resolved supervisor) or `UNSUPERVISED_MAX_LIFETIME_SECONDS` (90 min, unresolved) -- see [Heartbeat exit conditions and release paths](#heartbeat-exit-conditions-and-release-paths-issue-2714) below -- after which those gates are the only renewer left. Without the refresh there, a pipeline past ~4.5h would lose its signal under a lease those writes were holding up, reproducing the #2659 wedge exactly. The observed incidents were at roughly 3.5h, so that window is reachable rather than theoretical.
 
 Ownership-first ordering is the safety property. Writing the signal before the ownership check would republish a non-owner's `run_id` over a live successor's, which **denies the successor's forks their inheritance signal and re-creates the #2659 wedge**. It does not hand anyone the wrong `run_id`: `supervised_run_status` reports `live=True` only when the signal's `run_id` equals the lock peek's `owner_run_id`, so a mis-owned signal reads not-live and is never inherited. That liveness anchor is what bounds the damage to a stand-down rather than a takeover.
 
@@ -326,6 +326,24 @@ Ownership-first ordering is the safety property. Writing the signal before the o
 Before #2659 the signal was written only on acquire, so it expired 1800s into every pipeline while the lease was renewed indefinitely. From minute 30 onward every stage fork the supervisor dispatched got a bare `ISSUE_LOCKED` from its own supervisor's lock and stood down -- correctly, per the substrate-probe rule, since only `SUPERVISED_RUN_ACTIVE` means inherit-and-continue. The pipeline wedged with a live lock, a live heartbeat, and no error anywhere. Both carriers now share the renewers' lifetime: the signal cannot outlive the lease, and the lease cannot outlive the signal by more than one renewal interval.
 
 The worktree `.sdlc-run` file carrier is deliberately not refreshed on renew -- it has no TTL, and is cleared by `clear_supervised_run_signal` on the run's terminal transition.
+
+### Heartbeat exit conditions and release paths (issue #2714)
+
+**A renewer never mints.** `touch_issue_lock(..., renew_only=True)` is the mode the heartbeat's extend uses: it skips both minting branches (`SET NX` on an absent key, and the since-expired-key-reads-as-free branch) and writes through a compare-and-set Lua script that only lands if the stored value is still byte-identical to the one this call just read. A release landing between the peek and the extend makes the write a no-op instead of recreating the key -- structurally, not by convention, so a zombie heartbeat can never re-acquire a lease its supervisor already gave up. A `renew_only` call also fails **closed** on a Redis error (`acquired=False`), the one exception to `touch_issue_lock`'s default fail-open behavior: reporting ownership it cannot verify is exactly the shape the mode exists to eliminate.
+
+The heartbeat's own exits:
+
+| Exit reason | Trigger | Releases the lease? |
+|---|---|---|
+| `lease_lost` / `foreign_owner` | The peek finds the lease absent, or owned by a different `run_id` | No -- nothing to release, or a successor already owns it |
+| `supervisor_dead` | Two consecutive positive-death observations of the recorded `(pid, create_time)` | Yes -- releases the lease and clears the supervised-run signal, then exits (~120s bound from a kill) |
+| `max_lifetime` | `MAX_LIFETIME_SECONDS` (4h) reached with a resolved supervisor | No -- the supervisor watch is the real death detector; this is only a backstop |
+| `unsupervised_max_lifetime` | `UNSUPERVISED_MAX_LIFETIME_SECONDS` (90 min) reached with no resolvable supervisor | No -- an unresolvable supervisor is not proof of death; the lease is left to lapse on its own TTL |
+
+**Explicit release, alongside `finalize_session`.** Two additional paths hand the lease back deliberately, independent of the heartbeat:
+
+- **`tools/sdlc_stage_marker.py`'s stage-marker MERGE leg.** A successful, non-idempotent `MERGE`/`completed` marker write calls `release_run` (below) in the tool layer itself -- path-agnostic, firing for `/do-sdlc`, the `/sdlc` router, and worker-driven pipelines with zero skill cooperation.
+- **`sdlc-tool session-release`** (`tools/sdlc_session_release.py`). The `/do-sdlc` skill body's Step 5 calls this on the exits the tool-layer leg cannot observe: the REVIEW self-check HALT, a `blocked` router decision, and the iteration cap. It wraps `release_issue_lock` (compare-and-delete) followed by `clear_supervised_run_signal`, both already keyed on `run_id`, so a wrong or stale `run_id` is a safe no-op rather than a foreign-run's lease being dropped.
 
 ### Every ledger-write gate renews
 
@@ -381,12 +399,14 @@ The deploy runbook pairs the merge with an immediate worker restart: `./scripts/
 | `models/session_lifecycle.py` | `touch_issue_lock()`, `release_issue_lock()`, `_lock_owner_is_live()`, `IssueLockResult`, `ISSUE_LOCK_TTL_SECONDS` |
 | `tools/sdlc_session_ensure.py` | `_iter_orphan_sessions()`, `_issue_lock_payload_for_session()`, `_last_activity_at()` (idle-window fallback only) |
 | `models/agent_session.py` | `issue_number` mirror field; `active_run_id` field; `owned_run_ids` accumulated self-recognition set (issue #2446/#2451, see [SDLC Run Self-Recognition](sdlc-run-self-recognition.md)) |
-| `tools/sdlc_lease_heartbeat.py` | Peek-first renew-only detached lease-heartbeat for the local `/do-sdlc` supervisor (issue #2446/#2451) |
+| `tools/sdlc_lease_heartbeat.py` | Peek-first, `renew_only=True`-extending detached lease-heartbeat for the local `/do-sdlc` supervisor; polls the recorded supervisor identity and releases on confirmed death (issue #2446/#2451/#2714) |
+| `tools/sdlc_supervisor_identity.py` | `resolve_supervisor_identity_detailed()` -- resolves the supervising `claude` process's `(pid, create_time)` via `CLAUDE_PID` env then a `psutil` ancestry walk (issue #2714) |
+| `tools/sdlc_session_release.py` | `release_run()` / `sdlc-tool session-release` -- releases the issue lease + supervised-run signal for a run_id, ownership-checked (issue #2714) |
 | `tools/sdlc_session_ensure.py` | `ensure_session()`'s return-point wiring; `_acquire_run_lock_and_bind()` (exclusive run_id mint site) |
 | `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()`, `check_run_ownership()`, `resolve_ledger_lease()`/`revalidate_ledger_lease()` (writer lease checks, issue #2012), `resolve_target_repo_for_read()` (reader lease-first repo resolution, issue #2012) |
 | `agent/pipeline_ledger.py` | `PipelineLedger` -- the durable, issue-keyed record this lock's `target_repo` field authorizes writes to (issue #2012; see [`docs/features/sdlc-issue-keyed-stage-ledger.md`](sdlc-issue-keyed-stage-ledger.md)) |
 | `tools/sdlc_dispatch.py` | `record_dispatch_for_session()`'s direct lock call; `_peek_issue_lock_conflict()` + `_cli_record()`'s post-failure disambiguation; `--run-id` CLI flag |
-| `tools/sdlc_stage_marker.py` | `--run-id` CLI flag; ownership guard + renewal call |
+| `tools/sdlc_stage_marker.py` | `--run-id` CLI flag; ownership guard + renewal call; `_release_run_best_effort()` on the MERGE-completed transition (issue #2714) |
 | `tools/sdlc_verdict.py` | `--run-id` CLI flag on `verdict record`; ownership guard (no renewal) |
 | `tools/sdlc_meta_set.py` | `--run-id` CLI flag on state-mutating keys (e.g. `pr_number`); ownership guard (no renewal) |
 | `tools/sdlc_next_skill.py` | `decide()`'s peek pre-check |

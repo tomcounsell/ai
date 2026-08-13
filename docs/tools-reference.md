@@ -483,6 +483,16 @@ sdlc-tool session-ensure --issue-number 941 --issue-url "https://github.com/tomc
 
 Returns JSON: `{"session_id": "sdlc-local-941", "created": true}` (or `"created": false` if reused).
 
+### SDLC Session Release (`sdlc-tool session-release`)
+
+Release the per-issue run lease and its companion supervised-run signal, ownership-checked against `--run-id`. The counterpart to `session-ensure`: hands both back instead of taking them. Used by `/do-sdlc` Step 5 on exits a stage-marker `MERGE` write never observes (the REVIEW self-check HALT, a `blocked` router decision, the iteration cap); see `docs/sdlc/do-sdlc.md`. Best-effort and always exits 0.
+
+```bash
+sdlc-tool session-release --issue-number 2714 --run-id <hex>
+```
+
+Returns typed JSON, always all four keys: `{"released": bool, "reason": "released"|"not_owner"|"no_lease"|"missing_args"|"error", "issue_number": N, "run_id": "..."}`. A wrong or already-released `run_id` is a safe no-op (`not_owner` / `no_lease`), never a foreign run's lease being dropped.
+
 ### SDLC Stage Query (`sdlc-tool stage-query`)
 
 Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
