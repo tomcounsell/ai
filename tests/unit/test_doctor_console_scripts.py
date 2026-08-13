@@ -255,6 +255,34 @@ class TestShimmedAndNeverInstalled:
         )
         assert result.fix and "export PATH" in result.fix and "uv sync" in result.fix
 
+    def test_fix_signals_omission_when_more_than_five_names_are_not_installed(
+        self, tmp_path, monkeypatch
+    ):
+        """The `fix` string truncates the not-installed list at 5; it must say so.
+
+        `message` already appends `(+N more)` on truncation (see
+        `test_truncates_a_long_failure_list`); the `fix` string's own
+        `uv sync` remediation list truncated silently, so an operator who
+        installed exactly the five named entries and re-ran would still have
+        unnamed broken scripts.
+        """
+        names = tuple(f"valor-tool-{i}" for i in range(9))
+        root = _fake_checkout(tmp_path, names=())
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text()
+            + "\n".join(f'{n} = "tools.{n.replace("-", "_")}:main"' for n in names)
+            + "\n"
+        )
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+
+        assert result.passed is False
+        assert result.fix
+        assert "uv sync" in result.fix
+        assert "(+4 more)" in result.fix, (
+            "9 not-installed names, 5 shown -- the remaining 4 must be signaled, "
+            "not silently dropped"
+        )
+
 
 class TestRegisteredInDoctor:
     def test_check_is_registered_before_system_tools(self):

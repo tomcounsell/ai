@@ -284,9 +284,17 @@ def _check_console_scripts_resolve() -> CheckResult:
                 "directory becomes unreachable."
             )
         if not_installed:
+            not_installed_sorted = sorted(not_installed)
+            shown_not_installed = not_installed_sorted[:5]
+            not_installed_suffix = (
+                f" (+{len(not_installed_sorted) - len(shown_not_installed)} more)"
+                if len(not_installed_sorted) > len(shown_not_installed)
+                else ""
+            )
             fixes.append(
                 f"Install the missing entry point(s) with `uv sync` in {PROJECT_DIR} "
-                f"(or `uv pip install -e .`): {', '.join(sorted(not_installed)[:5])}."
+                f"(or `uv pip install -e .`): {', '.join(shown_not_installed)}"
+                f"{not_installed_suffix}."
             )
 
         return CheckResult(
