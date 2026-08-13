@@ -205,7 +205,7 @@ The `run_hook` subprocess helper is duplicated per test file rather than shared.
 - **Rewriting the section-parsing regexes.** The `extract_*` and `is_section_complete` functions have their own accumulated bug history and passing tests. This plan changes *which file* gets parsed, not *how*. Touching the parsers makes the diff unreviewable and puts the 29 existing pure-function tests at risk for no gain.
 - **Generalizing the helper into a validator base class.** Tempting once four scripts share an import. Resist: these scripts must stay import-light and fast under a 10s hook timeout, and a base class would pull the whole family into one blast radius. A function with a clear contract is the right unit.
 - **Building Bash-command-shape inspection into the shared module** so #2736 can adopt it later. No caller, no tests, and no way to know the right shape until PR #2686 lands. Speculative surface in a module that gates every write is exactly the wrong bet.
-- **Chasing every `git status` call under `.claude/hooks/`.** The sweep found several, but only target *selection* is this bug. Dirty-tree checks in `validate_no_destructive_git_in_worktree.py` and friends are legitimate and out of scope.
+- **Chasing every `git status` call under `.claude/hooks/`.** The sweep found several, but only target *selection* is this bug. Dirty-tree checks in `validate_no_destructive_git_in_worktree.py` and friends are legitimate and out of scope. The anti-criterion row must therefore match `porcelain` **scoped to a directory variable**, not bare `porcelain` — a bare match flags `validate_no_destructive_git_in_worktree.py:143`, which is correct code, and turns a green build red. Caught by running the row against the finished branch.
 - **Fixing `validate_knowledge_base_section.py`.** It discards stdin, which looks like the same signature, but it is unregistered, warn-only, and targets a fixed path. Changing it is motion, not progress.
 
 ## Risks
@@ -420,7 +420,7 @@ Final validation (Task 6) is performed by the code reviewer named in the Appetit
 | Format clean | `python -m ruff format --check .claude/hooks/ tests/unit/` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_hook_target.py tests/unit/test_validate_documentation_section.py tests/unit/test_validate_file_contains.py` | exit code 1 |
 | PR #2686 files untouched | `git diff --name-only main... -- .claude/hooks/validators/validate_no_raw_redis_delete.py .claude/hooks/dispatch/pre_tool_use_bash.py tests/unit/test_validate_no_raw_redis_delete.py` | output does not contain .py |
-| Anti-criterion: no git target selection | `grep -rl "porcelain" .claude/hooks/validators/ \| wc -l` | match count == 0 |
+| Anti-criterion: no git target selection | `grep -rl 'porcelain.*directory' .claude/hooks/validators/ \| wc -l` | match count == 0 |
 | Non-dict payload never raises | `printf 'null' \| .venv/bin/python .claude/hooks/validators/validate_documentation_section.py` | exit code 0 |
 | Sync manifest regenerated and clean | `python scripts/sync_claude_to_opencode.py && git diff --exit-code .opencode/SYNC_MANIFEST.json` | exit code 0 |
 
