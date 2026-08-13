@@ -1002,54 +1002,54 @@ Not applicable — this repo has no external docs site.
 
 ## Success Criteria
 
-- [ ] `flushdb()` against an unclaimed db raises, with a message naming the db, the claimed set, and
+- [x] `flushdb()` against an unclaimed db raises, with a message naming the db, the claimed set, and
   `scratch_test_db`; `flushall()` remains unconditionally blocked; `db == 0` remains blocked.
-- [ ] Every `redis.Redis(db=...)` site this plan converts takes its `db=` value from the claim API:
+- [x] Every `redis.Redis(db=...)` site this plan converts takes its `db=` value from the claim API:
   the `PYTEST_XDIST_WORKER` derivation (`_own_test_db`), the hardcoded `15`
   (`divergent_db`), `test_agent_catchup_recovery.py:61`'s `db=1`, and the two
   `connection_kwargs`-derived sites (`test_email_bridge.py:1399-1406`,
   `test_notify_isolation.py:61-65`). Verified per-site in review; the *structural* assertion that no
   such site can reappear is descoped to #2655.
-- [ ] `claim_test_db()` never returns a db number absent from `claimed_test_dbs()` — on **every**
+- [x] `claim_test_db()` never returns a db number absent from `claimed_test_dbs()` — on **every**
   return path, flock and registry-unreachable fallback alike. On exhaustion it polls briefly, then
   raises.
-- [ ] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
-- [ ] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
+- [x] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
+- [x] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
   the guard **intercepts** a `flushdb` aimed at db 1 — proven against a `SimpleNamespace` client stub
   carrying no connection, so no flush can reach an unowned db on any branch — and `flushdb()` on the
   claimed db is permitted with a real client. ~1 s, deterministic. **Red on `main` means no
   `RuntimeError` is raised** (the db-0-only guard does not intercept), never that a flush succeeded.
   Both outputs pasted into the PR body.
-- [ ] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
+- [x] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
   `covered_model_names()` unchanged and strands no `FakeCoveredModel`. Red on `main`. Output pasted
   into the PR body.
-- [ ] **The binding measurement (writer 3):** inside a test,
+- [x] **The binding measurement (writer 3):** inside a test,
   `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"]` is in `claimed_test_dbs()` — i.e. the
   popoto plugin no longer sits on db 15 while this process owns another slot. Red on `main` (the
   same fact the `PROBE sentinel_survived=False` observation reports), green on the branch. Stated in
   ownership terms deliberately: a literal `redis.Redis(db=15)` sentinel would itself be an unowned-db
   construction, contradicting the invariant this plan exists to establish.
-- [ ] The claim exists before any fixture runs: on a worker, `claimed_test_dbs()` is non-empty at the
+- [x] The claim exists before any fixture runs: on a worker, `claimed_test_dbs()` is non-empty at the
   first `_popoto_flush_db`. On the xdist controller, `_db_claim._CLAIMED_TEST_DB` stays `None` and no
   pool slot is consumed. Under `-n0` the master claims.
-- [ ] Pool exhaustion is paid **once per process**: the second `claim_test_db()` against a held pool
+- [x] Pool exhaustion is paid **once per process**: the second `claim_test_db()` against a held pool
   returns in well under the wait window and raises the same message.
-- [ ] `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` inside any test —
+- [x] `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` inside any test —
   the popoto plugin and this repo's fixture agree on one db, so a future popoto upgrade that changes
   the plugin's resolution order fails a test instead of silently rotating the suite.
-- [ ] The `redis_test_db` fast path at `tests/conftest.py:592-597` is deleted, so spike-5's
+- [x] The `redis_test_db` fast path at `tests/conftest.py:592-597` is deleted, so spike-5's
   disposition holds regardless of which Task 2 option (env export vs `-p no:popoto`) was chosen.
-- [ ] A live-client ownership check runs once per session: every popoto client
+- [x] A live-client ownership check runs once per session: every popoto client
   (`POPOTO_REDIS_DB`, `_POPOTO_ASYNC_REDIS_DB`) points at a db in `claimed_test_dbs()`. This is the
   plugin-agnostic runtime check; no static walk over `tests/` can see installed library code, so this
   criterion stands entirely on its own and is unaffected by the #2655 descope.
-- [ ] Every regression test added fails on `main` and passes on the branch — red-state output pasted
+- [x] Every regression test added fails on `main` and passes on the branch — red-state output pasted
   into the PR body.
-- [ ] Exhaustion-path tests complete in seconds, not the wait window — proving
+- [x] Exhaustion-path tests complete in seconds, not the wait window — proving
   `_TEST_DB_CLAIM_WAIT_S` is read as a module attribute at call time and is genuinely patchable.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail markers are added; the replaced exhaustion test is a hard assertion.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail markers are added; the replaced exhaustion test is a hard assertion.
 
 ## Team Orchestration
 
