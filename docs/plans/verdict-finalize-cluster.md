@@ -225,7 +225,7 @@ The write path all three defects sit on:
 
 Four defects across **five** code files: `tools/sdlc_review_finalize.py`, `tools/sdlc_stage_marker.py`, `tools/sdlc_verdict.py`, `tools/sdlc_stage_query.py`, and `agent/sdlc_router.py`. The fifth (`sdlc_stage_query.py`) was added by the round-2 blocker fix and is the one that carries the router-wide-outage failure mode: get `latest_review_head_sha` wrong and every lane re-reviews until G4 escalates.
 
-Medium still holds, because four of the five changes are a string rewrite, an argparse rename, an additive kwarg, and a one-clause predicate widening. The weight is concentrated in three proofs, not in volume: that the router predicate change does not re-open #1641/#1668, that the `head_sha` field change is migration-free against live ledgers, and that no head-SHA reader is left on the flattened-string path.
+Medium still holds, because four of the five changes are a string rewrite, an argparse rename, an additive kwarg, and a one-clause predicate widening. The weight is concentrated in four proofs, not in volume: that the router predicate change does not re-open #1641/#1668, that the `head_sha` field change is migration-free against live ledgers, that no head-SHA reader is left on the flattened-string path, and that the three-way `_verdicts["REVIEW"]` guard never lets `None` or a bare `str` reach a call typed for the other shape.
 
 ## Prerequisites
 
@@ -311,7 +311,7 @@ Separately, at `agent/sdlc_router.py:1666-1675`: give the no-rule fallthrough a 
 - [ ] `tools/sdlc_review_finalize.py` — the `except Exception` in `check_review_persistence` (`:333-343`) is a deliberate fail-closed catch. Assert it still yields `ok: False` with a preserved `reason` when the new `head_sha` read helper raises.
 - [ ] `agent/sdlc_router.py` — `_review_verdict_is_stale` (`:967-981`) swallows everything and fails safe to `False` (not stale). With row 8b now depending on it, add a test that a malformed `recorded_at` yields "not stale" and therefore leaves row 8 in control, rather than silently routing to a re-review loop.
 - [ ] `agent/sdlc_router.py` — `decide_next_dispatch` catches predicate exceptions and continues (`:1650-1656`). Assert the widened row 8b predicate never raises on a malformed `_verdicts` payload (non-dict, missing keys, `None`).
-- [ ] `tools/sdlc_stage_marker.py` — the outer `except Exception` (`:727-735`) already reports `STATE_MACHINE_RAISED` accurately; assert its message is unchanged by this work (it is the model the other three sites are being made to follow).
+- [ ] `tools/sdlc_stage_marker.py` — the outer `except Exception` (`:727-735`) already reports `STATE_MACHINE_RAISED` accurately; assert its message is unchanged by this work (it is the model the other four sites are being made to follow).
 
 ### Empty/Invalid Input Handling
 - [ ] `record_verdict(head_sha=...)` with `None`, `""`, whitespace, and a non-40-hex string — assert no `head_sha` key is written for falsy input and that a malformed value never produces a record that reads as a valid trailer.
@@ -336,7 +336,7 @@ Separately, at `agent/sdlc_router.py:1666-1675`: give the no-rule fallthrough a 
 - [ ] Any test asserting the trailered composite string in the `verdict` field — REPLACE: assert against the new split shape, keeping one legacy-string case to prove the read path still parses it.
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py` — CHECK: it guards skill-doc/code parity and may assert on flag names in `docs/sdlc/do-pr-review.md`.
 - [ ] `tests/unit/test_merge_predicate.py` — ADD (critique concern): assert the **exact `notes` string** at `tools/merge_predicate.py:588` for a new-shape record `{"verdict": "APPROVED", "head_sha": "<40hex>", "recorded_at": …}`. A pass/fail-only assertion cannot detect this regression: `:582-595` treats a trailer-less verdict as legitimate and silently downgrades to the weaker `recorded_at`-vs-commit-date comparison, and **both branches can return "fresh"**. This is a fail-open on the merge gate that #2404/#2415 exist to keep honest.
-- [ ] Tests covering `tools/sdlc_stage_query.py::_compute_meta` — ADD (critique blocker): assert `latest_review_head_sha` is populated across **three** `_verdicts["REVIEW"]` shapes — a new-shape dict with `head_sha`, a legacy mangled dict whose `verdict` string carries the trailer, and a **bare `str`** record. The bare-str case is the one that raises `AttributeError` if `head_sha_of_record` is called unguarded, and that exception is swallowed by `_resolve_enriched` into an empty ledger. Assert at both the `_compute_meta` and `decide_next_dispatch` levels, since the regression is router-wide.
+- [ ] Tests covering `tools/sdlc_stage_query.py::_compute_meta` — ADD (critique blocker): assert `latest_review_head_sha` is populated across **four** `_verdicts["REVIEW"]` shapes — a new-shape dict with `head_sha`, a legacy mangled dict whose `verdict` string carries the trailer, and a **bare `str`** record. and a `_verdicts` payload with **no `"REVIEW"` key at all**. The bare-str case raises `AttributeError` if `head_sha_of_record` is called unguarded; the missing-key case raises `TypeError` if `None` reaches the regex, and that one is the COMMON path — every issue still in PLAN/BUILD/TEST. Both exceptions are swallowed by `_resolve_enriched` into an empty ledger. Assert all four at both the `_compute_meta` and `decide_next_dispatch` levels, since the regression is router-wide.
 
 No xfail/xpass markers exist for any of these defects (grep of `tests/` for `xfail` intersected with verdict/finalize/router/marker returned nothing), so there are no expected-failure conversions to perform.
 
@@ -523,9 +523,18 @@ Two integration points must be verified rather than added:
 - Route `_review_trailer_present`, `check_review_persistence`, `tools/merge_predicate.py`, and the router freshness gate through them. **Preserve `merge_predicate`'s lazy in-function import** (`:580`) — the merge-guard hook needs module imports to stay stdlib-only.
 - **`tools/sdlc_stage_query.py`** (critique blocker): add a `latest_review_head_sha` key to `_compute_meta` (`:470-545`) sourced via `head_sha_of_record`, because `_extract_verdict_text` (`:443-451`) flattens the record to `record["verdict"]` and drops sibling keys. Make row 8f (`agent/sdlc_router.py:944-951`) prefer `meta.get("latest_review_head_sha")` before falling back to `head_sha_of_text(...)`. Without this, every approved verdict reads head-stale and the router re-dispatches `/do-pr-review` on every lane until G4 escalates.
 
-  **The `_verdicts["REVIEW"]` entry may legitimately be a bare `str`** — `_extract_verdict_text` (`:443-451`) already branches `isinstance(record, dict)` / `isinstance(record, str)` precisely because that legacy shape exists in live ledgers. `head_sha_of_record` must never be called unguarded on it: branch on `isinstance(verdicts.get("REVIEW"), dict)` first and route the str case to `head_sha_of_text`, mirroring the existing duality.
+  **The `_verdicts["REVIEW"]` entry is three-way, not two-way.** `_extract_verdict_text` (`:442-450`) branches `dict` → `str` → `None`, and the third branch is not an edge case: `verdicts.get("REVIEW")` yields `None` for every issue that has not yet recorded a REVIEW verdict, which is the majority of live ledgers. Mirror it exactly:
 
-  This is not defensive padding — the unguarded failure is **worse than the blocker it fixes**. An `AttributeError` inside `_compute_meta` propagates to `tools/sdlc_next_skill.py::_resolve_enriched` (`:87-97`), whose broad `except Exception` returns `{"stages": {}, "_meta": {}}`. That silently discards the ENTIRE ledger, so the router sees a fully-worked issue as brand new and routes it back to `/do-plan`. BLOCKER 1's failure mode was fail-closed-to-stale; this one is fail-open-to-amnesia.
+  ```
+  rec = verdicts.get("REVIEW")
+  if isinstance(rec, dict):   head = head_sha_of_record(rec)
+  elif isinstance(rec, str):  head = head_sha_of_text(rec)
+  else:                       head = None
+  ```
+
+  **Guard with `isinstance(rec, str)`, never with `not isinstance(rec, dict)`.** The negated form is precisely what routes `None` into `_HEAD_SHA_TRAILER_RE.search(...)`, which raises `TypeError: expected string or bytes-like object`. `head_sha_of_text(text: str)` is typed non-Optional and must never receive `verdicts.get("REVIEW")` directly.
+
+  This is not defensive padding — the unguarded failure is **worse than the blocker it fixes**. An `AttributeError` (bare-str record) or `TypeError` (missing record) inside `_compute_meta` propagates to `tools/sdlc_next_skill.py::_resolve_enriched` (`:87-97`), whose broad `except Exception` returns `{"stages": {}, "_meta": {}}`. That silently discards the ENTIRE ledger, so the router sees a fully-worked issue as brand new and routes it back to `/do-plan`. BLOCKER 1's failure mode was fail-closed-to-stale; this one is fail-open-to-amnesia — and in the `None` case it fires on the common path, not the rare one.
 - Leave `_verdict_is_recognized` a substring test — do not tighten it (#2548).
 
 ### 3. Make the refusals honest (#2740)
@@ -672,7 +681,94 @@ the build.
 | CONCERN | History & Consistency; driver-verified | Risk 5's lane-collision mitigation predates the round-2 fence change and is now stale: `docs/plans/sdlc-lane-recorded-slug.md` (status Ready) plans a repair of the dead slug read at `tools/sdlc_stage_query.py::_compute_meta:487`, which falls INSIDE this plan's `_compute_meta:470-545` edit span for `latest_review_head_sha`. A literal git merge conflict is plausible if both lanes build concurrently, and Risk 5 currently gives BUILD no signal to look for it. | revision 2 2026-08-13 | Add `tools/sdlc_stage_query.py::_compute_meta` to Risk 5's named file list and extend the mitigation: "re-check at BUILD start; if `sdlc-lane-recorded-slug` has begun editing `_compute_meta`, coordinate before landing `latest_review_head_sha`." |
 | NIT | Scope & Value | The Open Questions preamble claims every question "already has a default chosen and encoded in Technical Approach," but Q4 (no-rule block signal) has no encoded default — §4 explicitly defers with "Choose one and apply it consistently." Does not block build; contradicts the preamble. | revision 2 2026-08-13 | Existing `guard_id` values are short codes (G2/G4/G7), which favors the `guard_id="NO_RULE"` sentinel for convention consistency. Either encode that default at §4 or soften the preamble to name Q4 as the one genuine implementer choice. |
 
-**Structural checks (round 2):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive; no Popoto model changes, so no migration obligation); task numbering PASS (1-8 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (all referenced source files exist; the four `State NOT persisted` sites re-verified by grep at `:567`, `:603`, `:719`, `:972`); prerequisites PASS (`gh auth status` OK, venv on the pinned interpreter); cross-references PASS except the three-vs-four residue and the stale Appetite/Risk-5 counts captured above. One Verification-table note for the revision pass: the row `grep -c "latest_review_head_sha" tools/sdlc_stage_query.py agent/sdlc_router.py` with expected "output > 0 in both" is human-evaluable (two `path:count` lines) but not exit-code-checkable — `grep` exits 0 if EITHER file matches; split it into two `grep -q` rows to make "in both" mechanical.
+**Structural checks (round 2, superseded by round 3 below):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive; no Popoto model changes, so no migration obligation); task numbering PASS (1-8 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (all referenced source files exist; the four `State NOT persisted` sites re-verified by grep at `:567`, `:603`, `:719`, `:972`); prerequisites PASS (`gh auth status` OK, venv on the pinned interpreter); cross-references PASS except the three-vs-four residue and the stale Appetite/Risk-5 counts captured above. One Verification-table note for the revision pass: the row `grep -c "latest_review_head_sha" tools/sdlc_stage_query.py agent/sdlc_router.py` with expected "output > 0 in both" is human-evaluable (two `path:count` lines) but not exit-code-checkable — `grep` exits 0 if EITHER file matches; split it into two `grep -q` rows to make "in both" mechanical.
+
+### Round 3 — READY TO BUILD (with concerns)
+
+War room run 2026-08-13 (round 3, confirmation pass), FULL depth (force-FULL: the
+plan edits `.claude/skills-global/` and `agent/sdlc_router.py`; roster: Risk &
+Robustness, Scope & Value, History & Consistency, 3/3 complete and grounded).
+Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 1 concern, 2 nits.
+
+**Round-2 disposition: all 5 findings verified substantively closed in commit
+`d1e7bc026`,** independently confirmed by all three critics against real source.
+The four `State NOT persisted.` sites are real at `tools/sdlc_stage_marker.py:567`,
+`:603`, `:719`, `:972`; the bare-`str` guard prescription matches
+`_extract_verdict_text`'s real `isinstance` branching at
+`tools/sdlc_stage_query.py:442-450`, and the `_resolve_enriched` swallow-to-empty-ledger
+claim is accurate against `tools/sdlc_next_skill.py:86-97`; Appetite names five files
+with a Medium justification; Risk 5's collision claim was cross-checked against
+`docs/plans/sdlc-lane-recorded-slug.md` (status Ready, does target the dead slug read
+at `tools/sdlc_stage_query.py:487`, inside this plan's `:470-545` span); Q4's
+`guard_id="NO_RULE"` default matches the real `G2`/`G4`/`G7` short codes at
+`agent/sdlc_router.py:331,426,674`; and the `latest_review_head_sha` Verification row
+is split into two exit-code-checkable `grep -q` rows.
+
+The one concern is a defect **in the round-2 fix's own prescription**, driver-verified
+against live code — not a re-litigation of a closed finding.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness; driver-verified | The bare-`str` guard added by the round-2 fix is only **two-way** (`dict` vs. "the str case"), but the duality it claims to mirror is **three-way**: `_extract_verdict_text` (`tools/sdlc_stage_query.py:442-450`) returns `None` when the record is neither dict nor str, which is exactly what `verdicts.get("REVIEW")` yields whenever no REVIEW verdict has been recorded — the normal state for every issue still in PLAN/BUILD/TEST, i.e. the MAJORITY of live ledgers, not a legacy edge case. A literal reading of Task 2's "branch on `isinstance(...,dict)` first and route the str case to `head_sha_of_text`" sends that `None` into a regex search. Confirmed by driver: `re.compile(...).search(None)` raises `TypeError: expected string or bytes-like object`, which propagates into `_resolve_enriched`'s broad `except Exception` (`tools/sdlc_next_skill.py:95-96`) and discards the ENTIRE ledger. Same fail-open-to-amnesia mode the round-2 fix was written to prevent, but fired on the common path instead of the rare one — and Test Impact (`:339`) requires only three shapes, so no planned test would catch it. | revision 3 2026-08-13 | Make the guard three-way, mirroring `_extract_verdict_text` exactly: `if isinstance(rec, dict): head_sha_of_record(rec)` / `elif isinstance(rec, str): head_sha_of_text(rec)` / `else: None`. The gotcha is the negation: guard with `isinstance(rec, str)`, NEVER with `not isinstance(rec, dict)` — the latter is precisely what routes `None` into the regex. `head_sha_of_text(text: str)` is typed non-Optional, so it must never receive `verdicts.get("REVIEW")` directly. Add a FOURTH Test Impact case to the three at `:339`: a `_verdicts` payload with no `"REVIEW"` key at all, asserted at both the `_compute_meta` and `decide_next_dispatch` levels. |
+| NIT | History & Consistency (Scope & Value contested) | The round-2 "three sites" sweep left one un-tabled occurrence at line ~314 (Failure Path Test Strategy, Exception Handling Coverage): the `STATE_MACHINE_RAISED` bullet still calls `:733` "the model the other three sites are being made to follow" when four sites are being rewritten to follow it. Scope & Value read the same line as a legitimate count of the three `write_marker`-internal siblings and cleared it, so it is genuinely ambiguous rather than plainly wrong; Task 3's body is unambiguous at four, so BUILD cannot be misled. | revision 3 2026-08-13 | `grep -n "other three sites" docs/plans/verdict-finalize-cluster.md` returns exactly this one match, outside the `## Critique Results` tables. Reword to name the set rather than count it ("the `write_marker` sites plus `main()`'s `:969-974` wrapper") so neither reading remains available. |
+| NIT | Scope & Value | The Appetite paragraph rewritten in round 2 says "the weight is concentrated in three proofs" and enumerates the router-predicate, migration-free, and flattened-string-reader proofs — omitting the bare-`str` guard proof that the same revision calls "worse than the blocker it fixes." The paragraph rewritten specifically to justify Medium against a widened blast radius undersells the scariest risk it introduces. | revision 3 2026-08-13 | No code or test impact; Technical Approach §2 and Test Impact already carry the obligation. Renumber to four proofs and add "that no bare-`str` or absent REVIEW record ever reaches `head_sha_of_record` unguarded." Same self-consistency class as the round-2 "three sites" residue finding. |
+
+**Structural checks (round 3):** required sections PASS (Documentation carries a
+`docs/features/` checkbox item; Update System, Agent Integration, and Test Impact all
+present and substantive; no Popoto model changes, so no `scripts/update/migrations.py`
+migration obligation). Task numbering PASS (1-8 contiguous). Dependencies PASS (every
+`Depends On` ID resolves; no cycles). File paths PASS — all 18 referenced source, test,
+and doc paths exist on disk, and `grep -rn "State NOT persisted" tools/ agent/` returns
+exactly the 4 sites the plan claims. Prerequisites PASS. Cross-references PASS: every
+Success Criterion maps to a task; no No-Go or Rabbit Hole appears in the Solution as
+planned work. Round-2's own Verification-table note is discharged (the split `grep -q`
+rows landed). No structural finding this round.
+
+### Round 4 — READY TO BUILD (no concerns)
+
+War room run 2026-08-13 (round 4, confirmation pass), FULL depth (force-FULL: the
+plan edits `.claude/skills-global/` and `agent/sdlc_router.py`; roster: Risk &
+Robustness, Scope & Value, History & Consistency, 3/3 complete and grounded).
+Verdict: **READY TO BUILD (no concerns)** — 0 blockers, 0 concerns, 3 nits.
+
+**Round-3 disposition: all 3 findings verified substantively closed in commit
+`3b50d46ea`,** independently confirmed by all three critics against real source.
+The `_verdicts["REVIEW"]` guard is now three-way at Technical Approach §2 / Task 2
+(`dict` → `head_sha_of_record`, `str` → `head_sha_of_text`, `else` → `None`), with the
+negation gotcha stated explicitly ("guard with `isinstance(rec, str)`, never with
+`not isinstance(rec, dict)`"), and the shape mirrors the real `_extract_verdict_text`
+at `tools/sdlc_stage_query.py:443-451` exactly. Test Impact now requires four
+`_verdicts["REVIEW"]` shapes including the no-`REVIEW`-key common path; the live
+ledger for #2740 currently reads `"latest_review_verdict": null`, confirming that
+path is production-normal rather than a legacy edge case. Appetite now counts four
+proofs and names the bare-`str`/absent-REVIEW guard. The Failure Path Test Strategy
+`STATE_MACHINE_RAISED` bullet reads "the other four sites", resolving round 3's
+ambiguity. Risk & Robustness additionally traced row 8f's behavior when
+`latest_review_head_sha` is present-but-`None` through `agent/sdlc_router.py:942-953`
+and confirmed it converges on the documented stale=True contract — no bug.
+
+The three nits are doc-precision residue. None blocks the build; none requires a
+revision pass. BUILD may sweep them opportunistically.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| NIT | Scope & Value; History & Consistency | The round-3 edit that appended the fourth Test Impact case left a stray sentence break at Test Impact line ~339: "...and a **bare `str`** record. and a `_verdicts` payload with **no `"REVIEW"` key at all**." A period followed by a lowercase "and" breaks the four-shape list into a fragment. Comprehension is unaffected; the requirement still reads as four. | n/a (nit) | Replace the period after "record" with a comma so the four shapes read as one list. Cosmetic only — no code, test, or task impact. |
+| NIT | History & Consistency | Technical Approach §2 (plan line ~526) cites `_extract_verdict_text` as `(`:442-450`)`, contradicting `(`:443-451`)` at plan lines ~277 and ~524. Verified against `tools/sdlc_stage_query.py`: the `def` is at line 443 and the function's final `return None` is at line 451, so `:443-451` is correct and `:442-450` is off by one at both ends. | n/a (nit) | Change `:442-450` to `:443-451` at plan line ~526. BUILD reads the real file anyway, so this cannot mislead an implementer; it is plan-internal precision. |
+| NIT | History & Consistency (Risk & Robustness noted, judged below bar) | Solution > Key Elements (plan line ~241) reads "`write_marker` stops asserting a fact it cannot know at all three `State NOT persisted.` sites." The subject is `write_marker`, which genuinely holds three of the four sites, so the sentence is defensible — but it is the same contested-count ambiguity round 3 flagged at line ~314, and it survived both the round-2 and round-3 sweeps. | n/a (nit) | Either leave it (it is literally true of `write_marker`) or extend to "...at all three `State NOT persisted.` sites inside it; `main()`'s `:969-974` wrapper is corrected alongside." Technical Approach §1 and Task 3 are unambiguous at four, so BUILD cannot be misled. |
+
+**Structural checks (round 4):** required sections PASS (Documentation carries a
+`docs/features/` checkbox item; Update System, Agent Integration, and Test Impact all
+present and substantive; no Popoto model changes, so no `scripts/update/migrations.py`
+migration obligation). Task numbering PASS (1-8 contiguous). Dependencies PASS (every
+`Depends On` ID resolves; no cycles). File paths PASS — `grep -rn "State NOT persisted"
+tools/ agent/` returns exactly the 4 sites the plan claims (`tools/sdlc_stage_marker.py:567`,
+`:603`, `:719`, `:972`), and `_extract_verdict_text` / `_compute_meta` /
+`_resolve_enriched` all exist as cited (one off-by-one line reference captured as a nit
+above). Prerequisites PASS (`gh auth status` OK; venv 3.14.3 matches the `.python-version`
+pin). Cross-references PASS: every Success Criterion maps to a task; no No-Go or Rabbit
+Hole appears in the Solution as planned work. The only "three sites" strings remaining in
+the plan are inside the historical round-1/2/3 Critique Results tables, which are immutable
+records. No structural finding this round.
 
 ---
 

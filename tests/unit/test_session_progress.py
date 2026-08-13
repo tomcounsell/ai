@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent.session_runner.adapter as adapter
+from tests.db_claim import subprocess_env
 from tools.session_progress import (
     VERDICT_NO_RECENT_ACTIVITY,
     VERDICT_PROGRESSING,
@@ -77,7 +78,7 @@ def _unused_pid() -> int:
     gone rather than a zombie -- a zombie still answers `kill(pid, 0)` and
     would make the test assert the opposite of what it means to.
     """
-    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc = subprocess.Popen([sys.executable, "-c", ""], env=subprocess_env())
     proc.wait()
     return proc.pid
 

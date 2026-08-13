@@ -19,6 +19,7 @@ from tests._worker_guard import (
     _looks_like_worker_cmdline,
     assert_not_live_worker,
 )
+from tests.db_claim import subprocess_env
 
 
 class TestLooksLikeWorkerCmdline:
@@ -50,7 +51,8 @@ class TestAssertNotLiveWorker:
         line that ``ps`` reports, so the guard treats the pid as a worker.
         """
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)", "-m", "worker"]
+            [sys.executable, "-c", "import time; time.sleep(30)", "-m", "worker"],
+            env=subprocess_env(),
         )
         try:
             time.sleep(0.3)  # let ps observe the process

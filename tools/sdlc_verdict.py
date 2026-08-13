@@ -366,6 +366,7 @@ def record_verdict(
     now: datetime | None = None,
     judges: list | None = None,
     consensus: dict | None = None,
+    head_sha: str | None = None,
 ) -> dict:
     """Record a verdict for a stage on a session's stage_states.
 
@@ -394,6 +395,15 @@ def record_verdict(
             Persisted as ``_verdicts[stage]._consensus`` side-field. Caller
             (typically ``do-pr-review`` SKILL) computes via
             :func:`agent.sdlc_review_consensus.compute_consensus`.
+        head_sha: Optional PR head commit SHA the verdict judges (issue #2769).
+            This is the ONLY sanctioned way to record a head SHA. Do NOT
+            concatenate a ``REVIEW_CONTEXT head_sha=`` trailer onto ``verdict``:
+            ``normalize_verdict`` runs over the WHOLE verdict string, which
+            mangles such a trailer into ``REVIEW CONTEXT HEAD SHA=<HEX>`` and
+            leaves the stored verdict token unreadable as a bare ``APPROVED``.
+            Persisted verbatim (whitespace-stripped only, never normalized) as
+            the record's ``head_sha`` field, and only when truthy. Read it back
+            via ``tools._sdlc_utils.head_sha_of_record``.
 
     Returns:
         The written verdict record on success, or ``{}`` on any failure.
@@ -442,6 +452,15 @@ def record_verdict(
         "recorded_at": recorded_at,
         "artifact_hash": artifact_hash,
     }
+    # head_sha rides as its OWN field (issue #2769), never inside the verdict
+    # token: `normalize_verdict` above rewrites the whole string, so a
+    # concatenated trailer comes back out mangled. Attached only when truthy,
+    # following the _judges/_consensus precedent, and inside this SAME record
+    # so the write stays a single `update_stage_states` call (single-writer
+    # invariant). Stored raw apart from whitespace stripping -- it is a 40-hex
+    # commit SHA and must NOT pass through `normalize_verdict`.
+    if isinstance(head_sha, str) and head_sha.strip():
+        record["head_sha"] = head_sha.strip()
     if stage == "REVIEW":
         if blockers is not None:
             record["blockers"] = int(blockers)
@@ -566,7 +585,7 @@ def _review_trailer_present(issue_number: int | None) -> bool:
     if not issue_number:
         return False
     try:
-        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+        from tools._sdlc_utils import head_sha_of_record
         from tools.sdlc_stage_query import _resolve_issue_record
 
         record = _resolve_issue_record(issue_number)
@@ -577,7 +596,9 @@ def _review_trailer_present(issue_number: int | None) -> bool:
         if "APPROVED" not in verdict_text.upper():
             # Non-APPROVED path: no trailer is required by contract (Risk 1).
             return True
-        return bool(_HEAD_SHA_TRAILER_RE.search(verdict_text))
+        # Reads the `head_sha` FIELD first and the legacy in-token trailer
+        # second (#2769) -- both shapes satisfy this gate.
+        return bool(head_sha_of_record(verdict_record))
     except Exception as e:
         logger.debug(
             f"sdlc_verdict: REVIEW trailer presence probe failed for "
@@ -873,7 +894,13 @@ def _cli_get(args) -> dict:
     return _no_verdict(get_verdict(session, stage), scope)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the `sdlc-tool verdict` parser.
+
+    Split out of :func:`main` (#2767a) so flag spellings, help text, and the
+    `default=None` vs `0` count distinction are testable without executing a
+    state-mutating subcommand.
+    """
     parser = argparse.ArgumentParser(
         description="Record or retrieve SDLC critique/review verdicts",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -927,11 +954,11 @@ def main() -> None:
     fin = subparsers.add_parser(
         "finalize",
         help=(
-            "Atomically record a REVIEW verdict + head_sha trailer + REVIEW "
+            "Atomically record a REVIEW verdict + its head_sha + the REVIEW "
             "completed marker, then verify all three persisted (#2193)"
         ),
     )
-    fin.add_argument("--pr", type=int, required=True, help="PR number (head_sha trailer source)")
+    fin.add_argument("--pr", type=int, required=True, help="PR number (head_sha source)")
     fin.add_argument("--issue-number", type=int, required=True)
     fin.add_argument(
         "--verdict",
@@ -940,11 +967,41 @@ def main() -> None:
             "Verdict string; must carry one of APPROVED / CHANGES REQUESTED / "
             "BLOCKED_ON_CONFLICT / PR_CLOSED (decoration around the token is fine). "
             "Anything else is refused as REVIEW_VERDICT_UNRECOGNIZED (#2548). "
-            "On APPROVED the head_sha trailer is appended if absent."
+            "On APPROVED the PR head SHA is recorded in its own head_sha field (#2769)."
         ),
     )
-    fin.add_argument("--blockers", type=int, default=None)
-    fin.add_argument("--tech-debt", dest="tech_debt", type=int, default=None)
+    # #2767(a): these are COUNTS, and were bare `type=int` with no help at all
+    # on a call /do-pr-review calls "mandatory and terminal". An agent reading
+    # "record the verdict" naturally passes its findings prose, gets
+    # `invalid int value:`, and STOPs -- leaving the review complete on GitHub
+    # and absent from the ledger. The names now say what they hold.
+    #
+    # The old spellings are argparse aliases on the SAME argument (one flag,
+    # two spellings -- not a second code path). They exist for the
+    # cross-machine propagation window: the global do-pr-review SKILL.md is
+    # hardlinked to ~/.claude/skills/ by /update, so a machine that has not yet
+    # run /update still emits --blockers against a freshly-merged sdlc-tool.
+    count_help = (
+        "Integer COUNT of {what} -- NOT the findings text. "
+        "Findings belong in the review posted to the PR. "
+        "Omit for 'not assessed'; 0 means 'assessed, none found'."
+    )
+    fin.add_argument(
+        "--blocker-count",
+        "--blockers",
+        dest="blockers",
+        type=int,
+        default=None,
+        help=count_help.format(what="blocking findings"),
+    )
+    fin.add_argument(
+        "--tech-debt-count",
+        "--tech-debt",
+        dest="tech_debt",
+        type=int,
+        default=None,
+        help=count_help.format(what="tech-debt findings"),
+    )
     fin.add_argument(
         "--run-id",
         dest="run_id",
@@ -970,7 +1027,11 @@ def main() -> None:
     sc.add_argument("--issue-number", type=int, required=True)
     sc.set_defaults(func=_cli_selfcheck)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
 
     # Run-identity self-heal (issue #2144): a resumed pipeline turn loses the
     # run_id from context. Re-establish identity from the environment instead of

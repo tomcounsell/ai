@@ -146,10 +146,24 @@ class Dispatch:
 
 @dataclass(frozen=True)
 class Blocked:
-    """An escalation decision. The router should stop and surface to the human."""
+    """An escalation decision. The router should stop and surface to the human.
+
+    ``guard_id`` is a short machine-matchable code identifying WHY the router
+    escalated. It does not imply "a numbered guard fired" (#2767b): alongside
+    the ``G1``–``G8`` guard codes it also carries the ``NO_RULE`` sentinel for
+    the dispatch-table fallthrough — a genuine hole in the table rather than a
+    guard verdict. Callers matching on specific guards must compare against the
+    codes they care about, never merely test for presence.
+    """
 
     reason: str
     guard_id: str | None = None
+
+
+# Sentinel ``guard_id`` for the dispatch-table fallthrough (#2767b). Short-code
+# form matches the ``G2``/``G4``/``G7`` convention so downstream consumers can
+# match it without parsing the reason string.
+NO_RULE_GUARD_ID = "NO_RULE"
 
 
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
@@ -269,6 +283,33 @@ def _latest_review_verdict(stage_states: dict, meta: dict) -> str:
         return meta["latest_review_verdict"]
     verdicts = stage_states.get("_verdicts") or {}
     return _verdict_text(verdicts.get("REVIEW"))
+
+
+def _latest_review_head_sha(stage_states: dict, meta: dict) -> str:
+    """Return the head SHA the recorded REVIEW verdict judges, or ``""``.
+
+    Issue #2769 moved the head SHA out of the verdict token into its own
+    ``head_sha`` record field. Structural twin of :func:`_latest_review_verdict`:
+    prefers ``meta["latest_review_head_sha"]`` when ``sdlc_stage_query``
+    populated it, then reads the ``_verdicts["REVIEW"]`` record directly.
+
+    The router must stay import-free of ``tools/`` (the import-boundary
+    contract that also owns the duplicated ``_HEAD_SHA_TRAILER_RE`` below), so
+    this reimplements the field-first / legacy-trailer-second precedence
+    locally rather than calling ``tools._sdlc_utils.head_sha_of_record``.
+    """
+    meta_head = meta.get("latest_review_head_sha")
+    if isinstance(meta_head, str) and meta_head.strip():
+        return meta_head.strip()
+    record = (stage_states.get("_verdicts") or {}).get("REVIEW")
+    if isinstance(record, dict):
+        field = record.get("head_sha")
+        if isinstance(field, str) and field.strip():
+            return field.strip()
+    # Legacy fallback: the SHA is still embedded in the (normalize-mangled)
+    # verdict text. Permanent -- pre-split ledgers are never migrated.
+    match = _HEAD_SHA_TRAILER_RE.search(_latest_review_verdict(stage_states, meta))
+    return match.group(1) if match else ""
 
 
 def guard_g1_critique_loop(
@@ -901,14 +942,17 @@ def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
     return result
 
 
-# The stored REVIEW verdict may carry a ``REVIEW_CONTEXT head_sha=<hex>``
-# trailer naming the PR head commit it judged (emitted by /do-pr-review Step 5;
-# the same trailer tools/merge_predicate's freshness check consumes). The text
-# may have passed through ``normalize_verdict`` (uppercased, underscores mapped
-# to spaces), so the pattern matches both the raw and normalized forms, and SHA
-# comparison is case-insensitive. Kept in lockstep with
-# ``tools.merge_predicate._HEAD_SHA_TRAILER_RE`` (duplicated here because the
-# router must stay import-free of tools/ — the import-boundary contract).
+# The LEGACY read path for the head SHA a REVIEW verdict judged: ledgers written
+# before #2769 carry it as a ``REVIEW_CONTEXT head_sha=<hex>`` trailer inside the
+# verdict token itself. The text may have passed through ``normalize_verdict``
+# (uppercased, underscores mapped to spaces), so the pattern matches both the raw
+# and normalized forms, and SHA comparison is case-insensitive. Kept in lockstep
+# with ``tools._sdlc_utils._HEAD_SHA_TRAILER_RE``, which is the single definition
+# every tools/ reader shares; duplicated here because the router must stay
+# import-free of tools/ — the import-boundary contract.
+#
+# Current writes put the SHA in the record's own ``head_sha`` field, reached via
+# ``_latest_review_head_sha`` below.
 _HEAD_SHA_TRAILER_RE = re.compile(
     r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
 )
@@ -933,7 +977,8 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     - key present but EMPTY (the fail-closed lookup-failure sentinel, set
       alongside ``pr_head_sha_lookup_failed``) → **True (stale)** — a lookup
       failure must route toward re-review, never silently pass as fresh
-    - verdict has NO parseable head_sha trailer → **True (stale)** — an
+    - verdict attributes to NO head SHA — neither a ``head_sha`` record field
+      nor a legacy in-token trailer (#2769) → **True (stale)** — an
       unattributable verdict is re-reviewed at the current head, never trusted
       as fresh (re-review records a fresh verdict WITH the trailer, so this
       converges; loop-bound by G4)
@@ -947,10 +992,14 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     head_sha = context.get("pr_head_sha") or ""
     if not head_sha:
         return True
-    trailer = _HEAD_SHA_TRAILER_RE.search(verdict)
-    if not trailer:
+    # #2769: the verdict's head SHA lives in its own `head_sha` record field
+    # now (surfaced as `_meta.latest_review_head_sha`); the in-token trailer is
+    # the legacy fallback inside _latest_review_head_sha. An unattributable
+    # verdict yields "" and stays stale, exactly as before.
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
         return True
-    return trailer.group(1).lower() != head_sha.lower()
+    return recorded_head.lower() != head_sha.lower()
 
 
 def _review_verdict_is_stale(stage_states: dict) -> bool:
@@ -1181,14 +1230,63 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Patch applied after review findings — re-review is required."""
+    """Owns every post-patch state whose REVIEW verdict is no longer trustworthy.
+
+    Two disjuncts, both meaning "a patch landed and the standing verdict does
+    not describe the current code":
+
+    1. ``last_dispatched_skill == /do-patch`` — the patch just ran.
+    2. ``_review_verdict_is_stale(stage_states)`` — the recorded verdict
+       predates the latest ``/do-patch`` dispatch, whatever ran since.
+
+    Disjunct 2 is the #2767(b) widening. Before it, a review → patch → review →
+    patch → review sequence could land on a **stale** verdict with
+    ``last_dispatched_skill == /do-pr-review``, which no row owned: row 7 needs
+    an absent verdict, row 8 steps aside precisely on staleness, rows 8c/8d/8e
+    all need an absent verdict — so the router returned
+    ``Blocked('no matching dispatch rule')``.
+
+    Rows 8 and 8b stay disjoint: row 8 (``_rule_review_has_findings``) returns
+    False whenever ``_review_verdict_is_stale`` is True, so fresh findings still
+    route to ``/do-patch`` at row 8 and only stale ones reach here.
+
+    Disjunct 2 also transfers one state away from the rows BELOW this one. This
+    row precedes 8f/9/10, so a **stale APPROVED** verdict is now re-reviewed
+    rather than advanced to ``/do-docs`` or the merge fast-path. That is
+    deliberate: an approval recorded before the latest patch does not describe
+    the code that patch produced, and advancing on it would merge code no review
+    ever saw. It converges -- the re-review records a verdict newer than the
+    patch dispatch, which row 9 then owns -- and G4 bounds it otherwise. See
+    ``TestStaleApprovedIsReReviewedNotAdvanced``.
+
+    Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
+    2, and one of which — 8c — actually *calls* this predicate):
+
+        ``_review_verdict_is_stale`` returns False whenever ``recorded_at`` is
+        absent, and ``recorded_at`` is absent exactly when no verdict was
+        recorded — ``tools.sdlc_verdict.record_verdict`` refuses to write a
+        record at all for an empty/non-string verdict, so the two fields are
+        written together or not at all. Rows 8c/8d/8e all require the ABSENCE
+        of a recorded verdict, therefore disjunct 2 is identically False on
+        every state they own.
+
+    No defensive step-asides are added on the strength of that proof.
+
+    Loop-bound by G4 (``same_stage_dispatch_count``): a verdict that stays
+    permanently stale escalates to a human rather than spinning on
+    ``/do-pr-review``.
+    """
     if not meta.get("pr_number"):
         return False
     # PATCH completed after REVIEW failed — need to re-review.
     if stage_states.get("PATCH") != STATUS_COMPLETED:
         return False
     last = meta.get("last_dispatched_skill") or ""
-    return last == SKILL_DO_PATCH
+    if last == SKILL_DO_PATCH:
+        return True
+    # #2767(b): the patch may have been followed by other dispatches. A verdict
+    # older than the latest /do-patch is stale no matter what ran since.
+    return _review_verdict_is_stale(stage_states)
 
 
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1408,7 +1506,10 @@ _rule_branch_exists_no_pr.__doc__ = "Branch exists, no PR"
 _rule_tests_failing.__doc__ = "Tests failing"
 _rule_pr_exists_no_review.__doc__ = "PR exists, no review"
 _rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR tech debt)"
-_rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
+_rule_patch_applied_after_review.__doc__ = (
+    "Patch applied after review findings (last dispatch was /do-patch, "
+    "OR the recorded review verdict is stale against the latest /do-patch)"
+)
 _rule_review_in_progress_no_verdict.__doc__ = (
     "Review in_progress, no verdict recorded (stalled) — re-review"
 )
@@ -1670,7 +1771,7 @@ def decide_next_dispatch(
             )
         return Blocked(
             reason="no matching dispatch rule",
-            guard_id=None,
+            guard_id=NO_RULE_GUARD_ID,
         )
 
     return primary

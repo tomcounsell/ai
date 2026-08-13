@@ -248,6 +248,30 @@ On exit (any path), report:
 3. **Artifacts**: issue, plan path, PR number, merge commit
 4. **Anything needing human attention**: unresolved blockers, skipped acknowledgments, follow-ups
 
+## Step 5: Release the run lease
+
+You hold this issue's run lease for as long as this supervision loop lives, and
+nothing reclaims it when you simply stop — there is no terminal transition on a
+HALT. Left held, it makes the *next* run on this issue refuse with a foreign-owner
+block until the lease's ceiling lapses hours later.
+
+So after the Final Report, hand the lease back with the pipeline tool's
+**`session-release`** subcommand, passing this run's issue number and `run_id`
+(see the repo context probe for the exact invocation). It is ownership-checked
+and best-effort: a wrong or already-released `run_id` is a safe no-op, so run it
+whenever in doubt and never let its output change your reported outcome.
+
+Do this on the exits nothing else observes:
+
+- the **3d.4 REVIEW self-check HALT**
+- a **`blocked`** router decision (3a / 3e)
+- the **iteration cap** being reached
+
+The **merged** exit needs no action from you — completing the MERGE stage
+releases the lease in the tool layer, on the marker write itself. Running the
+step there anyway is harmless (it reports no lease held), but it is not what
+makes the merged path correct.
+
 ## Relationship to /sdlc (in this repo)
 
 | | `/sdlc` (in this repo) | `/do-sdlc` |

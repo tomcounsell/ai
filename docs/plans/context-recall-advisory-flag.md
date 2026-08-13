@@ -335,10 +335,13 @@ commented `# email address as chat_id`), so running the Telegram guard on an ema
 if medium == "telegram":
     ok = deliverable_telegram_peer(chat_id)
 else:                       # email
-    ok = bool(chat_id) and "@" in str(chat_id)
+    ok = _email_chat_id_usable(chat_id)   # strict address shape, shell-metacharacter rejection
 ```
 
-Never run the Telegram peer guard on an email `chat_id`, and never run the `"@"` check on a Telegram one.
+Never run the Telegram peer guard on an email `chat_id`, and never run the email guard on a Telegram one.
+(The originally specified bare `"@" in str(chat_id)` check was hardened in PR #2695 review rounds 2-3:
+the email `chat_id` is the attacker-controlled From address, and the emitted command is shell-quoted
+via `shlex.quote` in the shared builder besides — both the guard and the quoting are load-bearing.)
 
 Commands, taken from the verified argparse definitions (`N` = `CONTEXT_RECALL_HISTORY_DEPTH`, see item 10):
 - Telegram (`tools/valor_telegram.py:1316-1353`): `valor-telegram read --chat-id <real id> -n N`
@@ -864,11 +867,13 @@ Standard Tier 1 pool. `delivery-builder` carries `Domain: untrusted-input` frami
 - Define `CONTEXT_RECALL_HISTORY_DEPTH` (env-overridable, default `10`, provisional-tunable comment) and
   use it for both media. No literal depth anywhere.
 - Telegram command `valor-telegram read --chat-id <id> -n <depth>`; email
-  `valor-email read --search "<addr>" -n <depth>`, returning `None` on a guard miss (the
+  `valor-email read --search <addr-shell-quoted> -n <depth>` (the address is passed through
+  `shlex.quote`, not double-quoted by hand — PR #2695 round 2), returning `None` on a guard miss (the
   `valor-email threads` fallback was dropped in PR #2695 review round 1 — fail open with no advisory
   rather than emit a peer-less command).
-- **Branch the chat-id guard on `medium`**: `deliverable_telegram_peer` for telegram,
-  `bool(chat_id) and "@" in str(chat_id)` for email. Never run the Telegram peer guard on an email
+- **Branch the chat-id guard on `medium`**: `deliverable_telegram_peer` for telegram, the strict
+  `_email_chat_id_usable` shape check (hardened past the original `"@"` substring test in PR #2695
+  rounds 2-3) for email. Never run the Telegram peer guard on an email
   `chat_id` — it rejects every one of them (`utils/peer.py:37-44` vs `bridge/email_bridge.py:1512`).
   Return `None` on any guard miss.
 - Outbound verdict via `agent.llm.run_typed` (Haiku, `sdk_timeout=3.0`); no hand-rolled Anthropic
@@ -993,7 +998,7 @@ Standard Tier 1 pool. `delivery-builder` carries `Domain: untrusted-input` frami
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `./scripts/pytest-clean.sh tests/unit/test_context_recall.py tests/unit/test_intake_classifier.py tests/unit/test_message_drafter.py tests/unit/test_promise_advisory.py -q` | exit code 0 |
+| Tests pass | `./scripts/pytest-clean.sh tests/unit/test_context_recall.py tests/unit/test_intake_classifier.py tests/unit/test_message_drafter.py tests/unit/test_promise_advisory.py tests/unit/test_output_handler.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | New module exists | `test -f bridge/context_recall.py` | exit code 0 |

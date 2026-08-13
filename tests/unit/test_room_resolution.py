@@ -10,6 +10,7 @@ prefix and delete every record via the ORM afterward.
 
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,9 @@ from models.room import (
     room_id_for_session,
     telegram_addressee,
 )
+from tests.db_claim import subprocess_env
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -256,6 +260,7 @@ class TestPeerParseSingleHome:
             text=True,
             timeout=30,
             check=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         payload = json.loads(result.stdout.strip().splitlines()[-1])
         assert payload["popoto_loaded"] is False, (

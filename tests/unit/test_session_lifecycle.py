@@ -25,6 +25,7 @@ from models.session_lifecycle import (
     finalize_session,
     transition_status,
 )
+from tests.db_claim import subprocess_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1508,6 +1509,179 @@ class TestTouchIssueLockTargetRepoPinning:
         assert renewed_payload["target_repo"] == "tomcounsell/ai"
 
 
+class TestRenewOnly:
+    """Tests for touch_issue_lock(..., renew_only=True) -- issue #2714 L0.
+
+    A renewer must NEVER mint. The default (``renew_only=False``) path has two
+    independent minting branches (the ``SET NX`` and the follow-up
+    ``raw is None`` "treat as acquired" race window); under ``renew_only``
+    both are skipped and the renewal write goes through a compare-and-set Lua
+    script, so re-minting a lease the supervisor just released is structurally
+    impossible rather than argued down.
+
+    The state assertions run against the real (per-worker test db) Redis so
+    "leaves the key absent" is a claim about Redis, not about a mock.
+    """
+
+    ISSUE = 271400
+    KEY = f"session:issuelock:{ISSUE}"
+
+    def teardown_method(self):
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.delete(self.KEY)
+
+    def _seed(self, payload, ttl=1800):
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.set(self.KEY, json.dumps(payload), ex=ttl)
+
+    def _stored(self):
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(self.KEY)
+        return None if raw is None else json.loads(raw)
+
+    def test_absent_key_is_not_minted(self):
+        """BLOCKER regression (#2714): the heartbeat's extend landing one
+        millisecond after the supervisor released the lease must report
+        not-acquired AND leave the key absent -- never re-mint it."""
+        from models.session_lifecycle import touch_issue_lock
+
+        result = touch_issue_lock(
+            self.ISSUE, "run-a", session_id="sdlc-local-2714", renew_only=True
+        )
+
+        assert result.acquired is False
+        assert result.owner_run_id is None
+        assert result.owner_session_id is None
+        assert self._stored() is None  # the key is still absent
+
+    def test_self_owned_key_renews_and_self_heals(self):
+        """A self-owned lease still renews under renew_only, and still gains
+        target_repo / machine_id / renewed_at on a legacy payload."""
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        self._seed(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2714",
+                "pid": 1,
+                "hostname": "h",
+                "create_time": 1000.0,
+            },
+            ttl=30,
+        )
+
+        with patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"):
+            result = touch_issue_lock(
+                self.ISSUE,
+                "run-a",
+                session_id="sdlc-local-2714",
+                target_repo="tomcounsell/ai",
+                renew_only=True,
+            )
+
+        assert result.acquired is True
+        assert result.owner_run_id == "run-a"
+        assert result.owner_session_id == "sdlc-local-2714"
+        assert result.target_repo == "tomcounsell/ai"
+
+        renewed = self._stored()
+        assert renewed["target_repo"] == "tomcounsell/ai"
+        assert renewed["machine_id"] == "hw-uuid-1"
+        assert renewed["renewed_at"] > 0
+        # Untouched identity fields survive the renewal verbatim.
+        assert renewed["pid"] == 1
+        assert renewed["hostname"] == "h"
+        assert renewed["create_time"] == 1000.0
+        # The CAS re-applies the full lease TTL, not the 30s the seed carried.
+        assert _R.ttl(self.KEY) > 30
+        assert _R.ttl(self.KEY) <= ISSUE_LOCK_TTL_SECONDS
+
+    def test_foreign_key_reports_owner_and_does_not_write(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        self._seed(
+            {
+                "run_id": "successor-run",
+                "session_id": "sdlc-local-2714",
+                "pid": 999,
+                "hostname": "other",
+            }
+        )
+        before = self._stored()
+
+        result = touch_issue_lock(
+            self.ISSUE, "run-a", session_id="sdlc-local-2714", renew_only=True
+        )
+
+        assert result.acquired is False
+        assert result.owner_run_id == "successor-run"
+        assert self._stored() == before  # nothing written
+
+    def test_cas_loses_when_value_changed_between_read_and_write(self):
+        """A release landing inside the read->write window makes the CAS a
+        no-op: report not-acquired, and never recreate the key."""
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        from models.session_lifecycle import touch_issue_lock
+
+        self._seed({"run_id": "run-a", "session_id": "sdlc-local-2714", "pid": 1})
+
+        real_get = _R.get
+
+        def get_then_release(key, *a, **kw):
+            raw = real_get(key, *a, **kw)
+            if key == self.KEY:
+                _R.delete(self.KEY)  # supervisor releases mid-call
+            return raw
+
+        with patch.object(_R, "get", side_effect=get_then_release):
+            result = touch_issue_lock(
+                self.ISSUE, "run-a", session_id="sdlc-local-2714", renew_only=True
+            )
+
+        assert result.acquired is False
+        assert result.owner_run_id is None
+        assert self._stored() is None
+
+    def test_default_still_mints_via_set_nx(self):
+        """renew_only=False (the default) is unchanged for every existing
+        caller, including the SET NX acquire."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = True
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
+
+        assert result.acquired is True
+        assert result.owner_run_id == "run-a"
+        _args, kwargs = mock_redis.set.call_args
+        assert kwargs.get("nx") is True
+        mock_redis.eval.assert_not_called()
+
+    def test_redis_error_fails_closed_for_renewer_open_for_default(self):
+        """A renewer must fail CLOSED: a transient Redis error on the extend
+        must never report ownership of a lease it may not hold. The
+        non-renew_only default keeps #2446's fail-open behavior."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.side_effect = RuntimeError("redis down")
+            mock_redis.set.side_effect = RuntimeError("redis down")
+            renewer = touch_issue_lock(1954, "run-a", renew_only=True)
+            default = touch_issue_lock(1954, "run-a")
+
+        assert renewer.acquired is False
+        assert renewer.owner_run_id is None
+        assert renewer.owner_session_id is None
+        assert default.acquired is True  # #2446 fail-open preserved
+        assert default.owner_run_id == "run-a"
+
+
 class TestReleaseIssueLock:
     """Tests for release_issue_lock() -- the COMPARE-AND-DELETE release
     (issue #2003, cycle-2 CONCERN 2). Never a raw DEL."""
@@ -1600,13 +1774,7 @@ class TestRunIdentityAcrossProcesses:
 
     @staticmethod
     def _subprocess_env():
-        import popoto.redis_db as rdb
-
-        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
-        host = kwargs.get("host") or "localhost"
-        port = kwargs.get("port") or 6379
-        db = kwargs.get("db", 1)
-        env = {**os.environ, "REDIS_URL": f"redis://{host}:{port}/{db}"}
+        env = subprocess_env()
         env.pop("SDLC_HOLDER_TOKEN", None)  # the env seam is GONE -- prove it
         return env
 

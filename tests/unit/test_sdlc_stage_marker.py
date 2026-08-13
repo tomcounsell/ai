@@ -28,6 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -238,6 +240,13 @@ class TestWriteMarker:
         err = capsys.readouterr().err
         assert "STATE_MACHINE_REJECTED" in err
         assert "predecessor not completed" in err
+        # #2740: the taxon and the ValueError text still reach the operator
+        # (both above), but the message no longer claims non-persistence.
+        # write_marker cannot see writes its CALLER already committed --
+        # `finalize` records the verdict one step before calling it -- so this
+        # sentence was false on exactly the path that fires most often.
+        assert "State NOT persisted" not in err
+        assert "stage-query" in err
 
     def test_fresh_plan_in_progress_backfills_and_persists(self):
         """First-write-at-PLAN acceptance (#1916): a fresh ledger (ISSUE=ready)
@@ -1158,6 +1167,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--issue-number" in result.stdout
@@ -1168,22 +1178,18 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         # Missing required --stage and --status
         assert result.returncode != 0
 
     def test_with_issue_number_outputs_json(self):
-        import popoto.redis_db as rdb
-
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
-        # Isolate the subprocess to the per-worker test Redis db -- unit tests
-        # must never touch production Redis.
-        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
-        clean_env["REDIS_URL"] = (
-            f"redis://{kwargs.get('host') or 'localhost'}:"
-            f"{kwargs.get('port') or 6379}/{kwargs.get('db', 1)}"
-        )
+        # subprocess_env() points the child at this pytest process's claimed
+        # test db. The strips keep the child from inheriting a live bridge run
+        # identity, which is what the assertions below turn on.
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [
                 sys.executable,
@@ -1547,3 +1553,85 @@ class TestSkipMarkerWrite:
         assert code == 1
         assert result["reason"] == "STAGE_RAN_NOT_SKIPPABLE"
         assert "STAGE_RAN_NOT_SKIPPABLE" in capsys.readouterr().err
+
+
+class TestMergeCompletedReleasesLease:
+    """The tool-layer release leg (issue #2714 L1, round-1 History CONCERN).
+
+    A skill-body prose step cannot be the only release mechanism -- #1654
+    failed for exactly that reason. The happy path therefore releases from the
+    tool layer, on the MERGE/completed marker write itself, so it fires for
+    ``/do-sdlc``, the ``/sdlc`` router, and worker-driven pipelines alike with
+    zero skill cooperation.
+    """
+
+    @staticmethod
+    def _live_lock():
+        from models.session_lifecycle import IssueLockResult
+
+        return MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="run-m", target_repo="o/r"
+            )
+        )
+
+    def _write(self, states, release_mock, stage="MERGE", status="completed"):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = states
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools._sdlc_utils.revalidate_ledger_lease", return_value=True),
+            patch("tools.sdlc_session_release.release_run", release_mock),
+        ):
+            return write_marker(stage=stage, status=status, issue_number=2714, run_id="run-m")
+
+    def test_successful_merge_completion_releases_the_run(self):
+        release_mock = MagicMock(return_value={"released": True, "reason": "released"})
+
+        result, code = self._write({"MERGE": "in_progress"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_called_once_with(2714, "run-m")
+
+    def test_idempotent_merge_completion_does_not_release(self):
+        """Race 3: the already-completed branch does not own the transition,
+        so releasing there could free a SUCCESSOR run's lease."""
+        release_mock = MagicMock()
+
+        result, code = self._write({"MERGE": "completed"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_not_called()
+
+    def test_non_merge_completion_does_not_release(self):
+        release_mock = MagicMock()
+
+        _, code = self._write({"DOCS": "in_progress"}, release_mock, stage="DOCS")
+
+        assert code == 0
+        release_mock.assert_not_called()
+
+    def test_merge_in_progress_does_not_release(self):
+        release_mock = MagicMock()
+
+        _, code = self._write({"MERGE": "pending"}, release_mock, status="in_progress")
+
+        assert code == 0
+        release_mock.assert_not_called()
+
+    def test_release_failure_never_fails_the_marker_write(self):
+        """Best-effort: a raising release must not turn a good write into an error."""
+        release_mock = MagicMock(side_effect=RuntimeError("redis down"))
+
+        result, code = self._write({"MERGE": "in_progress"}, release_mock)
+
+        assert code == 0
+        assert result == {"stage": "MERGE", "status": "completed"}
+        release_mock.assert_called_once_with(2714, "run-m")

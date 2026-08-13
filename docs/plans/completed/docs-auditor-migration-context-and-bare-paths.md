@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -486,25 +486,25 @@ accommodate.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new `git ls-files` call is the only new failure surface. It must be wrapped and,
+- [x] The new `git ls-files` call is the only new failure surface. It must be wrapped and,
       on any failure, **fail-closed toward permissiveness for bare names only** (empty
       index ⇒ bare names fall back to doc-relative check ⇒ likely absent ⇒ withhold). Test
       asserts the `logger.warning` fires and that dir-prefixed refs are unaffected.
-- [ ] `_apply_fixes_to_file`'s existing `except Exception` on read (`:576`) and write
+- [x] `_apply_fixes_to_file`'s existing `except Exception` on read (`:576`) and write
       (`:635`) are untouched; their existing coverage stands.
-- [ ] No `except Exception: pass` is introduced. Verification row asserts this.
+- [x] No `except Exception: pass` is introduced. Verification row asserts this.
 
 ### Empty/Invalid Input Handling
-- [ ] `_normalize_prose("")`, `_normalize_prose(None)`-guarded, and whitespace-only content
+- [x] `_normalize_prose("")`, `_normalize_prose(None)`-guarded, and whitespace-only content
       must not raise and must produce no fixes.
-- [ ] `_detect_stale_term_fixes("")` returns `[]` — already covered by
+- [x] `_detect_stale_term_fixes("")` returns `[]` — already covered by
       `test_absent_key_emits_no_fix` (`:620`); extend to empty and whitespace-only.
-- [ ] `_absent_new_path_refs` with an empty `candidate` and with `original_refs == set()`
+- [x] `_absent_new_path_refs` with an empty `candidate` and with `original_refs == set()`
       returns `[]`.
-- [ ] A doc that is entirely a fenced code block produces zero stale-term fixes.
+- [x] A doc that is entirely a fenced code block produces zero stale-term fixes.
 
 ### Error State Rendering
-- [ ] A withheld bare-name fix must reach every surface `run_docs_auditor` produces:
+- [x] A withheld bare-name fix must reach every surface `run_docs_auditor` produces:
       `findings`, `summary`, the Telegram message, `WITHHELD_PR_MARKER` in the PR body, and
       the Redis liveness `fixes_withheld`. The existing `TestWithheldBlocksAutoMerge`
       (`:837`) covers this for dir-prefixed paths; extend it with a bare-name case so the
@@ -512,17 +512,17 @@ accommodate.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary::test_migration_context_skips_fix` (`:603`) — **UPDATE**: it asserts only the un-backticked form, which is why #2744 shipped green. Parametrize across backticked, cased, and alias/arrow forms.
-- [ ] `::TestStaleTermDictionary::test_no_migration_context_queues_fix` (`:609`) — **UPDATE**: confirm the widened hatch does not over-exempt; the content must still queue a fix.
-- [ ] `::TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`:613`) — **KEEP**: it pins the channel contract the line-filtering change must not break. Verify it still passes unmodified.
-- [ ] `::TestStaleTermWordBoundary::test_apply_leaves_session_logs_path_untouched` (`:648`) — **UPDATE**: extend to assert `models/session_log.py` is also untouched (path-token suppression), the corruption the existence invariant cannot catch.
-- [ ] `::TestExistenceInvariant` (`:669-800`) — **UPDATE**: every fixture uses `dir/file.py` paths. Add bare-name fixtures alongside; do not replace the existing ones (they pin dir-prefixed behavior as unchanged).
-- [ ] `::TestExistenceInvariant::test_preexisting_absent_path_is_never_revalidated` (`:725`) — **KEEP and extend**: the additive-only property is what makes the widening free (spike-4). Add a bare-name twin.
-- [ ] `::TestWithheldBlocksAutoMerge` (`:837`) — **UPDATE**: add a bare-name withhold case proving propagation to PR body / Telegram / liveness.
-- [ ] `::TestNonMarkdownApplyGuard` (`:489`) — **KEEP**: unaffected; verify still green (the `.md`-only write guard at `:1130` is untouched).
-- [ ] `::TestStaleTermWordBoundary` — **ADD** a `README.md` line-shift fixture: a broken index entry deleted via the `new == ""` sentinel on an earlier line plus a stale term with adjacent deletion prose on a later line. Proves apply-time suppression survives the literal loop's line deletions. Assert on resulting content — detection-time indices fail this silently, not loudly.
-- [ ] `::TestWithheldRateNonRegression` — **NEW**: the `withheld-rate-non-regression` row. See "How `withheld-rate-non-regression` must be implemented" under Verification; it drives `_apply_fixes_to_file` directly inside a disposable detached `git worktree` (never the live checkout), self-baselining narrow-vs-widened `_PATH_REF_RE` in one run. `audit(apply_mode="dry-run")` cannot be used.
-- [ ] No `xfail`/`xpass` markers exist anywhere in `tests/unit/test_docs_auditor_substrate.py` — verified by grep at plan time. **No xfail conversions required.**
+- [x] `tests/unit/test_docs_auditor_substrate.py::TestStaleTermDictionary::test_migration_context_skips_fix` (`:603`) — **UPDATE**: it asserts only the un-backticked form, which is why #2744 shipped green. Parametrize across backticked, cased, and alias/arrow forms.
+- [x] `::TestStaleTermDictionary::test_no_migration_context_queues_fix` (`:609`) — **UPDATE**: confirm the widened hatch does not over-exempt; the content must still queue a fix.
+- [x] `::TestStaleTermDictionary::test_fixes_travel_on_the_regex_channel` (`:613`) — **KEEP**: it pins the channel contract the line-filtering change must not break. Verify it still passes unmodified.
+- [x] `::TestStaleTermWordBoundary::test_apply_leaves_session_logs_path_untouched` (`:648`) — **UPDATE**: extend to assert `models/session_log.py` is also untouched (path-token suppression), the corruption the existence invariant cannot catch.
+- [x] `::TestExistenceInvariant` (`:669-800`) — **UPDATE**: every fixture uses `dir/file.py` paths. Add bare-name fixtures alongside; do not replace the existing ones (they pin dir-prefixed behavior as unchanged).
+- [x] `::TestExistenceInvariant::test_preexisting_absent_path_is_never_revalidated` (`:725`) — **KEEP and extend**: the additive-only property is what makes the widening free (spike-4). Add a bare-name twin.
+- [x] `::TestWithheldBlocksAutoMerge` (`:837`) — **UPDATE**: add a bare-name withhold case proving propagation to PR body / Telegram / liveness.
+- [x] `::TestNonMarkdownApplyGuard` (`:489`) — **KEEP**: unaffected; verify still green (the `.md`-only write guard at `:1130` is untouched).
+- [x] `::TestStaleTermWordBoundary` — **ADD** a `README.md` line-shift fixture: a broken index entry deleted via the `new == ""` sentinel on an earlier line plus a stale term with adjacent deletion prose on a later line. Proves apply-time suppression survives the literal loop's line deletions. Assert on resulting content — detection-time indices fail this silently, not loudly.
+- [x] `::TestWithheldRateNonRegression` — **NEW**: the `withheld-rate-non-regression` row. See "How `withheld-rate-non-regression` must be implemented" under Verification; it drives `_apply_fixes_to_file` directly inside a disposable detached `git worktree` (never the live checkout), self-baselining narrow-vs-widened `_PATH_REF_RE` in one run. `audit(apply_mode="dry-run")` cannot be used.
+- [x] No `xfail`/`xpass` markers exist anywhere in `tests/unit/test_docs_auditor_substrate.py` — verified by grep at plan time. **No xfail conversions required.**
 
 ## Rabbit Holes
 
@@ -632,51 +632,51 @@ keep their exact signatures and their `_ok_result` return contract
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/docs-auditor.md` — document the four-gate rewrite path
+- [x] Update `docs/features/docs-auditor.md` — document the four-gate rewrite path
       (migration-context hatch → context suppression → path-token suppression → existence
       invariant), the **document-scoped** hatch ruling and why line-scoping was rejected,
       and the bare-name existence semantics including the ambiguity ruling.
-- [ ] Record in the same doc the recorded reason `:454` and `:761` were left unchanged, so
+- [x] Record in the same doc the recorded reason `:454` and `:761` were left unchanged, so
       the decision survives the next reader who notices the asymmetry.
-- [ ] `docs/features/README.md` already indexes `docs-auditor.md` — verify the one-line
+- [x] `docs/features/README.md` already indexes `docs-auditor.md` — verify the one-line
       description still matches; update only if it does.
 
 ### Inline Documentation
-- [ ] Rewrite the `_detect_stale_term_fixes` docstring (`:497-513`). Today it accurately
+- [x] Rewrite the `_detect_stale_term_fixes` docstring (`:497-513`). Today it accurately
       says word-anchoring "stops short of never rewrites a path" — after path-token
       suppression that sentence is wrong and must describe the new guarantee.
-- [ ] Docstring for `_absent_new_path_refs` covering the bare-name resolution order and the
+- [x] Docstring for `_absent_new_path_refs` covering the bare-name resolution order and the
       `≥1 match ⇒ pass` ambiguity ruling.
-- [ ] Comment beside `:454` and `:761` recording why they are deliberately narrower than
+- [x] Comment beside `:454` and `:761` recording why they are deliberately narrower than
       `_PATH_REF_RE` (#2759 acceptance criterion 3).
 
 ## Success Criteria
 
-- [ ] Running `_detect_stale_term_fixes` + apply over `docs/features/popoto-redis-expansion.md`
+- [x] Running `_detect_stale_term_fixes` + apply over `docs/features/popoto-redis-expansion.md`
       and `docs/guides/agent-session-migration-audit.md` produces **zero byte changes**.
-- [ ] The same over `docs/guides/summarizer-output-audit.md` produces at most **one**
+- [x] The same over `docs/guides/summarizer-output-audit.md` produces at most **one**
       changed occurrence (the accepted `:68` residual), down from five.
-- [ ] `_PATH_REF_RE` matches `README.md` and `agent_session.py` as well as
+- [x] `_PATH_REF_RE` matches `README.md` and `agent_session.py` as well as
       `agent/session_logs.py` and `docs/features/x.md`.
-- [ ] A proposed substitution to a nonexistent **bare** filename is withheld, with a test
+- [x] A proposed substitution to a nonexistent **bare** filename is withheld, with a test
       (#2759 AC1).
-- [ ] The ambiguous bare-name case has defined, tested behavior: passes, DEBUG-logged
+- [x] The ambiguous bare-name case has defined, tested behavior: passes, DEBUG-logged
       (#2759 AC2).
-- [ ] All three patterns audited; `:454` and `:761` left unchanged **with the reason
+- [x] All three patterns audited; `:454` and `:761` left unchanged **with the reason
       recorded in a code comment** (#2759 AC3).
-- [ ] Withheld-fix count over `docs/features/*.md`, measured via
+- [x] Withheld-fix count over `docs/features/*.md`, measured via
       `TestWithheldRateNonRegression`, is **not greater** after the change than before
       (#2759 AC4). See "How `withheld-rate-non-regression` must be implemented" under
       Verification — `apply_mode="dry-run"` **cannot** be used for this measurement.
-- [ ] Every behavioral fix has a test demonstrated **red against `main`** before the fix and
+- [x] Every behavioral fix has a test demonstrated **red against `main`** before the fix and
       green after; the red output is pasted into the PR description as the paper trail.
-- [ ] The diff touches **only** `reflections/docs_auditor.py`,
+- [x] The diff touches **only** `reflections/docs_auditor.py`,
       `tests/unit/test_docs_auditor_substrate.py`, and `docs/**` (the last covers Task 6's
       `docs/features/docs-auditor.md` update). The `File fence honored` Verification row's
       grep allowlist is the single source of truth for this criterion; do not narrow the
       grep to exclude `docs/`, which would break Task 6.
-- [ ] Tests pass (`/do-test`, with `POPOTO_TEST_DB=9`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`, with `POPOTO_TEST_DB=9`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -844,6 +844,22 @@ regardless of the change's real effect:
    wrong. `_apply_fixes_to_file` is gated on `apply_mode == "apply"` at `:1130`, so in
    dry-run it never runs and `withheld` stays empty. Verified against source during this
    revision.
+3. **Filtering the fix set through `_detect_stale_term_fixes`** — discovered at build time,
+   recorded here as a plan/code reconciliation. After this lane's #2744 hatch fix, the
+   hatch exempts *every* doc in the live corpus that mentions a `STALE_TERMS` key, so the
+   detector proposes nothing over `docs/features/*.md` and the measurement collapses to
+   `0 == 0` with `_absent_new_path_refs` never invoked. The #2744 fix would silently
+   hollow out #2759's proof. **The shipped test therefore builds its fix set directly from
+   `STALE_TERMS`**, deliberately bypassing the hatch, so real corpus text keeps flowing
+   through the guard AC4 is actually about.
+
+**Non-vacuity must be asserted, not assumed.** All three failure modes above return a
+passing-looking zero, so the test asserts positively that it did real work before it
+asserts the property: the widened arm must make strictly more refs visible than the narrow
+arm (otherwise `after <= before` is one pattern measured twice), and
+`_absent_new_path_refs` must have been invoked at least once in each arm (otherwise the
+measurement is vacuous rather than clean). Only then does it assert
+`after["withheld"] <= before["withheld"]`.
 
 **The mechanism that works.** Drive `_apply_fixes_to_file` directly. It needs a real git
 checkout — the existence oracle and the `git ls-files` basename index both do, and a

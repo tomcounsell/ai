@@ -209,9 +209,23 @@ session-ensure`, owns the per-issue lock for the WHOLE run:
   still renews it at stage boundaries.
 - **Explicit release.** `finalize_session` (`models/session_lifecycle.py`)
   releases the lease (`release_issue_lock`, compare-and-delete) and clears
-  the signal on EVERY terminal transition — completion and graceful failure —
-  so the happy path frees immediately and the TTL is only the crash backstop
-  (the existing `orphaned_lock` self-heal covers a hard crash).
+  the signal on EVERY terminal transition it runs on. A `/do-sdlc`
+  supervisor exit never calls it, though — its HALT/blocked/cap exits have
+  no terminal transition at all — so two further paths release explicitly
+  (issue #2714): the `MERGE`/`completed` stage-marker write releases in the
+  tool layer itself (`tools/sdlc_stage_marker.py`, path-agnostic — fires for
+  `/do-sdlc`, the `/sdlc` router, and worker-driven pipelines alike), and
+  `/do-sdlc`'s own Step 5 calls `sdlc-tool session-release` on the REVIEW
+  self-check HALT, a `blocked` router decision, and the iteration cap — the
+  exits neither of the other two paths observes. The detached local lease
+  heartbeat (`tools/sdlc_lease_heartbeat.py`) also releases on its own,
+  independent of all three, once it confirms its supervisor is dead. The
+  `orphaned_lock` self-heal is not a crash backstop for any of this: its
+  freshness is re-stamped by the heartbeat's own renewal ticks, so a lease
+  the heartbeat is still renewing never reads as orphaned regardless of
+  whether the supervisor behind it is still alive. See
+  [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md#heartbeat-exit-conditions-and-release-paths-issue-2714)
+  for the full release-path catalogue.
 - **Single-owner MERGE.** `tools/merge_predicate.py` gains check group (d):
   when `--run-id` is supplied (the `/do-merge` skill always passes it), the
   merge actor's `run_id` must hold the current issue lease. A fork that never
@@ -233,10 +247,10 @@ session-ensure`, owns the per-issue lock for the WHOLE run:
   construction. The refused state is exactly what row 8e recovers.
 - **Head_sha staleness (row 8f + G6):** `sdlc-tool next-skill` context
   assembly live-fetches the PR head (`_fetch_pr_head_sha`,
-  `context["pr_head_sha"]`); the router compares it to the verdict's
-  `REVIEW_CONTEXT head_sha=` trailer — the same freshness definition
-  `tools/merge_predicate` enforces. A mismatch, a missing trailer, or a
-  failed lookup (fail-closed: `pr_head_sha=""` +
+  `context["pr_head_sha"]`); the router compares it to the head SHA the
+  verdict attributes to, surfaced as `_meta.latest_review_head_sha` — the same
+  freshness definition `tools/merge_predicate` enforces. A mismatch, a verdict
+  attributable to no head SHA, or a failed lookup (fail-closed: `pr_head_sha=""` +
   `pr_head_sha_lookup_failed=true`, never omitted) routes to `/do-pr-review`
   at the new head instead of merging.
 

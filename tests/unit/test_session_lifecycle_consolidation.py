@@ -10,7 +10,6 @@ Covers:
 - Parent finalization via _finalize_parent_sync()
 """
 
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +24,7 @@ from models.session_lifecycle import (
     transition_status,
     update_session,
 )
+from tests.db_claim import subprocess_env
 
 
 @pytest.fixture
@@ -469,7 +469,7 @@ class TestImportSafety:
             capture_output=True,
             text=True,
             cwd=project_root,
-            env={**os.environ, "PYTHONPATH": project_root},
+            env=subprocess_env(project_root=project_root),
         )
         assert result.returncode == 0, (
             f"models.session_lifecycle failed to import standalone: {result.stderr}"

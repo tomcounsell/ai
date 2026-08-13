@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _LANE_IDENTITY_CLASS = "TestLaneSlugMintedAtLaneStart"
@@ -255,6 +257,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--issue-number" in result.stdout
@@ -266,6 +269,7 @@ class TestCLI:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode != 0
 
@@ -1554,7 +1558,6 @@ class TestKillOrphans:
         assert result["orphans"] == []
 
     def test_cli_dry_run_exits_zero_with_valid_json(self):
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
             [
                 sys.executable,
@@ -1566,7 +1569,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
-            env=env,
+            env=subprocess_env(project_root=REPO_ROOT, PYTHONDONTWRITEBYTECODE="1"),
         )
         assert result.returncode == 0
         # stdout must be parseable JSON
@@ -1587,6 +1590,7 @@ class TestKillOrphans:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         # argparse .error() exits 2
         assert result.returncode != 0
@@ -2813,3 +2817,67 @@ class TestOwnedRunIdsSelfRecognition:
 
         assert result["blocked"] is True
         assert result["reason"] == "SUPERVISED_RUN_ACTIVE"
+
+
+class TestLeaseHeartbeatSpawnIdentity:
+    """Issue #2714 L2: the spawner hands the heartbeat its supervisor identity.
+
+    The heartbeat is detached (``start_new_session=True``) and reparented to
+    pid 1 within seconds, so it can only ever watch an EXPLICITLY RECORDED
+    supervisor ``(pid, create_time)`` -- spike-2 proved the parent-pid shortcut
+    is unsound because it reads a HEALTHY heartbeat as orphaned.
+    """
+
+    def _spawn(self, monkeypatch, detailed):
+        from tools import sdlc_session_ensure as se
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("VALOR_WORKER_MODE", raising=False)
+        with (
+            patch.object(si, "resolve_supervisor_identity_detailed", detailed),
+            patch("subprocess.Popen") as popen,
+        ):
+            se._maybe_launch_lease_heartbeat(2714, "run-abc", "sdlc-local-2714")
+        return popen
+
+    def test_argv_carries_identity_when_both_halves_resolve(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        popen = self._spawn(monkeypatch, MagicMock(return_value=(si.SOURCE_ENV, 32886, 111.5)))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" in argv
+        assert argv[argv.index("--supervisor-pid") + 1] == "32886"
+        assert argv[argv.index("--supervisor-create-time") + 1] == "111.5"
+        assert argv[argv.index("--supervisor-source") + 1] == si.SOURCE_ENV
+
+    def test_argv_omits_identity_when_unresolved(self, monkeypatch):
+        from tools import sdlc_supervisor_identity as si
+
+        popen = self._spawn(monkeypatch, MagicMock(return_value=(si.SOURCE_UNRESOLVED, None, None)))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" not in argv
+        assert "--supervisor-create-time" not in argv
+
+    def test_resolver_raising_still_spawns_the_heartbeat(self, monkeypatch):
+        """The renewer is the load-bearing part; identity is an enhancement."""
+        popen = self._spawn(monkeypatch, MagicMock(side_effect=RuntimeError("psutil exploded")))
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert "--supervisor-pid" not in argv
+        assert "--issue-number" in argv
+
+    def test_pytest_guard_still_blocks_every_spawn(self, monkeypatch):
+        """The guard at sdlc_session_ensure.py:164 must stay intact -- a real
+        detached process must never outlive the test suite."""
+        from tools import sdlc_session_ensure as se
+
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_x (call)")
+        with patch("subprocess.Popen") as popen:
+            se._maybe_launch_lease_heartbeat(2714, "run-abc", "sdlc-local-2714")
+        popen.assert_not_called()

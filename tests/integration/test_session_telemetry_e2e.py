@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent.session_telemetry import _get_telemetry_dir
+from tests.db_claim import subprocess_env
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +24,7 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=str(WORKTREE),
+        env=subprocess_env(project_root=str(WORKTREE)),
     )
 
 

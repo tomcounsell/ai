@@ -21,13 +21,15 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).parent.parent.parent
 PYTHON = sys.executable
 
 
 def run_tool_subprocess(code: str, env_override: dict | None = None) -> subprocess.CompletedProcess:
     """Run a python -c command the same way the agent does in /do-docs Agent C."""
-    env = os.environ.copy()
+    env = subprocess_env(project_root=str(REPO_ROOT))
     if env_override:
         env.update(env_override)
     return subprocess.run(

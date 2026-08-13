@@ -16,9 +16,24 @@ The supervisor never decides dispatch itself — `sdlc-tool next-skill` (→ `ag
 
 The `sdlc-local-{N}` anchor created by `session-ensure` in step 1 is a bookkeeping record, not a job for a worker to run: it is created with `is_ledger=True`, and every worker recovery/pickup guard skips past it rather than requeuing or executing it. This keeps a live standalone `python -m worker` process from mistaking the anchor for orphaned work and driving the same issue a second time in parallel with this local supervisor. See [Eng Session Architecture](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
 
-### Lease Heartbeat (issue #2446/#2451)
+### Lease Heartbeat (issue #2446/#2451/#2714)
 
-Unlike the worker, which keeps its issue lock alive via the in-process 60s `_tick_issue_lock_renewal` tick, this supervisor is a per-turn `claude -p` subprocess blocked inside a synchronous stage call -- it has no equivalent in-process renewer. `session-ensure` closes that gap on a fresh local mint by launching `tools/sdlc_lease_heartbeat.py` as a **detached** subprocess: a peek-first, renew-only loop that extends the lease every `ISSUE_LOCK_TTL_SECONDS // 3` and self-terminates once the lease is no longer owned by its `run_id` or after a bounded max lifetime. The wiring lives entirely in `tools/sdlc_session_ensure.py` -- no edit to this skill body was required. If the lease still lapses (e.g. a Redis hiccup outlasting the heartbeat), the `AgentSession.owned_run_ids` accumulated set lets a stage fork carrying the prior `run_id` be recognized as self and inherit the re-minted identity instead of aborting. See [SDLC Run Self-Recognition](sdlc-run-self-recognition.md) for the full mechanism.
+Unlike the worker, which keeps its issue lock alive via the in-process 60s `_tick_issue_lock_renewal` tick, this supervisor is a per-turn `claude -p` subprocess blocked inside a synchronous stage call -- it has no equivalent in-process renewer. `session-ensure` closes that gap on a fresh local mint by launching `tools/sdlc_lease_heartbeat.py` as a **detached** subprocess: a peek-first loop that extends the lease every `ISSUE_LOCK_TTL_SECONDS // 3` through a `renew_only=True` compare-and-set write (`touch_issue_lock`'s two minting branches are structurally skipped, so this renewer can never mint a lease nobody holds) and exits once the lease is no longer owned by its `run_id`.
+
+The heartbeat's lifetime is anchored to evidence about its supervisor, not a fixed clock. `session-ensure` resolves the supervising `claude` process's identity -- `CLAUDE_PID` env var, then a `psutil` ancestry walk, then unresolved -- at mint time (the only moment the detached child is still inside that process tree) and hands `(pid, create_time)` to the heartbeat on its argv. The heartbeat polls that identity every `SDLC_SUPERVISOR_CHECK_INTERVAL_SECONDS` (default 60s), decoupled from the renew cadence, and on two consecutive positively-established death observations (`SDLC_SUPERVISOR_DEATH_CONFIRMATIONS`) it releases the lease and the supervised-run signal and exits -- a killed supervisor's lease is gone in roughly two minutes rather than waiting on a multi-hour ceiling. Every decision (start, each exit) is logged at INFO to `logs/sdlc_lease_heartbeat.log`.
+
+When the supervisor resolves, the unchanged 4h `MAX_LIFETIME_SECONDS` backstop still applies -- the supervisor watch is the real death detector, so a live long-running BUILD stage is never cut off by the ceiling. When no supervisor identity can be resolved, a tighter 90-minute `UNSUPERVISED_MAX_LIFETIME_SECONDS` ceiling applies instead, and that exit stops renewing **without releasing** -- an unresolvable supervisor is not proof of death, so the lease is left to lapse on its own 1800s TTL (total exposure ≤2h on that path only).
+
+If the lease still lapses (e.g. a Redis hiccup outlasting the heartbeat), the `AgentSession.owned_run_ids` accumulated set lets a stage fork carrying the prior `run_id` be recognized as self and inherit the re-minted identity instead of aborting. See [SDLC Run Self-Recognition](sdlc-run-self-recognition.md) for the full mechanism.
+
+### Lease release on exit (issue #2714)
+
+Nothing reclaims the lease when the supervisor loop simply stops -- there is no terminal transition on a HALT. Two release paths close that:
+
+- **Tool-layer, path-agnostic.** A successful, non-idempotent `MERGE`/`completed` stage-marker write releases the lease and clears the supervised-run signal in `tools/sdlc_stage_marker.py` itself, so it fires for `/do-sdlc`, the `/sdlc` router, and worker-driven pipelines alike with zero skill cooperation.
+- **`/do-sdlc` Step 5.** On the exits the tool layer cannot observe -- the REVIEW self-check HALT, a `blocked` router decision, or the iteration cap -- Step 5 invokes `sdlc-tool session-release --issue-number {n} --run-id {run_id}` after the Final Report. It is ownership-checked and best-effort: a wrong or already-released `run_id` is a safe no-op. See `docs/sdlc/do-sdlc.md` for the concrete invocation and reason-code table.
+
+See [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md) for the full renewer/release call-site catalogue.
 
 ## Refusal discrimination (issue #2452)
 

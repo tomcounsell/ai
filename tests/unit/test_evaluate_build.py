@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.db_claim import subprocess_env
+
 # Add scripts to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
@@ -138,6 +140,7 @@ class TestExitCodes:
             capture_output=True,
             text=True,
             cwd=cwd or str(Path(__file__).parent.parent.parent),
+            env=subprocess_env(project_root=str(Path(__file__).parent.parent.parent)),
         )
         return result
 
@@ -152,12 +155,7 @@ class TestExitCodes:
         plan_file = tmp_path / "no_ac_plan.md"
         plan_file.write_text(PLAN_WITHOUT_AC)
 
-        result = subprocess.run(
-            [sys.executable, "scripts/evaluate_build.py", str(plan_file)],
-            capture_output=True,
-            text=True,
-            cwd=str(Path(__file__).parent.parent.parent),
-        )
+        result = self._run_script([str(plan_file)])
         assert result.returncode == 3, (
             f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
         )
@@ -168,12 +166,7 @@ class TestExitCodes:
         plan_file = tmp_path / "empty_ac_plan.md"
         plan_file.write_text(PLAN_WITH_EMPTY_AC)
 
-        result = subprocess.run(
-            [sys.executable, "scripts/evaluate_build.py", str(plan_file)],
-            capture_output=True,
-            text=True,
-            cwd=str(Path(__file__).parent.parent.parent),
-        )
+        result = self._run_script([str(plan_file)])
         assert result.returncode == 3, (
             f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
         )
