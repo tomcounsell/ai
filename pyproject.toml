@@ -95,6 +95,7 @@ valor-deck-video = "tools.deck_video.cli:main"
 valor-computer = "tools.computer.cli:main"
 valor = "tools.valor_cli:main"
 valor-cross-vendor-judge = "tools.cross_vendor_judge:main"
+valor-session = "tools.valor_session:main"
 valor-session-archive = "tools.session_archive_cli:main"
 valor-venv-health = "tools.venv_health:main"
 
