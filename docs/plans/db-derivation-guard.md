@@ -458,7 +458,7 @@ is worse than no check. The commands were always right; nothing could read them.
 | No stale exemption | `python -c "from tests.db_derivation_guard import *; _,s=apply_dispositions(scan_tree()); print(len(s))"` | output is `0` |
 | Disposition tables satisfy the invariant | `python -c "from tests.db_derivation_guard import check_dispositions; print(check_dispositions())"` | output is `[]` |
 | Guard is non-vacuous: it sees real sites | `python -c "from tests.db_derivation_guard import scan_tree; print(len(scan_tree().candidates))"` | output is `26` (17 `db=`, 9 `from_url`) |
-| The `ast.Attribute` branch is load-bearing | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -k attribute_qualified -q` | exit code 0; prints `{'Attribute': 17}` |
+| The `ast.Attribute` branch is load-bearing | `./scripts/pytest-clean.sh tests/unit/test_db_derivation_guard.py -k attribute_qualified -q` | exit code 0, driven by the real `by_kind.get('Attribute', 0) >= 15` assertion (the `{'Attribute': 17}` print itself only reaches the terminal under `-n0`; `-n auto`'s xdist workers swallow stdout even under `capsys.disabled()`) |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Anti-criterion: the four #2628-owned paths are untouched | `git diff --name-only origin/main...HEAD \| grep -c -e 'tests/conftest.py' -e 'tests/db_claim.py' -e 'tests/integration/test_notify_isolation.py' -e 'docs/features/test-db-ownership.md'` | printed number is `0` (`grep -c` exits 1 on zero matches; judge the number, not the exit status) |

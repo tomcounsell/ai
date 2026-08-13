@@ -345,8 +345,11 @@ def _splat_candidate(
 
     - **a dict literal with a ``"db"`` key** -- callee-agnostic, like the rest
       of route 1. The value is visible, so it is judged exactly as a written-out
-      ``db=`` would be. A dict literal with no ``db`` key is provably safe and
-      yields no candidate.
+      ``db=`` would be. A dict literal with no ``"db"`` key AND no nested ``**``
+      unpack is provably safe and yields no candidate. A dict literal that DOES
+      contain a nested unpack (``**{**base_kw, "host": "x"}``) cannot be proven
+      safe that way -- the unpacked entries are invisible to a static scan -- and
+      falls through to the opaque-leg treatment below instead.
     - **an opaque ``**name``** -- undecidable, so a violation, but *only* for a
       callee that looks like a Redis construction.
 
@@ -367,7 +370,16 @@ def _splat_candidate(
     callee-agnostic.
     """
     if isinstance(value, ast.Dict):
+        has_opaque_entry = False
         for key, val in zip(value.keys, value.values, strict=False):
+            if key is None:
+                # A nested ** unpack inside the dict literal, e.g.
+                # **{**base_kw, "host": "x"}. Its entries are invisible to a
+                # static scan, so this dict cannot be proven safe even if no
+                # OTHER key here is literally "db" -- fall through to the
+                # opaque-leg treatment below instead of returning None.
+                has_opaque_entry = True
+                continue
             if isinstance(key, ast.Constant) and key.value == "db":
                 return Candidate(
                     path=rel_path,
@@ -382,7 +394,8 @@ def _splat_candidate(
                     ),
                     pool_db=None if _is_claim_call(val) else _first_pool_db(_int_literals(val)),
                 )
-        return None
+        if not has_opaque_entry:
+            return None
 
     if callee not in REDIS_CONSTRUCTORS:
         return None

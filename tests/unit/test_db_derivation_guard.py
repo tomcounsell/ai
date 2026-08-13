@@ -394,8 +394,24 @@ class TestSplatHandling:
         assert result.violations == []
         assert len(result.candidates) == 1, "the site must still be SEEN, just accepted"
 
-    def test_a_dict_literal_splat_without_a_db_key_is_provably_safe(self):
+    def test_a_dict_literal_splat_without_a_db_key_or_nested_unpack_is_provably_safe(self):
         result = scan_source('import redis\ndef t():\n    redis.Redis(**{"host": "x"})\n', "t.py")
+        assert result.candidates == []
+
+    def test_a_dict_literal_splat_with_a_nested_unpack_falls_through_to_opaque(self):
+        """A nested ** unpack inside the dict is invisible to a static scan, so
+        the dict cannot be proven safe even absent a literal "db" key."""
+        result = scan_source(
+            'import redis\ndef t(base_kw):\n    redis.Redis(**{**base_kw, "host": "x"})\n', "t.py"
+        )
+        assert len(result.violations) == 1
+        assert "cannot see" in result.violations[0].detail
+
+    def test_a_dict_literal_splat_with_a_nested_unpack_into_an_unrelated_helper_is_ignored(self):
+        """The callee scoping still applies on the fall-through path."""
+        result = scan_source(
+            'def t(base_kw):\n    make_session(**{**base_kw, "host": "x"})\n', "t.py"
+        )
         assert result.candidates == []
 
     def test_the_dict_literal_leg_ignores_the_callee(self):

@@ -39,14 +39,28 @@ Everything else is a violation.
 
 ## The polarity is inverted, deliberately
 
-The guard does **not** enumerate which functions it inspects. It flags every `db=` keyword argument
-passed to *any* call anywhere under `tests/`, plus every `from_url(...)` argument, and then requires
-the value to match one of the shapes above.
+The guard is callee-agnostic almost everywhere, but not unconditionally, and the one exception is
+worth naming precisely. Route 1's `db=` keyword matching, and the dict-literal leg of a `**` splat
+(`redis.Redis(**{"db": 15})`), are both callee-agnostic: the value is visible in the AST, so it is
+judged on its own terms regardless of what it is being passed to. The opaque `**name` splat
+(`redis.Redis(**kw)`) is the one place callee matters, because the value is *not* visible — there is
+nothing else to judge it by.
 
 Enumerating accepted *callee* shapes is what failed three times: everything unenumerated passes
-silently, and the next call site is always written in a shape nobody enumerated. Ignoring the callee
-name costs nothing today (every `db=` keyword in `tests/` is a Redis construction) and means a
-constructor name nobody has thought of yet is still checked.
+silently, and the next call site is always written in a shape nobody enumerated. That is still the
+guard's thesis for every route where the value is visible, and it holds without exception there.
+
+**Why the opaque leg is scoped to `REDIS_CONSTRUCTORS`.** An unrestricted, callee-agnostic version of
+the opaque-splat leg was tried first, not assumed safe: flagging every opaque `**` splat regardless of
+callee produced 183 violations across 100+ unrelated files, because `**kwargs` forwarding is the
+ordinary way test helpers are written in this tree. `tests/` has 191 `**` splat call sites total and
+zero of them are Redis-ish. A guard that fires on every helper in the repo does not get fixed, it gets
+deleted, and then the real hole is open again with no guard at all — so the opaque leg alone is scoped
+to `REDIS_CONSTRUCTORS` (`Redis`, `StrictRedis`, `from_url`), and the cost is recorded rather than
+hidden. This matters beyond the code comment: a maintainer reading only this doc, without the module's
+own docstring, could see `REDIS_CONSTRUCTORS` as a violation of the guard's stated thesis and "restore"
+name-agnostic matching on that leg — which would re-trigger the 183-violation flood and get the guard
+deleted rather than fixed.
 
 The same inversion dissolves the `from_url` problem. The guard does not need to understand every URL
 expression, only to refuse every one it cannot prove safe.
@@ -115,6 +129,7 @@ need an independently claimed one — hand-picking a pool slot is the defect thi
 
 A guard that measures nothing looks exactly like a guard that passes. The test file asserts the
 candidate count is non-zero, asserts that Redis constructions in this tree are attribute-qualified (so
-a `node.func.id` matcher would be vacuous), and plants nine offending sources in `tmp_path` — one per
-shape — asserting each produces a violation naming the file and line. Planted sources are parsed,
+a `node.func.id` matcher would be vacuous), and plants one offending source per shape it claims to
+catch (`PLANTED_OFFENDERS` in `tests/unit/test_db_derivation_guard.py`, currently eleven) in
+`tmp_path`, asserting each produces a violation naming the file and line. Planted sources are parsed,
 never executed, and no test here claims a pool database or touches db 0.
