@@ -21,8 +21,12 @@ If the user provides args, parse them as `<days> [categories]`. Otherwise use de
 Run these git commands in parallel from the repo root to collect commit history:
 
 ```bash
-# Verify you're on the correct branch
-git pull && git branch --show-current
+# Refresh from the remote, then verify you're on the correct branch.
+# Fetch + ff-merge the upstream ref rather than `git pull`: `.git/FETCH_HEAD`
+# is shared by every worktree of a repo, so in a multi-worktree checkout a
+# concurrent fetch can retarget a bare pull's merge. The merge is allowed to
+# fail (no upstream, or diverged) — this is a read-only review either way.
+git fetch && git merge --ff-only @{upstream} 2>/dev/null; git branch --show-current
 
 # Get all commits
 git log --since="<DAYS> days ago" --oneline --no-merges

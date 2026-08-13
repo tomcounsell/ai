@@ -186,7 +186,7 @@
            session; only render the strip once there's something to show. #}
         {% if pipeline.total_cost_usd or pipeline.total_input_tokens or pipeline.total_output_tokens or pipeline.total_cache_read_tokens %}
         <div class="token-strip mb-4">
-            {% if pipeline.total_cost_usd %}<span class="token-chip token-chip-cost" title="Total cost (USD)">${{ "%.4f"|format(pipeline.total_cost_usd) }}</span>{% endif %}
+            {% if pipeline.total_cost_usd %}<span class="token-chip token-chip-cost" title="Total cost (USD)">{{ pipeline.total_cost_usd | usd }}</span>{% endif %}
             {% if pipeline.total_input_tokens %}<span class="token-chip" title="Input tokens">in {{ "{:,}".format(pipeline.total_input_tokens) }}</span>{% endif %}
             {% if pipeline.total_output_tokens %}<span class="token-chip" title="Output tokens">out {{ "{:,}".format(pipeline.total_output_tokens) }}</span>{% endif %}
             {% if pipeline.total_cache_read_tokens %}<span class="token-chip" title="Cache-read tokens">cache {{ "{:,}".format(pipeline.total_cache_read_tokens) }}</span>{% endif %}

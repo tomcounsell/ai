@@ -8,26 +8,33 @@
     <td>
         <span class="child-connector"></span>
         <span class="text-muted mono" style="font-size: 11px;">{{ s.initiator or 'run' }}</span>
+        {# Persona sits on a second line here rather than in its own column: it
+           only ever has a value on run rows, so a column of it read as empty.
+           Persona vocabulary tracks _resolve_persona_display(): "Engineer"/
+           "Teammate" are the only emitted values; legacy/raw fall through to
+           purple. #}
+        {% if s.session_type or (s.classification_type and s.classification_type != 'sdlc') %}
+        {# 18px == .child-connector's 12px width + its 6px margin, so this line
+           starts under the initiator text rather than under the tree connector. #}
+        <div class="job-ref mono" style="padding-left: 18px;">
+            {% if s.session_type %}
+            <span class="badge badge-{{ 'blue' if s.session_type == 'Engineer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ 'eng' if s.session_type == 'Engineer' else ('teammate' if s.session_type == 'Teammate' else s.session_type) }}</span>
+            {% endif %}
+            {% if s.classification_type and s.classification_type != 'sdlc' %}
+            <span class="badge badge-outline" style="font-size: 10px;">{{ s.classification_type }}</span>
+            {% endif %}
+        </div>
+        {% endif %}
     </td>
     <td>
         <div class="mono" style="font-size: 12px;">{{ s.display_name }}</div>
-        {% if s.branch_name %}
-        <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
-        {% endif %}
+        {# Second line mirrors the Job row's job-ref: the run's own identifiers,
+           including the session id that used to occupy a trailing column. #}
+        <div class="job-ref mono">
+            {% if s.branch_name %}<span class="job-ref-item">{{ s.branch_name }}</span>{% endif %}
+            <span class="job-ref-item" title="agent session id">{{ s.agent_session_id[:8] }}</span>
+        </div>
     </td>
-    <td>
-        {% if s.session_type %}
-        {# Persona vocabulary tracks _resolve_persona_display(): "Engineer"/"Teammate"
-           are the only emitted values; legacy/raw fall through to purple. #}
-        <span class="badge badge-{{ 'blue' if s.session_type == 'Engineer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ 'eng' if s.session_type == 'Engineer' else ('teammate' if s.session_type == 'Teammate' else s.session_type) }}</span>
-        {% else %}
-        <span class="text-muted">-</span>
-        {% endif %}
-        {% if s.classification_type and s.classification_type != 'sdlc' %}
-        <span class="badge badge-outline" style="font-size: 10px;">{{ s.classification_type }}</span>
-        {% endif %}
-    </td>
-    <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
     <td>
         {% if s.status %}
         {% set terminal = s.status in ('failed', 'error', 'abandoned', 'killed', 'completed', 'superseded') %}
@@ -76,6 +83,7 @@
         <span class="text-muted">-</span>
         {% endif %}
     </td>
+    <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
     <td>
         {% if s.stages %}
         <div class="stage-indicator">
@@ -87,6 +95,5 @@
         <span class="text-muted">-</span>
         {% endif %}
     </td>
-    <td class="mono text-muted" style="font-size: 11px;">{{ s.agent_session_id[:8] }}</td>
 </tr>
 {% endmacro %}

@@ -66,7 +66,7 @@ class TestAddresseeForSession:
         assert addressee_for_session(s) == "email:tom@yuda.me"
 
     def test_non_numeric_chat_id_falls_through_to_email_branch(self):
-        # react-transport-derivation Task 2: _numeric_peer("a@b.com") returns
+        # react-transport-derivation Task 2: numeric_peer("a@b.com") returns
         # None, and that None must NOT short-circuit to SYSTEM_ADDRESSEE --
         # control must fall through to the "@" in raw email branch, or every
         # email-bridge session silently re-homes to the system Room.
@@ -242,7 +242,7 @@ class TestPeerParseSingleHome:
         script = (
             "import sys, json, time\n"
             "t0 = time.time()\n"
-            "from utils.peer import deliverable_telegram_peer, _numeric_peer\n"
+            "from utils.peer import deliverable_telegram_peer, numeric_peer\n"
             "elapsed = time.time() - t0\n"
             "print(json.dumps({\n"
             "    'popoto_loaded': 'popoto' in sys.modules,\n"
@@ -276,10 +276,10 @@ class TestPeerParseSingleHome:
         )
 
     def test_models_room_reexports_peer_helpers(self):
-        from models.room import _numeric_peer as room_numeric_peer
         from models.room import deliverable_telegram_peer as room_deliverable
-        from utils.peer import _numeric_peer as canonical_numeric_peer
+        from models.room import numeric_peer as room_numeric_peer
         from utils.peer import deliverable_telegram_peer as canonical_deliverable
+        from utils.peer import numeric_peer as canonical_numeric_peer
 
         assert room_numeric_peer is canonical_numeric_peer
         assert room_deliverable is canonical_deliverable

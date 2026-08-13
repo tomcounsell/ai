@@ -105,6 +105,218 @@ def _check_venv() -> CheckResult:
     )
 
 
+def _repo_venv_bin_dirs() -> list[Path]:
+    """Bin directories whose console scripts legitimately run this repo's code.
+
+    The current checkout's ``.venv/bin`` always counts. The main checkout's is
+    added too, because doctor frequently runs from a worktree whose lane still
+    invokes the tools installed by the main checkout.
+    """
+    candidates = [PROJECT_DIR / ".venv" / "bin"]
+    try:
+        from agent.worktree_manager import main_checkout_venv
+
+        main_venv = main_checkout_venv(PROJECT_DIR)
+        if main_venv is not None:
+            candidates.append(main_venv / "bin")
+    except Exception:  # noqa: S110 -- the current checkout's venv is enough on its own
+        pass
+
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            ordered.append(candidate)
+    return ordered
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when two paths are the same file, including via a hardlink.
+
+    `/update` hardlinks some entry points into `~/.local/bin`, so an on-PATH
+    copy outside the venv is not automatically the wrong copy.
+    """
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
+def _check_console_scripts_resolve() -> CheckResult:
+    """Check every `[project.scripts]` name resolves into this repo's venv (#2566).
+
+    Skills, hooks, and SDLC addenda invoke these entry points by bare name:
+    `critique-roster-check`, `critique-resume-probe`, and `sdlc-push-guard` are
+    all called that way, and the first two are fail-closed *gates*. What the
+    name resolves to is therefore load-bearing, and it is pure host state that
+    no amount of correct packaging can guarantee.
+
+    Three failure modes, with three different remedies:
+
+    * `.venv/bin` is absent from PATH while a stale `~/Library/Python/3.12/bin`
+      is present. The stale directory holds shims for a *system* interpreter
+      with no editable install of this repo, so the name resolves, runs, and
+      dies with `ModuleNotFoundError: No module named 'tools'`. Observed on
+      another machine in #2566.
+    * The same PATH with no stale shim for a given name, which surfaces as
+      `command not found` (exit 127) instead. Also #2566.
+    * The venv leads PATH and nothing shadows it, but the name was never
+      installed into it — someone added a `[project.scripts]` entry and the
+      puller has not re-synced. The remedy is `uv sync`, and reporting this as
+      "shadowed" sends an operator to reorder a PATH that is already correct.
+
+    Deleting stale shims only converts the first shape into the second, so the
+    check measures resolution rather than shim hygiene: a name is healthy when
+    it resolves into a repo venv bin directory, and unhealthy when it resolves
+    anywhere else or nowhere at all. Distinguishing the third shape from the
+    first two is what `_installed_in_venv` is for.
+
+    Ordering note: this runs before `_check_system_tools`, whose
+    `scripts.update.verify` import prepends `~/Library/Python/3.12/bin` to
+    `os.environ["PATH"]`. Measuring first keeps the reported resolution the one
+    a shell would actually get.
+    """
+    import shutil
+    import tomllib
+
+    pyproject = PROJECT_DIR / "pyproject.toml"
+    try:
+        scripts = tomllib.loads(pyproject.read_text()).get("project", {}).get("scripts", {})
+    except (OSError, ValueError) as e:
+        return CheckResult(
+            name="console_scripts_resolve",
+            category="Environment",
+            passed=False,
+            message=f"could not read [project.scripts] from {pyproject}: {e}",
+            fix="Repair pyproject.toml",
+        )
+
+    if not scripts:
+        return CheckResult(
+            name="console_scripts_resolve",
+            category="Environment",
+            passed=False,
+            message="pyproject.toml declares no [project.scripts] entry points",
+            fix="Restore the [project.scripts] table in pyproject.toml",
+        )
+
+    venv_bins = _repo_venv_bin_dirs()
+    path_entries = {
+        os.path.realpath(os.path.expanduser(p))
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p
+    }
+    on_path = [d for d in venv_bins if os.path.realpath(d) in path_entries]
+
+    def _installed_in_venv(script_name: str) -> bool:
+        """Does a repo venv bin dir actually carry this entry point?
+
+        This is what separates "something else is winning the PATH race" from
+        "nothing was ever built to win it". Both produce an unresolvable bare
+        name, and they have opposite remedies.
+        """
+        return any((bin_dir / script_name).exists() for bin_dir in venv_bins)
+
+    misresolved: list[str] = []
+    not_installed: list[str] = []
+    resolved_into: list[str] = []
+    for name in sorted(scripts):
+        found = shutil.which(name)
+        if found is None:
+            if _installed_in_venv(name):
+                misresolved.append(f"{name} -> not found")
+            else:
+                not_installed.append(name)
+                misresolved.append(f"{name} -> not installed in the repo venv")
+            continue
+        found_path = Path(found)
+        match = next(
+            (
+                bin_dir
+                for bin_dir in venv_bins
+                if found_path.parent == bin_dir
+                or os.path.realpath(found_path.parent) == os.path.realpath(bin_dir)
+                or _same_file(found_path, bin_dir / name)
+            ),
+            None,
+        )
+        if match is None:
+            if not _installed_in_venv(name):
+                not_installed.append(name)
+                misresolved.append(f"{name} -> {found} (not installed in the repo venv)")
+            else:
+                misresolved.append(f"{name} -> {found}")
+        elif str(match) not in resolved_into:
+            resolved_into.append(str(match))
+
+    primary = venv_bins[0] if venv_bins else PROJECT_DIR / ".venv" / "bin"
+
+    if misresolved:
+        shown = misresolved[:5]
+        suffix = (
+            f" (+{len(misresolved) - len(shown)} more)" if len(misresolved) > len(shown) else ""
+        )
+        # Three states, not two. A name can lose the PATH race, or never have
+        # been built to enter it. Collapsing the second into "shadowed" tells
+        # an operator to reorder a PATH that is already correct — and that is
+        # the likeliest case from here on, since it is what a teammate hits
+        # after pulling a new [project.scripts] entry without re-syncing.
+        a_path_problem = len(not_installed) < len(misresolved)
+        if not a_path_problem:
+            path_note = f"{len(not_installed)} declared but not installed in {primary}"
+        elif not on_path:
+            path_note = f"{primary} is not on PATH"
+        else:
+            path_note = f"{on_path[0]} is on PATH but is shadowed"
+        if a_path_problem and not_installed:
+            path_note += f"; {len(not_installed)} also not installed in the venv"
+
+        fixes = []
+        if a_path_problem:
+            fixes.append(
+                f'Put the repo venv first on PATH: export PATH="{primary}:$PATH" '
+                "(persist it in your shell profile). Any stale shim in an earlier "
+                "directory becomes unreachable."
+            )
+        if not_installed:
+            not_installed_sorted = sorted(not_installed)
+            shown_not_installed = not_installed_sorted[:5]
+            not_installed_suffix = (
+                f" (+{len(not_installed_sorted) - len(shown_not_installed)} more)"
+                if len(not_installed_sorted) > len(shown_not_installed)
+                else ""
+            )
+            fixes.append(
+                f"Install the missing entry point(s) with `uv sync` in {PROJECT_DIR} "
+                f"(or `uv pip install -e .`): {', '.join(shown_not_installed)}"
+                f"{not_installed_suffix}."
+            )
+
+        return CheckResult(
+            name="console_scripts_resolve",
+            category="Environment",
+            passed=False,
+            message=(
+                f"{len(misresolved)}/{len(scripts)} console scripts do not resolve into the "
+                f"repo venv — {path_note}; bare-name callers run the wrong copy or nothing "
+                f"at all (#2566): {'; '.join(shown)}{suffix}"
+            ),
+            fix=" ".join(fixes) + " Then re-run.",
+        )
+
+    return CheckResult(
+        name="console_scripts_resolve",
+        category="Environment",
+        passed=True,
+        message=f"{len(scripts)} console scripts resolve into {', '.join(resolved_into)}",
+    )
+
+
 def _check_git_hooks_installed() -> CheckResult:
     """Check that `core.hooksPath` points at the repo's tracked hooks (#2540).
 
@@ -1608,6 +1820,9 @@ def get_checks(
         # Environment
         _check_python_version,
         _check_venv,
+        # Runs before _check_system_tools, whose scripts.update.verify import
+        # mutates PATH (see the check's docstring).
+        _check_console_scripts_resolve,
         _check_git_hooks_installed,
         _check_popoto_floor,
         _check_worktree_interpreters,

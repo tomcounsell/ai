@@ -150,6 +150,7 @@ class UpdateResult:
         default_factory=list
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
+    sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -892,6 +893,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
         result.warnings.append(f"memory-distill-backfill registration: {mdr.detail}")
 
+    # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
+    # (#2717) via the same generalized register path. Same ordering
+    # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
+    # vault→config copy so the entry propagates into the per-machine
+    # config/reflections.yaml on this same cycle.
+    log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
+    result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
+        project_dir
+    )
+    upr = result.sdlc_upvote_pickup_register_result
+    if upr.action == "registered":
+        log(
+            "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
+            v,
+            always=True,
+        )
+    elif upr.action == "noop":
+        log("sdlc-upvote-pickup reflection already registered", v)
+    elif upr.action == "skipped":
+        log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
+    if not upr.success:
+        log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
+        result.warnings.append(f"sdlc-upvote-pickup registration: {upr.detail}")
+
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
     # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
@@ -1164,8 +1189,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         # Pull rebase and re-push; if our changes are already present,
                         # reset to origin/main (no warning needed).
                         try:
+                            # Fetch + rebase onto the NAMED ref, not FETCH_HEAD
+                            # (#2650): `git pull --rebase` resolves its onto-
+                            # target through .git/FETCH_HEAD, which every
+                            # worktree of the repo shares, so a peer lane's
+                            # concurrent fetch can retarget our rebase.
                             deps.run_cmd(
-                                ["git", "pull", "--rebase", "origin", "main"],
+                                ["git", "fetch", "origin", "main"],
+                                cwd=project_dir,
+                            )
+                            deps.run_cmd(
+                                ["git", "rebase", "origin/main"],
                                 cwd=project_dir,
                             )
                             # Check if our commit is still ahead of origin

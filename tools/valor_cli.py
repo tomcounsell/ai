@@ -212,6 +212,14 @@ def _to_create_namespace(args: argparse.Namespace) -> argparse.Namespace:
         model=args.model,
         needs_real_chrome=args.needs_real_chrome,
         json=args.json,
+        # The `valor` wrapper is a human-facing session launcher and
+        # deliberately does not expose --telegram-message-id (that anchor
+        # plumbing is internal, used by reflections/sdlc_upvote_lanes.py via
+        # tools.valor_session.create_session directly, and by the
+        # `python -m tools.valor_session create --telegram-message-id`
+        # debugging path -- see docs/features/upvote-autonomous-sdlc-pickup.md).
+        # A wrapper-launched session is never pre-anchored.
+        telegram_message_id=0,
     )
 
 

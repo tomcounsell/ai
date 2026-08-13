@@ -35,6 +35,17 @@ own "no run_id supplied: never mutates" special case at the caller layer: the
 heartbeat can only ever EXTEND a lease it already owns, never mint on a free
 key nor steal one from a successor.
 
+**The supervised-run signal renews with the lease (issue #2659).** A renewed
+tick also refreshes ``session:supervisedrun:{N}``
+(``agent/supervised_run.py``), the companion key a stage fork reads to inherit
+the supervisor's ``run_id``. It carries the lease TTL but used to be written
+only at acquire, so it expired 1800s into every pipeline while this loop kept
+the lease alive indefinitely; from that point every stage fork the supervisor
+dispatched read a bare ``ISSUE_LOCKED`` from its own supervisor's lock and
+stood down. The two keys now share this loop's lifetime, so the signal can
+never outlive the lease and the lease can never outlive the signal by more
+than one renewal interval.
+
 Best-effort throughout: every tick is wrapped in try/except; a Redis hiccup is
 swallowed and retried next tick. The loop self-terminates after
 ``--max-lifetime`` regardless, so a crashed supervisor's heartbeat can never
@@ -108,6 +119,7 @@ def run_heartbeat(
         interval = _default_interval()
     interval = max(1, interval)
 
+    from agent.supervised_run import write_supervised_run_signal
     from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
     deadline = _monotonic() + max_lifetime
@@ -144,6 +156,16 @@ def run_heartbeat(
                 session_id=session_id,
                 ttl=ISSUE_LOCK_TTL_SECONDS,
             )
+            # Refresh the companion supervised-run signal on the same tick
+            # (issue #2659). The signal carries the lock's TTL but was written
+            # only at acquire, so before this it expired 1800s into every run
+            # while the lock was renewed forever -- and from that moment on
+            # every stage fork got a bare ISSUE_LOCKED from its own
+            # supervisor's lock and correctly stood down. Renewing both
+            # together is what makes the module docstring's "refreshed on
+            # every acquire/renew" true. working_dir is deliberately omitted:
+            # the worktree file carrier has no TTL and never needs refreshing.
+            write_supervised_run_signal(issue_number, run_id, session_id=session_id)
         except Exception as e:  # noqa: BLE001 - best-effort; never crash the loop
             logger.debug(
                 "sdlc_lease_heartbeat: tick failed for issue #%s (%s: %s) -- retrying",

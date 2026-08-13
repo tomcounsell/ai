@@ -35,7 +35,7 @@ We update Valor's codebase almost daily, but changes only take effect on the mac
 
 ### Key Elements
 
-- **`scripts/remote-update.sh`**: Single shell script that does the essential update — git pull first (in bash, before Python loads), then delegates to the Python orchestrator. Does NOT restart the bridge itself. Stripped-down version of the Claude Code `/update` skill (no calendar config, no MCP checks, no CLI tool audit — those are setup concerns, not update concerns).
+- **`scripts/remote-update.sh`**: Single shell script that does the essential update — fast-forwards `main` first (in bash, before Python loads), then delegates to the Python orchestrator. Does NOT restart the bridge itself. Stripped-down version of the Claude Code `/update` skill (no calendar config, no MCP checks, no CLI tool audit — those are setup concerns, not update concerns).
 - **Bridge command intercept**: Before any message processing, check if the raw text is `/update`. Run the script, reply with the result. If code changed, queue a restart (don't restart immediately).
 - **Queued restart**: Instead of killing the bridge mid-response, the update writes a restart flag file. The session queue worker checks for this flag between sessions and triggers a graceful restart only when idle.
 - **Launchd cron plist**: A second launchd job that runs `remote-update.sh` every 12 hours. If code changed, it writes the restart flag. Independent of the bridge — runs even if the bridge is down (in that case, launchd's `KeepAlive` will restart the bridge with the new code anyway).
@@ -123,17 +123,18 @@ if ! claim_lock; then
 fi
 trap cleanup_lock EXIT
 
-# ── Git pull FIRST — before invoking any Python ──────────────────────
-# Pull here so the Python orchestrator (run.py) and all update scripts are
-# up to date before they execute. Without this, a Telegram /update or cron
-# run always executes the pre-pull version of the orchestrator; changes to
+# ── Fast-forward FIRST — before invoking any Python ──────────────────
+# Update here so the Python orchestrator (run.py) and all update scripts are
+# current before they execute. Without this, a Telegram /update or cron
+# run always executes the pre-update version of the orchestrator; changes to
 # the update scripts only take effect on the next run.
 # run.py --cron is then called with --no-pull to skip the redundant pull.
 echo "[update] Pulling latest changes..."
-if git -C "$PROJECT_DIR" pull --ff-only 2>&1; then
+if git -C "$PROJECT_DIR" fetch origin main 2>&1 && \
+   git -C "$PROJECT_DIR" merge --ff-only origin/main 2>&1; then
     echo "[update] Pull complete"
 else
-    echo "[update] WARN: git pull failed or had conflicts — continuing with current code"
+    echo "[update] WARN: fetch/fast-forward failed or had conflicts — continuing with current code"
 fi
 
 # ── Run update in cron mode ──────────────────────────────────────────
@@ -327,12 +328,12 @@ Install/uninstall via `valor-service.sh`:
 **Mitigation:** Eliminated by design. The update script no longer restarts the bridge directly. It writes a restart flag file. The session queue worker checks the flag between sessions and only triggers a restart when all projects have no running sessions. The bridge finishes its current work before restarting. Worst case: if the bridge is perpetually busy, the restart is deferred until a quiet moment. A very long-running session (2+ hours) would delay the update — acceptable tradeoff vs losing a response.
 
 ### Risk 2: Cron and manual trigger race
-**Impact:** If someone types `/update` at the same moment the cron fires, two `git pull` + restart sequences run simultaneously.
+**Impact:** If someone types `/update` at the same moment the cron fires, two fast-forward + restart sequences run simultaneously.
 **Mitigation:** Use a lockfile in `remote-update.sh`. `flock` or a simple `mkdir`-based lock. If lock is held, exit 0 with "Update already in progress."
 
-### Risk 3: `git pull --ff-only` fails on dirty working tree
-**Impact:** If the machine has uncommitted local changes (e.g., from a running agent session), `git pull` fails.
-**Mitigation:** The script auto-stashes before pulling and pops after (matching the existing `/update` Claude Code skill behavior). If stash pop has conflicts, the code is still updated but the warning is surfaced. Agent sessions commit and push before completing, so dirty trees should be rare. Worst case: operator sees "stash pop conflict" in the output and resolves manually.
+### Risk 3: the fast-forward fails on a dirty working tree
+**Impact:** If the machine has uncommitted local changes (e.g., from a running agent session), the merge refuses.
+**Mitigation:** The script auto-stashes before updating and restores after. The restore is keyed on the stash's **commit sha**, never `stash@{0}` (#2650): `refs/stash` is a per-repository stack shared by every worktree, so a concurrent lane's stash landing on top would otherwise be restored into this checkout instead of ours. If our entry is gone, nothing is restored rather than a stranger's work. If stash pop has conflicts, the code is still updated but the warning is surfaced. Agent sessions commit and push before completing, so dirty trees should be rare. Worst case: operator sees "stash pop conflict" in the output and resolves manually.
 
 ### Risk 4: `uv` not installed on all machines
 **Impact:** New machines might not have `uv` yet.
