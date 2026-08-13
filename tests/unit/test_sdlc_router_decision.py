@@ -615,6 +615,41 @@ class TestReviewVerdictStaleness:
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_PATCH
 
+    def test_crashed_rereview_after_patch_still_dispatches_review(self):
+        """Stale verdict + crashed re-review dispatch → row 8b, not Blocked.
+
+        The observed dead end (popoto PR #548 / issue #537): a /do-pr-review
+        dispatched after the patch crashed before recording a verdict, so it
+        overwrote the /do-patch latch in last_dispatched_skill while leaving
+        the stale CHANGES REQUESTED verdict and REVIEW=pending in place.
+
+        Row 8 steps aside (verdict stale, #1641), 8c needs REVIEW=in_progress,
+        8d needs REVIEW in (completed, failed) AND no recorded verdict, and
+        8e/8f/9/10 need REVIEW=completed or an APPROVED verdict — every row
+        missed and the pipeline stranded on Blocked('no matching dispatch
+        rule'). Row 8b must own it on staleness alone.
+        """
+        states = self._base_states(
+            verdict_at="2026-08-13T07:02:49",
+            patch_at="2026-08-13T07:17:32",
+        )
+        states["REVIEW"] = "pending"
+        states["_sdlc_dispatches"].append(
+            # Crashed re-review: recorded no verdict, wrote no REVIEW marker.
+            {"skill": SKILL_DO_PR_REVIEW, "at": "2026-08-13T07:17:36"},
+        )
+        meta = {
+            "pr_number": 548,
+            "latest_review_verdict": "CHANGES REQUESTED",
+            "last_dispatched_skill": SKILL_DO_PR_REVIEW,  # latch overwritten
+            "patch_cycle_count": 1,
+            "pr_merge_state": "CLEAN",
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8b", f"expected row 8b, got {result.row_id!r}"
+
     def test_fresh_review_verdict_after_patch_still_dispatches_patch(self):
         """patch T1 < verdict T2 → fresh verdict → row 8 wins → /do-patch."""
         states = self._base_states(
