@@ -962,7 +962,7 @@ No code change in those paths.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/test-db-ownership.md` — the claim pool, the ownership invariant, what
+- [x] Create `docs/features/test-db-ownership.md` — the claim pool, the ownership invariant, what
   the guard denies and why, how to get a scratch db, what the exhaustion error means and how to
   clear it. Include the `#2117 → #2606 → #2624 → #2628` history so the next agent understands why
   the invariant is enforced rather than documented.
@@ -979,22 +979,22 @@ No code change in those paths.
   Record the relationship to **#2645**: this guard is the general form of that incident's Layer-1
   db-0 rule, and the per-process flock-claimed set is the by-db discriminator #2645's rename-command
   vs ACL question is looking for.
-- [ ] Add the entry to the `docs/features/README.md` index table.
+- [x] Add the entry to the `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] `tests/README.md` — update the isolation section: tests must never construct a
+- [x] `tests/README.md` — update the isolation section: tests must never construct a
   `redis.Redis(db=N)` from a self-derived number; `claim_test_db()` and the `scratch_test_db`
   fixture are the only sources. Note that `--dist=loadfile` gives co-location but not assignment
   determinism, so cross-file leaks surface differently every run. Add the module-reload rule: a
   test that `importlib.reload`s a module owning a registry must restore it, and the conftest guard
   now covers `agent.index_drift` and `monitoring.bridge_watchdog`.
-- [ ] `tests/README.md:9` — fix the stale "~40s parallel" runtime claim. `CLAUDE.md` and
+- [x] `tests/README.md:9` — fix the stale "~40s parallel" runtime claim. `CLAUDE.md` and
   `pyproject.toml`'s `--timeout=420` put a full `tests/unit/` run at roughly 20 minutes; the
   existing figure is ~30x off and misleads every agent budgeting a run.
-- [ ] `tests/db_claim.py` module docstring — document `claimed_test_dbs()`,
+- [x] `tests/db_claim.py` module docstring — document `claimed_test_dbs()`,
   `claim_scratch_test_db()`, and the wait-then-fail exhaustion policy, replacing the current
   "graceful legacy fallback" description.
-- [ ] `tests/conftest.py:103-150` — rewrite the guard's docstring: it is now an *ownership* guard
+- [x] `tests/conftest.py:103-150` — rewrite the guard's docstring: it is now an *ownership* guard
   of which the db0 rule is one case, and it still carries the 2026-06-03 production-wipe rationale.
 
 ### External Documentation Site
