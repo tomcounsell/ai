@@ -672,7 +672,48 @@ the build.
 | CONCERN | History & Consistency; driver-verified | Risk 5's lane-collision mitigation predates the round-2 fence change and is now stale: `docs/plans/sdlc-lane-recorded-slug.md` (status Ready) plans a repair of the dead slug read at `tools/sdlc_stage_query.py::_compute_meta:487`, which falls INSIDE this plan's `_compute_meta:470-545` edit span for `latest_review_head_sha`. A literal git merge conflict is plausible if both lanes build concurrently, and Risk 5 currently gives BUILD no signal to look for it. | revision 2 2026-08-13 | Add `tools/sdlc_stage_query.py::_compute_meta` to Risk 5's named file list and extend the mitigation: "re-check at BUILD start; if `sdlc-lane-recorded-slug` has begun editing `_compute_meta`, coordinate before landing `latest_review_head_sha`." |
 | NIT | Scope & Value | The Open Questions preamble claims every question "already has a default chosen and encoded in Technical Approach," but Q4 (no-rule block signal) has no encoded default — §4 explicitly defers with "Choose one and apply it consistently." Does not block build; contradicts the preamble. | revision 2 2026-08-13 | Existing `guard_id` values are short codes (G2/G4/G7), which favors the `guard_id="NO_RULE"` sentinel for convention consistency. Either encode that default at §4 or soften the preamble to name Q4 as the one genuine implementer choice. |
 
-**Structural checks (round 2):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive; no Popoto model changes, so no migration obligation); task numbering PASS (1-8 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (all referenced source files exist; the four `State NOT persisted` sites re-verified by grep at `:567`, `:603`, `:719`, `:972`); prerequisites PASS (`gh auth status` OK, venv on the pinned interpreter); cross-references PASS except the three-vs-four residue and the stale Appetite/Risk-5 counts captured above. One Verification-table note for the revision pass: the row `grep -c "latest_review_head_sha" tools/sdlc_stage_query.py agent/sdlc_router.py` with expected "output > 0 in both" is human-evaluable (two `path:count` lines) but not exit-code-checkable — `grep` exits 0 if EITHER file matches; split it into two `grep -q` rows to make "in both" mechanical.
+**Structural checks (round 2, superseded by round 3 below):** required sections PASS (Documentation / Update System / Agent Integration / Test Impact all present and substantive; no Popoto model changes, so no migration obligation); task numbering PASS (1-8 contiguous); dependencies PASS (all `Depends On` IDs resolve, no cycles); file paths PASS (all referenced source files exist; the four `State NOT persisted` sites re-verified by grep at `:567`, `:603`, `:719`, `:972`); prerequisites PASS (`gh auth status` OK, venv on the pinned interpreter); cross-references PASS except the three-vs-four residue and the stale Appetite/Risk-5 counts captured above. One Verification-table note for the revision pass: the row `grep -c "latest_review_head_sha" tools/sdlc_stage_query.py agent/sdlc_router.py` with expected "output > 0 in both" is human-evaluable (two `path:count` lines) but not exit-code-checkable — `grep` exits 0 if EITHER file matches; split it into two `grep -q` rows to make "in both" mechanical.
+
+### Round 3 — READY TO BUILD (with concerns)
+
+War room run 2026-08-13 (round 3, confirmation pass), FULL depth (force-FULL: the
+plan edits `.claude/skills-global/` and `agent/sdlc_router.py`; roster: Risk &
+Robustness, Scope & Value, History & Consistency, 3/3 complete and grounded).
+Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 1 concern, 2 nits.
+
+**Round-2 disposition: all 5 findings verified substantively closed in commit
+`d1e7bc026`,** independently confirmed by all three critics against real source.
+The four `State NOT persisted.` sites are real at `tools/sdlc_stage_marker.py:567`,
+`:603`, `:719`, `:972`; the bare-`str` guard prescription matches
+`_extract_verdict_text`'s real `isinstance` branching at
+`tools/sdlc_stage_query.py:442-450`, and the `_resolve_enriched` swallow-to-empty-ledger
+claim is accurate against `tools/sdlc_next_skill.py:86-97`; Appetite names five files
+with a Medium justification; Risk 5's collision claim was cross-checked against
+`docs/plans/sdlc-lane-recorded-slug.md` (status Ready, does target the dead slug read
+at `tools/sdlc_stage_query.py:487`, inside this plan's `:470-545` span); Q4's
+`guard_id="NO_RULE"` default matches the real `G2`/`G4`/`G7` short codes at
+`agent/sdlc_router.py:331,426,674`; and the `latest_review_head_sha` Verification row
+is split into two exit-code-checkable `grep -q` rows.
+
+The one concern is a defect **in the round-2 fix's own prescription**, driver-verified
+against live code — not a re-litigation of a closed finding.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness; driver-verified | The bare-`str` guard added by the round-2 fix is only **two-way** (`dict` vs. "the str case"), but the duality it claims to mirror is **three-way**: `_extract_verdict_text` (`tools/sdlc_stage_query.py:442-450`) returns `None` when the record is neither dict nor str, which is exactly what `verdicts.get("REVIEW")` yields whenever no REVIEW verdict has been recorded — the normal state for every issue still in PLAN/BUILD/TEST, i.e. the MAJORITY of live ledgers, not a legacy edge case. A literal reading of Task 2's "branch on `isinstance(...,dict)` first and route the str case to `head_sha_of_text`" sends that `None` into a regex search. Confirmed by driver: `re.compile(...).search(None)` raises `TypeError: expected string or bytes-like object`, which propagates into `_resolve_enriched`'s broad `except Exception` (`tools/sdlc_next_skill.py:95-96`) and discards the ENTIRE ledger. Same fail-open-to-amnesia mode the round-2 fix was written to prevent, but fired on the common path instead of the rare one — and Test Impact (`:339`) requires only three shapes, so no planned test would catch it. | pending | Make the guard three-way, mirroring `_extract_verdict_text` exactly: `if isinstance(rec, dict): head_sha_of_record(rec)` / `elif isinstance(rec, str): head_sha_of_text(rec)` / `else: None`. The gotcha is the negation: guard with `isinstance(rec, str)`, NEVER with `not isinstance(rec, dict)` — the latter is precisely what routes `None` into the regex. `head_sha_of_text(text: str)` is typed non-Optional, so it must never receive `verdicts.get("REVIEW")` directly. Add a FOURTH Test Impact case to the three at `:339`: a `_verdicts` payload with no `"REVIEW"` key at all, asserted at both the `_compute_meta` and `decide_next_dispatch` levels. |
+| NIT | History & Consistency (Scope & Value contested) | The round-2 "three sites" sweep left one un-tabled occurrence at line ~314 (Failure Path Test Strategy, Exception Handling Coverage): the `STATE_MACHINE_RAISED` bullet still calls `:733` "the model the other three sites are being made to follow" when four sites are being rewritten to follow it. Scope & Value read the same line as a legitimate count of the three `write_marker`-internal siblings and cleared it, so it is genuinely ambiguous rather than plainly wrong; Task 3's body is unambiguous at four, so BUILD cannot be misled. | pending | `grep -n "other three sites" docs/plans/verdict-finalize-cluster.md` returns exactly this one match, outside the `## Critique Results` tables. Reword to name the set rather than count it ("the `write_marker` sites plus `main()`'s `:969-974` wrapper") so neither reading remains available. |
+| NIT | Scope & Value | The Appetite paragraph rewritten in round 2 says "the weight is concentrated in three proofs" and enumerates the router-predicate, migration-free, and flattened-string-reader proofs — omitting the bare-`str` guard proof that the same revision calls "worse than the blocker it fixes." The paragraph rewritten specifically to justify Medium against a widened blast radius undersells the scariest risk it introduces. | pending | No code or test impact; Technical Approach §2 and Test Impact already carry the obligation. Renumber to four proofs and add "that no bare-`str` or absent REVIEW record ever reaches `head_sha_of_record` unguarded." Same self-consistency class as the round-2 "three sites" residue finding. |
+
+**Structural checks (round 3):** required sections PASS (Documentation carries a
+`docs/features/` checkbox item; Update System, Agent Integration, and Test Impact all
+present and substantive; no Popoto model changes, so no `scripts/update/migrations.py`
+migration obligation). Task numbering PASS (1-8 contiguous). Dependencies PASS (every
+`Depends On` ID resolves; no cycles). File paths PASS — all 18 referenced source, test,
+and doc paths exist on disk, and `grep -rn "State NOT persisted" tools/ agent/` returns
+exactly the 4 sites the plan claims. Prerequisites PASS. Cross-references PASS: every
+Success Criterion maps to a task; no No-Go or Rabbit Hole appears in the Solution as
+planned work. Round-2's own Verification-table note is discharged (the split `grep -q`
+rows landed). No structural finding this round.
 
 ---
 
