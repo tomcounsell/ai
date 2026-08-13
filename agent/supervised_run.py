@@ -37,8 +37,12 @@ the single source of truth for "is this run still the owner."
 
   All three renewers write only after confirming they still own the lease, so a
   signal is never republished over a successor's. The fourth writer matters
-  most for long runs: the heartbeat self-exits at 4h, after which the ledger
-  gate is the only renewer left.
+  most for long runs, because the heartbeat's exit is no longer a single 4h
+  backstop (issue #2714): it exits within ~2 checks of its supervising
+  ``claude`` process dying (releasing the lease and clearing this signal), at
+  90 minutes when no supervisor identity resolved (leaving both to their own
+  TTL), and otherwise still at the unchanged 4h ceiling. After any of those the
+  ledger gate is the only renewer left.
 
   Issue #2659: the renew half was missing for the first two years of this key's
   life, so the signal expired 1800s into every pipeline while the lease was

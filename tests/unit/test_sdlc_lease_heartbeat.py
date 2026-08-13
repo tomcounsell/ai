@@ -592,9 +592,68 @@ class TestReleaseRaceIsClosed:
             )
 
         assert rc == 0
-        assert calls["n"] == 2  # tick 1 renewed nothing; tick 2 saw it gone
+        # The extend's compare-and-set loses on the released key, and the
+        # heartbeat consumes that result: it exits on THIS tick rather than
+        # falling through to the signal write and discovering the loss on a
+        # later peek. One peek total.
+        assert calls["n"] == 1
         # The extend did NOT recreate the released key.
         assert _R.get(self.KEY) is None
+        # And it never republished the companion supervised-run signal with a
+        # fresh TTL for a lease it no longer holds. Without this assertion the
+        # fail-closed renewal result could be discarded and the suite would
+        # still pass.
+        assert signals == []
+
+    def test_fail_closed_renewal_also_stops_the_signal_write(self):
+        """The other way the extend reports not-acquired: `renew_only`'s
+        fail-CLOSED exception handler. It must reach the same exit, or a
+        transient Redis blip would keep republishing the supervised-run
+        signal for a lease whose ownership could not be verified.
+        """
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        def peek_ok_extend_fails_closed(*args, **kwargs):
+            if kwargs.get("peek"):
+                return IssueLockResult(
+                    acquired=False, owner_session_id="sdlc-local-2714", owner_run_id="mine"
+                )
+            # What touch_issue_lock returns for renew_only=True on any error.
+            return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+
+        # Bounded clock: the deadline is reachable, so a regression that stops
+        # consuming the fail-closed result fails this test on `signals` rather
+        # than spinning until the suite-wide timeout.
+        clock = {"n": 0}
+
+        def monotonic():
+            clock["n"] += 1
+            return 0.0 if clock["n"] <= 20 else 999.0
+
+        signals = []
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                side_effect=peek_ok_extend_fails_closed,
+            ),
+            patch(
+                "agent.supervised_run.write_supervised_run_signal",
+                side_effect=lambda *a, **kw: signals.append(a),
+            ),
+        ):
+            rc = run_heartbeat(
+                issue_number=self.ISSUE,
+                run_id="mine",
+                session_id="sdlc-local-2714",
+                interval=1,
+                max_lifetime=100,
+                _sleep=lambda s: None,
+                _monotonic=monotonic,
+            )
+
+        assert rc == 0
+        assert signals == []
 
 
 class TestSupervisorIdentityResolution:

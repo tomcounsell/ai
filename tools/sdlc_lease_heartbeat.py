@@ -426,13 +426,29 @@ def run_heartbeat(
                 # undone by it. Without it the extend re-minted the lease the
                 # supervisor had just given up and renewed it to the max-lifetime
                 # ceiling with nothing behind it.
-                touch_issue_lock(
+                extended = touch_issue_lock(
                     issue_number,
                     run_id,
                     session_id=session_id,
                     ttl=ISSUE_LOCK_TTL_SECONDS,
                     renew_only=True,
                 )
+                if not extended.acquired:
+                    # The CAS lost (a release landed inside the peek/extend
+                    # window) or `renew_only`'s fail-closed handler fired. Either
+                    # way we no longer hold the lease, so stop here rather than
+                    # falling through: the signal write below would otherwise
+                    # republish `session:supervisedrun:{N}` with a fresh TTL for
+                    # a lease we do not hold, which is the exact shape
+                    # `renew_only` fails closed to prevent. Exiting instead of
+                    # retrying is correct -- an absent or foreign lease is
+                    # terminal for this heartbeat, never re-acquirable (Risk 2).
+                    return _log_exit(
+                        EXIT_LEASE_LOST,
+                        issue_number,
+                        run_id,
+                        "renewal lost the lease between peek and extend",
+                    )
                 # Refresh the companion supervised-run signal on the same tick
                 # (issue #2659). The signal carries the lock's TTL but was written
                 # only at acquire, so before this it expired 1800s into every run
