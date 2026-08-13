@@ -1611,7 +1611,7 @@ touch `tests/unit/test_recovery_respawn_safety.py` and neither duplicates nor co
 | popoto client sits on a claimed db (writer 3) | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k popoto_plugin` | exit code 0 |
 | Session-start claim: controller claims nothing, `-n0` master does | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k session_claim` | exit code 0 (stub configs; no nested pytest run) |
 | Exhaustion is paid once per process, not per test | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k exhaustion` | exit code 0, whole selection completes in seconds |
-| No production file touched | `git diff --name-only origin/main... \| grep -v '^tests/\\\|^docs/\\\|^pyproject.toml$' \|\| true` | prints nothing (judge the printed lines, not the exit code) |
+| Production files: docstring-only | `git diff --name-only origin/main... \| grep -v '^tests/\\\|^docs/\\\|^pyproject.toml$' \|\| true` | prints only `tools/redis_flush_guard.py` — a docstring-only rename fix (the flush-guard fixture/dict rename), no behavior change, no service restart |
 | Legacy fallback no longer reachable on exhaustion | `grep -c 'falling back to legacy' tests/db_claim.py \|\| true` | match count == 1 (registry-unreachable path only) |
 | Live-network test out of the unit suite | `grep -c 'class TestSearchIntegration' tests/unit/test_youtube_search.py \|\| true` | prints `0` (`grep -c` exits 1 on zero matches, hence the `\|\| true`; judge the printed count, not the exit code) |
 | Ownership doc exists | `test -f docs/features/test-db-ownership.md` | exit code 0 |

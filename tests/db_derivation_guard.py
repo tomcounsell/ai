@@ -161,30 +161,26 @@ ALLOWLIST: tuple[Exemption, ...] = (
             "db-0 client that was built from a URL rather than a db= keyword."
         ),
     ),
+    Exemption(
+        path="unit/test_conftest_isolation_guards.py",
+        expr="divergent_db",
+        reason=(
+            "A second pool slot, independently claimed via claim_scratch_test_db() (the "
+            "scratch_test_db fixture), assigned to this local name rather than referenced "
+            "directly at the call site. The scan cannot resolve a bare fixture-parameter "
+            "binding to a literal pool slot -- it finds no integer in the subtree -- so "
+            "Candidate.pool_db is None here, and apply_dispositions's 'cand.pool_db is None' "
+            "gate is exactly what makes an ALLOWLIST entry (rather than DEFERRED) the correct "
+            "disposition for this site. Was DEFERRED under #2628 pending claim_scratch_test_db() "
+            "existing; #2628 added it, so this is no longer a temporary exemption."
+        ),
+    ),
 )
 
 # Temporary exemptions. Each MUST name a blocking issue and an expiry date, and
 # is reported on every run. These are NOT allowlist entries: the invariant check
 # below would reject at least one of them outright, which is the point.
-DEFERRED: tuple[Exemption, ...] = (
-    Exemption(
-        path="unit/test_conftest_isolation_guards.py",
-        expr="divergent_db",
-        reason=(
-            "Hand-picks a second pool slot (15, or 14 if this process claimed 15) and FLUSHES "
-            "it, so it can be flushed out from under a concurrent process. Fixing it needs a "
-            "second independently-claimed db — claim_scratch_test_db() — which does not exist "
-            "in tests/db_claim.py yet; #2628 is adding it. Deliberately DEFERRED and not "
-            "ALLOWLIST: the scan resolves this name's binding to pool slot 14, and "
-            "apply_dispositions refuses to let an ALLOWLIST entry cover a candidate carrying "
-            "a pool_db. (check_dispositions would accept the bare name — it sees only the "
-            "expression text, with no bindings — so apply_dispositions is the layer doing the "
-            "work here.) Weakening either is exactly the decay this guard exists to prevent."
-        ),
-        blocked_on="#2628",
-        expires="2026-11-06",
-    ),
-)
+DEFERRED: tuple[Exemption, ...] = ()
 
 
 # ---------------------------------------------------------------------------
