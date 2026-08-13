@@ -33,9 +33,9 @@ ever imports the test suite.
 
 | Layer | Boundary | What it stops | What it doesn't |
 |---|---|---|---|
-| 1. Process-wide flush guard | Every Python process started inside a repo venv | Any `.flushdb()` on db 0, any `.flushall()`, from any first-party or ad-hoc script | Non-Python clients; a process outside every discovered venv |
+| 1. Process-wide flush guard | Every Python process started inside a repo venv | Any `.flushdb()` on db 0, any `.flushall()`, from any first-party or ad-hoc script | Non-Python clients; a process outside every discovered venv; a flush issued as execute_command("FLUSHDB") or through redis.cluster.RedisCluster, neither of which the monkeypatch covers |
 | 2. Redis ACL | The Redis server itself | Non-Python clients (`redis-cli`, other languages, other checkouts) reaching db 0 | Nothing yet on its own. This PR ships the planner only; see below |
-| 3. PreToolUse hook validator | Agent-issued Bash commands | A flush written inline in a command Claude is about to run | A flush buried inside a file that's already been written; Bash is the only surface it sees |
+| 3. PreToolUse hook validator | Agent-issued Bash commands | A flush written inline in a command Claude is about to run | A flush buried inside a file that's already been written; Bash is the only surface it sees; and it fails open: if the validator itself raises, the dispatcher logs and allows, matching every sibling validator except validate_merge_guard |
 | 4. This documentation and the `CLAUDE.md` note | The agent's read-before-testing surface | The reasoning error at its source, before either script or command exists | Nothing mechanical: it's a knowledge layer, not an enforcement layer |
 
 ### Layer 1: process-wide flush guard
