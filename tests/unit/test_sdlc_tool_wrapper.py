@@ -209,13 +209,19 @@ class TestVerdictAndDispatchLoudExit:
 
         Same monkeypatch pattern as the verdict test — issue #2012 task 2
         re-points ``_cli_record`` at ``resolve_ledger_lease`` instead of a
-        session resolver.
+        session resolver, and #2637 re-points the *binding* at the owning
+        module: ``sdlc_dispatch`` calls ``_sdlc_utils.resolve_ledger_lease``
+        through the module object, so patching the source module's attribute
+        is what the call picks up. Patching ``sdlc_dispatch`` itself would
+        now set an attribute nothing reads, and this test would pass on a
+        handler that never raised.
         """
         harness = (
             "import sys\n"
             "from tools import sdlc_dispatch\n"
+            "import tools._sdlc_utils as _u\n"
             "def boom(*a, **kw): raise RuntimeError('redis down')\n"
-            "sdlc_dispatch.resolve_ledger_lease = boom\n"
+            "_u.resolve_ledger_lease = boom\n"
             "sys.argv = ['sdlc_dispatch', 'record', '--skill', '/do-build', "
             "'--issue-number', '999999', "
             f"'--run-id', '{'a' * 32}']\n"

@@ -118,8 +118,14 @@ import logging
 import sys
 import uuid
 
+# The lease helpers are reached through the MODULE object, never snapshotted
+# into these globals with a `from`-import: a snapshot taken during a lazy
+# first import that lands inside an active `unittest.mock` patch freezes the
+# MagicMock here for the life of the process and silently inverts every lease
+# check in this file (#2469, #2637). Guarded by
+# tests/unit/test_sdlc_lease_helper_binding.py.
+from tools import _sdlc_utils
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
-from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +513,7 @@ def _write_marker_impl(
     if probe_substrate() == SUBSTRATE_ABSENT:
         return _degraded(stage, "state not persisted — substrate absent"), 0
 
-    target_repo, lease_error = resolve_ledger_lease(issue_number, run_id)
+    target_repo, lease_error = _sdlc_utils.resolve_ledger_lease(issue_number, run_id)
     if lease_error is not None:
         reason = lease_error.get("reason", "LEASE_ABSENT")
         if reason == "ISSUE_LOCKED":
@@ -541,7 +547,7 @@ def _write_marker_impl(
         sm = PipelineStateMachine.for_issue(target_repo, issue_number)
 
         if status == "in_progress":
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
@@ -576,7 +582,7 @@ def _write_marker_impl(
                 reason, message = refusal
                 print(f"[ERROR] {reason}: {message} Marker write refused.", file=sys.stderr)
                 return {"error": reason.lower(), "reason": reason}, 1
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
@@ -677,7 +683,7 @@ def _write_marker_impl(
                     "error": "critique_verdict_missing",
                     "reason": "CRITIQUE_VERDICT_MISSING",
                 }, 1
-            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+            if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
                     "by a foreign run between resolve and write; marker write refused.",
