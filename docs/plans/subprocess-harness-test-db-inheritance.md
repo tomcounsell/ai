@@ -368,9 +368,9 @@ keys and `subprocess_env(**extra)` only adds them:
 - **Allowlist adjudication rule** — an entry is permitted for exactly two
   reasons, and the reason is written in the comment:
   1. `[#2628]` — the site lives in a file this plan's No-Gos forbid touching
-     because open PR #2683 owns it or edits adjacent lines. There are six such
+     because open PR #2683 owns it or edits adjacent lines. There are seven such
      sites:
-     `tests/unit/test_redis_flush_guard_prod.py:54,555,579,648`,
+     `tests/unit/test_redis_flush_guard_prod.py:54,555,579,648,666`,
      `tests/unit/test_conftest_isolation_guards.py:463`, and
      `tests/unit/test_youtube_search.py:219`. Allowlisting them in the
      *new* guard file touches no forbidden file, which is what breaks the
@@ -497,8 +497,8 @@ the plain mechanical conversion with no per-file decision:
 - [ ] `tests/integration/test_sdlc_dispatch.py` (2 env-less sites, :321 and :344) — UPDATE: add `env=subprocess_env(...)`.
 - [ ] `tests/integration/test_design_system_pipeline.py` — UPDATE: same.
 - [ ] `tests/integration/test_session_telemetry_e2e.py` — UPDATE: `project_root=str(WORKTREE)`.
-- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard, including its `ALLOWLIST` (6 `[#2628]` entries + the `[standalone-script]` class).
-- [ ] `tests/unit/test_redis_flush_guard_prod.py` (:54, :555, :579, :648), `tests/unit/test_conftest_isolation_guards.py` (:463), and `tests/unit/test_youtube_search.py` (:219) — NOT TOUCHED: real violations, allowlisted with a `[#2628]` reason because open PR #2683 owns or collides with all three.
+- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — CREATE: the AST guard, including its `ALLOWLIST` (7 `[#2628]` entries + the `[standalone-script]` class).
+- [ ] `tests/unit/test_redis_flush_guard_prod.py` (:54, :555, :579, :648, :666), `tests/unit/test_conftest_isolation_guards.py` (:463), and `tests/unit/test_youtube_search.py` (:219) — NOT TOUCHED: real violations, allowlisted with a `[#2628]` reason because open PR #2683 owns or collides with all three.
 
 No assertions change meaning anywhere. Every edit is additive to the subprocess
 invocation; the tests' subjects and expectations are untouched.
