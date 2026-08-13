@@ -1129,45 +1129,45 @@ after writing and reports a mismatch rather than retrying.
 
 ## Success Criteria
 
-- [ ] A flush guard is armed in every Python process started from a repo venv, verified by a doctor
+- [x] A flush guard is armed in every Python process started from a repo venv, verified by a doctor
   check that asserts liveness in a fresh subprocess (not file presence) across all repo venvs.
-- [ ] `flushdb()` on db 0 and `flushall()` anywhere raise `RuntimeError` naming
+- [x] `flushdb()` on db 0 and `flushall()` anywhere raise `RuntimeError` naming
   `REDIS_PRODUCTION_FLUSH_OK=1`; setting that variable to exactly `1` permits both.
-- [ ] `REDIS_PRODUCTION_FLUSH_OK` set to `""`, `"0"`, `"false"`, or `"no"` leaves the guard armed.
-- [ ] `tests/unit/test_redis_flush_guard.py` passes **unmodified** with the guard installed (D6
+- [x] `REDIS_PRODUCTION_FLUSH_OK` set to `""`, `"0"`, `"false"`, or `"no"` leaves the guard armed.
+- [x] `tests/unit/test_redis_flush_guard.py` passes **unmodified** with the guard installed (D6
   coexistence).
-- [ ] Repeated `install()` under a conftest-shaped outer wrapper does not grow the delegation chain
+- [x] Repeated `install()` under a conftest-shaped outer wrapper does not grow the delegation chain
   (D6a).
-- [ ] **`python -m scripts.update.redis_acl --dry-run` prints the four planned ACL commands and makes
+- [x] **`python -m scripts.update.redis_acl --dry-run` prints the four planned ACL commands and makes
   no server mutation**, and a doctor check reports the machine's current ACL drift. No criterion in
   this plan asserts applied server state — that lives in the runbook behind human sign-off (D8).
-- [ ] With `data/redis-acl-enabled` absent, or `REDIS_ACL_APPLY` unset, or both, `apply_redis_acl`
+- [x] With `data/redis-acl-enabled` absent, or `REDIS_ACL_APPLY` unset, or both, `apply_redis_acl`
   issues zero `ACL SETUSER`/`ACL SAVE` calls; `/update`'s call site passes no `apply` argument.
-- [ ] With `REDIS_APP_PASSWORD` unset, the **report** path still plans four commands
+- [x] With `REDIS_APP_PASSWORD` unset, the **report** path still plans four commands
   (`action != "skipped"`) using the `<REDIS_APP_PASSWORD>` placeholder, while the **apply** path
   returns `action="skipped", error="REDIS_APP_PASSWORD unset"` (D8a). No planned command or log line
   ever contains the secret's value.
-- [ ] `config/redis_bootstrap.py` forwards `username=` from `REDIS_URL` into
+- [x] `config/redis_bootstrap.py` forwards `username=` from `REDIS_URL` into
   `set_REDIS_DB_settings(...)`, asserted for both a credentialed URL (`username="valor-app"`) and a
   bare URL (`username=None`, the pre-rotation no-op) — D9. Without this, the #2661 rotation takes
   popoto down fleet-wide.
-- [ ] `tools/__init__.py` calls `arm()` inside `try/except Exception: pass`, so a harness-created
+- [x] `tools/__init__.py` calls `arm()` inside `try/except Exception: pass`, so a harness-created
   `.claude/worktrees/{agent}/` checkout self-heals on its first first-party import (D2b-i), and
   `import tools` still succeeds when the guard module is broken or absent.
-- [ ] Interpreter startup overhead from the `.pth` is under `_STARTUP_BUDGET_MS`, **asserted by a
+- [x] Interpreter startup overhead from the `.pth` is under `_STARTUP_BUDGET_MS`, **asserted by a
   pytest case** that measures it by parsing the `cumulative` field of the `_redis_flush_guard_boot` line from `python -X importtime -c pass`, best of five trials — not against a
   `-S` baseline, not eyeballed, and with no kill-switch env var (D2a-ii).
 - [ ] Test-suite Redis behavior is unchanged: `tests/unit/` passes with no edits to `tests/conftest.py`
   or `tests/db_claim.py`.
-- [ ] The PreToolUse dispatcher blocks the flush call shapes and `redis-cli -n 0 flushdb`, does **not**
+- [x] The PreToolUse dispatcher blocks the flush call shapes and `redis-cli -n 0 flushdb`, does **not**
   block `grep -rn flushdb tests/`, and does **not** block a command prefixed with
   `REDIS_PRODUCTION_FLUSH_OK=1` (D5a) — asserted in pytest, never in a Bash verification row (D5b).
-- [ ] `CLAUDE.md` § Manual Testing Hygiene names the `setdefault` foot-gun.
-- [ ] No file under `tests/conftest.py`, `tests/db_claim.py`, `tests/unit/test_redis_flush_guard.py`,
+- [x] `CLAUDE.md` § Manual Testing Hygiene names the `setdefault` foot-gun.
+- [x] No file under `tests/conftest.py`, `tests/db_claim.py`, `tests/unit/test_redis_flush_guard.py`,
   or `docs/features/test-db-ownership.md` appears in this PR's diff.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions apply — no expected-failure markers exist for this bug.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions apply — no expected-failure markers exist for this bug.
 
 ## Team Orchestration
 
