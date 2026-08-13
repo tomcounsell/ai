@@ -83,10 +83,12 @@ Gates 1 to 3 govern stale-term rewrites. Gate 4 governs every auto-fix from
 every detector.
 
 Over the three docs the auditor previously corrupted, false rewrites went from
-**18 occurrences to zero**. Across all of `docs/**/*.md` outside `docs/plans/`,
-surviving stale-term proposals are zero; the four docs that still contain a
-`STALE_TERMS` key are all genuine migration or audit prose where any rewrite
-would produce a false sentence. The detector is quiet, not dead: a synthetic
+**18 occurrences to 1**. Across all of `docs/**/*.md` outside `docs/plans/`,
+exactly one stale-term proposal survives — the accepted quoted-transcript
+residual at `docs/guides/summarizer-output-audit.md:68`, which the plan predicted
+and accepted; the four docs that still contain a `STALE_TERMS` key are all
+genuine migration or audit prose where any rewrite would produce a false
+sentence. The detector is quiet, not dead: a synthetic
 sentence carrying a stale term and no migration context still queues a fix, and
 a test pins that.
 
