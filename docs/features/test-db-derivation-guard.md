@@ -61,17 +61,34 @@ database in `[1..TEST_DB_POOL_MAX]`**. In practice this means db 0 only, and in 
 legitimate cases are tests that must construct a db-0 client to prove the db-0 flush guard refuses it,
 and reads of production-only keys such as worker heartbeat registrations.
 
-The invariant is enforced three ways: integer literals anywhere in the exempted expression's subtree,
-literals in the expression's local binding, and the db path of a literal Redis URL. A site the guard
-can prove names a pool slot is not coverable by an allowlist entry at all, even a matching one.
+The invariant is held by **two layers doing different halves**, and which is which matters if you ever
+touch either.
+
+`check_dispositions()` inspects the exemption expression *as text*. It parses `entry.expr` on its own,
+with no syntax tree and no bindings, and rejects an entry containing a pool-slot integer literal —
+`14`, `'redis://localhost:6379/14'`, `15 if base != 15 else 14`. What it cannot do is resolve a name:
+`divergent_db` has no integer in it, so this layer **accepts** it.
+
+`apply_dispositions()` is what actually stops laundering. It refuses to let an `ALLOWLIST` entry cover
+a candidate the *scan* proved names a pool slot, and the scan does have the bindings, so
+`divergent_db` reaches it carrying `pool_db=14`. Hiding a pool database behind a variable name is
+closed here, not above.
+
+That distinction is worth stating because the failure mode is quiet. One test covers the
+`apply_dispositions` condition. A maintainer who believes the text-level check enforces the invariant
+on its own, and simplifies that condition away, sees a single failure, reads it as noise, and removes
+the only thing holding the invariant up.
 
 **`DEFERRED`** — temporary. Must carry `blocked_on` (an issue like `#2628`) and an ISO `expires` date.
 Reported on every run and a hard failure once the date passes. This exists so a site that cannot be
 fixed yet is never laundered through `ALLOWLIST` by hiding its pool database behind a variable.
 
 Entries are keyed by `(path relative to tests/, exact unparsed expression)`. That survives line moves
-and is narrower than exempting a whole file. An entry that matches no site is a failure: exemptions
-cannot outlive the sites they were written for.
+and is narrower than exempting a whole file, but it is **per-file-per-expression, not per-site**: one
+entry covers every site in that file sharing the expression, and would silently cover a new one. The
+`test_redis_flush_guard.py` / `"0"` entry currently covers four sites. The db-0 invariant bounds the
+blast radius — a newcomer can only be swept up if it names db 0 too. An entry that matches no site is
+a failure: exemptions cannot outlive the sites they were written for.
 
 ## Relationship to the runtime ownership check
 

@@ -29,16 +29,33 @@ for ``ast.Attribute`` and ``.id`` for ``ast.Name`` for exactly that reason.
 
 Two dispositions, deliberately distinct
 ---------------------------------------
-``ALLOWLIST`` is permanent and machine-constrained: the settled invariant is that
-no allowlist entry may name a database in ``[1..TEST_DB_POOL_MAX]``, enforced by
-:func:`check_dispositions` rather than by review. In practice that means db 0
-only.
+``ALLOWLIST`` is permanent and machine-constrained: no allowlist entry may name
+a database in ``[1..TEST_DB_POOL_MAX]``. In practice that means db 0 only.
 
-``DEFERRED`` is temporary, dated, and issue-linked. It exists so that a site
-which cannot be fixed this round is never laundered through ``ALLOWLIST`` — an
-entry whose expression resolves to a pool slot would be REJECTED as an allowlist
-entry, and keeping the two lists separate is what lets the invariant stay
-literal. Deferred entries are printed on every run and hard-fail after ``expires``.
+``DEFERRED`` is temporary, dated, and issue-linked, so that a site which cannot
+be fixed this round is never laundered through ``ALLOWLIST``. Deferred entries
+are printed on every run and hard-fail after ``expires``.
+
+**Which layer enforces the invariant, precisely.** Two layers do different
+halves of the job, and it matters which is which:
+
+- :func:`check_dispositions` catches pool-slot **literals** written into an
+  exemption expression. It receives only the ``Exemption`` dataclass and calls
+  ``ast.parse(entry.expr)``, so it has no tree and no bindings. It rejects
+  ``'14'``, ``"'redis://localhost:6379/14'"`` and ``'15 if base != 15 else 14'``
+  — and it **accepts** a bare name like ``'divergent_db'``, because a name in
+  isolation has no integer in it to find.
+- :func:`apply_dispositions` is what actually stops laundering. Its
+  ``cand.pool_db is None or i >= len(allowlist)`` condition refuses to let any
+  ``ALLOWLIST`` entry cover a candidate the *scan* proved names a pool slot,
+  and the scan does have the bindings, so ``divergent_db`` arrives carrying
+  ``pool_db=14``.
+
+An earlier version of this docstring credited the whole protection to
+:func:`check_dispositions`. That was wrong and worth correcting rather than
+quietly fixing: a maintainer who believed it, and who simplified away the one
+condition in :func:`apply_dispositions`, would see a single test fail, read it
+as noise, and delete the only thing holding the invariant up.
 """
 
 from __future__ import annotations
@@ -71,6 +88,12 @@ CLAIM_FUNCS = frozenset({"claim_test_db", "claim_scratch_test_db"})
 # the same-named pytest fixture in conftest, which returns its value.
 CLAIM_URL_NAMES = frozenset({"redis_test_url"})
 
+# Used ONLY to scope the opaque-``**``-splat leg (see `_splat_candidate`). Every
+# other route in this module is deliberately callee-agnostic; this is the one
+# place an enumeration is the lesser evil, because `**` forwarding is ubiquitous
+# in test helpers and a callee-agnostic version flagged 183 unrelated sites.
+REDIS_CONSTRUCTORS = frozenset({"Redis", "StrictRedis", "from_url"})
+
 _URL_DB_RE = re.compile(r"^redis(?:s)?://[^/]*/(\d+)\s*$")
 
 
@@ -85,7 +108,14 @@ class Exemption:
 
     ``path`` is repo-relative to ``tests/``. ``expr`` is the exact
     ``ast.unparse`` of the offending value, which is stable across line moves
-    (unlike a line number) and precise (unlike a whole-file exemption).
+    (unlike a line number).
+
+    Matching is **per-file-per-expression, not per-site**: one entry covers
+    every site in that file sharing the expression, and would silently cover a
+    new one. The single ``test_redis_flush_guard.py`` / ``"0"`` entry currently
+    covers four sites. The ``ALLOWLIST`` db-0 invariant bounds the blast radius
+    — a new site can only be swept up if it names db 0 too — which is why this
+    is acceptable rather than merely convenient.
     """
 
     path: str
@@ -157,9 +187,11 @@ DEFERRED: tuple[Exemption, ...] = (
             "it, so it can be flushed out from under a concurrent process. Fixing it needs a "
             "second independently-claimed db — claim_scratch_test_db() — which does not exist "
             "in tests/db_claim.py yet; #2628 is adding it. Deliberately DEFERRED and not "
-            "ALLOWLIST: the allowlist invariant rejects this expression (its binding resolves "
-            "to pool slots 15/14), and weakening the invariant to fit it is exactly the decay "
-            "this guard exists to prevent."
+            "ALLOWLIST: the scan resolves this name's binding to pool slot 14, and "
+            "apply_dispositions refuses to let an ALLOWLIST entry cover a candidate carrying "
+            "a pool_db. (check_dispositions would accept the bare name — it sees only the "
+            "expression text, with no bindings — so apply_dispositions is the layer doing the "
+            "work here.) Weakening either is exactly the decay this guard exists to prevent."
         ),
         blocked_on="#2628",
         expires="2026-11-06",
@@ -304,6 +336,73 @@ def _resolve_one_hop(
     return False, f"{name.id!r} = {ast.unparse(bound[0])}, which is not a claim call", bound[0]
 
 
+def _splat_candidate(
+    value: ast.AST, rel_path: str, call: ast.Call, callee: str | None
+) -> Candidate | None:
+    """A candidate for a ``**`` splat that could be carrying a ``db``.
+
+    Two shapes, judged differently:
+
+    - **a dict literal with a ``"db"`` key** -- callee-agnostic, like the rest
+      of route 1. The value is visible, so it is judged exactly as a written-out
+      ``db=`` would be. A dict literal with no ``db`` key is provably safe and
+      yields no candidate.
+    - **an opaque ``**name``** -- undecidable, so a violation, but *only* for a
+      callee that looks like a Redis construction.
+
+    That callee scoping is a deliberate, bounded exception to the module's
+    otherwise callee-agnostic polarity, and it is worth naming. Route 1 can
+    afford to ignore the callee because every one of the 17 ``db=`` sites in
+    this tree is a Redis construction. ``**`` is not like that: it is the
+    ordinary way test helpers forward kwargs, and flagging it everywhere
+    produced **183 violations across 100+ unrelated files** on the first
+    attempt. A guard that fires on every test helper in the repo does not get
+    fixed, it gets deleted -- and then the real hole is open again with no
+    guard at all.
+
+    So the enumeration here buys usability at a known cost: a Redis client
+    constructed through an alias nobody listed, receiving an opaque splat, is
+    invisible. Today that costs nothing (the tree has 191 ``**`` call sites and
+    zero are Redis constructions), and the dict-literal leg above stays fully
+    callee-agnostic.
+    """
+    if isinstance(value, ast.Dict):
+        for key, val in zip(value.keys, value.values, strict=False):
+            if isinstance(key, ast.Constant) and key.value == "db":
+                return Candidate(
+                    path=rel_path,
+                    lineno=call.lineno,
+                    kind="db-kwarg",
+                    expr=ast.unparse(val),
+                    callee=callee,
+                    ok=_is_claim_call(val),
+                    detail=(
+                        "db passed through a ** dict literal; value is not a "
+                        "call to claim_test_db()/claim_scratch_test_db()"
+                    ),
+                    pool_db=None if _is_claim_call(val) else _first_pool_db(_int_literals(val)),
+                )
+        return None
+
+    if callee not in REDIS_CONSTRUCTORS:
+        return None
+
+    return Candidate(
+        path=rel_path,
+        lineno=call.lineno,
+        kind="db-kwarg",
+        expr=f"**{ast.unparse(value)}",
+        callee=callee,
+        ok=False,
+        detail=(
+            "opaque ** splat into a Redis construction: this call may carry a "
+            "db= the guard cannot see. Pass db= explicitly from "
+            "claim_test_db() instead of splatting a dict."
+        ),
+        pool_db=None,
+    )
+
+
 def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
     parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
@@ -340,6 +439,19 @@ def scan_source(source: str, rel_path: str) -> ScanResult:
 
         # --- Route 1: any db= keyword, to any callee whatsoever ------------
         for kw in node.keywords:
+            # A `**` splat parses as a keyword with `arg is None`, so a plain
+            # `kw.arg != "db"` skip made `redis.Redis(**{"db": 15})` produce no
+            # candidate at all -- not a violation, not a pass, simply unseen.
+            # That is the same shape the guard exists to close: one nobody
+            # enumerated. There is no live site today (191 `**` call sites
+            # under tests/, zero of them Redis constructions), but the deferred
+            # test_notify_isolation.py site already works with connection_kwargs
+            # dicts, so `redis.Redis(**kw)` is one refactor away.
+            if kw.arg is None:
+                splat = _splat_candidate(kw.value, rel_path, node, callee)
+                if splat is not None:
+                    result.candidates.append(splat)
+                continue
             if kw.arg != "db":
                 continue
             value = kw.value

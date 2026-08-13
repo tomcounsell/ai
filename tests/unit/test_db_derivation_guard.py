@@ -180,6 +180,24 @@ PLANTED_OFFENDERS = [
         "cannot be determined",
         id="unparseable-url",
     ),
+    # A `**` splat parses as a keyword with `arg is None`, so the original
+    # `kw.arg != "db"` skip made both of these produce no candidate at all --
+    # not a violation, not a pass, simply unseen. Exactly the class of miss the
+    # guard exists to close: a shape nobody enumerated. No live site exists
+    # today, but the deferred test_notify_isolation.py already works with
+    # connection_kwargs dicts, so `redis.Redis(**kw)` is one refactor away.
+    pytest.param(
+        "db-through-a-dict-literal-splat",
+        'import redis\n\n\ndef test_x():\n    redis.Redis(**{"db": 15})\n',
+        "db 15",
+        id="db-through-a-dict-literal-splat",
+    ),
+    pytest.param(
+        "opaque-splat-into-a-redis-construction",
+        "import redis\n\n\ndef test_x(kw):\n    redis.Redis(**kw)\n",
+        "may carry a db= the guard cannot see",
+        id="opaque-splat-into-a-redis-construction",
+    ),
 ]
 
 
@@ -344,3 +362,58 @@ def test_unparseable_source_raises_rather_than_being_skipped():
     """A guard that swallows files it cannot parse reports clean on the worst file."""
     with pytest.raises(SyntaxError):
         scan_source("def broken(:\n", "test_broken.py")
+
+
+# ---------------------------------------------------------------------------
+# `**` splat handling (#2700 review, Tech Debt 2)
+# ---------------------------------------------------------------------------
+
+
+class TestSplatHandling:
+    """The dict-literal leg stays callee-agnostic; the opaque leg cannot.
+
+    Flagging every opaque `**` regardless of callee produced 183 violations
+    across 100+ unrelated files on the first attempt — `**kwargs` forwarding is
+    how test helpers are written here. A guard that fires on every helper in
+    the repo gets deleted rather than fixed, and then the real hole is open
+    with no guard at all. So the opaque leg is scoped to Redis constructions
+    and the cost is recorded rather than hidden.
+    """
+
+    def test_a_dict_literal_splat_is_judged_like_a_written_out_kwarg(self):
+        result = scan_source('import redis\ndef t():\n    redis.Redis(**{"db": 15})\n', "t.py")
+        assert len(result.violations) == 1
+        assert result.violations[0].pool_db == 15
+
+    def test_a_dict_literal_splat_carrying_a_claim_call_passes(self):
+        result = scan_source(
+            "import redis\nfrom tests.db_claim import claim_test_db\n"
+            'def t():\n    redis.Redis(**{"db": claim_test_db()})\n',
+            "t.py",
+        )
+        assert result.violations == []
+        assert len(result.candidates) == 1, "the site must still be SEEN, just accepted"
+
+    def test_a_dict_literal_splat_without_a_db_key_is_provably_safe(self):
+        result = scan_source('import redis\ndef t():\n    redis.Redis(**{"host": "x"})\n', "t.py")
+        assert result.candidates == []
+
+    def test_the_dict_literal_leg_ignores_the_callee(self):
+        """Polarity preserved where the value is visible."""
+        result = scan_source('def t():\n    Whatever(**{"db": 15})\n', "t.py")
+        assert len(result.violations) == 1
+
+    def test_an_opaque_splat_into_a_redis_construction_is_undecidable(self):
+        result = scan_source("import redis\ndef t(kw):\n    redis.Redis(**kw)\n", "t.py")
+        assert len(result.violations) == 1
+        assert "cannot see" in result.violations[0].detail
+
+    def test_an_opaque_splat_into_an_unrelated_helper_is_ignored(self):
+        """The bounded exception. Without it the guard is unusable, see the docstring."""
+        result = scan_source("def t(kw):\n    make_session(**kw)\n", "t.py")
+        assert result.candidates == []
+
+    def test_the_real_tree_has_no_splat_violations(self):
+        """Scoping claim, measured rather than asserted: 191 `**` sites, zero Redis."""
+        remaining, _ = apply_dispositions(scan_tree())
+        assert remaining == []
