@@ -28,9 +28,13 @@ Frontmatter example:
 import argparse
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+# Standalone script — sys.path mutation is safe (never imported as library).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from hook_utils.hook_target import read_hook_input, target_from_hook_input  # noqa: E402
 
 MISSING_SECTION_ERROR = """
 VALIDATION FAILED: Plan '{file}' is missing a ## Documentation section.
@@ -73,45 +77,6 @@ ACTION REQUIRED: Either:
 
 Do not leave the section empty or with only generic boilerplate.
 """
-
-
-def find_newest_plan_file(directory: str = "docs/plans") -> str | None:
-    """Find the most recently created plan file in git."""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", f"{directory}/"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-
-        new_files = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            status = line[:2]
-            filepath = line[3:].strip()
-            if status in ("??", "A ", " A", "AM") and filepath.endswith(".md"):
-                new_files.append(filepath)
-
-        if not new_files:
-            return None
-
-        # Return the newest by mtime
-        newest = None
-        newest_mtime = 0
-        for filepath in new_files:
-            path = Path(filepath)
-            if path.exists():
-                mtime = path.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = str(path)
-        return newest
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-        return None
 
 
 def extract_documentation_section(content: str) -> str | None:
@@ -214,23 +179,30 @@ def main():
     )
     args = parser.parse_args()
 
-    # Consume stdin if provided (SDK passes context via stdin)
-    try:
-        json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        pass
-
-    # Determine which file to validate
+    # An explicit path (CLI / tests) wins; otherwise take the path the hook's
+    # own tool input names. Never guess.
     plan_file = args.plan_file
     if not plan_file:
-        plan_file = find_newest_plan_file()
-        if not plan_file:
-            # No new plan file detected — nothing to validate, pass through
-            sys.exit(0)
+        plan_file = target_from_hook_input(read_hook_input())
+
+    if not plan_file:
+        sys.exit(0)
+
+    # Only enforce on plan docs; pass through anything else. This has to come
+    # before the existence check, or a Write to any non-plan path that the hook
+    # cannot stat (a relative path resolved against a different cwd, a file in
+    # another worktree) exits 2 and blocks a write it has no business judging.
+    if "docs/plans" not in plan_file.replace("\\", "/"):
+        sys.exit(0)
 
     if not Path(plan_file).exists():
-        print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
-        sys.exit(2)
+        # An explicit CLI argument that names nothing is a user error worth
+        # reporting. A hook-derived path we cannot resolve is not: there is no
+        # content to judge, so there is no finding to make.
+        if args.plan_file:
+            print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
 
     success, message = validate_documentation_section(plan_file)
 
