@@ -119,6 +119,11 @@ CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
 # underscore forms and mixed-case inputs still resolve correctly (#1638).
 REVIEW_APPROVED = "APPROVED"
 REVIEW_CHANGES_REQUESTED = "CHANGES REQUESTED"
+# Preflight short-circuit verdict (#2796): /do-pr-review records this when the
+# PR is CONFLICTING/DIRTY (or mergeability is UNKNOWN after retry) and stops
+# WITHOUT performing a code review. Canonical spaced form — the skills emit the
+# underscore form ``BLOCKED_ON_CONFLICT``, which normalize_verdict folds to this.
+REVIEW_BLOCKED_ON_CONFLICT = "BLOCKED ON CONFLICT"
 
 # Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
 # and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
@@ -815,11 +820,86 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     )
 
 
+def guard_g9_blocked_on_conflict(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G9: escalate when the recorded REVIEW verdict is BLOCKED_ON_CONFLICT (#2796).
+
+    ``BLOCKED_ON_CONFLICT`` is a first-class verdict token in
+    ``tools/sdlc_verdict.py``, ``tools/sdlc_review_finalize.py`` and
+    ``tools/sdlc_stage_marker.py``: ``/do-pr-review``'s preflight records it
+    when the PR is ``CONFLICTING``/``DIRTY`` (or mergeability is ``UNKNOWN``
+    after retry) and stops WITHOUT reviewing any code. Until this guard, the
+    router had no notion of the token at all, so a correctly-finalized
+    conflict verdict routed by accident:
+
+        row 8  (``_rule_review_has_findings``, via REVIEW==failed) → /do-patch
+        row 8b (``_rule_patch_applied_after_review``)              → /do-pr-review
+        → preflight short-circuits again, re-records the same verdict, repeat
+
+    ``/do-patch`` cannot resolve a merge conflict (its remit is failing tests
+    and review blockers) and the re-review never reaches the code, so the pair
+    ping-pongs until G4 escalates with a generic "stage oscillation" message
+    that names neither the conflict nor the rebase. Observed on popoto PRs
+    #546 and #548.
+
+    **Why Blocked rather than a dispatch row.** Nothing in the skill set can
+    resolve conflicts: ``/do-merge`` declares conflict resolution explicitly
+    out of scope, ``/do-patch`` is not specced for rebases, and there is no
+    rebase skill. The ``/do-pr-review`` outcome contract already states the
+    conclusion this guard enforces —
+    ``BLOCKED_ON_CONFLICT`` carries ``next_skill: null``, "the pipeline should
+    NOT auto-advance; the author must rebase". A guard is also the only shape
+    that CAN express this: a ``DispatchRule`` always yields a ``Dispatch``.
+
+    Two step-asides keep a resolved conflict from wedging the lane, so this
+    escalates on a LIVE conflict only:
+
+    - ``pr_merge_state == "CLEAN"`` — the live world says the PR is mergeable,
+      so the recorded verdict is describing a conflict that has since been
+      resolved. Any other value (including ``None``/``UNKNOWN``) still
+      escalates: fail-closed, since an unknown merge state is exactly the
+      condition preflight treats as conflicting.
+    - ``_review_verdict_is_stale`` — a ``/do-patch`` was dispatched after the
+      verdict was recorded, so the rebase may already have landed. Step aside
+      and let row 8b re-review; if the conflict survives, the re-review
+      records a FRESH conflict verdict and this guard fires on the next turn.
+
+    Ordered immediately after G4 so an already-oscillating lane keeps G4's
+    existing precedence (no behavior change for states that escalate today),
+    while a newly-conflicted lane stops here on turn 1 — before it can burn
+    a patch/review cycle — with a reason that names the rebase.
+    """
+    if not meta.get("pr_number"):
+        return None
+    verdict = normalize_verdict(_latest_review_verdict(stage_states, meta))
+    if REVIEW_BLOCKED_ON_CONFLICT not in verdict:
+        return None
+    if meta.get("pr_merge_state") == "CLEAN":
+        return None
+    if _review_verdict_is_stale(stage_states):
+        return None
+
+    pr_number = meta.get("pr_number")
+    merge_state = meta.get("pr_merge_state")
+    return Blocked(
+        reason=(
+            f"G9: PR #{pr_number} has merge conflicts "
+            f"(review recorded BLOCKED_ON_CONFLICT, merge state {merge_state!r}). "
+            f"No code review was performed. Rebase the branch onto main and "
+            f"resolve the conflicts, then re-run /do-pr-review. No SDLC skill "
+            f"resolves conflicts — this needs a human."
+        ),
+        guard_id="G9",
+    )
+
+
 GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g1_critique_loop,
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
     guard_g4_oscillation,
+    guard_g9_blocked_on_conflict,
     guard_g8_artifact_verification,
     guard_g7_plan_revising,
     guard_g5_artifact_hash_cache,

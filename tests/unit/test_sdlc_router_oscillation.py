@@ -1190,3 +1190,129 @@ class TestStageEntryUpsert:
             assert stage_for_skill(skill) == stage
         assert stage_for_skill("/do-nonexistent") is None
         assert stage_for_skill(None) is None
+
+
+# ---------------------------------------------------------------------------
+# G9 — BLOCKED_ON_CONFLICT ownership (#2796)
+# ---------------------------------------------------------------------------
+
+
+class TestG9BlockedOnConflict:
+    """A recorded BLOCKED_ON_CONFLICT verdict must escalate, not route.
+
+    The token is first-class in tools/sdlc_verdict.py,
+    tools/sdlc_review_finalize.py and tools/sdlc_stage_marker.py, but the
+    router had no notion of it: a PR that went DIRTY mid-pipeline recorded a
+    correctly-finalized verdict that then ping-ponged between row 8
+    (/do-patch, which cannot rebase) and row 8b (/do-pr-review, which
+    short-circuits on preflight and re-records the same verdict). Observed on
+    popoto PRs #546 and #548.
+    """
+
+    def _conflicted(self, *, verdict: str = "BLOCKED_ON_CONFLICT", **meta_over):
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            # The outcome contract's status for BLOCKED_ON_CONFLICT is "fail".
+            "REVIEW": "failed",
+            "PATCH": "completed",
+            "_verdicts": {
+                "REVIEW": {"verdict": verdict, "recorded_at": "2026-08-13T12:00:00+00:00"}
+            },
+            "_sdlc_dispatches": [{"skill": SKILL_DO_PATCH, "at": "2026-08-13T11:00:00+00:00"}],
+        }
+        meta = {
+            "pr_number": 546,
+            "latest_review_verdict": verdict,
+            "last_dispatched_skill": SKILL_DO_PATCH,
+            "pr_merge_state": "DIRTY",
+        }
+        meta.update(meta_over)
+        return states, meta
+
+    def test_conflict_verdict_escalates_to_g9(self):
+        """THE #2796 BUG: previously routed to /do-patch via row 8."""
+        states, meta = self._conflicted()
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked), f"expected Blocked, got {result!r}"
+        assert result.guard_id == "G9"
+        assert "rebase" in result.reason.lower()
+        assert "546" in result.reason
+
+    def test_underscore_and_spaced_forms_both_match(self):
+        """normalize_verdict folds BLOCKED_ON_CONFLICT to the spaced form."""
+        for form in ("BLOCKED_ON_CONFLICT", "BLOCKED ON CONFLICT", "blocked_on_conflict"):
+            states, meta = self._conflicted(verdict=form)
+            result = decide_next_dispatch(states, meta)
+            assert isinstance(result, Blocked), f"{form!r} did not escalate: {result!r}"
+            assert result.guard_id == "G9"
+
+    def test_decorated_verdict_still_matches(self):
+        """The token may carry decoration around it (per sdlc_verdict.py)."""
+        states, meta = self._conflicted(verdict="REVIEW: BLOCKED_ON_CONFLICT (preflight)")
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G9"
+
+    def test_clean_merge_state_steps_aside(self):
+        """Live world says mergeable → the recorded conflict is resolved; do
+        not wedge the lane on a verdict describing a conflict that is gone."""
+        states, meta = self._conflicted(pr_merge_state="CLEAN")
+        result = decide_next_dispatch(states, meta)
+        assert not (isinstance(result, Blocked) and result.guard_id == "G9")
+
+    def test_unknown_merge_state_still_escalates(self):
+        """Fail-closed: an unresolvable merge state is exactly what preflight
+        treats as conflicting — it must not read as "probably fine"."""
+        for state in (None, "UNKNOWN", "DIRTY", "BLOCKED"):
+            states, meta = self._conflicted(pr_merge_state=state)
+            result = decide_next_dispatch(states, meta)
+            assert isinstance(result, Blocked), f"merge_state={state!r} did not escalate"
+            assert result.guard_id == "G9"
+
+    def test_stale_conflict_verdict_steps_aside_for_rereview(self):
+        """A /do-patch dispatched AFTER the verdict may have landed the rebase.
+        Step aside so row 8b re-reviews; a surviving conflict records a fresh
+        verdict and G9 fires next turn."""
+        states, meta = self._conflicted()
+        states["_sdlc_dispatches"].append(
+            {"skill": SKILL_DO_PATCH, "at": "2026-08-13T13:00:00+00:00"}
+        )
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected re-review, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8b"
+
+    def test_no_pr_is_inert(self):
+        states, meta = self._conflicted()
+        meta["pr_number"] = None
+        result = decide_next_dispatch(states, meta)
+        assert not (isinstance(result, Blocked) and result.guard_id == "G9")
+
+    def test_other_verdicts_unaffected(self):
+        """G9 is scoped to the conflict token — normal verdicts route as before."""
+        states, meta = self._conflicted(verdict="CHANGES REQUESTED")
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected a Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PATCH
+
+    def test_loop_is_bounded_at_the_first_turn(self):
+        """End to end: the patch↔review ping-pong never starts. Before G9 this
+        burned a /do-patch and a /do-pr-review before G4 escalated with a
+        message naming neither the conflict nor the rebase."""
+        states, meta = self._conflicted()
+        dispatched = []
+        for _ in range(6):
+            count, _skill = compute_same_stage_count(states)
+            meta["same_stage_dispatch_count"] = count
+            result = decide_next_dispatch(states, meta)
+            if isinstance(result, Blocked):
+                break
+            dispatched.append(result.skill)
+            record_dispatch(states, result.skill, pr_number=546)
+            meta["last_dispatched_skill"] = result.skill
+        assert dispatched == [], f"conflict state dispatched skills before escalating: {dispatched}"
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G9"

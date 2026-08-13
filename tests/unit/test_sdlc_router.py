@@ -1133,7 +1133,13 @@ class TestEmptyStateRegression:
 
 
 class TestGuardsListOrder:
-    """Pin the exact GUARDS list order established by #1871."""
+    """Pin the exact GUARDS list order established by #1871.
+
+    G9 (#2796) is inserted immediately AFTER G4 so an already-oscillating lane
+    keeps G4's existing precedence — no state that escalates today changes its
+    guard_id — while a newly-conflicted lane escalates at G9 on turn 1, before
+    it can burn a patch/review cycle.
+    """
 
     def test_guards_pinned_order(self):
         names = [g.__name__ for g in GUARDS]
@@ -1142,6 +1148,7 @@ class TestGuardsListOrder:
             "guard_g2_critique_cycle_cap",
             "guard_g3_pr_lock",
             "guard_g4_oscillation",
+            "guard_g9_blocked_on_conflict",
             "guard_g8_artifact_verification",
             "guard_g7_plan_revising",
             "guard_g5_artifact_hash_cache",
