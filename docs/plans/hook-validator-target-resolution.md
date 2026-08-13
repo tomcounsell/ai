@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -266,31 +266,31 @@ The one integration surface that matters is the reverse direction: these hooks g
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/hook-target-resolution.md` describing the contract: validators resolve their target from the hook payload, `None` means nothing-to-validate, and working-tree state is never an input to target selection. Include the tracked-`docs/plans/` reproducer as the canonical regression.
-- [ ] Add an entry to `docs/features/README.md` index table (respect the sort order — `validate_features_readme_sort.py` enforces it).
-- [ ] Update `docs/features/hook-manifest.md` to note that `hook_utils/` is the sanctioned home for shared validator logic and to record the `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))` bootstrap as the standard import pattern.
+- [x] Create `docs/features/hook-target-resolution.md` describing the contract: validators resolve their target from the hook payload, `None` means nothing-to-validate, and working-tree state is never an input to target selection. Include the tracked-`docs/plans/` reproducer as the canonical regression. **Also documents the "No cwd, ever" rule** — neither the payload's cwd nor the hook process's — which the review round-1 blocker turned out to hinge on.
+- [x] Add an entry to `docs/features/README.md` index table (respect the sort order — `validate_features_readme_sort.py` enforces it). Sort order verified by `test_features_readme_sort.py`.
+- [x] Update `docs/features/hook-manifest.md` to note that `hook_utils/` is the sanctioned home for shared validator logic and to record the `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))` bootstrap as the standard import pattern.
 
 ### External Documentation Site
 No external documentation site in this repo — nothing to update.
 
 ### Inline Documentation
-- [ ] `hook_target.py`'s module docstring states the contract and cites #2682 / #2689 as the defects it exists to prevent.
-- [ ] Each ported validator's `main()` keeps a short comment on why an explicit CLI path and a hook-derived path get different missing-file treatment.
+- [x] `hook_target.py`'s module docstring states the contract and cites #2682 / #2689 as the defects it exists to prevent.
+- [x] Each ported validator's `main()` keeps a short comment on why an explicit CLI path and a hook-derived path get different missing-file treatment. Verified present in all five.
 
 ### Test Suite Index
-- [ ] Update the validation table in `tests/README.md`: bump the counts for `test_validate_verification_section.py` (9 → new total) and `test_validate_test_impact.py` (20 → new total), and add rows for `test_validate_documentation_section.py`, `test_validate_file_contains.py`, and `test_hook_target.py`.
+- [x] Update the validation table in `tests/README.md`: bump the counts for `test_validate_verification_section.py` (9 → 31) and `test_validate_test_impact.py` (20 → 42), and add rows for `test_validate_documentation_section.py` (41), `test_validate_file_contains.py` (49), and `test_hook_target.py` (128). `test_validate_no_gos_justification.py` also moved 72 → 77.
 
 ## Success Criteria
 
 - [x] `grep -rn "find_newest_plan_file" .claude/` returns zero matches.
 - [x] `grep -rn "find_newest_file" .claude/hooks/validators/` returns zero matches.
 - [x] `hook_utils/hook_target.py` exists and is imported by all five validators in the family (the four ported plus `validate_no_gos_justification.py`).
-- [ ] The #2689 reproducer passes: with `docs/plans/` containing a tracked anchor and another lane's untracked plan, a payload naming `docs/features/mine.md` exits 0 for all four ported validators. This currently exits 2 for three of them.
+- [x] The #2689 reproducer passes: with `docs/plans/` containing a tracked anchor and another lane's untracked plan, a payload naming `docs/features/mine.md` exits 0 for all four ported validators. Verified at DOCS against a live fixture — exit 0 for all **five** (the four ported plus `validate_no_gos_justification.py`). Pinned by `test_cross_lane_write_is_not_judged` in each family test file.
 - [x] A payload naming a genuinely deficient plan doc still exits 2, for each of the four.
 - [x] All tests in `test_validate_no_gos_justification.py` pass, with exactly one deliberate change. **Amended during the patch round.** The criterion originally read "all 65 pass unchanged", which review round 1 made unsatisfiable: Tech Debt 2 required unifying explicit-argv semantics across the family, and `test_non_plan_path_passes_even_when_it_does_not_exist` pinned the *old* behavior (an operator-supplied path outside `docs/plans` silently ignored). It was split into `test_hook_derived_non_plan_path_passes_even_when_it_does_not_exist`, which preserves the real intent — scope filter before existence check, on the payload path — and `test_explicit_cli_path_bypasses_the_scope_filter`, which pins the new unified rule. The regression-proof value of the file is intact; only the one assertion that encoded the inconsistency changed.
-- [ ] All 29 existing pure-function tests in the verification and test-impact files pass unchanged.
+- [x] All 29 existing pure-function tests in the verification and test-impact files pass unchanged. Verified via `git diff main...HEAD` on both files: the only removed lines are the module docstring and the `VALIDATORS_DIR` import-path constant (the shared `hook_utils` bootstrap replaced it). No test function body changed; the additions are the new targeting classes.
 - [x] Tests pass (`/do-test`) with `POPOTO_TEST_DB=12` via `scripts/pytest-clean.sh`.
-- [ ] Documentation updated (`/do-docs`).
+- [x] Documentation updated (`/do-docs`). Cascade run at HEAD `85b8ccd38`: retired-term sweep clean (the deleted guessers survive only in this plan and in the feature doc's own "deleted" list), docs-auditor substrate `status: ok` with 0 fixes and 0 withheld, and three surfaces corrected that predated the review round which promoted `in_scope` into the shared module.
 - [x] No hook was disabled to complete the work; if one was, the PR records it and it is re-enabled.
 - [x] The PR body states that #2638 and #2641 belong to PR #2686 and that #2736 is sequenced behind it.
 
