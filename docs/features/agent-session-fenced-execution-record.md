@@ -239,6 +239,7 @@ The fleet rollout to a bridge-running machine happens with these gaps known, and
 
 - [Agent Session Model](agent-session-model.md) — full field catalog.
 - [Agent Session Health Monitor](agent-session-health-monitor.md) — orphan reap and recovery detail.
+- [AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md) — who is authorized to write `updated_at` and the other liveness fields, and the `/update` reaper's full liveness ladder, of which this fence is the top rung.
 - [PM Session Liveness](pm-session-liveness.md) — evidence-only liveness detection.
 - [Redis Durability](redis-durability.md) — the broader durability posture this milestone feeds.
 - [Session Recovery Mechanisms](session-recovery-mechanisms.md) — where the startup dead-worker sweep fits among the other recovery mechanisms.
