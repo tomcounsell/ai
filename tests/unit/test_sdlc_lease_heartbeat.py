@@ -175,6 +175,135 @@ class TestPeekFirstRenewOnly:
         assert renewed["run_id"] == "mine"
         assert int(eval_args[5]) > 0  # ARGV[3]: the TTL
 
+    def test_no_supervisor_args_is_the_unchanged_pre_2714_behavior(self):
+        """Default-off proof (#2714 Test Impact): every branch this issue added
+        is inert unless an identity was explicitly recorded.
+
+        Called exactly as the pre-#2714 callers call it -- no supervisor args --
+        the loop peeks, renews, and exits at the caller's own bound: no process
+        is probed, no lease is released, no signal is cleared, and the exit
+        reason is the plain ``max_lifetime`` one, not the new unsupervised
+        ceiling. A regression here means the supervisor watch acquired a
+        default-on foothold.
+        """
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        calls = []
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+            calls.append((run_id, peek, renew_only))
+            return _peek_result("mine") if peek else MagicMock()
+
+        ticks = iter([0.0, 1.0, 2.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+            patch("agent.session_health._psutil_process_for_pid") as probe,
+            patch("models.session_lifecycle.release_issue_lock") as release,
+            patch("agent.supervised_run.clear_supervised_run_signal") as clear,
+            patch.object(logging.getLogger("tools.sdlc_lease_heartbeat"), "info") as info,
+        ):
+            rc = run_heartbeat(
+                issue_number=2446,
+                run_id="mine",
+                interval=1,
+                max_lifetime=5,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert probe.call_count == 0  # the supervisor watch never engaged
+        release.assert_not_called()
+        clear.assert_not_called()
+        renews = [c for c in calls if c[1] is False]
+        assert len(renews) >= 1
+        assert write_signal.call_count >= 1
+        logged = " ".join(str(c.args) for c in info.call_args_list)
+        assert "max_lifetime" in logged
+        assert "unsupervised_max_lifetime" not in logged
+
+    def test_dead_payload_pid_with_a_live_supervisor_still_renews(self):
+        """#2714 must never confuse the PAYLOAD pid with the SUPERVISOR pid.
+
+        Two different pids are in play on every local run: the lease payload's,
+        stamped by the ephemeral ``session-ensure`` CLI and dead by tick one,
+        and the supervising ``claude`` process's, handed over on the argv. Only
+        the latter may end the loop. Here the payload pid is dead and the
+        supervisor is alive: the renew must still fire (#2446/#2451) and the
+        lease must not be released.
+
+        Runs the REAL ``touch_issue_lock`` against the per-worker test Redis so
+        the payload-pid path is genuinely exercised, and keys the psutil double
+        on the pid so a mixed-up lookup shows up as an assertion failure rather
+        than a coincidence.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        issue = 271402
+        key = f"session:issuelock:{issue}"
+        payload_pid, supervisor_pid = 4242, 777
+        _R.delete(key)
+        _R.set(
+            key,
+            json.dumps(
+                {
+                    "run_id": "mine",
+                    "session_id": "sdlc-local-2714",
+                    "pid": payload_pid,  # the session-ensure CLI -- long dead
+                    "machine_id": "hw-uuid-1",
+                    "hostname": "this-host",
+                    "create_time": 1.0,
+                }
+            ),
+            ex=1800,
+        )
+
+        probed = []
+
+        def probe(pid):
+            probed.append(pid)
+            return None if pid == payload_pid else _alive_proc(99.0)
+
+        ticks = iter([0.0, 1.0, 2.0, 999.0])
+        try:
+            with (
+                patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+                patch("agent.session_health._psutil_process_for_pid", side_effect=probe),
+                patch("agent.supervised_run.write_supervised_run_signal"),
+                patch("models.session_lifecycle.release_issue_lock") as release,
+            ):
+                rc = run_heartbeat(
+                    issue_number=issue,
+                    run_id="mine",
+                    session_id="sdlc-local-2714",
+                    interval=1,
+                    max_lifetime=5,
+                    supervisor_pid=supervisor_pid,
+                    supervisor_create_time=99.0,
+                    supervisor_check_interval=1,
+                    _sleep=lambda s: None,
+                    _monotonic=lambda: next(ticks),
+                )
+
+            assert rc == 0
+            # The dead payload pid never became a death signal ...
+            release.assert_not_called()
+            # ... and the supervisor pid is the one the watch actually probed.
+            assert supervisor_pid in probed
+            # The lease survived, renewed under our own identity.
+            stored = _R.get(key)
+            assert stored is not None
+            renewed = json.loads(stored)
+            assert renewed["run_id"] == "mine"
+            assert renewed["renewed_at"] > 0
+        finally:
+            _R.delete(key)
+
     def test_missing_identifiers_exit_clean_never_touch(self):
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
@@ -344,6 +473,46 @@ class TestSupervisedRunSignalRenewal:
         assert rc == 0
         assert len(renews) >= 2  # the raising write did not end the loop
 
+    def test_signal_is_cleared_on_the_supervisor_dead_exit(self):
+        """#2714: a dead supervisor's signal is dropped, not left to expire.
+
+        #2659 coupled the signal's lifetime to the lease's, which is exactly
+        why a zombie heartbeat kept BOTH keys fresh. The coupling has to hold
+        in the other direction too: when the watch releases the lease it must
+        clear the companion signal under the same identity in the same breath,
+        or a stale ``session:supervisedrun:{N}`` outlives the lock it was
+        supposed to shadow for up to a full TTL and a successor's forks read a
+        dead run's ``run_id``.
+        """
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=_self_owned_touch()),
+            patch("agent.supervised_run.write_supervised_run_signal"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+            patch("models.session_lifecycle.release_issue_lock") as release,
+            patch("agent.supervised_run.clear_supervised_run_signal") as clear,
+        ):
+            rc = run_heartbeat(
+                issue_number=2659,
+                run_id="mine",
+                session_id="sdlc-local-2659",
+                interval=1,
+                max_lifetime=100,
+                supervisor_pid=4242,
+                supervisor_create_time=99.0,
+                supervisor_check_interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        # Compare-and-delete keyed on OUR run_id: a successor that already took
+        # over is never harmed by this clear.
+        clear.assert_called_once_with(2659, "mine")
+        release.assert_called_once_with(2659, "mine")
+
 
 class TestReleaseRaceIsClosed:
     """Race 1 (issue #2714): the supervisor releases the lease in the window
@@ -504,6 +673,32 @@ class TestSupervisorIdentityResolution:
         monkeypatch.delenv("CLAUDE_PID", raising=False)
         with patch.object(si, "_self_process", side_effect=RuntimeError("psutil exploded")):
             assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_UNRESOLVED, None, None)
+            # The best-effort contract asserted through its OBSERVABLE fallback,
+            # not through a `pass`: the caller gets (None, None) and no
+            # exception crosses the boundary into the ensure that spawns the
+            # heartbeat.
+            assert si.resolve_supervisor_identity() == (None, None)
+
+    def test_env_tier_raising_degrades_to_the_ancestry_tier(self, monkeypatch):
+        """A failing tier degrades to the next one, never to unresolved."""
+        from tools import sdlc_supervisor_identity as si
+
+        monkeypatch.setenv("CLAUDE_PID", "32886")
+        ancestor = MagicMock()
+        ancestor.pid = 999
+        ancestor.exe.return_value = "/opt/homebrew/bin/claude"
+        ancestor.create_time.return_value = 222.5
+        me = MagicMock()
+        me.parents.return_value = [ancestor]
+
+        with (
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                side_effect=RuntimeError("psutil exploded"),
+            ),
+            patch.object(si, "_self_process", return_value=me),
+        ):
+            assert si.resolve_supervisor_identity_detailed() == (si.SOURCE_ANCESTRY, 999, 222.5)
 
     def test_module_never_consults_the_parent_pid_syscall(self):
         """spike-2 anti-criterion: ``ppid``/``getppid`` is not a death signal."""
@@ -769,6 +964,43 @@ class TestSupervisorLiveness:
         assert rc == 0
         release.assert_not_called()
         assert len(renews) >= 3  # the raising probe never stopped the renewer
+
+    def test_malformed_supervisor_argv_never_aborts_the_cli(self):
+        """The CLI boundary half of "malformed means unresolved, not dead".
+
+        ``--supervisor-pid`` / ``--supervisor-create-time`` are deliberately
+        parsed as strings. With ``type=int`` / ``type=float`` a garbage value
+        would abort argparse with exit code 2 and leave the lease with NO
+        renewer at all -- strictly worse than the unresolved fallback. The
+        values must reach ``run_heartbeat`` verbatim, where
+        ``_resolved_supervisor`` classifies them as unresolved.
+        """
+        import sys
+
+        from tools import sdlc_lease_heartbeat as hb
+
+        for pid, create_time in [("not-a-pid", "99.0"), ("0", "99.0"), ("-5", "not-a-time")]:
+            argv = [
+                "sdlc_lease_heartbeat",
+                "--issue-number",
+                "2714",
+                "--run-id",
+                "mine",
+                "--supervisor-pid",
+                pid,
+                "--supervisor-create-time",
+                create_time,
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(hb, "run_heartbeat", return_value=0) as run,
+                patch.object(hb.logging, "basicConfig"),
+                patch.object(hb.sys, "exit"),
+            ):
+                hb.main()  # no SystemExit(2) from argparse
+
+            assert run.call_args.kwargs["supervisor_pid"] == pid
+            assert hb._resolved_supervisor(pid, create_time) == (None, None)
 
 
 class TestUnsupervisedCeiling:
