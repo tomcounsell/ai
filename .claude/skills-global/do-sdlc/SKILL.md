@@ -241,7 +241,8 @@ this run's identity:
 sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 ```
 
-Do **not** append `2>/dev/null || true`, or any other form that discards stderr or the exit code.
+Do **not** append a stderr redirect to `/dev/null`, a trailing `|| true`, or any other form that
+discards the diagnostic or the exit code.
 The whole point of this step is the payload; a form that destroys it makes every instruction below
 unfollowable and lets the run continue under an identity it has silently lost.
 

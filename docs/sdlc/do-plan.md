@@ -64,8 +64,12 @@ SKILL.md Phase 4 step 2a for the exact `date -u` invocation) and pushing,
 clear the lock so the router can route to build:
 
 ```bash
-sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id}
 ```
+
+Same disposition as the stage markers above: check the exit code, and treat a
+foreign-owner refusal as a stop condition rather than leaving the lock set while
+reporting success.
 
 ## Popoto Schema Migration Requirement
 
