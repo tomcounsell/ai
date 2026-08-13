@@ -409,6 +409,7 @@ Default `--window` is the watchdog's own `SESSION_PROGRESS_DEADLINE_S`, so the C
 **What it deliberately refuses to do.** Instantaneous `%CPU` and child-process count are not collected anywhere in `tools/session_progress.py`, and a test asserts they never creep in. Those two readings produced the 2026-08-07 misdiagnosis (#2662): a healthy session that went on to open a 14-file PR was reported as deadlocked because `%CPU` sampled 0.0 between subprocess bursts and the parent transcript was silent — the *expected* shape of a long synchronous `Agent` call. Every collector here is fail-silent and reports absence as absence: a missing marker directory, an absent transcript, an unreadable task dir, and a dead pid each read as "no signal", never as a hang.
 
 Resolution goes through `tools.valor_session._find_session`, the same Popoto-ORM resolver every other verb uses. No raw Redis access on this path.
+
 ### Disk Reclaim (`tools.disk_reclaim`)
 
 Ages out three categories of on-disk state whose teardown code previously had no

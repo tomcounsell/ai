@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import agent.session_runner.adapter as adapter
 from tools.session_progress import (
     VERDICT_NO_RECENT_ACTIVITY,
     VERDICT_PROGRESSING,
@@ -87,6 +88,20 @@ def _write_marker(root, session_id, ts, name="pm_hook_edges.toolactivity"):
     return d
 
 
+def _point_base_dir_at(monkeypatch, path) -> None:
+    """Point the production hook-edge base dir at ``path`` for this test.
+
+    Mirrors ``tests/unit/session_runner/test_tool_activity_liveness.py::
+    _point_base_dir_at``. ``tool_activity_signal`` has exactly one
+    implementation — it always delegates to
+    ``agent.session_runner.liveness.tool_activity_ts``, which resolves
+    ``agent.session_runner.adapter._hook_edge_base_dir()`` — so this is how
+    every test in this file drives markers through the real read path
+    instead of carrying a second, test-only implementation here.
+    """
+    monkeypatch.setattr(adapter, "_hook_edge_base_dir", lambda: str(path))
+
+
 def _write_transcript(projects_root, uuid, *, mtime, pr_entries=()):
     d = projects_root / "-Users-tomcounsell-src-ai"
     d.mkdir(parents=True, exist_ok=True)
@@ -113,7 +128,7 @@ def _write_task_output(tmp_root, uuid, *, mtime, task_id="a4567bb1ee449e919"):
 # ---------------------------------------------------------------------------
 
 
-def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path):
+def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path, monkeypatch):
     """Fresh tool activity + a 20-minute-quiet parent transcript = PROGRESSING.
 
     This is the exact evidence shape of the 2026-08-07 misdiagnosis. The
@@ -132,6 +147,7 @@ def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path):
 
     # Tool activity 4 seconds ago — the load-bearing signal.
     _write_marker(hook_root, "tg_cyndra_-1003900483201_353", NOW - 4)
+    _point_base_dir_at(monkeypatch, hook_root)
     # Parent transcript silent for 20 minutes: the EXPECTED shape, not a hang.
     _write_transcript(projects_root, uuid, mtime=NOW - 1200)
 
@@ -150,7 +166,6 @@ def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path):
         session,
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(projects_root),
         task_output_roots=[str(tmp_root)],
     )
@@ -163,13 +178,14 @@ def test_2662_scenario_fresh_tool_activity_quiet_transcript(tmp_path):
     assert "stuck" not in report.render().lower()
 
 
-def test_2662_scenario_reports_the_pr_it_went_on_to_open(tmp_path):
+def test_2662_scenario_reports_the_pr_it_went_on_to_open(tmp_path, monkeypatch):
     """The verdict line surfaces pr-link artifacts alongside the liveness read."""
     hook_root = tmp_path / "hook_edges"
     projects_root = tmp_path / "projects"
     uuid = "6f451ea2-687b-4258-967b-2caff5975fc0"
 
     _write_marker(hook_root, "s1", NOW - 4)
+    _point_base_dir_at(monkeypatch, hook_root)
     _write_transcript(
         projects_root,
         uuid,
@@ -190,7 +206,6 @@ def test_2662_scenario_reports_the_pr_it_went_on_to_open(tmp_path):
         _session(session_id="s1", claude_session_uuid=uuid),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(projects_root),
         task_output_roots=[str(tmp_path / "tmp")],
     )
@@ -204,13 +219,13 @@ def test_2662_scenario_reports_the_pr_it_went_on_to_open(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_absence_of_all_evidence_is_unknown_not_wedged(tmp_path):
+def test_absence_of_all_evidence_is_unknown_not_wedged(tmp_path, monkeypatch):
     """No marker, no transcript, no task output, no ORM stamps → UNKNOWN."""
+    _point_base_dir_at(monkeypatch, tmp_path / "absent")
     report = build_report(
         _session(claude_session_uuid=None),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(tmp_path / "absent"),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -218,14 +233,14 @@ def test_absence_of_all_evidence_is_unknown_not_wedged(tmp_path):
     assert "absence of evidence" in report.verdict_reason
 
 
-def test_all_signals_stale_is_no_recent_activity(tmp_path):
+def test_all_signals_stale_is_no_recent_activity(tmp_path, monkeypatch):
     hook_root = tmp_path / "hook_edges"
     _write_marker(hook_root, "s1", NOW - 5000)
+    _point_base_dir_at(monkeypatch, hook_root)
     report = build_report(
         _session(session_id="s1", claude_session_uuid=None),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -235,15 +250,15 @@ def test_all_signals_stale_is_no_recent_activity(tmp_path):
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "killed", "abandoned", "cancelled"])
-def test_terminal_status_is_unknown_even_with_fresh_signals(tmp_path, status):
+def test_terminal_status_is_unknown_even_with_fresh_signals(tmp_path, monkeypatch, status):
     """A finished session is neither progressing nor inactive — decline to guess."""
     hook_root = tmp_path / "hook_edges"
     _write_marker(hook_root, "s1", NOW - 2)
+    _point_base_dir_at(monkeypatch, hook_root)
     report = build_report(
         _session(session_id="s1", status=status, claude_session_uuid=None),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -251,16 +266,16 @@ def test_terminal_status_is_unknown_even_with_fresh_signals(tmp_path, status):
     assert status in report.verdict_reason
 
 
-def test_task_output_alone_can_prove_progress(tmp_path):
+def test_task_output_alone_can_prove_progress(tmp_path, monkeypatch):
     """A fresh background-task output file is sufficient positive evidence."""
     uuid = "abc00000-0000-0000-0000-000000000000"
     tmp_root = tmp_path / "tmp"
     _write_task_output(tmp_root, uuid, mtime=NOW - 30)
+    _point_base_dir_at(monkeypatch, tmp_path / "absent")
     report = build_report(
         _session(session_id="s-nomarker", claude_session_uuid=uuid),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(tmp_path / "absent"),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_root)],
     )
@@ -268,12 +283,12 @@ def test_task_output_alone_can_prove_progress(tmp_path):
     assert "task_output" in report.verdict_reason
 
 
-def test_orm_liveness_fields_count_as_evidence(tmp_path):
+def test_orm_liveness_fields_count_as_evidence(tmp_path, monkeypatch):
+    _point_base_dir_at(monkeypatch, tmp_path / "absent")
     report = build_report(
         _session(claude_session_uuid=None, last_stdout_at=NOW - 10),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(tmp_path / "absent"),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -281,7 +296,7 @@ def test_orm_liveness_fields_count_as_evidence(tmp_path):
     assert "last_stdout_at" in report.verdict_reason
 
 
-def test_pr_link_artifact_does_not_vote_on_the_verdict(tmp_path):
+def test_pr_link_artifact_does_not_vote_on_the_verdict(tmp_path, monkeypatch):
     """A recent PR proves work HAPPENED, not that work is HAPPENING."""
     projects_root = tmp_path / "projects"
     uuid = "def00000-0000-0000-0000-000000000000"
@@ -299,11 +314,11 @@ def test_pr_link_artifact_does_not_vote_on_the_verdict(tmp_path):
             }
         ],
     )
+    _point_base_dir_at(monkeypatch, tmp_path / "absent")
     report = build_report(
         _session(session_id="s-pr", claude_session_uuid=uuid),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(tmp_path / "absent"),
         projects_root=str(projects_root),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -321,34 +336,31 @@ def test_window_boundary_is_inclusive():
     assert verdict == VERDICT_NO_RECENT_ACTIVITY
 
 
-def test_context_only_signals_cannot_produce_progressing():
-    sig = [Signal("something", NOW - 1, counts_as_evidence=False)]
-    verdict, _ = compute_verdict(sig, "running", window_s=WINDOW, now=NOW)
-    assert verdict == VERDICT_UNKNOWN
-
-
 # ---------------------------------------------------------------------------
 # Graceful degradation — every one of these must return, never raise
 # ---------------------------------------------------------------------------
 
 
-def test_missing_marker_dir_degrades_to_absent(tmp_path):
-    assert tool_activity_signal("nope", hook_edge_root=str(tmp_path / "gone")).ts is None
+def test_missing_marker_dir_degrades_to_absent(tmp_path, monkeypatch):
+    _point_base_dir_at(monkeypatch, tmp_path / "gone")
+    assert tool_activity_signal("nope").ts is None
 
 
-def test_unreadable_marker_payload_degrades_to_absent(tmp_path):
+def test_unreadable_marker_payload_degrades_to_absent(tmp_path, monkeypatch):
     root = tmp_path / "hook_edges"
     d = root / "s1"
     d.mkdir(parents=True)
     (d / "pm_hook_edges.toolactivity").write_text("not-a-float")
-    assert tool_activity_signal("s1", hook_edge_root=str(root)).ts is None
+    _point_base_dir_at(monkeypatch, root)
+    assert tool_activity_signal("s1").ts is None
 
 
-def test_multiple_marker_channels_take_the_max(tmp_path):
+def test_multiple_marker_channels_take_the_max(tmp_path, monkeypatch):
     root = tmp_path / "hook_edges"
     _write_marker(root, "s1", NOW - 900, name="pm_hook_edges.toolactivity")
     _write_marker(root, "s1", NOW - 5, name="dev_hook_edges.toolactivity")
-    assert tool_activity_signal("s1", hook_edge_root=str(root)).ts == NOW - 5
+    _point_base_dir_at(monkeypatch, root)
+    assert tool_activity_signal("s1").ts == NOW - 5
 
 
 def test_missing_transcript_degrades_to_absent(tmp_path):
@@ -377,15 +389,15 @@ def test_dead_pid_reads_false_and_does_not_raise():
     assert pid_alive(4_000_000) in (False, None)
 
 
-def test_dead_pid_never_forces_a_negative_verdict(tmp_path):
+def test_dead_pid_never_forces_a_negative_verdict(tmp_path, monkeypatch):
     """Process-table facts are reported, never inferred from."""
     hook_root = tmp_path / "hook_edges"
     _write_marker(hook_root, "s1", NOW - 3)
+    _point_base_dir_at(monkeypatch, hook_root)
     report = build_report(
         _session(session_id="s1", claude_session_uuid=None, exec_pid=4_000_000),
         now=NOW,
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -430,11 +442,12 @@ def test_foreign_repo_transcript_found_by_glob_without_runner_cwd(tmp_path):
     assert found == str(written)
 
 
-def test_hook_marker_works_without_any_repo_hooks(tmp_path):
+def test_hook_marker_works_without_any_repo_hooks(tmp_path, monkeypatch):
     """The marker is repo-independent: no ORM stamps, no repo hooks, still fresh."""
     hook_root = tmp_path / "hook_edges"
     _write_marker(hook_root, "foreign-session", NOW - 1)
-    sig = tool_activity_signal("foreign-session", hook_edge_root=str(hook_root))
+    _point_base_dir_at(monkeypatch, hook_root)
+    sig = tool_activity_signal("foreign-session")
     assert sig.age_s(NOW) == pytest.approx(1.0)
 
 
@@ -452,13 +465,13 @@ def test_format_age_shapes():
     assert format_age(7200) == "2h"
 
 
-def test_json_output_is_serializable(tmp_path):
+def test_json_output_is_serializable(tmp_path, monkeypatch):
     hook_root = tmp_path / "hook_edges"
     _write_marker(hook_root, "s1", time.time())
+    _point_base_dir_at(monkeypatch, hook_root)
     report = build_report(
         _session(session_id="s1", claude_session_uuid=None),
         window_s=WINDOW,
-        hook_edge_root=str(hook_root),
         projects_root=str(tmp_path / "absent"),
         task_output_roots=[str(tmp_path / "absent")],
     )
@@ -546,23 +559,63 @@ def test_cmd_progress_is_read_only(monkeypatch, capsys):
     }
 
 
+def test_cmd_progress_window_zero_is_distinct_from_absent(monkeypatch, capsys):
+    """``--window 0`` must not be conflated with "no ``--window`` given".
+
+    ``float(window) if window else None`` treats ``0.0`` as falsy, so
+    ``--window 0`` used to silently discard the caller's window and fall
+    back to the watchdog's default (1800s). This pins the exact ``window_s``
+    ``cmd_progress`` hands to ``build_report`` for both cases so the
+    falsy/absent conflation cannot regress silently.
+    """
+    import tools.session_progress as session_progress_module
+    from tools import valor_session
+
+    seen: list[float | None] = []
+
+    class _FakeReport:
+        def to_dict(self):
+            return {"verdict": "UNKNOWN"}
+
+    def fake_build_report(_session, *, window_s=None):
+        seen.append(window_s)
+        return _FakeReport()
+
+    monkeypatch.setattr(session_progress_module, "build_report", fake_build_report)
+    monkeypatch.setattr(valor_session, "_load_env", lambda: None)
+    monkeypatch.setattr(valor_session, "_find_session", lambda _id: _session())
+
+    rc = valor_session.cmd_progress(SimpleNamespace(id="s1", window=0.0, json=True))
+    assert rc == 0
+    rc = valor_session.cmd_progress(SimpleNamespace(id="s1", window=None, json=True))
+    assert rc == 0
+
+    assert seen == [0.0, None], (
+        f"--window 0 must pass window_s=0.0, not fall back to the default: {seen}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The load-bearing signal's PRODUCTION path (review of #2668)
 # ---------------------------------------------------------------------------
 
 
 class TestToolActivityProductionPath:
-    """Every prior assertion routed through the `hook_edge_root` override.
+    """Isolated coverage of ``tool_activity_signal``'s wrapping behaviour.
 
-    So a break in the production branch — the one that actually runs — left the
-    suite green while the tool lost its headline reading.
+    ``tool_activity_signal`` has exactly one implementation, which delegates
+    straight to ``agent.session_runner.liveness.tool_activity_ts`` (the rest
+    of this file drives that real function end to end via
+    ``_point_base_dir_at``). These tests monkeypatch ``tool_activity_ts``
+    itself so propagation, absence, and the loud-degradation-on-exception
+    contract are pinned independently of on-disk marker mechanics.
     """
 
     def test_production_branch_propagates_the_real_value(self, monkeypatch):
         import agent.session_runner.liveness as liveness
 
         monkeypatch.setattr(liveness, "tool_activity_ts", lambda _sid: NOW - 4.0)
-        sig = tool_activity_signal("some-session")  # no hook_edge_root: production path
+        sig = tool_activity_signal("some-session")
         assert sig.ts == NOW - 4.0
         assert sig.age_s(NOW) == 4.0
 
@@ -619,15 +672,15 @@ class TestDeadPidIsSurfacedButDoesNotVote:
         dead = _unused_pid()
         assert pid_alive(dead) is False, "a reaped pid must read False, never None"
 
-    def test_dead_pid_is_named_in_the_verdict_line(self, tmp_path):
+    def test_dead_pid_is_named_in_the_verdict_line(self, tmp_path, monkeypatch):
         dead = _unused_pid()
         root = tmp_path / "hooks"
         _write_marker(root, "test-progress-session", NOW - 300.0)
+        _point_base_dir_at(monkeypatch, root)
         report = build_report(
             _session(exec_pid=dead),
             now=NOW,
             window_s=WINDOW,
-            hook_edge_root=str(root),
             projects_root="/nonexistent",
             task_output_roots=[],
         )
@@ -636,15 +689,15 @@ class TestDeadPidIsSurfacedButDoesNotVote:
         assert "not running" in report.verdict_line
         assert str(dead) in report.verdict_line
 
-    def test_unknowable_pid_adds_no_note(self, tmp_path):
+    def test_unknowable_pid_adds_no_note(self, tmp_path, monkeypatch):
         """Only a definite negative is a contradiction. `None` is silence."""
         root = tmp_path / "hooks"
         _write_marker(root, "test-progress-session", NOW - 300.0)
+        _point_base_dir_at(monkeypatch, root)
         report = build_report(
             _session(exec_pid=None),
             now=NOW,
             window_s=WINDOW,
-            hook_edge_root=str(root),
             projects_root="/nonexistent",
             task_output_roots=[],
         )
@@ -652,16 +705,16 @@ class TestDeadPidIsSurfacedButDoesNotVote:
         assert report.contradiction_note is None
         assert "not running" not in report.verdict_line
 
-    def test_no_note_when_the_verdict_is_not_progressing(self, tmp_path):
+    def test_no_note_when_the_verdict_is_not_progressing(self, tmp_path, monkeypatch):
         """A dead pid alongside NO RECENT ACTIVITY is not a contradiction."""
         dead = _unused_pid()
         root = tmp_path / "hooks"
         _write_marker(root, "test-progress-session", NOW - 99_999.0)
+        _point_base_dir_at(monkeypatch, root)
         report = build_report(
             _session(exec_pid=dead),
             now=NOW,
             window_s=WINDOW,
-            hook_edge_root=str(root),
             projects_root="/nonexistent",
             task_output_roots=[],
         )
@@ -686,14 +739,14 @@ class TestFutureDatedTimestamps:
         assert sig.age_s(NOW) == 0.0
         assert sig.is_implausible(NOW) is False
 
-    def test_future_marker_yields_unknown_not_progressing(self, tmp_path):
+    def test_future_marker_yields_unknown_not_progressing(self, tmp_path, monkeypatch):
         root = tmp_path / "hooks"
         _write_marker(root, "test-progress-session", NOW + 86400.0)
+        _point_base_dir_at(monkeypatch, root)
         report = build_report(
             _session(),
             now=NOW,
             window_s=WINDOW,
-            hook_edge_root=str(root),
             projects_root="/nonexistent",
             task_output_roots=[],
         )
@@ -702,15 +755,15 @@ class TestFutureDatedTimestamps:
         )
         assert "future" in report.verdict_reason
 
-    def test_a_real_signal_still_wins_over_a_skewed_one(self, tmp_path):
+    def test_a_real_signal_still_wins_over_a_skewed_one(self, tmp_path, monkeypatch):
         """One bad clock must not suppress evidence that is actually good."""
         root = tmp_path / "hooks"
         _write_marker(root, "test-progress-session", NOW + 86400.0, name="a.toolactivity")
+        _point_base_dir_at(monkeypatch, root)
         report = build_report(
             _session(last_turn_at=NOW - 12.0),
             now=NOW,
             window_s=WINDOW,
-            hook_edge_root=str(root),
             projects_root="/nonexistent",
             task_output_roots=[],
         )

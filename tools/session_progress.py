@@ -137,9 +137,6 @@ class Signal:
     name: str
     ts: float | None
     detail: str | None = None
-    #: Whether this signal may drive the verdict. Context-only signals are
-    #: reported for the reader but never make a verdict more or less certain.
-    counts_as_evidence: bool = True
 
     def age_s(self, now: float) -> float | None:
         """Seconds since this signal fired, or ``None`` when absent or impossible.
@@ -202,62 +199,48 @@ def _as_unix_ts(val) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def tool_activity_signal(session_id: str | None, *, hook_edge_root: str | None = None) -> Signal:
+def tool_activity_signal(session_id: str | None) -> Signal:
     """The load-bearing signal: freshest runner hook-edge tool-activity marker.
 
     Reads ``<hook-edge-dir>/<session_id>/*.toolactivity``, rewritten on every
     tool call including tool calls made from inside an in-process subagent.
     This is what read 0.0s age throughout the supposed #2662 deadlock.
 
-    ``hook_edge_root`` overrides the marker base directory for tests. When
-    omitted the production resolver is used; if even that fails the signal
-    degrades to absent rather than raising.
+    Delegates straight to
+    :func:`agent.session_runner.liveness.tool_activity_ts` — the single
+    production implementation of this read — rather than carrying a second
+    copy of the marker-glob logic here. Tests point the marker root
+    elsewhere by monkeypatching
+    ``agent.session_runner.adapter._hook_edge_base_dir`` (see
+    ``tests/unit/session_runner/test_tool_activity_liveness.py::
+    _point_base_dir_at``, mirrored in
+    ``tests/unit/test_session_progress.py``), which drives this same
+    function through the real read path instead of a parallel one.
     """
     if not session_id:
         return Signal("tool_activity", None, detail="no session_id")
 
-    if hook_edge_root is None:
-        try:
-            from agent.session_runner.liveness import tool_activity_ts  # noqa: PLC0415
-
-            ts = tool_activity_ts(session_id)
-        except Exception as exc:
-            # Loud, not silent. This is the load-bearing signal; degrading it
-            # to absent is correct behaviour but must never be invisible, or a
-            # break in tool_activity_ts costs the tool its headline reading
-            # while every caller still reads a confident UNKNOWN.
-            logger.warning(
-                "session_progress: tool_activity_ts unavailable (%s: %s) — "
-                "the load-bearing liveness signal is degraded to absent",
-                type(exc).__name__,
-                exc,
-            )
-            return Signal(
-                "tool_activity",
-                None,
-                detail=f"unavailable: {type(exc).__name__}",
-            )
-        return Signal("tool_activity", ts)
-
-    # Test/override path: read the markers directly under the given root.
     try:
-        suffix = ".toolactivity"
-        try:
-            from agent.session_runner.hook_edge import TOOL_ACTIVITY_SUFFIX  # noqa: PLC0415
+        from agent.session_runner.liveness import tool_activity_ts  # noqa: PLC0415
 
-            suffix = TOOL_ACTIVITY_SUFFIX
-        except Exception as exc:
-            logger.debug("session_progress: marker suffix import failed (%s)", exc)
-        session_dir = pathlib.Path(hook_edge_root) / str(session_id)
-        stamps: list[float] = []
-        for marker in session_dir.glob(f"*{suffix}"):
-            try:
-                stamps.append(float(marker.read_text().strip()))
-            except (OSError, ValueError):
-                continue
-        return Signal("tool_activity", max(stamps) if stamps else None)
-    except Exception:
-        return Signal("tool_activity", None)
+        ts = tool_activity_ts(session_id)
+    except Exception as exc:
+        # Loud, not silent. This is the load-bearing signal; degrading it
+        # to absent is correct behaviour but must never be invisible, or a
+        # break in tool_activity_ts costs the tool its headline reading
+        # while every caller still reads a confident UNKNOWN.
+        logger.warning(
+            "session_progress: tool_activity_ts unavailable (%s: %s) — "
+            "the load-bearing liveness signal is degraded to absent",
+            type(exc).__name__,
+            exc,
+        )
+        return Signal(
+            "tool_activity",
+            None,
+            detail=f"unavailable: {type(exc).__name__}",
+        )
+    return Signal("tool_activity", ts)
 
 
 def _task_output_roots(explicit: list[str] | None = None) -> list[pathlib.Path]:
@@ -491,11 +474,14 @@ def compute_verdict(
         return VERDICT_UNKNOWN, f"session status is {status!r} — not running"
 
     # `age_s` returns None for a future-dated timestamp, so an implausible
-    # marker drops out here rather than voting as maximally fresh.
+    # marker drops out here rather than voting as maximally fresh. PR-link
+    # artifacts are the only context-only readings this module produces and
+    # they are never turned into `Signal`s in the first place (see
+    # `pr_links`/`build_report`), so every `Signal` reaching this list votes.
     ages = [
         (sig.name, age)
         for sig in signals
-        if sig.counts_as_evidence and sig.ts is not None and (age := sig.age_s(now)) is not None
+        if sig.ts is not None and (age := sig.age_s(now)) is not None
     ]
     if not ages:
         skewed = [sig.name for sig in signals if sig.is_implausible(now)]
@@ -610,7 +596,6 @@ class ProgressReport:
                     "ts": sig.ts,
                     "age_s": sig.age_s(self.now),
                     "detail": sig.detail,
-                    "counts_as_evidence": sig.counts_as_evidence,
                 }
                 for sig in self.signals
             ],
@@ -640,9 +625,8 @@ class ProgressReport:
         lines.append(f"Liveness (window {format_age(self.window_s)}):")
         for sig in self.signals:
             age = format_age(sig.age_s(self.now)) if sig.ts is not None else "—"
-            tag = "" if sig.counts_as_evidence else "  [context only]"
             detail = f"  ({sig.detail})" if sig.detail else ""
-            lines.append(f"  {sig.name + ':':<18} {age}{detail}{tag}")
+            lines.append(f"  {sig.name + ':':<18} {age}{detail}")
         lines.append("")
         if self.artifacts:
             lines.append("Artifacts:")
@@ -659,7 +643,6 @@ def build_report(
     *,
     now: float | None = None,
     window_s: float | None = None,
-    hook_edge_root: str | None = None,
     projects_root: str | None = None,
     task_output_roots: list[str] | None = None,
 ) -> ProgressReport:
@@ -671,7 +654,11 @@ def build_report(
     ``tools.valor_session._find_session`` — the ORM is the only route to a
     session record; no raw Redis access happens anywhere on this path.
 
-    The keyword roots exist for hermetic tests; production passes none.
+    ``projects_root`` and ``task_output_roots`` exist for hermetic tests;
+    production passes neither. The hook-edge marker root that
+    :func:`tool_activity_signal` reads is not overridable here — tests point
+    it elsewhere by monkeypatching
+    ``agent.session_runner.adapter._hook_edge_base_dir`` directly.
     """
     now = time.time() if now is None else now
     window_s = default_window_s() if window_s is None else window_s
@@ -684,7 +671,7 @@ def build_report(
     tpath = transcript_path(claude_uuid, runner_cwd, projects_root=projects_root)
 
     signals: list[Signal] = [
-        tool_activity_signal(session_id, hook_edge_root=hook_edge_root),
+        tool_activity_signal(session_id),
         task_output_signal(claude_uuid, roots=task_output_roots),
         transcript_signal(tpath),
         *orm_liveness_signals(session),

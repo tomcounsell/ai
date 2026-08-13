@@ -1317,7 +1317,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
             return 1
 
         window = getattr(args, "window", None)
-        report = build_report(session, window_s=float(window) if window else None)
+        report = build_report(session, window_s=float(window) if window is not None else None)
 
         if getattr(args, "json", False):
             print(json.dumps(report.to_dict(), indent=2, default=str))
