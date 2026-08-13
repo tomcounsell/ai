@@ -1533,6 +1533,44 @@ class TestRows8And9Unchanged:
         assert result.row_id == "9"
 
 
+class TestStaleApprovedIsReReviewedNotAdvanced:
+    """The widening's one genuine ownership TRANSFER, pinned deliberately.
+
+    Row 8b precedes rows 8f/9/10 in ``DISPATCH_RULES``, so a **stale** APPROVED
+    verdict -- one recorded before the latest ``/do-patch`` dispatch -- is now
+    re-reviewed rather than advanced to ``/do-docs`` or the merge fast-path.
+
+    This is not incidental. An APPROVED verdict that predates a patch does not
+    describe the code the patch produced, and advancing on it would merge code
+    no review ever saw. Spike-2's "rows 8 and 9 unchanged" holds for FRESH
+    verdicts only; these cases are the boundary of that claim.
+
+    It converges: a re-review records a verdict newer than the patch dispatch,
+    which is then fresh, and row 9 owns it again. G4 bounds the loop if it
+    somehow does not.
+    """
+
+    def test_stale_approved_review_completed_routes_to_re_review(self):
+        states = _post_patch_states(verdict="APPROVED", review_status="completed")
+        meta = {"pr_number": 4242, "last_dispatched_skill": SKILL_DO_PR_REVIEW}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch), f"expected Dispatch, got {result!r}"
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8b"
+
+    def test_a_fresh_re_review_then_advances_to_docs(self):
+        """Convergence, executable: the same state with a verdict recorded
+        AFTER the patch dispatch is fresh, and row 9 owns it."""
+        states = _post_patch_states(
+            verdict="APPROVED", review_status="completed", patch_dispatched_at=None
+        )
+        meta = {"pr_number": 4242, "last_dispatched_skill": SKILL_DO_PR_REVIEW}
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_DOCS
+        assert result.row_id == "9"
+
+
 class TestRow8bDisjointFromEmptyVerdictRows:
     """Rows 8c/8d/8e require NO recorded verdict; the new staleness disjunct is
     identically False there because ``recorded_at`` only exists alongside a

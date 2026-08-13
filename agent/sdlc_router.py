@@ -942,14 +942,17 @@ def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
     return result
 
 
-# The stored REVIEW verdict may carry a ``REVIEW_CONTEXT head_sha=<hex>``
-# trailer naming the PR head commit it judged (emitted by /do-pr-review Step 5;
-# the same trailer tools/merge_predicate's freshness check consumes). The text
-# may have passed through ``normalize_verdict`` (uppercased, underscores mapped
-# to spaces), so the pattern matches both the raw and normalized forms, and SHA
-# comparison is case-insensitive. Kept in lockstep with
-# ``tools.merge_predicate._HEAD_SHA_TRAILER_RE`` (duplicated here because the
-# router must stay import-free of tools/ — the import-boundary contract).
+# The LEGACY read path for the head SHA a REVIEW verdict judged: ledgers written
+# before #2769 carry it as a ``REVIEW_CONTEXT head_sha=<hex>`` trailer inside the
+# verdict token itself. The text may have passed through ``normalize_verdict``
+# (uppercased, underscores mapped to spaces), so the pattern matches both the raw
+# and normalized forms, and SHA comparison is case-insensitive. Kept in lockstep
+# with ``tools._sdlc_utils._HEAD_SHA_TRAILER_RE``, which is the single definition
+# every tools/ reader shares; duplicated here because the router must stay
+# import-free of tools/ — the import-boundary contract.
+#
+# Current writes put the SHA in the record's own ``head_sha`` field, reached via
+# ``_latest_review_head_sha`` below.
 _HEAD_SHA_TRAILER_RE = re.compile(
     r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
 )
@@ -1246,6 +1249,15 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     Rows 8 and 8b stay disjoint: row 8 (``_rule_review_has_findings``) returns
     False whenever ``_review_verdict_is_stale`` is True, so fresh findings still
     route to ``/do-patch`` at row 8 and only stale ones reach here.
+
+    Disjunct 2 also transfers one state away from the rows BELOW this one. This
+    row precedes 8f/9/10, so a **stale APPROVED** verdict is now re-reviewed
+    rather than advanced to ``/do-docs`` or the merge fast-path. That is
+    deliberate: an approval recorded before the latest patch does not describe
+    the code that patch produced, and advancing on it would merge code no review
+    ever saw. It converges -- the re-review records a verdict newer than the
+    patch dispatch, which row 9 then owns -- and G4 bounds it otherwise. See
+    ``TestStaleApprovedIsReReviewedNotAdvanced``.
 
     Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
     2, and one of which — 8c — actually *calls* this predicate):

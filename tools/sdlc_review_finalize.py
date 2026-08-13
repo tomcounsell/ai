@@ -387,24 +387,30 @@ def finalize(
     blockers: int | None = None,
     tech_debt: int | None = None,
 ) -> dict:
-    """Atomically record verdict + head_sha trailer + REVIEW marker, then verify.
+    """Record verdict + head_sha + REVIEW marker, then verify all three landed.
 
     Collapses the historically hand-run 3-call sequence (``verdict record``,
     ``stage-marker REVIEW completed``, ``verdict get`` readback) into one
-    operation that cannot partially complete: any failure at any step raises
+    self-verifying call: any failure at any step raises
     :class:`ReviewFinalizeError` (or, for a lease-ownership refusal,
     :class:`tools.sdlc_verdict.OwnershipError` is NOT used here -- lease
     failures are reported as :class:`ReviewFinalizeError` too, prefixed with
     the same ``LEASE_ABSENT``/``ISSUE_LOCKED``/``TARGET_REPO_MISSING``
-    reasons ``tools/sdlc_verdict.py``'s ``_cli_record`` uses) with no
-    partial write left behind.
+    reasons ``tools/sdlc_verdict.py``'s ``_cli_record`` uses).
+
+    It is **not** transactional, and does not claim to be. The verdict is
+    written before the marker is attempted -- the deliberate #2415/#2577
+    ordering -- so the marker write can be refused with the verdict already
+    durable. That branch raises with a message naming exactly what landed
+    (#2740); re-running the identical call is idempotent and lands the marker.
 
     Args:
-        pr: PR number -- source of the head_sha trailer.
+        pr: PR number -- source of the recorded head SHA.
         issue_number: GitHub issue number (the ledger key component).
         verdict: Free-form verdict string (e.g. ``"APPROVED"``). May already
-            carry a ``REVIEW_CONTEXT head_sha=`` trailer -- if so it is left
-            untouched (idempotent append).
+            carry a ``REVIEW_CONTEXT head_sha=`` trailer -- if so the SHA is
+            lifted out into the record's ``head_sha`` field and stripped from
+            the stored token, so it is persisted exactly once (#2769).
         run_id: The caller's run identity (``sdlc-tool session-ensure``).
         blockers: Optional blocker count.
         tech_debt: Optional tech-debt count.

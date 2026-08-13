@@ -965,7 +965,9 @@ class TestCheckReviewPersistenceHeadShaShapes:
         assert result["ok"] is False
         assert result["reason"] == "REVIEW_VERDICT_MISSING"
 
-    def test_preserves_an_earlier_named_reason_when_the_helper_raises(self):
+    def test_head_sha_resolution_failure_fails_closed_with_its_own_reason(self):
+        """`_fetch_pr_head_sha` raising is a HANDLED branch with its own explicit
+        reason -- distinct from the `except Exception` path covered above."""
         with (
             patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
             patch(

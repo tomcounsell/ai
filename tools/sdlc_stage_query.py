@@ -48,7 +48,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from tools._sdlc_utils import _resolve_target_repo
+from tools._sdlc_utils import _resolve_target_repo, head_sha_of_record, head_sha_of_text
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import is_pipeline_ledger as _is_pipeline_ledger
 from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_repo_for_read
@@ -467,9 +467,13 @@ def _extract_head_sha(record) -> str | None:
     trailer regex raises ``TypeError``, which
     ``tools/sdlc_next_skill._resolve_enriched``'s broad ``except`` swallows into
     an EMPTY ledger -- routing a fully-worked issue back to ``/do-plan``.
-    """
-    from tools._sdlc_utils import head_sha_of_record, head_sha_of_text
 
+    Two layers guard that, deliberately: ``head_sha_of_text`` also type-checks
+    its input and returns ``""``, so it is the one actually holding the line
+    today and the negated form would not currently raise. This branch is the
+    layer that expresses the INTENT -- it is what keeps the guarantee if that
+    helper is ever tightened to its declared non-Optional ``str`` signature.
+    """
     if isinstance(record, dict):
         return head_sha_of_record(record) or None
     if isinstance(record, str):

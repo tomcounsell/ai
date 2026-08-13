@@ -40,6 +40,14 @@ _HEAD_SHA_TRAILER_RE = re.compile(
     r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
 )
 
+# The same 40-hex shape the trailer regex requires, applied to the standalone
+# `head_sha` record field (#2769). Both read paths must enforce well-formedness
+# identically: `_review_trailer_present` gates the REVIEW completed marker and
+# tells the operator the verdict "carries no well-formed head SHA", so a field
+# holding arbitrary text must not satisfy that gate when a malformed trailer
+# would not have.
+_HEAD_SHA_FIELD_RE = re.compile(r"\A[0-9A-Fa-f]{40}\Z")
+
 
 def head_sha_of_text(text: str) -> str:
     """Return the head SHA carried by a verdict *string*, or ``""``.
@@ -64,10 +72,16 @@ def head_sha_of_record(record: dict) -> str:
     ``APPROVED REVIEW CONTEXT HEAD SHA=<HEX>`` -- so the stored verdict token
     was never the bare ``APPROVED`` any reader expected.
 
-    Precedence (**the field wins**): the ``head_sha`` field is what the current
-    writer records deliberately; an in-token trailer is either legacy residue or
-    a caller-supplied string the writer already extracted. When both are present
-    and disagree, the field is authoritative.
+    Precedence (**a well-formed field wins**): the ``head_sha`` field is what
+    the current writer records deliberately; an in-token trailer is either legacy
+    residue or a caller-supplied string the writer already extracted. When both
+    are present and disagree, the field is authoritative.
+
+    Both paths enforce the same 40-hex shape. A field holding anything else is
+    treated as absent, exactly as a malformed trailer is -- ``record_verdict``'s
+    ``head_sha`` kwarg is public, so without this check an arbitrary string
+    would satisfy ``_review_trailer_present`` and open the REVIEW completed
+    marker gate that refuses a malformed trailer.
 
     The regex fallback over ``record["verdict"]`` is **permanent, not
     scaffolding**: live ledgers hold mangled verdict strings forever and there is
@@ -77,7 +91,7 @@ def head_sha_of_record(record: dict) -> str:
     if not isinstance(record, dict):
         return ""
     field = record.get("head_sha")
-    if isinstance(field, str) and field.strip():
+    if isinstance(field, str) and _HEAD_SHA_FIELD_RE.match(field.strip()):
         return field.strip()
     return head_sha_of_text(record.get("verdict") or "")
 

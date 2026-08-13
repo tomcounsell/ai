@@ -111,6 +111,28 @@ def test_head_sha_of_record_tolerates_non_dict_and_empty_field():
     assert head_sha_of_record({"verdict": "APPROVED", "head_sha": "   "}) == ""
 
 
+def test_head_sha_of_record_rejects_a_malformed_field_like_a_malformed_trailer():
+    """Both read paths enforce the same 40-hex shape. `record_verdict`'s
+    `head_sha` kwarg is public, so a field holding arbitrary text must not
+    satisfy `_review_trailer_present` -- the gate that refuses a malformed
+    trailer and tells the operator the verdict carries no well-formed head
+    SHA."""
+    for bad in ("not-a-sha", SHA[:39], SHA + "0", "z" * 40, f"  {SHA[:20]}  "):
+        assert head_sha_of_record({"verdict": "APPROVED", "head_sha": bad}) == "", bad
+
+
+def test_a_malformed_field_falls_back_to_a_well_formed_legacy_trailer():
+    """Treated as absent, not as a hard failure: the permanent legacy read path
+    still resolves the record."""
+    record = {"verdict": f"APPROVED REVIEW_CONTEXT head_sha={SHA}", "head_sha": "not-a-sha"}
+    assert head_sha_of_record(record) == SHA
+
+
+def test_a_well_formed_field_is_accepted_in_either_case():
+    assert head_sha_of_record({"verdict": "APPROVED", "head_sha": SHA.upper()}) == SHA.upper()
+    assert head_sha_of_record({"verdict": "APPROVED", "head_sha": f"  {SHA}  "}) == SHA
+
+
 def test_head_sha_of_text_is_regex_only_and_never_none():
     assert head_sha_of_text(f"APPROVED REVIEW_CONTEXT head_sha={SHA}") == SHA
     assert head_sha_of_text("APPROVED") == ""

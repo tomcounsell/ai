@@ -1196,11 +1196,15 @@ class TestRecordVerdictHeadSha:
         session = fake_session_reload_patched
         record = record_verdict(session, "REVIEW", "APPROVED", head_sha="not-a-sha")
 
+        # Stored verbatim -- record_verdict does not validate, so the ledger
+        # keeps whatever the caller wrote.
         assert record["head_sha"] == "not-a-sha"
         # The verdict token itself carries no trailer-shaped text.
         assert _HEAD_SHA_TRAILER_RE.search(record["verdict"]) is None
-        assert head_sha_of_record(record) == "not-a-sha"
-        assert head_sha_of_record(record).lower() != _2769_SHA
+        # ...but the READ path treats a malformed field exactly as it treats a
+        # malformed trailer: absent. Otherwise arbitrary text would satisfy
+        # _review_trailer_present, the gate that refuses a malformed trailer.
+        assert head_sha_of_record(record) == ""
 
     def test_head_sha_lands_in_the_same_single_write(self, fake_session_reload_patched):
         """Single-writer invariant: one update_stage_states call, never two."""

@@ -181,13 +181,15 @@ These are hard gates. No exceptions.
 On the approval path, the REVIEW verdict record, its `head_sha` field, and the
 REVIEW completion marker are written by **one `sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
 hand-run, separable sequence. Never emit the OUTCOME block without a
-successful (exit 0) `finalize` call first. The atomicity is enforced in the
+successful (exit 0) `finalize` call first. The verification is enforced in the
 tool itself (`tools/sdlc_review_finalize.py`, sharing `check_review_persistence`
-with `verdict selfcheck`): `finalize` records the verdict, appends the trailer,
+with `verdict selfcheck`): `finalize` records the verdict and its head SHA,
 writes the marker on the APPROVED path, and reads all three back before
 returning 0 — any gap yields a named non-zero error
-(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
-instead of a silent partial write. The underlying WS3c gate in
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`).
+It is self-verifying, not transactional: on the branch where the verdict landed
+and the marker write was then refused, the error names exactly that, and
+re-running the identical call is idempotent. The underlying WS3c gate in
 `tools/sdlc_stage_marker.py` still refuses `stage-marker --stage REVIEW
 --status completed` with `REVIEW_VERDICT_MISSING` when no substrate verdict is
 readable (and, on the APPROVED path, also requires the trailer — see
