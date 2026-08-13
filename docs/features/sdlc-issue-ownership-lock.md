@@ -92,6 +92,8 @@ Ownership is decided **solely** by comparing the caller's `run_id` against the p
 
 Neither side ever assembles a `PipelineLedger` key with a `None` repo component -- see the ledger doc's Risk 5 discussion for the full writer/reader guard contract.
 
+**How writers bind the helpers.** Writers reach `resolve_ledger_lease()` and `revalidate_ledger_lease()` through the module object -- `from tools import _sdlc_utils`, then `_sdlc_utils.resolve_ledger_lease(...)` -- never through a module-level `from tools._sdlc_utils import resolve_ledger_lease`. A `from`-import snapshots the function into the writer's own globals at import time. If that first import happens to land while a test holds `tools._sdlc_utils.resolve_ledger_lease` patched, the `MagicMock` is frozen into those globals for the life of the process and every lease check in that writer silently inverts, which reads like corrupted Redis state rather than a binding problem. That is the #2469 root cause; #2637 closed the class across all three writers. `tests/unit/test_sdlc_lease_helper_binding.py` holds the shape with three independent checks: a per-writer globals assertion, a repo-wide AST sweep so a new writer cannot reopen the hazard, and a behavioral late-patch assertion per writer. Function-local imports inside a call body re-resolve on every call and are unaffected.
+
 ### Behavior
 
 | Scenario | Result |
