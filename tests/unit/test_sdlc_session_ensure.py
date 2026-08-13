@@ -25,6 +25,26 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_LANE_IDENTITY_CLASS = "TestLaneSlugMintedAtLaneStart"
+
+
+@pytest.fixture(autouse=True)
+def _stub_lane_identity(request):
+    """Neutralize lane-slug resolution (#2735) outside the class that tests it.
+
+    ``ensure_session`` mints the lane's identity on entry, which peeks the issue
+    lock for the pinned target repo and writes a ``PipelineLedger``. That is
+    correct behavior and ``TestLaneSlugMintedAtLaneStart`` asserts it -- but for
+    every other test in this file it is noise: it adds a ``touch_issue_lock``
+    call that the lock-wiring assertions count, and it leaves a real ledger
+    record per test.
+    """
+    if request.cls is not None and request.cls.__name__ == _LANE_IDENTITY_CLASS:
+        yield
+        return
+    with patch("tools.sdlc_session_ensure.resolve_lane_slug", return_value=None):
+        yield
+
 
 class TestEnsureSession:
     """Tests for the ensure_session function."""

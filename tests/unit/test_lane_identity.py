@@ -232,9 +232,8 @@ class TestG8LaneBranchDivergence:
         completed. Today G8 derives ``some-other-name``, probes a branch that
         never existed, and force-dispatches ``/do-patch`` forever.
         """
-        from tools.lane_identity import mint_lane_slug
-
         from tools import sdlc_next_skill
+        from tools.lane_identity import mint_lane_slug
 
         repo_root = _write_plans_dir(
             tmp_path,
@@ -365,6 +364,13 @@ class TestResolveLaneSlugReadPath:
 class TestResolveLaneSlugHealPath:
     """``allow_heal=True`` mints once, conditional-on-empty, never overwrites."""
 
+    @pytest.fixture(autouse=True)
+    def _offline(self, monkeypatch):
+        """No test here touches origin unless it installs its own listing."""
+        import tools.lane_identity as lane_identity
+
+        monkeypatch.setattr(lane_identity, "_ls_remote_heads", dict)
+
     def test_heal_creates_the_ledger_and_mints(self, clean_ledgers):
         from tools.lane_identity import resolve_lane_slug
 
@@ -413,21 +419,112 @@ class TestResolveLaneSlugHealPath:
         assert reloaded.stage_states_json == '{"PLAN": "completed"}'
         assert reloaded.slug == f"sdlc-{_ISSUE_RESOLVER}"
 
-    def test_ladder_adopts_a_pushed_lane_branch_over_minting(self, clean_ledgers, monkeypatch):
-        """Rung 3: an existing ``session/sdlc-{N}`` on origin is adopted, not
-        re-invented. This is what unwedges a mid-pipeline lane like #2663."""
+    def test_ladder_adopts_a_differently_shaped_branch_via_the_pr_head(
+        self, clean_ledgers, monkeypatch
+    ):
+        """Rung 2 is shape-agnostic and precedes the fixed-shape probe.
+
+        ``.worktrees/sdlc-1920`` and ``.worktrees/sdlc-1997`` sit on
+        ``session/dev-<hash>`` branches. A probe that only knows the
+        issue-derived shape would miss them and invent a competing identity
+        for a lane that already has a branch -- the exact failure the ladder
+        exists to prevent.
+        """
         import tools.lane_identity as lane_identity
 
+        head_sha = "a" * 40
         monkeypatch.setattr(
             lane_identity,
             "_ls_remote_heads",
-            lambda: {f"refs/heads/session/sdlc-{_ISSUE_RESOLVER}": "deadbeef" * 5},
+            lambda: {
+                "refs/heads/session/dev-7bd4cf82": head_sha,
+                "refs/heads/session/unrelated-lane": "b" * 40,
+            },
         )
+        monkeypatch.setattr(
+            "tools.pr_head_resolver.resolve_pr_head_sha",
+            lambda *a, **k: head_sha,
+        )
+
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_RESOLVER)
+        ledger.pr_number = 4242
+        ledger.save(update_fields=["pr_number"])
+
+        resolved = lane_identity.resolve_lane_slug(
+            _ISSUE_RESOLVER, allow_heal=True, target_repo=_TEST_REPO
+        )
+        assert resolved == "dev-7bd4cf82"
+        assert PipelineLedger.get(_TEST_REPO, _ISSUE_RESOLVER).slug == "dev-7bd4cf82"
+
+    def test_ambiguous_pr_head_match_falls_through_to_the_mint(self, clean_ledgers, monkeypatch):
+        """Two branches at the same tip is a per-invocation identity, so rung 2
+        declines rather than picking one by listing order."""
+        import tools.lane_identity as lane_identity
+
+        head_sha = "a" * 40
+        monkeypatch.setattr(
+            lane_identity,
+            "_ls_remote_heads",
+            lambda: {
+                "refs/heads/session/dev-7bd4cf82": head_sha,
+                "refs/heads/session/dev-81976da0": head_sha,
+            },
+        )
+        monkeypatch.setattr(
+            "tools.pr_head_resolver.resolve_pr_head_sha",
+            lambda *a, **k: head_sha,
+        )
+
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, _ISSUE_RESOLVER)
+        ledger.pr_number = 4242
+        ledger.save(update_fields=["pr_number"])
 
         resolved = lane_identity.resolve_lane_slug(
             _ISSUE_RESOLVER, allow_heal=True, target_repo=_TEST_REPO
         )
         assert resolved == f"sdlc-{_ISSUE_RESOLVER}"
+
+    def test_ladder_adopts_a_pushed_lane_branch(self, clean_ledgers, monkeypatch):
+        """Rung 3: an already-pushed lane branch on origin is adopted.
+
+        This is what lets a mid-pipeline lane like #2663 capture the identity
+        it already has instead of the resolver inventing a rival one.
+        """
+        import tools.lane_identity as lane_identity
+
+        probed = []
+
+        def fake_heads():
+            probed.append(True)
+            return {f"refs/heads/session/sdlc-{_ISSUE_RESOLVER}": "c" * 40}
+
+        monkeypatch.setattr(lane_identity, "_ls_remote_heads", fake_heads)
+
+        resolved = lane_identity.resolve_lane_slug(
+            _ISSUE_RESOLVER, allow_heal=True, target_repo=_TEST_REPO
+        )
+        assert resolved == f"sdlc-{_ISSUE_RESOLVER}"
+        assert probed, "rung 3 never consulted origin"
+
+    def test_ladder_adopts_the_tracking_plan_stem(self, clean_ledgers, monkeypatch, tmp_path):
+        """Rung 4: a plan whose ``tracking:`` frontmatter claims the issue names
+        the lane, so a human-named lane keeps its human name."""
+        import tools.lane_identity as lane_identity
+
+        repo_root = _write_plans_dir(
+            tmp_path,
+            {
+                "session-liveness-tick-counter.md": _tracking_frontmatter(_ISSUE_RESOLVER)
+                + "\n# Plan\n"
+            },
+        )
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(repo_root))
+        monkeypatch.setattr(lane_identity, "_ls_remote_heads", dict)
+
+        resolved = lane_identity.resolve_lane_slug(
+            _ISSUE_RESOLVER, allow_heal=True, target_repo=_TEST_REPO
+        )
+        assert resolved == "session-liveness-tick-counter"
 
 
 # ---------------------------------------------------------------------------
