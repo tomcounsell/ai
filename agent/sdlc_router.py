@@ -1181,14 +1181,38 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Patch applied after review findings — re-review is required."""
+    """Patch applied after review findings — re-review is required.
+
+    Two independent ways to recognize "a patch landed after the last verdict":
+
+    1. ``last_dispatched_skill == /do-patch`` — the immediate post-patch turn.
+    2. ``_review_verdict_is_stale()`` — the recorded verdict predates the latest
+       ``/do-patch`` dispatch, regardless of what has been dispatched since.
+
+    Disjunct (2) closes the crashed-re-review dead end: row 8
+    (``_rule_review_has_findings``) steps aside on exactly this staleness by
+    design (#1641) and hands off to this row, but the ``last_dispatched_skill``
+    latch is a single slot — a ``/do-pr-review`` dispatch that crashes without
+    recording a verdict overwrites ``/do-patch`` in it. The state then matched
+    nothing: row 8 stepped aside (stale), 8b missed (latch overwritten), 8c
+    needs ``REVIEW==in_progress``, 8d needs ``REVIEW in (completed, failed)``
+    AND no recorded verdict at all, and 8e/8f/9/10 need ``REVIEW==completed``
+    or an APPROVED verdict — ``Blocked('no matching dispatch rule')``,
+    permanently stranded. Keying on staleness rather than only on the latch
+    makes this row the true complement of row 8's step-aside.
+
+    Loop-bound by G4 (``same_stage_dispatch_count``): the re-review records a
+    fresh verdict (postdating the patch, so no longer stale), which converges.
+    """
     if not meta.get("pr_number"):
         return False
     # PATCH completed after REVIEW failed — need to re-review.
     if stage_states.get("PATCH") != STATUS_COMPLETED:
         return False
     last = meta.get("last_dispatched_skill") or ""
-    return last == SKILL_DO_PATCH
+    if last == SKILL_DO_PATCH:
+        return True
+    return _review_verdict_is_stale(stage_states)
 
 
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
