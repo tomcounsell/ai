@@ -279,6 +279,30 @@ Session status: {session_status}
 
 Return intent, confidence (0.0-1.0), and reason."""
 
+# Appended to INTENT_CLASSIFICATION_PROMPT only when the context-recall flag is
+# enabled (#2694). Kept as a separate constant so prompt and output schema can
+# never disagree: the extended prompt and IntentDecisionWithRecall are selected
+# together, and the base prompt is paired with the base IntentDecision.
+#
+# The test is a question about REFERENTS, never a keyword allowlist
+# (Development Principle 3).
+CONTEXT_RECALL_PROMPT_SECTION = """
+
+## Context recall
+
+Also judge, independently of the intent above: reading ONLY the message text
+and knowing nothing about the conversation before it, do you know what thing
+the message is talking about?
+
+Set context_recall_advised = true when the message leans on something named
+earlier that is not in the message itself -- a bare approval or refusal, a
+pronoun or ordinal with no antecedent, a correction with no stated target.
+
+Set context_recall_advised = false when the message names its own subject well
+enough to act on without reading anything earlier.
+
+Give a concise context_recall_reason either way."""
+
 
 class IntentDecision(BaseModel):
     """Strict structured output for the intake intent classifier.
@@ -294,6 +318,26 @@ class IntentDecision(BaseModel):
     intent: Literal["interjection", "new_work"]
     confidence: float
     reason: str
+
+
+class IntentDecisionWithRecall(IntentDecision):
+    """``IntentDecision`` plus the context-recall judgment (#2694).
+
+    A separate model rather than two optional fields on ``IntentDecision`` so
+    the prompt and the schema are selected together — with the kill switch off,
+    the classifier sends the unextended prompt AND validates against the
+    unextended schema, which is the exact pair spike-3 measured as
+    regression-free. Extended schema + unextended prompt is a combination no
+    spike covered and it must never reach the hot path.
+
+    Both fields carry defaults so a granite response that omits them still
+    validates. Without the defaults, an omission would raise into
+    ``classify_message_intent_async``'s fail-open ``except`` and silently flip
+    every message to ``new_work``, killing shipped interjection routing.
+    """
+
+    context_recall_advised: bool = False
+    context_recall_reason: str = ""
 
 
 async def classify_message_intent_async(
@@ -321,29 +365,54 @@ async def classify_message_intent_async(
         - intent: "interjection"|"new_work"
         - confidence: float between 0.0 and 1.0
         - reason: brief explanation of classification
+        - context_recall_advised: bool, True when the message leans on
+          conversation history the session cannot see (#2694). Always False
+          while ``CONTEXT_RECALL_INBOUND_ENABLED`` is off (the default).
+        - context_recall_reason: brief explanation of the recall judgment
     """
     # Empty messages default to new_work
     if not message or not message.strip():
-        return {"intent": "new_work", "confidence": 1.0, "reason": "Empty message"}
+        return {
+            "intent": "new_work",
+            "confidence": 1.0,
+            "reason": "Empty message",
+            "context_recall_advised": False,
+            "context_recall_reason": "",
+        }
 
-    # No session context means no active session to interject into
+    # No session context means no active session to interject into.
+    # NOTE (#2694): this hard return precedes any model call, so a session with
+    # an empty context_summary yields no context-recall verdict either. That is
+    # the accepted scope boundary (plan decision D4), not an oversight.
     if not session_context:
         return {
             "intent": "new_work",
             "confidence": 1.0,
             "reason": "No active session context",
+            "context_recall_advised": False,
+            "context_recall_reason": "",
         }
 
     try:
         from agent.llm import run_typed_local
+        from bridge.context_recall import inbound_enabled
 
-        prompt = INTENT_CLASSIFICATION_PROMPT.format(
+        # Prompt and schema are chosen together — never one without the other.
+        recall_on = inbound_enabled()
+        prompt_template = (
+            INTENT_CLASSIFICATION_PROMPT + CONTEXT_RECALL_PROMPT_SECTION
+            if recall_on
+            else INTENT_CLASSIFICATION_PROMPT
+        )
+        output_model = IntentDecisionWithRecall if recall_on else IntentDecision
+
+        prompt = prompt_template.format(
             message=message,
             session_context=session_context,
             session_status=session_status if session_status else "(unknown)",
         )
 
-        decision = await run_typed_local(prompt, IntentDecision)
+        decision = await run_typed_local(prompt, output_model)
 
         if not (0.0 <= decision.confidence <= 1.0):
             raise ValueError(f"Invalid confidence value: {decision.confidence}")
@@ -352,9 +421,13 @@ async def classify_message_intent_async(
             "intent": decision.intent,
             "confidence": decision.confidence,
             "reason": decision.reason,
+            "context_recall_advised": bool(getattr(decision, "context_recall_advised", False)),
+            "context_recall_reason": getattr(decision, "context_recall_reason", "") or "",
         }
 
-        # Apply confidence threshold: below it, default to new_work
+        # Apply confidence threshold: below it, default to new_work.
+        # Touches `intent` and `reason` only — the context-recall keys are an
+        # independent judgment and must survive the clamp untouched (#2694).
         if result["intent"] != "new_work" and result["confidence"] < INTENT_CONFIDENCE_THRESHOLD:
             logger.info(
                 f"Intent {result['intent']} below threshold "
@@ -371,4 +444,6 @@ async def classify_message_intent_async(
             "intent": "new_work",
             "confidence": 0.0,
             "reason": f"Classification failed: {e}",
+            "context_recall_advised": False,
+            "context_recall_reason": "",
         }

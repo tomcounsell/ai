@@ -1308,8 +1308,15 @@ def cmd_chats(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    """Main entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser.
+
+    Extracted from ``main`` so callers that need to validate a command string
+    against the *real* flag definitions can do so without invoking the CLI —
+    see the context-recall advisory's integration test (#2694), which parses
+    the command it emits with this parser so the advisory cannot silently rot
+    if ``read``'s flags ever change.
+    """
     parser = argparse.ArgumentParser(
         prog="valor-telegram",
         description="Read and send Telegram messages",
@@ -1483,6 +1490,12 @@ def main() -> int:
     )
     chats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    return parser
+
+
+def main() -> int:
+    """Main entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.command:
