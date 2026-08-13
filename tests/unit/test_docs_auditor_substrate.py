@@ -33,6 +33,20 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def git_repo(repo: Path) -> Path:
+    """A ``repo`` that is also a real git checkout.
+
+    The bare-name existence oracle (#2759) resolves a filename with no ``/``
+    against a ``git ls-files --cached --others --exclude-standard`` basename
+    index. That index only exists inside a git checkout, so ambiguity and
+    index-backed resolution have to be exercised here rather than on the plain
+    ``tmp_path`` ``repo`` fixture.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def reset_global_state():
     """Reset module-level counters between tests."""
@@ -600,15 +614,51 @@ class TestStaleTermDictionary:
         assert docs_auditor.STALE_TERMS["SessionLog"] == "AgentSession"
         assert "RedisJob" in docs_auditor.STALE_TERMS
 
-    def test_migration_context_skips_fix(self):
-        content = "The SessionLog has been renamed to AgentSession."
-        fixes = docs_auditor._detect_stale_term_fixes(content)
-        # Migration context recognized -> no fix queued
-        assert fixes == []
+    @pytest.mark.parametrize(
+        "content",
+        [
+            # Bare form — the only shape the pre-#2744 hatch could ever see.
+            "The SessionLog has been renamed to AgentSession.",
+            # Backticked: the corpus writes every identifier this way, which is
+            # why `formerly SessionLog` never matched a single live document.
+            "The `SessionLog` has been renamed to `AgentSession`.",
+            "`RedisJob` was replaced by `AgentSession` in the same pass.",
+            # Mixed case at the start of a sentence.
+            "Formerly `RedisJob`, this model is now `AgentSession`.",
+            # Alias form — agent-session-migration-audit.md's actual prose.
+            "The compat shim declares `SessionLog = AgentSession` for old imports.",
+            # Arrow forms — summarizer-output-audit.md's actual prose.
+            "Rename map: `SessionLog` -> `AgentSession` across all call sites.",
+            "Rename map: `SessionLog` → `AgentSession` across all call sites.",
+            # "replacing both the earlier ..." — popoto-redis-expansion.md:7.
+            "`AgentSession` lands, replacing both the earlier `SessionLog` and `RedisJob` models.",
+        ],
+    )
+    def test_migration_context_skips_fix(self, content):
+        """The hatch must fire on the phrasings the corpus actually uses (#2744).
 
-    def test_no_migration_context_queues_fix(self):
-        content = "The SessionLog has methods to track session state."
-        assert (r"\bSessionLog\b", "AgentSession") in _stale_pairs(content)
+        Every case here is a document that *correctly* records a completed
+        rename. Rewriting any occurrence in it produces a sentence saying the
+        new name was formerly itself — a false statement that ships with
+        ``fixes_withheld == 0`` and auto-merges unread.
+        """
+        assert docs_auditor._detect_stale_term_fixes(content) == []
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "The SessionLog has methods to track session state.",
+            "The SessionLog holds per-turn state and is queried directly.",
+            "Worker turns append to the session_log field on exit.",
+        ],
+    )
+    def test_no_migration_context_queues_fix(self, content):
+        """The widened hatch must not over-exempt (plan Risk 1).
+
+        Prose that merely *mentions* a stale term without recording a migration
+        still has to queue a fix, or the detector becomes decorative.
+        """
+        assert docs_auditor._detect_stale_term_fixes(content) != []
 
     def test_fixes_travel_on_the_regex_channel(self):
         fixes = docs_auditor._detect_stale_term_fixes("The SessionLog tracks state.")
@@ -646,11 +696,28 @@ class TestStaleTermWordBoundary:
         ]
 
     def test_apply_leaves_session_logs_path_untouched(self, repo):
+        """Path tokens are never rewritten, whether or not the target exists.
+
+        ``agent/session_logs.py`` is saved by word-anchoring (#2711).
+        ``models/session_log.py`` is not: ``/`` and ``.`` are word boundaries, so
+        ``\\bsession_log\\b`` matches the whole path segment and rewrites it to
+        ``models/agent_session.py``. Both files exist on disk here on purpose —
+        that is the point. The #2728 existence invariant cannot catch a rewrite
+        whose target exists, so only path-token suppression stands between a
+        correct doc and a silently false one (#2744).
+        """
         doc = repo / "docs" / "features" / "snap.md"
-        original = "Snapshots live in `agent/session_logs.py`.\n"
+        original = (
+            "Snapshots live in `agent/session_logs.py`.\n"
+            "The backward-compat shim lives in `models/session_log.py`.\n"
+        )
         doc.write_text(original)
         (repo / "agent").mkdir()
         (repo / "agent" / "session_logs.py").write_text("")
+        (repo / "models").mkdir()
+        (repo / "models" / "session_log.py").write_text("")
+        # The rewrite target exists too — the existence invariant will pass it.
+        (repo / "models" / "agent_session.py").write_text("")
 
         regex_fixes = docs_auditor._detect_stale_term_fixes(original)
         applied, withheld = docs_auditor._apply_fixes_to_file(
@@ -659,6 +726,79 @@ class TestStaleTermWordBoundary:
         assert applied == 0
         assert withheld == []
         assert doc.read_text() == original
+
+    def test_stale_term_inside_fenced_block_is_not_rewritten(self, repo):
+        """A fenced code block is illustrative, not prose to modernize.
+
+        Suppression is an *apply-time* property (the detector keeps returning
+        ``(re.Pattern, str)``), so the assertion is on the resulting file
+        content, not on the detector's return value.
+        """
+        doc = repo / "docs" / "features" / "fence.md"
+        original = (
+            "# Notes\n"
+            "\n"
+            "Historical example, kept verbatim:\n"
+            "\n"
+            "```python\n"
+            "rows = SessionLog.objects.all()\n"
+            "```\n"
+        )
+        doc.write_text(original)
+
+        regex_fixes = docs_auditor._detect_stale_term_fixes(original)
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/fence.md"), repo, [], regex_fixes=regex_fixes
+        )
+        assert applied == 0
+        assert withheld == []
+        assert doc.read_text() == original
+
+    def test_suppression_survives_an_earlier_line_deletion(self, repo):
+        """Apply-time suppression must survive the literal loop's line deletes.
+
+        ``_apply_fixes_to_file`` runs the literal ``fixes`` list first, and
+        ``_detect_readme_broken_entries`` emits a ``new == ""`` whole-line-delete
+        sentinel. Any line index computed against the on-disk content is stale
+        the moment a line ahead of it disappears.
+
+        Here the broken index entry sits on an *earlier* line than the stale
+        term, so a detection-time index would suppress the wrong line and let
+        ``SessionLog`` be rewritten anyway. It would do so silently, never
+        raising — hence the assertion is on the resulting file content.
+        """
+        readme = repo / "docs" / "features" / "README.md"
+        original = (
+            "# Feature Index\n"
+            "\n"
+            "- [Gone](gone.md)\n"
+            "- [Kept](kept.md)\n"
+            "\n"
+            "The `SessionLog` model no longer exists.\n"
+            "It was superseded during the Popoto consolidation.\n"
+        )
+        readme.write_text(original)
+        (repo / "docs" / "features" / "kept.md").write_text("# Kept\n")
+
+        with patch.object(docs_auditor, "_git_log_follow_renames", return_value=[]):
+            literal_fixes = docs_auditor._detect_readme_broken_entries(readme, original, repo)
+        # The fixture is only meaningful if the delete sentinel really fired.
+        assert ("- [Gone](gone.md)", "") in literal_fixes
+
+        regex_fixes = docs_auditor._detect_stale_term_fixes(original)
+        assert regex_fixes, "fixture must queue a stale-term fix for the later line"
+
+        docs_auditor._apply_fixes_to_file(
+            Path("docs/features/README.md"), repo, literal_fixes, regex_fixes=regex_fixes
+        )
+
+        text = readme.read_text()
+        # The earlier broken entry is gone...
+        assert "- [Gone](gone.md)" not in text
+        assert "- [Kept](kept.md)" in text
+        # ...and the later stale term is still correctly suppressed.
+        assert "`SessionLog` model no longer exists" in text
+        assert "AgentSession" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +874,101 @@ class TestExistenceInvariant:
         assert applied == 1
         assert withheld == []
         assert "agent/vanished.py" in p.read_text()
+
+    # -- bare (unprefixed) filename refs, #2759 ------------------------------
+    # These sit ALONGSIDE the dir-prefixed cases above, which stay untouched:
+    # widening `_PATH_REF_RE` from `+` to `*` must not change any of them.
+
+    @pytest.fixture()
+    def bare_doc(self, repo):
+        p = repo / "docs" / "features" / "bare.md"
+        p.write_text("Runtime lives in `session_runner.py`.\n")
+        (repo / "docs" / "features" / "session_runner.py").write_text("")
+        return Path("docs/features/bare.md")
+
+    def test_fix_introducing_absent_bare_name_is_withheld(self, repo, bare_doc):
+        """The #2711 corruption shape, minus the directory prefix (#2759 AC1).
+
+        ``_PATH_REF_RE`` requires at least one ``dir/`` segment, so a bare
+        filename is invisible to the existence invariant and passes
+        unconditionally — exactly the class that shipped as ``d7bf3ad99``.
+        """
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            bare_doc, repo, [("session_runner.py", "ghost_module.py")]
+        )
+        assert applied == 0
+        assert withheld == [
+            {
+                "doc": str(bare_doc),
+                "old": "session_runner.py",
+                "new": "ghost_module.py",
+                "reason": "target-absent",
+            }
+        ]
+        assert "ghost_module.py" not in (repo / bare_doc).read_text()
+
+    def test_bare_name_resolvable_in_doc_directory_passes(self, repo, bare_doc):
+        """Resolution order step 1: the doc's own directory.
+
+        A bare ref in a doc is most often a sibling. Resolving it against the
+        repo root instead would read as absent and over-withhold.
+        """
+        (repo / "docs" / "features" / "headless_runner.py").write_text("")
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            bare_doc, repo, [("session_runner.py", "headless_runner.py")]
+        )
+        assert applied == 1
+        assert withheld == []
+        assert "headless_runner.py" in (repo / bare_doc).read_text()
+
+    def test_ambiguous_bare_name_passes_and_debug_logs(self, git_repo, caplog):
+        """Resolution order step 2, ambiguity ruling: >=1 match passes (#2759 AC2).
+
+        The invariant asks "does this name denote something real", not "is it
+        unambiguous". Ambiguity never produced the #2711 corruption, so it is
+        logged at DEBUG and allowed through rather than withheld.
+        """
+        repo = git_repo
+        doc = repo / "docs" / "features" / "amb.md"
+        doc.write_text("Runtime lives in `session_runner.py`.\n")
+        (repo / "docs" / "features" / "session_runner.py").write_text("")
+        for pkg in ("alpha", "beta"):
+            (repo / pkg).mkdir()
+            (repo / pkg / "shared_helper.py").write_text("")
+
+        with caplog.at_level("DEBUG", logger="reflections.docs_auditor"):
+            applied, withheld = docs_auditor._apply_fixes_to_file(
+                Path("docs/features/amb.md"),
+                repo,
+                [("session_runner.py", "shared_helper.py")],
+            )
+
+        assert applied == 1
+        assert withheld == []
+        assert "shared_helper.py" in doc.read_text()
+        assert any(
+            r.levelname == "DEBUG" and "shared_helper.py" in r.getMessage() for r in caplog.records
+        ), "ambiguous bare-name resolution must be DEBUG-logged"
+
+    def test_preexisting_absent_bare_name_is_never_revalidated(self, repo):
+        """Additive-only twin of ``test_preexisting_absent_path_is_never_revalidated``.
+
+        This property is what makes the widening free (spike-4): ``original_refs``
+        is computed with the same pattern, so widening widens both sides
+        symmetrically and the 1557 newly-visible corpus refs cost zero withholds.
+        """
+        p = repo / "docs" / "features" / "pre_bare.md"
+        p.write_text("Legacy `vanished_module.py` and `session_runner.py`.\n")
+        (repo / "docs" / "features" / "session_runner.py").write_text("")
+        (repo / "docs" / "features" / "kept_module.py").write_text("")
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/pre_bare.md"),
+            repo,
+            [("session_runner.py", "kept_module.py")],
+        )
+        assert applied == 1
+        assert withheld == []
+        assert "vanished_module.py" in p.read_text()
 
     def test_regex_channel_is_also_guarded(self, repo, doc):
         applied, withheld = docs_auditor._apply_fixes_to_file(
@@ -889,6 +1124,84 @@ class TestWithheldBlocksAutoMerge:
         body = create[create.index("--body") + 1]
         assert docs_auditor.WITHHELD_PR_MARKER in body
         assert "a/c.py" in body
+
+    def test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness(
+        self, repo, auth_ok, patch_redis
+    ):
+        """The new bare-name withhold class must reach every operator surface.
+
+        Computing the withhold is not enough — #2759's whole value is that the
+        rotation PR becomes auto-merge-ineligible and a human hears about it.
+        The withheld record here is produced by a real ``audit()`` run, not
+        hand-written, so the first assertion is the one that fails on ``main``.
+        """
+        p = repo / "docs" / "features" / "foo.md"
+        p.write_text("Reference `session_runner.py` here.\n" + "Padding line.\n" * 6)
+        (repo / "docs" / "features" / "session_runner.py").write_text("")
+
+        with (
+            patch.object(
+                docs_auditor,
+                "_detect_renamed_symbol_fixes",
+                return_value=[("session_runner.py", "ghost_module.py")],
+            ),
+            patch.object(docs_auditor, "_detect_renamed_link_fixes", return_value=[]),
+            patch.object(
+                docs_auditor,
+                "_resolve_pr_changed_files",
+                return_value=[Path("docs/features/foo.md")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch"),
+        ):
+            audit_result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert audit_result["fixes_withheld"] == 1
+        assert audit_result["withheld"][0]["new"] == "ghost_module.py"
+        assert "ghost_module.py" not in p.read_text()
+
+        # Surface 1 — the PR body carries the marker and the offending name.
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="https://github.com/o/r/pull/1", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
+            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr("slug", repo, withheld=audit_result["withheld"])
+
+        create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
+        body = create[create.index("--body") + 1]
+        assert docs_auditor.WITHHELD_PR_MARKER in body
+        assert "ghost_module.py" in body
+        # ...and that marker is what makes the PR auto-merge-ineligible.
+        assert self._eligible(body) is False
+
+        # Surfaces 2 and 3 — the Telegram notification and Redis liveness.
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+            patch("reflections.docs_auditor._update_rotation_hash"),
+            patch("reflections.docs_auditor._write_liveness") as liveness,
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "1 fix(es) withheld" in notify.call_args.args[0]
+        assert liveness.call_args.kwargs["fixes_withheld"] == 1
 
     def test_rotation_result_surfaces_withheld_count(self, repo, auth_ok, patch_redis):
         primary = repo / "docs" / "features" / "foo.md"
