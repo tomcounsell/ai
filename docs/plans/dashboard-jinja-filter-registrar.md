@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2719
 last_comment_id: 5245622050
+revision_applied: true
+revision_applied_at: 2026-08-13T12:39:23Z
 ---
 
 # Single Jinja Filter Registrar for the Dashboard
@@ -292,6 +294,14 @@ files under `tests/unit/`, and needs no secrets, services, or network access.
   asserts every `nodes.Filter` / `nodes.FilterBlock` name resolves against a
   production-registered environment. This is the guard that makes the *class* of bug
   impossible, not just this instance.
+- **No-hand-copy guard test**: the symmetric half of the same defect. A test walks
+  `tests/**/*.py` and fails on any file that assigns into a Jinja `.filters[...]` dict, so a
+  future fixture cannot re-open the hand-copy hole that caused #2719. Enforcement moves out of
+  prose and into CI.
+- **Production-shape equality assertion**: the guard env is a bare `Environment`, but
+  production renders through `Jinja2Templates`. The guard asserts the two have identical
+  filter-key sets, so a production-only filter added by some other mechanism trips the guard
+  instead of silently re-creating the divergence one level up.
 - **`analytics_stats.html` render coverage**: a small render test for the last uncovered
   `| usd` surface.
 
@@ -305,43 +315,77 @@ CI time**, naming the template and line → never reaches `main`.
 
 ### Technical Approach
 
-- Define `register_template_filters(env: Environment) -> None` in `ui/app.py`, immediately
-  after `_filter_usd` and before `create_app`. Body is the six existing assignments moved
-  verbatim from lines 149-154, retargeted from `templates.env` to the `env` parameter.
-- `create_app` calls `register_template_filters(templates.env)` at the current registration
-  site. No other production change; `_filter_usd` semantics stay exactly as shipped.
-- The guard test lives in a new `tests/unit/test_template_filter_registry.py`, marked
-  `pytest.mark.unit` and `pytest.mark.webui` to match the existing render tests. Shape:
+This section states **contracts**, not implementations. Placement within `ui/app.py`, helper
+decomposition, and docstring phrasing are the builder's to choose; only the behavior below is
+binding.
 
-  ```python
-  env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
-  register_template_filters(env)
-  missing = set()
-  for path in sorted(TEMPLATES_DIR.rglob("*.html")):
-      ast = env.parse(path.read_text(), filename=str(path))
-      for node in ast.find_all((nodes.Filter, nodes.FilterBlock)):
-          if node.name not in env.filters:
-              missing.add((path.relative_to(TEMPLATES_DIR).as_posix(), node.name, node.lineno))
-  assert not missing
+- **Registrar contract**: `register_template_filters(env: Environment) -> None` in `ui/app.py`
+  takes any `jinja2.Environment` and registers exactly the six dashboard filters on it. It
+  registers filters and nothing else — it must not touch loader, autoescape, globals, or
+  extensions, because the two consuming fixtures differ in autoescape (spike-3). The six
+  `_filter_*` functions are unchanged; `_filter_usd` semantics stay exactly as shipped by
+  `96b0f65dd`.
+- `create_app` calls the registrar in place of the six imperative assignments at
+  `ui/app.py:149-154`. Production behavior is byte-identical.
+- **Filter-demand guard contract**: a new `tests/unit/test_template_filter_registry.py`, marked
+  `pytest.mark.unit` and `pytest.mark.webui` to match the existing render tests, parses every
+  `ui/templates/**/*.html` against a registrar-configured environment and fails if any
+  `nodes.Filter` **or** `nodes.FilterBlock` name is absent from `env.filters`. Scanning both
+  node types is deliberate — `{% filter %}` is a distinct node (see Research). The failure
+  message names template path, filter name, and line number. The scan must also assert it
+  visited a non-zero template count and collected a non-empty filter set, so an empty sweep
+  cannot pass vacuously (Risk 2).
+- **Production-shape equality**: the guard env is a bare `Environment`, but production renders
+  through `Jinja2Templates` (`ui/app.py:146`; imported from `fastapi.templating` at
+  `ui/app.py:21`, not starlette). Assert filter-**key** equality between the two:
+
+  ```
+  prod = Jinja2Templates(directory=str(TEMPLATES_DIR))
+  register_template_filters(prod.env)
+  assert set(prod.env.filters) == set(guard_env.filters)
   ```
 
-  Scanning both `nodes.Filter` and `nodes.FilterBlock` is deliberate (see Research). The
-  failure message must name template, filter, and line so the next developer is not left
-  bisecting.
-- **Demonstrated-red requirement**: the guard is a validator, and a passing suite never proves
-  a validator blocks. Before landing, temporarily add `{{ 1 | notafilter }}` to a template,
-  show the guard fails naming that template and line, remove it, show the guard passes. Paste
-  both outputs into the PR description.
+  Do **not** call `create_app()` for this — it mounts `StaticFiles` and builds every router.
+  Compare keys only: verified by execution that `Jinja2Templates` differs from a bare
+  `Environment` in exactly two non-filter ways (`autoescape` is a `select_autoescape` callable,
+  and it injects a `url_for` global), and its extra-filter set is empty today. So the assertion
+  passes now and acts as a tripwire if a future `filters.update(...)`, `Jinja2Templates(env=...)`,
+  or Jinja extension introduces a production-only filter the guard would otherwise not see.
+- **No-hand-copy guard contract**: the same file walks `tests/**/*.py`, skips its own filename,
+  and fails on any file matching the regex `\.filters\s*\[`. Anchor on the attribute form
+  (`\.filters\s*[`), **not** a bare `filters[` — a local variable named `filters` would
+  false-positive. The self-exemption is required because the guard file legitimately reads
+  `env.filters`. Verified against the live repo at plan time: exactly **7** matches exist today,
+  all inside the two fixtures Task 2 rewires
+  (`test_session_modal_liveness_render.py:51-53`, `test_per_project_modal.py:35-38`), so the
+  test goes green the moment Task 2 lands and needs **no grandfather list**. This is what makes
+  "never hand-copy filters" an enforced rule rather than a README note — the plan's own root
+  cause was that comments do not fail builds.
+- **Demonstrated-red requirement**: the two guards are validators, and a passing suite never
+  proves a validator blocks. Before landing, for each guard: introduce the violation, capture
+  the failing output, remove it, capture the passing output. For the filter-demand guard,
+  temporarily add `{{ 1 | notafilter }}` to a template and confirm the failure names that
+  template and line. For the no-hand-copy guard, temporarily add an `env.filters["x"] = ...`
+  line to a scratch test file and confirm the failure names that file. Paste all four outputs
+  into the PR description.
 - Re-baseline the two stale assertions against production semantics:
   - `test_token_cost_strip_renders_when_present` → assert `"$1.24"` for a `1.2345` input
     (ceil-to-cent, per `96b0f65dd`), not `"$1.2345"`.
-  - `test_renders_timestamps_via_format_filter` → assert the humanized production output.
-    Prefer computing the expectation by calling `_filter_format_timestamp(ts)` directly rather
-    than hardcoding `"1m ago"`, so the test asserts *agreement with production* instead of
-    re-encoding a format that can drift again. Keep the `"Last active"` structural assertion.
-- Add `tests/unit/test_analytics_stats_render.py` (or a class in the guard-test file) that
-  renders `_partials/analytics_stats.html` through a registrar-configured env with a minimal
-  `analytics` mapping and asserts both cost cards render ceil-to-cent values.
+  - `test_renders_timestamps_via_format_filter` → compute the expectation by calling
+    `_filter_format_timestamp(ts)` rather than hardcoding, so the test asserts *agreement with
+    production* instead of re-encoding a format that can drift again. Do **not** hardcode
+    `"1m ago"`: the filter calls `.astimezone()` and several branches return
+    `dt.strftime("%H:%M")`, so a hardcoded expectation is local-timezone dependent. Because that
+    computed expectation is self-referential (the template applies the same function, so it can
+    only fail if the filter token is dropped entirely, and `"1m ago"` is a 7-char substring
+    cheap to satisfy incidentally in a large HTML blob), add discriminating checks alongside it:
+    assert the **raw unfiltered value is absent** (`str(int(ts)) not in html`) and keep the
+    `"Last active"` structural assertion. The `now - 60` input is safe from the
+    `< 60 → "just now"` boundary because the filter samples `utc_now()` strictly after `ts` is
+    captured, so `diff` is always `>= 60`.
+- Add `tests/unit/test_analytics_stats_render.py` that renders `_partials/analytics_stats.html`
+  through a registrar-configured env with a minimal `analytics` mapping and asserts both cost
+  cards render ceil-to-cent values.
 
 ## Failure Path Test Strategy
 
@@ -352,23 +396,32 @@ CI time**, naming the template and line → never reaches `main`.
       `ui/app.py`'s filter region.
 
 ### Empty/Invalid Input Handling
-- [ ] `register_template_filters(env)` on an env that already has a filter of the same name
-      overwrites it — intended, and the behavior `create_app` has today. Assert the registrar
-      is idempotent: calling it twice on the same env leaves `env.filters` equivalent.
 - [ ] Assert `register_template_filters` registers every one of the six names, by comparing
       `set(env.filters) - set(Environment().filters)` against the expected name set. This is
       what makes "adding a new production filter without touching test code does not break
-      these tests" mechanically true rather than aspirational.
-- [ ] `_filter_usd(None)` returns `"$0.00"` and `_filter_format_timestamp(None)` returns `"-"`;
-      the templates guard cost sites with `{% if %}`, so the None path is reachable only via
-      the filters directly. Cover both in the registrar test.
+      these tests" mechanically true rather than aspirational. **This completeness test is the
+      one registrar-behavior test worth writing.**
+- [ ] **DROPPED — no idempotency test.** An earlier draft prescribed asserting that calling the
+      registrar twice leaves `env.filters` equivalent. That is a property of
+      `dict.__setitem__`, a Python language guarantee, not of this code. Testing it adds a row
+      to the suite and zero information. Overwrite-on-repeat remains the intended behavior and
+      is exactly what `create_app` does today; it simply needs no test.
+- [ ] **RELOCATED — filter `None`-paths do not belong in the registry test.**
+      `_filter_usd(None) == "$0.00"` and `_filter_format_timestamp(None) == "-"` are properties
+      of the filters, not the registrar, and are unrelated to the #2719 defect. If kept, they go
+      in a filters-focused test module so `test_template_filter_registry.py` retains exactly one
+      job: proving the registration seam is complete and unbypassed. They are optional; the plan
+      does not require them.
 
 ### Error State Rendering
-- [ ] The guard test *is* the error-state test for this feature: it asserts the failure mode
-      (an unregistered filter) is detected statically instead of surfacing as a render-time 500.
-      The demonstrated-red step above proves it fires.
-- [ ] Failure output must name the offending template path, filter name, and line number —
-      asserted by inspecting the assertion message in the red-state demonstration.
+- [ ] The two guard tests *are* the error-state tests for this feature. The filter-demand guard
+      asserts an unregistered filter is detected statically instead of surfacing as a
+      render-time 500. The no-hand-copy guard asserts a re-opened hand-copy hole is detected at
+      CI time instead of surfacing as a stale fixture months later. The demonstrated-red steps
+      prove both fire.
+- [ ] Filter-demand guard failure output must name the offending template path, filter name, and
+      line number; no-hand-copy guard failure output must name the offending test file — both
+      asserted by inspecting the assertion messages in the red-state demonstrations.
 
 ## Test Impact
 
@@ -387,12 +440,17 @@ CI time**, naming the template and line → never reaches `main`.
 - [ ] `tests/unit/test_per_project_modal.py::env` (fixture, lines 29-39) — REPLACE: delete the
       four lambdas, call `register_template_filters(e)`. Keep `autoescape=True`. Spike-3
       confirms no assertion in that file changes.
-- [ ] `tests/unit/test_template_filter_registry.py` — CREATE: filter-demand guard plus
-      registrar-completeness and idempotency tests.
+- [ ] `tests/unit/test_template_filter_registry.py` — CREATE: filter-demand guard,
+      production-shape (`Jinja2Templates`) filter-key equality assertion, registrar-completeness
+      test, and the no-hand-copy guard over `tests/**/*.py`. No idempotency test (see Failure
+      Path Test Strategy).
 - [ ] `tests/unit/test_analytics_stats_render.py` — CREATE: render coverage for the third
       `| usd` surface.
 - [ ] No other test constructs a Jinja `Environment` — verified by
-      `grep -rn "Environment(" tests/`, which returns exactly the two fixtures above.
+      `grep -rn "Environment(" tests/`, which returns exactly the two fixtures above. The
+      no-hand-copy guard makes this a standing invariant rather than a one-time check: verified
+      at plan time that `\.filters\s*\[` matches exactly 7 lines across `tests/`, all inside
+      those two fixtures, so the guard is green immediately after Task 2 with no exemption list.
 
 ## Rabbit Holes
 
@@ -440,6 +498,18 @@ registrar silently propagates the deletion into every test env, and a template s
 filter would fail only at render time in production.
 **Mitigation:** This is precisely what the guard catches: it resolves template demand against
 the *registrar's* output, so removing a still-used filter turns the guard red immediately.
+
+### Risk 5: The guard env and the production env re-diverge
+**Impact:** The guard builds a bare `Environment` while production renders through
+`Jinja2Templates`. If a future change adds a production-only filter by some mechanism the
+`grep -c 'templates.env.filters\['` anti-criterion cannot see — `filters.update(...)`,
+`Jinja2Templates(env=...)`, or a Jinja extension registered in `create_app` — the guard would
+green-light templates against a filter set production does not actually have. That is the
+original three-lists divergence reproduced one level up.
+**Mitigation:** The guard asserts filter-**key** equality between its own env and a
+`Jinja2Templates`-shaped env with the registrar applied. Verified at plan time that the two
+differ only in `autoescape` (a `select_autoescape` callable) and a `url_for` global, with
+identical filter sets — so the assertion passes today and fires the moment they diverge.
 
 ### Risk 4: Importing `ui.app` in unit tests pulls in a heavy dependency chain
 **Impact:** `ui/app.py` imports `agent.constants`, which imports the `agent` package and
@@ -498,9 +568,12 @@ only by `create_app` and by test fixtures.
       new filter is added there and nowhere else. `docs/features/dashboard.md:139` already
       documents the `freshness_age` filter, so this extends existing content rather than
       creating a new page.
-- [ ] Update `tests/README.md`: add `test_template_filter_registry.py` to the suite index and
-      note that dashboard render fixtures must obtain filters from
-      `ui.app.register_template_filters`, never hand-copy them.
+- [ ] Update `tests/README.md`: add `test_template_filter_registry.py` and
+      `test_analytics_stats_render.py` to the suite index, and note that dashboard render
+      fixtures must obtain filters from `ui.app.register_template_filters`, never hand-copy
+      them — pointing at the no-hand-copy guard as the *enforcement*. The README note is
+      documentation of a rule CI enforces, not the rule's only home; the plan's own root cause
+      was that comments do not fail builds.
 - [ ] No new `docs/features/README.md` index entry — no new feature page is created.
 
 ### External Documentation Site
@@ -519,9 +592,10 @@ only by `create_app` and by test fixtures.
 - [ ] `tests/unit/test_session_modal_liveness_render.py::TestModalMetadataSections::test_token_cost_strip_renders_when_present` passes, asserting `$1.24`.
 - [ ] `tests/unit/test_session_modal_liveness_render.py::TestModalLivenessSection::test_renders_timestamps_via_format_filter` passes against production `_filter_format_timestamp` output.
 - [ ] `tests/unit/test_per_project_modal.py` passes unchanged in its assertions.
-- [ ] No test file hand-copies filter registrations: `grep -rn 'filters\[' tests/` returns nothing.
+- [ ] No test file hand-copies filter registrations — enforced by the no-hand-copy guard test in `tests/unit/test_template_filter_registry.py` (a CI test, not a human-run grep), anchored on `\.filters\s*\[` with the guard file self-exempted.
+- [ ] The guard env's filter keys equal a `Jinja2Templates`-shaped production env's filter keys.
 - [ ] `ui/app.py` registers filters in exactly one place (`register_template_filters`); `create_app` contains no `templates.env.filters[` assignment.
-- [ ] The guard test fails when a template references an unregistered filter — proven by a red-state demonstration pasted into the PR description.
+- [ ] The filter-demand guard fails when a template references an unregistered filter, and the no-hand-copy guard fails when a test file assigns into `.filters[...]` — both proven by red-state demonstrations pasted into the PR description.
 - [ ] `_partials/analytics_stats.html` has render coverage asserting both cost cards.
 - [ ] No production render output changes: `_filter_usd` still uses `math.ceil`, and no file under `ui/templates/` is modified by this PR.
 - [ ] Tests pass (`/do-test`)
@@ -556,6 +630,18 @@ only by `create_app` and by test fixtures.
   - Agent Type: documentarian
   - Resume: true
 
+### File Ownership (prevents the two builders colliding)
+
+The split is kept rather than merged, so the boundary must be explicit:
+
+| Agent | Owns | Must not touch |
+|---|---|---|
+| `filter-registrar-builder` | `ui/app.py`, `tests/unit/test_session_modal_liveness_render.py`, `tests/unit/test_per_project_modal.py` (Tasks 1-2, serial) | the two new test files |
+| `filter-guard-builder` | `tests/unit/test_template_filter_registry.py`, `tests/unit/test_analytics_stats_render.py` (Tasks 3-4, serial) | `ui/app.py` — its only production dependency is `from ui.app import TEMPLATES_DIR, register_template_filters` |
+
+Each agent runs its own tasks serially; the two agents run in parallel with each other. No task
+is `Parallel: true` while sharing an assignee with another concurrently-flagged task.
+
 ### Available Agent Types
 
 Standard Tier 1 pool. No domain framing needed — this is ordinary Python/Jinja test-infrastructure work.
@@ -566,15 +652,16 @@ Standard Tier 1 pool. No domain framing needed — this is ordinary Python/Jinja
 
 - **Task ID**: build-registrar
 - **Depends On**: none
-- **Validates**: `tests/unit/test_template_filter_registry.py` (create), `python -c "from ui.app import register_template_filters"`
+- **Validates**: `./.venv/bin/python -c "from ui.app import register_template_filters"` and `./scripts/pytest-clean.sh tests/unit/test_per_project_modal.py`
 - **Informed By**: spike-3 (registrar must own filters only, never autoescape — the two fixtures differ)
 - **Assigned To**: `filter-registrar-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `register_template_filters(env: Environment) -> None` to `ui/app.py` after `_filter_usd`, moving the six assignments from lines 149-154 verbatim.
+- Add `register_template_filters(env: Environment) -> None` to `ui/app.py`, moving the six assignments from lines 149-154 verbatim (retargeted to the `env` parameter). Placement within the module is the builder's call.
 - Replace those six lines in `create_app` with `register_template_filters(templates.env)`.
-- Docstring: single source of truth; callers own loader/autoescape; new filters go here.
+- Docstring states the contract: single source of truth; callers own loader/autoescape; new filters go here. Wording is the builder's.
 - Confirm `./.venv/bin/python -c "import ui.app"` still imports without a Redis connection.
+- **Why `test_per_project_modal.py` is the gate here:** Task 1 changes no test file, so that suite passes both before and after. A red there means the `create_app` rewiring broke import or registration — a meaningful Task-1 signal. `test_template_filter_registry.py` is **not** a Task 1 validator; it does not exist until Task 3 creates it (the earlier draft's circular dependency).
 
 ### 2. Rewire both test fixtures and re-baseline stale assertions
 
@@ -599,25 +686,29 @@ Standard Tier 1 pool. No domain framing needed — this is ordinary Python/Jinja
 - **Informed By**: spike-1 (AST scan finds 6 production filters, 8 built-ins, 0 unknowns across 5 templates), research (`nodes.FilterBlock` must be scanned alongside `nodes.Filter`; `|attr`/`map('name')` are a documented blind spot)
 - **Assigned To**: `filter-guard-builder`
 - **Agent Type**: test-engineer
-- **Parallel**: true
+- **Parallel**: true (with Tasks 1-2 only — Task 4 now runs after this one on the same agent)
+- **Must not touch `ui/app.py`.** Its only production dependency is `from ui.app import TEMPLATES_DIR, register_template_filters`. Tasks 1-2 own that file serially on the other agent.
 - Create `tests/unit/test_template_filter_registry.py`, marked `pytest.mark.unit` and `pytest.mark.webui`.
-- Guard test: parse every `ui/templates/**/*.html` on a registrar-configured env; assert no `nodes.Filter`/`nodes.FilterBlock` name is missing from `env.filters`. Failure message names template, filter, and line.
+- Filter-demand guard: parse every `ui/templates/**/*.html` on a registrar-configured env; assert no `nodes.Filter`/`nodes.FilterBlock` name is missing from `env.filters`. Failure message names template, filter, and line.
 - Assert the sweep visited a non-zero template count and collected a non-empty filter set, so an empty scan cannot pass vacuously.
+- **Production-shape equality**: build `Jinja2Templates(directory=str(TEMPLATES_DIR))`, apply the registrar to its `.env`, and assert its filter **keys** equal the guard env's. Do NOT call `create_app()` (it mounts StaticFiles and builds every router). Keys only — the two envs legitimately differ in `autoescape` and a `url_for` global.
+- **No-hand-copy guard**: walk `tests/**/*.py`, skip `Path(__file__).name`, and fail on any file matching `re.search(r"\.filters\s*\[", ...)`. Anchor on the attribute form, not a bare `filters[`. Verified at plan time: 7 matches today, all in the two fixtures Task 2 rewires — no grandfather list needed. The self-exemption is required because this file legitimately reads `env.filters`.
 - Add a registrar-completeness test: `set(env.filters) - set(Environment().filters)` equals the six expected names.
-- Add an idempotency test: calling the registrar twice leaves `env.filters` equivalent.
-- Cover `_filter_usd(None) == "$0.00"` and `_filter_format_timestamp(None) == "-"`.
-- **Demonstrated red**: temporarily add `{{ 1 | notafilter }}` to a template, capture the failing output, remove it, capture the passing output. Both go in the PR description.
-- Docstring records the dynamic-filter blind spot.
+- **No idempotency test** — `dict.__setitem__` idempotence is a Python language guarantee, not behavior of this code.
+- **No filter `None`-path assertions here** — `_filter_usd(None)` / `_filter_format_timestamp(None)` are filter properties, not registrar properties, and are unrelated to #2719. This file keeps exactly one job. Put them in a filters-focused module if you want them at all (optional).
+- **Demonstrated red, both guards**: (a) temporarily add `{{ 1 | notafilter }}` to a template, capture the failing output, remove it, capture the passing output; (b) temporarily add an `env.filters["x"] = ...` line to a scratch test file, capture the failing output naming that file, remove it, capture the passing output. All four outputs go in the PR description.
+- Docstring records the dynamic-filter (`|attr`, `map('name')`) blind spot.
 
 ### 4. Add analytics_stats render coverage
 
 - **Task ID**: build-analytics-coverage
-- **Depends On**: build-registrar
+- **Depends On**: build-guard
 - **Validates**: `tests/unit/test_analytics_stats_render.py` (create)
 - **Informed By**: spike-4 (83-line template, flat `analytics` mapping, no includes or macros)
 - **Assigned To**: `filter-guard-builder`
 - **Agent Type**: test-engineer
-- **Parallel**: true
+- **Parallel**: false
+- **Sequenced deliberately.** An earlier draft marked Tasks 3 and 4 both `Parallel: true` while assigning both to `filter-guard-builder` — one agent cannot execute two tasks concurrently, so a supervisor honoring the flags would either double-dispatch the agent (rival incarnations racing on one worktree) or silently serialize against the stated plan. This is one small render test; parallelism buys nothing, and sequencing after Task 3 lets it reuse the registrar-configured env helper Task 3 just wrote. Do NOT reassign it to `filter-registrar-builder`, which owns the serial Tasks 1-2 on `ui/app.py`.
 - Render `_partials/analytics_stats.html` through a registrar-configured env with a minimal `analytics` mapping.
 - Assert both cost cards (`cost_today_usd` at line 30, `cost_7d_usd` at line 34) render ceil-to-cent values.
 - Assert the sub-cent case renders `$0.01`, not `$0.00` — the behavior `96b0f65dd` exists to protect.
@@ -664,28 +755,38 @@ Standard Tier 1 pool. No domain framing needed — this is ordinary Python/Jinja
 | Registrar exists and is importable | `./.venv/bin/python -c "from ui.app import register_template_filters; print('ok')"` | output contains ok |
 | Registrar covers all six filters | `./.venv/bin/python -c "from jinja2 import Environment; from ui.app import register_template_filters as r; e=Environment(); b=set(Environment().filters); r(e); print(sorted(set(e.filters)-b))"` | output contains format_duration |
 | Every template filter resolves | `./.venv/bin/python -c "import pathlib,jinja2;from jinja2 import nodes;from ui.app import register_template_filters as r;td=pathlib.Path('ui/templates');e=jinja2.Environment(loader=jinja2.FileSystemLoader(str(td)));r(e);m=[(str(p),n.name) for p in td.rglob('*.html') for n in e.parse(p.read_text()).find_all((nodes.Filter,nodes.FilterBlock)) if n.name not in e.filters];print(len(m))"` | output contains 0 |
-| No hand-copied filters in tests | `grep -rn 'filters\[' tests/ \| wc -l` | match count == 0 |
-| create_app has no inline registrations | `grep -c 'templates.env.filters\[' ui/app.py` | match count == 0 |
+| No hand-copied filters in tests | `! grep -rnE '\.filters\s*\[' tests/ --include='*.py' \| grep -v test_template_filter_registry.py \| grep -q .` | exit code 0 |
+| create_app has no inline registrations | `! grep -q 'templates.env.filters\[' ui/app.py` | exit code 0 |
 | Anti-criterion: usd semantics unchanged | `grep -c 'math.ceil' ui/app.py` | output > 0 |
-| Anti-criterion: stale 4-decimal assertion gone | `grep -c '1\.2345"' tests/unit/test_session_modal_liveness_render.py` | match count == 0 |
-| Anti-criterion: no template markup changed | `git diff --name-only origin/main... -- ui/templates/ \| wc -l` | match count == 0 |
+| Anti-criterion: stale 4-decimal assertion gone | `! grep -q '1\.2345"' tests/unit/test_session_modal_liveness_render.py` | exit code 0 |
+| Anti-criterion: no template markup changed | `test -z "$(git diff --name-only origin/main... -- ui/templates/)"` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+
+**Exit-code convention:** the four anti-criterion rows above are written as `! grep -q ...` /
+`test -z ...` rather than `grep -c ... == 0`. `grep` exits **1** when it finds nothing, so a
+runner judging by exit code would read the *success* state (no matches) as a failure. The one
+positive row (`grep -c 'math.ceil' ui/app.py`, expected `> 0`) is judged by output, not exit
+code, and is already correct as written.
 
 ## Critique Results
 
 War room depth: **FULL** (3 critics). Findings: 8 total — 0 blockers, 6 concerns, 2 nits.
+Verdict: **READY TO BUILD (with concerns)**, recorded in commit `6d2ad5999` on `main`.
+
+**Revision status: all 8 findings applied.** Every row below is addressed in the plan body; the
+Implementation Note column is retained because the build agents consume it directly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The guard builds a bare `Environment`, but production renders through `Jinja2Templates` (`ui/app.py:146`). The only defense against the two re-diverging is the `grep -c 'templates.env.filters\['` anti-criterion, which catches subscript assignment only — a future `filters.update(...)`, `Jinja2Templates(env=...)`, or a Jinja extension in `create_app` adds a production-only filter the guard cannot see. That is the three-lists divergence one level up. | pending | Assert filter-key equality between the guard env and a production-shaped env: `from fastapi.templating import Jinja2Templates` (ui/app.py:21 imports it from fastapi, not starlette); `prod = Jinja2Templates(directory=str(TEMPLATES_DIR)); register_template_filters(prod.env); assert set(prod.env.filters) == set(guard_env.filters)`. Do NOT call `create_app()` — it mounts StaticFiles and builds every router. Compare `.filters` KEYS only: verified by execution that `Jinja2Templates` differs from a bare `Environment` in exactly two non-filter ways (`autoescape` is a `select_autoescape` callable, and it injects a `url_for` global); its extra-filter set is empty today, which is why the assertion passes now and acts as a tripwire later. |
-| CONCERN | Risk & Robustness | Re-baselining `test_renders_timestamps_via_format_filter` by computing `expected = _filter_format_timestamp(ts)` makes the assertion self-referential — the template applies the same function, so it can only fail if the filter token is dropped entirely, and it matches the 7-char substring `1m ago`, cheap to satisfy incidentally in a large HTML blob. | pending | Keep the production-agreement computation but add a discriminating check: alongside `assert expected in html`, assert the raw unfiltered value is absent (`assert str(int(ts)) not in html`) and keep `assert "Last active" in html`. Do NOT hardcode `"1m ago"`: `_filter_format_timestamp` calls `.astimezone()` and several branches return `dt.strftime("%H:%M")`, so a hardcoded expectation is local-timezone dependent. The `now - 60` input is safe from the `< 60 → "just now"` boundary because the filter samples `utc_now()` strictly after `ts` is captured, so `diff` is always `>= 60`. |
-| CONCERN | Scope & Value | Failure Path Test Strategy states the registrar "is six dict assignments with no branching," then prescribes tests for that non-branching code: an idempotency test (a property of Python dict assignment, not of this code) and `None`-path assertions that belong to the filters, not the registrar, and are unrelated to the defect. | pending | KEEP the completeness test — `set(env.filters) - set(Environment().filters) == {the six names}` — it is what makes "add a filter, tests inherit it" mechanically true rather than aspirational. DROP the idempotency test outright: `dict.__setitem__` idempotence is a language guarantee. If the `None`-path assertions are kept, move them to a filters-focused test so `test_template_filter_registry.py` retains exactly one job. |
-| CONCERN | History & Consistency | The plan names its root cause ("comments do not fail builds") but lands the anti-recurrence rule as a `tests/README.md` note plus a Success Criterion checked by a human running `grep -rn 'filters\['` once. That is a comment with extra steps: the plan guards *templates demanding an unregistered filter* but leaves the symmetric failure — *a new fixture hand-rolling filters again* — enforced by prose. A third fixture added later reproduces #2719 with nothing going red. | pending | Promote the grep into a CI test in `tests/unit/test_template_filter_registry.py`: walk `tests/**/*.py`, skip `Path(__file__).name`, and flag any file matching `re.search(r"\.filters\s*\[", p.read_text())`. Anchor on `\.filters\s*\[` (attribute access), NOT the plan's bare `filters[`, so a local variable named `filters` cannot false-positive. Verified against the live repo: exactly 7 matches exist today, all in the two fixtures Task 2 rewires (`test_session_modal_liveness_render.py:51-53`, `test_per_project_modal.py:35-38`), so the test goes green the moment Task 2 lands and needs no grandfather list. The filename self-exemption is required because the guard file legitimately reads `env.filters`. |
-| CONCERN | History & Consistency | Task 1 declares `Validates: tests/unit/test_template_filter_registry.py (create)`, but that file is created by Task 3, which itself declares `Depends On: build-registrar`. The dependency graph and the validation field point in opposite directions: a builder following Task 1 literally blocks on a file that cannot exist yet, or writes the guard early and collides with Task 3's assignee on the same new file. | pending | Set Task 1 `Validates:` to `./.venv/bin/python -c "from ui.app import register_template_filters"` plus `./scripts/pytest-clean.sh tests/unit/test_per_project_modal.py`. The second command is a meaningful Task-1 gate precisely because Task 1 changes no test file — that suite passes both before and after, so a red there means the `create_app` rewiring broke import or registration. Leave `test_template_filter_registry.py (create)` on Task 3 only. |
-| CONCERN | History & Consistency + Scope & Value | Tasks 3 and 4 are both `Parallel: true` while both are `Assigned To: filter-guard-builder`. One agent cannot execute two tasks concurrently, so a supervisor honoring the flags either double-dispatches the same agent (two incarnations racing on one worktree) or silently serializes, contradicting the Team Orchestration table. Relatedly, four named agents for a Small change touching one production file and four test files is handoff overhead exceeding the work. | pending | Set Task 4 `Parallel: false` and run it after Task 3 on the same agent — it is one small render test, the parallelism buys nothing, and sequencing lets it reuse the registrar-configured env helper Task 3 just wrote. Do NOT reassign Task 4 to `filter-registrar-builder`, which owns the serial Tasks 1-2 on `ui/app.py`. If the two builders are instead merged (the simpler option), the conflict dissolves; a kept split requires the guard builder never touch `ui/app.py` — its only production dependency is `from ui.app import TEMPLATES_DIR, register_template_filters`. |
-| NIT | Risk & Robustness | Three anti-criterion Verification rows use `grep -c` expecting `match count == 0`, but `grep` exits 1 when it finds nothing, so a runner judging by exit code reads the success state as a failure. | pending | Use `! grep -q 'templates.env.filters\[' ui/app.py` (exit 0 when absent) or `grep -c ... ; test $? -eq 1`. The positive row (`grep -c 'math.ceil' ui/app.py`, expected `> 0`) is already correct. |
-| NIT | Scope & Value | The plan pins builder-owned detail: the exact ~15-line guard body, the exact insertion point ("immediately after `_filter_usd` and before `create_app`"), and two docstrings' content. None change the outcome; over-specification invites review churn when the builder's equally-correct arrangement differs. | pending | State the contract (guard scans `nodes.Filter` and `nodes.FilterBlock` across every template and names template/filter/line on failure; registrar takes an `Environment` and registers filters only) and let the builder own placement and phrasing. |
+| CONCERN | Risk & Robustness | The guard builds a bare `Environment`, but production renders through `Jinja2Templates` (`ui/app.py:146`). The only defense against the two re-diverging is the `grep -c 'templates.env.filters\['` anti-criterion, which catches subscript assignment only — a future `filters.update(...)`, `Jinja2Templates(env=...)`, or a Jinja extension in `create_app` adds a production-only filter the guard cannot see. That is the three-lists divergence one level up. | Technical Approach → Production-shape equality; Risk 5; Task 3; Success Criteria | Assert filter-key equality between the guard env and a production-shaped env: `from fastapi.templating import Jinja2Templates` (ui/app.py:21 imports it from fastapi, not starlette); `prod = Jinja2Templates(directory=str(TEMPLATES_DIR)); register_template_filters(prod.env); assert set(prod.env.filters) == set(guard_env.filters)`. Do NOT call `create_app()` — it mounts StaticFiles and builds every router. Compare `.filters` KEYS only: verified by execution that `Jinja2Templates` differs from a bare `Environment` in exactly two non-filter ways (`autoescape` is a `select_autoescape` callable, and it injects a `url_for` global); its extra-filter set is empty today, which is why the assertion passes now and acts as a tripwire later. |
+| CONCERN | Risk & Robustness | Re-baselining `test_renders_timestamps_via_format_filter` by computing `expected = _filter_format_timestamp(ts)` makes the assertion self-referential — the template applies the same function, so it can only fail if the filter token is dropped entirely, and it matches the 7-char substring `1m ago`, cheap to satisfy incidentally in a large HTML blob. | Technical Approach → re-baseline bullet 2 (discriminating checks added); Task 2 | Keep the production-agreement computation but add a discriminating check: alongside `assert expected in html`, assert the raw unfiltered value is absent (`assert str(int(ts)) not in html`) and keep `assert "Last active" in html`. Do NOT hardcode `"1m ago"`: `_filter_format_timestamp` calls `.astimezone()` and several branches return `dt.strftime("%H:%M")`, so a hardcoded expectation is local-timezone dependent. The `now - 60` input is safe from the `< 60 → "just now"` boundary because the filter samples `utc_now()` strictly after `ts` is captured, so `diff` is always `>= 60`. |
+| CONCERN | Scope & Value | Failure Path Test Strategy states the registrar "is six dict assignments with no branching," then prescribes tests for that non-branching code: an idempotency test (a property of Python dict assignment, not of this code) and `None`-path assertions that belong to the filters, not the registrar, and are unrelated to the defect. | Failure Path Test Strategy → Empty/Invalid Input Handling (idempotency DROPPED, None-paths RELOCATED); Task 3 | KEEP the completeness test — `set(env.filters) - set(Environment().filters) == {the six names}` — it is what makes "add a filter, tests inherit it" mechanically true rather than aspirational. DROP the idempotency test outright: `dict.__setitem__` idempotence is a language guarantee. If the `None`-path assertions are kept, move them to a filters-focused test so `test_template_filter_registry.py` retains exactly one job. |
+| CONCERN | History & Consistency | The plan names its root cause ("comments do not fail builds") but lands the anti-recurrence rule as a `tests/README.md` note plus a Success Criterion checked by a human running `grep -rn 'filters\['` once. That is a comment with extra steps: the plan guards *templates demanding an unregistered filter* but leaves the symmetric failure — *a new fixture hand-rolling filters again* — enforced by prose. A third fixture added later reproduces #2719 with nothing going red. | Solution → No-hand-copy guard test; Technical Approach → No-hand-copy guard contract; Task 3; Verification; Success Criteria | Promote the grep into a CI test in `tests/unit/test_template_filter_registry.py`: walk `tests/**/*.py`, skip `Path(__file__).name`, and flag any file matching `re.search(r"\.filters\s*\[", p.read_text())`. Anchor on `\.filters\s*\[` (attribute access), NOT the plan's bare `filters[`, so a local variable named `filters` cannot false-positive. Verified against the live repo: exactly 7 matches exist today, all in the two fixtures Task 2 rewires (`test_session_modal_liveness_render.py:51-53`, `test_per_project_modal.py:35-38`), so the test goes green the moment Task 2 lands and needs no grandfather list. The filename self-exemption is required because the guard file legitimately reads `env.filters`. |
+| CONCERN | History & Consistency | Task 1 declares `Validates: tests/unit/test_template_filter_registry.py (create)`, but that file is created by Task 3, which itself declares `Depends On: build-registrar`. The dependency graph and the validation field point in opposite directions: a builder following Task 1 literally blocks on a file that cannot exist yet, or writes the guard early and collides with Task 3's assignee on the same new file. | Task 1 `Validates:` rewritten; guard file left on Task 3 only | Set Task 1 `Validates:` to `./.venv/bin/python -c "from ui.app import register_template_filters"` plus `./scripts/pytest-clean.sh tests/unit/test_per_project_modal.py`. The second command is a meaningful Task-1 gate precisely because Task 1 changes no test file — that suite passes both before and after, so a red there means the `create_app` rewiring broke import or registration. Leave `test_template_filter_registry.py (create)` on Task 3 only. |
+| CONCERN | History & Consistency + Scope & Value | Tasks 3 and 4 are both `Parallel: true` while both are `Assigned To: filter-guard-builder`. One agent cannot execute two tasks concurrently, so a supervisor honoring the flags either double-dispatches the same agent (two incarnations racing on one worktree) or silently serializes, contradicting the Team Orchestration table. Relatedly, four named agents for a Small change touching one production file and four test files is handoff overhead exceeding the work. | Task 4 set `Parallel: false`, `Depends On: build-guard`; Team Orchestration → File Ownership table | Set Task 4 `Parallel: false` and run it after Task 3 on the same agent — it is one small render test, the parallelism buys nothing, and sequencing lets it reuse the registrar-configured env helper Task 3 just wrote. Do NOT reassign Task 4 to `filter-registrar-builder`, which owns the serial Tasks 1-2 on `ui/app.py`. If the two builders are instead merged (the simpler option), the conflict dissolves; a kept split requires the guard builder never touch `ui/app.py` — its only production dependency is `from ui.app import TEMPLATES_DIR, register_template_filters`. |
+| NIT | Risk & Robustness | Three anti-criterion Verification rows use `grep -c` expecting `match count == 0`, but `grep` exits 1 when it finds nothing, so a runner judging by exit code reads the success state as a failure. | Verification table rewritten to `! grep -q` / `test -z` form + exit-code convention note | Use `! grep -q 'templates.env.filters\[' ui/app.py` (exit 0 when absent) or `grep -c ... ; test $? -eq 1`. The positive row (`grep -c 'math.ceil' ui/app.py`, expected `> 0`) is already correct. |
+| NIT | Scope & Value | The plan pins builder-owned detail: the exact ~15-line guard body, the exact insertion point ("immediately after `_filter_usd` and before `create_app`"), and two docstrings' content. None change the outcome; over-specification invites review churn when the builder's equally-correct arrangement differs. | Technical Approach reframed as contracts; guard body, insertion point, and docstring wording de-pinned in Tasks 1 and 3 | State the contract (guard scans `nodes.Filter` and `nodes.FilterBlock` across every template and names template/filter/line on failure; registrar takes an `Environment` and registers filters only) and let the builder own placement and phrasing. |
 
 ---
 
