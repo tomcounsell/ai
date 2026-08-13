@@ -1777,11 +1777,82 @@ def decide_next_dispatch(
     return primary
 
 
+def stage_for_skill(skill: str | None) -> str | None:
+    """Return the pipeline stage a ``/do-*`` skill executes, or ``None``.
+
+    Inverse of ``agent.pipeline_graph.STAGE_TO_SKILL``, derived from it rather
+    than hand-maintained so the two cannot drift (#2730). ``STAGE_TO_SKILL`` is
+    1:1, so the inversion is unambiguous.
+    """
+    for stage, mapped in STAGE_TO_SKILL.items():
+        if mapped == skill:
+            return stage
+    return None
+
+
+def confirm_or_append_stage_entry(
+    stage_states: dict,
+    stage: str,
+    now: datetime | None = None,
+    pr_number: int | None = None,
+) -> dict:
+    """Record that ``stage`` was entered, without double-counting the router.
+
+    Issue #2730. Two different actors observe a stage starting, and before this
+    only one of them recorded it:
+
+    - the router calls ``record_dispatch`` *before* invoking a sub-skill, which
+      is the only signal available if the skill dies before it starts;
+    - the stage itself transitions to ``in_progress``, which happens on EVERY
+      entry path including the ones that never reach the router (a skill-to-skill
+      chain such as ``/do-build`` → ``/do-patch``, and the PreToolUse hook, which
+      is the dominant marker writer on the bridge).
+
+    Recording in both places naively would double every router-driven dispatch
+    and halve G4's effective threshold. Instead the router's record is an
+    **unconfirmed slot** (``confirmed: False``) and this function upgrades it in
+    place. When no unconfirmed slot exists the stage was reached without the
+    router, and a confirmed record is appended.
+
+    The result is exactly one record per stage entry, from either path, while a
+    genuine second entry still appends a second record -- which is the whole G4
+    signal and must not be deduplicated away.
+
+    ``last_dispatched_skill`` (``history[-1]["skill"]``) consequently becomes
+    *true* on the bypass path rather than naming whichever skill the router last
+    saw. That is the fix, not a side effect: rows 8b/8d gate on it.
+    """
+    history = stage_states.get("_sdlc_dispatches")
+    if not isinstance(history, list):
+        history = []
+
+    # Newest-first: upgrade the most recent unconfirmed slot for this stage.
+    for entry in reversed(history):
+        if not isinstance(entry, dict) or entry.get("stage") != stage:
+            continue
+        if entry.get("confirmed") is False:
+            entry["confirmed"] = True
+            stage_states["_sdlc_dispatches"] = history
+            return stage_states
+        # The newest record for this stage is already confirmed, so this is a
+        # fresh entry into a stage that ran before. Fall through and append.
+        break
+
+    skill = STAGE_TO_SKILL.get(stage)
+    if skill is None:
+        # An unknown stage has no skill to attribute the entry to. Recording a
+        # skill-less record would break every consumer of history[-1]["skill"].
+        return stage_states
+
+    return record_dispatch(stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True)
+
+
 def record_dispatch(
     stage_states: dict,
     skill: str,
     now: datetime | None = None,
     pr_number: int | None = None,
+    confirmed: bool = True,
 ) -> dict:
     """Append a dispatch record to ``stage_states._sdlc_dispatches``.
 
@@ -1823,6 +1894,15 @@ def record_dispatch(
             "skill": skill,
             "at": timestamp,
             "stage_snapshot": snapshot,
+            # #2730: the stage this dispatch executes, so the stage-entry
+            # upgrade path can find its slot without re-deriving it from the
+            # skill string at read time. NOT in `stage_snapshot` -- G4 compares
+            # snapshots, and a per-dispatch-varying field there kills
+            # oscillation detection outright.
+            "stage": stage_for_skill(skill),
+            # False marks a router slot awaiting confirmation that the stage
+            # actually started. See confirm_or_append_stage_entry.
+            "confirmed": confirmed,
         }
     )
     # FIFO-evict oldest entries to bound the list.

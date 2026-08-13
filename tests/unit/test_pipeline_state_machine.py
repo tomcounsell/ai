@@ -1897,3 +1897,116 @@ class TestSkippedIsSettled:
         """StageStates coerces unknown statuses to `pending`; `skipped` is known."""
         validated = StageStates.from_dict({"CRITIQUE": "skipped"}).to_dict()
         assert validated["CRITIQUE"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Issue #2730: starting a stage records a dispatch, through the real _save().
+#
+# These go through PipelineStateMachine rather than calling the router helper
+# directly, because the load-bearing claim is that the record survives _save()'s
+# preserved-metadata merge. _save() re-reads `_sdlc_dispatches` from the backing
+# store and merges that copy over anything in memory, so a record applied before
+# the merge would be silently discarded -- which is precisely why the entry is
+# applied inside _save() after the merge rather than in _activate_stage.
+# ---------------------------------------------------------------------------
+
+
+class TestStageEntryRecordsDispatch:
+    def _history(self, session):
+        return json.loads(session.stage_states).get("_sdlc_dispatches", [])
+
+    def test_start_stage_records_a_dispatch_through_save(self):
+        session = _make_session(
+            {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "completed"}
+        )
+        sm = PipelineStateMachine(session)
+        sm.start_stage("BUILD")
+
+        history = self._history(session)
+        assert [e["skill"] for e in history] == ["/do-build"]
+        assert history[0]["stage"] == "BUILD"
+        assert history[0]["confirmed"] is True
+
+    def test_the_record_survives_the_preserved_metadata_merge(self):
+        """The reason this lives inside _save(): a record written before the
+        merge is overwritten by the store's copy of `_sdlc_dispatches`."""
+        session = _make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "_sdlc_dispatches": [
+                    {"skill": "/do-plan", "at": "2026-01-01T00:00:00+00:00", "stage": "PLAN"}
+                ],
+            }
+        )
+        sm = PipelineStateMachine(session)
+        sm.start_stage("BUILD")
+
+        assert [e["skill"] for e in self._history(session)] == ["/do-plan", "/do-build"]
+
+    def test_a_router_slot_is_upgraded_not_duplicated(self):
+        """The router records `confirmed: False` before invoking; the stage
+        entry must upgrade that slot rather than append beside it."""
+        session = _make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "_sdlc_dispatches": [
+                    {
+                        "skill": "/do-build",
+                        "at": "2026-01-01T00:00:00+00:00",
+                        "stage": "BUILD",
+                        "confirmed": False,
+                    }
+                ],
+            }
+        )
+        sm = PipelineStateMachine(session)
+        sm.start_stage("BUILD")
+
+        history = self._history(session)
+        assert len(history) == 1, history
+        assert history[0]["confirmed"] is True
+
+    def test_a_failing_dispatch_record_never_blocks_the_marker_write(self):
+        """A stage must not become unrecordable because its audit entry failed."""
+        session = _make_session(
+            {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "completed"}
+        )
+        sm = PipelineStateMachine(session)
+        with patch(
+            "agent.sdlc_router.confirm_or_append_stage_entry",
+            side_effect=RuntimeError("ledger exploded"),
+        ):
+            sm.start_stage("BUILD")
+
+        assert json.loads(session.stage_states)["BUILD"] == "in_progress"
+
+    def test_a_genuine_re_entry_appends_a_second_record(self):
+        """The G4 signal: a real re-entry must not be deduplicated away, or the
+        guard this issue exists to re-arm stays disarmed."""
+        session = _make_session(
+            {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "completed"}
+        )
+        sm = PipelineStateMachine(session)
+        sm.start_stage("BUILD")
+        sm.fail_stage("BUILD")
+        sm.start_stage("BUILD")
+
+        assert [e["skill"] for e in self._history(session)] == ["/do-build", "/do-build"]
+
+    def test_restarting_an_already_in_progress_stage_records_nothing(self):
+        """`start_stage` no-ops when the stage is already in_progress, so no
+        entry occurred and none must be recorded -- otherwise a repeated marker
+        write would inflate the count and trip G4 on a stage that never
+        re-entered."""
+        session = _make_session(
+            {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "completed"}
+        )
+        sm = PipelineStateMachine(session)
+        sm.start_stage("BUILD")
+        sm.start_stage("BUILD")
+
+        assert [e["skill"] for e in self._history(session)] == ["/do-build"]

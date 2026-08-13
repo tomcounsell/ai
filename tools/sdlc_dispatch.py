@@ -28,6 +28,17 @@ router evaluates guards and selects a dispatch target but **before** invoking
 the sub-skill. This ordering preserves the G4 oscillation signal even if the
 sub-skill crashes mid-execution.
 
+**The router is no longer the only writer (issue #2730).** It writes an
+*unconfirmed slot* (``confirmed: False``), and
+``PipelineStateMachine._activate_stage`` upgrades that slot in place when the
+stage actually starts -- or appends its own confirmed record when the stage was
+reached without the router at all. Previously only this module wrote the
+history, so a stage reached by a skill-to-skill chain (``/do-build`` ->
+``/do-patch``) or by the PreToolUse hook left a stage marker and no ledger
+entry, and G4 had nothing to count: issue #2711's ledger showed six completed
+stages against zero dispatch records. The slot protocol is what keeps the two
+writers from double-counting a single dispatch.
+
 The ``get`` subcommand prints the current ``_sdlc_dispatches`` list as JSON.
 It is useful for debugging G4 state in a live session.
 
@@ -103,7 +114,13 @@ def record_dispatch_for_ledger(
     ts = now or datetime.now(UTC)
 
     def _apply(states: dict) -> dict:
-        states = record_dispatch(states, skill=skill, now=ts, pr_number=pr_number)
+        # #2730: the router records BEFORE invoking the sub-skill, so this is a
+        # slot awaiting confirmation that the stage actually started, not a
+        # completed observation. `PipelineStateMachine.start_stage` upgrades it
+        # in place; if the stage is instead reached without the router, that
+        # path appends its own confirmed record. Either way exactly one record
+        # per stage entry.
+        states = record_dispatch(states, skill=skill, now=ts, pr_number=pr_number, confirmed=False)
         # Dispatch records carry the run identity (issue #2003) — annotated
         # here so ``agent.sdlc_router.record_dispatch`` stays run-id-agnostic.
         try:
