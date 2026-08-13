@@ -366,6 +366,7 @@ def record_verdict(
     now: datetime | None = None,
     judges: list | None = None,
     consensus: dict | None = None,
+    head_sha: str | None = None,
 ) -> dict:
     """Record a verdict for a stage on a session's stage_states.
 
@@ -394,6 +395,15 @@ def record_verdict(
             Persisted as ``_verdicts[stage]._consensus`` side-field. Caller
             (typically ``do-pr-review`` SKILL) computes via
             :func:`agent.sdlc_review_consensus.compute_consensus`.
+        head_sha: Optional PR head commit SHA the verdict judges (issue #2769).
+            This is the ONLY sanctioned way to record a head SHA. Do NOT
+            concatenate a ``REVIEW_CONTEXT head_sha=`` trailer onto ``verdict``:
+            ``normalize_verdict`` runs over the WHOLE verdict string, which
+            mangles such a trailer into ``REVIEW CONTEXT HEAD SHA=<HEX>`` and
+            leaves the stored verdict token unreadable as a bare ``APPROVED``.
+            Persisted verbatim (whitespace-stripped only, never normalized) as
+            the record's ``head_sha`` field, and only when truthy. Read it back
+            via ``tools._sdlc_utils.head_sha_of_record``.
 
     Returns:
         The written verdict record on success, or ``{}`` on any failure.
@@ -442,6 +452,15 @@ def record_verdict(
         "recorded_at": recorded_at,
         "artifact_hash": artifact_hash,
     }
+    # head_sha rides as its OWN field (issue #2769), never inside the verdict
+    # token: `normalize_verdict` above rewrites the whole string, so a
+    # concatenated trailer comes back out mangled. Attached only when truthy,
+    # following the _judges/_consensus precedent, and inside this SAME record
+    # so the write stays a single `update_stage_states` call (single-writer
+    # invariant). Stored raw apart from whitespace stripping -- it is a 40-hex
+    # commit SHA and must NOT pass through `normalize_verdict`.
+    if isinstance(head_sha, str) and head_sha.strip():
+        record["head_sha"] = head_sha.strip()
     if stage == "REVIEW":
         if blockers is not None:
             record["blockers"] = int(blockers)
@@ -566,7 +585,7 @@ def _review_trailer_present(issue_number: int | None) -> bool:
     if not issue_number:
         return False
     try:
-        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+        from tools._sdlc_utils import head_sha_of_record
         from tools.sdlc_stage_query import _resolve_issue_record
 
         record = _resolve_issue_record(issue_number)
@@ -577,7 +596,9 @@ def _review_trailer_present(issue_number: int | None) -> bool:
         if "APPROVED" not in verdict_text.upper():
             # Non-APPROVED path: no trailer is required by contract (Risk 1).
             return True
-        return bool(_HEAD_SHA_TRAILER_RE.search(verdict_text))
+        # Reads the `head_sha` FIELD first and the legacy in-token trailer
+        # second (#2769) -- both shapes satisfy this gate.
+        return bool(head_sha_of_record(verdict_record))
     except Exception as e:
         logger.debug(
             f"sdlc_verdict: REVIEW trailer presence probe failed for "

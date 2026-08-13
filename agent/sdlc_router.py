@@ -285,6 +285,33 @@ def _latest_review_verdict(stage_states: dict, meta: dict) -> str:
     return _verdict_text(verdicts.get("REVIEW"))
 
 
+def _latest_review_head_sha(stage_states: dict, meta: dict) -> str:
+    """Return the head SHA the recorded REVIEW verdict judges, or ``""``.
+
+    Issue #2769 moved the head SHA out of the verdict token into its own
+    ``head_sha`` record field. Structural twin of :func:`_latest_review_verdict`:
+    prefers ``meta["latest_review_head_sha"]`` when ``sdlc_stage_query``
+    populated it, then reads the ``_verdicts["REVIEW"]`` record directly.
+
+    The router must stay import-free of ``tools/`` (the import-boundary
+    contract that also owns the duplicated ``_HEAD_SHA_TRAILER_RE`` below), so
+    this reimplements the field-first / legacy-trailer-second precedence
+    locally rather than calling ``tools._sdlc_utils.head_sha_of_record``.
+    """
+    meta_head = meta.get("latest_review_head_sha")
+    if isinstance(meta_head, str) and meta_head.strip():
+        return meta_head.strip()
+    record = (stage_states.get("_verdicts") or {}).get("REVIEW")
+    if isinstance(record, dict):
+        field = record.get("head_sha")
+        if isinstance(field, str) and field.strip():
+            return field.strip()
+    # Legacy fallback: the SHA is still embedded in the (normalize-mangled)
+    # verdict text. Permanent -- pre-split ledgers are never migrated.
+    match = _HEAD_SHA_TRAILER_RE.search(_latest_review_verdict(stage_states, meta))
+    return match.group(1) if match else ""
+
+
 def guard_g1_critique_loop(
     stage_states: dict, meta: dict, context: dict
 ) -> Dispatch | Blocked | None:
@@ -947,7 +974,8 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     - key present but EMPTY (the fail-closed lookup-failure sentinel, set
       alongside ``pr_head_sha_lookup_failed``) → **True (stale)** — a lookup
       failure must route toward re-review, never silently pass as fresh
-    - verdict has NO parseable head_sha trailer → **True (stale)** — an
+    - verdict attributes to NO head SHA — neither a ``head_sha`` record field
+      nor a legacy in-token trailer (#2769) → **True (stale)** — an
       unattributable verdict is re-reviewed at the current head, never trusted
       as fresh (re-review records a fresh verdict WITH the trailer, so this
       converges; loop-bound by G4)
@@ -961,10 +989,14 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     head_sha = context.get("pr_head_sha") or ""
     if not head_sha:
         return True
-    trailer = _HEAD_SHA_TRAILER_RE.search(verdict)
-    if not trailer:
+    # #2769: the verdict's head SHA lives in its own `head_sha` record field
+    # now (surfaced as `_meta.latest_review_head_sha`); the in-token trailer is
+    # the legacy fallback inside _latest_review_head_sha. An unattributable
+    # verdict yields "" and stays stale, exactly as before.
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
         return True
-    return trailer.group(1).lower() != head_sha.lower()
+    return recorded_head.lower() != head_sha.lower()
 
 
 def _review_verdict_is_stale(stage_states: dict) -> bool:

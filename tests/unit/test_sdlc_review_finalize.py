@@ -2,7 +2,8 @@
 
 Covers the atomic finalize write+verify path, the shared
 check_review_persistence read-back, the read-only selfcheck path, the named
-error taxonomy, idempotent trailer append, and fail-closed behavior on
+error taxonomy, the #2769 head_sha field/verdict-token split (with its
+permanent legacy-trailer read fallback), and fail-closed behavior on
 gh/Redis errors. Mirrors the mock-at-the-lease-boundary conventions used in
 tests/unit/test_sdlc_verdict.py and tests/unit/test_sdlc_stage_marker.py.
 """
@@ -543,14 +544,19 @@ class TestFinalize:
             result = finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
 
         assert result["ok"] is True
-        # The trailer was appended once, idempotently, into the recorded call.
-        assert mock_record.call_args.kwargs["verdict"] == trailered
+        # #2769: the verdict token is recorded BARE and the head SHA rides in
+        # its own `head_sha=` kwarg. Concatenating them was the bug -- the
+        # writer's normalize_verdict mangled the trailer into the token.
+        assert mock_record.call_args.kwargs["verdict"] == "APPROVED"
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
+        assert "REVIEW_CONTEXT" not in mock_record.call_args.kwargs["verdict"]
         mock_marker.assert_called_once()
         assert mock_marker.call_args.kwargs["status"] == "completed"
 
-    def test_idempotent_trailer_append_when_already_present(self):
-        """A verdict string that already carries the trailer must not get a
-        second trailer appended."""
+    def test_already_trailered_input_is_split_into_bare_token_and_head_sha(self):
+        """#2769: an already-trailered input is STRIPPED to the bare verdict
+        token and its SHA lands in `head_sha=` exactly once -- never stored in
+        both places, and never left inside the verdict string."""
         already_trailered = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
         lease_ok, revalidate_ok = self._patch_lease_ok()
         with (
@@ -570,8 +576,9 @@ class TestFinalize:
             finalize(pr=1, issue_number=42, verdict=already_trailered, run_id="run-1")
 
         written_verdict = mock_record.call_args.kwargs["verdict"]
-        assert written_verdict == already_trailered
-        assert written_verdict.count("REVIEW_CONTEXT") == 1
+        assert written_verdict == "APPROVED"
+        assert "REVIEW_CONTEXT" not in written_verdict
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
 
     def test_non_approved_verdict_skips_marker_write(self):
         """CHANGES REQUESTED must not attempt a REVIEW completed marker write."""
@@ -880,3 +887,96 @@ class TestRecognizedVerdictVocabulary:
                 result = check_review_persistence(pr=1, issue_number=42)
             assert result["ok"] is False
             assert result["reason"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: check_review_persistence reads the head SHA through
+# `head_sha_of_record` -- field first, legacy in-token trailer second.
+# The legacy fallback is PERMANENT: pre-split ledgers are never migrated.
+# ---------------------------------------------------------------------------
+
+
+class TestCheckReviewPersistenceHeadShaShapes:
+    @pytest.fixture(autouse=True)
+    def _stub_repo_resolution(self):
+        with patch(
+            "tools.sdlc_review_finalize.resolve_target_repo_for_read",
+            return_value="o/r",
+        ):
+            yield
+
+    def _run(self, verdict_record):
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value=verdict_record),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            return check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+
+    def test_new_field_shape_passes_every_gate(self):
+        result = self._run({"verdict": "APPROVED", "head_sha": _HEAD_SHA})
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+
+    def test_legacy_mangled_shape_still_passes_every_gate(self):
+        """The pre-split record: normalize_verdict mangled the trailer into the
+        token. It must keep parsing forever -- no migration exists."""
+        result = self._run({"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_HEAD_SHA.upper()}"})
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+
+    def test_field_wins_over_a_disagreeing_legacy_trailer(self):
+        result = self._run(
+            {
+                "verdict": f"APPROVED REVIEW_CONTEXT head_sha={'b' * 40}",
+                "head_sha": _HEAD_SHA,
+            }
+        )
+        assert result["ok"] is True
+
+    def test_stale_field_fails_closed_even_with_a_fresh_legacy_trailer(self):
+        result = self._run(
+            {
+                "verdict": f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}",
+                "head_sha": "b" * 40,
+            }
+        )
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_read_helper_raising_still_fails_closed_with_a_preserved_reason(self):
+        """The outer `except Exception` is a deliberate fail-closed catch: an
+        exploding read helper must never read as a pass."""
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_finalize.head_sha_of_record",
+                side_effect=RuntimeError("ledger exploded"),
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_VERDICT_MISSING"
+
+    def test_preserves_an_earlier_named_reason_when_the_helper_raises(self):
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": "APPROVED"},
+            ),
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha",
+                side_effect=HeadShaResolutionError("gh down"),
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"

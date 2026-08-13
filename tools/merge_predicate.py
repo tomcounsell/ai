@@ -576,15 +576,18 @@ def _check_verdict_freshness(
     # Lazy import: this module's other imports are stdlib-only so the
     # merge-guard hook can load it under any interpreter (see module
     # docstring). tools._sdlc_utils pulls in models.agent_session, so the
-    # trailer regex is fetched here rather than at module level.
-    from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+    # trailer reader is fetched here rather than at module level.
+    from tools._sdlc_utils import head_sha_of_record
 
-    trailer = _HEAD_SHA_TRAILER_RE.search(verdict_text)
+    # Reads the record's `head_sha` FIELD first, falling back to the legacy
+    # in-token trailer (#2769). A record carrying neither drops through to the
+    # weaker recorded_at-vs-commit-date comparison below.
+    trailer = head_sha_of_record(record) if isinstance(record, dict) else ""
     if trailer:
         if not head_sha:
             failed.append("PR head SHA unavailable for verdict freshness check")
             return
-        if trailer.group(1).lower() == head_sha.lower():
+        if trailer.lower() == head_sha.lower():
             notes.append("REVIEW verdict fresh: head_sha trailer matches PR head commit")
             return
         failed.append("REVIEW verdict predates PR head commit (head_sha trailer mismatch)")

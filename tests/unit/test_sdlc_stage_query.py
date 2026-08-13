@@ -1290,3 +1290,98 @@ class TestResolveIssueRecord:
             result = query_enriched(issue_number=700504)
 
         assert result["_meta"]["pr_number"] == 777
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: `_meta.latest_review_head_sha`.
+#
+# `_extract_verdict_text` flattens a `_verdicts[stage]` record to its `verdict`
+# string and drops every sibling key, so the new `head_sha` FIELD is invisible
+# to the router without this meta slot.
+#
+# All FOUR `_verdicts["REVIEW"]` shapes are exercised, at BOTH the
+# `_compute_meta` and `decide_next_dispatch` levels, because the regression is
+# router-wide. The `None` shape (no "REVIEW" key at all) is the COMMON path --
+# every issue still in PLAN/BUILD/TEST is in it -- and letting `None` reach the
+# trailer regex raises TypeError, which `sdlc_next_skill._resolve_enriched`'s
+# broad `except` swallows into an EMPTY ledger, routing a fully-worked issue
+# back to /do-plan.
+# ---------------------------------------------------------------------------
+
+_2769_SHA = "abcdef0123456789abcdef0123456789abcdef01"
+
+_2769_SHAPES = [
+    ("field-shape", {"REVIEW": {"verdict": "APPROVED", "head_sha": _2769_SHA}}, _2769_SHA),
+    (
+        "legacy-mangled-dict",
+        {"REVIEW": {"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_2769_SHA.upper()}"}},
+        _2769_SHA,
+    ),
+    ("bare-str-record", {"REVIEW": f"APPROVED REVIEW_CONTEXT head_sha={_2769_SHA}"}, _2769_SHA),
+    ("no-review-key", {"CRITIQUE": {"verdict": "READY TO BUILD"}}, None),
+]
+
+
+class TestLatestReviewHeadShaMeta:
+    def _meta_for(self, verdicts):
+        from tools.sdlc_stage_query import _compute_meta
+
+        raw_states = {"ISSUE": "completed", "_verdicts": verdicts}
+        with (
+            patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None),
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
+            patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
+        ):
+            return _compute_meta(raw_states, MagicMock(pr_number=None), None)
+
+    def test_default_meta_carries_the_key(self):
+        """_default_meta must stay key-for-key with _compute_meta: a key in one
+        and absent from the other makes meta.get() mean different things on the
+        session-found vs session-missing paths."""
+        from tools.sdlc_stage_query import _default_meta
+
+        assert "latest_review_head_sha" in _default_meta()
+        assert _default_meta()["latest_review_head_sha"] is None
+
+    def test_every_verdict_shape_yields_the_expected_head_sha(self):
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            got = meta["latest_review_head_sha"]
+            if expected is None:
+                assert got is None, label
+            else:
+                assert got is not None and got.lower() == expected, label
+
+    def test_no_shape_raises(self):
+        """The whole point: none of the four shapes may raise. A TypeError or
+        AttributeError here is swallowed upstream into an empty ledger."""
+        for label, verdicts, _ in _2769_SHAPES:
+            self._meta_for(verdicts)  # must not raise
+        # Belt and braces: a wholly absent _verdicts key.
+        self._meta_for({})
+
+    def test_decide_next_dispatch_survives_every_shape(self):
+        """Router level: the same four shapes must route without exploding."""
+        from agent.sdlc_router import decide_next_dispatch
+
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            stage_states = {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "_verdicts": verdicts,
+            }
+            decision = decide_next_dispatch(stage_states, meta, {})
+            assert decision is not None, label
+
+    def test_router_head_sha_reader_agrees_with_meta_for_every_shape(self):
+        from agent.sdlc_router import _latest_review_head_sha
+
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            got = _latest_review_head_sha({"_verdicts": verdicts}, meta)
+            assert got.lower() == (expected or ""), label
+            # And with an EMPTY meta (the _resolve_enriched degraded path), the
+            # router still reads the record directly.
+            direct = _latest_review_head_sha({"_verdicts": verdicts}, {})
+            assert direct.lower() == (expected or ""), label

@@ -41,6 +41,47 @@ _HEAD_SHA_TRAILER_RE = re.compile(
 )
 
 
+def head_sha_of_text(text: str) -> str:
+    """Return the head SHA carried by a verdict *string*, or ``""``.
+
+    Regex-only (issue #2769): for callers that hold a verdict text and nothing
+    else -- a legacy bare-string ``_verdicts[stage]`` entry, or a verdict whose
+    trailer was concatenated into the token before the split landed. Returns
+    ``""`` (never ``None``) so callers can treat it as a plain falsy string.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    match = _HEAD_SHA_TRAILER_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def head_sha_of_record(record: dict) -> str:
+    """Return the head SHA a ``_verdicts[stage]`` record attests to, or ``""``.
+
+    Issue #2769 split the head SHA out of the verdict token into its own
+    ``head_sha`` record field, because ``record_verdict`` normalizes the verdict
+    string and was mangling ``APPROVED REVIEW_CONTEXT head_sha=<hex>`` into
+    ``APPROVED REVIEW CONTEXT HEAD SHA=<HEX>`` -- so the stored verdict token
+    was never the bare ``APPROVED`` any reader expected.
+
+    Precedence (**the field wins**): the ``head_sha`` field is what the current
+    writer records deliberately; an in-token trailer is either legacy residue or
+    a caller-supplied string the writer already extracted. When both are present
+    and disagree, the field is authoritative.
+
+    The regex fallback over ``record["verdict"]`` is **permanent, not
+    scaffolding**: live ledgers hold mangled verdict strings forever and there is
+    no migration. ``get_verdict`` also coerces a legacy bare-string record to
+    ``{"verdict": <str>}``, a shape with no ``head_sha`` key at all.
+    """
+    if not isinstance(record, dict):
+        return ""
+    field = record.get("head_sha")
+    if isinstance(field, str) and field.strip():
+        return field.strip()
+    return head_sha_of_text(record.get("verdict") or "")
+
+
 # === Request-scoped env-fallback memo (issue #2122) ===
 # `_resolve_target_repo()` shells out to `gh repo view` / `git rev-parse` and
 # is issue-INDEPENDENT: it resolves the ambient repo from GH_REPO /

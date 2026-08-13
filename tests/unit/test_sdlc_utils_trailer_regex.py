@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import importlib
 
-from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE, head_sha_of_record, head_sha_of_text
 
 SHA = "abcdef0123456789abcdef0123456789abcdef01"
 
@@ -64,3 +64,56 @@ def test_merge_predicate_imports_cleanly_after_hoist():
     # The constant is no longer defined on merge_predicate itself -- it is
     # imported lazily inside _check_verdict_freshness from _sdlc_utils.
     assert not hasattr(module, "_HEAD_SHA_TRAILER_RE")
+
+
+# ---------------------------------------------------------------------------
+# head_sha_of_record / head_sha_of_text -- the two-entry-point read helper over
+# one body (#2769). The head SHA now rides as its own `head_sha` record field;
+# the regex over the verdict text is the PERMANENT legacy fallback for ledgers
+# written before the split (there is deliberately no migration).
+# ---------------------------------------------------------------------------
+
+OTHER_SHA = "1234567890abcdef1234567890abcdef12345678"
+
+
+def test_head_sha_of_record_prefers_the_field():
+    record = {"verdict": "APPROVED", "head_sha": SHA}
+    assert head_sha_of_record(record) == SHA
+
+
+def test_head_sha_of_record_falls_back_to_legacy_mangled_verdict():
+    """A pre-split ledger stores the SHA inside the normalize-mangled token."""
+    record = {"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={SHA.upper()}"}
+    assert head_sha_of_record(record).lower() == SHA
+
+
+def test_head_sha_of_record_field_and_trailer_agreeing():
+    record = {"verdict": f"APPROVED REVIEW_CONTEXT head_sha={SHA}", "head_sha": SHA}
+    assert head_sha_of_record(record) == SHA
+
+
+def test_head_sha_of_record_field_wins_when_they_disagree():
+    """Defined precedence: the FIELD is what the current writer recorded
+    deliberately; an in-token trailer is legacy residue."""
+    record = {"verdict": f"APPROVED REVIEW_CONTEXT head_sha={OTHER_SHA}", "head_sha": SHA}
+    assert head_sha_of_record(record) == SHA
+
+
+def test_head_sha_of_record_returns_empty_when_neither_present():
+    assert head_sha_of_record({"verdict": "APPROVED"}) == ""
+
+
+def test_head_sha_of_record_tolerates_non_dict_and_empty_field():
+    assert head_sha_of_record(None) == ""
+    assert head_sha_of_record("APPROVED") == ""
+    # get_verdict coerces a legacy bare-string record to {"verdict": <str>},
+    # a shape with no head_sha key at all.
+    assert head_sha_of_record({"verdict": "APPROVED", "head_sha": "   "}) == ""
+
+
+def test_head_sha_of_text_is_regex_only_and_never_none():
+    assert head_sha_of_text(f"APPROVED REVIEW_CONTEXT head_sha={SHA}") == SHA
+    assert head_sha_of_text("APPROVED") == ""
+    assert head_sha_of_text("") == ""
+    # Non-str input must not raise -- the common ledger path passes None.
+    assert head_sha_of_text(None) == ""
