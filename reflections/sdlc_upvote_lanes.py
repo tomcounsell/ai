@@ -61,6 +61,7 @@ from reflections.utilities import (
     resolve_eng_group,
     run_per_project_audit,
 )
+from tools.lane_identity import lane_branch_name, mint_lane_slug, resolve_lane_slug
 
 logger = logging.getLogger("reflections.sdlc_upvote_lanes")
 
@@ -129,8 +130,8 @@ UPVOTE_ENTRY_TIMEOUT_S = 1500
 
 # Derived, never fresh literals -- a TIMEOUTS__UV_SYNC_S override must not
 # silently invalidate this arithmetic. create_session's cold-worktree `uv
-# sync` is the dominant term: every pickup is a cold worktree (the slug is
-# sdlc-{N}, unique per issue, so get_or_create_worktree never reuses one).
+# sync` is the dominant term: every pickup is a cold worktree (the lane slug
+# is unique per issue, so get_or_create_worktree never reuses one).
 UPVOTE_CREATE_WORST_CASE_S = settings.timeouts.uv_sync_s + settings.timeouts.git_subprocess_s
 UPVOTE_PICKUP_WORST_CASE_S = (
     2 * UPVOTE_GH_TIMEOUT_S + UPVOTE_ANCHOR_WAIT_S + UPVOTE_CREATE_WORST_CASE_S
@@ -326,12 +327,23 @@ def _ledger_has_recorded_stage(repo: str, issue_number: int) -> bool:
 
 
 def _has_pr_on_branch(repo: str, issue_number: int, cwd: str) -> dict | None:
-    """Returns the first PR (open or merged) on session/sdlc-{N}, or None.
+    """Returns the first PR (open or merged) on the lane's branch, or None.
+
+    The branch is the recorded lane slug when one exists, and the issue-derived
+    name otherwise. This site SEARCHES, so it may guess: probing costs one `gh`
+    call and records nothing, so a wrong guess is free. It must NOT skip on an
+    unresolved slug -- it is called after gate 2 has already excluded every
+    candidate with a recorded stage, so every candidate reaching here has no
+    recorded slug, and skipping would disable gate 4 entirely.
 
     --state all deliberately: an OPEN pr means sdlc_progress owns the lane;
     a MERGED pr on an issue that's still open means the implementation PR
     lacked `Closes #N` and this gate must stop the lane from restarting.
     """
+    # The mint always yields a non-empty slug, so `head` is never None here.
+    head = lane_branch_name(
+        resolve_lane_slug(issue_number, target_repo=repo) or mint_lane_slug(issue_number)
+    )
     try:
         proc = subprocess.run(
             [
@@ -341,7 +353,7 @@ def _has_pr_on_branch(repo: str, issue_number: int, cwd: str) -> dict | None:
                 "--repo",
                 repo,
                 "--head",
-                f"session/sdlc-{issue_number}",
+                head,
                 "--state",
                 "all",
                 "--json",
@@ -486,7 +498,13 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         issue_number = candidate.get("number")
         if not isinstance(issue_number, int):
             continue
-        slug = f"sdlc-{issue_number}"
+        # Resolve ONCE, heal OFF. Every gate below looks sessions up by this
+        # name, and none of them may record one: this is still a *scan*, and
+        # the reflection declines most candidates seconds later. Healing here
+        # would permanently fix an identity (the write is no-overwrite) for an
+        # issue no lane ever starts. The heal moves past every gate, to the
+        # point the reflection has actually committed to a pickup.
+        slug = resolve_lane_slug(issue_number, target_repo=repo) or mint_lane_slug(issue_number)
         title = candidate.get("title") or ""
         url = candidate.get("url") or ""
 
@@ -564,6 +582,17 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
                 f"issue #{issue_number}: another lane started during the anchor wait (benign)"
             )
             continue
+
+        # Past every gate and past the Race-1 re-check: this is the first point
+        # at which the reflection has committed to starting a lane, so it is
+        # the first point at which recording an identity is correct. The result
+        # is deliberately NOT reassigned to `slug` -- rung 1 returns what the
+        # probe above already read, and on a miss the heal mints the same
+        # issue-derived name the probe fell back to, so they agree by
+        # construction. Reassigning would risk gates 1/1.6 and the Race-1
+        # re-check having tested one name while the session is created under
+        # another, silently losing duplicate-lane protection.
+        resolve_lane_slug(issue_number, allow_heal=True, target_repo=repo)
 
         session_message = (
             f"Run the next SDLC stage for issue #{issue_number}: {title}. This issue is "

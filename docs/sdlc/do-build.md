@@ -1,6 +1,17 @@
 # do-build addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-build/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## `{slug}` resolution in this repo
+
+The generic body's Plan Resolution step derives `{slug}` from the plan
+filename. In this repo that generic default is superseded: the lane's `{slug}`
+— the name of its worktree and its branch — is recorded on `PipelineLedger.slug`
+by `session-ensure` (the Step 0 substrate probe below already calls it) and
+resolved via `tools/lane_identity.py::resolve_lane_slug`. Do not re-derive
+`{slug}` from `PLAN_PATH`'s filename; a human-named plan may legitimately
+track an issue-derived lane, or the reverse. See
+[`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md).
+
 ## Pipeline Substrate & Scripts (the generic body defers these here)
 
 The leaned body describes these abstractly; here are the concrete invocations.

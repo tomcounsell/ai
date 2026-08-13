@@ -1,5 +1,5 @@
 ---
-status: Needs Revision
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -30,38 +30,95 @@ What actually happens is worse, because it is invisible:
    run_id is **refused** — `LEASE_ABSENT` or `ISSUE_LOCKED` — at
    `tools/sdlc_stage_marker.py:534-556`. The refusal returns exit code 1 and
    prints a diagnostic to stderr.
-3. `.claude/skills-global/do-sdlc/SKILL.md:219` and the marker invocations in
+3. `.claude/skills-global/do-sdlc/SKILL.md:225` and the marker invocations in
    `docs/sdlc/do-plan.md:12-13` end in **`2>/dev/null || true`**. The exit code is
    discarded and the diagnostic is routed to `/dev/null`. The supervisor sees
-   nothing.
-4. Markers are therefore never written. Writers that *do* carry the winning
-   identity (the verdict recorder, invoked by the critique subagent) succeed.
+   nothing. Note this idiom appears **three** times in the skill body (`:75`,
+   `:171`, `:225`), not once.
+4. Some of those refusals self-heal and some do not. Issue #2144 already ships a
+   recovery at the marker layer: `tools/sdlc_stage_marker.py:993-1005` calls
+   `maybe_heal_after_write` → `heal_run_identity` → `reestablish_run_id` on a
+   `LEASE_ABSENT`/stale-`ISSUE_LOCKED` refusal and retries the write once. It
+   works in production, and it worked on this plan's own reproduction — the
+   refused CRITIQUE marker landed on retry, leaving all nine stage keys. So the
+   earlier claim that markers are "refused forever" is **false**; the honest
+   statement is that the run silently loses its identity, recovers only if the
+   one-shot heal succeeds, and never tells anyone either way.
 
-The end state is a ledger holding **only** whatever the winning identity wrote.
-That is observationally identical to a wipe, which is why #2675 was filed as one.
+The end state is a ledger that may hold only whatever the winning identity
+wrote. That is observationally identical to a wipe, which is why #2675 was filed
+as one.
 
-### Live evidence — issue #2735, current batch
+### Live evidence — a reproduction on this plan's own lane
 
-`sdlc-tool stage-query --issue-number 2735` returns a `stages` blob containing
-exactly one key:
+An earlier revision of this plan cited issue #2735's ledger holding only
+`_verdicts` (201 bytes, zero stage keys) as proof that no marker ever landed.
+**That evidence was withdrawn in critique: it was a mid-flight snapshot.** The
+`_verdicts`-only shape is the normal cold-start window between a run's
+`session-ensure` and its first `stage-marker`. Nineteen minutes later the same
+ledger carried all nine stage keys, five completed, with
+`sdlc:marker_writes:2735:c4a2eb90…` reading `ok=5, fail=2`. Nothing was lost.
+The structural argument below is still correct; only the instance was wrong.
 
-```json
-{"_verdicts": {"CRITIQUE": {"verdict": "READY TO BUILD",
-  "recorded_at": "2026-08-13T09:34:31.074015+00:00",
-  "artifact_hash": "sha256:2bde9098..."}}}
+The reproduction that replaces it happened on **this plan's own lane**. A
+routine CRITIQUE marker write for issue #2675 produced:
+
+```
+[ERROR] ISSUE_LOCKED: issue lock held by a foreign run
+(run_id=892e56f81bad42a9aa5d68100d30b026, session=sdlc-local-2675)
 ```
 
-201 bytes. No `ISSUE`/`PLAN`/`CRITIQUE` stage keys, no `_sdlc_dispatches`. For
-contrast, `tomcounsell/ai:2740` (5602 bytes) and `tomcounsell/ai:2744` (2576
-bytes) each carry all nine stage keys plus `_sdlc_dispatches`, `_stage_skips`,
-`_patch_cycle_count`, `_critique_cycle_count`, `_verdicts`. Same batch, same day.
+The supervising run's id was `c76476afd036481eb040837696632227`. A **new run_id
+was minted for the run's own session, mid-run, unprompted** — #2675's defect,
+observed directly rather than inferred. The session record afterwards:
 
-**This shape cannot be produced by a wipe-then-repopulate.** `_save()`
-(`agent/pipeline_state.py:520-555`) unconditionally backfills every member of
-`ALL_STAGES` to `"pending"` before serializing (`:524-527`), so *any* successful
-marker write leaves all nine stage keys behind. Their total absence proves no
-marker write ever landed on this ledger — not that one landed and was later
-erased.
+```
+active_run_id: 892e56f81bad42a9aa5d68100d30b026
+owned_run_ids: ["892e56f81bad42a9aa5d68100d30b026"]
+```
+
+`owned_run_ids` holds **only the new id**. The original is absent.
+
+That absence is the mechanism. `_append_owned_run_id`
+(`tools/sdlc_session_ensure.py:111-140`) reads, dedups, appends and caps — it
+never replaces — so a history containing only the new id proves the record it
+appended to was already empty. The identity history that
+`_validated_reuse_candidate`'s free-lock branch depends on had been erased from
+the session record before the re-mint, which is precisely why the re-mint could
+not be avoided.
+
+**The failure is self-perpetuating**, and that is why #2735 was hit twice rather
+than once: each re-mint lands on an empty history, so the *next* re-ensure has
+no corroboration either and mints again.
+
+**Why the ledger looks wiped without ever being wiped.** Ledger resolution
+follows run identity. From the vantage point of a freshly minted id, a populated
+ledger can read empty — which is observationally identical to a wipe and is why
+#2675 was filed as one. The durable record was never destroyed: `PipelineLedger`
+carries no TTL, and no deleter exists anywhere in `tools/ agent/ scripts/
+reflections/ models/ worker/ bridge/`.
+
+**The structural argument stands.** `_save()` (`agent/pipeline_state.py:494-…`)
+unconditionally backfills every member of `ALL_STAGES` to `"pending"` before
+serializing (`:525-527`), so *any* successful marker write leaves all nine stage
+keys behind. A blob with zero stage keys therefore means no marker landed **on
+that ledger key** — which, given the resolution point above, is a statement
+about identity, not about destruction.
+
+### Why the session record is the wrong place for identity history
+
+`AgentSession` is the fragile half of this system and the ledger is the durable
+half, yet continuity depends on the fragile one. `Meta.ttl` is 30 days
+(documented at `models/agent_session.py` as having never actually fired), and
+`ensure_session`'s resolution order ends in a **create fall-through** — any path
+that lands there produces a record with an empty `owned_run_ids`, and identity
+continuity is gone. `PipelineLedger`, by contrast, is issue-keyed and has no TTL
+precisely so it outlives every AgentSession lifecycle event.
+
+This is the argument for Task 3: anchoring run-identity history on the ledger
+makes continuity independent of whatever erases the session-side copy, which
+matters because this plan does **not** claim to know that eraser. Identifying it
+is tracked separately (see Prior Art); the fix here is robust either way.
 
 ### The refusals were never even counted
 
@@ -359,10 +416,9 @@ The new corroboration record is a `_run_identities` key inside the ledger's own
 
 | New decision point | Direction | Why |
 |---|---|---|
-| Step 3d.6 exit-code check | **fail-closed** | A re-ensure that cannot establish identity means every subsequent marker in the run is refused. Continuing is guaranteed silent data loss. |
+| Step 3d.6 exit-code check | **fail-closed on a foreign-owner refusal, fail-open on a transient error** | A foreign owner means this run has genuinely lost the issue; continuing is silent data loss. A Redis blip is not that, and aborting a healthy run on one would be a worse regression than the bug. |
 | Reading the new `_run_identities` anchor | **fail-open** | A read error degrades to today's three proofs. A Redis hiccup must never block a legitimate rebind. Mirrors `touch_issue_lock`'s peek default. |
 | Writing `_run_identities` on bind | **fail-open** | Best-effort observability metadata; a write failure must not fail a lock acquisition that already succeeded. Mirrors `_record_marker_telemetry`. |
-| `run-health` zero-write disposition | **fail-closed** | This is the detector. A detector that fails open is the bug being fixed. |
 
 ## Appetite
 
@@ -383,12 +439,7 @@ file and needs demonstrated-red tests against real Redis.
    keeping its own stale copy. This alone converts the failure from silent to
    loud and stops the compounding described in Data Flow.
 
-2. **Make the zero-write run visible (Task 2).** Add a
-   `never_wrote` disposition to `run-health`: `ok_writes == 0 and fail_writes == 0`
-   is not `clean`. This is the detector that would have caught #2735 at the first
-   between-stage check.
-
-3. **Give reuse a durable place to look (Task 3).** Record each bound run_id into
+2. **Give reuse a durable place to look (Task 2).** Record each bound run_id into
    an issue-keyed `_run_identities` list on the ledger, and teach
    `_validated_reuse_candidate` to accept it as a fourth proof. A re-ensure after
    a lapse then rebinds to the existing identity even when the `AgentSession` was
@@ -419,13 +470,6 @@ iteration. The existing "route its payload through the same three-way table"
 sentence stops being a contradiction and becomes an instruction that can be
 followed.
 
-**Task 2** — `tools/sdlc_run_health.py`. New module constant
-`DISPOSITION_NEVER_WROTE = "never_wrote"`, returned when
-`ok_writes == 0 and fail_writes == 0`. The existing `never_landed` /
-`transient_recovered` / `clean` branches are unchanged for every run that wrote
-anything. `tools/sdlc_review_finalize.py` already asserts `>= 1` confirmed ok
-write before selfcheck passes; this makes the same signal available to the
-supervisor mid-run instead of only at REVIEW.
 
 **Task 3** — the durable anchor. On successful bind in
 `_acquire_run_lock_and_bind`, append the bound run_id to `_run_identities` on the
@@ -478,22 +522,15 @@ SDLC_RUN_IDENTITY_HISTORY_MAX = int(
   that no migration is needed.
 - `_run_identities` present but malformed (a string, a dict, `null`) → treated as
   `[]`, never raises.
-- `run-health` with `run_id=None` or `issue_number=None` → unchanged empty
-  counters, and must NOT report `never_wrote` (there is no run to judge).
 
 ### Error State Rendering
 
 - A refused marker must still print its `LEASE_ABSENT` / `ISSUE_LOCKED`
   diagnostic to stderr and exit 1 — assert this is unchanged, since Task 1's
   value depends entirely on it.
-- `never_wrote` must render as a distinct string in the `run-health` JSON, not
-  collapse into `clean`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_run_health.py` — UPDATE: existing cases asserting
-      `disposition == "clean"` for a zero-counter run now expect `"never_wrote"`.
-      This is the demonstrated-red case: the test must fail on current `main`.
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: add the fourth-proof
       cases; assert the three existing proofs are unchanged (control).
 - [ ] `tests/integration/test_sdlc_run_identity_resume.py` — UPDATE: extend the
@@ -567,9 +604,15 @@ Verification.
 ### Risk 5: `_meta` continues to mask an empty ledger
 
 Per spike-6, `_meta.revision_applied_at` comes from plan frontmatter and looks
-healthy on a gutted ledger. This plan does not change that. **Mitigation:**
-out of scope, but Task 2's `never_wrote` gives the supervisor a signal that does
-not depend on `_meta` at all. Noted in No-Gos.
+healthy on a gutted ledger. This plan does not change that. **Mitigation:** out
+of scope here. A zero-write detector was drafted as a task and **dropped in
+critique**: `ok_writes == 0 and fail_writes == 0` is also the normal state of
+every healthy run before its first marker, so it would fire on healthy
+pipelines, and `run-health` has no call site in `.claude/` or `docs/` to fire
+from. The real enforcement already exists at REVIEW
+(`tools/sdlc_review_finalize.py:552-560`, which requires at least one confirmed
+ok write). Ledger-integrity observability is owned by the separate
+`docs/plans/ledger-integrity.md` lane. Noted in No-Gos.
 
 ## Race Conditions
 
@@ -641,12 +684,8 @@ surface. No new `pyproject.toml [project.scripts]` entry, no new bridge import.
       claim is validated.
 - [ ] Update `docs/sdlc/do-sdlc.md` to describe Step 3d.6's new loud contract and
       the run_id-adoption requirement.
-- [ ] Update `docs/sdlc/do-plan.md` marker invocations (this is Task 4 — it is
+- [ ] Update `docs/sdlc/do-plan.md` marker invocations (this is Task 3 — it is
       both the code change and the doc change).
-- [ ] Add a `never_wrote` row to the disposition table in
-      `docs/features/sdlc-run-health.md` if that file exists; otherwise document
-      the disposition in `tools/sdlc_run_health.py`'s module docstring, which is
-      the current source of truth for the disposition vocabulary.
 
 ## Success Criteria
 
@@ -654,42 +693,41 @@ surface. No new `pyproject.toml [project.scripts]` entry, no new bridge import.
    rebinds to the **existing** run_id instead of minting a fresh one — proven by
    an integration test against real Redis.
 2. When rebinding is genuinely impossible, Step 3d.6 fails **loudly**: non-zero
-   exit, diagnostic on stderr, supervisor stops rather than continuing with a
-   stale identity.
-3. `sdlc-tool run-health` reports `never_wrote` — not `clean` — for a run with
-   zero ok and zero fail marker writes. Demonstrated red against current `main`.
-4. No `2>/dev/null || true` remains on any `session-ensure` or `stage-marker`
+   exit and diagnostic on stderr, surfaced to the supervisor rather than
+   discarded. A *foreign-owner* refusal stops the run; a transient error is
+   surfaced and retried, never converted into an abort.
+3. No `2>/dev/null || true` remains on any `session-ensure` or `stage-marker`
    invocation in `.claude/skills-global/do-sdlc/SKILL.md` or `docs/sdlc/do-plan.md`.
-5. The three pre-existing reuse proofs behave identically (control tests pass
+4. The three pre-existing reuse proofs behave identically (control tests pass
    unchanged).
-6. `tools/sdlc_session_ensure.py::ensure_session` is byte-identical to `main`.
+5. `tools/sdlc_session_ensure.py::ensure_session` is byte-identical to `main`.
 
 ## Step by Step Tasks
 
 ### 1. Make Step 3d.6 loud and identity-adopting
 
-- Edit `.claude/skills-global/do-sdlc/SKILL.md` Step 3d.6: remove
-  `2>/dev/null || true`; add prose requiring an exit-code branch and requiring
-  the supervisor to adopt the returned `run_id` for subsequent stages.
+- Edit `.claude/skills-global/do-sdlc/SKILL.md`: remove `2>/dev/null || true`
+  from **all three** occurrences (`:75` session-ensure, `:171` TEST stage-marker,
+  `:225` Step 3d.6 re-ensure). Scoping this to Step 3d.6 alone would leave the
+  matching anti-criterion unsatisfiable — that mismatch was a critique blocker.
+- Add prose requiring an exit-code branch and requiring the supervisor to adopt
+  the returned `run_id` for subsequent stages.
 - Resolve the self-contradiction: the existing "route its payload through the
   same three-way table" sentence must now be executable.
+- **Fail-open on transient errors.** A non-zero exit must be surfaced and routed
+  through the three-way table, never turned into an unconditional pipeline abort
+  — a re-ensure that halts a run on a Redis blip is a worse regression than the
+  bug. Only a *foreign-owner* refusal is a stop condition.
 - No Python. No tests (skill-body prose), verified by Verification greps.
 
-### 2. `never_wrote` disposition in run-health
+### 2. Durable issue-keyed run-identity anchor (touches the contested file — ordering cleared)
 
-- Add `DISPOSITION_NEVER_WROTE = "never_wrote"` to `tools/sdlc_run_health.py`.
-- Return it when `ok_writes == 0 and fail_writes == 0` and a real
-  `(issue_number, run_id)` pair was supplied.
-- Update the module docstring's disposition list — replace the current
-  `clean -- zero fail writes ..., or no counters at all` wording entirely; do not
-  leave the old sentence alongside the new one.
-- Tests in `tests/unit/test_sdlc_run_health.py`: demonstrated red (a zero-counter
-  run currently returns `clean`), plus a control that a run with ok writes and no
-  fails still returns `clean`.
-
-### 3. Durable issue-keyed run-identity anchor (touches the contested file — STOP for ordering first)
-
-- **Before starting: confirm cross-lane ordering with the #2735 and #2766 lanes.**
+- **Ordering with the #2735 and #2766 lanes was cleared by the team lead.** The
+  edit is confined to `_validated_reuse_candidate` (`:284-347`), disjoint from
+  lane-identity's mint (~`:639`) and the merged `:499` `update_fields` hunk; the
+  same-file/different-hunk precedent from PR #2747 applies. **Land promptly** —
+  lane-identity rebases across this hunk. If the fix creeps beyond `:284-347` in
+  this file, STOP and report before writing it.
 - Add `SDLC_RUN_IDENTITY_HISTORY_MAX` with the GRAIN OF SALT comment.
 - On successful bind in `_acquire_run_lock_and_bind`, append the bound run_id to
   `_run_identities` on the ledger via `update_stage_states(..., field="stage_states_json")`.
@@ -701,7 +739,7 @@ surface. No new `pyproject.toml [project.scripts]` entry, no new bridge import.
   controls), `tests/integration/test_sdlc_run_identity_resume.py` (real-Redis
   create-fall-through + lapsed lease → rebind).
 
-### 4. Close the same hole in the do-plan addendum
+### 3. Close the same hole in the do-plan addendum
 
 - Edit `docs/sdlc/do-plan.md:12-13`: remove `2>/dev/null || true` from both PLAN
   marker invocations, and state that a non-zero exit is a stop condition.
@@ -714,20 +752,18 @@ harness on the *success* case.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Run-health tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_run_health.py -q` | exit code 0 |
 | Session-ensure tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
 | Resume integration passes | `scripts/pytest-clean.sh tests/integration/test_sdlc_run_identity_resume.py -q` | exit code 0 |
 | Marker semantics unchanged (control) | `scripts/pytest-clean.sh tests/unit/test_sdlc_stage_marker.py -q` | exit code 0 |
 | State-machine merge unchanged (control) | `scripts/pytest-clean.sh tests/unit/test_pipeline_state_machine.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
-| New disposition exists | `grep -q "never_wrote" tools/sdlc_run_health.py` | exit code 0 |
-| Disposition reachable via CLI | `sdlc-tool run-health --help` | exit code 0 |
+| Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
+| Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Identity cap is env-overridable | `grep -q "SDLC_RUN_IDENTITY_HISTORY_MAX" tools/sdlc_session_ensure.py` | exit code 0 |
-| Cap carries the grain-of-salt marker | `grep -q "GRAIN OF SALT" tools/sdlc_session_ensure.py` | exit code 0 |
-| Durable anchor written to the ledger | `grep -q "_run_identities" tools/sdlc_session_ensure.py` | exit code 0 |
+| Cap carries its own grain-of-salt marker | `grep -q "GRAIN OF SALT: SDLC_RUN_IDENTITY_HISTORY_MAX" tools/sdlc_session_ensure.py` | exit code 0 |
+| Durable anchor consulted as a reuse proof | `grep -q "_run_identities" tools/sdlc_session_ensure.py` | exit code 0 |
+| Durable anchor written on the ledger side | `grep -q "_run_identities" agent/pipeline_ledger.py` | exit code 0 |
 | Ownership-lock docs updated | `grep -q "_run_identities" docs/features/sdlc-issue-ownership-lock.md` | exit code 0 |
-| Step 3d.6 docs updated | `grep -q "reuse-run-id" docs/sdlc/do-sdlc.md` | exit code 0 |
+| Step 3d.6 addendum names the exit-code branch | `grep -q "exit code" docs/sdlc/do-sdlc.md` | exit code 0 |
 
 **Anti-criteria** — each must exit 0. These are anchored to actual code *use*
 rather than to bare identifiers, so a check cannot be satisfied only by deleting

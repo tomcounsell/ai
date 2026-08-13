@@ -68,6 +68,8 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+from tools.lane_identity import resolve_lane_slug
+
 logger = logging.getLogger(__name__)
 
 # Idle window (in seconds) before a sdlc-local session is considered a zombie
@@ -688,6 +690,25 @@ def ensure_session(
     if not issue_number or issue_number < 1:
         logger.debug(f"sdlc_session_ensure: invalid issue_number {issue_number}")
         return {}
+
+    # Mint the lane's identity (issues #2735/#2718). ensure_session is the one
+    # component that runs on EVERY lane-start path before any plan or any stage
+    # exists, so this is where the slug is created and recorded on the
+    # PipelineLedger. The call sits on the function's only entry path, above
+    # every branch, so a single invocation covers all six success return points
+    # by construction; it is idempotent and conditional-on-empty, so it can
+    # never double-write. It must swallow: ensure_session's contract is to
+    # return a session dict, and a Redis or git failure inside identity
+    # resolution must not convert a successful ensure into `return {}`.
+    try:
+        resolve_lane_slug(issue_number, allow_heal=True)
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: lane slug resolution failed for #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
 
     try:
         # Env-var short-circuit: bridge-initiated sessions inject VALOR_SESSION_ID

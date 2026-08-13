@@ -547,6 +547,12 @@ is not touched. Both keys must also be added to the vault `~/Desktop/Valor/.env`
 
 ## Test Impact
 
+- [ ] `tests/unit/test_output_handler.py` — GUARD (added post-hoc, PR #2695 round 3): the outbound
+      check sits on `TelegramRelayOutputHandler.send()`'s main path, so this suite reaches it on
+      every drafter test. An autouse `stub_outbound_context_recall` fixture in `tests/conftest.py`
+      keeps the unit suite off live model calls (escape hatch `CONTEXT_RECALL_OUTBOUND_STUB=0`);
+      a pin test in `test_context_recall_wiring.py` fails loudly if the stub is removed. This row's
+      omission is why a live-billed-API-call blocker survived two review rounds.
 - [ ] `tests/unit/test_intake_classifier.py` — UPDATE: existing assertions construct/compare
       `IntentDecision` and the returned dict. Add the two new keys to expected dicts; the
       `_fake_decision` helper (`:26-37`) must return an `IntentDecision` carrying the new fields.

@@ -1,533 +1,326 @@
 ---
 status: Needs Revision
 type: bug
-appetite: Medium
+appetite: Small
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2730
 ---
 
-# ledger integrity: a dispatch record no path can bypass, an oscillation signal that can actually fire, and a stage-entry gate that refuses a live peer
+# ledger integrity: a G4 counter that can see alternation, and an inter-run liveness gate on dispatch
 
-Two issues, one lane. Both are failures of the same organ — the issue-keyed `PipelineLedger`'s record of *who ran what, when* — and both surface as a guard that looks armed and is not.
+Two issues, one lane, one PR. Both are failures of the same organ — the issue-keyed `PipelineLedger`'s record of who ran what — and both surface as a guard that looks armed and is not.
 
-- **#2730** — stage skills write markers; only the router records dispatches. Any stage that runs without passing through the router leaves a marker and no ledger entry, so G4 has nothing to count.
-- **#2731** — `record_dispatch` carries no liveness signal, so nothing at the tool layer can refuse a second agent entering a stage that already has a live one.
+- **#2730** — G4 scores an alternating oscillation at 1 no matter how long it runs, because `compute_same_stage_count` breaks its walk on the first differing skill.
+- **#2731** — `dispatch record` authorizes on lease *ownership* and never consults lease *liveness*, so it cannot refuse a dispatch whose foreign holder is still alive.
 
-They ship together because #2731's gate has to read the same record #2730 makes trustworthy. Gating on a record that half the paths never write would produce a gate that silently never fires — the exact failure class this lane exists to close.
+**This is round 2.** Round 1 proposed three workstreams; two were withdrawn or re-scoped after a critique and three spikes. Read Round 1 Disposition before assuming any part of this is new.
+
+## Round 1 Disposition
+
+Round 1 was **NEEDS REVISION** (4 blockers, all confirmed by the author with a shell). What survived, and what was then ruled:
+
+| Round-1 item | Outcome |
+|---|---|
+| #2730 record-completeness (markers imply a dispatch entry) | **DEFERRED — fence-blocked.** spike-2 proved the fix must live in `PipelineStateMachine.start_stage()` (`agent/pipeline_state.py`), because the PreToolUse hook writes markers *without* going through `write_marker` and is the dominant writer on the bridge. That file is outside this lane's fence and the extension was not granted. See No-Gos. |
+| #2730(b) counter defect | **IN SCOPE — lead ruled.** Round 1 withdrew it after spike-1 showed the motivating history was productive work. Ruled back in: #2730's headline claim is "defangs G4", and shipping while G4 scores alternation at ≤1 fails the issue's purpose. Re-shaped below so it cannot re-introduce the false positive spike-1 warned about. |
+| #2731 gate | **IN SCOPE, NARROWED — owner ruled.** Issue-lease read only. No claim key, no record fields. Covers inter-run collisions; the intra-run shape is an explicit documented residual. #2731's body and ACs were rewritten to match (comment `5280704079`). |
 
 ## Problem
 
-### #2730 — the dispatch history is not a record of what happened
+### #2730 — the counter cannot see the shape it is asked to detect
 
-On issue #2711 the ledger asserts **six completed stages** and holds **zero dispatch entries**:
+`compute_same_stage_count` (`agent/sdlc_router.py:1870-1881`) walks `_sdlc_dispatches` backward and counts entries sharing **both** the last entry's skill **and** its `stage_snapshot`. The skill test breaks the walk:
 
-```
-markers:    ISSUE completed, PLAN completed, CRITIQUE completed,
-            BUILD completed, TEST completed, REVIEW completed, DOCS ready
-dispatches: []
-same_stage_dispatch_count: 0
-```
-
-(The issue reported one `/do-patch` entry when filed; the history has since emptied while every marker survived. Dispatch history is the more fragile of the two records — noted, not diagnosed, see Open Questions.)
-
-**Mechanism.** `sdlc-tool dispatch record`'s contract is caller-side: "Call AFTER guard evaluation but BEFORE invoking the sub-skill." Only two files call it — `.claude/skills/sdlc/SKILL.md` (the router) and `.claude/skills-global/do-sdlc/SKILL.md` (the supervisor). **No stage skill records a dispatch.** Stage markers are the mirror image: eight skill and doc files write those directly.
-
-That asymmetry is the defect. Stage completion is self-reported by the stage; dispatch is recorded only by the router. A stage that executes without the router therefore writes one and not the other. A concrete non-router path is in the repo today: `.claude/skills-global/do-build/SKILL.md:128` tells `/do-build` to route failures to `/do-patch` and re-run — a direct skill-to-skill chain that never reaches the router's record step.
-
-### #2730(b) — G4 cannot count the oscillation shape that actually happens
-
-**This mechanism is not in the issue and is not fixed by making the record complete.** It was found while verifying #2730 and it is the more severe half.
-
-`compute_same_stage_count` (`agent/sdlc_router.py:1871-1880`) walks the history backward and **breaks on the first entry whose skill differs**. It only ever counts a consecutive same-skill run, so any A→B→A→B alternation scores at most 1.
-
-Evidence from the `verdict-finalize-cluster` lane (merged as `706fc4da0`), whose dispatch history is complete and correct:
-
-```
-/do-plan → /do-plan-critique → /do-plan → /do-plan-critique →
-/do-plan → /do-plan-critique → /do-plan → /do-plan-critique → /do-build
-same_stage_dispatch_count: 0
+```python
+for entry in reversed(history):
+    ...
+    if entry.get("skill") != skill:
+        break                      # <- any alternation stops the walk here
 ```
 
-A textbook four-round plan↔critique oscillation, perfectly recorded, counted as **zero**.
+An A→B→A→B loop therefore scores at most 1, however long it runs and however stuck it is. `MAX_SAME_STAGE_DISPATCHES = 3` is unreachable for every alternating loop — and the alternating loops are the ones that matter: rows 8↔8b (`/do-patch` ↔ `/do-pr-review`) and rows 2b↔3 (`/do-plan-critique` ↔ `/do-plan`).
 
-The dominant oscillation shapes in this router alternate:
+`_rule_patch_applied_after_review`'s docstring (`:1275`) states "Loop-bound by G4 (`same_stage_dispatch_count`)" for exactly such a loop. That bound does not exist. PR #2790 extended that same docstring; this plan owns the correction.
 
-| loop | rows | skills | G4 can count it? |
-|---|---|---|---|
-| plan ↔ critique | 2b ↔ 3 | `/do-plan-critique`, `/do-plan` | **no** — correctly bounded by G5 instead |
-| review ↔ patch | 8 ↔ 8b | `/do-patch`, `/do-pr-review` | **no** — and row 8b's docstring claims G4 bounds it |
-| stalled critique retry | 2c | `/do-plan-critique` ×N | yes |
-| stalled/crashed review retry | 8c, 8d, 8e, 8f | `/do-pr-review` ×N | yes |
+**What is NOT the defect — and why the fix is shaped as it is (spike-1).** The `706fc4da0` history (four `/do-plan`↔`/do-plan-critique` rounds) reports `same_stage_dispatch_count: 0`, but that zero comes from the D5 self-clearing branch (`:1888-1894`), not the skill break, and those four rounds were **productive work**: each *cycle* carries a different recorded snapshot because the plan genuinely changed each round. G4 correctly declined to escalate. Any fix that makes that history escalate is a false positive that would wedge every healthy pipeline on this machine. The snapshot-equality conjunct is what separates spinning from progress, and it is retained untouched.
 
-`_rule_patch_applied_after_review`'s docstring (`agent/sdlc_router.py:1275`) states "Loop-bound by G4 (`same_stage_dispatch_count`)" for a loop that provably alternates. That is a gate that cannot fire (#2658's family), and the `706fc4da0` lane extended that same claim — this plan owns the correction.
+### #2731 — the gate authorizes on ownership, never on liveness
 
-Shipping #2730 as scoped would complete the record and leave this untouched, producing a guard that *looks* fixed. That is worse than the honest breakage we have.
+`_cli_record` (`tools/sdlc_dispatch.py`) resolves and re-validates the lease, then appends. Both checks ask *"do I own this?"*. Neither asks *"is somebody else still alive in it?"* A foreign live holder and a foreign dead holder are treated identically — and since #2714 anchored the lease heartbeat to its supervisor's lifetime, the lease can now answer that question honestly.
 
-### #2731 — no liveness gate on stage entry
-
-Two concurrent `/do-build` agents ran on issue #2629's BUILD stage, same slug, same worktree. Both produced byte-identical code, so the collision cost only compute; the same collision on divergent implementations corrupts the branch.
-
-Nothing at the tool layer can refuse it. `record_dispatch` appends `{skill, at, stage_snapshot}` and nothing else — no liveness signal exists to test. `same_stage_dispatch_count` detects repetition *over time* and is blind to overlap *in time*.
-
-A naive counter threshold is wrong: #2629's first dispatch had died mid-work and was legitimately recovered, so "refuse if count >= 1" blocks the common correct path. The refusal needs a real liveness test.
-
-**The stated design premise does not hold, and this is the lane's one genuine open decision.** The owner's constraint is that liveness belongs to the lease, not to the dispatch record. Three facts from source say a read of the *issue* lease cannot express this gate:
-
-1. `agent/supervised_run.py:4-8` — a stage fork **inherits the supervisor's `run_id`** rather than contesting the lock, and a bare `session-ensure` under a live signal is refused (`SUPERVISED_RUN_ACTIVE`) specifically "so no fork can mint a competing `run_id`."
-2. `models/session_lifecycle.py:1140-1147` — lease ownership is decided **solely** by comparing `run_id`.
-3. `_lock_renewal_is_fresh` (`:962-993`) — the lease's liveness signal is `renewed_at` recency, which its own docstring says tracks "the RUN's life rather than one ephemeral process's." The payload `pid` belongs to the ephemeral `session-ensure` CLI and is dead within seconds of a locally-minted lease.
-
-The lease is **run-scoped by construction**. #2629's collision was two agents inside one supervised run, so both carry the same `run_id` and any lease read reports "alive, and it is you" for both. A lease read can refuse an *inter-run* collision — which `resolve_ledger_lease` already largely does — and is structurally blind to the shape #2731 was filed about.
-
-Note also that #2731's own sketch proposes a `dispatcher: {holder_id, pid, pid_create_time}` block **on the dispatch record**, which the owner's constraint forbids. The issue and the constraint are in direct conflict, and the issue's acceptance criteria are written against the record-block design. See Open Questions Q1 — this plan does not proceed on the gate until that is settled.
+**Known residual, deliberate and documented.** This gate covers **inter-run** collisions only. Two agents inside one supervised run share `run_id` (forks inherit it — `agent/supervised_run.py`, #2026 WS1), lease ownership compares `run_id` alone, lease liveness is renewal recency tracking the *run* not the process, and under `/do-sdlc` both forks are subagents of one `claude` process sharing `CLAUDE_PID`, pid, create_time, worktree and `session_id`. Nothing the lease can see distinguishes them. **The #2629 collision that prompted the issue is not fixed here.** Its root cause is the run model — one `run_id` per pipeline, shared by every fork — which is #2026 territory and would need a self-minted claim token with its own TTL and release protocol. Shipping without saying so would leave the next reader believing the stage is guarded.
 
 ## Freshness Check
 
-**Baseline commit:** `87ecf3f36` (main)
-**Issues filed at:** #2730 2026-08-13 · #2731 2026-08-13
-**Disposition:** Current
+**Baseline:** `main` at `ad2ad58f8`. **Disposition:** Current.
 
-**File:line references verified at baseline:**
-- `tools/sdlc_dispatch.py` — `record` is the only writer; contract stated in the `record` subparser help — holds.
-- `agent/sdlc_router.py:1835-1895` (`compute_same_stage_count`) — the same-skill break at `:1874` holds.
-- `agent/sdlc_router.py:204-230` (`build_stage_snapshot`) — excludes `_sdlc_dispatches` and timestamps; holds.
-- `agent/sdlc_router.py:439-471` (`guard_g4_oscillation`), `:86` (`MAX_SAME_STAGE_DISPATCHES = 3`) — hold.
-- `agent/pipeline_graph.py:62-72` (`STAGE_TO_SKILL`) — canonical 1:1 stage→skill map, already imported by the router at `:41`.
-- `tools/sdlc_stage_query.py:528-541` — calls `build_stage_snapshot` + `compute_same_stage_count` and passes `raw_states`. **Both callees are in this lane's fence; the call site needs no edit.** This is what keeps the off-limits file off-limits.
-- `models/session_lifecycle.py:886-960` (`IssueLockResult`, `_lock_renewal_is_fresh`), `:995` (`_lock_owner_is_live`), `:1122` (`touch_issue_lock`) — hold, read-only for this lane.
-- `agent/pid_fence.py:87-154` (`proc_create_time`, `create_times_match`, `fence_is_live`) — the existing liveness primitive.
+Verified at baseline:
+- `agent/sdlc_router.py:1856-1896` (`compute_same_stage_count`), `:1874` (the skill break), `:1883-1894` (D5), `:86` (`MAX_SAME_STAGE_DISPATCHES = 3`), `:98` (`MAX_DISPATCH_HISTORY = 10`), `:439-471` (`guard_g4_oscillation`), `:204-229` (`build_stage_snapshot`), `:1275` (the false G4 claim).
+- `tools/sdlc_dispatch.py` — `_cli_record`'s resolve + revalidate, and the module-object lease access guarded by `tests/unit/test_sdlc_lease_helper_binding.py` (#2469/#2637).
+- `models/session_lifecycle.py:886` (`IssueLockResult`, incl. `orphaned_lock`), `:962` (`_lock_renewal_is_fresh`), `:995` (`_lock_owner_is_live`), `:1122` (`touch_issue_lock`, `peek=True`).
+- `tools/sdlc_stage_query.py:528-541` — calls `build_stage_snapshot` + `compute_same_stage_count`, passing `raw_states`. **Both callees are in-fence; this call site needs no edit,** which is what keeps the off-limits file untouched.
 
-**Merged work this plan sits on:**
-- **PR #2784 (#2714)** — anchored the lease heartbeat to its supervisor's lifetime, merged 2026-08-13T12:13:49Z. This is what makes the lease a trustworthy *run*-liveness signal, and is the basis of the owner's constraint. It does not make the lease agent-scoped; see #2731 above.
-- **PR #2790 (#2740/#2767/#2769)** — merged 2026-08-13T12:18:56Z from this same agent. Touched `agent/sdlc_router.py` (row 8b, `NO_RULE`) and `tools/sdlc_stage_marker.py` (four refusal messages). This lane rebases on it and corrects row 8b's G4 claim, which that PR extended.
-
-**Active plans overlapping this area:** `docs/plans/simulated-bridge-dispatch-harness.md` mentions dispatch but targets a bridge test harness, not the ledger. No file-level collision found. `tools/sdlc_stage_query.py` is under active work by the lane-identity lane — this plan deliberately requires no edit there (see the boundary note above), which must be re-verified at BUILD start.
-
-## Spike Results (round 1, post-critique)
-
-Run by the plan author with a shell after the critique, to settle the four
-blockers empirically rather than by argument. All four critique blockers are
-confirmed; two NEW findings emerged that change the fix location and the fence.
-
-### spike-1: Does the #2730(b) evidence show a defect? — NO
-
-- **Method:** called `compute_same_stage_count` directly against the real
-  `706fc4da0` ledger, both with and without the live snapshot.
-- **Finding:**
-  ```
-  backward walk only:        (1, '/do-build')
-  with live snapshot (real): (0, '/do-build')
-  ```
-  The reported `0` comes from the **D5 self-clearing branch**
-  (`agent/sdlc_router.py:1888-1894`), not the skill break at `:1874`. The
-  recorded snapshots settle it further — adjacent plan/critique pairs share an
-  identical snapshot, while each *cycle* differs:
-
-  | entries | skills | snapshot |
-  |---|---|---|
-  | 2,3 | `/do-plan`, `/do-plan-critique` | identical |
-  | 4,5 | same pair | identical, differs from above |
-  | 6,7 | same pair | identical, differs again |
-
-  The snapshot advanced every round because the plan genuinely changed each
-  round. Those four critique rounds were **productive work, and G4 correctly
-  declined to escalate.**
-- **Confidence:** high — direct execution against the real ledger.
-- **Impact on plan:** #2730(b) as written is **withdrawn**. The structural
-  property is real (the skill break does cap alternation at 1), but there is no
-  evidence of a harmful unbounded alternating loop, and a fix keyed on an
-  *unchanged* snapshot would target a near-null state — a new gate that cannot
-  fire. Re-file as its own investigation issue if wanted; do not build it here.
-
-### spike-2: What is the real #2730 mechanism? — A THIRD marker writer nobody named
-
-- **Method:** traced every production caller of `PipelineStateMachine.start_stage()`.
-- **Finding:** exactly two callers, and **the plan's fix location covers only one**:
-
-  | caller | path | reaches `write_marker`? |
-  |---|---|---|
-  | `tools/sdlc_stage_marker.py:576` | skill bodies via `sdlc-tool stage-marker` | yes |
-  | `agent/hooks/pre_tool_use.py:334` | **PreToolUse hook, on every `Skill(do-*)` call** | **no — bypasses it entirely** |
-
-  `agent/hooks/post_tool_use.py:62` is the `complete_stage` counterpart. Per
-  `docs/features/sdlc-local-supervision.md`, on the bridge "stage markers are
-  written in-session by the Skill hooks," so the hook path is the **dominant**
-  marker writer there, and it never touches `write_marker`.
-- **Confidence:** high.
-- **Impact on plan:** Task 2's fix location is wrong — putting the dispatch
-  record in `write_marker` would be a **no-op on the bridge**, the very place
-  the divergence was observed. `PipelineStateMachine.start_stage()` /
-  `complete_stage()` (`agent/pipeline_state.py:870`) is the true universal choke
-  point every actor funnels through. **This moves the fix into
-  `agent/pipeline_state.py`, which is outside this lane's stated fence** — the
-  fence needs extending before BUILD.
-- **Side finding:** there are at least **three** stage↔skill maps, not one —
-  `agent/pipeline_graph.py:62` (`STAGE_TO_SKILL`),
-  `tools/sdlc_stage_marker.py:143` (`_SKIP_STAGE_SKILL`), and
-  `agent/hooks/pre_tool_use.py:59` (`_SKILL_TO_STAGE`, the inverse). This is
-  #2491's "hardcoded duplicates" family.
-
-### spike-3: The #2731 collision topology — two topologies exist, and they need different discriminators
-
-- **Method:** `docs/features/sdlc-local-supervision.md` "Relationship to `/sdlc`"
-  table, `tools/sdlc_supervisor_identity.py:20-25`, plus an attempt to recover
-  #2629's run data (unrecoverable — its dispatch history is *also* empty, itself
-  another #2730 instance, and the `sdlc-local-2629` anchor no longer resolves).
-- **Finding:** settled structurally rather than forensically. #2731 names
-  `/do-sdlc` explicitly, and the two pipelines have different process shapes:
-
-  | pipeline | execution | two concurrent stage agents are... | pid fence discriminates? |
-  |---|---|---|---|
-  | `/do-sdlc` | subagents in the local session | **one `claude` process** — same `CLAUDE_PID`, create_time, ancestry, worktree, `run_id`, `session_id` | **no** |
-  | `/sdlc` | child eng `AgentSession`s via the worker | separate OS processes | yes |
-
-- **Confidence:** high for the structural claim; the specific #2629 run data is
-  permanently lost.
-- **Impact on plan:** confirms the critique. In the `/do-sdlc` topology the only
-  thing that differs between two forks is **something a fork mints itself**, so
-  neither a lease read (Option A) nor a pid fence (Option B) can gate it. A
-  workable gate needs a self-minted claim token plus TTL and explicit release —
-  which reverts Risk 4 from "inverted lock hazard" to an ordinary wedge hazard
-  and is a materially larger design than either option costed. Q1 as posed
-  offers two options that both fail; it must be re-posed.
+**Merged work this sits on:** PR #2784 (#2714, supervisor-anchored lease heartbeat — what makes the lease trustworthy for run liveness) and PR #2790 (#2740/#2767/#2769, from this agent — touched row 8b's docstring, corrected here).
 
 ## Prior Art
 
-- **#2012 task 2** — re-pointed `dispatch record` at the issue-keyed `PipelineLedger`, making the run_id-keyed lease the sole authorization. Established the writer shape this plan extends.
-- **#1641 / #1668** — the two oscillation classes G4 and rows 2c/8c were built for. Both are *same-skill* repeats, which is why G4's consecutive-run counter was adequate for them and why the alternation gap went unnoticed.
-- **#2026 WS1 (`agent/supervised_run.py`)** — made fork `run_id` inheritance structural. This is the direct cause of #2731's intra-run blindness: it is working as designed, and the design is what makes the lease unable to discriminate two forks.
-- **#2620 / #2714** — moved lease liveness from pid inference to renewal recency, then anchored renewal to the supervisor. Together they are why the lease is trustworthy for *run* liveness and silent on *agent* liveness.
-- **#2650** — the plan-doc write lease. The nearest precedent for a scoped claim key with a pid fence, and the model for Option B below. #2731 was split out of it as the piece deliberately left out.
-- **#2658** — "gates that cannot fire: require demonstrated-red for verification rows, guards, and skill self-checks." #2730(b) is a member of that family, found the way that issue predicts they get found.
-- **#2305 defect 1 / `agent/pid_fence.py`** — the canonical rule this plan inherits: *unknown never authorizes more force*. An unverifiable liveness answer must not license a second agent in.
+- **#1641 / #1668** — the two oscillation classes G4 was built for. Both are *same-skill* repeats, which is why the consecutive-run counter was adequate then and why the alternation gap went unnoticed.
+- **#2026 WS1** — structural fork `run_id` inheritance. Working as designed, and the direct cause of #2731's intra-run residual.
+- **#2620 / #2714** — moved lease liveness from pid inference to renewal recency, then anchored it to the supervisor. Together they are why a liveness read is trustworthy now and was not before.
+- **#2012 task 2** — made the lease the sole authorization for a dispatch record. This plan adds the liveness question that authorization never asked.
+- **#2658** — "gates that cannot fire." #2730 is a member; this closes one instance and does not open the general audit.
+- **#2305 / `agent/pid_fence.py`** — *unknown never authorizes more force*, the rule the indeterminate branch follows.
 
 ## Why Previous Fixes Failed
 
-| Prior fix | What it did | Why it left this open |
+| Prior fix | What it did | Why this stayed open |
 |---|---|---|
-| #2012 task 2 | Made the dispatch record ledger-keyed and lease-authorized | Fixed *where* the record is written and *who* may write it. Never revisited *which actors are obliged to write it* — the caller-side contract stayed router-only. |
-| #1641 / #1668 → G4 | Counter over consecutive same-skill dispatches | Closed the two same-skill loops it was shown. The alternating loops were never in evidence, so the counter's shape was never questioned; later rows then *cited* G4 as their bound without checking it could count them. |
-| #2026 WS1 | Structural fork `run_id` inheritance | Solved lock contention between supervisor and forks by making them one owner. That is precisely what removes the tool layer's ability to tell two forks apart. |
-| #2650 | Plan-doc write lease | Scoped to `docs/plans/*.md`. Two BUILD agents write source in a worktree and never touch it — stated in #2731 itself. |
+| #1641/#1668 → G4 | Counter over consecutive same-skill dispatches | Closed the two same-skill loops it was shown. Later rows then *cited* G4 as their bound without checking it could count their shape. |
+| #2012 task 2 | Lease-authorized the dispatch record | Settled *who may write*. Never asked whether someone else is *currently writing*. |
+| #2714 | Anchored the lease heartbeat to the supervisor | Made lease liveness trustworthy — but nothing on the dispatch path reads it. |
 
-**Root-cause pattern:** each fix made one record or one lock authoritative for the actor it had in view, and none asked *"can every actor that changes this state reach this record, and can the signal built on it actually distinguish the cases it claims to?"* That question is this plan's through-line.
+**Pattern:** each fix made one signal authoritative and left its consumers assuming a stronger guarantee than it provides. Both defects are a claimed bound never checked against the shape it claims to bound.
 
-## Data Flow
+## Technical Approach
 
-The write path both defects sit on:
+### 1. #2730 — let the walk cross skill boundaries (`agent/sdlc_router.py`)
 
-1. `/sdlc` (router) evaluates guards, selects a target, calls `sdlc-tool dispatch record --skill S` → appends `{skill, at, stage_snapshot, run_id}` to `_sdlc_dispatches`.
-   - *#2731 has no gate here.* Nothing tests whether a live agent already occupies the stage.
-2. The router invokes the sub-skill.
-3. The sub-skill writes its own stage marker via `sdlc-tool stage-marker` → `PipelineStateMachine` → `stage_states`.
-   - *#2730 originates in the gap between 1 and 3:* a skill reached any way other than step 2 performs step 3 and never step 1.
-4. `tools/sdlc_stage_query._compute_meta` reads `_sdlc_dispatches`, calls `build_stage_snapshot` + `compute_same_stage_count`, publishes `same_stage_dispatch_count` + `last_dispatched_skill` into `_meta`.
-5. `guard_g4_oscillation` reads `_meta["same_stage_dispatch_count"]` and escalates at `MAX_SAME_STAGE_DISPATCHES`.
-   - *#2730(b) manifests here:* the counter is structurally incapable of seeing an alternating loop, however complete the history is.
+Delete the skill-identity break at `:1874`. The snapshot-equality test at `:1879` remains the sole streak terminator and continues to do all the "progress or spinning?" work.
 
-**Stated plainly:** #2730 starves the signal, #2730(b) makes the signal unable to see the common case even when well fed, and #2731 is a gate that has no signal at all.
+Why that is the whole fix:
+- An A→B→A→B loop over an unchanged snapshot now counts every entry and reaches `MAX_SAME_STAGE_DISPATCHES`.
+- A productive alternation still scores 1 per snapshot, because the snapshot advances — the spike-1 history stays at rest and does **not** escalate.
+- Same-skill loops (rows 2c/8c/8d/8e/8f) count exactly as today; the removed test was redundant for them, since identical snapshots on consecutive same-skill entries already implied it.
+- **The returned `skill` is unchanged.** It is `history[-1]["skill"]`, read before the loop (`:1863`), so `last_dispatched_skill` — which drives G1 (`:336`), G3 (`:403`), G7 (`:685`), row 8b (`:1284`) and row 8d (`:1380`) — is bit-identical. This is what keeps the change from rewriting routing, and it is a blocking test obligation, not an assumption.
 
-## Architectural Impact
+`guard_g4_oscillation`'s message (`:460`) reads "{skill} dispatched {count} times", wrong wording once a streak can span skills. Reword for a repeating cycle **without** adding a `_meta` key — the guard already receives `stage_states` and can name the streak's skills locally.
 
-- **New dependencies:** none.
-- **Interface changes:** additive only, and deliberately confined to this lane's fence.
-  - Dispatch records gain a `stage` field (audit/dedup identity). **It must not enter `build_stage_snapshot`** — G4 compares snapshots, and any per-dispatch-varying field silently kills oscillation detection. This is #2731's own warning about the `dispatcher` block, and it applies identically here.
-  - `compute_same_stage_count`'s counting rule changes (Task 3). Its signature and its `_meta` key name do not, which is what keeps `tools/sdlc_stage_query.py` untouched.
-- **Coupling:** decreases. Today "a stage ran" is knowable only if the router happened to be the caller. After this, the actor that changes stage state is the actor that records it.
-- **Data ownership:** `_sdlc_dispatches` gains a second writer (the marker path). This is the one genuine ownership change and it is the point of the fix — see Risk 1 for the double-count hazard it creates.
-- **Reversibility:** high for #2730 (additive field + a counting rule). The #2731 gate's reversibility depends on which option Q1 selects.
+Then correct `_rule_patch_applied_after_review` (`:1275`) and audit the remaining claims (`grep -in "bound by G4"`, eleven hits) so each names a bound that can fire.
 
-## Appetite
+### 2. #2731 — consult lease liveness before appending (`tools/sdlc_dispatch.py`)
 
-**Size:** Medium
+In `_cli_record`, before the append, peek the issue lease. If held by a **different** `run_id`, decide on liveness:
 
-**Team:** Solo dev, code reviewer
+| lease state | decision |
+|---|---|
+| no holder, or holder is us | append (unchanged) |
+| foreign holder, provably live | **refuse** — named reason, non-zero exit, holder identified |
+| foreign holder, provably dead (`orphaned_lock`) | append — the #2629 recovery case |
+| foreign holder, liveness indeterminate | **refuse** — unknown never authorizes entry |
 
-Three defects across a small file set: `tools/sdlc_dispatch.py`, `tools/sdlc_stage_marker.py`, `agent/sdlc_router.py`, and tests. The weight is not volume — it is four proofs:
+The indeterminate branch is deliberate and consistent: `_lock_owner_is_live` already fails *toward* live, so an unverifiable holder reads as live and refusing is the matching outcome.
 
-1. That the marker-side record cannot double-count against the router's record (Risk 1).
-2. That the new counting rule fires on alternation **and** still fires on the same-skill loops rows 2c/8c/8d/8e/8f depend on, without re-opening #1641/#1668.
-3. That nothing per-dispatch-varying reaches `build_stage_snapshot`.
-4. That the #2731 gate refuses a live peer and admits a dead one, with *unknown* never authorizing entry.
+**Constraints:** no new fields on the dispatch record; `build_stage_snapshot` untouched; lease helpers reached through the module object, never a `from`-import (#2469/#2637).
 
-Medium holds only if Q1 is settled before BUILD. If Q1 selects Option B (a new stage-claim key), the appetite grows to the upper edge of Medium and #2731 should be considered for its own PR.
-
-## Prerequisites
-
-| Requirement | Check | Purpose |
-|---|---|---|
-| Worktree on the pinned interpreter | `.venv/bin/python -c "import sys,pathlib; assert sys.version.split()[0].startswith(pathlib.Path('.python-version').read_text().strip())"` | `scripts/pytest-clean.sh` aborts otherwise |
-| Rebased on `706fc4da0` | `git merge-base --is-ancestor 706fc4da0 HEAD` | Row 8b / marker-message work this plan corrects |
-| `tools/sdlc_stage_query.py` still calls the router helpers | `grep -n "compute_same_stage_count" tools/sdlc_stage_query.py` | The lane-identity boundary; if this changed, coordinate |
-
-## Solution
-
-### Key Elements
-
-- **One event, one record.** The actor that changes stage state records the dispatch. The router keeps its pre-invocation record (it is the only signal for a skill that dies before it starts); the marker path fills the gap for every other entry path, with an identity that makes the two idempotent rather than additive.
-- **An oscillation signal that counts what oscillates.** G4 counts *stage re-entry without forward progress*, not *consecutive identical skill strings*, so an alternating loop is visible.
-- **A stage-entry gate with a real liveness test** — pending Q1.
-- **Docstring honesty.** Every row that claims a G4 bound either has one after this change, or says which guard actually bounds it.
-
-### Technical Approach
-
-**1. #2730 — make the record unbypassable (`tools/sdlc_stage_marker.py`, `tools/sdlc_dispatch.py`)**
-
-`write_marker` derives the skill from `agent.pipeline_graph.STAGE_TO_SKILL[stage]` (canonical, 1:1, already imported by the router) and records a dispatch on **stage entry** — the transition of a stage *into* `in_progress`, not every marker write.
-
-The double-count hazard is the whole design problem. The router records `/do-build` and then `/do-build` writes `BUILD in_progress`; naively that is two records for one dispatch, and G4 counts inflate toward false escalation. The dedup must key on something stable across both writes and *distinct* across genuine repeats. Candidate identity: `(run_id, stage, occupancy)` where occupancy increments only on a `not in_progress → in_progress` transition. BUILD must prove:
-
-- A router-driven dispatch yields exactly one record.
-- A bypassing chain (`/do-build` → `/do-patch`) yields exactly one record for `/do-patch`.
-- A genuine repeat of the same stage yields a second record (this is the G4 signal; deduping it away is the failure mode that would silently disarm the guard).
-
-Marker discipline is uneven — some skills write `in_progress`, several write only `completed`. A `completed` write for a stage that never recorded an entry must therefore also record one, or the stages that skip `in_progress` stay invisible. BUILD surveys which skills write which statuses and states the coverage explicitly rather than assuming.
-
-**2. #2730(b) — an oscillation signal that can fire (`agent/sdlc_router.py`)**
-
-Change `compute_same_stage_count` from "consecutive entries with an identical skill string" to a rule that detects a repeating **cycle** over an unchanged snapshot. The snapshot equality test is already the real "no forward progress" signal and is retained unchanged; only the skill-identity break at `:1874` is at issue.
-
-Constraints this must satisfy, all testable:
-- Rows 2c/8c/8d/8e/8f (same-skill repeats) still escalate at `MAX_SAME_STAGE_DISPATCHES` exactly as today — #1641/#1668 must not re-open.
-- An A→B→A→B loop over an unchanged snapshot escalates.
-- A productive alternation, where the snapshot advances each turn, never escalates. This is the false-positive risk and it is the one that would wedge every healthy pipeline; it is a blocking test obligation, not a nicety.
-- `same_stage_dispatch_count` keeps its name, type, and meaning-of-magnitude so `guard_g4_oscillation` and `tools/sdlc_stage_query.py` need no change.
-
-Then correct `_rule_patch_applied_after_review`'s docstring (`:1275`) and audit the other five "Loop-bound by G4" claims against the new rule, so each names a bound that exists.
-
-**3. #2731 — the stage-entry liveness gate (BLOCKED on Q1)**
-
-Two options, both honoring "no liveness fields on the dispatch record":
-
-- **Option A — issue-lease read only.** `dispatch record` refuses when the issue lease is held by a *different, live* `run_id`. Small, uses `touch_issue_lock(peek=True)` and the existing `_lock_owner_is_live`. **Does not cover #2629's observed intra-run collision** and largely duplicates `resolve_ledger_lease`. Honest but nearly a no-op.
-- **Option B — a stage-scoped claim key.** A Redis key per `(issue, stage)` holding the entering agent's `(pid, create_time)` fence, modelled on #2650's plan-doc lease and using `agent/pid_fence.py`. Refuses when the recorded fence is live and no `completed` marker for that stage postdates it; admits when provably dead (#2629's recovery case); admits when absent (pre-change records). Covers the observed collision. Costs a new key and a release path — and a claim that is never released is a wedge, so its TTL and release legs are the design risk.
-
-Option B is the recommendation. Under either option the loser-side stand-down protocol (detect, diff against the peer's HEAD, stash anything unique, stand down **without mutating stage state**, report) is written into the skill body that owns it.
-
-## Failure Path Test Strategy
-
-### Exception Handling Coverage
-- [ ] `record_dispatch_for_ledger` already swallows every exception to `False`. With the marker path now calling it, assert a failed dispatch write never fails the *marker* write — a stage must not become unrecordable because its audit entry failed. Fail-open here is correct and must be deliberate.
-- [ ] `write_marker`'s `STATE_MACHINE_RAISED` catch must not be widened by the new call; assert its message is unchanged (it is the model the four refusal sites were made to follow in `706fc4da0`).
-- [ ] `compute_same_stage_count` is called inside `_compute_meta`'s broad `try`. Assert the new rule never raises on a malformed history — non-dict entries, missing `skill`, missing `stage_snapshot`, `None` — because that `except` swallows into `same_stage_count = 0`, silently disarming G4.
-
-### Empty/Invalid Input Handling
-- [ ] A stage with no `STAGE_TO_SKILL` entry (an unknown stage string) must record nothing and not raise.
-- [ ] Dispatch history containing pre-change records with no `stage` field must count correctly under the new rule.
-- [ ] History at exactly `MAX_DISPATCH_HISTORY` (FIFO eviction boundary) — assert eviction cannot truncate a streak into invisibility, or state that it can and why that is acceptable. See Risk 6: this is arithmetic, not a corner case.
-
-### Error State Rendering
-- [ ] The #2731 refusal is a user-visible error path and is a deliverable: named reason on stderr, non-zero exit, identifying the live holder.
-- [ ] A G4 escalation triggered by an *alternating* loop must name the cycle in its `Blocked.reason`, not a single skill — `guard_g4_oscillation`'s current message says "{skill} dispatched {count} times", which is wrong wording for a cycle.
-
-## Test Impact
-
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — UPDATE: add the alternating-loop escalation case and the productive-alternation non-escalation case; keep every existing same-skill case green (#1641/#1668 regression set).
-- [ ] `tests/unit/test_sdlc_router.py`, `test_sdlc_router_decision.py` — CHECK: assertions on `same_stage_dispatch_count` and on rows 8/8b routing.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` — ADD: the marker path records a dispatch on stage entry; no double-count against a router record; a failed dispatch write does not fail the marker write.
-- [ ] `tests/unit/test_sdlc_dispatch.py` (verify it exists; else create) — ADD: dedup identity, the `stage` field, and the #2731 gate.
-- [ ] `tests/unit/test_sdlc_lease_helper_binding.py` — CHECK: it guards `sdlc_dispatch`'s module-object lease access (#2469/#2637). Any new import in that file must not snapshot lease helpers via `from`-import.
-- [ ] A test asserting `build_stage_snapshot` output is unchanged by this lane — the single highest-value regression test here, since a leaked field disarms G4 silently.
-
-No xfail markers exist for these defects.
-
-## Rabbit Holes
-
-- **Rewriting the dispatch table or the guard set.** #2730(b) is one counting rule. A guard redesign is a separate project.
-- **Making the ledger a general event log.** Tempting once markers write dispatches. The record stays exactly as wide as G4 and the #2731 gate need.
-- **Fixing #2675's ledger-anchor recreation.** It plausibly explains why #2711's history emptied. It is a different defect with its own issue.
-- **Auditing every guard for fireability.** #2658 owns that. This plan corrects the G4 claims it touches and stops.
-- **Making the #2731 gate cover cross-machine collisions.** `pid_fence` is local-only by construction; a foreign-machine holder fails toward "live" and the TTL is the backstop, exactly as the issue lock already does.
+Note this largely *hardens* what `resolve_ledger_lease` already does — a foreign live holder mostly fails ownership today. The new value is the explicit, named, tested refusal plus correct handling of the dead-holder and indeterminate cases.
 
 ## Risks
 
-### Risk 1: The marker-side record double-counts against the router's record
-**Impact:** every router-driven dispatch scores twice, G4 escalates at half its intended threshold, and healthy pipelines wedge with a spurious oscillation block. This is the highest-severity outcome in the lane — it converts a dead guard into a hair-trigger one.
-**Mitigation:** the dedup identity is the core of Task 2 and gets the demonstrated-red treatment: a test that fails against a naive unconditional append. Assert exact record counts, not merely "a record exists".
+### Risk 1: The counter change makes G4 fire on productive work
+**Impact:** the worst outcome available here — every healthy pipeline escalates to a human every few turns.
+**Mitigation:** the snapshot-equality conjunct is retained *unchanged* and is the only streak terminator. The spike-1 history (`706fc4da0`, four productive rounds) is a required non-escalation fixture. Demonstrated-red in both directions: a stuck alternating loop must escalate **and** the productive one must stay at rest.
 
-### Risk 2: The new counting rule fires on productive work
-**Impact:** a healthy review↔patch cycle escalates to a human every few turns; every lane on the machine stalls.
-**Mitigation:** the snapshot-equality conjunct is retained unchanged and is what distinguishes progress from spinning. Explicit non-escalation tests for advancing snapshots, and the #1641/#1668 same-skill set stays green.
+### Risk 2: `last_dispatched_skill` shifts and rewrites routing
+**Impact:** G1/G3/G7/row-8b/row-8d change behavior silently.
+**Mitigation:** the returned skill is read before the loop and untouched. Pinned by a test asserting the second return value equals `history[-1]["skill"]` across every fixture, including alternating ones.
 
-### Risk 3: A per-dispatch-varying field reaches `build_stage_snapshot`
-**Impact:** G4 silently never fires again — the failure this whole lane exists to fix, re-introduced by the fix.
-**Mitigation:** the `stage` field is added to the record and explicitly not to the snapshot; a test pins the snapshot's exact key set.
+### Risk 3: The #2731 refusal blocks legitimate recovery
+**Impact:** a crashed run's issue becomes undispatchable — worse than the collision it prevents.
+**Mitigation:** the dead-holder branch is exactly #2629's recovery case and is a required test. The lease TTL remains the backstop, unchanged.
 
-### Risk 4: The #2731 claim key wedges a stage
-**Impact:** a crashed agent leaves a claim nothing releases, and the stage is permanently unenterable — strictly worse than the collision it prevents.
-**Mitigation:** (Option B only) the fence is a liveness test, not a lock: a dead holder's claim is ignorable by construction, never waited on. Plus a TTL. This inverts the usual lock hazard and must be tested with a stale claim from a dead pid.
-
-### Risk 6: The history is too short to hold a countable cycle
-**Impact:** G4 still cannot fire on alternation, after all this work — the streak is FIFO-evicted before it reaches the threshold.
-**The arithmetic, which is tight:** `MAX_DISPATCH_HISTORY = 10` (`agent/sdlc_router.py:98`) and `MAX_SAME_STAGE_DISPATCHES = 3` (`:86`). A 2-skill cycle repeated 3 times needs 6 entries — fits. A 3-skill cycle needs 9 — barely fits. A 4-skill cycle needs 12 and **cannot ever be counted**. Task 2 makes this worse before it makes it better: the marker path adds records, so the same wall-clock history occupies more slots.
-**Mitigation:** BUILD computes the worst-case cycle length the router can actually produce and either proves it fits in 10, or raises `MAX_DISPATCH_HISTORY`. Raising it is cheap (a bounded list on a ledger already holding stage snapshots) and is preferable to a threshold that silently cannot be reached. This interacts with Q4 and must be settled together with it.
+### Risk 4: The intra-run residual is mistaken for coverage
+**Impact:** someone reads "dispatch has a liveness gate" and assumes two BUILD agents cannot collide. They can.
+**Mitigation:** an acceptance criterion — the residual and its #2026 root cause are documented in the shipped feature docs, not only here.
 
 ### Risk 5: Lane collision on `tools/sdlc_stage_query.py`
-**Impact:** conflict with the lane-identity lane.
-**Mitigation:** this plan requires no edit there, by design — the G4 rule change lives entirely in `agent/sdlc_router.py` behind an unchanged signature. Re-verify at BUILD start.
+**Mitigation:** no edit required there by construction (the G4 change sits behind an unchanged signature). Pinned by a Verification row.
 
 ## Race Conditions
 
-### Race 1: Router record and marker record interleave
-**Location:** `tools/sdlc_dispatch.record_dispatch_for_ledger` → `update_stage_states`
-**Trigger:** the router's record and the skill's marker-side record land close together on the same ledger.
-**Mitigation:** both go through `update_stage_states`' optimistic retry, so neither is lost. The dedup must therefore be evaluated *inside* the update function against the state being written, not read-then-write outside it — a check-then-append across two calls is exactly the interleaving that produces the double record.
+### Race 1: The lease is taken between the liveness peek and the append
+**Location:** `tools/sdlc_dispatch._cli_record`
+**Mitigation:** unchanged and already correct — `revalidate_ledger_lease` runs immediately before the write. The new peek is an *additional* refusal, never a replacement, and must be ordered so a foreign takeover between peek and write still fails the revalidate.
 
-### Race 2: Two agents enter a stage simultaneously (#2731's own race)
-**Location:** the gate, wherever Q1 puts it
-**Trigger:** two forks call `dispatch record` for the same stage within the same instant.
-**Mitigation:** the claim must be acquired with an atomic primitive (`SET NX`), not read-then-write. A gate that reads, decides, then writes admits both agents in exactly the window it exists to close.
-
-### Race 3: Stage completes between the liveness read and the append
-**Location:** the gate
-**Trigger:** the prior agent finishes and writes `completed` after the gate reads its claim as live.
-**Mitigation:** the gate's condition is "live holder AND no `completed` marker postdating the claim"; re-read the marker immediately before refusing, so a just-finished peer does not block a legitimate next entry.
+### Race 2: The foreign holder dies between the peek and the refusal
+**Impact:** a legitimate recovery is refused once.
+**Mitigation:** accepted and bounded — the refusal is non-destructive and the next attempt sees a dead holder. The message says so, so the operator retries rather than escalates.
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] Backfilling dispatch records for existing ledgers. The read paths tolerate short histories; a backfill over live ledgers is human-gated and must follow, not accompany, the writer change.
-- [SEPARATE-SLUG #2675] Continuity re-ensure recreating the ledger anchor. A candidate explanation for #2711's emptied history, but a different defect.
-- [SEPARATE-SLUG #2658] The general fireable-gate audit.
-- [SEPARATE-SLUG #2637] The frozen lease-helper import in `sdlc_dispatch`. Named in #2730 as a *candidate* contributing cause; ruled out here — it would surface as a refused (`ok: false`) record, and would not explain markers succeeding while records vanish under the same run. Recorded so BUILD does not re-investigate.
+- **[FENCE-BLOCKED] #2730's record-completeness half.** spike-2 established the fix must live in `PipelineStateMachine.start_stage()` (`agent/pipeline_state.py:870`) — its only two production callers are `tools/sdlc_stage_marker.py:576` and `agent/hooks/pre_tool_use.py:334`, and the hook path bypasses `write_marker` entirely, so a `write_marker`-only fix is a no-op on the bridge. Outside this lane's fence. **#2730 is only partially closed by this PR and the PR body must say so.**
+- **[SEPARATE-SLUG #2026]** The run model that makes intra-run forks indistinguishable.
+- **[SEPARATE-SLUG #2658]** The general fireable-gate audit.
+- **[SEPARATE-SLUG #2491]** The three stage↔skill maps (`pipeline_graph.STAGE_TO_SKILL`, `sdlc_stage_marker._SKIP_STAGE_SKILL`, `pre_tool_use._SKILL_TO_STAGE`) found by spike-2.
+- **[SEPARATE-SLUG #2675]** Why #2711's and #2629's dispatch histories emptied.
+- A general guard rework, a new `_meta` key, or any widening of `build_stage_snapshot`.
+
+## Test Impact
+
+- [ ] `tests/unit/test_sdlc_router_oscillation.py` — ADD: an alternating loop over an unchanged snapshot escalates; the spike-1 productive history does **not**; the returned skill is `history[-1]["skill"]` in both. KEEP every #1641/#1668 same-skill case green.
+- [ ] `tests/unit/test_sdlc_dispatch.py` + `tests/integration/test_sdlc_dispatch.py` — ADD the four-row liveness table. The integration file pins `same_stage_dispatch_count` at `:207`/`:295`; verify both.
+- [ ] `tests/unit/test_sdlc_stage_query.py:601` — CHECK: asserts on the count.
+- [ ] `tests/unit/test_sdlc_lease_helper_binding.py` — CHECK: no new `from`-import of lease helpers.
+- [ ] A test pinning `build_stage_snapshot`'s exact key set.
 
 ## Update System
 
-No update-system changes. All edits are internal to `tools/` and `agent/`, plus skill-body prose for the stand-down protocol. `.claude/skills-global/` bodies propagate via the existing `/update` hardlink; no new wiring.
+No update-system changes. Both edits are internal to `agent/sdlc_router.py` and `tools/sdlc_dispatch.py` — no new dependency, config file, Popoto model, or migration. The one skill-body edit (the loser-side stand-down protocol) lands in an existing `.claude/skills-global/` file already registered for hardlink sync by `scripts/update/hardlinks.py`, so it propagates on each machine's next `/update` with no new wiring.
+
+Per the repo's post-merge convention, run `/update` after this PR merges so running services pick up the new router and `sdlc-tool` behavior — the G4 counter change affects live dispatch decisions, so a stale worker would keep scoring alternation at 1.
 
 ## Agent Integration
 
-No new entry points. `sdlc-tool dispatch` and `sdlc-tool stage-marker` already exist. Two integration points to verify rather than add:
+No new entry points. `sdlc-tool dispatch` and the router are both existing surfaces; this changes a counting rule and adds a refusal on one of them. Three integration points to verify rather than add:
 
-- [ ] `sdlc-tool dispatch record --help` documents the refusal reason (#2731).
-- [ ] The skill body that owns the loser-side stand-down states it.
+- [ ] `sdlc-tool dispatch record` exits non-zero with the named reason on a live foreign holder, and the reason reaches stderr where the `/do-sdlc` supervisor and the `/sdlc` router both already read refusal reasons.
+- [ ] The refusal reason is distinguishable from the existing `ISSUE_LOCKED` / `LEASE_ABSENT` / `TARGET_REPO_MISSING` set, so a supervisor can tell "someone is live in this stage" from "you do not own this issue".
+- [ ] A G4 escalation triggered by an alternating streak renders a `Blocked` a supervisor can act on — the reason names the cycle rather than a single skill.
 
 ## Documentation
 
-### Feature Documentation
-- [ ] `docs/features/sdlc-router-oscillation-guard.md` — the new G4 counting rule, what it can and cannot see, and the corrected per-row bound claims.
-- [ ] `docs/features/sdlc-stage-tracking.md` — stage entry now records a dispatch.
-- [ ] `docs/features/sdlc-pipeline.md` — check the G4 description.
-- [ ] `docs/tools-reference.md` — the #2731 refusal.
-- [ ] `docs/features/README.md` — index entries if any page is added.
-
-### Inline Documentation
-- [ ] `compute_same_stage_count` — the new rule and why the old one could not see alternation.
-- [ ] `build_stage_snapshot` — state that per-dispatch-varying fields must never be added, and why.
-- [ ] `_rule_patch_applied_after_review` (`:1275`) and the other five "Loop-bound by G4" claims.
-- [ ] `guard_g4_oscillation` — the escalation message's wording for a cycle.
-- [ ] `tools/sdlc_dispatch.py` module docstring — the caller contract is no longer router-only.
+- [ ] `docs/features/sdlc-router-oscillation-guard.md` — what the counter now counts; the corrected per-row bound claims.
+- [ ] `docs/features/sdlc-issue-ownership-lock.md` — the liveness gate **and the intra-run residual with its #2026 pointer** (Risk 4).
+- [ ] `docs/tools-reference.md` — the new refusal reason.
+- [ ] Inline: `compute_same_stage_count` (why the walk crosses skills; the snapshot conjunct is the sole terminator), `guard_g4_oscillation`'s message, `:1275`, and the other "bound by G4" claims.
+- [ ] The loser-side stand-down protocol in the skill body that owns it.
 
 ## Success Criteria
 
-- [ ] A stage reached without the router records a dispatch (#2730).
-- [ ] A router-driven dispatch records exactly one entry — no double count (#2730, Risk 1).
-- [ ] An alternating loop over an unchanged snapshot escalates via G4 (#2730b).
-- [ ] A productive alternation with an advancing snapshot never escalates (#2730b, Risk 2).
-- [ ] Every same-skill escalation case from #1641/#1668 still passes unchanged.
-- [ ] `build_stage_snapshot`'s key set is unchanged, pinned by a test (Risk 3).
-- [ ] Every "Loop-bound by G4" docstring names a bound that can actually fire.
+- [ ] An alternating loop over an unchanged snapshot escalates via G4 (#2730).
+- [ ] The spike-1 productive history does **not** escalate (Risk 1).
+- [ ] Every #1641/#1668 same-skill case passes unchanged.
+- [ ] `compute_same_stage_count`'s returned skill is unchanged across all fixtures (Risk 2).
+- [ ] Every "bound by G4" docstring names a bound that can fire.
+- [ ] A dispatch against a live foreign lease holder is refused with a named reason (#2731).
+- [ ] A dispatch against a dead foreign holder succeeds (#2629 recovery).
+- [ ] Indeterminate liveness refuses.
+- [ ] The dispatch record gains no fields; `build_stage_snapshot` is unchanged.
 - [ ] `tools/sdlc_stage_query.py` is not modified.
-- [ ] A dispatch whose stage has a provably live peer is refused with a named reason (#2731, pending Q1).
-- [ ] A dispatch whose peer is provably dead succeeds — #2629's recovery case (#2731, pending Q1).
-- [ ] The loser-side stand-down protocol is stated in the skill body that owns it (#2731).
-- [ ] Tests pass; documentation updated.
+- [ ] The intra-run residual is documented in shipped docs (Risk 4).
+- [ ] The PR body states that #2730's record-completeness half is deferred, and why.
 
 ## Step by Step Tasks
 
-### 1. Survey every actor that changes stage state
-- **Task ID**: audit-writers
+### 1. Let the G4 walk cross skill boundaries
+- **Task ID**: build-g4-crossing
 - **Depends On**: none
 - **Parallel**: true
-- Enumerate every path that writes a stage marker and every path that records a dispatch, across `tools/`, `agent/`, `.claude/skills*/`, and `docs/sdlc/`.
-- For each stage, record which statuses are written and by whom, so Task 2 knows which stages would stay invisible if only `in_progress` recorded.
-- Confirm or refute that `/do-build`'s chain to `/do-patch` is the only in-repo non-router invocation path.
+- Remove the skill break at `:1874`; retain the snapshot conjunct untouched.
+- Reword `guard_g4_oscillation`'s message for a multi-skill streak, no new `_meta` key.
+- Correct `:1275`; audit all eleven `grep -in "bound by G4"` hits.
+- Tests per Test Impact, including both demonstrated-red directions and the returned-skill pin.
 
-### 2. Record a dispatch on stage entry (#2730)
-- **Task ID**: build-marker-records
-- **Depends On**: audit-writers
-- **Parallel**: false
-- Derive the skill via `STAGE_TO_SKILL`; record on stage entry; add the `stage` field to the record.
-- **The dedup must be evaluated inside the `update_stage_states` apply function** (Race 1), never as a read-then-append across two calls.
-- Prove: one record for a router-driven dispatch, one for a bypassing chain, two for a genuine repeat.
-- A failed dispatch write must never fail the marker write.
-- **`stage` must not enter `build_stage_snapshot`** (Risk 3).
-
-### 3. Make G4 count what oscillates (#2730b)
-- **Task ID**: build-g4-cycle-count
-- **Depends On**: none
-- **Parallel**: true
-- Replace the same-skill break in `compute_same_stage_count` with cycle detection over an unchanged snapshot.
-- Keep the signature and the `_meta` key name so `tools/sdlc_stage_query.py` needs no edit.
-- Add the alternating-escalation and productive-non-escalation cases; keep the #1641/#1668 set green.
-- Correct the six "Loop-bound by G4" docstrings and `guard_g4_oscillation`'s message wording.
-
-### 4. Stage-entry liveness gate (#2731)
+### 2. Consult lease liveness in `dispatch record`
 - **Task ID**: build-liveness-gate
-- **Depends On**: build-marker-records, **Q1 resolved**
-- **Parallel**: false
-- **BLOCKED until Q1 is answered.** Implement the selected option; acquire atomically (Race 2); re-read the completion marker before refusing (Race 3); unknown never authorizes entry.
-- Write the loser-side stand-down protocol into the owning skill body.
+- **Depends On**: none
+- **Parallel**: true
+- Implement the four-row table; order the peek so `revalidate_ledger_lease` still closes the TOCTOU (Race 1).
+- Lease helpers via the module object only (#2469/#2637).
+- Named reason, non-zero exit, holder identified, retry guidance for Race 2.
 
-### 5. Documentation
+### 3. Documentation
 - **Task ID**: document-lane
-- **Depends On**: build-marker-records, build-g4-cycle-count, build-liveness-gate
+- **Depends On**: build-g4-crossing, build-liveness-gate
 - **Parallel**: false
 
-### 6. Final validation
+### 4. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-lane
 - **Parallel**: false
+- Run the Verification table; confirm every Success Criterion; confirm the PR body carries the deferral note.
 
 ## Verification
 
 | Check | Command | Expected |
 |---|---|---|
 | Router/oscillation tests | `scripts/pytest-clean.sh tests/unit/test_sdlc_router.py tests/unit/test_sdlc_router_oscillation.py tests/unit/test_sdlc_router_decision.py -q` | exit 0 |
-| Marker/dispatch tests | `scripts/pytest-clean.sh tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_dispatch.py -q` | exit 0 |
-| Lease-helper binding intact | `scripts/pytest-clean.sh tests/unit/test_sdlc_lease_helper_binding.py -q` | exit 0 |
+| Dispatch tests | `scripts/pytest-clean.sh tests/unit/test_sdlc_dispatch.py tests/integration/test_sdlc_dispatch.py -q` | exit 0 |
+| Stage-query + lease binding | `scripts/pytest-clean.sh tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_lease_helper_binding.py -q` | exit 0 |
 | Lint / format | `python -m ruff check . && python -m ruff format --check .` | exit 0 |
 | Off-limits file untouched | `git diff --name-only main...HEAD -- tools/sdlc_stage_query.py` | empty |
-| Snapshot not widened | `grep -n "def build_stage_snapshot" -A 30 agent/sdlc_router.py` | returns the same five keys |
-| Stage→skill map is the single source | `grep -c "STAGE_TO_SKILL" tools/sdlc_stage_marker.py` | > 0 |
-| No G4 claim without a bound | `grep -n "Loop-bound by G4" agent/sdlc_router.py` | every hit reviewed in the PR body |
+| Snapshot not widened | `scripts/pytest-clean.sh -k build_stage_snapshot -q` | exit 0 |
+| Every G4 claim reviewed | `grep -in "bound by G4" agent/sdlc_router.py` | eleven hits, each reviewed in the PR body |
 
 ## Open Questions
 
-**Q1 is a genuine blocker — it is not pre-answered, and Task 4 does not start until it is settled.**
-
-1. **#2731's gate primitive.** The owner's constraint is "liveness belongs to the lease, do not add liveness fields to the dispatch record." Source shows the *issue* lease is run-scoped and cannot see an intra-run collision, which is the shape #2629 exhibited. Option A (issue-lease read) is faithful to the literal constraint and does not fix the observed bug; Option B (a stage-scoped claim key with a pid fence, per #2650's precedent) honors "liveness lives in a lease, not in the audit record" and does fix it. **Recommendation: Option B.** Owner's call.
-2. **Should #2730(b) ship in this lane or as its own issue?** It is not in #2730's text, but #2730's headline claim is that G4 is defanged, and shipping record-completeness alone yields a guard that looks armed and is not. Recommendation: keep it here.
-3. **Why did #2711's dispatch history empty while its markers survived?** #2675 is the likely cause. Not investigated; listed so the reviewer can decline it explicitly.
-4. **`MAX_SAME_STAGE_DISPATCHES = 3` and `MAX_DISPATCH_HISTORY = 10` under the new rule.** Should the threshold count *cycles* or *entries*? And the bound must be large enough to hold the threshold: a 4-skill cycle repeated 3 times needs 12 entries and cannot fit in 10, so the guard would be unreachable by arithmetic (Risk 6). Recommendation: count cycles, and raise `MAX_DISPATCH_HISTORY` to whatever the worst-case cycle requires with headroom.
+None. Both round-1 questions were resolved by ruling (#2731 scope; #2730 counter in scope); the record-completeness fence question is recorded as a No-Go rather than left open.
 
 ## Critique Results
 
 ### Round 1 — NEEDS REVISION
 
-War room run 2026-08-13, FULL depth. Verdict: **NEEDS REVISION** — 4 blockers,
-9 concerns, 5 nits. Every blocker was independently re-verified against source
-by the plan author with a shell (the critic had none). All four hold.
+War room 2026-08-13, FULL depth. **4 blockers**, all re-verified against source by the author with a shell. Full detail lives in the round-1 history; the surviving dispositions are tabulated in "Round 1 Disposition" above. Summary of the four:
 
-| Severity | Finding | Status |
+1. **The #2730(b) evidence did not show the defect it claimed.** The backward walk returns `1`; the reported `0` came from D5 self-clearing. Adjacent plan/critique pairs share a snapshot while each cycle differs — the state advanced every round, so G4 correctly declined. *Disposition: the defect is real but the evidence was wrong; the fix is re-shaped to preserve the productive case (Risk 1).*
+2. **The dedup identity `(run_id, stage, occupancy)` was unimplementable** — `run_id` is shared by fork inheritance, `occupancy` does not exist, and the marker path writes via `PipelineStateMachine._save()` rather than `update_stage_states`, so the stated atomicity mitigation was impossible. *Disposition: workstream deferred (fence-blocked).*
+3. **`_sdlc_dispatches` has at least seven consumers, not the two named** — `last_dispatched_skill` drives G1/G3/G7/row-8b/row-8d; `_latest_dispatch_at` drives rows 8 and 2b. *Disposition: now Risk 2, with a dedicated pin; the chosen fix leaves the returned skill bit-identical.*
+4. **The #2731 Option B recommendation was blind to its target** — `CLAUDE_PID` names the top-level process even from a subagent, and `fence_is_live` returns `False` for unknown, which would have *admitted* the second agent. *Disposition: owner ruled lease-read-only; residual documented.*
+
+Also fixed from the concern list: eleven "bound by G4" claims (case-insensitive), not six; `tests/integration/test_sdlc_dispatch.py` added to Test Impact; Risk 6's speculative arithmetic dropped with the deferred workstream; the stub tasks given content; Q1 closed by ruling.
+
+### Round 2 — NEEDS REVISION
+
+War room 2026-08-13 (round 2). **4 blockers.** The two decisive ones were
+re-verified by the author by execution.
+
+**B1 (confirmed by execution) — WS1 does not fire on the loops it names.**
+`build_stage_snapshot` includes `_patch_cycle_count` and `_critique_cycle_count`
+(`agent/sdlc_router.py:226-227`), and those move on exactly the transitions
+inside the cited loops: `complete_stage("PATCH")` → `patch_cycle_count += 1`
+(`agent/pipeline_state.py:979`), `fail_stage("CRITIQUE")` →
+`critique_cycle_count += 1` (`:1020`). So consecutive dispatch snapshots in a
+real 8↔8b or 2b↔3 loop differ, and the walk still breaks at the snapshot test.
+Measured with the proposed one-line change applied:
+
+| fixture | count | escalates at `MAX_SAME_STAGE_DISPATCHES = 3`? |
 |---|---|---|
-| BLOCKER | **Task 3's evidence does not show the defect it claims.** The motivating `706fc4da0` history returns `(1, '/do-build')` from the backward walk; the reported `0` comes from the **D5 self-clearing branch** (`agent/sdlc_router.py:1888-1894`), not the skill break at `:1874`. Worse, the recorded snapshots show adjacent plan/critique pairs sharing a snapshot while each *cycle* differs — the state advanced every round because the plan genuinely changed. Those four rounds were **productive work and G4 correctly declined to escalate**. The plan presented healthy behavior as a defect, and its proposed fix (cycle detection over an *unchanged* snapshot) targets a state that may be a null set — a new gate that cannot fire, the #2658 family this lane claims to close. | CONFIRMED by author |
-| BLOCKER | **The `(run_id, stage, occupancy)` dedup is unimplementable.** `run_id` is shared by construction (fork inheritance, `agent/supervised_run.py:4-11`) so it discriminates nothing; `occupancy` does not exist in `stage_states`; and the marker write *is* the event that changes it. Further, Race 1's mitigation ("evaluate inside `update_stage_states`") is impossible — the marker path writes via `PipelineStateMachine.start_stage/complete_stage` → `_save()`, an independent read-merge-write. Atomic dedup across the two paths cannot be done without restructuring one. | CONFIRMED by author |
-| BLOCKER | **The plan named two consumers of `_sdlc_dispatches`; there are at least seven, and Task 2 silently rewrites routing.** `last_dispatched_skill` drives G1 (`:336`), G3 (`:403`), G7 (`:685`), row 8b (`:1284`), row 8d (`:1380`) and G4's message (`:460`); `_latest_dispatch_at` drives row 8's patch-staleness (`:1023`) and row 2b's (`:1095`); `tools/sdlc_stage_marker.py:390-398` reads it to refuse `--status skipped`. In the plan's own `/do-build`→`/do-patch` motivating case, a later `BUILD completed` marker record makes `last_dispatched_skill == /do-build` when the last real dispatch was `/do-patch`, flipping rows 8b/8d. The claim that coupling *decreases* is false. | CONFIRMED by author |
-| BLOCKER | **Option B is blind to the collision it claims to cover.** `tools/sdlc_supervisor_identity.py:20-25`: `CLAUDE_PID` names the TOP-LEVEL `claude` process "even when the call originates from a subagent... whose supervisor loop and every stage subagent live inside that one process." Two stage subagents share pid, create_time, ancestry, machine_id, worktree, run_id and session_id, so a pid fence discriminates exactly as little as the lease. Separately the polarity is inverted: `fence_is_live` returns `False` for *unknown* (`agent/pid_fence.py:138-142`), which under a refuse-if-live gate **admits** the second agent, contradicting the "unknown never authorizes entry" criterion. The plan's lease analysis is correct and independently confirmed; the recommendation built on it is not. | CONFIRMED by author |
+| frozen alternation (no snapshot field moves) | **4** | yes |
+| real 8↔8b loop (`_patch_cycle_count` moves each cycle: 1,1,2,2,3,3) | **2** | **no** |
 
-**Selected concerns** (full set in the review thread):
+The trade-off is the plan's own core and it was never stated: *the snapshot
+conjunct that protects the productive history (Risk 1) is the same thing that
+defeats detection of the stuck version of that loop.* The residual set WS1
+actually catches — alternation where **no** snapshot field moves — is precisely
+the state that arises when markers/verdicts/counters never land, i.e. **the
+record-completeness half this plan defers as fence-blocked.** WS1 is gated on
+the deferred half.
 
-- Eleven "loop-bound by G4" claims exist, not six — the plan's grep is case-sensitive and misses `:984` and `:1655`. Use `-i "bound by G4"`.
-- Risk 6's arithmetic is wrong in both directions: there is **no** `/do-test` or `/do-issue` row in `DISPATCH_RULES`, so router-produced cycles today are 2-skill and the "4-skill cycle" case is hypothetical. The real hazard is that Task 2 would *introduce* `/do-test`/`/do-build` entries the router never produced, widening the alphabet against `MAX_DISPATCH_HISTORY = 10`.
-- `tests/integration/test_sdlc_dispatch.py` pins `same_stage_dispatch_count` at `:207`/`:295` and is absent from the Verification table; `tests/unit/test_sdlc_stage_query.py:601` also asserts on it.
-- `tools/sdlc_stage_marker.py:143` already holds a second stage→skill map (`_SKIP_STAGE_SKILL`); the "single source" success criterion passes trivially while the duplicate survives.
-- `/do-build/SKILL.md:132` invokes `/do-docs` directly — a second non-router chain, so Task 1's framing is refuted before it starts.
-- Tasks 5 and 6 are stubs; Task 4's `Depends On` mixes a task ID with a prose gate and **no task owns answering Q1**, so an unresolved Q1 blocks the whole lane, not just Task 4.
+**B2 (confirmed) — WS2 is dead code where the plan puts it.**
+`resolve_ledger_lease` returns `ISSUE_LOCKED` for *any* foreign holder
+(`tools/_sdlc_utils.py:744-749`) and `_cli_record` returns immediately
+(`tools/sdlc_dispatch.py:204-210`). A gate "before the append" therefore can
+never observe a foreign holder. Placing it *before* `resolve_ledger_lease` makes
+it reachable but regresses #2144: `reestablish_run_id` adopts a **live**
+supervisor's `run_id` (`tools/_sdlc_run_identity.py:162-164`), so "foreign +
+live → refuse" converts the sanctioned self-heal into a hard refusal. The new
+reason would also miss the heal tuple (`:378`) and the loud/exit tuple
+(`:394-403`), so it would exit **0** despite the plan promising non-zero.
 
-**Disposition:** the lane is three lanes sharing a page. Re-plan required before any
-build. Minimum: (a) re-derive the G4 comparand against a *real* recorded oscillation,
-or drop #2730(b); (b) replace the dedup with the upsert-slot design (router writes
-`{skill, stage, at, confirmed: false}`; the marker path upgrades in place or appends
-when absent); (c) enumerate and test every `_sdlc_dispatches` consumer; (d) spike the
-#2629 process topology before Q1 can be answered; (e) split into three PRs.
+**B3 — row 3 of the liveness table is not implementable.** `orphaned_lock` means
+the lock is still *held* by the foreign `run_id`, merely judged dead
+(`models/session_lifecycle.py:1249`). Appending then requires passing
+`revalidate_ledger_lease`, which refuses on a foreign payload — so the append is
+only possible by skipping the revalidate (which Race 1 promises to keep) or by a
+lease-takeover primitive that exists nowhere (`tools/sdlc_session_ensure.py`
+computes `orphaned_lock` and still refuses, leaving TTL expiry as the only
+recovery).
+
+**B4 — an existing test inverts.**
+`tests/unit/test_sdlc_router_oscillation.py:313-320`
+(`test_compute_same_stage_count_resets_on_skill_change`) records three
+dispatches on `states = {}`, so all three snapshots are byte-identical: today
+`count == 1`, after the change `count == 3`. Success Criterion "every
+#1641/#1668 same-skill case passes unchanged" is false as written.
+
+**Confirmed sound by the critic:** the returned-skill invariant (Risk 2) holds by
+inspection — `skill` is read at `:1863` before the loop and both return sites use
+it, so `last_dispatched_skill` is bit-identical and the five routing consumers
+are unaffected. `tools/sdlc_stage_query.py` genuinely needs no edit. The
+intra-run residual and the fence-blocked deferral are honestly written.
+
+**Disposition: the lane as fenced cannot meaningfully close either issue.** WS1
+is a strict improvement but only for frozen alternation, which is the deferred
+half's territory; WS2 is dead code, a #2144 regression, or needs an unscoped
+primitive. Escalated to the lead for a fence/scope decision rather than revised
+a third time.

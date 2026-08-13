@@ -1364,7 +1364,7 @@ class TestSkipPreconditions:
         from tools.sdlc_stage_marker import _skip_precondition_error
 
         with patch(
-            "tools._sdlc_utils.find_plan_path", return_value=Path("docs/plans/real-plan.md")
+            "tools.lane_identity.find_plan_path", return_value=Path("docs/plans/real-plan.md")
         ):
             reason, message = _skip_precondition_error("CRITIQUE", 2577)
         assert reason == "PLAN_EXISTS_NOT_SKIPPABLE"
@@ -1374,7 +1374,7 @@ class TestSkipPreconditions:
         """'Cannot confirm no plan exists' must never read as 'no plan exists'."""
         from tools.sdlc_stage_marker import _skip_precondition_error
 
-        with patch("tools._sdlc_utils.find_plan_path", side_effect=RuntimeError("boom")):
+        with patch("tools.lane_identity.find_plan_path", side_effect=RuntimeError("boom")):
             assert _skip_precondition_error("CRITIQUE", 2577)[0] == "PLAN_EXISTS_NOT_SKIPPABLE"
 
     def test_recorded_verdict_refuses(self):
@@ -1382,7 +1382,7 @@ class TestSkipPreconditions:
         from tools.sdlc_stage_marker import _skip_precondition_error
 
         with (
-            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.lane_identity.find_plan_path", return_value=None),
             patch(
                 "tools.sdlc_stage_query._load_raw_states",
                 return_value={"_verdicts": {"CRITIQUE": {"verdict": "READY TO BUILD"}}},
@@ -1395,7 +1395,7 @@ class TestSkipPreconditions:
         from tools.sdlc_stage_marker import _skip_precondition_error
 
         with (
-            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.lane_identity.find_plan_path", return_value=None),
             patch(
                 "tools.sdlc_stage_query._load_raw_states",
                 return_value={"_sdlc_dispatches": [{"skill": "/do-plan-critique"}]},
@@ -1407,7 +1407,7 @@ class TestSkipPreconditions:
     def test_missing_ledger_fails_closed(self):
         from tools.sdlc_stage_marker import _skip_precondition_error
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=None):
+        with patch("tools.lane_identity.find_plan_path", return_value=None):
             assert _skip_precondition_error("CRITIQUE", 2577, ledger=None)[0] == (
                 "STAGE_RAN_NOT_SKIPPABLE"
             )
@@ -1416,7 +1416,7 @@ class TestSkipPreconditions:
         from tools.sdlc_stage_marker import _skip_precondition_error
 
         with (
-            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.lane_identity.find_plan_path", return_value=None),
             patch("tools.sdlc_stage_query._load_raw_states", side_effect=RuntimeError("redis")),
         ):
             assert _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock())[0] == (
@@ -1432,7 +1432,7 @@ class TestSkipPreconditions:
         from tools.sdlc_stage_marker import _skip_precondition_error
 
         with (
-            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.lane_identity.find_plan_path", return_value=None),
             patch("tools.sdlc_stage_query._load_raw_states", return_value={}),
         ):
             assert _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock()) is None

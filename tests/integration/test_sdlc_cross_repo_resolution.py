@@ -44,7 +44,7 @@ def _resolve_plan_in(repo: Path, issue_number: int) -> str:
     env.pop("SDLC_TARGET_REPO", None)
     code = textwrap.dedent(
         f"""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         p = find_plan_path({issue_number})
         print(p if p else "")
         """
@@ -99,7 +99,7 @@ def _resolve_plan_with_env(env_repo: Path, issue_number: int) -> str:
     """Run find_plan_path with SDLC_TARGET_REPO set, cwd forced to REPO_ROOT (ai-repo)."""
     code = textwrap.dedent(
         f"""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         p = find_plan_path({issue_number})
         print(p if p else "")
         """
@@ -150,7 +150,7 @@ def test_file_fallback_bare_mention_suppressed(tmp_path):
     env.pop("SDLC_TARGET_REPO", None)
     code = textwrap.dedent(
         """
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         # Issue 8888888 extremely unlikely to be in the real ai-repo plans dir.
         p = find_plan_path(8888888)
         print(p if p else "")
