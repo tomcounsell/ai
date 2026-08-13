@@ -62,15 +62,18 @@ _REPO_MARKER = Path(".claude") / "hooks" / "validators" / "validate_no_raw_redis
 # CLI forms below are real execution. A bare `.py` path counts because
 # `./scripts/thing.py` executes without the word "python" appearing.
 #
-# The leading class must include `/`, `~` and `.`: the house idiom invokes the
-# interpreter by path (`.venv/bin/python -c ...`, and CLAUDE.md documents the
+# The leading class must include `/`: the house idiom invokes the interpreter
+# by path (`.venv/bin/python -c ...`, and CLAUDE.md documents the
 # `.venv/bin/valor-*` form), so a class of only whitespace and shell
 # metacharacters left the primary vector unmatched -- it blocked on main and
 # passed here. The class exists to stop `python` matching inside a longer word
 # like `mypython`; a path separator before it is exactly the case it must
-# admit.
+# admit. `/` alone covers every path form, including `~/...` and `./...`, since
+# a separator always precedes the interpreter name. Do NOT add `.` to the
+# class: it makes prose naming `.python-version` read as executable and
+# reopens the #2638 false positive.
 _EXECUTABLE_CONTEXT = re.compile(
-    r"(?:^|[\s;|&(<`$'\"/~.])"
+    r"(?:^|[\s;|&(<`$'\"/])"
     r"(?:python[\d.]*|ipython|pytest|redis-cli|uvx|uv\s+run|[\w./~-]+\.py)"
     r"(?:\b|$)"
 )

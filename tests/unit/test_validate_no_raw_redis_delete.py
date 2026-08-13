@@ -134,6 +134,14 @@ class TestExecutableContextGate:
             f"git commit -m 'docs: explain why {DELETE_CALL}) on an AgentSession is wrong'",
             f"echo 'never call {DELETE_CALL}) on a Room' >> notes.md",
             f"cat <<'EOF' > doc.md\nAvoid {HGETALL_CALL}) on Memory keys.\nEOF",
+            # Prose naming a dotfile that starts with an interpreter name. This
+            # pins `.` OUT of the executable-context leading class: with `.` in
+            # the class, `.python-version` reads as an invocation and this
+            # sentence blocks. `/` alone still catches every real path form,
+            # so the narrower class costs nothing. CLAUDE.md discusses
+            # `.python-version` next to this rule, so the shape is routine.
+            f"git commit -m 'docs: .python-version pins the interpreter; "
+            f"never {DELETE_CALL}) an AgentSession'",
         ],
     )
     def test_prose_without_an_interpreter_is_allowed(self, command):
