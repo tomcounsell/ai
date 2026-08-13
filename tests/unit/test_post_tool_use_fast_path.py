@@ -39,16 +39,50 @@ import time:       140 |        140 |   config.settings
 """
 
 
+def _importtime_module_names(stderr: str) -> list[str]:
+    """Parse module names out of a ``-X importtime`` stderr dump.
+
+    Row contract (stable since Python 3.7, verified on CPython 3.14.5):
+    each import row is ``import time: {self_us} | {cumulative_us} |
+    {indent}{module_name}``, preceded by a header row whose final column is
+    the literal ``imported package`` (the only column with an interior
+    space, which is what lets us skip the header generically). ``-X
+    importtime=2`` additionally emits ``import time: cached | cached |
+    {name}`` rows sharing the same three-column shape. Dotted submodule
+    names appear in full (e.g. ``json.scanner``), not as bare leaves.
+    Malformed rows (fewer than 3 pipe-delimited fields — CPython documents
+    that importtime output "may be broken in multi-threaded applications")
+    are skipped rather than treated as fatal.
+    """
+    names = []
+    for line in stderr.splitlines():
+        if not line.startswith("import time:"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        name = parts[-1].strip().lstrip("│├└─ \t")
+        if not name or " " in name:
+            continue
+        names.append(name)
+    return names
+
+
 def _heavy_import_offenders(stderr: str, heavy: tuple[str, ...] = _HEAVY_MODULES) -> list[str]:
     """Return which ``heavy`` module names are genuinely present in a
     ``-X importtime`` stderr dump.
 
-    Placeholder body (Task 1 / red-first): the ORIGINAL substring scan,
-    verbatim. It is deliberately kept naive here so the crafted fixtures can
-    demonstrate the false positive before the identity-matching parser
-    replaces this body in Task 2.
+    Matches on module *identity* (exact name or dotted descendant) rather
+    than substring containment. Substring matching produced a false
+    positive for #2692: ``tools.redis_flush_guard`` and
+    ``_redis_flush_guard_boot`` merely contain "redis" as a substring — they
+    are not the ``redis`` package and not descendants of it — so a plain
+    ``"redis" in stderr`` check blamed the hook for an import it never
+    performed.
     """
-    return [m for m in heavy if m in stderr]
+    names = _importtime_module_names(stderr)
+    offenders = {h for h in heavy for n in names if n == h or n.startswith(h + ".")}
+    return sorted(offenders)
 
 
 def _sidecar(session_id: str) -> Path:
