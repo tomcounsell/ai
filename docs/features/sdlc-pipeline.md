@@ -209,9 +209,23 @@ session-ensure`, owns the per-issue lock for the WHOLE run:
   still renews it at stage boundaries.
 - **Explicit release.** `finalize_session` (`models/session_lifecycle.py`)
   releases the lease (`release_issue_lock`, compare-and-delete) and clears
-  the signal on EVERY terminal transition — completion and graceful failure —
-  so the happy path frees immediately and the TTL is only the crash backstop
-  (the existing `orphaned_lock` self-heal covers a hard crash).
+  the signal on EVERY terminal transition it runs on. A `/do-sdlc`
+  supervisor exit never calls it, though — its HALT/blocked/cap exits have
+  no terminal transition at all — so two further paths release explicitly
+  (issue #2714): the `MERGE`/`completed` stage-marker write releases in the
+  tool layer itself (`tools/sdlc_stage_marker.py`, path-agnostic — fires for
+  `/do-sdlc`, the `/sdlc` router, and worker-driven pipelines alike), and
+  `/do-sdlc`'s own Step 5 calls `sdlc-tool session-release` on the REVIEW
+  self-check HALT, a `blocked` router decision, and the iteration cap — the
+  exits neither of the other two paths observes. The detached local lease
+  heartbeat (`tools/sdlc_lease_heartbeat.py`) also releases on its own,
+  independent of all three, once it confirms its supervisor is dead. The
+  `orphaned_lock` self-heal is not a crash backstop for any of this: its
+  freshness is re-stamped by the heartbeat's own renewal ticks, so a lease
+  the heartbeat is still renewing never reads as orphaned regardless of
+  whether the supervisor behind it is still alive. See
+  [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md#heartbeat-exit-conditions-and-release-paths-issue-2714)
+  for the full release-path catalogue.
 - **Single-owner MERGE.** `tools/merge_predicate.py` gains check group (d):
   when `--run-id` is supplied (the `/do-merge` skill always passes it), the
   merge actor's `run_id` must hold the current issue lease. A fork that never
