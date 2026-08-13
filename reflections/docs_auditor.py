@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -494,38 +495,134 @@ def _detect_readme_broken_entries(
     return fixes
 
 
+def _normalize_prose(text: str | None) -> str:
+    """Lowercase, strip backticks, and collapse whitespace — for cue matching only.
+
+    The corpus writes every identifier backticked (``formerly `RedisJob```), which
+    is why the pre-#2744 hatch's bare substring tests (``f"formerly {old_term}"``)
+    never matched a single live document. Normalizing both the haystack and the
+    generated cues makes the hatch see the prose humans actually wrote.
+
+    **Never** use the result to produce output — it is lossy by design. It exists
+    solely to answer "does this document record a migration?".
+    """
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.replace("`", "").lower())
+
+
+# Verbs/adjectives that mark a sentence as recording a completed rename. Each fires
+# only in combination with the *new* term appearing somewhere in the same document
+# (see ``_has_migration_context``), which is what keeps them from exempting prose
+# that merely mentions a stale name.
+_MIGRATION_CUE_WORDS = (
+    "renamed",
+    "rename",
+    "replaced",
+    "replaces",
+    "replacing",
+    "formerly",
+    "earlier",
+    "old",
+    "alias",
+    "superseded",
+    "supersedes",
+)
+
+
+def _migration_cues(old_term: str, new_term: str) -> tuple[str, ...]:
+    """Directed migration cues for one ``(old_term, new_term)`` pair, normalized.
+
+    These name *both* terms, so they are conclusive on their own and do not need
+    the new term to appear separately. Generated from the pair rather than
+    hard-coded, so adding a ``STALE_TERMS`` entry needs no edit here.
+    """
+    old = _normalize_prose(old_term)
+    new = _normalize_prose(new_term)
+    return (
+        f"renamed to {new}",
+        f"replaced by {new}",
+        f"now {new}",
+        f"formerly {old}",
+        f"replaces {old}",
+        f"replacing {old}",
+        f"earlier {old}",
+        f"old {old}",
+        f"alias {old}",
+        f"alias {new}",
+        f"{old} = {new}",
+        f"{old} -> {new}",
+        f"{old} → {new}",
+    )
+
+
+def _has_migration_context(normalized: str, old_term: str, new_term: str) -> bool:
+    """Whether a **whole document** records the ``old_term`` → ``new_term`` migration.
+
+    Two tiers, both evaluated over ``_normalize_prose``'d text:
+
+    1. A *directed* cue naming both (or the specific) terms — ``renamed to X``,
+       ``formerly Y``, ``Y = X``, ``Y -> X``, ``Y → X``, ``alias Y`` …
+    2. A generic migration cue word (``replacing``, ``earlier``, ``old`` …)
+       **plus** the new term appearing somewhere in the document. Tier 2 is what
+       catches real corpus prose whose cue and term sit in different clauses, e.g.
+       *"`AgentSession` lands, replacing both the earlier `SessionLog` and
+       `RedisJob` models"* — where no directed cue names ``RedisJob`` at all.
+
+    Requiring the new term for tier 2 is the guard against over-exemption: prose
+    that merely mentions a stale name without ever naming its successor is not a
+    migration record and still queues a fix.
+    """
+    if any(cue in normalized for cue in _migration_cues(old_term, new_term)):
+        return True
+    new = _normalize_prose(new_term)
+    if new and new in normalized:
+        return any(word in normalized for word in _MIGRATION_CUE_WORDS)
+    return False
+
+
 def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     """Detect stale terms from STALE_TERMS dict that lack migration context.
 
     Matching is **word-anchored** with ``\\b``: a key never matches inside a
     longer run of word characters, so ``session_log`` does not match inside
-    ``agent/session_logs.py`` or ``session_log_writer`` (#2711). That is the
-    whole guarantee — it stops short of "never rewrites a path". ``/``, ``.``
-    and ``-`` are all word boundaries, so a key that *equals* an entire path
-    segment still matches and is still rewritten (``models/session_log.py`` →
-    ``models/agent_session.py``). Only the existence invariant in
-    ``_apply_fixes_to_file`` catches that, and only when the rewritten path is
-    absent from the working tree.
+    ``agent/session_logs.py`` or ``session_log_writer`` (#2711).
+
+    **Paths are never rewritten** (#2744). Word-anchoring alone did not deliver
+    that — ``/``, ``.`` and ``-`` are word boundaries, so a key equal to a whole
+    path segment used to be rewritten (``models/session_log.py`` →
+    ``models/agent_session.py``), a corruption the existence invariant provably
+    cannot catch because *both* files exist. Path-token suppression in
+    ``_apply_fixes_to_file`` now closes it: a match lying inside a
+    ``dir/file.{py,md}``-shaped token is left alone unconditionally.
+
+    **The migration-context hatch is DOCUMENT-scoped, deliberately.** Spike-2 of
+    ``docs/plans/docs-auditor-migration-context-and-bare-paths.md`` measured a
+    line-scoped (occurrence-scoped) hatch as *strictly worse*: it re-exposed 8
+    occurrences that the document scope correctly exempts, because migration
+    context in real prose sits in a different sentence from the term it explains.
+    Do not "improve" this into a per-occurrence rule.
+
+    Two further gates live at apply time rather than here, because the literal
+    ``fixes`` loop runs first and can delete lines out from under any index
+    computed against ``content``: fence/heading/deletion-prose suppression (via
+    ``_build_line_context`` / ``_is_documented_deletion``) and path-token
+    suppression. See ``_apply_fixes_to_file``.
 
     Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
     so detection and application share one matching semantics. These are passed
     to ``_apply_fixes_to_file`` as ``regex_fixes``, never mixed into the literal
-    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel).
+    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel). The
+    replacement stays a plain ``str``; the suppression callable is built at the
+    apply site so the withheld record and this channel's contract stay intact.
     """
+    normalized = _normalize_prose(content)
     fixes: list[tuple[re.Pattern[str], str]] = []
     for old_term, new_term in STALE_TERMS.items():
         pattern = re.compile(rf"\b{re.escape(old_term)}\b")
         if not pattern.search(content):
             continue
-        migration_context = (
-            f"renamed to {new_term}" in content
-            or f"replaced by {new_term}" in content
-            or f"now {new_term}" in content
-            or f"formerly {old_term}" in content
-            or f"Replaces {old_term}" in content
-            or f"replaces {old_term}" in content
-        )
-        if not migration_context:
+        if not _has_migration_context(normalized, old_term, new_term):
             fixes.append((pattern, new_term))
     return fixes
 
@@ -547,6 +644,68 @@ def _absent_new_path_refs(original_refs: set[str], candidate: str, repo_root: Pa
     )
 
 
+# A file-path-shaped token. Generalizes the single-segment shape to any number of
+# directory segments so a stale term matching the *first* segment is suppressed too.
+_PATH_TOKEN_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
+
+
+def _match_inside_path_token(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` lies wholly inside a ``dir/file.{py,md}`` token.
+
+    Scanning is confined to the match's own line, which bounds the cost and makes
+    the answer independent of how large the document is.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    rel_start, rel_end = start - line_start, end - line_start
+    return any(m.start() <= rel_start and rel_end <= m.end() for m in _PATH_TOKEN_RE.finditer(line))
+
+
+def _make_stale_term_replacer(replacement: str, suppressed: list[int]) -> Callable[[re.Match], str]:
+    """Build the apply-time suppression callable for one stale-term regex fix.
+
+    Context is re-derived from ``match.string`` — the text *currently being
+    rewritten* — and ``match.start()``, the live offset into it. That is the whole
+    point: ``_apply_fixes_to_file`` applies the literal ``fixes`` list first,
+    including ``_detect_readme_broken_entries``' ``new == ""`` whole-line-delete
+    sentinel, so any line index computed at detection time is stale the moment a
+    line ahead of it disappears — and it fails *silently*, producing a plausible
+    wrong rewrite rather than an error. There is no index here to go stale.
+
+    A suppressed match returns ``match.group(0)`` unchanged, but ``subn`` still
+    counts it, so each suppression is recorded in ``suppressed`` for the caller to
+    subtract from the reported ``applied`` count.
+
+    The callable is local to the apply loop and never travels on the regex channel:
+    ``_detect_stale_term_fixes`` keeps returning ``(re.Pattern, str)``, and
+    ``_reject`` keeps receiving the replacement *string* so the withheld record
+    stays human-readable in the PR body, findings summary, and warning log.
+    """
+    context_cache: dict[str, tuple[list[str], list[bool], list[str]]] = {}
+
+    def _replace(match: re.Match) -> str:
+        text = match.string
+        context = context_cache.get(text)
+        if context is None:
+            in_fence, heading_for_line = _build_line_context(text)
+            context = (text.splitlines(), in_fence, heading_for_line)
+            context_cache[text] = context
+        lines, in_fence, heading_for_line = context
+        line_idx = text.count("\n", 0, match.start())
+        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+            suppressed.append(1)
+            return match.group(0)
+        if _match_inside_path_token(text, match.start(), match.end()):
+            suppressed.append(1)
+            return match.group(0)
+        return replacement
+
+    return _replace
+
+
 def _apply_fixes_to_file(
     path: Path,
     repo_root: Path,
@@ -558,6 +717,15 @@ def _apply_fixes_to_file(
     ``fixes`` are literal ``(old, new)`` pairs; ``new == ""`` deletes the whole
     line that exactly equals ``old``. ``regex_fixes`` are ``(pattern, replacement)``
     pairs applied via ``pattern.subn()`` in their own loop.
+
+    **Apply-time suppression (regex fixes only, #2744):** each regex fix's plain
+    ``str`` replacement is wrapped in a locally-built callable
+    (``_make_stale_term_replacer``) that leaves a match untouched when it sits in
+    a fenced code block, under a deletion-recording heading, next to deletion
+    prose, or inside a file-path token. The literal ``fixes`` loop runs *first*
+    and its ``new == ""`` sentinel deletes whole lines, so this context must be —
+    and is — derived from the live, already-mutated text at match time rather
+    than from any index computed at detection time.
 
     **Existence invariant:** a fix may not introduce a ``dir/file.{py,md}``-shaped
     reference that does not exist under ``repo_root``. Violating fixes are rejected
@@ -619,8 +787,13 @@ def _apply_fixes_to_file(
         applied += count
 
     for pattern, new in regex_fixes:
-        candidate, count = pattern.subn(new, new_text)
-        if count == 0:
+        suppressed: list[int] = []
+        candidate, count = pattern.subn(_make_stale_term_replacer(new, suppressed), new_text)
+        count -= len(suppressed)
+        # An all-suppressed fix leaves the text byte-identical while ``subn``
+        # still reports a nonzero raw count. Skipping it keeps ``applied`` honest
+        # and avoids a pointless existence-invariant pass over unchanged text.
+        if count <= 0 or candidate == new_text:
             continue
         absent = _absent_new_path_refs(original_refs, candidate, repo_root)
         if absent:
