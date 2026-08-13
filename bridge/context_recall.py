@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shlex
 
 from pydantic import BaseModel, Field
 
@@ -56,6 +58,44 @@ CONTEXT_RECALL_PREFILTER_MAX_CHARS = int(
 )
 
 _TRUTHY = ("1", "true", "yes", "on")
+
+# Conservative address-shape check for the email leg's `_chat_id_usable`
+# guard: exactly one "@" splitting non-empty local/domain parts, with no
+# whitespace, control characters, or shell metacharacters (backtick,
+# semicolon, double-quote, dollar sign) in either part. This is
+# defense-in-depth, not the sole line of defense -- `_shell_safe` below
+# routes the value through `shlex.quote` at the interpolation site
+# regardless of what this guard accepts, so a value that slips past it
+# still cannot break out of the emitted command.
+_EMAIL_SHAPE_RE = re.compile(r"^[^\s@`;\"$\x00-\x1f]+@[^\s@`;\"$\x00-\x1f]+$")
+
+
+def _looks_like_a_bare_email_address(value) -> bool:
+    """Conservative shape check, not an RFC 5322 validator.
+
+    ``chat_id`` on the email leg is ``bridge/email_bridge.py``'s
+    ``_extract_address`` output -- already run through
+    ``email.utils.parseaddr`` and stripped of any display name -- so this
+    only needs to reject garbage and injection-shaped values, not parse
+    arbitrary ``From`` headers.
+    """
+    return bool(value) and isinstance(value, str) and _EMAIL_SHAPE_RE.match(value) is not None
+
+
+def _shell_safe(value) -> str:
+    """Collapse whitespace and single-quote a value for shell interpolation.
+
+    ``str.split()`` with no args splits on (and collapses runs of) all
+    whitespace including newlines, which stops a newline-bearing chat id
+    from splitting the advisory across lines and forging a second
+    authoritative-looking advisory line. ``shlex.quote`` then makes the
+    result inert against backtick/``$``/quote-based command injection. Both
+    media route through this exact call so they cannot drift apart the way
+    ``_sanitize_reason`` (``bridge/injection_inspection.py``) is reused
+    rather than reimplemented.
+    """
+    return shlex.quote(" ".join(str(value).split()))
+
 
 # Model prompt for the outbound verdict. The test is a question about
 # *referents*, never a keyword allowlist (Development Principle 3).
@@ -121,7 +161,7 @@ def _chat_id_usable(chat_id, medium: str) -> bool:
         from utils.peer import deliverable_telegram_peer
 
         return deliverable_telegram_peer(chat_id)
-    return bool(chat_id) and "@" in str(chat_id)
+    return _looks_like_a_bare_email_address(chat_id)
 
 
 def build_context_recall_advisory(
@@ -155,10 +195,11 @@ def build_context_recall_advisory(
             return None
 
         depth = CONTEXT_RECALL_HISTORY_DEPTH
+        safe_chat_id = _shell_safe(chat_id)
         if medium == "telegram":
-            command = f"valor-telegram read --chat-id {chat_id} -n {depth}"
+            command = f"valor-telegram read --chat-id {safe_chat_id} -n {depth}"
         else:
-            command = f'valor-email read --search "{chat_id}" -n {depth}'
+            command = f"valor-email read --search {safe_chat_id} -n {depth}"
 
         advisory = (
             "[context-recall] This message may depend on earlier conversation "

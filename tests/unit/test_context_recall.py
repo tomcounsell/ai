@@ -8,6 +8,8 @@ integration contract that the emitted command is actually runnable against
 No live model calls: the outbound verdict's transport is monkeypatched.
 """
 
+import shlex
+
 import pytest
 
 from bridge.context_recall import (
@@ -104,10 +106,19 @@ class TestAdvisoryBuilderEmail:
     def test_email_address_yields_a_real_command(self):
         advisory = build_context_recall_advisory(chat_id="someone@example.com", medium="email")
         assert advisory is not None
-        assert (
-            f'valor-email read --search "someone@example.com" -n {CONTEXT_RECALL_HISTORY_DEPTH}'
-            in advisory
-        )
+        command_line = next(line for line in advisory.splitlines() if "valor-email" in line).strip()
+        # Ordinary addresses contain no shell metacharacters, so
+        # `shlex.quote` leaves them unquoted -- assert on the parsed argv
+        # rather than a literal quoting style, since that style is an
+        # implementation detail of the sanitizer, not the contract.
+        assert shlex.split(command_line) == [
+            "valor-email",
+            "read",
+            "--search",
+            "someone@example.com",
+            "-n",
+            str(CONTEXT_RECALL_HISTORY_DEPTH),
+        ]
 
     def test_telegram_peer_guard_is_never_applied_to_an_email_chat_id(self, monkeypatch):
         def explode(_chat_id):
@@ -119,6 +130,56 @@ class TestAdvisoryBuilderEmail:
     @pytest.mark.parametrize("bad", [None, "", "not-an-address"])
     def test_unresolvable_email_peers_return_none(self, bad):
         assert build_context_recall_advisory(chat_id=bad, medium="email") is None
+
+    @pytest.mark.parametrize(
+        "malicious",
+        [
+            "bob`id`@clientco.com",
+            '"; id; "@evil.com',
+        ],
+    )
+    def test_injection_shaped_addresses_are_neutralized(self, malicious):
+        """Two exploits reproduced independently in review round 2:
+
+        * ``email.utils.parseaddr('Ops <bob\\`id\\`@clientco.com>')`` preserves
+          backticks in the address -- backtick command substitution would
+          survive inside a double-quoted ``--search "..."`` argument.
+        * The address ``'"; id; "@evil.com'`` breaks out of the ``--search``
+          argument entirely once the surrounding quotes are naive.
+
+        Either the tightened ``_chat_id_usable`` guard rejects the value
+        outright (an acceptable disposition -- no advisory beats a broken
+        one), or -- if it were ever loosened -- the shell interpolation
+        itself must still neutralize it. Assert on the actual disposition
+        rather than assuming one, so this test exercises whichever layer is
+        doing the work.
+        """
+        advisory = build_context_recall_advisory(chat_id=malicious, medium="email")
+        if advisory is None:
+            return  # guard rejected it outright -- also an acceptable disposition
+        command_line = next(line for line in advisory.splitlines() if "valor-email" in line).strip()
+        argv = shlex.split(command_line)
+        assert argv.count("--search") == 1
+
+    def test_shell_metacharacters_are_neutralized_when_the_guard_accepts_them(self):
+        """Pins the sanitizer itself, not just the guard.
+
+        The two exploit strings above are rejected by the guard's shape
+        check, which would make ``test_injection_shaped_addresses_are_neutralized``
+        vacuous on its own -- it could pass purely because the guard filters
+        everything interesting out before interpolation is ever exercised.
+        An apostrophe is not in the guard's metacharacter blocklist, so this
+        address clears ``_chat_id_usable`` and reaches the interpolation
+        site with a shell-significant character still in it, proving
+        ``shlex.quote`` -- not just the guard -- is doing real work.
+        """
+        malicious = "bob'id'@clientco.com"
+        advisory = build_context_recall_advisory(chat_id=malicious, medium="email")
+        assert advisory is not None
+        command_line = next(line for line in advisory.splitlines() if "valor-email" in line).strip()
+        argv = shlex.split(command_line)
+        assert argv.count("--search") == 1
+        assert argv[argv.index("--search") + 1] == malicious
 
 
 class TestPrefilter:

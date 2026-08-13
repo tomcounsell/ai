@@ -377,6 +377,33 @@ class TestInboundPromptOrdering:
         assert src.index(banner_stmt) < src.index(advisory_stmt)
 
 
+class TestCallSitesWireUpBeforeDispatch:
+    """Source-level pin: the two call sites inside main() that populate
+    _ctx_recall_advisory / extra_overrides must run before the
+    dispatch_telegram_session(...) call that consumes them. Two previous
+    review rounds found these call sites reachable by nothing in the suite --
+    mutating either to a no-op left 194 tests green. This pin makes a reorder
+    or deletion of either call site fail loudly."""
+
+    def test_build_and_merge_calls_precede_the_consuming_dispatch(self):
+        from pathlib import Path
+
+        src = Path("bridge/telegram_bridge.py").read_text()
+        build_call = "_ctx_recall_advisory = _build_context_recall_advisory_for_intent("
+        merge_call = "extra_overrides = _merge_context_recall_into_extra_overrides("
+        # Unique to the specific dispatch_telegram_session(...) call that
+        # actually receives extra_overrides -- there are 3 dispatch call
+        # sites in this file, so anchoring on "dispatch_telegram_session("
+        # alone would match the wrong (earlier) one.
+        dispatch_marker = "extra_context_overrides=extra_overrides,"
+
+        assert build_call in src
+        assert merge_call in src
+        assert dispatch_marker in src
+        assert src.index(build_call) < src.index(dispatch_marker)
+        assert src.index(merge_call) < src.index(dispatch_marker)
+
+
 class TestAckSteeringRoutedAdvisory:
     """The interjection branch pushes a SEPARATE message, at the back."""
 
