@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1299,6 +1301,161 @@ class TestWithheldBlocksAutoMerge:
             docs_auditor.run_docs_auditor()
 
         assert notify.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# TestWithheldRateNonRegression — #2759 AC4
+# ---------------------------------------------------------------------------
+
+
+# The pre-#2759 pattern: `+` requires at least one `dir/` segment, so bare
+# filenames were invisible to the existence invariant. This is the "before" arm.
+_NARROW_PATH_REF_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.(?:py|md)")
+
+
+class TestWithheldRateNonRegression:
+    """Widening ``_PATH_REF_RE`` adds no withholds on the real corpus (#2759 AC4).
+
+    This is the mechanical proof behind the plan's ruling that #2759 does **not**
+    block on #2729 (withheld PRs are auto-merge-ineligible forever and stale-close
+    at day 14). Two measurement paths report a reassuring zero regardless of the
+    change's real effect and are therefore not used:
+
+    1. ``_detect_stale_term_fixes`` alone never reaches ``_absent_new_path_refs``;
+       ``fixes_withheld`` is populated only by ``_apply_fixes_to_file``.
+    2. ``audit(apply_mode="dry-run")`` is *also* wrong — ``_apply_fixes_to_file``
+       is gated on ``apply_mode == "apply"``, so dry-run leaves ``withheld`` empty
+       unconditionally.
+
+    So ``_apply_fixes_to_file`` is driven directly, against a **real git checkout**
+    (both the existence oracle and the ``git ls-files`` basename index need one; a
+    ``tmp_path`` mirror makes every reference read as absent and turns the
+    measurement into noise) — specifically a **disposable detached worktree**, torn
+    down in a ``finally``. Never the live checkout: ``_apply_fixes_to_file`` writes
+    with ``full.write_text``, several agents test on this machine concurrently, and
+    ``pytest-clean.sh`` runs under ``--timeout=420 --timeout-method=thread``, so a
+    restore that does not run is a realistic outcome with another lane's checkout as
+    its blast radius.
+
+    **Self-baselining, no pinned constant.** Both arms are measured in the same run
+    over the same corpus snapshot — narrow ``+`` vs. the shipped widened ``*`` —
+    asserting ``after <= before``. A hard-coded baseline would rot against a corpus
+    the auditor rewrites daily.
+
+    **The fix set deliberately bypasses the migration-context hatch.** After #2744
+    the hatch exempts every doc in the live corpus that mentions a ``STALE_TERMS``
+    key, so ``_detect_stale_term_fixes`` proposes nothing there and a hatch-filtered
+    measurement would be ``0 == 0`` with the invariant never invoked — the third way
+    to report a vacuous zero. Building the fix set straight from ``STALE_TERMS``
+    keeps real corpus text flowing through ``_absent_new_path_refs``, which is the
+    guard AC4 is actually about. The non-vacuity assertions below fail loudly if a
+    future corpus or detector change ever hollows this out.
+    """
+
+    CORPUS_GLOB = "docs/features/*.md"
+
+    @staticmethod
+    def _stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
+        """Every ``STALE_TERMS`` rewrite the corpus text could possibly attract."""
+        fixes = []
+        for old_term, new_term in docs_auditor.STALE_TERMS.items():
+            pattern = re.compile(rf"\b{re.escape(old_term)}\b")
+            if pattern.search(content):
+                fixes.append((pattern, new_term))
+        return fixes
+
+    @classmethod
+    def _measure(cls, worktree: Path, *, narrow: bool) -> dict[str, int]:
+        """Run the corpus through ``_apply_fixes_to_file`` under one regex arm.
+
+        Restores the worktree afterwards so the second arm sees the identical
+        snapshot, and clears the basename-index cache (memoized on
+        ``repo_root.resolve()``, i.e. shared by both arms) so neither measurement
+        answers from the other's snapshot.
+        """
+        saved_re = docs_auditor._PATH_REF_RE
+        saved_invariant = docs_auditor._absent_new_path_refs
+        invariant_calls = 0
+
+        def _spy(*args, **kwargs):
+            nonlocal invariant_calls
+            invariant_calls += 1
+            return saved_invariant(*args, **kwargs)
+
+        docs_auditor._absent_new_path_refs = _spy
+        if narrow:
+            docs_auditor._PATH_REF_RE = _NARROW_PATH_REF_RE
+        docs_auditor._BASENAME_INDEX_CACHE.clear()
+
+        withheld_total = 0
+        visible_refs: set[str] = set()
+        try:
+            for full in sorted(worktree.glob(cls.CORPUS_GLOB)):
+                content = full.read_text(encoding="utf-8", errors="replace")
+                visible_refs |= set(docs_auditor._PATH_REF_RE.findall(content))
+                fixes = cls._stale_term_fixes(content)
+                if not fixes:
+                    continue
+                _, withheld = docs_auditor._apply_fixes_to_file(
+                    full.relative_to(worktree), worktree, [], regex_fixes=fixes
+                )
+                withheld_total += len(withheld)
+        finally:
+            docs_auditor._PATH_REF_RE = saved_re
+            docs_auditor._absent_new_path_refs = saved_invariant
+            docs_auditor._BASENAME_INDEX_CACHE.clear()
+            subprocess.run(
+                ["git", "checkout", "--", "."], cwd=worktree, check=True, capture_output=True
+            )
+
+        return {
+            "withheld": withheld_total,
+            "invariant_calls": invariant_calls,
+            "visible_refs": len(visible_refs),
+        }
+
+    def test_widening_path_ref_re_adds_no_withholds(self):
+        repo_root = Path(docs_auditor.__file__).resolve().parents[1]
+        if not (repo_root / ".git").exists():
+            pytest.skip("not a git checkout — the existence oracle needs a real index")
+
+        holder = Path(tempfile.mkdtemp(prefix="docs-auditor-withheld-rate-"))
+        worktree = holder / "corpus"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
+        try:
+            before = self._measure(worktree, narrow=True)
+            after = self._measure(worktree, narrow=False)
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree)],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+            shutil.rmtree(holder, ignore_errors=True)
+            docs_auditor._BASENAME_INDEX_CACHE.clear()
+
+        # The two arms must genuinely differ, or "after <= before" is a tautology
+        # over one pattern measured twice.
+        assert after["visible_refs"] > before["visible_refs"], (
+            f"widening made no new refs visible ({after} vs {before}) — "
+            "the narrow arm is not being applied"
+        )
+        # ...and the guard being measured must actually have run.
+        assert before["invariant_calls"] > 0 and after["invariant_calls"] > 0, (
+            f"the existence invariant was never invoked ({before}, {after}) — "
+            "the measurement is vacuous, not clean"
+        )
+        # #2759 AC4: widening `original_refs` and the candidate scan symmetrically
+        # costs no new withholds, because `_absent_new_path_refs` is additive-only.
+        assert after["withheld"] <= before["withheld"], (
+            f"widening _PATH_REF_RE raised the withheld count: {before} -> {after}"
+        )
 
 
 # ---------------------------------------------------------------------------
