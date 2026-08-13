@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -573,6 +573,8 @@ Two integration points must be verified rather than added:
 ---
 
 ## Open Questions
+
+Each question below already has a default chosen and encoded in Technical Approach, so the plan is buildable as written. They are listed for the critique and the human to override, not to block the build.
 
 1. **Flag rename vs. accept prose (#2767a).** This plan chose rename-plus-alias over deriving counts from prose, on the grounds that a silently-wrong count is worse than a loud failure. Confirm, or say if you would rather `finalize` accept prose and count the findings itself.
 2. **Legacy-read posture (#2769).** The plan keeps the trailer-regex fallback permanently, since live ledgers hold mangled strings forever. Confirm that is right rather than treating the fallback as time-boxed scaffolding — this repo's no-legacy-code principle could be read either way, and the answer determines whether the fallback carries a removal note.
