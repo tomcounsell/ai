@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Needs Revision
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -412,3 +412,34 @@ No new entry points. `sdlc-tool dispatch` and `sdlc-tool stage-marker` already e
 2. **Should #2730(b) ship in this lane or as its own issue?** It is not in #2730's text, but #2730's headline claim is that G4 is defanged, and shipping record-completeness alone yields a guard that looks armed and is not. Recommendation: keep it here.
 3. **Why did #2711's dispatch history empty while its markers survived?** #2675 is the likely cause. Not investigated; listed so the reviewer can decline it explicitly.
 4. **`MAX_SAME_STAGE_DISPATCHES = 3` and `MAX_DISPATCH_HISTORY = 10` under the new rule.** Should the threshold count *cycles* or *entries*? And the bound must be large enough to hold the threshold: a 4-skill cycle repeated 3 times needs 12 entries and cannot fit in 10, so the guard would be unreachable by arithmetic (Risk 6). Recommendation: count cycles, and raise `MAX_DISPATCH_HISTORY` to whatever the worst-case cycle requires with headroom.
+
+## Critique Results
+
+### Round 1 — NEEDS REVISION
+
+War room run 2026-08-13, FULL depth. Verdict: **NEEDS REVISION** — 4 blockers,
+9 concerns, 5 nits. Every blocker was independently re-verified against source
+by the plan author with a shell (the critic had none). All four hold.
+
+| Severity | Finding | Status |
+|---|---|---|
+| BLOCKER | **Task 3's evidence does not show the defect it claims.** The motivating `706fc4da0` history returns `(1, '/do-build')` from the backward walk; the reported `0` comes from the **D5 self-clearing branch** (`agent/sdlc_router.py:1888-1894`), not the skill break at `:1874`. Worse, the recorded snapshots show adjacent plan/critique pairs sharing a snapshot while each *cycle* differs — the state advanced every round because the plan genuinely changed. Those four rounds were **productive work and G4 correctly declined to escalate**. The plan presented healthy behavior as a defect, and its proposed fix (cycle detection over an *unchanged* snapshot) targets a state that may be a null set — a new gate that cannot fire, the #2658 family this lane claims to close. | CONFIRMED by author |
+| BLOCKER | **The `(run_id, stage, occupancy)` dedup is unimplementable.** `run_id` is shared by construction (fork inheritance, `agent/supervised_run.py:4-11`) so it discriminates nothing; `occupancy` does not exist in `stage_states`; and the marker write *is* the event that changes it. Further, Race 1's mitigation ("evaluate inside `update_stage_states`") is impossible — the marker path writes via `PipelineStateMachine.start_stage/complete_stage` → `_save()`, an independent read-merge-write. Atomic dedup across the two paths cannot be done without restructuring one. | CONFIRMED by author |
+| BLOCKER | **The plan named two consumers of `_sdlc_dispatches`; there are at least seven, and Task 2 silently rewrites routing.** `last_dispatched_skill` drives G1 (`:336`), G3 (`:403`), G7 (`:685`), row 8b (`:1284`), row 8d (`:1380`) and G4's message (`:460`); `_latest_dispatch_at` drives row 8's patch-staleness (`:1023`) and row 2b's (`:1095`); `tools/sdlc_stage_marker.py:390-398` reads it to refuse `--status skipped`. In the plan's own `/do-build`→`/do-patch` motivating case, a later `BUILD completed` marker record makes `last_dispatched_skill == /do-build` when the last real dispatch was `/do-patch`, flipping rows 8b/8d. The claim that coupling *decreases* is false. | CONFIRMED by author |
+| BLOCKER | **Option B is blind to the collision it claims to cover.** `tools/sdlc_supervisor_identity.py:20-25`: `CLAUDE_PID` names the TOP-LEVEL `claude` process "even when the call originates from a subagent... whose supervisor loop and every stage subagent live inside that one process." Two stage subagents share pid, create_time, ancestry, machine_id, worktree, run_id and session_id, so a pid fence discriminates exactly as little as the lease. Separately the polarity is inverted: `fence_is_live` returns `False` for *unknown* (`agent/pid_fence.py:138-142`), which under a refuse-if-live gate **admits** the second agent, contradicting the "unknown never authorizes entry" criterion. The plan's lease analysis is correct and independently confirmed; the recommendation built on it is not. | CONFIRMED by author |
+
+**Selected concerns** (full set in the review thread):
+
+- Eleven "loop-bound by G4" claims exist, not six — the plan's grep is case-sensitive and misses `:984` and `:1655`. Use `-i "bound by G4"`.
+- Risk 6's arithmetic is wrong in both directions: there is **no** `/do-test` or `/do-issue` row in `DISPATCH_RULES`, so router-produced cycles today are 2-skill and the "4-skill cycle" case is hypothetical. The real hazard is that Task 2 would *introduce* `/do-test`/`/do-build` entries the router never produced, widening the alphabet against `MAX_DISPATCH_HISTORY = 10`.
+- `tests/integration/test_sdlc_dispatch.py` pins `same_stage_dispatch_count` at `:207`/`:295` and is absent from the Verification table; `tests/unit/test_sdlc_stage_query.py:601` also asserts on it.
+- `tools/sdlc_stage_marker.py:143` already holds a second stage→skill map (`_SKIP_STAGE_SKILL`); the "single source" success criterion passes trivially while the duplicate survives.
+- `/do-build/SKILL.md:132` invokes `/do-docs` directly — a second non-router chain, so Task 1's framing is refuted before it starts.
+- Tasks 5 and 6 are stubs; Task 4's `Depends On` mixes a task ID with a prose gate and **no task owns answering Q1**, so an unresolved Q1 blocks the whole lane, not just Task 4.
+
+**Disposition:** the lane is three lanes sharing a page. Re-plan required before any
+build. Minimum: (a) re-derive the G4 comparand against a *real* recorded oscillation,
+or drop #2730(b); (b) replace the dedup with the upsert-slot design (router writes
+`{skill, stage, at, confirmed: false}`; the marker path upgrades in place or appends
+when absent); (c) enumerate and test every `_sdlc_dispatches` consumer; (d) spike the
+#2629 process topology before Q1 can be answered; (e) split into three PRs.
