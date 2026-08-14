@@ -257,10 +257,12 @@ run. It may differ from the one you carried in: a lapsed lease is rebound, and a
 a new identity. Keeping your own stale copy is precisely how a run ends up writing markers nobody
 accepts.
 
-**Branch on the payload, not the exit code.** `session-ensure` exits 0 unconditionally and signals
-refusal as `{"blocked": true, "reason": ...}` on stdout, with the human-readable diagnostic on
-stderr. (Its sibling `stage-marker` *does* exit non-zero — do not generalize one tool's disposition
-to the other.) On a `blocked` payload, route it through the **same** three-way table and
+**Branch on the payload, not the exit code.** `session-ensure` exits 0 on every outcome it can
+report — success and refusal alike — and signals refusal as `{"blocked": true, "reason": ...}` on
+stdout, with the human-readable diagnostic on stderr. (Its sibling `stage-marker` *does* exit
+non-zero — do not generalize one tool's disposition to the other.) A non-zero exit here is a
+wrapper or usage error, emits **no payload at all**, and is not recoverable: stop and report rather
+than retrying. On a `blocked` payload, route it through the **same** three-way table and
 `owner_run_id` self-identity check from Step 2, so the own-ghost abandonment bug does not simply
 relocate from the top of the loop to this stage seam:
 
@@ -273,7 +275,9 @@ relocate from the top of the loop to this stage seam:
 - **Transient** — a Redis/broker error, a timeout, or any payload that is none of the above:
   **surface it and retry**, then continue. Never convert a transient error into a pipeline abort —
   halting a healthy run on a broker blip is worse than the bug this step exists to catch. A payload
-  missing `run_id` entirely belongs here too, since the tool cannot report that case as an exit code.
+  that parses but carries neither `run_id` nor `blocked` belongs here too. **Empty stdout is not
+  transient** — that is the wrapper/usage error above, and retrying it forever is how a broken
+  install turns into an identity-less run.
 
 ### 3e. Check exit conditions
 
