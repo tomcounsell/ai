@@ -95,6 +95,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Mark session as requiring real Chrome (BYOB) — serialized.",
     )
+    p_create.add_argument(
+        "--job-id",
+        help="Bind the lane's outbound expectation to this Job (#2708; default: walk parents).",
+    )
+    p_create.add_argument(
+        "--expect-what",
+        help="What this lane owes back (recorded on the bound Job; default: placeholder).",
+    )
     p_create.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     # sub-subcommands for the rest of the lifecycle.
@@ -252,6 +260,8 @@ def _to_create_namespace(args: argparse.Namespace) -> argparse.Namespace:
         slug=args.slug,
         model=args.model,
         needs_real_chrome=args.needs_real_chrome,
+        job_id=args.job_id,
+        expect_what=args.expect_what,
         json=args.json,
         # The `valor` wrapper is a human-facing session launcher and
         # deliberately does not expose --telegram-message-id (that anchor

@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -481,39 +481,39 @@ read absorbs it.
 
 ## Documentation
 
-- [ ] Rewrite `docs/features/durability-model.md` "Goals and promises" →
+- [x] Rewrite `docs/features/durability-model.md` "Goals and promises" →
       "Goals and expectations": the single obligation primitive, both directions, the
       chokepoint-derived `status`/`has_open_expectations`, rest derivation, discharge
       rule (AC: doc describes expectations as the single obligation primitive).
-- [ ] Add reconciler section (or `docs/features/expectation-reconciler.md` + README index
+- [x] Add reconciler section (or `docs/features/expectation-reconciler.md` + README index
       entry) covering the ladder, shipped-work guard, caps, and operator escalation.
-- [ ] Amend `docs/plans/durability-room-job-agentrun.md`: Schema Gate Amendment 2 + mark
+- [x] Amend `docs/plans/durability-room-job-agentrun.md`: Schema Gate Amendment 2 + mark
       the superseded promise-model ACs "superseded by #2708" (owner directive).
-- [ ] Update `docs/features/session-steering.md` only if the reconciler adds a new steer
+- [x] Update `docs/features/session-steering.md` only if the reconciler adds a new steer
       producer worth naming (expected: one line).
-- [ ] Docstrings: `models/job.py` header rewritten for the new status quo (no historical
+- [x] Docstrings: `models/job.py` header rewritten for the new status quo (no historical
       promise narration — describe only what is).
 
 ## Success Criteria
 
-- [ ] Expectations recorded bidirectionally on Job with `direction`; no separate promise
+- [x] Expectations recorded bidirectionally on Job with `direction`; no separate promise
       model, API, or vocabulary survives outside history entries.
-- [ ] Lane spawn through the session-create core records an outbound expectation when a Job
+- [x] Lane spawn through the session-create core records an outbound expectation when a Job
       resolves (integration-tested), and the PM prime mandates the hygiene.
-- [ ] Discharge path works and discharged expectations disappear from every surfacing
+- [x] Discharge path works and discharged expectations disappear from every surfacing
       query.
-- [ ] A Job with an open expectation cannot be swept to rest; an expectation-less idle Job
+- [x] A Job with an open expectation cannot be swept to rest; an expectation-less idle Job
       still rests by age (both unit-tested).
-- [ ] Reconciler surfaces open outbound expectations with gone owners, steers/respawns per
+- [x] Reconciler surfaces open outbound expectations with gone owners, steers/respawns per
       the ladder, and never respawns when the shipped-work guard finds a pushed branch or
       open/merged PR (tested with fake git/gh fixtures).
-- [ ] Under-recording test: no code path asserts a Job complete from an empty expectation
+- [x] Under-recording test: no code path asserts a Job complete from an empty expectation
       list alone.
-- [ ] Popoto bool-trap regression test on `has_open_expectations`.
-- [ ] Migration is idempotent and preserves promise history verbatim as inbound
+- [x] Popoto bool-trap regression test on `has_open_expectations`.
+- [x] Migration is idempotent and preserves promise history verbatim as inbound
       expectations.
-- [ ] Durability plan amended; #2494's superseded ACs named there.
-- [ ] Tests pass (`/do-test`); documentation updated (`/do-docs`).
+- [x] Durability plan amended; #2494's superseded ACs named there.
+- [x] Tests pass (`/do-test`); documentation updated (`/do-docs`).
 
 ## Team Orchestration
 

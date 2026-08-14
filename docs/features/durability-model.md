@@ -1,16 +1,17 @@
 # Durability Model: Room / Job / AgentSession
 
-The single place that answers **"a message or a promise is durable because X."**
+The single place that answers **"a message or an obligation is durable because X."**
 Shipped incrementally by `docs/plans/durability-room-job-agentrun.md`
 (issue #2494): Milestone 1 (fenced execution record), Milestone 2 (Room +
-durable inbox, PR #2622), Milestone 3 (Job + routing + advisory promises).
+durable inbox, PR #2622), Milestone 3 (Job + routing + advisory gating);
+generalized by #2708 (expectations as the single obligation primitive).
 
 ## The three-model shape
 
 | Model | What it is | Durability property |
 |-------|-----------|---------------------|
 | **`Room`** (`models/room.py`) | The environment a conversation happens in: `(project_key, addressee)`, addressee ∈ `telegram:{chat_id}` \| `email:{address}` \| `system`. Resolved from `projects.json` (config stays the source of truth). | **Immortal** (no TTL). Owns the durable inbox — a message appended to a Room cannot be addressed to a dead object. DMs and groups are covered identically. |
-| **`Job`** (`models/job.py`) | A responsibility to complete something end to end. Carries a required, **append-only-versioned `goal`** and the PM's promises as appended/removed entries on it. | **Never hard-closed, no TTL.** Goes to rest by age (`status="at-rest"`); *any* new message revives it regardless of age. The Job outlives every session that served it. |
+| **`Job`** (`models/job.py`) | A responsibility to complete something end to end. Carries a required, **append-only-versioned `goal`** and every recorded **expectation** as appended/discharged entries on it. | **Never hard-closed, no TTL.** Goes to rest by age (`status="at-rest"`) — but never while an expectation is open; *any* new message revives it regardless of age. The Job outlives every session that served it. |
 | **`AgentSession`** (`models/agent_session.py`) | An agent's context: resume handle, parent hierarchy, and the **fenced execution record** (`harness`, `exec_pid`, `pid_create_time`, cwd, spawn history). There is no separate run model. | Bounded by `Meta.ttl`. Crash-resume appends a new fence record; the newest entry is the live fence recovery paths read. See [`agent-session-fenced-execution-record.md`](agent-session-fenced-execution-record.md). |
 
 ## Inbound flow (target ordering)
@@ -52,7 +53,7 @@ fresh session.
 - Binding is **idempotent** on the message identity (`SET NX`): a
   crash-after-bind re-route finds the existing binding and no-ops (Race 4).
 
-## Goals and promises (PM-authored, advisory-gated)
+## Goals and expectations (the single obligation primitive)
 
 The router is deliberately not smart enough to author a goal: at mint the
 Job's goal is the mechanical placeholder `handle user message '<first 20
@@ -61,34 +62,65 @@ chars>…'`. **Authoring the real goal (v1) is the PM's mandated first step**
 via `python -m tools.job_tool author-goal`. Goal versions are append-only —
 history is never overwritten.
 
-**Promises have no obligation model and no mechanical trigger** (Risk 4:
-every mechanical design either under- or over-fires). Instead:
+**Expectations are the single obligation primitive** — one entry shape
+`(holder, owner, what, direction)` on the Job's goal JSON, covering both
+directions (#2708):
+
+- **`inbound`** — what we owe a requester (holder = the requester,
+  owner = the PM). Subsumes the retired promise model.
+- **`outbound`** — what a spawned lane owes its PM (holder = the PM
+  session, owner = the lane session id/slug). Recorded at the spawn
+  chokepoint (`tools/valor_session.py` create core) as a **null-fallback**:
+  PM-authored entries are canonical (`--expect-what`, or
+  `job_tool expectation-add`), and when none exists for the new lane the
+  core stamps a mechanical entry marked `placeholder` (provenance-derived,
+  mirroring `goal_is_placeholder()`) so the obligation is never
+  unrecorded. The fallback trigger is **per lane** — a second lane is
+  never skipped because the first one is covered.
+
+Rules, in flow order:
 
 1. The drafter promise gate (see [`promise-gate.md`](promise-gate.md)) stays
-   the detection chokepoint. On a deferral-shaped outbound it is
-   **advisory**: the blocked draft carries a revise-or-override suggestion
+   the detection chokepoint and stays **advisory** — no verdict ever writes
+   an obligation. On a deferral-shaped outbound the blocked draft carries a
+   revise-or-override suggestion
    (`bridge/promise_gate.build_promise_advisory`, strictly read-only) back
    to the PM through the self-draft steering path.
 2. **Revise**: the PM rewrites to claim only delivered work.
-   **Override**: the PM stands by the promise by recording it —
-   `tools/job_tool promise-add` appends it to the Job's goal record — and
-   resends. A recorded **open** promise clears the gate
-   (`promise_recorded_override`). The override is **Job-scoped by design**:
-   any open promise on the bound Job clears the gate for every outbound on
-   that Job until discharge — once the PM has durably stood by a promise,
-   re-blocking each subsequent deferral on the same Job would be the nag
-   machine Risk 4 forbids. This is the designed semantic per the plan's
-   advisory framing, not per-message matching.
-3. **Discharge is PM-authored too**: `promise-remove` stamps `removed_ts`
-   (append-only; the entry is kept).
-4. **At-rest backstop**: the `agent/session_health.py` periodic sweep first
-   applies **rest-by-age** — `Job.sweep_to_rest()` transitions active Jobs
-   idle past `JOB_AT_REST_AGE_SECONDS` (provisional 72h, env-overridable)
-   to `at-rest` via the ORM — then surfaces Jobs at rest with open
-   promises to the **operator log only** (never human chat), alongside the
-   operator metric `metrics:promise_advisories_issued` vs
-   `metrics:promises_authored` — an ignored advisory is visible, not
-   silent.
+   **Override**: the PM stands by the obligation by recording it —
+   `tools/job_tool expectation-add --direction inbound` — and resends. A
+   recorded **open inbound** expectation clears the gate
+   (`promise_recorded_override`); outbound expectations never do (a lane's
+   obligation to the PM says nothing about what we owe the requester). The
+   override is **Job-scoped by design**: any open inbound expectation on
+   the bound Job clears the gate for every outbound on that Job until
+   discharge.
+3. **Discharge is owner-authored, always**: `expectation-remove` stamps
+   `removed_ts` (append-only; the entry is kept). Nothing mechanical ever
+   discharges — the reconciler surfaces evidence; the PM decides.
+4. **Status and rest derive from the chokepoint**: `Job._write_goal_data`
+   is the single write site that derives `has_open_expectations` AND forces
+   `status="active"` while any expectation is open, so the two can never
+   disagree. `Job.sweep_to_rest()` (called from the `agent/session_health.py`
+   periodic sweep) transitions active Jobs idle past
+   `JOB_AT_REST_AGE_SECONDS` (provisional 72h, env-overridable) to
+   `at-rest` — **skipping any Job with an open expectation**. "Is this Job
+   finished?" is answerable from state: a Job with an open expectation
+   cannot be at rest. An expectation-less idle Job still rests by age, so
+   under-recording degrades to today's behavior, never to a false "done".
+5. **Invariant alarm**: the renamed
+   `_check_jobs_at_rest_with_open_expectations` health check (still the
+   sole `sweep_to_rest()` caller) intersects the `status` and
+   `has_open_expectations` indexes — empty in steady state by
+   construction; any hit is drift or a migration edge, surfaced to the
+   operator log only.
+6. **Drift advisory**: on the same cadence, a live PM whose live eng
+   children are not covered by a matching open outbound expectation on its
+   bound Job is surfaced to the operator log (advisory only, no writes) —
+   the backstop for spawn paths where no Job resolves.
+7. **Reconciler**: open outbound expectations whose owners are gone are
+   recovered by `reflections/expectation_reconciler.py` — see
+   [`expectation-reconciler.md`](expectation-reconciler.md).
 
 `tools/job_tool.py` enforces **Room scope at the tool layer**: every Job
 lookup filters on the calling session's own `room_id`, so cross-Room Jobs
@@ -120,14 +152,15 @@ generic `rebuild_indexes()` sweep skips them instead; both register a
 narrows). Listing a model in `_GUARDED_ELSEWHERE` without registering it in
 `_run_guarded_repairs()` leaves it with no index hygiene at all — the gap
 that produced #2640. `Job` carries two IndexedFields, both low-cardinality:
-`status` (active/at-rest) and the derived boolean `has_open_promises` (Schema
-Gate Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp. The
+`status` (active/at-rest) and the derived boolean `has_open_expectations`
+(Schema Gate Amendment 2, #2708); no index holds a pid, uuid, or timestamp. The
 reply index is a plain string KV — no hash, no class set, no secondary index —
 so the identity-less-hash flood mechanism structurally cannot occur for it.
 
-The daily `has_open_promises` backfill (`Job.backfill_open_promises_index()`,
-run from `repair_indexes()` while the bridge and workers are live) writes
-*only* that field via `save(update_fields=["has_open_promises"])`. Popoto
+The daily `has_open_expectations` backfill
+(`Job.backfill_open_expectations_index()`, run from `repair_indexes()` while
+the bridge and workers are live) writes *only* that field via
+`save(update_fields=["has_open_expectations"])`. Popoto
 excludes IndexedFields from the plain HSET mapping and maintains them through
 an atomic Lua EVAL instead, so a save whose entire field list is IndexedFields
 sends no `goal` bytes at all — a maintenance pass on this path can never

@@ -834,9 +834,9 @@ class TestDrafterInHandler:
         assert payload["text"] == "Raw text survives? yes."
 
     def test_routing_fields_persisted_on_passthrough(self):
-        """On the verbatim pass-through path, context_summary (deterministic) and
-        expectations are persisted to the session. When draft.expectations is None
-        it must NOT overwrite a pre-existing expectations value on the session."""
+        """On the verbatim pass-through path, context_summary (deterministic) is
+        persisted to the session. The drafter's open_questions is drafter-local
+        and never persisted (#2708: Job expectations are the obligation record)."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -844,10 +844,8 @@ class TestDrafterInHandler:
         handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-passthrough"
-        # Simulate a pre-existing expectations value (from a prior turn)
-        session.expectations = "Prior open question from earlier turn"
 
-        # Drafter returns verbatim text with context_summary set but expectations=None
+        # Drafter returns verbatim text with context_summary set but open_questions=None
         # (the raw text had no ## Open Questions section)
         drafted = MessageDraft(
             text="Fixed the drafter. All tests passing.",
@@ -855,7 +853,7 @@ class TestDrafterInHandler:
             needs_self_draft=False,
             artifacts={},
             context_summary="Fixed the drafter",
-            expectations=None,  # No new questions from this turn
+            open_questions=None,  # No new questions from this turn
         )
 
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
@@ -863,11 +861,6 @@ class TestDrafterInHandler:
 
         # context_summary WAS written (it's non-None)
         assert session.context_summary == "Fixed the drafter"
-        # expectations=None must NOT overwrite the prior value
-        # The _persist_routing_fields implementation checks `if expectations is not None`
-        # before setting — so the prior value is preserved.
-        # NOTE: The mock records the last assignment; if no assignment happened the
-        # mock attribute still holds the value we set above.
         # Delivery happened.
         handler._redis.rpush.assert_called_once()
 
@@ -882,7 +875,7 @@ class TestDrafterFailureRecovery:
     1. ``needs_self_draft`` → inject ``SELF_DRAFT_INSTRUCTION`` via steering.
     2. Self-draft loop prevention via ``peek_steering_sender``.
     3. Narration fallback substitution when steering is unavailable.
-    4. Persistence of ``context_summary`` / ``expectations`` on success.
+    4. Persistence of ``context_summary`` on success (open_questions is drafter-local).
     """
 
     def _make_handler(self):
@@ -1153,8 +1146,8 @@ class TestDrafterFailureRecovery:
     def test_routing_fields_persisted_on_successful_draft(self):
         """When drafter returns context_summary it is written back and saved.
 
-        Durability plan #2494: the write-only AgentSession expectations field is
-        deleted, so the drafter's ``expectations`` is no longer persisted here."""
+        Durability plan #2494 deleted the write-only AgentSession field, so the
+        drafter's ``open_questions`` is never persisted here."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -1171,7 +1164,7 @@ class TestDrafterFailureRecovery:
             needs_self_draft=False,
             artifacts={},
             context_summary="Investigating the router bug",
-            expectations="Needs a yes/no from human",
+            open_questions="Needs a yes/no from human",
         )
 
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
@@ -1183,7 +1176,7 @@ class TestDrafterFailureRecovery:
     def test_routing_fields_persisted_when_context_summary_present(self):
         """context_summary is persisted whenever non-None — the old was_drafted
         gate has been removed; it is written when present, regardless of draft
-        path. (Durability plan #2494: expectations is no longer persisted.)"""
+        path. (Durability plan #2494: open_questions is never persisted.)"""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -1198,7 +1191,7 @@ class TestDrafterFailureRecovery:
             needs_self_draft=False,
             artifacts={},
             context_summary="Should be persisted now",
-            expectations="And this too",
+            open_questions="And this too",
         )
 
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
@@ -1209,7 +1202,7 @@ class TestDrafterFailureRecovery:
         session.save.assert_called_once()
 
     def test_routing_fields_not_persisted_when_none(self):
-        """When both context_summary and expectations are None, save() is not called."""
+        """When both context_summary and open_questions are None, save() is not called."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -1224,7 +1217,7 @@ class TestDrafterFailureRecovery:
             needs_self_draft=False,
             artifacts={},
             context_summary=None,
-            expectations=None,
+            open_questions=None,
         )
 
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
@@ -1250,7 +1243,7 @@ class TestDrafterFailureRecovery:
             needs_self_draft=False,
             artifacts={},
             context_summary="topic",
-            expectations=None,
+            open_questions=None,
         )
 
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
@@ -1404,7 +1397,7 @@ class TestDrafterFailureRecovery:
             needs_self_draft=False,
             artifacts={},
             context_summary=None,
-            expectations=None,
+            open_questions=None,
         )
 
         reset_was_called = {"flag": False}
@@ -2526,7 +2519,7 @@ class TestDrafterHoistedAboveTransport:
             full_output_file=None,
             artifacts={},
             needs_self_draft=False,
-            expectations=None,
+            open_questions=None,
             context_summary=None,
         )
 
@@ -2552,7 +2545,7 @@ class TestDrafterHoistedAboveTransport:
             full_output_file=None,
             artifacts={},
             needs_self_draft=False,
-            expectations=None,
+            open_questions=None,
             context_summary=None,
         )
 

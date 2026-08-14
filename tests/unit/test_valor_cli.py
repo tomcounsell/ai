@@ -343,6 +343,8 @@ class TestUnderlyingAttrContract:
             "slug",
             "model",
             "needs_real_chrome",
+            "job_id",
+            "expect_what",
             "json",
             "telegram_message_id",
         },

@@ -277,14 +277,14 @@ class _LocalBindings(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802 - ast API
         self._enter_function(node)
 
-    def visit_Assign(self, node: ast.Assign) -> None:
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802 — ast.NodeVisitor API
         if self._stack:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     self.bindings[self._stack[-1]].setdefault(target.id, []).append(node.value)
         self.generic_visit(node)
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802 — ast.NodeVisitor API
         if self._stack and isinstance(node.target, ast.Name) and node.value is not None:
             self.bindings[self._stack[-1]].setdefault(node.target.id, []).append(node.value)
         self.generic_visit(node)

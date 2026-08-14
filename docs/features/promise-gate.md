@@ -90,24 +90,27 @@ zero-writes test monkeypatches every Redis write command to explode) that
 rides the self-draft steering instruction back to the agent:
 
 - **Revise** — rewrite to claim only delivered work, with evidence.
-- **Override** — stand by the promise by recording it on the bound Job
-  (`python -m tools.job_tool promise-add`) and resend. The drafter core
+- **Override** — stand by the obligation by recording an inbound
+  expectation on the bound Job (`python -m tools.job_tool expectation-add
+  --direction inbound`) and resend. The drafter core
   (`_evaluate_drafter_promise`) downgrades a BLOCK to ALLOW
   (`reason="promise_recorded_override"`, audited) when the session's bound
-  Job carries an **open** promise entry
+  Job carries an **open inbound** expectation
   (`bridge.promise_gate.promise_override_active`, resolved through the
   permanent reply index via `bridge.job_router.job_for_session`).
-  Discharged promises do not override.
+  Discharged expectations do not override, and outbound expectations
+  (what a spawned lane owes the PM) never clear the gate.
 
 While the bound Job's goal is still the router's mint placeholder, the same
 advisory carries the **goal-authoring nudge** — the second enforcement point
 of the PM's goal mandate (the `prime-pm-role` priming is the first).
 
-Promises are PM-authored and PM-discharged only — no trigger class ever
-writes one (Risk 4 of the durability plan). The backstop is the
-`agent/session_health.py` sweep's `_check_jobs_at_rest_with_open_promises`,
-which surfaces Jobs at rest with open promises to the operator log along
-with the `metrics:promise_advisories_issued` vs `metrics:promises_authored`
+Expectations are PM-authored and PM-discharged only — no mechanical
+trigger ever discharges one (Risk 4 of the durability plan, carried into
+#2708). The backstop is the `agent/session_health.py` sweep's
+`_check_jobs_at_rest_with_open_expectations`, which surfaces Jobs at rest
+with open expectations to the operator log along with the
+`metrics:promise_advisories_issued` vs `metrics:expectations_authored`
 counters. See [`durability-model.md`](durability-model.md).
 
 ## Architectural posture

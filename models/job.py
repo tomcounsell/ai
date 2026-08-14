@@ -9,28 +9,35 @@ Schema (ratified one-shot by the Task 5 schema-gate ruling of
   ``SortedField(partition_by="room_id")`` serves the top-N bind-or-mint
   candidate lookup without an unbounded index.
 - Two IndexedFields, both low-cardinality: ``status`` (``active`` /
-  ``at-rest``) and ``has_open_promises`` (two-valued bool). Their
-  intersection serves the at-rest-with-open-promise backstop without
-  scanning the at-rest population. The schema gate's rule is a cardinality
-  rule — never index a pid, uuid, or timestamp — and both honor it
-  (Schema Gate Amendment 1, ``docs/plans/job-model-scaling-followups.md``).
-  ``has_open_promises`` is a derived projection of ``goal``, never
+  ``at-rest``) and ``has_open_expectations`` (two-valued bool). The schema
+  gate's rule is a cardinality rule — never index a pid, uuid, or
+  timestamp — and both honor it (Schema Gate Amendment 2,
+  ``docs/plans/durability-room-job-agentrun.md``).
+  ``has_open_expectations`` is a derived projection of ``goal``, never
   authoritative: every read that matters re-verifies with
-  :meth:`Job.open_promises`.
+  :meth:`Job.open_expectations`. ``status`` is chokepoint-maintained at
+  ``_write_goal_data``: an open expectation forces ``active``, so the
+  at-rest-with-open-expectation index intersection is an
+  invariant-violation alarm, empty in steady state.
 - ``goal`` is an **append-only-versioned plain field** (JSON). The router
   never model-authors it: at mint it holds only the mechanical placeholder
   (:func:`mint_placeholder_goal`), so ``goal`` is never null and the
   synchronous bind-or-mint path never blocks. Authoring the real goal (v1)
-  is the PM's mandated first step on the Job. The PM's promises live on the
-  goal as appended/removed entries — a removal appends ``removed_ts`` rather
-  than deleting, so the full promise history stays reconstructable.
+  is the PM's mandated first step on the Job.
+- **Expectations are the single obligation primitive**, both directions,
+  stored on the goal as ``(holder, owner, what, direction)`` entries.
+  ``inbound``: what we owe a requester (the holder is the requester).
+  ``outbound``: what a PM expects a spawned lane to deliver (the holder
+  is the PM, the owner is the lane). Discharge appends ``removed_ts``
+  rather than deleting, so the full obligation history stays
+  reconstructable. A Job with an open expectation cannot be at rest.
 - **Never hard-closed.** A Job goes to rest by age (``sweep_to_rest`` on the
   session-health cadence, threshold ``JOB_AT_REST_AGE_SECONDS``) and is
   revived by any new steering message regardless of age (``revive``). This
   revival-after-apparent-completion is user-visible behavior, documented in
   ``docs/features/durability-model.md``.
 - Immortal: no ``Meta.ttl`` — the Job is the durable record of what was
-  promised and delivered; it must outlive every session that served it.
+  expected and delivered; it must outlive every session that served it.
 """
 
 from __future__ import annotations
@@ -59,7 +66,7 @@ _EPOCH = datetime(1970, 1, 2, tzinfo=UTC)
 # applied by ``Job.sweep_to_rest`` on the session-health cadence).
 # GRAIN OF SALT: provisional/tunable via env — sized to keep multi-day
 # conversations active across a weekend while letting abandoned threads
-# reach the at-rest-with-open-promise backstop within the week.
+# reach rest within the week.
 JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 * 3600)))
 
 
@@ -91,16 +98,17 @@ class Job(Model):
     # room_id so the sorted set stays per-Room (the proven
     # AgentSession.created_at partition_by="project_key" pattern).
     last_active_at = SortedField(type=datetime, partition_by="room_id")
-    # Append-only-versioned goal + promises, JSON:
+    # Append-only-versioned goal + expectations, JSON (schema v2):
     #   {"versions": [{"ts", "author", "text"}, ...],
-    #    "promises": [{"id", "ts", "text", "removed_ts"}, ...]}
+    #    "expectations": [{"id", "ts", "direction", "holder", "owner",
+    #                      "what", "removed_ts", "placeholder"}, ...]}
     goal = Field(null=True)
     # Derived projection of `goal`, maintained at the _write_goal_data
-    # chokepoint so it cannot be bypassed. Bounds the at-rest backstop to an
-    # index intersection instead of a scan of the whole at-rest population.
+    # chokepoint so it cannot be bypassed. Bounds the reconciler's scan to
+    # an index instead of the whole Job population.
     # `type=bool` is load-bearing: without it the value hydrates as the
     # string "False", which is truthy.
-    has_open_promises = IndexedField(type=bool, default=False)
+    has_open_expectations = IndexedField(type=bool, default=False)
 
     # -- Identity -----------------------------------------------------------
 
@@ -143,7 +151,7 @@ class Job(Model):
                         "text": goal_text,
                     }
                 ],
-                "promises": [],
+                "expectations": [],
             },
             save=False,
         )
@@ -158,19 +166,55 @@ class Job(Model):
         except (json.JSONDecodeError, TypeError):
             logger.warning("[job] invalid goal JSON on %s; treating as empty", self.job_id)
             data = {}
-        data.setdefault("versions", [])
-        data.setdefault("promises", [])
+        if not isinstance(data, dict):
+            logger.warning("[job] non-object goal JSON on %s; treating as empty", self.job_id)
+            data = {}
+        # Coerce rather than setdefault: a stored null (or any non-list) must
+        # read as empty, not blow up every caller downstream.
+        for key in ("versions", "expectations"):
+            if not isinstance(data.get(key), list):
+                data[key] = []
+        # Merge-on-every-read self-heal (Race 4): a lingering pre-cutover
+        # `promises` key — including one written by an unrestarted old-code
+        # process AFTER the offline migration ran — is absorbed here as
+        # inbound expectation entries, id-deduplicated, history intact.
+        # Deliberately not a one-shot: every read converges the two shapes.
+        legacy = data.pop("promises", None)
+        if legacy:
+            existing_ids = {e.get("id") for e in data["expectations"]}
+            for entry in legacy:
+                if entry.get("id") in existing_ids:
+                    continue
+                data["expectations"].append(
+                    {
+                        "id": entry.get("id"),
+                        "ts": entry.get("ts"),
+                        "direction": "inbound",
+                        "holder": "requester",
+                        "owner": "pm",
+                        "what": entry.get("text", ""),
+                        "removed_ts": entry.get("removed_ts"),
+                    }
+                )
         return data
 
     def _write_goal_data(self, data: dict, *, save: bool = True) -> None:
-        self.goal = json.dumps(data)
-        # Every promise mutation funnels through here (mint, add_promise,
-        # remove_promise, append_goal_version), so deriving the index flag at
-        # this point makes it un-bypassable rather than a discipline callers
-        # have to remember.
-        self.has_open_promises = any(
-            entry.get("removed_ts") is None for entry in data.get("promises", [])
+        # Derive BEFORE assigning goal so a derivation failure on malformed
+        # entries raises without half-writing the record.
+        has_open = any(
+            isinstance(entry, dict) and entry.get("removed_ts") is None
+            for entry in data.get("expectations", [])
         )
+        self.goal = json.dumps(data)
+        # Every expectation mutation funnels through here (mint,
+        # add_expectation, discharge_expectation, append_goal_version), so
+        # deriving the index flag AND the status projection at this point
+        # makes them un-bypassable rather than a discipline callers have to
+        # remember. A single write site computes both, so they cannot
+        # disagree: an open expectation forces `active`.
+        self.has_open_expectations = has_open
+        if has_open and self.status != "active":
+            self.status = "active"
         if save:
             self.save()
 
@@ -203,38 +247,81 @@ class Job(Model):
         data["versions"].append({"ts": _now().isoformat(), "author": author, "text": text})
         self._write_goal_data(data)
 
-    # -- Promises (PM-authored, appended/removed as goal entries) -----------
+    # -- Expectations (the single obligation primitive, both directions) ----
 
-    def add_promise(self, text: str) -> str:
-        """Append an open promise entry; returns its id."""
+    def add_expectation(
+        self,
+        what: str,
+        *,
+        direction: str = "inbound",
+        owner: str | None = None,
+        holder: str | None = None,
+        placeholder: bool = False,
+    ) -> str:
+        """Append an open expectation entry; returns its id.
+
+        ``inbound`` (the default): what we owe a requester — the requester
+        holds it, we own it, so ``holder``/``owner`` default to
+        ``requester``/``pm``. ``outbound``: what a PM expects a spawned lane
+        to deliver — ``holder`` defaults to ``pm`` and ``owner`` (the lane's
+        session id or slug) must be named. ``placeholder=True`` marks a
+        mechanical null-fallback entry (spawn chokepoint) the PM is nudged
+        to refine — provenance-derived, mirroring :meth:`goal_is_placeholder`.
+
+        An expectation with an empty ``owner`` or ``what`` is rejected
+        loudly: an unownable expectation is unreconcilable — worse than
+        none at all.
+        """
+        if direction not in ("inbound", "outbound"):
+            raise ValueError(f"expectation direction must be inbound|outbound, got {direction!r}")
+        if not what or not str(what).strip():
+            raise ValueError("expectation 'what' must be non-empty")
+        if owner is None and direction == "inbound":
+            owner = "pm"
+        if not owner or not str(owner).strip():
+            raise ValueError("expectation 'owner' must be non-empty (who must deliver this?)")
+        if holder is None:
+            holder = "requester" if direction == "inbound" else "pm"
         data = self._goal_data()
-        promise_id = uuid.uuid4().hex[:12]
-        data["promises"].append(
+        expectation_id = uuid.uuid4().hex[:12]
+        data["expectations"].append(
             {
-                "id": promise_id,
+                "id": expectation_id,
                 "ts": _now().isoformat(),
-                "text": text,
+                "direction": direction,
+                "holder": holder,
+                "owner": str(owner).strip(),
+                "what": str(what).strip(),
                 "removed_ts": None,
+                "placeholder": bool(placeholder),
             }
         )
         self._write_goal_data(data)
-        return promise_id
+        return expectation_id
 
-    def remove_promise(self, promise_id: str) -> bool:
-        """Discharge a promise. Append-only: stamps ``removed_ts``, keeps the entry."""
+    def discharge_expectation(self, expectation_id: str) -> bool:
+        """Discharge an expectation. Append-only: stamps ``removed_ts``, keeps the entry.
+
+        Always owner-authored — no mechanical trigger ever discharges; the
+        reconciler surfaces evidence and the PM discharges deliberately.
+        """
         data = self._goal_data()
-        for entry in data["promises"]:
-            if entry.get("id") == promise_id and entry.get("removed_ts") is None:
+        for entry in data["expectations"]:
+            if entry.get("id") == expectation_id and entry.get("removed_ts") is None:
                 entry["removed_ts"] = _now().isoformat()
                 self._write_goal_data(data)
                 return True
         return False
 
-    def open_promises(self) -> list[dict]:
-        return [p for p in self._goal_data()["promises"] if p.get("removed_ts") is None]
+    def open_expectations(self, *, direction: str | None = None) -> list[dict]:
+        """Open (undischarged) expectations, optionally filtered by direction."""
+        entries = [e for e in self._goal_data()["expectations"] if e.get("removed_ts") is None]
+        if direction is not None:
+            entries = [e for e in entries if e.get("direction") == direction]
+        return entries
 
-    def all_promises(self) -> list[dict]:
-        return list(self._goal_data()["promises"])
+    def all_expectations(self) -> list[dict]:
+        return list(self._goal_data()["expectations"])
 
     # -- Lifecycle (rest by age, revived by any steer; never hard-closed) ---
 
@@ -275,13 +362,19 @@ class Job(Model):
         """Rest-by-age: transition idle active Jobs to ``at-rest`` via the ORM.
 
         Runs on the session-health cadence (invoked by
-        ``agent/session_health.py::_check_jobs_at_rest_with_open_promises``
-        immediately before the open-promise scan, so the backstop always
+        ``agent/session_health.py::_check_jobs_at_rest_with_open_expectations``
+        immediately before the invariant-alarm scan, so the backstop always
         evaluates fresh rest state — never correct logic over empty input).
         An active Job whose ``last_active_at`` is older than
         ``JOB_AT_REST_AGE_SECONDS`` goes to rest through ``mark_at_rest()``
         (a normal ORM save, so INDEX_SWAP_LUA moves the ``status`` index
         membership). Rest is never terminal — any reply revives the Job.
+
+        A Job with an OPEN expectation never rests: an obligation is
+        outstanding, so the Job is not finished no matter how idle. An
+        expectation-less idle Job still rests by age — under-recording
+        degrades to rest-by-age (unknown surfaced by time), never to a
+        false "done" (hazard 1).
 
         Returns the number of Jobs transitioned.
         """
@@ -293,6 +386,8 @@ class Job(Model):
             cutoff = now_ts - JOB_AT_REST_AGE_SECONDS
             for job in cls.query.filter(status="active"):
                 try:
+                    if job.open_expectations():
+                        continue
                     last_ts = to_unix_ts(job.last_active_at)
                     if last_ts is not None and last_ts < cutoff:
                         job.mark_at_rest()
@@ -311,31 +406,49 @@ class Job(Model):
         return rested
 
     @classmethod
-    def at_rest_with_open_promises(cls) -> list[Job]:
-        """Jobs at rest that still carry an open promise entry.
+    def at_rest_with_open_expectations(cls) -> list[Job]:
+        """Jobs at rest that still carry an open expectation entry.
 
-        The at-rest health backstop (``agent/session_health.py``) surfaces
-        these to the operator surface only — never to human chat.
+        **Invariant-violation alarm**: ``status`` is chokepoint-maintained
+        (an open expectation forces ``active`` at ``_write_goal_data``) and
+        ``sweep_to_rest`` skips Jobs with open expectations, so in steady
+        state this intersection is EMPTY. Any hit means drift or a
+        migration edge and is surfaced to the operator surface only —
+        never to human chat.
 
-        Served by intersecting the ``status`` and ``has_open_promises``
+        Served by intersecting the ``status`` and ``has_open_expectations``
         index sets, so the work is proportional to the flagged set rather
-        than to the at-rest population. That population has no upper bound:
-        rest-by-age bounds the *active* set, nothing retires an at-rest Job,
-        and this runs every 300 seconds per worker. The old form hydrated
-        every at-rest Job and ``json.loads``-ed its ``goal`` on each pass.
+        than to the at-rest population.
 
-        ``has_open_promises`` is a derived projection, so each candidate is
-        re-verified against :meth:`open_promises` — the ``goal`` JSON stays
-        the single source of truth, and a stale flag can only cost a
+        ``has_open_expectations`` is a derived projection, so each candidate
+        is re-verified against :meth:`open_expectations` — the ``goal`` JSON
+        stays the single source of truth, and a stale flag can only cost a
         hydration, never a wrong answer.
         """
         flagged = []
         try:
-            for job in cls.query.filter(status="at-rest", has_open_promises=True):
-                if job.open_promises():
+            for job in cls.query.filter(status="at-rest", has_open_expectations=True):
+                if job.open_expectations():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a backstop query never raises
-            logger.warning("[job] at_rest_with_open_promises query failed: %s", e)
+            logger.warning("[job] at_rest_with_open_expectations query failed: %s", e)
+        return flagged
+
+    @classmethod
+    def with_open_expectations(cls) -> list[Job]:
+        """All Jobs carrying an open expectation — the reconciler's scan root.
+
+        Index-bounded via ``has_open_expectations``; each candidate is
+        re-verified against :meth:`open_expectations` (stale flag costs a
+        hydration, never a wrong answer).
+        """
+        flagged = []
+        try:
+            for job in cls.query.filter(has_open_expectations=True):
+                if job.open_expectations():
+                    flagged.append(job)
+        except Exception as e:  # noqa: BLE001 — a scan helper never raises
+            logger.warning("[job] with_open_expectations query failed: %s", e)
         return flagged
 
     # -- Guarded index repair (Risk 2 / #2207) ------------------------------
@@ -443,19 +556,19 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
-            cls.backfill_open_promises_index()
+            cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
             cls._repair_lock.release()
 
     @classmethod
-    def backfill_open_promises_index(cls) -> int:
-        """Stamp ``has_open_promises`` on Jobs whose stored flag disagrees with ``goal``.
+    def backfill_open_expectations_index(cls) -> int:
+        """Stamp ``has_open_expectations`` on Jobs whose stored flag disagrees with ``goal``.
 
         This is a daily re-derivation, not a one-shot legacy migration:
         ``rebuild_indexes()`` runs immediately before this method on the same
         maintenance path (see :meth:`repair_indexes`) and already stamps every
-        hash — including legacy rows with no ``has_open_promises`` attribute —
+        hash — including legacy rows with no ``has_open_expectations`` attribute —
         via ``model_class(**model_attrs)``, which fills the missing field from
         ``default=False`` and calls ``on_save`` for every field. So by the time
         this loop runs, every row already has a flag; what this loop catches is
@@ -463,13 +576,13 @@ class Job(Model):
         making a wrongly-``True`` or wrongly-``False`` flag self-heal within a
         day.
 
-        The write is scoped to ``update_fields=["has_open_promises"]``, which
+        The write is scoped to ``update_fields=["has_open_expectations"]``, which
         popoto sends as an EVAL-only Lua call touching just that field and its
         index sets — no ``goal`` bytes are ever transmitted. This means a
-        concurrent promise write (``add_promise`` / ``remove_promise`` /
-        ``append_goal_version``, landing between this loop's re-fetch and its
-        save) can never be clobbered by this method, structurally rather than
-        by a narrowed timing window.
+        concurrent expectation write (``add_expectation`` /
+        ``discharge_expectation`` / ``append_goal_version``, landing between
+        this loop's re-fetch and its save) can never be clobbered by this
+        method, structurally rather than by a narrowed timing window.
 
         Each row is re-fetched by both KeyFields immediately before deriving,
         so the derivation reads fresh ``goal`` data rather than a snapshot that
@@ -478,9 +591,10 @@ class Job(Model):
         that one row, never abort the whole daily sweep. The residual staleness
         this leaves — the gap between the re-fetch and the save — can only ever
         produce a wrong flag, never lost data: every consumer
-        (``at_rest_with_open_promises``) re-verifies against ``open_promises()``
-        before surfacing anything, so a stale flag costs at most one wasted
-        hydration or one delayed operator-surface signal.
+        (``at_rest_with_open_expectations``, ``with_open_expectations``)
+        re-verifies against ``open_expectations()`` before surfacing anything,
+        so a stale flag costs at most one wasted hydration or one delayed
+        operator-surface signal.
 
         The loop assigns no ``_now()`` anywhere and never writes
         ``last_active_at``. That is deliberate: two machines running the daily
@@ -503,24 +617,24 @@ class Job(Model):
                         continue
                     derived = any(
                         entry.get("removed_ts") is None
-                        for entry in fresh._goal_data().get("promises", [])
+                        for entry in fresh._goal_data().get("expectations", [])
                     )
-                    if fresh.has_open_promises is not derived:
-                        fresh.has_open_promises = derived
+                    if fresh.has_open_expectations is not derived:
+                        fresh.has_open_expectations = derived
                         # Field-scoped on purpose: see the docstring's write-scope
                         # invariant. Widening this list (e.g. adding
                         # last_active_at) would both reintroduce clobber risk and
                         # break cross-machine convergence.
-                        fresh.save(update_fields=["has_open_promises"])
+                        fresh.save(update_fields=["has_open_expectations"])
                         stamped += 1
                 except Exception as e:  # noqa: BLE001 — one bad row never stops the backfill
                     logger.warning(
-                        "[job] open-promise backfill failed for %s: %s",
+                        "[job] open-expectation backfill failed for %s: %s",
                         getattr(job, "job_id", "?"),
                         e,
                     )
         except Exception as e:  # noqa: BLE001 — maintenance path never raises
-            logger.warning("[job] open-promise backfill failed: %s", e)
+            logger.warning("[job] open-expectation backfill failed: %s", e)
         if stamped:
-            logger.info("[job] open-promise backfill stamped %d Job(s)", stamped)
+            logger.info("[job] open-expectation backfill stamped %d Job(s)", stamped)
         return stamped
