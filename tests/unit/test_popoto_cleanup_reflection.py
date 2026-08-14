@@ -71,7 +71,7 @@ class TestJobGuardedRepairIsScheduled:
     the second, so it received no index hygiene of any kind in production --
     no identity-less-hash quarantine, no `$IndexF:Job:*` clear, no
     `$SortF:Job:last_active_at:*` partition rebuild, no daily
-    `backfill_open_promises_index()`.
+    `backfill_open_expectations_index()`.
 
     The load-bearing assertions below are behavioural: a `run_cleanup()` pass
     must actually reap a manufactured `$SortF` orphan and delete a planted

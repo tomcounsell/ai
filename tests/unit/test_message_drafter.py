@@ -242,15 +242,15 @@ class TestDraftMessage:
         assert isinstance(result.context_summary, str)
 
     @pytest.mark.asyncio
-    async def test_expectations_none_for_no_questions(self):
-        """expectations is None when no ## Open Questions section exists."""
+    async def test_open_questions_none_for_no_questions(self):
+        """open_questions is None when no ## Open Questions section exists."""
         text = "Fixed the bug and committed abc1234. All tests passing. " * 10
         result = await draft_message(text)
-        assert result.expectations is None
+        assert result.open_questions is None
 
     @pytest.mark.asyncio
-    async def test_expectations_from_open_questions_section(self):
-        """expectations is populated from ## Open Questions section."""
+    async def test_open_questions_from_open_questions_section(self):
+        """open_questions is populated from ## Open Questions section."""
         text = (
             "Completed the refactoring work. All tests pass.\n\n"
             "## Open Questions\n"
@@ -258,8 +258,8 @@ class TestDraftMessage:
             "- Is the confidence threshold of 0.80 acceptable?\n"
         )
         result = await draft_message(text)
-        assert result.expectations is not None
-        assert "merge" in result.expectations.lower() or "design" in result.expectations.lower()
+        assert result.open_questions is not None
+        assert "merge" in result.open_questions.lower() or "design" in result.open_questions.lower()
 
     @pytest.mark.asyncio
     async def test_self_summary_instruction_quality(self):
@@ -684,15 +684,15 @@ class TestDraftingBypass:
 
 
 class TestQuestionFabricationPrevention:
-    """Tests for anti-fabrication rules — expectations must come from raw output only.
+    """Tests for anti-fabrication rules — open_questions must come from raw output only.
 
     The drafter must NEVER fabricate questions from declarative statements.
-    Only explicit questions (from ## Open Questions sections) populate expectations.
+    Only explicit questions (from ## Open Questions sections) populate open_questions.
     """
 
     @pytest.mark.asyncio
     async def test_no_questions_fabricated_from_declarative_statements(self):
-        """Declarative planned work must produce expectations=None."""
+        """Declarative planned work must produce open_questions=None."""
         # Long enough to bypass short-output path, no ## Open Questions section
         agent_output = (
             "I will add sdlc to classifier categories. "
@@ -702,14 +702,14 @@ class TestQuestionFabricationPrevention:
         )
         result = await draft_message(agent_output)
 
-        # No ## Open Questions section → expectations must be None
-        assert result.expectations is None
+        # No ## Open Questions section → open_questions must be None
+        assert result.open_questions is None
         # Verify no --- separator (which precedes questions)
         assert "\n---\n" not in result.text
 
     @pytest.mark.asyncio
     async def test_explicit_questions_from_open_questions_section(self):
-        """Real ## Open Questions section must populate expectations."""
+        """Real ## Open Questions section must populate open_questions."""
         agent_output = (
             "Completed the refactoring work. All 12 tests passing. "
             "Committed abc1234 and pushed to session/refactor.\n\n"
@@ -718,8 +718,8 @@ class TestQuestionFabricationPrevention:
         )
         result = await draft_message(agent_output)
 
-        assert result.expectations is not None
-        assert "exponential backoff" in result.expectations
+        assert result.open_questions is not None
+        assert "exponential backoff" in result.open_questions
 
     @pytest.mark.asyncio
     async def test_future_tense_plans_not_turned_into_questions(self):
@@ -731,7 +731,7 @@ class TestQuestionFabricationPrevention:
         )
         result = await draft_message(agent_output)
 
-        assert result.expectations is None
+        assert result.open_questions is None
         assert "\n---\n" not in result.text
 
 
@@ -864,9 +864,9 @@ class TestMessageDraftDataclass:
         draft = MessageDraft(text="hello")
         assert draft.context_summary is None
 
-    def test_expectations_defaults_none(self):
+    def test_open_questions_defaults_none(self):
         draft = MessageDraft(text="hello")
-        assert draft.expectations is None
+        assert draft.open_questions is None
 
     def test_violations_defaults_empty_list(self):
         draft = MessageDraft(text="hello")
@@ -878,16 +878,16 @@ class TestMessageDraftDataclass:
 
 
 class TestExpectationsRecallParity:
-    """Tests verifying that expectations come exclusively from _extract_open_questions.
+    """Tests verifying that open_questions comes exclusively from _extract_open_questions.
 
     The drafter must NEVER fabricate questions from declarative statements.
-    expectations must be None (not "", not any other falsy value) when no
+    open_questions must be None (not "", not any other falsy value) when no
     ## Open Questions section is present.
     """
 
     @pytest.mark.asyncio
-    async def test_open_questions_section_populates_expectations(self):
-        """A real ## Open Questions section must produce matching expectations."""
+    async def test_open_questions_section_populates_open_questions(self):
+        """A real ## Open Questions section must produce matching open_questions."""
         agent_output = (
             "Completed the migration. All 47 tests pass. Committed abc1234.\n\n"
             "## Open Questions\n"
@@ -896,15 +896,15 @@ class TestExpectationsRecallParity:
         )
         result = await draft_message(agent_output)
 
-        assert result.expectations is not None
+        assert result.open_questions is not None
         assert (
-            "exponential backoff" in result.expectations
-            or "confidence threshold" in result.expectations
+            "exponential backoff" in result.open_questions
+            or "confidence threshold" in result.open_questions
         )
 
     @pytest.mark.asyncio
-    async def test_declarative_output_yields_none_expectations(self):
-        """Pure declarative output with no ## Open Questions → expectations is None."""
+    async def test_declarative_output_yields_none_open_questions(self):
+        """Pure declarative output with no ## Open Questions → open_questions is None."""
         agent_output = (
             "Fixed the authentication bug in bridge/telegram_bridge.py. "
             "The session lock cleanup now runs on startup. "
@@ -912,12 +912,12 @@ class TestExpectationsRecallParity:
         )
         result = await draft_message(agent_output)
 
-        # No ## Open Questions section → no expectations
-        assert result.expectations is None
+        # No ## Open Questions section → no open_questions
+        assert result.open_questions is None
 
     @pytest.mark.asyncio
     async def test_none_contract_not_empty_string(self):
-        """expectations is None (not '') when no questions are found.
+        """open_questions is None (not '') when no questions are found.
 
         The contract is: None means 'no questions', empty string is ambiguous
         and must not be used. Callers rely on truthiness to gate routing.
@@ -929,14 +929,14 @@ class TestExpectationsRecallParity:
         result = await draft_message(agent_output)
 
         # Must be exactly None, not an empty string or empty list
-        assert result.expectations is None
-        assert result.expectations != ""
-        assert result.expectations != []
+        assert result.open_questions is None
+        assert result.open_questions != ""
+        assert result.open_questions != []
 
     @pytest.mark.asyncio
     async def test_trailing_question_mark_sentences_not_fabricated(self):
         """Sentences that end in '?' but are not in ## Open Questions must not
-        become expectations. Anti-fabrication rule preserved from original drafter."""
+        become open_questions. Anti-fabrication rule preserved from original drafter."""
         agent_output = (
             "Should we use Redis or Postgres? I think Redis is better for this use case. "
             "The current implementation uses Redis anyway. "
@@ -945,7 +945,7 @@ class TestExpectationsRecallParity:
         result = await draft_message(agent_output)
 
         # Questions embedded in declarative prose must not be extracted
-        assert result.expectations is None
+        assert result.open_questions is None
 
     @pytest.mark.asyncio
     async def test_open_questions_section_with_multiple_items(self):
@@ -959,10 +959,11 @@ class TestExpectationsRecallParity:
         )
         result = await draft_message(agent_output)
 
-        assert result.expectations is not None
+        assert result.open_questions is not None
         # All three questions should appear in some form
         assert (
-            "merge" in result.expectations.lower() or "design review" in result.expectations.lower()
+            "merge" in result.open_questions.lower()
+            or "design review" in result.open_questions.lower()
         )
 
 

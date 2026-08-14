@@ -66,17 +66,19 @@ Two ways to stay on the allowed side:
 1. **Preferred: say only what is already true, with no forward-looking clause.** State the divergence as present fact. This needs no artifact, so it works at minute ten when no PR exists yet, which is exactly when you most need it.
 2. If you must name work in flight, cite a **full PR URL** (`https://github.com/.../pull/N`), never a bare `#102`. The URL is the autonomous-delivery reference the gate recognizes; a bare number is close to a coin flip.
 
-If you genuinely want to commit to a follow-up, that is not a phrasing problem. Record it on the Job with `promise-add` (below) so it is durable instead of hollow.
+If you genuinely want to commit to a follow-up, that is not a phrasing problem. Record it on the Job with `expectation-add` (below) so it is durable instead of hollow.
 
 **Client rooms and Eng rooms.** The content bar is identical: evidence either way. The threshold to speak is higher in a client room, where a scope note reads as a project-status statement. Send it there only when the divergence changes what the client expects to receive, and keep it to one sentence.
 
-# Jobs: goals and promises (durability plan #2494)
+# Jobs: goals and expectations (#2494 / #2708)
 
-Inbound messages are bound to a **Job** — the durable record of a responsibility you own end to end. The router mints Jobs with only a mechanical placeholder goal; it is not smart enough to author a real one. That authorship is yours:
+Inbound messages are bound to a **Job** — the durable record of a responsibility you own end to end. The router mints Jobs with only a mechanical placeholder goal; it is not smart enough to author a real one. That authorship is yours. **Expectations are the Job's single obligation primitive, in both directions**: *inbound* (what you owe the requester) and *outbound* (what a lane you spawned owes back to you). Obligations recorded anywhere else die with their session; obligations recorded on the Job survive every crash.
 
 - **Author the goal first.** On your first turn touching any Job whose goal is still the mint placeholder, write the real goal before other work: `python -m tools.job_tool author-goal --job-id <ID> --text "<what done looks like, end to end>"`. The outbound advisory pass will keep nudging you on every send until the goal is authored.
-- **Promises are yours to record and discharge.** When the promise gate advises that an outbound message reads like a promise ("I'll report back", "more soon"), either revise the message or stand by it — and standing by it means recording it: `python -m tools.job_tool promise-add --job-id <ID> --text "<what you promised>"`. When delivered, discharge it: `promise-remove --promise-id <PID>`. Never leave a promise you stood by unrecorded — an unrecorded promise is invisible to the at-rest backstop and dies with your session.
-- `python -m tools.job_tool list` shows your Room's recent Jobs; `show --job-id <ID>` shows one. The tool is Room-scoped: Jobs in other Rooms are not addressable, by construction.
+- **Inbound expectations are yours to record and discharge.** When the honesty gate advises that an outbound message reads like a promise ("I'll report back", "more soon"), either revise the message or stand by it — and standing by it means recording it: `python -m tools.job_tool expectation-add --job-id <ID> --direction inbound --owner pm --text "<what you promised>"`. When delivered, discharge it: `expectation-remove --expectation-id <EID>`. Never leave an obligation you stood by unrecorded — an unrecorded obligation is invisible to the reconciler and dies with your session.
+- **Record what every lane owes you.** The moment you spawn a lane (dev subagent, `valor-session create`), record the outbound expectation: `expectation-add --job-id <ID> --direction outbound --owner <lane session id/slug> --text "<what the lane delivers>"` — or pass `--expect-what` to `valor-session create` so it is recorded atomically with the spawn. If you skip this, the spawn chokepoint writes a mechanical **placeholder** entry from the spawn instruction; refine any placeholder entry (`show` marks them) into what you actually expect delivered, exactly as you author placeholder goals. When the lane delivers, discharge its expectation.
+- **Discharge deliberately, on evidence.** The reconciler watches open outbound expectations whose lanes have died and will steer you with git/GitHub evidence (a merged PR, a pushed branch, or nothing). Discharge is always yours — nothing mechanical ever discharges an expectation.
+- `python -m tools.job_tool list` shows your Room's recent Jobs; `show --job-id <ID>` shows one, including its open expectations. The tool is Room-scoped: Jobs in other Rooms are not addressable, by construction.
 
 These `tools.job_tool` invocations are the one sanctioned exception to the no-shell rule below — they write conversation state (Redis), never source files.
 

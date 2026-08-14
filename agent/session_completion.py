@@ -961,13 +961,13 @@ async def _deliver_pipeline_completion(
                     # dedupe-against-mid-session-sends IS desired. See
                     # docs/plans/dedupe-completion-emit.md and #1262.
                     #
-                    # expectations=None: Pass 2 returns plain text, not a
-                    # MessageDraft, so there is no expectations concept here.
+                    # open_questions=None: Pass 2 returns plain text, not a
+                    # MessageDraft, so there is no open-questions concept here.
                     verdict = _ss(
                         final_text,
                         _xa(final_text),
                         baseline,
-                        expectations=None,
+                        open_questions=None,
                         session_status=None,
                         threshold=LOW_CUTOFF,
                     )

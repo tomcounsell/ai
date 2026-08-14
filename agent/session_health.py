@@ -887,20 +887,24 @@ async def _check_at_rest_owed_communication() -> int:
     return flagged
 
 
-async def _check_jobs_at_rest_with_open_promises() -> int:
-    """At-rest promise backstop (durability plan #2494 Task 14).
+async def _check_jobs_at_rest_with_open_expectations() -> int:
+    """At-rest expectation invariant alarm (#2708) — and the ``sweep_to_rest`` caller.
 
-    Surfaces Jobs at rest that still carry an OPEN promise entry — work the
-    PM stood by and never discharged — to the OPERATOR surface only
-    (logs + counter), never human chat. Runs from the same periodic sweep
-    as ``_check_at_rest_owed_communication`` so it cannot become
-    correct-logic-with-a-dead-caller. The log line carries the
-    advisories-issued vs promises-authored operator metric so an ignored
-    advisory is visible instead of silent.
+    This check is the sole invoker of ``Job.sweep_to_rest()`` on the
+    session-health cadence: deleting it would silently stop Jobs aging to
+    rest. Sweep-then-scan ordering is load-bearing — the scan must always
+    evaluate fresh rest state, never correct logic over stale input.
+
+    With ``status`` chokepoint-maintained (an open expectation forces
+    ``active`` at ``Job._write_goal_data``) and ``sweep_to_rest`` skipping
+    Jobs with open expectations, the at-rest-with-open-expectation
+    intersection is EMPTY in steady state. Any hit is an
+    **invariant-violation alarm** (drift or a migration edge), surfaced to
+    the OPERATOR surface only (logs + counter), never human chat.
 
     Observability only: no Job mutation, no discharge, no nag messages —
-    discharge is PM-authored (``tools/job_tool promise-remove``), per the
-    Risk 4 no-nag-machine ruling. Returns the number of Jobs flagged.
+    discharge is PM-authored (``tools/job_tool expectation-remove``).
+    Returns the number of Jobs flagged.
     """
     flagged = 0
     try:
@@ -908,23 +912,25 @@ async def _check_jobs_at_rest_with_open_promises() -> int:
 
         # Rest-by-age first (JOB_AT_REST_AGE_SECONDS): idle active Jobs
         # transition to at-rest via the ORM here, on this same cadence —
-        # without this the backstop below would be correct logic over
+        # without this the alarm below would be correct logic over
         # permanently-empty input (nothing else ever sets at-rest).
         rested = _Job.sweep_to_rest()
         if rested:
-            logger.info("[at-rest-promise] rest-by-age swept %d job(s) to at-rest", rested)
+            logger.info("[at-rest-expectation] rest-by-age swept %d job(s) to at-rest", rested)
 
-        for job in _Job.at_rest_with_open_promises():
+        for job in _Job.at_rest_with_open_expectations():
             flagged += 1
-            open_promises = job.open_promises()
-            logger.warning(
-                "[at-rest-promise] Job %s (room=%s) is at rest with %d open "
-                "promise(s): %s — goal: %r. The PM stood by these and has not "
-                "discharged them (tools/job_tool promise-remove).",
+            open_entries = job.open_expectations()
+            logger.error(
+                "[at-rest-expectation] INVARIANT VIOLATION: Job %s (room=%s) "
+                "is at rest with %d open expectation(s): %s — goal: %r. "
+                "The chokepoint should have forced status=active; investigate "
+                "drift or a migration edge. Discharge stays PM-authored "
+                "(tools/job_tool expectation-remove).",
                 job.job_id,
                 job.room_id,
-                len(open_promises),
-                "; ".join(p.get("text", "?") for p in open_promises[:3]),
+                len(open_entries),
+                "; ".join(e.get("what", "?") for e in open_entries[:3]),
                 job.current_goal(),
             )
         if flagged:
@@ -932,19 +938,95 @@ async def _check_jobs_at_rest_with_open_promises() -> int:
                 from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
                 issued = _R.get("metrics:promise_advisories_issued") or 0
-                authored = _R.get("metrics:promises_authored") or 0
+                authored = _R.get("metrics:expectations_authored") or 0
                 logger.warning(
-                    "[at-rest-promise] operator metric: %s advisories issued / "
-                    "%s promises authored",
+                    "[at-rest-expectation] operator metric: %s advisories issued / "
+                    "%s expectations authored",
                     int(issued),
                     int(authored),
                 )
             except Exception as _metric_err:
-                logger.debug("[at-rest-promise] metric read failed: %s", _metric_err)
+                logger.debug("[at-rest-expectation] metric read failed: %s", _metric_err)
     except Exception as _scan_err:
         # Fail loud (logged), never silently — same posture as the owed-
         # communication check above.
-        logger.error("[at-rest-promise] scan crashed (non-fatal): %s", _scan_err)
+        logger.error("[at-rest-expectation] scan crashed (non-fatal): %s", _scan_err)
+    return flagged
+
+
+async def _check_expectation_drift_advisory() -> int:
+    """Drift advisory (#2708, Risks 1 & 4): spawned lanes with no recorded obligation.
+
+    Job resolution at the spawn chokepoint is best-effort, so a lane can be
+    created without an outbound expectation landing anywhere. This advisory
+    is the backstop: on the session-health cadence, surface to the OPERATOR
+    surface any live PM session whose live eng children are not covered by
+    a matching open outbound expectation on its bound Job. Advisory only —
+    no writes, no steering, no discharge. Returns the number of uncovered
+    (parent, child) pairs flagged.
+    """
+    flagged = 0
+    try:
+        from bridge.job_router import job_for_session  # noqa: PLC0415
+        from models.agent_session import AgentSession  # noqa: PLC0415
+        from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        rows = list(AgentSession.query.filter(session_type="eng"))
+        live = [r for r in rows if getattr(r, "status", None) in NON_TERMINAL_STATUSES]
+        parents_by_key: dict[str, object] = {}
+        for row in live:
+            for key in (
+                getattr(row, "id", None),
+                getattr(row, "agent_session_id", None),
+                getattr(row, "session_id", None),
+            ):
+                if key:
+                    parents_by_key[str(key)] = row
+
+        for child in live:
+            try:
+                parent_ref = getattr(child, "parent_agent_session_id", None)
+                if not parent_ref:
+                    continue
+                parent = parents_by_key.get(str(parent_ref))
+                if parent is None:
+                    continue  # parent not live — the reconciler's territory
+                job = job_for_session(parent)
+                if job is None:
+                    continue  # no bound Job resolves — nothing to compare against
+                owners = {
+                    str(e.get("owner") or "") for e in job.open_expectations(direction="outbound")
+                }
+                child_names = {
+                    str(v)
+                    for v in (
+                        getattr(child, "slug", None),
+                        getattr(child, "session_id", None),
+                        getattr(child, "agent_session_id", None),
+                    )
+                    if v
+                }
+                child_names |= {f"session/{n}" for n in set(child_names)}
+                if owners & child_names:
+                    continue  # covered
+                flagged += 1
+                logger.warning(
+                    "[expectation-drift] PM session %s has live child %s with NO "
+                    "matching open outbound expectation on Job %s — the lane's "
+                    "obligation is unrecorded and invisible to the reconciler. "
+                    "The PM should record it: python -m tools.job_tool "
+                    "expectation-add --job-id %s --direction outbound --owner %s "
+                    '--text "<what the lane delivers>"',
+                    getattr(parent, "session_id", "?"),
+                    getattr(child, "session_id", "?"),
+                    job.job_id,
+                    job.job_id,
+                    getattr(child, "slug", None) or getattr(child, "session_id", "?"),
+                )
+            except Exception as _child_err:  # noqa: BLE001 — one pair never stops the scan
+                logger.warning("[expectation-drift] per-child check failed: %s", _child_err)
+    except Exception as _scan_err:  # noqa: BLE001
+        logger.error("[expectation-drift] scan crashed (non-fatal): %s", _scan_err)
     return flagged
 
 
@@ -4498,15 +4580,27 @@ async def _agent_session_health_check() -> None:
             _at_rest_err,
         )
 
-    # === At-rest promise backstop (durability plan #2494 Task 14) ===
-    # Jobs at rest with an open PM-authored promise surface to the operator
-    # log on the same cadence. Same fail-loud-but-non-fatal posture.
+    # === At-rest expectation invariant alarm (#2708) ===
+    # Runs Job.sweep_to_rest() (sole caller) then alarms on any at-rest Job
+    # with an open expectation — steady-state empty by construction. Same
+    # fail-loud-but-non-fatal posture.
     try:
-        await _check_jobs_at_rest_with_open_promises()
-    except Exception as _at_rest_promise_err:  # pragma: no cover - defensive
+        await _check_jobs_at_rest_with_open_expectations()
+    except Exception as _at_rest_expectation_err:  # pragma: no cover - defensive
         logger.error(
-            "[session-health] at-rest promise backstop crashed (non-fatal): %s",
-            _at_rest_promise_err,
+            "[session-health] at-rest expectation alarm crashed (non-fatal): %s",
+            _at_rest_expectation_err,
+        )
+
+    # === Expectation drift advisory (#2708 Risks 1 & 4) ===
+    # Live PM sessions with live eng children not covered by an open outbound
+    # expectation on the bound Job. Advisory only, operator surface only.
+    try:
+        await _check_expectation_drift_advisory()
+    except Exception as _drift_err:  # pragma: no cover - defensive
+        logger.error(
+            "[session-health] expectation drift advisory crashed (non-fatal): %s",
+            _drift_err,
         )
 
     # === Orphan subprocess reap pass (issue #1218) ===

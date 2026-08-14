@@ -1,4 +1,4 @@
-"""PM Job tools: create / author goal / promise add+remove (Tasks 13-14, #2494).
+"""PM Job tools: create / author goal / expectation add+remove (#2708).
 
 Room scope is enforced AT THE TOOL LAYER, not in the system prompt
 (prompt-level constraints drift — see the teammate-permissions precedent):
@@ -16,10 +16,10 @@ from models.job import Job
 from models.room import room_id as make_room_id
 from tools.job_tool import (
     JobToolError,
-    add_promise,
+    add_expectation,
     author_goal,
     create_job,
-    remove_promise,
+    remove_expectation,
 )
 
 
@@ -64,8 +64,14 @@ class TestRoomScope:
         other_rid = f"test-jobtool-other-{uuid.uuid4().hex[:8]}|telegram:9"
         foreign = Job.mint(other_rid, "someone else's work")
         try:
-            with pytest.raises(JobToolError):
-                add_promise(session.session_id, foreign.job_id, "I'll report back")
+            with pytest.raises(JobToolError, match="not found in your Room"):
+                add_expectation(
+                    session.session_id,
+                    foreign.job_id,
+                    "I'll report back",
+                    direction="inbound",
+                    owner="pm",
+                )
             with pytest.raises(JobToolError):
                 author_goal(session.session_id, foreign.job_id, "hijacked goal")
         finally:
@@ -75,9 +81,15 @@ class TestRoomScope:
         session, _rid = scratch_session
         job = create_job(session.session_id, "Own-room job")
 
-        pid = add_promise(session.session_id, job.job_id, "I'll report back at 5pm")
-        assert pid
-        assert remove_promise(session.session_id, job.job_id, pid) is True
+        eid = add_expectation(
+            session.session_id,
+            job.job_id,
+            "I'll report back at 5pm",
+            direction="inbound",
+            owner="pm",
+        )
+        assert eid
+        assert remove_expectation(session.session_id, job.job_id, eid) is True
 
     def test_author_goal_appends_pm_version(self, scratch_session):
         session, _rid = scratch_session
@@ -87,3 +99,64 @@ class TestRoomScope:
         fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
         assert fresh.current_goal() == "v2 goal, sharper"
         assert len(fresh.goal_versions()) == 2
+
+
+class TestExpectations:
+    def test_outbound_expectation_names_the_lane_that_owes_it(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+
+        add_expectation(
+            session.session_id,
+            job.job_id,
+            "the migration PR",
+            direction="outbound",
+            owner="session/job-expectations",
+        )
+
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        entry = fresh.open_expectations()[0]
+        assert entry["direction"] == "outbound"
+        assert entry["owner"] == "session/job-expectations"
+        assert entry["what"] == "the migration PR"
+        # PM-authored through the tool is never a mechanical placeholder.
+        assert entry["placeholder"] is False
+
+    def test_discharged_expectation_leaves_the_open_set(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "I'll report back", direction="inbound", owner="pm"
+        )
+
+        assert remove_expectation(session.session_id, job.job_id, eid) is True
+
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        assert fresh.open_expectations() == []
+        assert len(fresh.all_expectations()) == 1  # history survives
+
+    def test_unknown_expectation_id_reports_false_not_success(self, scratch_session):
+        """The CLI turns this into an actionable non-zero exit rather than
+        silently claiming a discharge."""
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+
+        assert remove_expectation(session.session_id, job.job_id, "no-such-id") is False
+
+    @pytest.mark.parametrize(
+        ("kwargs", "fragment"),
+        [
+            ({"text": "  ", "direction": "inbound", "owner": "pm"}, "text"),
+            ({"text": "deliver", "direction": "outbound", "owner": " "}, "owner"),
+            ({"text": "deliver", "direction": "sideways", "owner": "pm"}, "direction"),
+        ],
+    )
+    def test_unusable_expectation_is_refused_loudly(self, scratch_session, kwargs, fragment):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+
+        with pytest.raises(JobToolError, match=fragment):
+            add_expectation(session.session_id, job.job_id, **kwargs)
+
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        assert fresh.open_expectations() == []

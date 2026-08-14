@@ -25,7 +25,7 @@ This module contains only pure functions. The SDLC scoping decision
 (``session.is_sdlc``) is enforced at the call site in
 ``agent/output_handler.py::TelegramRelayOutputHandler.send``. This module
 never reads ``session`` directly — callers pass the pre-extracted fields
-(recent_sent_drafts, expectations, session_status) to keep this module
+(recent_sent_drafts, open_questions, session_status) to keep this module
 side-effect-free and trivially testable.
 
 ## Consumers
@@ -96,7 +96,7 @@ def should_suppress(
     draft_text: str,
     draft_artifacts: dict | None,
     recent_sent_drafts: list[dict] | None,
-    expectations: list | None,
+    open_questions: list | None,
     session_status: str | None,
     threshold: float | None = None,
 ) -> SuppressionVerdict:
@@ -109,7 +109,7 @@ def should_suppress(
        empty text — caller may still queue a fallback).
     2. ``recent_sent_drafts`` is ``None`` or empty → ``send`` (no baseline to
        compare against).
-    3. ``expectations`` is non-empty → ``send`` (drafter detected a question for
+    3. ``open_questions`` is non-empty → ``send`` (drafter detected a question for
        the human; the send is intentional).
     4. ``session_status`` is terminal (``"completed"``, ``"failed"``,
        ``"blocked"``) → ``send`` (final message must always deliver).
@@ -132,7 +132,7 @@ def should_suppress(
                              ``None`` is treated as ``{}``.
         recent_sent_drafts:  Session-scoped history of previously sent drafts,
                              each a dict with ``{ts, text, artifacts}``.
-        expectations:        the drafter's ``expectations`` field (MessageDraft).
+        open_questions:      the drafter's ``open_questions`` field (MessageDraft).
                              Non-empty means the agent has a question for the
                              human — always ``send``.
         session_status:      Current ``AgentSession.status`` string.
@@ -157,7 +157,7 @@ def should_suppress(
             draft_text,
             draft_artifacts,
             recent_sent_drafts,
-            expectations,
+            open_questions,
             session_status,
             threshold=threshold,
         )
@@ -172,7 +172,7 @@ def _should_suppress_inner(
     draft_text: str,
     draft_artifacts: dict | None,
     recent_sent_drafts: list[dict] | None,
-    expectations: list | None,
+    open_questions: list | None,
     session_status: str | None,
     *,
     threshold: float | None = None,
@@ -193,8 +193,8 @@ def _should_suppress_inner(
         return SuppressionVerdict(action="send", reason="no_baseline")
 
     # ── Termination condition 3: drafter detected a question for the human ──
-    if expectations:
-        return SuppressionVerdict(action="send", reason="has_expectations")
+    if open_questions:
+        return SuppressionVerdict(action="send", reason="has_open_questions")
 
     # ── Termination condition 4: session is in a terminal status ────────────
     if session_status in _TERMINAL_STATUSES:

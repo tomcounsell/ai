@@ -302,8 +302,8 @@ def _run_guarded_repairs() -> dict:
 
     Room and Job have no other caller, so this sweep is their cadence, and it
     is the cadence their own code assumes: ``Job.repair_indexes()`` closes by
-    calling ``Job.backfill_open_promises_index()``, documented as a *daily*
-    re-derivation of the ``has_open_promises`` flag. ``run_cleanup`` runs on
+    calling ``Job.backfill_open_expectations_index()``, documented as a *daily*
+    re-derivation of the ``has_open_expectations`` flag. ``run_cleanup`` runs on
     the daily ``popoto-index-cleanup`` reflection plus once per worker start.
 
     Both repair methods return ``(quarantined, rebuilt)`` and both take a
