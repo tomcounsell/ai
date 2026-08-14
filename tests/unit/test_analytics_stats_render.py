@@ -10,20 +10,17 @@ here too.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from jinja2 import Environment, FileSystemLoader
 
-from ui.app import register_template_filters
+from ui.app import TEMPLATES_DIR, register_template_filters
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
 
 
 @pytest.fixture
 def env() -> Environment:
-    template_dir = Path(__file__).resolve().parent.parent.parent / "ui" / "templates"
-    e = Environment(loader=FileSystemLoader(str(template_dir)))
+    e = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
     register_template_filters(e)
     return e
 
@@ -67,12 +64,9 @@ def test_sub_cent_cost_renders_as_one_cent_not_zero(env):
     assert "$0.00" not in html
 
 
-def test_no_analytics_renders_empty_state():
+def test_no_analytics_renders_empty_state(env):
     """Falsy `analytics` renders the empty-state message, not a KeyError."""
-    template_dir = Path(__file__).resolve().parent.parent.parent / "ui" / "templates"
-    e = Environment(loader=FileSystemLoader(str(template_dir)))
-    register_template_filters(e)
-    tmpl = e.get_template("_partials/analytics_stats.html")
+    tmpl = env.get_template("_partials/analytics_stats.html")
     html = tmpl.render(analytics=None)
     assert "No analytics data yet." in html
     assert "stats-grid" not in html
