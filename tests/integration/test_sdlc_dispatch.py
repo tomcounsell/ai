@@ -363,3 +363,31 @@ class TestNextSkillCLISubprocess:
         assert proc.returncode in (0, 1), f"Unexpected exit code {proc.returncode}: {proc.stdout}"
         # Pretty format should have at least one newline (indented JSON)
         assert "\n" in proc.stdout, f"Expected indented JSON but got: {proc.stdout!r}"
+
+    def test_run_id_flag_is_accepted_by_argparse(self):
+        """Issue #2766: --run-id is a real CLI flag, not just a decide()
+        keyword. This is the argparse regression surface for the flag --
+        a subprocess invocation with an unrecognized argument exits 2 with
+        argparse's own usage error, never reaching decide() at all."""
+        rc, data = self._run_cli(
+            [
+                "--session-id",
+                "nonexistent-id-xyz-run-id-flag",
+                "--run-id",
+                "some-caller-run-id",
+            ]
+        )
+        assert rc in (0, 1), f"--run-id must be a recognized flag, got exit {rc}: {data}"
+
+    def test_run_id_flag_appears_in_help(self):
+        """--help documents --run-id as a read-only identity assertion."""
+        proc = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc_next_skill", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=subprocess_env(project_root=str(REPO_ROOT)),
+            timeout=15,
+        )
+        assert proc.returncode == 0
+        assert "--run-id" in proc.stdout

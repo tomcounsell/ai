@@ -405,6 +405,7 @@ class TestIssueLockPreCheck:
             "owner_run_id": "foreign-run",
             "owner_session_id": "sdlc-local-4001-other",
             "orphaned_lock": False,
+            "peek_identity": "unresolved",
         }
         resolve_mock.assert_not_called()
         lock_mock.assert_called_once()
@@ -504,6 +505,327 @@ class TestIssueLockPreCheck:
             "row_id": expected.row_id,
             "dispatched": True,
         }
+
+
+class TestSelfLockPeekIdentity:
+    """Issue #2766: a caller-stated ``--run-id`` peeks the issue lock under
+    its own identity directly, never through ``find_session_by_issue`` --
+    so a supervisor can never be told to stand down for a lock it holds
+    itself, regardless of why the session lookup misses it.
+
+    Unit-level cases here use mocks for the branch matrix (terminal status,
+    non-eng session_type, lookup-raises); the demonstrated-red proof lives in
+    ``tests/integration/test_sdlc_session_ensure_integration.py::TestSelfLockPeekIdentityEndToEnd``
+    against a REAL session-ensure + REAL session record, per the plan's
+    Success Criteria (a red produced only by patching
+    ``find_session_by_issue`` proves the mock, not the bug).
+    """
+
+    def test_caller_run_id_bypasses_terminal_session_lookup_miss(self, monkeypatch):
+        """The lock is held under the caller's own run_id; find_session_by_issue
+        would return None (terminal status excluded it) but is never even
+        consulted because --run-id was supplied."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        lookup_mock = MagicMock(return_value=None)  # simulates terminal-status exclusion
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None, owner_run_id="own-run")
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", lookup_mock),
+            patch(
+                "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+            ) as lock_mock,
+            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+        ):
+            sdlc_next_skill.decide(issue_number=5001, run_id="own-run")
+
+        lookup_mock.assert_not_called()
+        lock_mock.assert_called_once_with(5001, "own-run", session_id="", peek=True)
+
+    def test_caller_run_id_bypasses_non_eng_session_lookup_miss(self, monkeypatch):
+        """Same shape, different find_session_by_issue exclusion axis
+        (non-eng session_type) -- still never consulted."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        lookup_mock = MagicMock(return_value=None)  # simulates non-eng exclusion
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None, owner_run_id="own-run")
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", lookup_mock),
+            patch(
+                "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+            ) as lock_mock,
+            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+        ):
+            sdlc_next_skill.decide(issue_number=5002, run_id="own-run")
+
+        lookup_mock.assert_not_called()
+        lock_mock.assert_called_once_with(5002, "own-run", session_id="", peek=True)
+
+    def test_caller_run_id_bypasses_lookup_raising(self, monkeypatch):
+        """find_session_by_issue raising must not matter either -- it is
+        never called when --run-id is supplied."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        lookup_mock = MagicMock(side_effect=RuntimeError("boom"))
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None, owner_run_id="own-run")
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", lookup_mock),
+            patch(
+                "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+            ) as lock_mock,
+            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+        ):
+            result = sdlc_next_skill.decide(issue_number=5003, run_id="own-run")
+
+        lookup_mock.assert_not_called()
+        lock_mock.assert_called_once_with(5003, "own-run", session_id="", peek=True)
+        assert "error" not in result
+
+    def test_no_run_id_still_hits_lookup_and_logs_unresolved(self, monkeypatch, caplog):
+        """No --run-id supplied: unchanged inference path runs, and a raising
+        lookup produces peek_identity == 'unresolved' with a debug log, not a
+        silent swallow."""
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+        from models.session_lifecycle import IssueLockResult
+
+        lookup_mock = MagicMock(side_effect=RuntimeError("boom"))
+        lock_result = IssueLockResult(
+            acquired=False, owner_session_id="other", owner_run_id="foreign-run"
+        )
+        with (
+            caplog.at_level(logging.DEBUG, logger="tools.sdlc_next_skill"),
+            patch("tools._sdlc_utils.find_session_by_issue", lookup_mock),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=lock_result),
+        ):
+            result = sdlc_next_skill.decide(issue_number=5004)
+
+        lookup_mock.assert_called_once()
+        assert result["blocked"] is True
+        assert result["peek_identity"] == "unresolved"
+
+    def test_foreign_run_id_against_live_lock_still_blocks(self, monkeypatch):
+        """Anti-regression: a supplied --run-id that does NOT match the live
+        lock owner must still block. The flag changes only which identity is
+        compared, never whether the comparison happens -- it is not a
+        bypass."""
+        from models.session_lifecycle import IssueLockResult
+
+        resolve_mock = MagicMock()
+        monkeypatch.setattr(sdlc_next_skill, "_resolve_enriched", resolve_mock)
+
+        lock_result = IssueLockResult(
+            acquired=False,
+            owner_session_id="other-session",
+            owner_run_id="rival-run",
+            orphaned_lock=False,
+        )
+        with patch(
+            "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+        ) as lock_mock:
+            result = sdlc_next_skill.decide(issue_number=5005, run_id="my-run")
+
+        resolve_mock.assert_not_called()
+        lock_mock.assert_called_once_with(5005, "my-run", session_id="", peek=True)
+        assert result["blocked"] is True
+        assert result["reason"] == "ISSUE_LOCKED"
+        assert result["owner_run_id"] == "rival-run"
+        assert result["peek_identity"] == "caller"
+
+    def test_stale_self_run_id_surfaces_session_mirror_diagnostic(self, monkeypatch):
+        """Race 4: caller asserts run_id X, the live lock is held by Y, and
+        the session mirror also reads Y (the caller's own successor id after
+        an orphaned-lock re-ensure it forgot to rebind to). The block is
+        correct and stays; session_mirror_run_id is added as a diagnostic
+        only, never used to override it."""
+        from models.session_lifecycle import IssueLockResult
+
+        lock_result = IssueLockResult(
+            acquired=False, owner_session_id="sess-y", owner_run_id="Y", orphaned_lock=False
+        )
+        mirror_session = MagicMock()
+        mirror_session.active_run_id = "Y"
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", return_value=lock_result),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=mirror_session),
+        ):
+            result = sdlc_next_skill.decide(issue_number=5006, run_id="X")
+
+        assert result["blocked"] is True
+        assert result["peek_identity"] == "caller"
+        assert result["session_mirror_run_id"] == "Y"
+
+    def test_stale_self_diagnostic_lookup_failure_leaves_key_absent(self, monkeypatch):
+        """The session-mirror diagnostic lookup on the --run-id-supplied
+        blocked path must never turn a failure into an error -- a raise
+        there just leaves the key absent, block intact."""
+        from models.session_lifecycle import IssueLockResult
+
+        lock_result = IssueLockResult(
+            acquired=False, owner_session_id="sess-y", owner_run_id="Y", orphaned_lock=False
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", return_value=lock_result),
+            patch(
+                "tools._sdlc_utils.find_session_by_issue",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            result = sdlc_next_skill.decide(issue_number=5007, run_id="X")
+
+        assert result["blocked"] is True
+        assert "session_mirror_run_id" not in result
+        assert "error" not in result
+
+    def test_empty_and_whitespace_run_id_behave_as_omitted(self, monkeypatch):
+        """--run-id "" or whitespace-only must fall through to the inference
+        path exactly as if omitted -- never compared as an identity."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None)
+        for candidate in ("", "   "):
+            with (
+                patch("tools._sdlc_utils.find_session_by_issue", return_value=None) as lookup_mock,
+                patch(
+                    "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+                ) as lock_mock,
+                patch.object(
+                    sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}
+                ),
+            ):
+                sdlc_next_skill.decide(issue_number=5008, run_id=candidate)
+
+            lookup_mock.assert_called_once()
+            lock_mock.assert_called_once_with(5008, None, session_id="", peek=True)
+
+    def test_no_lock_present_with_run_id_proceeds_to_guards(self, monkeypatch):
+        """No lock exists at all + --run-id supplied -> acquired=True (a free
+        lock always peeks acquired), proceeds past the pre-check with no
+        block."""
+        from agent.sdlc_router import Dispatch, decide_next_dispatch
+        from models.session_lifecycle import IssueLockResult
+
+        states = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        meta: dict = {}
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        expected = decide_next_dispatch(states, meta, {})
+        assert isinstance(expected, Dispatch)
+
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None)
+        with patch("models.session_lifecycle.touch_issue_lock", return_value=lock_result):
+            result = sdlc_next_skill.decide(issue_number=5009, run_id="my-run")
+
+        assert result.get("blocked") is not True
+        assert result["dispatched"] is True
+
+    def test_peek_identity_absent_on_dispatch_payload(self, monkeypatch):
+        """peek_identity is a diagnostic on ISSUE_LOCKED payloads only --
+        never on a dispatch result (no payload pollution)."""
+        from agent.sdlc_router import Dispatch, decide_next_dispatch
+        from models.session_lifecycle import IssueLockResult
+
+        states = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        meta: dict = {}
+
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+        expected = decide_next_dispatch(states, meta, {})
+        assert isinstance(expected, Dispatch)
+
+        lock_result = IssueLockResult(acquired=True, owner_session_id=None)
+        with patch("models.session_lifecycle.touch_issue_lock", return_value=lock_result):
+            result = sdlc_next_skill.decide(issue_number=5010, run_id="my-run")
+
+        assert "peek_identity" not in result
 
 
 class TestStageArtifactVerification:

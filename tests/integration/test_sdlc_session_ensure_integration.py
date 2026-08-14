@@ -499,3 +499,151 @@ class TestStageArtifactVerificationGate:
         assert result.get("dispatched") is True, result
         assert result["skill"] == "/do-merge", result
         assert result["row_id"] == "10", result
+
+
+class TestSelfLockPeekIdentityEndToEnd:
+    """Issue #2766: a supervisor that mints its own issue lock via a real
+    ``session-ensure`` must never be told to stand down for that same lock on
+    its first ``next-skill`` call, even when its session record is invisible
+    to ``find_session_by_issue`` (terminal status, or non-``eng``
+    ``session_type``).
+
+    This is the demonstrated-red proof named in the plan's Success Criteria:
+    a red produced only by ``patch("tools._sdlc_utils.find_session_by_issue",
+    return_value=None)`` proves the mock, not the bug. These tests instead
+    drive a REAL ``ensure_session`` (real Redis lock, real session record),
+    then mutate the real record so the real, unmodified
+    ``find_session_by_issue`` filters legitimately exclude it -- reproducing
+    the two structurally ordinary conditions named in the plan's Problem
+    section, not a stubbed lookup.
+    """
+
+    @pytest.fixture
+    def cleanup_lock(self):
+        from models.session_lifecycle import release_issue_lock
+
+        issue_numbers: list[int] = []
+
+        def _register(n: int) -> int:
+            issue_numbers.append(n)
+            return n
+
+        yield _register
+        for n in issue_numbers:
+            try:
+                release_issue_lock(n, None)
+            except Exception:
+                pass
+
+    def _mint_self_lock(self, monkeypatch, cleanup_test_sessions, cleanup_lock, issue_number):
+        """Real session-ensure: mints a run_id and acquires the real issue
+        lock under it. Returns (session_id, run_id)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        cleanup_lock(issue_number)
+        session_id = f"tg_valor_test_selflock_{issue_number}"
+
+        bridge_session = AgentSession.create_eng(
+            session_id=session_id,
+            project_key=TEST_PROJECT_KEY,
+            working_dir="/tmp",
+            chat_id=f"test_chat_selflock_{issue_number}",
+            telegram_message_id=1,
+            message_text=f"SDLC issue {issue_number}",
+            sender_name="IntegrationTest",
+        )
+        from models.session_lifecycle import transition_status
+
+        transition_status(bridge_session, "running", "integration test setup")
+
+        monkeypatch.setenv("VALOR_SESSION_ID", session_id)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        result = ensure_session(issue_number=issue_number)
+        assert result["session_id"] == session_id
+        run_id = result["run_id"]
+        assert run_id
+        return session_id, run_id
+
+    def test_self_lock_survives_terminal_session_with_run_id(
+        self, monkeypatch, cleanup_test_sessions, cleanup_lock
+    ):
+        """Session goes terminal (a stall advisory / reaper race, the plan's
+        Race 2) while the lock the same run minted is still live. Without
+        ``--run-id``, the caller has no way to avoid the self-block. With
+        ``--run-id``, the peek succeeds under the caller's own stated
+        identity, never consulting the session lookup at all."""
+        from tools._sdlc_utils import find_session_by_issue
+        from tools import sdlc_next_skill
+
+        issue_number = 2_100_000 + random.randint(0, 999)
+        session_id, run_id = self._mint_self_lock(
+            monkeypatch, cleanup_test_sessions, cleanup_lock, issue_number
+        )
+
+        session = next(iter(AgentSession.query.filter(session_id=session_id)))
+        session.status = "completed"
+        session.save()
+
+        # The #1915 terminal filter is doing exactly its job here -- the
+        # session is genuinely invisible to the inference path.
+        assert find_session_by_issue(issue_number) is None
+
+        # Existing inference-path behavior (preserved, unchanged): with no
+        # stated identity the caller self-blocks on its own lock.
+        blocked = sdlc_next_skill.decide(issue_number=issue_number)
+        assert blocked.get("blocked") is True, blocked
+        assert blocked.get("reason") == "ISSUE_LOCKED", blocked
+        assert blocked.get("owner_run_id") == run_id, blocked
+        assert blocked.get("orphaned_lock") is False, blocked
+
+        # The fix: a caller-stated --run-id peeks under its own identity and
+        # never self-blocks.
+        result = sdlc_next_skill.decide(issue_number=issue_number, run_id=run_id)
+        assert result.get("blocked") is not True, result
+
+    def test_self_lock_survives_non_eng_session_with_run_id(
+        self, monkeypatch, cleanup_test_sessions, cleanup_lock
+    ):
+        """Session's type flips away from ``eng`` while the lock the same run
+        minted is still live. Same self-block/fix shape as the terminal
+        case, over the other ``find_session_by_issue`` exclusion axis.
+
+        ``session_type`` is a Popoto KeyField, and in-place KeyField mutation
+        (``save(migrate_key=True)``) leaves the pre-migration key behind
+        instead of removing it (a separate, out-of-scope Popoto behavior) --
+        so this simulates the flip by deleting the eng record and recreating
+        an equivalent non-eng one under the same session_id/issue_url. The
+        real lock (minted by the real ``ensure_session`` call above) is left
+        untouched throughout."""
+        from tools._sdlc_utils import find_session_by_issue
+        from tools import sdlc_next_skill
+
+        issue_number = 2_101_000 + random.randint(0, 999)
+        session_id, run_id = self._mint_self_lock(
+            monkeypatch, cleanup_test_sessions, cleanup_lock, issue_number
+        )
+
+        session = next(iter(AgentSession.query.filter(session_id=session_id)))
+        issue_url = session.issue_url
+        chat_id = session.chat_id
+        session.delete()
+        AgentSession(
+            session_id=session_id,
+            project_key=TEST_PROJECT_KEY,
+            session_type="dev",
+            chat_id=chat_id,
+            issue_url=issue_url,
+            status="running",
+        ).save()
+
+        assert find_session_by_issue(issue_number) is None
+
+        blocked = sdlc_next_skill.decide(issue_number=issue_number)
+        assert blocked.get("blocked") is True, blocked
+        assert blocked.get("reason") == "ISSUE_LOCKED", blocked
+        assert blocked.get("owner_run_id") == run_id, blocked
+        assert blocked.get("orphaned_lock") is False, blocked
+
+        result = sdlc_next_skill.decide(issue_number=issue_number, run_id=run_id)
+        assert result.get("blocked") is not True, result

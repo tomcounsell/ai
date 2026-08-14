@@ -491,17 +491,39 @@ def decide(
     issue_number: int | None = None,
     session_id: str | None = None,
     proposed_skill: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Run the dispatch algorithm and return a JSON-serialisable result dict.
 
     This is the programmatic interface; CLI consumers go through ``main()``.
+
+    Args:
+        issue_number: GitHub issue number to look up the session/lock for.
+        session_id: Explicit AgentSession id (overrides issue-number lookup
+            for the enriched-context resolution; unrelated to the lock peek).
+        proposed_skill: The skill the LLM was about to invoke.
+        run_id: Optional read-only identity assertion (issue #2766). When
+            supplied, it IS the peek identity for the issue-lock pre-check --
+            ``find_session_by_issue`` is never consulted, so a caller can
+            never be told to stand down for a lock it holds itself just
+            because its session record is momentarily invisible to that
+            lookup (terminal status, non-``eng`` session_type, or a lookup
+            exception). This is never minted, adopted, or written anywhere;
+            it changes only *which identity ``touch_issue_lock`` compares
+            against*, never *whether* the peek runs or whether it can
+            acquire/renew (it never does -- ``peek=True`` on every path).
+            When omitted, the pre-#2766 inference path
+            (``find_session_by_issue(...).active_run_id``) runs unchanged.
 
     Returns:
         On ``Dispatch``: ``{"skill": "/do-X", "reason": "...", "row_id": "...",
         "dispatched": True}``
         On ``Blocked``: ``{"blocked": True, "reason": "...", "guard_id": "..."}``
         On issue-lock contention: ``{"blocked": True, "reason": "ISSUE_LOCKED",
-        "guard_id": "ISSUE_LOCK", "owner_session_id": "..."}``
+        "guard_id": "ISSUE_LOCK", "owner_session_id": "...", "peek_identity":
+        "caller" | "session_mirror" | "unresolved"}`` (and, only on the
+        caller-supplied blocked path, ``"session_mirror_run_id"``:
+        diagnostics only, never used to override the block).
         On error: ``{"error": "...", "dispatched": False}``
     """
     try:
@@ -521,35 +543,82 @@ def decide(
         if issue_number:
             from models.session_lifecycle import touch_issue_lock
 
-            # Run-identity peek (issue #2003, minimal call-site update): this
-            # read-only pre-check compares the lock against the CURRENT
-            # legitimate run's identity, read back from the issue session's
-            # active_run_id mirror (read-only -- peek never mutates or adopts).
-            # When they match, the lock belongs to the run driving this
-            # pipeline and next-skill proceeds; a mismatch (crash window /
-            # foreign takeover mid-write) blocks with the owner surfaced.
-            peek_run_id = None
-            try:
-                from tools._sdlc_utils import find_session_by_issue
-
-                issue_session = find_session_by_issue(issue_number)
-                if issue_session is not None:
-                    peek_run_id = getattr(issue_session, "active_run_id", None)
-            except Exception:
+            # Run-identity peek (issue #2003, minimal call-site update; issue
+            # #2766, caller-stated identity): this read-only pre-check
+            # compares the lock against the CURRENT legitimate run's
+            # identity. When a caller states its own identity via
+            # ``run_id``, that assertion IS the peek identity, full stop --
+            # find_session_by_issue is never consulted, so a caller can
+            # never be told to stand down for its own lock just because the
+            # session lookup happens to miss (terminal status, non-eng
+            # session_type, or a lookup exception -- see #2766). Omitting
+            # ``run_id`` preserves the original inference path unchanged:
+            # read back the issue session's active_run_id mirror (still
+            # read-only -- peek never mutates or adopts). When the compared
+            # identity matches the lock's owner, the lock belongs to the run
+            # driving this pipeline and next-skill proceeds; a mismatch
+            # (crash window / foreign takeover mid-write, or a genuine rival)
+            # blocks with the owner surfaced.
+            #
+            # The terminal filter and the eng-only filter inside
+            # find_session_by_issue (#1915) are never widened and never
+            # opted out of at this call site -- the peek argument passed to
+            # touch_issue_lock is never inverted either. Widening either
+            # would trade this bug for a #1915 regression; see the plan's
+            # Rabbit Holes section.
+            stated_run_id = (run_id or "").strip() or None
+            peek_identity: str
+            if stated_run_id:
+                peek_run_id = stated_run_id
+                peek_identity = "caller"
+            else:
                 peek_run_id = None
+                try:
+                    from tools._sdlc_utils import find_session_by_issue
+
+                    issue_session = find_session_by_issue(issue_number)
+                    if issue_session is not None:
+                        peek_run_id = getattr(issue_session, "active_run_id", None)
+                    peek_identity = "session_mirror" if peek_run_id else "unresolved"
+                except Exception as e:
+                    peek_run_id = None
+                    peek_identity = "unresolved"
+                    logger.debug(f"next-skill peek: session lookup failed ({e})")
 
             lock_result = touch_issue_lock(
                 issue_number, peek_run_id, session_id=session_id or "", peek=True
             )
             if not lock_result.acquired:
-                return {
+                blocked_payload = {
                     "blocked": True,
                     "reason": "ISSUE_LOCKED",
                     "guard_id": "ISSUE_LOCK",
                     "owner_run_id": lock_result.owner_run_id,
                     "owner_session_id": lock_result.owner_session_id,
                     "orphaned_lock": lock_result.orphaned_lock,
+                    "peek_identity": peek_identity,
                 }
+                if stated_run_id:
+                    # Stale-self diagnostic (Race 4): a caller-supplied
+                    # run_id that does not match the live lock might be this
+                    # same supervisor's OWN successor id after an
+                    # orphaned-lock re-ensure it forgot to rebind to, not a
+                    # rival. Surface what the session mirror currently says
+                    # so the supervisor's owned_run_ids self-identity check
+                    # has the data to tell the two apart. Diagnostic only --
+                    # never overrides the block, and a failure here must
+                    # never turn the block into an error.
+                    try:
+                        from tools._sdlc_utils import find_session_by_issue
+
+                        mirror_session = find_session_by_issue(issue_number)
+                        if mirror_session is not None:
+                            mirror_run_id = getattr(mirror_session, "active_run_id", None)
+                            if mirror_run_id:
+                                blocked_payload["session_mirror_run_id"] = mirror_run_id
+                    except Exception as e:
+                        logger.debug(f"next-skill peek: session-mirror diagnostic failed ({e})")
+                return blocked_payload
 
         enriched = _resolve_enriched(issue_number, session_id)
         stage_states = enriched.get("stages") or {}
@@ -634,6 +703,19 @@ def main(argv: list[str] | None = None) -> int:
         help="The skill the LLM was about to invoke (passed to G3 guard for PR-lock detection).",
     )
     parser.add_argument(
+        "--run-id",
+        metavar="ID",
+        default=None,
+        help=(
+            "Optional read-only identity assertion (issue #2766): the caller's own "
+            "run_id, used ONLY to peek the issue lock under the caller's own stated "
+            "identity so a run is never told to stand down for its own lock. "
+            "next-skill never mints, adopts, or renews a run_id with this value -- "
+            "it changes only which identity is compared, never whether the peek "
+            "runs. Omit to preserve the prior session-lookup inference path."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=["json", "pretty"],
         default="json",
@@ -657,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
             issue_number=args.issue_number,
             session_id=args.session_id,
             proposed_skill=args.proposed_skill,
+            run_id=args.run_id,
         )
 
     if args.format == "pretty":
