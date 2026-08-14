@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2755
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-14T02:52:00Z
 ---
 
 # sdlc_progress lane discovery: read recorded identity, not branch shape
