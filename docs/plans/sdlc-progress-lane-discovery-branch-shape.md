@@ -196,23 +196,29 @@ The change is confined to steps 3 and 5. Steps 6-8 are untouched, which is the p
 
 ### Flow
 
-**Reflection tick** → fetch open `session/*` PRs (one `gh` call) → **per PR**: strip `session/` for the slug → **resolver ladder** (ledger by PR → ledger by slug → PR closing ref → slug shape) → *resolved* → existing gates (issue-open, stale, live, escalated, budget, cooldown) → **action ladder** (steer / resume / create) → counts + findings
-                                                                                                                                          ↘ *unresolved or ambiguous* → `gate-unknown` finding → **next PR**
+**Reflection tick** → one repo-scoped ledger enumeration → `{pr_number: issue_number}` map → fetch open `session/*` PRs (one `gh` call, explicit `--limit`) → **per PR**: strip `session/` for the slug → staleness gate (`_last_commit`) → **resolver ladder** (ledger by PR → PR closing ref → slug shape) → *resolved* → remaining gates (issue-open, live, escalated, budget) → cap + target-dedupe check → cooldown claim → **action ladder** (steer / resume / create) → counts + findings
+    ↘ *no local ref* → `gate-unknown: branch-not-fetched` → next PR
+    ↘ *unresolved / ambiguous* → `gate-unknown` finding → next PR
+    ↘ *degraded (a rung errored)* → `gate-unknown: ledger-degraded`, create rung suppressed
 
 ### Technical Approach
 
 Corrected line references (post-`e50eba258`):
 
 - Delete `_SDLC_BRANCH_RE` at **`:118`** along with its comment block at `:116-117`.
-- Rewrite `_list_open_sdlc_prs` (**`:217-236`**) as `_list_open_lane_prs`: add `closingIssuesReferences` to the `--json` field list, replace the regex predicate at `:235` with a `session/` namespace test expressed through the existing `_slug_from_branch` helper (a non-`None` return *is* the membership test — do not introduce a second place that knows the prefix).
-- Keep `_slug_from_branch` (**`:256-260`**) unchanged; it is already shape-agnostic and it is the module's single owner of the prefix.
-- Demote `_issue_number_from_slug` (**`:263-266`**) to ladder rung 4; keep the body, replace the docstring with one that says it is the last resort and why.
-- Add `_resolve_lane_issue(pr, slug, target_repo)` next to it, with a docstring modeled on `merge_predicate._resolve_tracked_issue`: the rung order, the unique-match rule, the ambiguity outcome, and the reason rung 4 is last.
-- Rewrite the discovery loop at **`:811-819`** to call the corpus function and the resolver, and to append a finding on the unresolved/ambiguous path instead of a bare `continue`.
-- Guard every ledger read with a broad `except Exception` that logs and degrades to the next rung, matching `merge_predicate`'s Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`. A Redis outage must degrade this reflection, never crash it.
+- Rewrite `_list_open_sdlc_prs` (**`:217-236`**) as `_list_open_lane_prs`: add `closingIssuesReferences` (including each reference's **repository**, not just its `number`) to the `--json` field list, pass an explicit `--limit` (the call currently relies on `gh`'s default of 30, which was harmless when the regex discarded almost everything and is now a silent truncation of the entire discovery surface), and replace the regex predicate at `:235` with a `session/` namespace test expressed through the existing `_slug_from_branch` helper. The membership test is a **non-empty** return — `_slug_from_branch("session/")` returns `""`, which is non-`None` but falsy, and admitting it would format every downstream Redis key with an empty slug so two such lanes would share an escalation key. Do not introduce a second place that knows the prefix.
+- Tighten `_slug_from_branch` (**`:256-260`**) to return `None` on a blank remainder, mirroring `tools/lane_identity.py::_nonempty` (`:106-115`), and rewrite its docstring — it currently reads "Return 'sdlc-<N>' for 'session/sdlc-<N>', else None", which after this change is the most misleading line in the file. It remains the module's single owner of the prefix.
+- Demote `_issue_number_from_slug` (**`:263-266`**) to the ladder's last rung; keep the body, replace the docstring with one that says it is the last resort and why. **Paraphrase** what it replaced ("the old branch-shape filter") — do not name the deleted constant, or the anti-criterion greps in the Verification table will trip on this very docstring.
+- Add `_resolve_lane_issue(pr, slug, target_repo, ledger_map)` next to it, with a docstring modeled on `merge_predicate._resolve_tracked_issue`: the rung order, the unique-match rule, the repo-match rule on the closing reference, the ambiguity outcome, the declined-vs-errored distinction, and the reason the deriving rung is last.
+- Hoist a single repo-scoped `PipelineLedger` enumeration to the top of `_check_project_stalls`, building `{pr_number: issue_number}` for `target_repo` (skipping records whose `issue_number` is `None`, matching `merge_predicate.py:349-351`). Import `PipelineLedger` **lazily inside the function under a broad `except Exception`**, matching `reflections/sdlc_upvote_lanes.py:315` and `merge_predicate`'s Guard 1 — a module-level import lets a Popoto client-init failure break module load for the whole reflection.
+- Move the staleness gate (`_last_commit`) ahead of identity resolution in the discovery loop, and give its `commit is None` skip (**`:829-831`**) a `gate-unknown: branch-not-fetched {slug}` finding instead of a silent `continue`.
+- Rewrite the discovery loop at **`:811-819`** to call the corpus function and the resolver, and to append findings on the unresolved / ambiguous / degraded paths instead of a bare `continue`.
+- Guard every ledger read with a broad `except Exception` that logs at `warning` with the rung name and slug, matching `merge_predicate`'s Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`. A Redis outage must degrade this reflection, never crash it — and a *degraded* resolution suppresses the create rung (see Key Elements).
 - Rewrite the stale comment at **`:762-770`**.
+- Update the module docstring, which names the old filter twice and load-bearingly (**`:5`**, "inspects open SDLC PRs (`session/sdlc-<N>`)", and **`:10-11`**, gate "1-4 branch shape"), and add `SDLC_STALL_ACTIONS_MAX_PER_TICK` to the Configuration block at **`:53-63`**. These are assertions, not conditionals.
+- Update the summary string at **`:948-952`** ("N SDLC PR(s) inspected"): `len(prs)` now counts all session lanes including unresolvable ones, and this is the line a human reads in the reflection report.
 
-Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-branch-set, as the issue's Desired Outcome sketched. spike-1 shows that design resolves 1 of 5 live lanes; the ladder resolves 5 of 5 at lower cost (rung 3 is free — the data arrives in the corpus call). Rung 2 preserves the issue's intent as the ledger population matures, and becomes the dominant rung over time without further work.
+Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-branch-set, as the issue's Desired Outcome sketched. spike-1 shows that design resolves 1 of the live lanes; the ladder resolves all of them at lower cost (the closing-reference rung is free — the data arrives in the corpus call). See Key Elements for why ledger-by-recorded-slug is cut entirely rather than kept as a maturing rung.
 
 ## Failure Path Test Strategy
 
@@ -221,10 +227,10 @@ Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-
 - [ ] The existing `_run_gh` handlers (`FileNotFoundError`, `TimeoutExpired`, broad) are unchanged and already covered by `test_gh_pr_list_filenotfound_returns_empty`; that test is retargeted to the renamed function.
 
 ### Empty/Invalid Input Handling
-- [ ] `closingIssuesReferences` absent, `None`, or `[]` → rung 3 yields nothing and the ladder continues to rung 4. Tested for all three shapes; `gh` omits the key entirely on some payload shapes, so `pr.get(...) or []` is the required idiom.
+- [ ] `closingIssuesReferences` absent, `None`, or `[]` → the closing-reference rung yields nothing and the ladder continues to the deriving rung. `gh` omits the key entirely on some payload shapes, so `pr.get(...) or []` is the required idiom. **Parametrized into one test** — three tests for one idiom is over-testing.
 - [ ] `headRefName` empty or `None` → `_slug_from_branch` returns `None` → PR excluded from the corpus. Tested.
 - [ ] A `session/` branch with an empty remainder (`"session/"`) → slug is `""` → excluded from the corpus, not passed to the resolver with an empty identity.
-- [ ] `target_repo is None` → rungs 1-2 skipped without an unscoped query. Tested by asserting the ledger query is never invoked.
+- [ ] `target_repo is None` → both read-based rungs skipped without an unscoped query. Tested by asserting the ledger query is never invoked and that a closing reference is not trusted.
 
 ### Error State Rendering
 - [ ] Unresolved and ambiguous lanes surface as `gate-unknown: issue-unresolved {slug}` / `gate-unknown: issue-ambiguous {slug}` in the returned `findings`, and are asserted in tests. This is the user-visible failure path: the reflection's finding list is what a human reads.
