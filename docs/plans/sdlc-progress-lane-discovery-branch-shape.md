@@ -61,7 +61,7 @@ tick reports `gate-unknown` and declines to act — it never guesses.
 
 ## Freshness Check
 
-**Baseline commit:** `34ab8da2f` (worktree-local; not reachable from `main` — the main-reachable ancestor is `e50eba258`, the last code commit touching the referenced files) (working tree clean; `e50eba258` is the last code commit touching the referenced files)
+**Baseline commit:** `34ab8da2f` (worktree-local, working tree clean; not reachable from `main` — the main-reachable ancestor is `e50eba258`, the last code commit touching the referenced files)
 **Issue filed at:** 2026-08-13T05:18:28Z
 **Disposition:** Minor drift
 
@@ -151,7 +151,7 @@ No relevant external findings — proceeding with codebase context and training 
 3. **Corpus fetch**: `_list_open_lane_prs(cwd)` runs one `gh pr list` and returns open non-draft PRs whose head is in the `session/` namespace, each carrying `number`, `headRefName`, `isDraft`, `closingIssuesReferences`.
 4. **Slug**: `_slug_from_branch(branch)` strips `session/` — unchanged, already shape-agnostic.
 5. **Issue resolution** (new): `_resolve_lane_issue(pr, slug, target_repo, ledger_map)` walks the three-rung issue resolution ladder and returns `(issue_number | None, reason)`. The ledger rung reads a map built once per tick; the closing-reference rung reads the payload already in hand; the last rung derives from the slug. Resolution runs *after* the staleness gate, so a fresh healthy lane never pays for it.
-6. **Gates**: unchanged — issue-open (`_issue_is_open`), staleness (`_last_commit` + threshold), liveness (`_lane_is_live`), escalation-once (`_escalation_exists`), attempt budget (`_attempts_count`), action cooldown (`_action_cooldown_set`).
+6. **Gates**: same gates, reordered — staleness (`_last_commit` + threshold) now runs before resolution, then issue-open (`_issue_is_open`) moves below the ladder because it consumes the resolved number, then liveness (`_lane_is_live`), escalation-once (`_escalation_exists`), attempt budget (`_attempts_count`), and finally the action cooldown claim (`_action_cooldown_set`), which now sits below rung selection and every same-tick brake.
 7. **Action**: unchanged — `_pick_steer_target` then `_attempt_action` (steer / resume / create), with `adopt_lane_slug(issue_number, slug, target_repo)` on the create rung (`:716`).
 8. **Output**: `findings` list and `counts` dict returned to the reflection runner; escalations reach a human via `_send_alert`.
 
@@ -180,7 +180,7 @@ The change is confined to steps 3 and 5. Steps 6-8 are untouched, which is the p
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `PipelineLedger.slug` exists | `python -c "from agent.pipeline_ledger import PipelineLedger; assert hasattr(PipelineLedger, 'slug')"` | #2735 substrate this plan reads |
-| `gh` supports `closingIssuesReferences` on `pr list` | `gh pr list --state open --limit 1 --json number,closingIssuesReferences` | Resolver rung 3 |
+| `gh` supports `closingIssuesReferences` on `pr list` | `gh pr list --state open --limit 1 --json number,closingIssuesReferences` | Resolver rung 2 |
 | Redis reachable for ledger reads | `python -c "from agent.pipeline_ledger import PipelineLedger; list(PipelineLedger.query.filter(target_repo='tomcounsell/ai'))"` | The per-tick ledger map. Note this proves reachability only: `target_repo` is an unindexed plain `Field`, so Popoto loads every key and filters in Python — the call is a full enumeration, not a scoped read. |
 
 ## Solution
@@ -205,7 +205,7 @@ The change is confined to steps 3 and 5. Steps 6-8 are untouched, which is the p
 
 ### Flow
 
-**Reflection tick** → one repo-scoped ledger enumeration → `{pr_number: issue_number}` map → fetch open `session/*` PRs (one `gh` call, explicit `--limit`) → **per PR**: strip `session/` for the slug → staleness gate (`_last_commit`) → **resolver ladder** (ledger by PR → PR closing ref → slug shape) → *resolved* → remaining gates (issue-open, live, escalated, budget) → cap + target-dedupe check → cooldown claim → **action ladder** (steer / resume / create) → counts + findings
+**Reflection tick** → one repo-scoped ledger enumeration → `{pr_number: set[int]}` map → fetch open `session/*` PRs (one `gh` call, explicit `--limit`) → **per PR**: strip `session/` for the slug → staleness gate (`_last_commit`) → **resolver ladder** (ledger by PR → PR closing ref → slug shape) → *resolved* → remaining gates (issue-open, live, escalated, budget) → cap + target-dedupe check → cooldown claim → **action ladder** (steer / resume / create) → counts + findings
     ↘ *no local ref* → `gate-unknown: branch-not-fetched` → next PR
     ↘ *unresolved / ambiguous* → `gate-unknown` finding → next PR
     ↘ *degraded (a rung errored)* → `gate-unknown: ledger-degraded`, create rung suppressed
@@ -426,9 +426,9 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
 - Delete `_SDLC_BRANCH_RE` and its comment block (`:116-118`).
-- Rename `_list_open_sdlc_prs` → `_list_open_lane_prs`; add `closingIssuesReferences` **including each reference's repository** to the `--json` field list; pass an explicit `--limit`.
+- Rename `_list_open_sdlc_prs` → `_list_open_lane_prs`; add `closingIssuesReferences` to the `--json` field list and derive each reference's repository from whatever object shape `gh` emits, per spike-6 (`repository` key, else parse `url`, else restrict the rung). `gh --json` selects **top-level fields only** — a subfield cannot be requested. Pass an explicit `--limit`.
 - Express the namespace test through `_slug_from_branch` returning a **non-empty** slug, and tighten that helper to return `None` on a blank remainder. Do not add a second site that knows the `session/` prefix.
-- Hoist one repo-scoped `PipelineLedger` enumeration to the top of `_check_project_stalls` into a `{pr_number: issue_number}` map, skipping records with a `None` `issue_number`. Import `PipelineLedger` lazily inside the function under a broad `except Exception`.
+- Hoist one repo-scoped `PipelineLedger` enumeration to the top of `_check_project_stalls` into a `{pr_number: set[int]}` map, skipping records with a `None` `issue_number`. A second record on the same `pr_number` is rung 1's ambiguity outcome, never an overwrite. Import `PipelineLedger` lazily inside the function under a broad `except Exception`.
 - Add `_resolve_lane_issue(pr, slug, target_repo, ledger_map) -> tuple[int | None, str]` implementing the three rungs in order, modeled on `tools/merge_predicate.py::_resolve_tracked_issue` (`:355-440`).
 - The closing-reference rung requires a single distinct reference **whose repository equals `target_repo`**. Skip both the ledger rung and the closing-reference rung when `target_repo` is `None` — never issue an unscoped query, never trust an unmatchable reference.
 - Two-or-more candidates at any rung returns `(None, "ambiguous")` and does not fall through.
@@ -447,7 +447,7 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 - **Agent Type**: builder
 - **Parallel**: false
 - **Hoist `_pick_steer_target` (`:891`) above `_action_cooldown_set` (`:887`)** — the dedupe needs the target `session_id` and the degraded-create suppression needs `kind`, and neither is known until selection runs.
-- Delete the now-dead `_action_cooldown_release` calls at `:894` and `:898`; rewrite `_action_cooldown_release`'s docstring (`:350-360`) and the module docstring's ladder ordering (`:20-30`) so neither still claims the cooldown is taken before rung selection.
+- Delete the two now-dead **pre-dispatch** `_action_cooldown_release` calls at `:894` and `:898`. The **post-dispatch** releases at `:929` (benign race) and `:935` (declined rung) stay, and so does the function itself — there are four call sites in the file, not two; rewrite `_action_cooldown_release`'s docstring (`:350-360`) and the module docstring's ladder ordering (`:20-30`) so neither still claims the cooldown is taken before rung selection.
 - Add the per-tick **target dedupe**: record each dispatched `session_id`; a later lane resolving to a used target defers with an `action-cap:` finding. This is the primary guard.
 - Add `_DEFAULT_ACTIONS_MAX_PER_TICK` to the thresholds block with the module's grain-of-salt comment, plus `_actions_max_per_tick()` reading `SDLC_STALL_ACTIONS_MAX_PER_TICK` via `_env_float`.
 - Count steer + resume + create against the cap, emitting `action-cap: {slug} deferred to next tick`. **Check the dedupe, the cap, the create brake, and the degraded-create suppression all before `_action_cooldown_set`** — deferring after the claim would make the lane wait an hour rather than a tick, and would make the finding text false.
