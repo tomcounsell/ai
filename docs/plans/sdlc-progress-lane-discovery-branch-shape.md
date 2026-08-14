@@ -40,6 +40,15 @@ is not degraded — it is presently blind to the entire lane population. And it 
 silent about it: no lane is reported missing, because a lane that never enters the
 corpus is never counted.
 
+**Census caveat (added at critique, 2026-08-14).** This table is a snapshot and has
+already decayed: #2695 and #2683 merged overnight (`0f070970b`, `fb00b8542`), and
+#2685 is a draft, which the retained draft filter (`:234`) excludes. The count that
+sizes the burst mitigation is therefore volatile by nature. The mitigation is
+justified **structurally** — a detector with no track record on a population it has
+never seen should not act on all of it at once — not by any particular census
+number. Treat `session/dev-41a59eee` in the test plan as a synthetic fixture string,
+not a live lane.
+
 **Desired outcome:**
 
 Discovery is driven by recorded identity and by links that exist in the world (the
@@ -114,6 +123,12 @@ No relevant external findings — proceeding with codebase context and training 
 - **Confidence**: high
 - **Impact on plan**: Rung 3 adopts only on a **single distinct** reference. Two-or-more is a `gate-unknown: issue-ambiguous` finding and the lane is skipped, never guessed at. This mirrors `merge_predicate`'s AMBIGUOUS outcome and `lane_identity`'s rung-2 "unique match required" rule.
 
+### spike-5: Can the worker's checkout actually resolve these branches? (added at critique)
+- **Assumption**: "`_last_commit` will return a timestamp for a human-named lane branch."
+- **Method**: to be run before build — `git log -1 --format=%ct origin/session/<human-named-branch>` in the worker's `ai` checkout, for each currently-open lane branch.
+- **Why it is load-bearing**: `_last_commit` (`:277-300`) resolves `origin/<branch>` and returns `None` on a missing remote-tracking ref, at which point the loop does a silent `continue` (`:829-831`). Under the old regex this path was unreachable in practice because the corpus was empty. After widening, it is the gate that decides whether this fix delivers anything at all — and it would fail *silently*, which is the exact shape this plan opens by condemning.
+- **Impact on plan**: if refs are missing, the fix needs a fetch step or an explicit remote read. Regardless of the outcome, the `commit is None` skip gains a `gate-unknown: branch-not-fetched {slug}` finding (see Key Elements) so this can never be a silent zero again. **This spike must be run and its result recorded before build starts.**
+
 ### spike-4: What is the blast radius of widening the corpus filter?
 - **Assumption**: "Widening `^session/sdlc-\d+$` to a `session/` prefix admits only lanes."
 - **Method**: prototype (live `gh` call over all open PRs)
@@ -127,7 +142,7 @@ No relevant external findings — proceeding with codebase context and training 
 2. **Repo resolution**: `target_repo = _project_repo(project)` (`:771`) yields `owner/name`, or `None` for a project with no `github` block.
 3. **Corpus fetch**: `_list_open_lane_prs(cwd)` runs one `gh pr list` and returns open non-draft PRs whose head is in the `session/` namespace, each carrying `number`, `headRefName`, `isDraft`, `closingIssuesReferences`.
 4. **Slug**: `_slug_from_branch(branch)` strips `session/` — unchanged, already shape-agnostic.
-5. **Issue resolution** (new): `_resolve_lane_issue(pr, slug, target_repo)` walks the four-rung ladder and returns `(issue_number | None, reason)`. Ledger rungs read `PipelineLedger` via Popoto; rung 3 reads the payload already in hand; rung 4 parses the slug.
+5. **Issue resolution** (new): `_resolve_lane_issue(pr, slug, target_repo, ledger_map)` walks the three-rung issue resolution ladder and returns `(issue_number | None, reason)`. The ledger rung reads a map built once per tick; the closing-reference rung reads the payload already in hand; the last rung derives from the slug. Resolution runs *after* the staleness gate, so a fresh healthy lane never pays for it.
 6. **Gates**: unchanged — issue-open (`_issue_is_open`), staleness (`_last_commit` + threshold), liveness (`_lane_is_live`), escalation-once (`_escalation_exists`), attempt budget (`_attempts_count`), action cooldown (`_action_cooldown_set`).
 7. **Action**: unchanged — `_pick_steer_target` then `_attempt_action` (steer / resume / create), with `adopt_lane_slug(issue_number, slug, target_repo)` on the create rung (`:716`).
 8. **Output**: `findings` list and `counts` dict returned to the reflection runner; escalations reach a human via `_send_alert`.
@@ -158,22 +173,26 @@ The change is confined to steps 3 and 5. Steps 6-8 are untouched, which is the p
 |-------------|---------------|---------|
 | `PipelineLedger.slug` exists | `python -c "from agent.pipeline_ledger import PipelineLedger; assert hasattr(PipelineLedger, 'slug')"` | #2735 substrate this plan reads |
 | `gh` supports `closingIssuesReferences` on `pr list` | `gh pr list --state open --limit 1 --json number,closingIssuesReferences` | Resolver rung 3 |
-| Redis reachable for ledger reads | `python -c "from agent.pipeline_ledger import PipelineLedger; list(PipelineLedger.query.filter(target_repo='tomcounsell/ai'))"` | Resolver rungs 1-2 |
+| Redis reachable for ledger reads | `python -c "from agent.pipeline_ledger import PipelineLedger; list(PipelineLedger.query.filter(target_repo='tomcounsell/ai'))"` | The per-tick ledger map. Note this proves reachability only: `target_repo` is an unindexed plain `Field`, so Popoto loads every key and filters in Python — the call is a full enumeration, not a scoped read. |
 
 ## Solution
 
 ### Key Elements
 
-- **Namespace corpus filter**: `_list_open_lane_prs` admits open non-draft PRs whose head branch is in the `session/` namespace. The `session/` prefix is the lane boundary; the *shape of the rest* is not consulted. `_SDLC_BRANCH_RE` is deleted outright — the branch-shape concept leaves the module rather than lingering as a demoted fallback (AC bullet 4).
-- **Four-rung issue resolver** (`_resolve_lane_issue`): a single helper that returns `(issue_number | None, reason)` and is the module's only path from a PR to an issue number. Ordered most-authoritative first:
-  1. **Recorded ledger, by PR number** — `PipelineLedger.query.filter(pr_number=...)`, repo-scoped to `target_repo`, requiring exactly one distinct `issue_number`. Precedent: `tools/merge_predicate.py:415`.
-  2. **Recorded ledger, by recorded slug** — repo-scoped scan for a record whose `slug` equals this branch's slug, requiring a unique match. Catches lanes that have a recorded identity but whose `pr_number` was never written.
-  3. **The PR's own closing reference** — the single distinct entry in `closingIssuesReferences`, already in the corpus payload. This adopts an identity that exists in the world (the same principle as `lane_identity.py` rungs 2-3), and it is what covers the 4-of-5 lanes the ledger cannot see today.
-  4. **Issue-derived slug shape** — `_issue_number_from_slug`, retained solely as the last rung with a comment saying so. It is the only rung that *derives* rather than reads, so it sits at the bottom.
+- **Namespace corpus filter**: `_list_open_lane_prs` admits open non-draft PRs whose head branch is in the `session/` namespace and whose slug remainder is **non-empty**. The `session/` prefix is the lane boundary; the *shape of the rest* is not consulted. `_SDLC_BRANCH_RE` is deleted outright — the branch-shape concept leaves the module rather than lingering as a demoted fallback (AC bullet 4). The draft filter at `:234` is **retained unchanged**; drafts are a separate, deliberate exclusion and this plan does not revisit them.
+- **Three-rung issue resolver** (`_resolve_lane_issue`): a single helper returning `(issue_number | None, reason)`, the module's only path from a PR to an issue number. Named the *issue resolution ladder* to avoid colliding with `tools/lane_identity.py`'s existing (and inverse) four-rung slug ladder. Ordered most-authoritative first:
+  1. **Recorded ledger, by PR number** — a lookup into the per-tick ledger map (see below), repo-scoped to `target_repo`, ignoring records whose `issue_number` is `None`, and requiring exactly one distinct `issue_number`. Precedent: `tools/merge_predicate.py:415`.
+  2. **The PR's own closing reference** — the single distinct entry in `closingIssuesReferences` **whose repository equals `target_repo`**, already in the corpus payload. This adopts an identity that exists in the world (the same principle as `lane_identity.py`'s adopt rungs), and it is what covers the lanes the ledger cannot see today.
+  3. **Issue-derived slug shape** — `_issue_number_from_slug`, retained solely as the last rung with a docstring saying so. It is the only rung that *derives* rather than reads, so it sits at the bottom.
   Any rung that finds two-or-more candidates does **not** fall through to a weaker rung — it returns `None` with an `ambiguous` reason. Falling through from "two authoritative answers" to "one guessed answer" would be strictly worse than declining.
-- **Explicit unresolved reporting**: a lane whose issue cannot be resolved emits a `gate-unknown: issue-unresolved {slug}` or `gate-unknown: issue-ambiguous {slug}` finding rather than a silent `continue`. The silence is half the bug: today an invisible lane produces no signal at all.
-- **Per-tick action cap**: `_DEFAULT_ACTIONS_MAX_PER_TICK` with a `SDLC_STALL_ACTIONS_MAX_PER_TICK` env override, following the module's existing provisional-constant convention (`:120-136`) and carrying the same grain-of-salt comment. It bounds steer + resume + create per project tick. The existing create brake stays as-is beneath it.
-- **`target_repo is None` handling**: rungs 1-2 are unavailable (an unscoped ledger query could bind a lane to another repo's issue). The resolver skips them and continues at rung 3. The now-stale comment at `:762-770`, which justifies the `None` case as unreachable *because the branch filter admits only issue-derived names*, is rewritten to state the new reason.
+- **Ledger-by-recorded-slug is deliberately NOT a rung.** The original draft had it as rung 2. It is cut because it cannot fire for the population this plan exists to serve: `docs/features/sdlc-lane-identity.md:110-121` records that a human-named lane's minter writes `sdlc-{N}`, and `_record_slug_if_empty` is no-overwrite, so `ledger.slug == branch slug` is permanently false for exactly those lanes. Where it *is* true, the record either carries a `pr_number` (rung 1 already answered) or the slug is `sdlc-N` (rung 3 restated, more expensively). Spike-1's single resolved lane was resolved by `pr_number`. Adding it "for when the ledger matures" would ship an unfalsifiable rung — the #2035 inertness shape this plan's own Prior Art section warns about. If the ledger's slug-writing behavior changes, that is a new issue with a new measurement.
+- **One ledger read per tick, not per PR.** `slug`, `pr_number`, and `target_repo` are unindexed plain `Field`s, so Popoto resolves these filters by loading every key and filtering in Python — "repo-scoped" scopes nothing at the Redis layer, and `PipelineLedger` has no TTL by design. `_check_project_stalls` therefore performs **one** repo-scoped enumeration up front, builds a `{pr_number: issue_number}` map, and rung 1 reads the map. Cost is O(ledger) per tick instead of O(open lanes × ledger).
+- **Resolution runs after the staleness gate.** `_last_commit` needs only the branch, so a fresh healthy lane never pays for identity resolution or a `gh issue view`. This also bounds finding noise: unlike every existing `gate-unknown` (all transient), an unresolvable identity is a *stable* condition that would otherwise emit a finding every 30 minutes forever.
+- **Explicit unresolved reporting**: a lane whose issue cannot be resolved emits `gate-unknown: issue-unresolved {slug}` or `gate-unknown: issue-ambiguous {slug}` rather than a silent `continue`. The silence is half the bug: today an invisible lane produces no signal at all. A lane whose branch has no local `origin/` ref emits `gate-unknown: branch-not-fetched {slug}` for the same reason — that skip is silent today (`:829-831`) and becomes load-bearing once the corpus is non-empty.
+- **Declined vs. errored rungs.** A rung that cleanly finds nothing is a *decline* and falls through normally. A rung that **raises** (Redis outage) is an *error*: the ladder still falls through so steer/resume can proceed, but the resolution is marked degraded, the **create rung is suppressed**, and a `gate-unknown: ledger-degraded {slug}` finding is emitted. The reason: create is the only action that calls `adopt_lane_slug`, whose write is no-overwrite and therefore uncorrectable. Steering the wrong session is recoverable; writing the wrong permanent identity is not.
+- **Per-tick target dedupe**: the primary burst guard. `_pick_steer_target` queries project-wide (`:544-596`) with same-lane only a ranking preference, so several newly-visible lanes with no same-lane session all resolve to the *same* eng session. Each dispatched target `session_id` is recorded for the tick; a later lane resolving to an already-used target defers with an `action-cap:` finding. A count cap alone does not prevent one session being told to work three different issues in one tick — the rival-incarnation shape.
+- **Per-tick action cap**: `_DEFAULT_ACTIONS_MAX_PER_TICK` with a `SDLC_STALL_ACTIONS_MAX_PER_TICK` env override, following the module's existing provisional-constant convention (`:120-136`) and carrying the same grain-of-salt comment. Secondary to the target dedupe. It bounds steer + resume + create per project tick — the machine-wide first-tick ceiling is cap × owned projects, matching how `creates_this_tick` already scopes. The existing create brake stays as-is beneath it. **The cap is tested before `_action_cooldown_set` at `:886`**, not after: the cooldown is a one-hour SETNX claim, and a lane deferred after the claim would wait an hour, not a tick — making the `deferred to next tick` finding text false. Checking before the claim is why the cap needs no `_action_cooldown_release` counterpart.
+- **`target_repo is None` handling**: both read-based rungs are unavailable — an unscoped ledger query could bind a lane to another repo's issue, and a closing reference cannot be repo-matched without a repo to match against. The resolver skips both and continues at the deriving rung. The now-stale comment at `:762-770`, which justifies the `None` case as unreachable *because the branch filter admits only issue-derived names*, is rewritten to state the new reason.
 
 ### Flow
 
