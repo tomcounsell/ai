@@ -568,27 +568,27 @@ only by `create_app` and by test fixtures.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/dashboard.md` with a short "Template filters" subsection: the six
+- [x] Update `docs/features/dashboard.md` with a short "Template filters" subsection: the six
       filters, `register_template_filters` as the single registration seam, and the rule that a
       new filter is added there and nowhere else. `docs/features/dashboard.md:139` already
       documents the `freshness_age` filter, so this extends existing content rather than
       creating a new page.
-- [ ] Update `tests/README.md`: add `test_template_filter_registry.py` and
+- [x] Update `tests/README.md`: add `test_template_filter_registry.py` and
       `test_analytics_stats_render.py` to the suite index, and note that dashboard render
       fixtures must obtain filters from `ui.app.register_template_filters`, never hand-copy
       them — pointing at the no-hand-copy guard as the *enforcement*. The README note is
       documentation of a rule CI enforces, not the rule's only home; the plan's own root cause
       was that comments do not fail builds.
-- [ ] No new `docs/features/README.md` index entry — no new feature page is created.
+- [x] No new `docs/features/README.md` index entry — no new feature page is created.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo has no Sphinx/MkDocs site.
+- [x] Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
-- [ ] `register_template_filters` gets a docstring stating it is the single source of truth for
+- [x] `register_template_filters` gets a docstring stating it is the single source of truth for
       dashboard template filters, that callers own loader/autoescape, and that new filters go
       here so tests inherit them.
-- [ ] The guard test gets a docstring explaining what it catches, and explicitly recording the
+- [x] The guard test gets a docstring explaining what it catches, and explicitly recording the
       dynamic-filter (`|attr`, `map('name')`) blind spot.
 
 ## Success Criteria
