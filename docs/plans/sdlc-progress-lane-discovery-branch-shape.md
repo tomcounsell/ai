@@ -349,80 +349,84 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 
 ## Step by Step Tasks
 
-### 1. Widen the corpus filter to the `session/` namespace
-- **Task ID**: build-corpus
+### 0. Run spike-5 and the red regression test
+- **Task ID**: build-red
 - **Depends On**: none
 - **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
-- **Informed By**: spike-4 (5 of 7 open PRs are `session/*`; the 2 non-lane PRs are `fix/*` and are correctly excluded)
+- **Informed By**: spike-5 (nothing has verified the worker's checkout can resolve human-named lane branches, and that gate now decides whether the fix delivers anything)
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Delete `_SDLC_BRANCH_RE` and its comment block (`:116-118`).
-- Rename `_list_open_sdlc_prs` → `_list_open_lane_prs`; add `closingIssuesReferences` to the `--json` field list.
-- Express the namespace test through `_slug_from_branch` returning a non-empty slug — do not add a second site that knows the `session/` prefix.
-- Update every call site and the module docstring if it names the old filter.
+- Run spike-5 (`git log -1 --format=%ct origin/session/<human-named-branch>` per open lane branch, in the worker's `ai` checkout) and record the result in the Spike Results section. If refs are missing, stop and report — the design needs a fetch step.
+- Write the headline regression test — a stalled lane on a human-named branch is discovered and acted on — and **watch it fail** against the current module. Record the failure. A passing suite written after the fix proves nothing about a rewritten predicate.
 
-### 2. Implement the four-rung issue resolver
-- **Task ID**: build-resolver
-- **Depends On**: build-corpus
+### 1. Widen the corpus filter and implement the issue resolution ladder
+- **Task ID**: build-discovery
+- **Depends On**: build-red
 - **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
-- **Informed By**: spike-1 (ledger-only resolves 1 of 5 — a ladder is required, not a single read), spike-2 (`closingIssuesReferences` covers 5 of 5 at zero extra subprocess cost), spike-3 (multi-ref PRs are real; #2746 declares two)
+- **Informed By**: spike-1 (a ledger-only read resolves almost nothing — a ladder is required), spike-2 (`closingIssuesReferences` arrives free in the corpus call), spike-3 (multi-ref PRs are real; #2746 declares two)
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Add `_resolve_lane_issue(pr, slug, target_repo) -> tuple[int | None, str]` implementing rungs 1-4 in order, modeled on `tools/merge_predicate.py::_resolve_tracked_issue` (`:355-440`).
-- Ledger reads go through `PipelineLedger.query.filter(...)`, repo-scoped, each wrapped in a broad `except Exception` that logs at `warning` and falls through.
-- Skip rungs 1-2 entirely when `target_repo` is `None` — never issue an unscoped query.
+- Delete `_SDLC_BRANCH_RE` and its comment block (`:116-118`).
+- Rename `_list_open_sdlc_prs` → `_list_open_lane_prs`; add `closingIssuesReferences` **including each reference's repository** to the `--json` field list; pass an explicit `--limit`.
+- Express the namespace test through `_slug_from_branch` returning a **non-empty** slug, and tighten that helper to return `None` on a blank remainder. Do not add a second site that knows the `session/` prefix.
+- Hoist one repo-scoped `PipelineLedger` enumeration to the top of `_check_project_stalls` into a `{pr_number: issue_number}` map, skipping records with a `None` `issue_number`. Import `PipelineLedger` lazily inside the function under a broad `except Exception`.
+- Add `_resolve_lane_issue(pr, slug, target_repo, ledger_map) -> tuple[int | None, str]` implementing the three rungs in order, modeled on `tools/merge_predicate.py::_resolve_tracked_issue` (`:355-440`).
+- The closing-reference rung requires a single distinct reference **whose repository equals `target_repo`**. Skip both the ledger rung and the closing-reference rung when `target_repo` is `None` — never issue an unscoped query, never trust an unmatchable reference.
 - Two-or-more candidates at any rung returns `(None, "ambiguous")` and does not fall through.
-- Demote `_issue_number_from_slug` to rung 4 and rewrite its docstring.
-- Rewrite the discovery loop (`:811-819`) to use the resolver and to append `gate-unknown: issue-unresolved {slug}` / `gate-unknown: issue-ambiguous {slug}` findings instead of a bare `continue`.
-- Rewrite the stale `target_repo` comment at `:762-770`.
+- Distinguish **declined** from **errored**: an errored rung logs at `warning` with rung name and slug, marks the resolution degraded, suppresses the create rung downstream, and emits `gate-unknown: ledger-degraded {slug}`.
+- Demote `_issue_number_from_slug` to the last rung and rewrite its docstring — paraphrase what it replaced, never name the removed identifiers.
+- Move the staleness gate ahead of resolution; give the `commit is None` skip a `gate-unknown: branch-not-fetched {slug}` finding.
+- Rewrite the discovery loop (`:811-819`) to use the corpus function and the resolver, appending findings on the unresolved / ambiguous / degraded paths instead of a bare `continue`.
+- Rewrite the stale `target_repo` comment at `:762-770`, the module docstring (`:5`, `:10-11`), the Configuration block (`:53-63`), and the summary string (`:948-952`).
 
-### 3. Add the per-tick action cap
-- **Task ID**: build-cap
-- **Depends On**: build-resolver
+### 2. Add the per-tick target dedupe and action cap
+- **Task ID**: build-brakes
+- **Depends On**: build-discovery
 - **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`
-- **Informed By**: spike-4 (corpus goes 0 → 5 lanes on the first tick after deploy)
+- **Informed By**: the critique's finding that `_pick_steer_target` is project-wide (`:544-596`), so a count cap alone lets one session be told to work several issues in one tick
 - **Assigned To**: `discovery-builder`
 - **Agent Type**: builder
 - **Parallel**: false
+- Add the per-tick **target dedupe**: record each dispatched `session_id`; a later lane resolving to a used target defers with an `action-cap:` finding. This is the primary guard.
 - Add `_DEFAULT_ACTIONS_MAX_PER_TICK` to the thresholds block with the module's grain-of-salt comment, plus `_actions_max_per_tick()` reading `SDLC_STALL_ACTIONS_MAX_PER_TICK` via `_env_float`.
-- Count steer + resume + create against the cap in `_check_project_stalls`; emit `action-cap: {slug} deferred to next tick` for deferred lanes, mirroring the `create-brake:` finding at `:897`.
+- Count steer + resume + create against the cap, emitting `action-cap: {slug} deferred to next tick`. **Check both the dedupe and the cap before `_action_cooldown_set` at `:886`** — deferring after the claim would make the lane wait an hour rather than a tick, and would make the finding text false.
 - Leave the existing create brake in place beneath the cap.
 
-### 4. Retarget and extend the test surface
+### 3. Complete the test surface
 - **Task ID**: build-tests
-- **Depends On**: build-corpus, build-resolver, build-cap
+- **Depends On**: build-brakes
 - **Validates**: `tests/unit/reflections/test_sdlc_progress_check.py`, `tests/integration/test_sdlc_stall_auto_resume_e2e.py`
-- **Informed By**: spike-3 (use #2746's real two-ref shape), spike-4 (use the real branch names)
-- **Assigned To**: `discovery-test-builder`
-- **Agent Type**: test-engineer
+- **Informed By**: spike-3 (use #2746's real two-ref shape)
+- **Assigned To**: `discovery-builder`
+- **Agent Type**: builder
 - **Parallel**: false
-- Apply every disposition in the Test Impact section.
-- Add the resolver suite: one test per rung, rung-4-not-consulted-when-ledger-answers, both ambiguity shapes, `target_repo is None`, and per-rung exception fall-through.
-- Add the headline regression test: a stalled lane on `session/dev-41a59eee` is discovered and acted on.
-- Flip the e2e fixture's branch to a human-named one so the integration path proves the fix.
+- Apply every disposition and every added test in the Test Impact section, including all eight negative cases.
+- Monkeypatch `PipelineLedger.query`; no real Redis, no Popoto bring-up.
+- Flip the e2e fixture's branch to a human-named one — **mandatory**, not "consider": it is the single highest-value test here.
 
-### 5. Validate
+### 4. Validate
 - **Task ID**: validate-discovery
 - **Depends On**: build-tests
 - **Assigned To**: `discovery-validator`
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every Verification row.
-- Confirm each negative criterion independently: regex absent, rung 4 not consulted when the ledger answers, ambiguity produces no action, no unscoped ledger query.
+- Confirm each negative criterion independently: regex absent, the deriving rung not consulted when the ledger answers, ambiguity produces no action, cross-repo reference rejected, create suppressed on a degraded resolution, no cooldown burned by a capped lane, no unscoped ledger query, ledger enumerated once per tick.
+- **Demonstrate the raw-Redis row goes red** against a deliberately-introduced violation, then revert it. A gate never shown to fail has not been verified.
 - Confirm no raw Redis access was introduced.
 
-### 6. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-discovery
 - **Assigned To**: `discovery-documentarian`
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Apply every checkbox in the Documentation section.
+- Apply every checkbox in the Documentation section. Update the two existing docs; create no new feature doc.
 
-### 7. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: `discovery-validator`
