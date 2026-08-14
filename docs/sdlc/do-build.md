@@ -83,7 +83,8 @@ PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
 git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
 PLAN_REL=$(python -c "import os; print(os.path.relpath('$PLAN_PATH', '$PLAN_REPO'))")
 PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number {issue_number} --run-id {run_id} \
+  || { echo "G7 disarmed: meta-set refused the plan-hash write" >&2; exit 1; }
 # Before PR: re-read CURRENT_HASH; if STORED_HASH non-empty and differs, abort
 # (plan revised mid-build) and `sdlc-tool stage-marker --stage BUILD --status failed --run-id {run_id}`.
 STORED_HASH=$(sdlc-tool stage-query --issue-number {issue_number} | python -c "import sys,json; print(json.load(sys.stdin).get('_meta',{}).get('plan_hash_at_build_start') or '')")
@@ -93,8 +94,15 @@ STORED_HASH=$(sdlc-tool stage-query --issue-number {issue_number} | python -c "i
 succeeds, record the PR number on the session record:
 
 ```bash
-sdlc-tool meta-set --key pr_number --value {PR} --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool meta-set --key pr_number --value {PR} --issue-number {issue_number} --run-id {run_id}
 ```
+
+`meta-set` exits non-zero on an ownership refusal, so check it on both calls rather than suppressing
+with `2>/dev/null || true` (issue #2675). A foreign-owner `ISSUE_LOCKED` is a stop condition —
+swallow it and you leave `plan_hash_at_build_start` unset (disarming the G7 guard) or `pr_number`
+unrecorded, with the build reporting success either way. The plan-hash call needs the explicit
+`|| { ...; exit 1; }` above because it sits mid-block with no `set -e`: without it the block's
+status comes from the trailing `STORED_HASH=` pipeline and the refusal is invisible.
 
 This command is the single writer of `AgentSession.pr_number`; the read-only
 recovery rungs (validated gh search, `session/{slug}` branch-head fallback)

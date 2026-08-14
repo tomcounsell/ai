@@ -89,6 +89,17 @@ ORPHAN_AGE_SECONDS = 600
 # the OWNED_RUN_IDS_CAP env var.
 OWNED_RUN_IDS_CAP = int(os.environ.get("OWNED_RUN_IDS_CAP", "32"))
 
+# Cap on the DURABLE, issue-keyed run-identity history (issue #2675) -- the
+# ledger-side ``_run_identities`` anchor that outlives the session record, read
+# as the fourth reuse proof below and written by
+# ``tools/_sdlc_utils.py::_anchor_confirmed_run_identity``.
+# GRAIN OF SALT: SDLC_RUN_IDENTITY_HISTORY_MAX is PROVISIONAL/TUNABLE at 20 --
+# generous enough to cover a long pipeline with repeated lease lapses, bounded
+# so the ledger blob cannot grow without limit over an issue's whole lifetime
+# (it is read on every router poll). Override via the
+# SDLC_RUN_IDENTITY_HISTORY_MAX env var.
+SDLC_RUN_IDENTITY_HISTORY_MAX = int(os.environ.get("SDLC_RUN_IDENTITY_HISTORY_MAX", "20"))
+
 
 def _read_owned_run_ids(session) -> list[str]:
     """Return this session's recorded owned_run_ids as a list, tolerantly.
@@ -297,13 +308,32 @@ def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) ->
        record's ``active_run_id`` equals the claim -- the mirror written by
        this pipeline's own earlier ``ensure_session()`` corroborates the
        claim after a TTL lapse.
+    3. **Free lock + durable anchor match** (issue #2675): the lock lapsed
+       AND the claim appears in this issue's ``_run_identities`` anchor on
+       the ledger. Every proof above corroborates against the ``AgentSession``,
+       and ``ensure_session``'s resolution order ends in a create
+       fall-through -- a record landing there has no ``active_run_id`` and an
+       empty ``owned_run_ids``, so all of them are structurally unreachable
+       and the run re-mints, orphaning every write that still carries the
+       old id. Worse, each re-mint lands on another empty history, so the
+       failure is self-perpetuating. The anchor is issue-keyed and has no
+       TTL, so it survives what erases the session-side copy.
 
     Anything else returns ``None`` -- never an error: an unverified claim
     simply falls through to the normal fresh-mint contest, where a live
     foreign holder still yields ISSUE_LOCKED. The no-adopt invariant holds:
-    this helper never reads a run_id OUT of the lock or the record to hand
-    to the caller; it only echoes back a claim the caller already carried,
-    and only when the lock/record corroborates it.
+    this helper never reads a run_id OUT of the lock, the record, or the
+    anchor to hand to the caller; it only echoes back a claim the caller
+    already carried, and only when one of them corroborates it. That
+    distinction is load-bearing for the anchor in particular: unlike
+    ``owned_run_ids``, which is session-scoped self-history, the anchor is
+    issue-scoped and can legitimately hold a genuinely foreign run's id, so
+    it corroborates the caller's own claim on a FREE lock and is never
+    consulted to take over a live one.
+
+    The anchor read is fail-open in every direction: an unresolvable target
+    repo, a missing ledger, or a read error all degrade to exactly the three
+    session-side proofs.
     """
     from models.session_lifecycle import touch_issue_lock
 
@@ -346,6 +376,27 @@ def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) ->
             session, "active_run_id", None
         ) == reuse_run_id or reuse_run_id in _read_owned_run_ids(session):
             return reuse_run_id
+        # Fourth proof (issue #2675): the session record knows nothing -- it was
+        # very likely just created by ensure_session's create fall-through -- so
+        # fall back to the DURABLE issue-keyed anchor. The claim is honored only
+        # when this issue's ledger records it as an identity that genuinely held
+        # this lease, which is exactly the self-written history owned_run_ids
+        # was meant to be before the record lost it.
+        try:
+            from agent.pipeline_ledger import read_run_identities
+            from tools._sdlc_utils import _resolve_target_repo_fallback
+
+            anchor_repo = _resolve_target_repo_fallback()
+            if anchor_repo and reuse_run_id in read_run_identities(anchor_repo, issue_number):
+                return reuse_run_id
+        except Exception as e:
+            logger.debug(
+                "sdlc_session_ensure: run-identity anchor read failed for issue #%s "
+                "(%s: %s) -- falling back to fresh mint",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
     return None
 
 

@@ -72,8 +72,12 @@ export SDLC_TARGET_REPO
 # state-mutating `sdlc-tool` call in Step 3 passes it back explicitly via
 # `--run-id {run_id}`. The standalone worker threads its own run_id in-process, so the
 # real worker-vs-local guard is preserved.
-sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
+sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}"
 ```
+
+Let stderr through and read the JSON payload. `session-ensure` reports a refusal *in the payload*
+(`{"blocked": true, "reason": ...}`), not through the exit code — it exits 0 either way — so a
+discarded diagnostic here is a run that proceeds under an identity it does not hold.
 
 Read the JSON from the tool result and **record the `run_id`** (`{"session_id": ..., "created": ..., "run_id": "<hex>"}`) — carry it through every iteration of the Step 3 loop. Reuses the existing `sdlc-local-{N}` session on re-runs. The ownership contract:
 
@@ -100,7 +104,7 @@ concurrent `/do-sdlc` on the same issue emits a byte-identical `owner_session_id
 explicitly; do not substitute `run_id` (the sibling field the tool also returns) for it. A match on
 `owner_run_id` is this run's own ghost (inherit-and-continue); a mismatch is a rival even when
 `owner_session_id` matches (stop-and-report). (see #2446, #2451)
-- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED`; the lock frees within its TTL and a fresh contest then mints a new run_id (duration and renewal semantics are #2446's — do not restate a number here). **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
+- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED`; the lock frees within its TTL and a fresh contest then mints a new run_id (duration and renewal semantics are #2446's — do not restate a number here). **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock, or — on a free lock — against the session record or the issue's durable run-identity anchor, and never adopts an unverified one.
 - **Ledger-anchor rule:** `sdlc-local-{N}` is a non-executable ledger anchor (`is_ledger`, #2042), not
   a live executable session. It permanently shows `status=running` and carries the run's `_meta` stage
   state — it must **not** be killed, and a running-looking anchor is not evidence of a rogue pipeline.
@@ -168,11 +172,24 @@ Carry forward context between iterations: the `run_id` goes into every stage pro
 `/do-test` and `/do-patch` do not write their own stage markers — on the bridge, the worker's dev-completion handler does it. Locally, the supervisor must:
 
 ```bash
-sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_number} --run-id {run_id}
 # or --status failed, per the subagent's report
 ```
 
 All other stage skills self-mark; do NOT double-write markers for them.
+
+A non-zero exit means the marker did **not** land — the ledger does not say what
+you think it says. Read the stderr diagnostic and route it:
+
+- `ISSUE_LOCKED` naming an `owner_run_id` that is **not** yours → a foreign run
+  owns this issue. **Stop the loop** and report; continuing writes nothing and
+  loses the run.
+- `LEASE_ABSENT`, or `ISSUE_LOCKED` naming an id you recognize as your own →
+  your lease lapsed. Run the Step 3d.6 re-ensure, **adopt the `run_id` it
+  returns**, and retry the marker once under the adopted id.
+- Anything else (a Redis/broker error, a timeout) → transient. Retry once, and
+  only report-and-continue if it persists. A transient error is never an
+  unconditional pipeline abort.
 
 ### 3d.4. REVIEW self-check gate (issue #2193)
 
@@ -222,15 +239,45 @@ After the stage subagent returns (3c/3d/3d.4/3d.5) and before asking the router 
 this run's identity:
 
 ```bash
-sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id} 2>/dev/null || true
+sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 ```
 
+Do **not** append a stderr redirect to `/dev/null`, a trailing `|| true`, or any other form that
+discards the diagnostic.
+The whole point of this step is the payload; a form that destroys it makes every instruction below
+unfollowable and lets the run continue under an identity it has silently lost.
+
 This is a **continuity proof** — the tool verifies the held `run_id` against the live lock/session
-record — not a lease keepalive; it does not renew or extend the TTL. (Lease renewal/heartbeat is
-owned by #2446; revisit this step once that lands, since a heartbeat may make it redundant.) The
-re-ensure can itself return a refusal — route its payload through the **same** three-way table and
+record and against the durable issue-keyed run-identity anchor on the ledger — not a lease
+keepalive; it does not renew or extend the TTL (that is the heartbeat's job, issue #2714).
+
+**Adopt the returned `run_id`.** When the payload carries no `blocked` flag, read `run_id` out of it
+and use **that** value as `{run_id}` for every subsequent stage, prompt and `--run-id` flag in this
+run. It may differ from the one you carried in: a lapsed lease is rebound, and a fresh contest mints
+a new identity. Keeping your own stale copy is precisely how a run ends up writing markers nobody
+accepts.
+
+**Branch on the payload, not the exit code.** `session-ensure` exits 0 on every outcome it can
+report — success and refusal alike — and signals refusal as `{"blocked": true, "reason": ...}` on
+stdout, with the human-readable diagnostic on stderr. (Its sibling `stage-marker` *does* exit
+non-zero — do not generalize one tool's disposition to the other.) A non-zero exit here is a
+wrapper or usage error, emits **no payload at all**, and is not recoverable: stop and report rather
+than retrying. On a `blocked` payload, route it through the **same** three-way table and
 `owner_run_id` self-identity check from Step 2, so the own-ghost abandonment bug does not simply
-relocate from the top of the loop to this stage seam.
+relocate from the top of the loop to this stage seam:
+
+- **Foreign owner** — `ISSUE_LOCKED` whose `owner_run_id` is neither yours nor a self-identity you
+  recognize: this run has genuinely lost the issue. **Stop the loop** and report. This is the one
+  stop condition.
+- **Self / hand-off** — `SUPERVISED_RUN_ACTIVE`, or an `owner_run_id` the self-identity check
+  confirms is your own: **inherit** `owner_run_id` as `{run_id}` and continue.
+- **Orphaned lock** — `orphaned_lock: true`: wait out the TTL, re-ensure, adopt what comes back.
+- **Transient** — a Redis/broker error, a timeout, or any payload that is none of the above:
+  **surface it and retry**, then continue. Never convert a transient error into a pipeline abort —
+  halting a healthy run on a broker blip is worse than the bug this step exists to catch. A payload
+  that parses but carries neither `run_id` nor `blocked` belongs here too. **Empty stdout is not
+  transient** — that is the wrapper/usage error above, and retrying it forever is how a broken
+  install turns into an identity-less run.
 
 ### 3e. Check exit conditions
 

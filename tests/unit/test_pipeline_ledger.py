@@ -236,3 +236,128 @@ class TestGetOrCreateConcurrentCreateRace:
         # Exactly one record persisted in Redis.
         rows = list(PipelineLedger.query.filter(ledger_key=f"{_TEST_REPO}:{self._ISSUE}"))
         assert len(rows) == 1
+
+
+class TestRunIdentityAnchor:
+    """Durable, issue-keyed run-identity anchor (issue #2675).
+
+    The SDLC run's identity history used to live only on
+    ``AgentSession.owned_run_ids`` -- the fragile half of the system. These
+    tests cover the ledger-side half: an append-only, capped, fail-open list
+    stored under ``_run_identities`` inside the ledger's own stage-state blob,
+    which outlives every AgentSession lifecycle event.
+    """
+
+    _ISSUE = 100_675
+
+    def setup_method(self):
+        _cleanup(self._ISSUE)
+
+    def teardown_method(self):
+        _cleanup(self._ISSUE)
+
+    def test_absent_anchor_reads_as_empty_list(self):
+        """Every pre-existing ledger record has no ``_run_identities`` key at
+        all -- it must read as ``[]`` rather than raise. This is the
+        backward-compat proof that no migration is needed."""
+        from agent.pipeline_ledger import read_run_identities
+
+        PipelineLedger.get_or_create(_TEST_REPO, self._ISSUE)
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == []
+
+    def test_missing_ledger_reads_as_empty_list(self):
+        from agent.pipeline_ledger import read_run_identities
+
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == []
+
+    def test_recorded_identity_is_readable(self):
+        from agent.pipeline_ledger import read_run_identities, record_run_identity
+
+        assert record_run_identity(_TEST_REPO, self._ISSUE, "run-a", 20) is True
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == ["run-a"]
+
+    def test_append_is_idempotent_and_order_preserving(self):
+        from agent.pipeline_ledger import read_run_identities, record_run_identity
+
+        for run_id in ("run-a", "run-b", "run-a", "run-c"):
+            record_run_identity(_TEST_REPO, self._ISSUE, run_id, 20)
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == ["run-a", "run-b", "run-c"]
+
+    def test_history_is_capped_newest_last(self):
+        from agent.pipeline_ledger import read_run_identities, record_run_identity
+
+        for i in range(6):
+            record_run_identity(_TEST_REPO, self._ISSUE, f"run-{i}", 3)
+        got = read_run_identities(_TEST_REPO, self._ISSUE)
+        assert got == ["run-3", "run-4", "run-5"], got
+
+    def test_anchor_does_not_disturb_sibling_stage_state_keys(self):
+        """The anchor shares the blob with the stage map and every other
+        ``_*`` metadata key -- appending must leave them intact."""
+        import json
+
+        from agent.pipeline_ledger import read_run_identities, record_run_identity
+
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, self._ISSUE)
+        ledger.stage_states_json = json.dumps({"BUILD": "completed", "_verdicts": {"X": 1}})
+        ledger.save()
+
+        record_run_identity(_TEST_REPO, self._ISSUE, "run-a", 20)
+
+        blob = json.loads(PipelineLedger.get(_TEST_REPO, self._ISSUE).stage_states_json)
+        assert blob["BUILD"] == "completed"
+        assert blob["_verdicts"] == {"X": 1}
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == ["run-a"]
+
+    def test_malformed_anchor_value_reads_as_empty(self):
+        """A string, a dict, or ``null`` under ``_run_identities`` degrades to
+        ``[]`` and never raises."""
+        import json
+
+        from agent.pipeline_ledger import read_run_identities
+
+        for bogus in ("not-a-list", {"a": 1}, None, 7):
+            ledger = PipelineLedger.get_or_create(_TEST_REPO, self._ISSUE)
+            ledger.stage_states_json = json.dumps({"_run_identities": bogus})
+            ledger.save()
+            assert read_run_identities(_TEST_REPO, self._ISSUE) == [], bogus
+
+    def test_malformed_blob_reads_as_empty(self):
+        from agent.pipeline_ledger import read_run_identities
+
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, self._ISSUE)
+        ledger.stage_states_json = "{not json"
+        ledger.save()
+        assert read_run_identities(_TEST_REPO, self._ISSUE) == []
+
+    def test_falsy_arguments_are_a_no_op(self):
+        from agent.pipeline_ledger import read_run_identities, record_run_identity
+
+        assert record_run_identity(None, self._ISSUE, "run-a", 20) is False
+        assert record_run_identity(_TEST_REPO, None, "run-a", 20) is False
+        assert record_run_identity(_TEST_REPO, self._ISSUE, "", 20) is False
+        assert record_run_identity(_TEST_REPO, self._ISSUE, "run-a", 0) is False
+        assert read_run_identities(None, self._ISSUE) == []
+        assert read_run_identities(_TEST_REPO, None) == []
+
+    def test_write_failure_is_fail_open(self):
+        """A write failure must never raise -- the caller's lock acquisition
+        has already succeeded and must not be undone by best-effort metadata."""
+        from agent.pipeline_ledger import record_run_identity
+
+        with patch.object(PipelineLedger, "get_or_create", side_effect=RuntimeError("redis down")):
+            assert record_run_identity(_TEST_REPO, self._ISSUE, "run-a", 20) is False
+
+    def test_read_failure_is_fail_open(self):
+        from agent.pipeline_ledger import read_run_identities
+
+        with patch.object(PipelineLedger, "get", side_effect=RuntimeError("redis down")):
+            assert read_run_identities(_TEST_REPO, self._ISSUE) == []
+
+    def test_exhausted_retries_return_false_without_raising(self):
+        """``update_stage_states`` returning False (retries exhausted) is
+        reported, not raised -- the bind is unaffected."""
+        from agent.pipeline_ledger import record_run_identity
+
+        with patch("tools.stage_states_helpers.update_stage_states", return_value=False):
+            assert record_run_identity(_TEST_REPO, self._ISSUE, "run-a", 20) is False

@@ -19,6 +19,7 @@ cannot pick up the live worktree ``.sdlc-run`` of the running pipeline.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,9 @@ pytestmark = [pytest.mark.integration]
 # Recognizable, test-scoped identifiers so teardown can scope cleanup narrowly.
 TEST_PROJECT_KEY = "test-sdlc-2144-resume"
 TEST_REPO_SLUG = "test-owner/test-repo-2144-resume"
+
+# The create fall-through resolves its project/repo pairing from the cwd.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_marker_main(argv):
@@ -56,8 +60,14 @@ def cleanup(issue_number):
 
     def _cleanup():
         try:
+            # The bridge-style session by project_key, plus the sdlc-local-{N}
+            # record the create fall-through mints under the repo's own project.
+            local_id = f"sdlc-local-{issue_number}"
             for s in AgentSession.query.all():
-                if getattr(s, "project_key", None) == TEST_PROJECT_KEY:
+                if (
+                    getattr(s, "project_key", None) == TEST_PROJECT_KEY
+                    or getattr(s, "session_id", None) == local_id
+                ):
                     s.delete()
         except Exception:
             pass
@@ -130,9 +140,7 @@ class TestResumeSelfHealEndToEnd:
         assert release_issue_lock(issue_number, run_id) is True
         clear_supervised_run_signal(issue_number, run_id)
 
-        # 3. The resumed turn writes its BUILD-completed marker with NO --run-id
-        #    (the skill convention wraps this `2>/dev/null || true`, so a silent
-        #    refusal would freeze the ledger — the bug this fix closes).
+        # 3. The resumed turn writes its BUILD-completed marker with NO --run-id.
         code = _run_marker_main(
             [
                 "sdlc-tool",
@@ -206,3 +214,149 @@ class TestResumeSelfHealEndToEnd:
         assert sm.states.get("TEST") == "completed", sm.states
 
         release_issue_lock(issue_number, run_id)
+
+
+class TestDurableRunIdentityRebind:
+    """Issue #2675: a re-ensure after a lapsed lease, against a session record
+    that knows nothing, must REBIND to the existing run identity rather than
+    mint a fresh one.
+
+    This is the create-fall-through shape from ``ensure_session``'s resolution
+    order: the session-side continuity record (``active_run_id`` /
+    ``owned_run_ids``) is empty by construction, so every pre-#2675 proof is
+    structurally unreachable and the run silently re-mints -- after which every
+    write still carrying the old id is refused, and the next re-ensure lands on
+    another empty history and re-mints again.
+
+    Real Redis, real ledger, real issue lock. The only stubbed boundary is
+    target-repo resolution (``GH_REPO``), as in the class above.
+    """
+
+    def _anchor_via_real_marker_write(self, issue_number, run_id):
+        """Land a real stage marker so the run's identity is anchored the way
+        production anchors it -- through ``resolve_ledger_lease`` confirming
+        this run as the live lease owner."""
+        code = _run_marker_main(
+            [
+                "sdlc-tool",
+                "--stage",
+                "PLAN",
+                "--status",
+                "completed",
+                "--issue-number",
+                str(issue_number),
+                "--run-id",
+                run_id,
+            ]
+        )
+        assert code == 0, "setup marker write must land"
+
+    def _reensure_on_a_forgetful_session(self, issue_number, monkeypatch, claim):
+        """Drop every session-side carrier, then re-ensure carrying ``claim``.
+
+        Deleting the session record forces ``ensure_session`` down its **create
+        fall-through** -- the branch that produces a record with no
+        ``active_run_id`` and an empty ``owned_run_ids``, which is precisely the
+        state that makes the three session-side proofs unreachable. The cwd
+        moves back to the repo root only because the create branch resolves the
+        project/repo pairing from it.
+        """
+        from models.agent_session import AgentSession
+        from tools.sdlc_session_ensure import ensure_session
+
+        for s in AgentSession.query.all():
+            if getattr(s, "project_key", None) == TEST_PROJECT_KEY:
+                s.delete()
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        monkeypatch.chdir(_REPO_ROOT)
+        return ensure_session(issue_number=issue_number, reuse_run_id=claim)
+
+    def test_lapsed_lease_rebinds_to_the_anchored_identity(
+        self, monkeypatch, tmp_path, issue_number, cleanup
+    ):
+        from models.session_lifecycle import release_issue_lock
+
+        monkeypatch.setenv("GH_REPO", TEST_REPO_SLUG)
+        monkeypatch.chdir(tmp_path)
+
+        _session_id, result = _mint_identity(issue_number, monkeypatch)
+        run_id = result["run_id"]
+        assert run_id, result
+        self._anchor_via_real_marker_write(issue_number, run_id)
+
+        # The identity is on the DURABLE, issue-keyed anchor -- not just the
+        # session record that is about to disappear.
+        from agent.pipeline_ledger import read_run_identities
+
+        assert run_id in read_run_identities(TEST_REPO_SLUG, issue_number)
+
+        # The lease lapses and the session record is gone.
+        assert release_issue_lock(issue_number, run_id) is True
+
+        rebound = self._reensure_on_a_forgetful_session(issue_number, monkeypatch, run_id)
+
+        assert rebound.get("run_id") == run_id, (
+            f"re-ensure must rebind to the anchored identity, not mint a fresh one: {rebound}"
+        )
+        release_issue_lock(issue_number, run_id)
+
+    def test_unanchored_claim_still_falls_through_to_a_fresh_mint(
+        self, monkeypatch, tmp_path, issue_number, cleanup
+    ):
+        """NO-ADOPT CONTROL. A claim the anchor has never seen is not
+        corroborated by anything, so the contest mints fresh -- the anchor
+        widens what counts as self, it does not wave claims through."""
+        from models.session_lifecycle import release_issue_lock
+
+        monkeypatch.setenv("GH_REPO", TEST_REPO_SLUG)
+        monkeypatch.chdir(tmp_path)
+
+        _session_id, result = _mint_identity(issue_number, monkeypatch)
+        run_id = result["run_id"]
+        self._anchor_via_real_marker_write(issue_number, run_id)
+        assert release_issue_lock(issue_number, run_id) is True
+
+        bogus = "deadbeefdeadbeefdeadbeefdeadbeef"
+        minted = self._reensure_on_a_forgetful_session(issue_number, monkeypatch, bogus)
+
+        assert minted.get("run_id") not in (bogus, None), minted
+        assert minted["run_id"] != run_id, (
+            f"the anchor must never hand a caller an identity it did not claim: {minted}"
+        )
+        release_issue_lock(issue_number, minted["run_id"])
+
+    def test_foreign_live_holder_still_yields_issue_locked(
+        self, monkeypatch, tmp_path, issue_number, cleanup
+    ):
+        """A live foreign lease still refuses, even though BOTH the claim and
+        the live owner sit in the issue-keyed anchor. The anchor is never
+        authority to take over a lock somebody else holds."""
+        from models.session_lifecycle import release_issue_lock, touch_issue_lock
+
+        monkeypatch.setenv("GH_REPO", TEST_REPO_SLUG)
+        monkeypatch.chdir(tmp_path)
+
+        _session_id, result = _mint_identity(issue_number, monkeypatch)
+        run_id = result["run_id"]
+        self._anchor_via_real_marker_write(issue_number, run_id)
+        assert release_issue_lock(issue_number, run_id) is True
+
+        # A genuinely different run takes the issue and anchors itself too.
+        foreign = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        assert touch_issue_lock(
+            issue_number, foreign, session_id="sdlc-local-foreign", target_repo=TEST_REPO_SLUG
+        ).acquired
+        self._anchor_via_real_marker_write(issue_number, foreign)
+
+        from agent.pipeline_ledger import read_run_identities
+
+        anchored = read_run_identities(TEST_REPO_SLUG, issue_number)
+        assert run_id in anchored and foreign in anchored, anchored
+
+        blocked = self._reensure_on_a_forgetful_session(issue_number, monkeypatch, run_id)
+
+        assert blocked.get("blocked") is True, blocked
+        assert blocked.get("reason") == "ISSUE_LOCKED", blocked
+        assert blocked.get("owner_run_id") == foreign, blocked
+        release_issue_lock(issue_number, foreign)

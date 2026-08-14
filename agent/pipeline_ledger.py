@@ -24,6 +24,7 @@ every AgentSession that ever worked it is deleted -- see
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -347,3 +348,136 @@ class PipelineLedger(Model):
             if existing is not None:
                 return existing
         return None
+
+
+# ---------------------------------------------------------------------------
+# Durable issue-keyed run-identity anchor (issue #2675)
+# ---------------------------------------------------------------------------
+# The SDLC run identity's continuity history used to live only on
+# ``AgentSession.owned_run_ids`` -- the fragile half of this system. A session
+# record is TTL'd, and ``ensure_session``'s resolution order ends in a create
+# fall-through, so any path landing there produces a record with an empty
+# history and the run silently re-mints its identity mid-flight. Every
+# subsequent write then carries an id nobody accepts, and because each re-mint
+# lands on an empty history the failure is self-perpetuating.
+#
+# The anchor moves that history onto the entity the pipeline is *about*: this
+# issue-keyed ledger, which has no TTL and outlives every AgentSession
+# lifecycle event. It is stored as a ``_run_identities`` list inside the
+# ledger's own ``stage_states_json`` blob -- an underscore-prefixed metadata
+# key like ``_verdicts`` and ``_sdlc_dispatches``, so it needs no schema field
+# and no migration, ``PipelineStateMachine._save()`` already merges it forward
+# as an unowned key, and an absent key on any pre-existing record reads as an
+# empty list.
+
+RUN_IDENTITIES_KEY = "_run_identities"
+
+
+def _extract_run_identities(raw) -> list[str]:
+    """Pull the identity list out of a stage-state blob, tolerantly.
+
+    A missing key, a malformed blob, or a non-list value under the key all
+    resolve to ``[]``. Continuity corroboration must degrade to the session-side
+    proofs, never raise.
+    """
+    if not raw:
+        return []
+    try:
+        blob = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(blob, dict):
+        return []
+    identities = blob.get(RUN_IDENTITIES_KEY)
+    if not isinstance(identities, list):
+        return []
+    return [str(x) for x in identities if x]
+
+
+def read_run_identities(target_repo: str | None, issue_number: int | None) -> list[str]:
+    """Return the run identities recorded against ``(target_repo, issue_number)``.
+
+    Non-mutating: uses :meth:`PipelineLedger.get`, so a read never litters an
+    empty ledger for an issue nothing has written yet. Fails OPEN -- any error,
+    an absent ledger, or a malformed blob returns ``[]``, which degrades the
+    caller to its pre-anchor behavior rather than blocking a legitimate rebind.
+    """
+    if not target_repo or not issue_number:
+        return []
+    try:
+        ledger = PipelineLedger.get(target_repo, issue_number)
+        if ledger is None:
+            return []
+        return _extract_run_identities(ledger.stage_states_json)
+    except Exception as exc:
+        logger.debug(
+            "read_run_identities: anchor read failed for %s#%s (%s: %s) -- degrading to []",
+            target_repo,
+            issue_number,
+            type(exc).__name__,
+            exc,
+        )
+        return []
+
+
+def record_run_identity(
+    target_repo: str | None, issue_number: int | None, run_id: str | None, cap: int
+) -> bool:
+    """Append ``run_id`` to this issue's durable run-identity anchor.
+
+    Idempotent (an id already present is a no-op that skips the write entirely),
+    capped to the most recent ``cap`` entries newest-last so a long-lived issue
+    cannot grow the blob without bound, and written through
+    ``update_stage_states`` so a concurrent writer's append is merged rather
+    than clobbered.
+
+    Callers must only record an identity they have *proven* is their own -- a
+    confirmed live lease owner. The anchor is self-written history, exactly like
+    ``AgentSession.owned_run_ids``; populating it from a foreign lock payload
+    would turn it into an adoption channel.
+
+    Fails OPEN: returns ``False`` on any failure and never raises. The caller's
+    lease is already established by the time this runs, and best-effort
+    continuity metadata must never undo it.
+    """
+    if not target_repo or not issue_number or not run_id:
+        return False
+    try:
+        cap = int(cap)
+    except (TypeError, ValueError):
+        return False
+    if cap < 1:
+        return False
+
+    try:
+        ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+        if run_id in _extract_run_identities(ledger.stage_states_json):
+            # Already anchored: skip the read-modify-write round trip entirely.
+            # This is the common case on every write after the run's first.
+            return True
+
+        def append_run_identity(states: dict) -> dict:
+            identities = [x for x in _extract_run_identities(states) if x != run_id]
+            identities.append(run_id)
+            states[RUN_IDENTITIES_KEY] = identities[-cap:]
+            return states
+
+        # Layering note: ``tools/`` -> ``agent/`` is the established dependency
+        # edge, so this upward import is deliberately lazy and function-local
+        # (the same shape agent/pipeline_state.py already uses for its tools/
+        # imports). The helper's optimistic retry + post-save verification is
+        # what makes concurrent appends from two re-ensures safe.
+        from tools.stage_states_helpers import update_stage_states
+
+        return bool(update_stage_states(ledger, append_run_identity, field="stage_states_json"))
+    except Exception as exc:
+        logger.debug(
+            "record_run_identity: anchor write failed for %s#%s run_id=%s (%s: %s) "
+            "-- lease is unaffected",
+            target_repo,
+            issue_number,
+            run_id,
+            type(exc).__name__,
+            exc,
+        )
+        return False

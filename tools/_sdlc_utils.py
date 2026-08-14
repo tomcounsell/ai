@@ -688,6 +688,46 @@ def is_pipeline_ledger(record) -> bool:
         return False
 
 
+def _anchor_confirmed_run_identity(
+    target_repo: str | None, issue_number: int | None, run_id: str | None
+) -> None:
+    """Record a CONFIRMED lease owner on the issue's durable identity anchor.
+
+    Issue #2675. Continuity used to be corroborated only against the session
+    record, which ``ensure_session``'s create fall-through leaves empty -- so a
+    re-ensure after a lease lapse had nothing to recognize itself by and minted
+    a fresh identity mid-run, orphaning every write that still carried the old
+    one. The anchor is the durable, issue-keyed copy of that history.
+
+    This is the write half, and it sits here deliberately: :func:`resolve_ledger_lease`
+    is the one place a run is *confirmed* to be the live owner of the issue's
+    lease with the pinned ``target_repo`` already in hand, so the record is
+    self-written history with the same provenance as
+    ``AgentSession.owned_run_ids`` -- never read out of a foreign payload -- and
+    it costs no extra repo resolution.
+
+    Skipped when the lease carries no pinned ``target_repo``: there is no ledger
+    key to anchor against, and a phantom ``None:{issue}`` key is worse than no
+    anchor (Risk 5). Fails OPEN and never raises -- the caller's lease is
+    already established and must not be undone by best-effort metadata.
+    """
+    if not target_repo or not issue_number or not run_id:
+        return
+    try:
+        from agent.pipeline_ledger import record_run_identity
+        from tools.sdlc_session_ensure import SDLC_RUN_IDENTITY_HISTORY_MAX
+
+        record_run_identity(target_repo, issue_number, run_id, SDLC_RUN_IDENTITY_HISTORY_MAX)
+    except Exception as e:
+        logger.debug(
+            "_anchor_confirmed_run_identity: skipped for %s#%s (%s: %s)",
+            target_repo,
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+
+
 def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | None, dict | None]:
     """Peek the issue-lock lease and validate ``run_id`` as its confirmed live owner.
 
@@ -719,6 +759,11 @@ def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | N
         established lease at all) or ``"ISSUE_LOCKED"`` (held by a foreign
         run; ``error`` also carries ``owner_run_id``/``owner_session_id``/
         ``orphaned_lock``). Never raises.
+
+    Side effect on the confirmed-owner path: the run's identity is recorded on
+    the issue's durable run-identity anchor (issue #2675, see
+    :func:`_anchor_confirmed_run_identity`). Best-effort and fail-open -- it
+    cannot change what this function returns.
     """
     if not issue_number or not run_id:
         return None, {"reason": "LEASE_ABSENT"}
@@ -737,6 +782,7 @@ def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | N
         return None, {"reason": "LEASE_ABSENT"}
 
     if result.acquired and result.owner_run_id == run_id:
+        _anchor_confirmed_run_identity(result.target_repo, issue_number, run_id)
         return result.target_repo, None
     if result.acquired:
         # Lock unheld -- no established lease for this run_id at all.

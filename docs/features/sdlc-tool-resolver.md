@@ -212,7 +212,7 @@ The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner C
 - `tools.sdlc_verdict.main()` and `tools.sdlc_dispatch.main()` catch internal exceptions, print `{}` to stdout (so existing JSON parsers don't break), log the error to stderr, and `sys.exit(1)`.
 - Skill markdown calling `sdlc-tool verdict record ...` and `sdlc-tool dispatch record ...` does **not** wrap these calls in `2>/dev/null || true` — failures must surface to the operator.
 - `tools.sdlc_stage_marker` exits 1 on ownership-guard rejection (issue #1735) — the only loud case for that module. All other `stage_marker` paths (degraded substrate, no session, idempotent) remain exit 0.
-- `stage_query` and `session_ensure` keep `sys.exit(0)` unconditionally; their callers in skill markdown still use `2>/dev/null || true` because they are best-effort.
+- `stage_query` and `session_ensure` keep `sys.exit(0)` unconditionally. `stage_query`'s callers still use `2>/dev/null || true` because they are best-effort. `session_ensure`'s do **not** (issue #2675): it reports refusals as `{"blocked": true, "reason": ...}` in its JSON payload, and a caller that discards stderr or ignores that flag proceeds under an identity it does not hold. Branch on the payload there, never on the exit code.
 
 The split is enforced by:
 

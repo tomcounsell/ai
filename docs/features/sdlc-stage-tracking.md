@@ -39,10 +39,30 @@ This path fires automatically for all sessions initiated through the Telegram br
 Each SDLC skill writes explicit in_progress/completed markers using the `sdlc-tool stage-marker` wrapper (which dispatches into `tools/sdlc_stage_marker.py`):
 
 ```bash
-sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} --run-id {run_id}
 # ... skill work ...
-sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id}
 ```
+
+**Whenever the marker carries a `--run-id`, do not suppress it with `2>/dev/null || true`**
+(issue #2675). `stage-marker` exits non-zero on an ownership refusal, and a discarded exit code
+leaves the skill reporting a stage the ledger never recorded. Check it: an `ISSUE_LOCKED` naming a
+foreign `owner_run_id` is a stop condition, while a `LEASE_ABSENT` means re-ensure the identity,
+adopt the `run_id` that comes back, and retry once.
+
+The run-identity-less markers are the exception, and they are two different mechanisms:
+
+- **`do-issue`'s ISSUE marker** (`.claude/skill-context/do-issue.md`) is written before any run
+  identity exists. `stage-marker` routes a `--run-id`-less ISSUE marker to `write_issue_marker_cold`,
+  a genuinely sessionless write — there is no in-flight run to lose.
+- **`do-docs`'s DOCS marker** (`.claude/skill-context/do-docs.md`) omits `--run-id` because the
+  cascade can be invoked standalone. That is *not* a cold path: it falls through to
+  `heal_missing_run_id` (issue #2144), which re-establishes identity from the environment and
+  proceeds. It refuses with `RUN_ID_REQUIRED` only when there is nothing to heal — exactly the
+  standalone case, where the marker is legitimately best-effort.
+
+Both keep their suppression. But a supervisor-driven cascade *does* carry a run identity, so pass
+`--run-id` and check the exit code whenever you have one.
 
 The wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd (including target-repo cwds where a shadow `tools/` package would otherwise hijack module resolution). See `docs/features/sdlc-tool-resolver.md` for the full rationale.
 
