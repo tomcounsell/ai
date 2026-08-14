@@ -73,11 +73,15 @@ def test_registrar_covers_all_six_dashboard_filters():
 def test_guard_env_matches_production_shaped_filter_keys():
     """The guard env is a bare Environment; production renders through
     Jinja2Templates (ui/app.py, imported from fastapi.templating). Assert
-    filter-KEY equality between the two so a future production-only filter
-    added by any mechanism other than the registrar (filters.update(...),
-    Jinja2Templates(env=...), a Jinja extension in create_app) trips this
-    guard instead of silently re-diverging one level up. The two envs
-    legitimately differ in autoescape and a url_for global — keys only."""
+    filter-KEY equality between the two so a filter that Jinja2Templates
+    itself contributes — e.g. a FastAPI/Starlette upgrade shipping a new
+    default — cannot diverge from the guard unnoticed. The two envs
+    legitimately differ in autoescape and a url_for global — keys only.
+
+    Scope: this builds its own Jinja2Templates and never calls create_app
+    (which would mount StaticFiles and every router), so a filter registered
+    inside create_app by some route other than the registrar is invisible
+    here; that case is covered by the anti-criterion grep over ui/app.py."""
     guard_env = _registrar_env()
     prod = _production_shaped_env()
     assert set(guard_env.filters) == set(prod.env.filters)
