@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -335,12 +335,12 @@ The one agent-visible surface is unchanged in shape and improved in content: esc
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sdlc-lane-identity.md` — add a "Discovery reads identity" section covering the four-rung resolver, why rung 4 is last, and why a full-ledger enumeration was rejected (spike-1's 1-of-5 measurement). This doc is #2735's and is the natural home; the read direction belongs next to the write direction.
-- [ ] Update the stall-detector documentation to state that the `session/` namespace — not the `sdlc-<N>` shape — is the lane boundary, and to document `SDLC_STALL_ACTIONS_MAX_PER_TICK` alongside the existing thresholds. (Locate via `grep -rln "sdlc-progress-check\|SDLC_STALL_THRESHOLD_HOURS" docs/`; if no dedicated doc exists, create `docs/features/sdlc-stall-detection.md` and add it to the `docs/features/README.md` index table.)
-- [ ] Add an entry to `docs/features/README.md` if a new doc is created.
+- [ ] Update `docs/features/sdlc-lane-identity.md` — add a "Discovery reads identity" section covering the issue resolution ladder, why the deriving rung is last, why a full-ledger enumeration was rejected (spike-1's measurement), and why ledger-by-recorded-slug is *not* a rung (this doc's own `:110-121` is the evidence). This doc is #2735's and is the natural home; the read direction belongs next to the write direction. Also describe the `session/` namespace here, as a **description of the existing single constructor** (`lane_branch_name` is the sole place the prefix is built; `agent/worktree_manager.py` creates `session/{slug}`) plus a note that automated stall action now keys on it — not as a new prohibition on humans, and with no enforcing hook.
+- [ ] Update `docs/features/pm-session-liveness.md` — **this is the stall detector's doc of record**, named by `reflections/sdlc_progress.py:65`. Do not create a new stall-detection doc; a parallel doc would violate the no-parallel-artifacts rule. Three statements there are falsified by this change and must be rewritten: `:270` (gate 1 is branch shape), `:273` (`origin/session/sdlc-<N>`), and `:336` ("Not draft-PR or non-SDLC-branch aware. Drafts and ad-hoc branches (`session/<other-slug>`) are intentionally excluded") — that last line is the stated design intent being reversed. Add `SDLC_STALL_ACTIONS_MAX_PER_TICK` to the env table at `:322-328`.
+- [ ] No new feature doc, and therefore no `docs/features/README.md` index entry.
 
 ### Inline Documentation
-- [ ] `_resolve_lane_issue` docstring: the rung order, the unique-match rule, the ambiguity outcome, and why rung 4 (the only deriving rung) is last.
+- [ ] `_resolve_lane_issue` docstring: the rung order, the unique-match rule, the repo-match rule, the ambiguity outcome, the declined-vs-errored distinction, and why the deriving rung is last.
 - [ ] `_issue_number_from_slug` docstring: rewrite to say it is the last-resort fallback and what supersedes it.
 - [ ] Rewrite the stale `target_repo` comment at `:762-770`, whose stated justification ("the branch filter admits only issue-derived names") this change invalidates.
 - [ ] Grain-of-salt comment on `_DEFAULT_ACTIONS_MAX_PER_TICK`, matching the module's existing provisional-constant block.
@@ -349,10 +349,15 @@ The one agent-visible surface is unchanged in shape and improved in content: esc
 
 - [ ] A stalled lane on a human-named branch (`session/dev-<hash>`, `session/<words>`) is discovered and acted on, proven by a test using spike-4's real branch names.
 - [ ] `_SDLC_BRANCH_RE` no longer exists anywhere in `reflections/sdlc_progress.py`.
-- [ ] `_issue_number_from_slug` is reached only after all three read-based rungs decline, proven by a test that asserts it is not consulted when the ledger answers.
+- [ ] `_issue_number_from_slug` is reached only after both read-based rungs decline, proven by a test that asserts it is not consulted when the ledger answers.
 - [ ] A PR with two closing references (the #2746 shape) produces a `gate-unknown: issue-ambiguous` finding and **no** action.
-- [ ] A ledger/Redis failure degrades to rungs 3-4 with a logged warning and never raises out of `_check_project_stalls`.
-- [ ] The per-tick action cap bounds steer + resume + create, with deferred lanes reported as findings.
+- [ ] A closing reference pointing at a *different repository* does not resolve, proven by a test.
+- [ ] A ledger/Redis failure degrades to the remaining rungs with a logged warning, never raises out of `_check_project_stalls`, and **suppresses the create rung** while emitting `gate-unknown: ledger-degraded`.
+- [ ] Two stalled lanes in one tick never dispatch to the same `session_id`.
+- [ ] The per-tick action cap bounds steer + resume + create, with deferred lanes reported as findings and **no cooldown key left claimed** on the deferred path.
+- [ ] The ledger is enumerated at most once per project tick, not once per PR.
+- [ ] The raw-Redis verification row has been demonstrated to go **red** against a deliberately-introduced violation before being trusted green.
+- [ ] spike-5's result (can the worker's checkout resolve human-named lane branches?) is recorded in this plan.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -360,28 +365,24 @@ The one agent-visible surface is unchanged in shape and improved in content: esc
 
 ### Team Members
 
+Three agents, not four. This is one module, one unit-test file, one integration fixture, and two doc sections; a separate test-builder costs a full context handoff for a file the builder is already reading line by line to retarget eleven monkeypatch sites.
+
 - **Builder (discovery)**
   - Name: `discovery-builder`
-  - Role: rewrite the corpus filter and implement the four-rung resolver in `reflections/sdlc_progress.py`
+  - Role: write the red regression test first, then the corpus filter, the issue resolution ladder, the ledger map, the target dedupe and cap, and the full test surface in `reflections/sdlc_progress.py` and its tests
   - Agent Type: builder
   - Domain: Redis/Popoto data
   - Resume: true
 
-- **Builder (tests)**
-  - Name: `discovery-test-builder`
-  - Role: retarget the existing test surface and add the resolver suite
-  - Agent Type: test-engineer
-  - Resume: true
-
 - **Validator (discovery)**
   - Name: `discovery-validator`
-  - Role: verify the acceptance criteria, especially the negative ones (regex gone, rung 4 not consulted when the ledger answers, ambiguity produces no action)
+  - Role: verify the acceptance criteria, especially the negative ones (regex gone, the deriving rung not consulted when the ledger answers, ambiguity produces no action, cross-repo reference rejected, create suppressed on a degraded resolution, no cooldown burned by the cap)
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `discovery-documentarian`
-  - Role: feature docs and index entry
+  - Role: update `sdlc-lane-identity.md` and `pm-session-liveness.md` — no new feature doc, no index entry
   - Agent Type: documentarian
   - Resume: true
 
@@ -484,14 +485,21 @@ Per the template's Tier 1 list. The discovery builder carries a `Domain: Redis/P
 | Integration e2e passes | `scripts/pytest-clean.sh tests/integration/test_sdlc_stall_auto_resume_e2e.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Branch-shape regex is gone | `grep -c '_SDLC_BRANCH_RE' reflections/sdlc_progress.py` | match count == 0 |
-| Old corpus function name is gone | `grep -rc '_list_open_sdlc_prs' reflections/ tests/` | match count == 0 |
-| Resolver exists | `grep -c '_resolve_lane_issue' reflections/sdlc_progress.py` | output > 1 |
-| Ledger is read by discovery | `grep -c 'PipelineLedger' reflections/sdlc_progress.py` | output > 0 |
-| Closing-reference rung is wired | `grep -c 'closingIssuesReferences' reflections/sdlc_progress.py` | output > 1 |
-| Per-tick cap is env-overridable | `grep -c 'SDLC_STALL_ACTIONS_MAX_PER_TICK' reflections/sdlc_progress.py` | output > 0 |
-| Ambiguity is reported, not guessed | `grep -c 'issue-ambiguous' reflections/sdlc_progress.py` | output > 0 |
-| No raw Redis on Popoto keys | `grep -nE '\.(hgetall\|hget\|scan_iter)\(' reflections/sdlc_progress.py` | match count == 0 |
+| Branch-shape regex is gone | `! grep -rq '_SDLC_BRANCH_RE' reflections/ tests/` | exit code 0 |
+| Old corpus function name is gone | `! grep -rq '_list_open_sdlc_prs' reflections/ tests/` | exit code 0 |
+| Resolver exists | `grep -q '_resolve_lane_issue' reflections/sdlc_progress.py` | exit code 0 |
+| Ledger is read by discovery | `grep -q 'PipelineLedger' reflections/sdlc_progress.py` | exit code 0 |
+| Closing-reference rung is wired | `grep -q 'closingIssuesReferences' reflections/sdlc_progress.py` | exit code 0 |
+| Per-tick cap is env-overridable | `grep -q 'SDLC_STALL_ACTIONS_MAX_PER_TICK' reflections/sdlc_progress.py` | exit code 0 |
+| Ambiguity is reported, not guessed | `grep -q 'issue-ambiguous' reflections/sdlc_progress.py` | exit code 0 |
+| Degraded ledger is reported | `grep -q 'ledger-degraded' reflections/sdlc_progress.py` | exit code 0 |
+| No raw Redis on Popoto keys | `grep -nE '\.(hgetall\|hget\|scan_iter)\(' reflections/sdlc_progress.py` | no output, exit code 1 |
+
+**Two notes on these rows, both from the critique.**
+
+The raw-Redis row previously used backslash-escaped pipes inside `grep -E`, where a backslashed pipe is a *literal* character rather than alternation — so the pattern matched nothing, ever, and the gate guarding the never-raw-Redis rule could not go red. Real alternation inside `-E` uses unescaped pipes; the row above is written that way, and the builder must confirm it goes red against a deliberately-introduced violation before trusting it green. A gate that cannot fail is worse than no gate.
+
+The two "must not appear" rows use `! grep -rq` rather than a count compared to zero: `grep -c` exits 1 on zero matches (which a `set -e` runner scores as failure) and `grep -rc` prints a per-file count line rather than a single number. They also carry a **paraphrase constraint**: this plan mandates rewritten docstrings and comments explaining what changed, and if the builder names a deleted identifier in that new prose the gate trips on its own documentation. Say "the old branch-shape filter", never the removed name. Note `tests/unit/reflections/test_sdlc_progress_check.py:621` currently quotes both removed identifiers verbatim in a docstring this plan already schedules for rewriting.
 
 ## Critique Results
 
@@ -538,6 +546,4 @@ The plan's direction is endorsed by all three critics: the problem is measured r
 
 ## Open Questions
 
-1. **Per-tick action cap default.** Provisional default of 3 (steer + resume + create combined), env-overridable. Given spike-4's measurement that the first tick after deploy will see roughly 5 previously-invisible lanes at once, is 3 the right first number, or should the first deploy run with `SDLC_STALL_RESUME_ENABLED=false` for one cycle to observe the finding list before any action fires?
-2. **Rung 3 trust level.** `closingIssuesReferences` is human-authored and is what covers 4 of the 5 live lanes today. It sits below both recorded-ledger rungs and requires a single distinct reference. Is that acceptable, or should rung 3 be gated behind an env flag until the ledger population matures enough for rungs 1-2 to dominate?
-3. **`session/` namespace as a documented contract.** This change makes the `session/` prefix load-bearing for automated action. Worth stating explicitly in `docs/features/sdlc-lane-identity.md` as "the `session/` namespace is reserved for SDLC lanes; do not push ad-hoc branches there" — or is that over-formalizing a convention that already holds?
+All three open questions were answered by the war room and folded into the plan body; see "Open Questions — war room answers" above. None remain open, and none require human input before build.
