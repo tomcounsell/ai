@@ -1243,7 +1243,7 @@ class TelegramRelayOutputHandler:
             return False
 
     def _count_promise_advisory_issued(self, session_id: str | None) -> None:
-        """Operator metric: advisories issued (vs promises authored).
+        """Operator metric: advisories issued (vs expectations authored).
 
         Not to prevent a PM from ignoring the advisory (it can't be
         prevented) — so an ignored advisory is visible instead of silent.

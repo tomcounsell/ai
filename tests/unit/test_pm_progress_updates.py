@@ -65,7 +65,7 @@ TAUGHT_ALLOWED = [
     "dev opened PR https://github.com/example/repo/pull/102 (14 files), still running tests.",
 ]
 
-# Explicit forward-deferral the role doc routes to ``promise-add`` instead. The
+# Explicit forward-deferral the role doc routes to ``expectation-add`` instead. The
 # heuristic must keep catching this on the fallback path.
 TAUGHT_BLOCKED = "dev opened PR #102. I'll report back when tests finish."
 

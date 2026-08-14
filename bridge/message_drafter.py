@@ -636,13 +636,13 @@ def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
     (matching ``evaluate_promise``'s disabled-path observability) and the text
     is never blocked.
 
-    Task 14 (#2494) override leg: a BLOCK verdict is downgraded to ALLOW
-    (``promise_recorded_override``) when the PM has stood by the promise —
-    an OPEN promise entry exists on the session's bound Job
-    (``bridge.promise_gate.promise_override_active``, read-only, Job-scoped
-    by design). That is the "override" half of revise-or-override: record
-    the promise via ``tools/job_tool promise-add``, resend, and the gate
-    clears.
+    Task 14 (#2494, carried into #2708) override leg: a BLOCK verdict is
+    downgraded to ALLOW (``promise_recorded_override``) when the PM has
+    stood by the obligation — an OPEN inbound expectation exists on the
+    session's bound Job (``bridge.promise_gate.promise_override_active``,
+    read-only, Job-scoped by design). That is the "override" half of
+    revise-or-override: record the expectation via
+    ``tools/job_tool expectation-add``, resend, and the gate clears.
 
     Returns the :class:`bridge.promise_gate.PromiseVerdict`; callers promote
     ``action == "block"`` to ``needs_self_draft=True``. Never raises: the
