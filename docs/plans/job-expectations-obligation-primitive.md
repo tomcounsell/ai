@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -481,17 +481,17 @@ read absorbs it.
 
 ## Documentation
 
-- [ ] Rewrite `docs/features/durability-model.md` "Goals and promises" →
+- [x] Rewrite `docs/features/durability-model.md` "Goals and promises" →
       "Goals and expectations": the single obligation primitive, both directions, the
       chokepoint-derived `status`/`has_open_expectations`, rest derivation, discharge
       rule (AC: doc describes expectations as the single obligation primitive).
-- [ ] Add reconciler section (or `docs/features/expectation-reconciler.md` + README index
+- [x] Add reconciler section (or `docs/features/expectation-reconciler.md` + README index
       entry) covering the ladder, shipped-work guard, caps, and operator escalation.
-- [ ] Amend `docs/plans/durability-room-job-agentrun.md`: Schema Gate Amendment 2 + mark
+- [x] Amend `docs/plans/durability-room-job-agentrun.md`: Schema Gate Amendment 2 + mark
       the superseded promise-model ACs "superseded by #2708" (owner directive).
-- [ ] Update `docs/features/session-steering.md` only if the reconciler adds a new steer
+- [x] Update `docs/features/session-steering.md` only if the reconciler adds a new steer
       producer worth naming (expected: one line).
-- [ ] Docstrings: `models/job.py` header rewritten for the new status quo (no historical
+- [x] Docstrings: `models/job.py` header rewritten for the new status quo (no historical
       promise narration — describe only what is).
 
 ## Success Criteria
