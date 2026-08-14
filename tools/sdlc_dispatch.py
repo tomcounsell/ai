@@ -123,6 +123,15 @@ def record_dispatch_for_ledger(
         states = record_dispatch(states, skill=skill, now=ts, pr_number=pr_number, confirmed=False)
         # Dispatch records carry the run identity (issue #2003) — annotated
         # here so ``agent.sdlc_router.record_dispatch`` stays run-id-agnostic.
+        #
+        # This annotation is ROUTER-PATH-ONLY. Records appended by the stage
+        # entry (#2730, `confirm_or_append_stage_entry`) carry no `run_id`,
+        # because `PipelineStateMachine` reaches its store as a bare
+        # `PipelineLedger` on the `for_issue` path and `active_run_id` is a
+        # field of `AgentSession`, not of the ledger — there is nothing to read
+        # it from. So a hook-driven lane's history is `run_id`-sparse, and any
+        # future reader must treat a missing `run_id` as "not recorded" rather
+        # than "a different run". No current reader consumes the field.
         try:
             history = states.get("_sdlc_dispatches") or []
             if history and isinstance(history[-1], dict):

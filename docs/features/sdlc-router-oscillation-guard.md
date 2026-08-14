@@ -239,6 +239,21 @@ that actually ran rather than whichever one the router last saw — after a
 that value; G1, G3 and G7 also read it, and rows 8 and 2b read
 `_latest_dispatch_at`.
 
+A sixth consumer reads the history for a different purpose:
+`tools/sdlc_stage_marker.py`'s retroactive-skip check refuses to mark a stage
+`skipped` once a dispatch for it exists. Because every stage entry now records
+one, a `/do-plan` that entered PLAN and then aborted to ask a question is no
+longer retroactively skippable. That is the guard's stated contract — the stage
+*was* reached — and it errs toward refusing a skip rather than granting a false
+one.
+
+Records appended by the stage entry carry no `run_id`. That annotation is
+applied only on the router path (`tools/sdlc_dispatch.py`), because
+`PipelineStateMachine` reaches its store as a bare `PipelineLedger` on the
+`for_issue` path while `active_run_id` is a field of `AgentSession`. A
+hook-driven lane's history is therefore `run_id`-sparse, and a missing `run_id`
+means "not recorded", never "a different run".
+
 The record is applied inside `_save()` **after** the preserved-metadata merge.
 `_save()` re-reads `_sdlc_dispatches` from the backing store and merges that
 copy over anything in memory, so a record written before the merge is silently
@@ -248,6 +263,25 @@ same single write.
 `stage` and `confirmed` live on the record and **never** in `stage_snapshot` —
 G4 compares snapshots, and a per-dispatch-varying field there would stop every
 comparison from ever matching, silently disabling oscillation detection.
+
+**Both writers must snapshot the same side of the stage transition.** The router
+records its slot before invoking, so its snapshot sees the entering stage's
+**pre-entry** status. An appended record is written from `_save()` *after*
+`_activate_stage` has already flipped the stage to `in_progress`, so left alone
+it would snapshot the other side. Since `compute_same_stage_count` breaks its
+walk on the first snapshot mismatch, mixing the two observation points makes a
+loop that alternates router-driven and bypass entries count **lower than it did
+before this feature existed** — adding the correct record would *lower* the
+streak. `_activate_stage` therefore carries the pre-entry status alongside the
+pending stage, and `confirm_or_append_stage_entry` builds the appended record's
+snapshot against that value via `record_dispatch`'s `snapshot_states` override.
+Measured on a three-cycle mixed-path `/do-patch` loop: 1 without the override, 6
+with it. `pr_number` has the same hazard and the same treatment — bypass records
+inherit it from the newest record carrying one.
+
+This invariant is the correctness keystone of the whole feature: a change that
+drops it does not fail loudly, it silently makes G4 count worse than not having
+the records at all.
 
 The `stage_snapshot` projection is deliberately narrow to prevent spurious
 churn:

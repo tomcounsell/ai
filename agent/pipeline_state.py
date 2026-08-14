@@ -406,6 +406,9 @@ class PipelineStateMachine:
         # build the instance via __new__) lands with the full attribute set.
         self.stage_skips = {}
         self._skip_precondition_cache: dict[str, tuple[str, str] | None] = {}
+        # (stage, pre-entry status) staged by _activate_stage for _save() to
+        # record as a dispatch entry (#2730).
+        self._pending_stage_entry: tuple[str, str | None] | None = None
 
         def _apply(data: dict) -> None:
             self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
@@ -507,8 +510,10 @@ class PipelineStateMachine:
         key (``_verdicts``, ``_sdlc_dispatches``, or any future ``_*`` key)
         would be silently dropped if we serialized ``self.states`` alone. To
         protect cross-writer invariants — especially the verdict recorder in
-        ``tools.sdlc_verdict`` and the dispatch recorder in
-        ``agent.sdlc_router.record_dispatch`` — we reload the latest raw
+        ``tools.sdlc_verdict`` and the router's dispatch recorder in
+        ``agent.sdlc_router.record_dispatch`` (and, since #2730, ``_save()``
+        itself, which appends the stage-entry record AFTER this merge — see
+        ``_apply_pending_stage_entry``) — we reload the latest raw
         stage-state blob from the active backing store BEFORE writing and
         merge every ``_*`` key we did not manage ourselves. This makes
         ``_save()`` a safe participant in the cross-process stage-state
@@ -583,7 +588,7 @@ class PipelineStateMachine:
         Never raises: a stage must not become unrecordable because its audit
         entry failed.
         """
-        pending = getattr(self, "_pending_stage_entry", None)
+        pending = self._pending_stage_entry
         if not pending:
             return
         self._pending_stage_entry = None
@@ -592,7 +597,7 @@ class PipelineStateMachine:
             from agent.sdlc_router import confirm_or_append_stage_entry
 
             confirm_or_append_stage_entry(data, stage, prior_status=prior_status)
-        except Exception as e:  # pragma: no cover - audit must never block a write
+        except Exception as e:  # audit must never block a write
             logger.debug(f"pipeline_state: stage-entry dispatch record failed for {stage}: {e}")
 
     def _load_preserved_metadata(self) -> dict:

@@ -1849,12 +1849,19 @@ def confirm_or_append_stage_entry(
     if not isinstance(history, list):
         history = []
 
-    # ONLY the newest record can be this entry's router slot. The router records
-    # immediately before invoking the sub-skill, so nothing else can land in
-    # between. Scanning further back would let a stale slot -- a dispatch that
-    # was recorded and then never started -- absorb an unrelated later entry,
-    # dropping that entry's record entirely and leaving `last_dispatched_skill`
-    # naming the wrong skill: exactly the defect this function exists to fix.
+    # ONLY the newest record is eligible as this entry's router slot. Scanning
+    # further back would let a stale slot -- a dispatch recorded and then never
+    # started -- absorb an unrelated later entry, dropping that entry's record
+    # and leaving `last_dispatched_skill` naming the wrong skill: exactly the
+    # defect this function exists to fix.
+    #
+    # This narrows the hole rather than closing it. If the sub-skill dies before
+    # `start_stage`, its slot IS the newest record, and a later entry into the
+    # same stage upgrades that dead slot instead of appending -- collapsing two
+    # dispatch events into one record and under-counting G4 by one. Closing it
+    # needs an age-out against `last["at"]`, which needs a defensible staleness
+    # threshold; the under-count is the safe direction (a missed escalation, not
+    # a false one), so it is left open deliberately rather than guessed at.
     last = history[-1] if history else None
     if isinstance(last, dict) and last.get("stage") == stage and last.get("confirmed") is False:
         last["confirmed"] = True
@@ -1885,27 +1892,26 @@ def confirm_or_append_stage_entry(
                 break
 
     # Build the snapshot against the stage's PRE-entry status, so this record is
-    # comparable with a router slot recorded before the same transition.
-    if prior_status is _NO_PRIOR_STATUS:
-        return record_dispatch(
-            stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True
-        )
-
-    had_key = stage in stage_states
-    current = stage_states.get(stage)
-    if prior_status is None:
-        stage_states.pop(stage, None)
-    else:
-        stage_states[stage] = prior_status
-    try:
-        return record_dispatch(
-            stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True
-        )
-    finally:
-        if had_key:
-            stage_states[stage] = current
+    # comparable with a router slot recorded before the same transition. The
+    # override is an explicit view rather than a mutate-and-restore of the
+    # caller's dict, so the invariant stays local to this function instead of
+    # depending on `build_stage_snapshot` copying eagerly two calls away.
+    snapshot_states = None
+    if prior_status is not _NO_PRIOR_STATUS:
+        snapshot_states = dict(stage_states)
+        if prior_status is None:
+            snapshot_states.pop(stage, None)
         else:
-            stage_states.pop(stage, None)
+            snapshot_states[stage] = prior_status
+
+    return record_dispatch(
+        stage_states,
+        skill=skill,
+        now=now,
+        pr_number=pr_number,
+        confirmed=True,
+        snapshot_states=snapshot_states,
+    )
 
 
 def record_dispatch(
@@ -1914,6 +1920,7 @@ def record_dispatch(
     now: datetime | None = None,
     pr_number: int | None = None,
     confirmed: bool = True,
+    snapshot_states: dict | None = None,
 ) -> dict:
     """Append a dispatch record to ``stage_states._sdlc_dispatches``.
 
@@ -1937,14 +1944,27 @@ def record_dispatch(
             ``pr_number`` is ``None`` — the explicit argument is the sole
             provenance (``sdlc_stage_query`` resolves the PR number from the
             ``AgentSession.pr_number`` field into ``_meta.pr_number``).
+        confirmed: ``False`` marks the record a **router slot** — a dispatch the
+            router recorded immediately before invoking a sub-skill, which the
+            stage entry later upgrades in place rather than duplicating. See
+            ``confirm_or_append_stage_entry`` for the protocol. ``True`` (the
+            default) records a dispatch that is already known to have started.
+        snapshot_states: Optional alternative source for the ``stage_snapshot``
+            projection. The record is still appended to ``stage_states``; only
+            the snapshot is built from this. Callers use it to snapshot a stage
+            transition from a specific side without mutating the live dict —
+            see ``confirm_or_append_stage_entry``'s ``prior_status``.
 
     Returns:
-        The mutated stage_states dict.
+        The mutated stage_states dict. The appended record carries ``skill``,
+        ``at``, ``stage_snapshot``, ``stage`` and ``confirmed``; the last two
+        are deliberately outside the snapshot (see below).
     """
     timestamp = (now or datetime.now(UTC)).isoformat()
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
-    view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
+    source = stage_states if snapshot_states is None else snapshot_states
+    view = {k: v for k, v in source.items() if k != "_sdlc_dispatches"}
     snapshot = build_stage_snapshot(view, meta={"pr_number": pr_number})
 
     history = stage_states.setdefault("_sdlc_dispatches", [])

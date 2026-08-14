@@ -1084,13 +1084,27 @@ class TestStageEntryUpsert:
         `_meta` to read it from, so recording None beside a router record's real
         value breaks the streak at every router/bypass boundary -- making the
         very records this feature adds uncountable, which is worse than the
-        missing records it fixes."""
-        states: dict = {}
-        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=42, confirmed=False)
-        confirm_or_append_stage_entry(states, "REVIEW")
-        confirm_or_append_stage_entry(states, "REVIEW")
+        missing records it fixes.
 
-        assert [e["stage_snapshot"]["pr_number"] for e in states["_sdlc_dispatches"]] == [42, 42]
+        Carries real stage statuses so the `count == 2` assertion is load-bearing:
+        on a bare `states = {}` the `stages` field is empty on both sides of the
+        boundary, and the count would hold even with the pre-entry-status
+        comparability bug reintroduced.
+        """
+        states: dict = {"REVIEW": "failed", "BUILD": "completed"}
+        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=42, confirmed=False)
+        prior = states.get("REVIEW")
+        states["REVIEW"] = "in_progress"
+        confirm_or_append_stage_entry(states, "REVIEW", prior_status=prior)
+
+        states["REVIEW"] = "failed"
+        prior = states.get("REVIEW")
+        states["REVIEW"] = "in_progress"
+        confirm_or_append_stage_entry(states, "REVIEW", prior_status=prior)
+
+        records = states["_sdlc_dispatches"]
+        assert [e["stage_snapshot"]["pr_number"] for e in records] == [42, 42]
+        assert [e["stage_snapshot"]["stages"]["REVIEW"] for e in records] == ["failed", "failed"]
         count, _ = compute_same_stage_count(states)
         assert count == 2
 
