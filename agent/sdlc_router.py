@@ -1256,7 +1256,8 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     deliberate: an approval recorded before the latest patch does not describe
     the code that patch produced, and advancing on it would merge code no review
     ever saw. It converges -- the re-review records a verdict newer than the
-    patch dispatch, which row 9 then owns -- and G4 bounds it otherwise. See
+    patch dispatch, which row 9 then owns. If it does not converge, nothing
+    stops it; see the unbounded-loop note at the end of this docstring. See
     ``TestStaleApprovedIsReReviewedNotAdvanced``.
 
     Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
@@ -1272,9 +1273,16 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
 
     No defensive step-asides are added on the strength of that proof.
 
-    Loop-bound by G4 (``same_stage_dispatch_count``): a verdict that stays
-    permanently stale escalates to a human rather than spinning on
-    ``/do-pr-review``.
+    NOT loop-bounded, despite what this docstring claimed until #2730. The
+    8 -> 8b loop alternates ``/do-patch`` with ``/do-pr-review``, and
+    ``compute_same_stage_count`` requires consecutive entries to share BOTH the
+    skill and the ``stage_snapshot``. The alternation fails the first test, and
+    ``_patch_cycle_count`` -- which ``build_stage_snapshot`` includes and
+    ``complete_stage("PATCH")`` increments every cycle -- fails the second. G2
+    caps critique cycles only; there is no patch-cycle equivalent. So a verdict
+    that stays permanently stale spins on ``/do-pr-review`` without escalating.
+    Tracked on #2801, which carries the measurements and the reason the obvious
+    one-line fix does not work.
     """
     if not meta.get("pr_number"):
         return False
@@ -1777,11 +1785,142 @@ def decide_next_dispatch(
     return primary
 
 
+def stage_for_skill(skill: str | None) -> str | None:
+    """Return the pipeline stage a ``/do-*`` skill executes, or ``None``.
+
+    Inverse of ``agent.pipeline_graph.STAGE_TO_SKILL``, derived from it rather
+    than hand-maintained so the two cannot drift (#2730). ``STAGE_TO_SKILL`` is
+    1:1, so the inversion is unambiguous.
+    """
+    for stage, mapped in STAGE_TO_SKILL.items():
+        if mapped == skill:
+            return stage
+    return None
+
+
+_NO_PRIOR_STATUS = object()
+
+
+def confirm_or_append_stage_entry(
+    stage_states: dict,
+    stage: str,
+    now: datetime | None = None,
+    pr_number: int | None = None,
+    prior_status: object = _NO_PRIOR_STATUS,
+) -> dict:
+    """Record that ``stage`` was entered, without double-counting the router.
+
+    Issue #2730. Two different actors observe a stage starting, and before this
+    only one of them recorded it:
+
+    - the router calls ``record_dispatch`` *before* invoking a sub-skill, which
+      is the only signal available if the skill dies before it starts;
+    - the stage itself transitions to ``in_progress``, which happens on EVERY
+      entry path including the ones that never reach the router (a skill-to-skill
+      chain such as ``/do-build`` → ``/do-patch``, and the PreToolUse hook, which
+      is the dominant marker writer on the bridge).
+
+    Recording in both places naively would double every router-driven dispatch
+    and halve G4's effective threshold. Instead the router's record is an
+    **unconfirmed slot** (``confirmed: False``) and this function upgrades it in
+    place. When no unconfirmed slot exists the stage was reached without the
+    router, and a confirmed record is appended.
+
+    The result is exactly one record per stage entry, from either path, while a
+    genuine second entry still appends a second record -- which is the whole G4
+    signal and must not be deduplicated away.
+
+    ``last_dispatched_skill`` (``history[-1]["skill"]``) consequently becomes
+    *true* on the bypass path rather than naming whichever skill the router last
+    saw. That is the fix, not a side effect: rows 8b/8d gate on it.
+
+    ``prior_status`` is the entering stage's status **before** it flipped to
+    ``in_progress``, and it is what keeps the two writers comparable. The router
+    records its slot before invoking, so its snapshot sees the pre-entry status;
+    an appended record is written after ``_activate_stage`` has already flipped
+    the stage, so without this it would see ``in_progress`` instead. G4 breaks
+    its walk on the first snapshot mismatch, so mixing the two observation
+    points makes a loop that alternates router-driven and bypass entries count
+    *lower* than it did before this feature existed -- adding the correct record
+    would lower the streak. Callers that know the pre-entry status pass it; the
+    snapshot is then built against that value, matching the router.
+    """
+    history = stage_states.get("_sdlc_dispatches")
+    if not isinstance(history, list):
+        history = []
+
+    # ONLY the newest record is eligible as this entry's router slot. Scanning
+    # further back would let a stale slot -- a dispatch recorded and then never
+    # started -- absorb an unrelated later entry, dropping that entry's record
+    # and leaving `last_dispatched_skill` naming the wrong skill: exactly the
+    # defect this function exists to fix.
+    #
+    # This narrows the hole rather than closing it. If the sub-skill dies before
+    # `start_stage`, its slot IS the newest record, and a later entry into the
+    # same stage upgrades that dead slot instead of appending -- collapsing two
+    # dispatch events into one record and under-counting G4 by one. Closing it
+    # needs an age-out against `last["at"]`, which needs a defensible staleness
+    # threshold; the under-count is the safe direction (a missed escalation, not
+    # a false one), so it is left open deliberately rather than guessed at.
+    last = history[-1] if history else None
+    if isinstance(last, dict) and last.get("stage") == stage and last.get("confirmed") is False:
+        last["confirmed"] = True
+        # Re-stamp the time: `_latest_dispatch_at` (rows 8 and 2b) must report
+        # when the stage actually started, not when the router queued it.
+        last["at"] = (now or datetime.now(UTC)).isoformat()
+        stage_states["_sdlc_dispatches"] = history
+        return stage_states
+
+    skill = STAGE_TO_SKILL.get(stage)
+    if skill is None:
+        # An unknown stage has no skill to attribute the entry to. Recording a
+        # skill-less record would break every consumer of history[-1]["skill"].
+        return stage_states
+
+    # Inherit the PR number from the newest record that carries one. The bypass
+    # path has no `_meta` to read it from, and `pr_number` is IN the snapshot
+    # G4 compares -- so recording None beside a router record's real value
+    # breaks the streak at every router/bypass boundary, making the very records
+    # this function adds uncountable.
+    if pr_number is None:
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            snapshot = entry.get("stage_snapshot")
+            if isinstance(snapshot, dict) and snapshot.get("pr_number") is not None:
+                pr_number = snapshot["pr_number"]
+                break
+
+    # Build the snapshot against the stage's PRE-entry status, so this record is
+    # comparable with a router slot recorded before the same transition. The
+    # override is an explicit view rather than a mutate-and-restore of the
+    # caller's dict, so the invariant stays local to this function instead of
+    # depending on `build_stage_snapshot` copying eagerly two calls away.
+    snapshot_states = None
+    if prior_status is not _NO_PRIOR_STATUS:
+        snapshot_states = dict(stage_states)
+        if prior_status is None:
+            snapshot_states.pop(stage, None)
+        else:
+            snapshot_states[stage] = prior_status
+
+    return record_dispatch(
+        stage_states,
+        skill=skill,
+        now=now,
+        pr_number=pr_number,
+        confirmed=True,
+        snapshot_states=snapshot_states,
+    )
+
+
 def record_dispatch(
     stage_states: dict,
     skill: str,
     now: datetime | None = None,
     pr_number: int | None = None,
+    confirmed: bool = True,
+    snapshot_states: dict | None = None,
 ) -> dict:
     """Append a dispatch record to ``stage_states._sdlc_dispatches``.
 
@@ -1805,14 +1944,27 @@ def record_dispatch(
             ``pr_number`` is ``None`` — the explicit argument is the sole
             provenance (``sdlc_stage_query`` resolves the PR number from the
             ``AgentSession.pr_number`` field into ``_meta.pr_number``).
+        confirmed: ``False`` marks the record a **router slot** — a dispatch the
+            router recorded immediately before invoking a sub-skill, which the
+            stage entry later upgrades in place rather than duplicating. See
+            ``confirm_or_append_stage_entry`` for the protocol. ``True`` (the
+            default) records a dispatch that is already known to have started.
+        snapshot_states: Optional alternative source for the ``stage_snapshot``
+            projection. The record is still appended to ``stage_states``; only
+            the snapshot is built from this. Callers use it to snapshot a stage
+            transition from a specific side without mutating the live dict —
+            see ``confirm_or_append_stage_entry``'s ``prior_status``.
 
     Returns:
-        The mutated stage_states dict.
+        The mutated stage_states dict. The appended record carries ``skill``,
+        ``at``, ``stage_snapshot``, ``stage`` and ``confirmed``; the last two
+        are deliberately outside the snapshot (see below).
     """
     timestamp = (now or datetime.now(UTC)).isoformat()
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
-    view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
+    source = stage_states if snapshot_states is None else snapshot_states
+    view = {k: v for k, v in source.items() if k != "_sdlc_dispatches"}
     snapshot = build_stage_snapshot(view, meta={"pr_number": pr_number})
 
     history = stage_states.setdefault("_sdlc_dispatches", [])
@@ -1823,6 +1975,15 @@ def record_dispatch(
             "skill": skill,
             "at": timestamp,
             "stage_snapshot": snapshot,
+            # #2730: the stage this dispatch executes, so the stage-entry
+            # upgrade path can find its slot without re-deriving it from the
+            # skill string at read time. NOT in `stage_snapshot` -- G4 compares
+            # snapshots, and a per-dispatch-varying field there kills
+            # oscillation detection outright.
+            "stage": stage_for_skill(skill),
+            # False marks a router slot awaiting confirmation that the stage
+            # actually started. See confirm_or_append_stage_entry.
+            "confirmed": confirmed,
         }
     )
     # FIFO-evict oldest entries to bound the list.

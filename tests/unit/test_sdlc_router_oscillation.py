@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
 from agent.sdlc_router import (
     MAX_SAME_STAGE_DISPATCHES,
@@ -12,11 +14,13 @@ from agent.sdlc_router import (
     SKILL_DO_PLAN,
     SKILL_DO_PLAN_CRITIQUE,
     SKILL_DO_PR_REVIEW,
+    SKILL_DO_TEST,
     Blocked,
     Dispatch,
     build_stage_snapshot,
     canonical_snapshot,
     compute_same_stage_count,
+    confirm_or_append_stage_entry,
     decide_next_dispatch,
     record_dispatch,
 )
@@ -952,3 +956,237 @@ def test_g4_bounds_permanently_stale_review_verdict_loop():
     assert len(dispatched) <= MAX_SAME_STAGE_DISPATCHES + 1, (
         f"row 8b re-dispatched {len(dispatched)} times before G4 fired"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2730: the dispatch record must be unbypassable.
+#
+# Only the router used to write `_sdlc_dispatches`, while stage markers were
+# written by the stage itself. Any stage reached without the router -- a
+# skill-to-skill chain like /do-build -> /do-patch, or the PreToolUse hook,
+# which never touches write_marker and is the dominant marker writer on the
+# bridge -- therefore left a marker and no ledger entry, and G4 had nothing to
+# count. Issue #2711's ledger showed six completed stages and zero dispatches.
+#
+# The fix is an upsert slot: the router records `confirmed: False` before
+# invoking, and the stage entry upgrades that slot in place -- or appends its
+# own when the router was bypassed. Exactly one record per stage entry from
+# either path, while a genuine SECOND entry still appends, because that is the
+# whole G4 signal and deduplicating it away would disarm the guard.
+# ---------------------------------------------------------------------------
+
+
+class TestStageEntryUpsert:
+    def _skills(self, states):
+        return [e["skill"] for e in states.get("_sdlc_dispatches", [])]
+
+    def _router_driven(self, states):
+        """Router records its slot, THEN the stage flips and the entry lands."""
+        record_dispatch(states, SKILL_DO_PATCH, confirmed=False)
+        prior = states.get("PATCH")
+        states["PATCH"] = "in_progress"
+        confirm_or_append_stage_entry(states, "PATCH", prior_status=prior)
+
+    def _bypass(self, states):
+        """`/do-build` chains straight to `/do-patch` -- no router record."""
+        prior = states.get("PATCH")
+        states["PATCH"] = "in_progress"
+        confirm_or_append_stage_entry(states, "PATCH", prior_status=prior)
+
+    def test_a_bypass_record_snapshots_the_pre_entry_status_like_the_router(self):
+        """The two writers must observe the SAME side of the stage transition.
+
+        The router records its slot before invoking, so its snapshot sees the
+        pre-entry status. An appended record is written after `_activate_stage`
+        already flipped the stage, so if it snapshots the live value it sees
+        `in_progress` instead. G4 breaks its walk on the first snapshot
+        mismatch, so mixing the two observation points makes a loop that
+        alternates router-driven and bypass entries count LOWER than it did
+        before this feature existed -- adding the correct record would lower the
+        streak, which is the opposite of the point.
+
+        Every other fixture here starts from a bare `states = {}`, where the
+        diverging field is empty on both sides and the defect is invisible.
+        This one gives PATCH a real pre-entry status.
+        """
+        states: dict = {"PATCH": "failed", "REVIEW": "completed"}
+        self._router_driven(states)
+        states["PATCH"] = "failed"
+        self._bypass(states)
+        states["PATCH"] = "failed"
+        self._router_driven(states)
+
+        snapshots = [e["stage_snapshot"]["stages"].get("PATCH") for e in states["_sdlc_dispatches"]]
+        assert snapshots == ["failed", "failed", "failed"], (
+            f"a bypass record must snapshot the pre-entry status, got {snapshots}"
+        )
+        count, _ = compute_same_stage_count(states)
+        assert count == 3, (
+            "three /do-patch entries over an unchanged snapshot must count 3; "
+            f"got {count} -- the added record is lowering G4's streak"
+        )
+
+    def test_router_driven_dispatch_yields_exactly_one_record(self):
+        """The double-count hazard. Two writers observe one dispatch; a naive
+        append would halve G4's effective threshold."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_BUILD, confirmed=False)
+        confirm_or_append_stage_entry(states, "BUILD")
+
+        assert self._skills(states) == [SKILL_DO_BUILD]
+        assert states["_sdlc_dispatches"][0]["confirmed"] is True
+
+    def test_bypassed_stage_records_itself(self):
+        """The #2730 defect proper: no router record exists, so the stage entry
+        must append one rather than leaving the ledger silent."""
+        states: dict = {}
+        confirm_or_append_stage_entry(states, "PATCH")
+
+        assert self._skills(states) == [SKILL_DO_PATCH]
+        assert states["_sdlc_dispatches"][0]["confirmed"] is True
+
+    def test_build_to_patch_chain_reports_patch_as_last_dispatched(self):
+        """The named regression fixture. `/do-build` chains to `/do-patch`
+        without the router, so before this fix `last_dispatched_skill` read
+        `/do-build` while `/do-patch` was the skill that actually ran -- and
+        rows 8b and 8d gate on exactly that value."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_BUILD, confirmed=False)
+        confirm_or_append_stage_entry(states, "BUILD")
+        confirm_or_append_stage_entry(states, "PATCH")
+
+        assert self._skills(states) == [SKILL_DO_BUILD, SKILL_DO_PATCH]
+        _, last_skill = compute_same_stage_count(states)
+        assert last_skill == SKILL_DO_PATCH
+
+    def test_genuine_repeat_still_appends_so_g4_can_count(self):
+        """Deduplicating a real re-entry would silently disarm the guard this
+        whole issue exists to re-arm."""
+        states: dict = {}
+        for _ in range(3):
+            record_dispatch(states, SKILL_DO_PR_REVIEW, confirmed=False)
+            confirm_or_append_stage_entry(states, "REVIEW")
+
+        assert self._skills(states) == [SKILL_DO_PR_REVIEW] * 3
+        count, skill = compute_same_stage_count(states)
+        assert count == 3
+        assert skill == SKILL_DO_PR_REVIEW
+
+    def test_repeat_on_the_bypass_path_also_appends(self):
+        states: dict = {}
+        confirm_or_append_stage_entry(states, "PATCH")
+        confirm_or_append_stage_entry(states, "PATCH")
+
+        assert self._skills(states) == [SKILL_DO_PATCH] * 2
+
+    def test_a_bypass_record_inherits_the_pr_number_so_g4_can_count_it(self):
+        """`pr_number` is IN the snapshot G4 compares. The bypass path has no
+        `_meta` to read it from, so recording None beside a router record's real
+        value breaks the streak at every router/bypass boundary -- making the
+        very records this feature adds uncountable, which is worse than the
+        missing records it fixes.
+
+        Carries real stage statuses so the `count == 2` assertion is load-bearing:
+        on a bare `states = {}` the `stages` field is empty on both sides of the
+        boundary, and the count would hold even with the pre-entry-status
+        comparability bug reintroduced.
+        """
+        states: dict = {"REVIEW": "failed", "BUILD": "completed"}
+        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=42, confirmed=False)
+        prior = states.get("REVIEW")
+        states["REVIEW"] = "in_progress"
+        confirm_or_append_stage_entry(states, "REVIEW", prior_status=prior)
+
+        states["REVIEW"] = "failed"
+        prior = states.get("REVIEW")
+        states["REVIEW"] = "in_progress"
+        confirm_or_append_stage_entry(states, "REVIEW", prior_status=prior)
+
+        records = states["_sdlc_dispatches"]
+        assert [e["stage_snapshot"]["pr_number"] for e in records] == [42, 42]
+        assert [e["stage_snapshot"]["stages"]["REVIEW"] for e in records] == ["failed", "failed"]
+        count, _ = compute_same_stage_count(states)
+        assert count == 2
+
+    def test_a_stale_slot_for_another_stage_does_not_absorb_this_entry(self):
+        """A dispatch recorded but never started leaves an unconfirmed slot
+        forever. Scanning past intervening records to find it would drop the
+        real entry's record and leave `last_dispatched_skill` naming the wrong
+        skill -- the exact defect this feature exists to fix. Only the NEWEST
+        record can be this entry's slot, since the router records immediately
+        before invoking."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_TEST, confirmed=False)  # never started
+        record_dispatch(states, SKILL_DO_PATCH, confirmed=False)
+        confirm_or_append_stage_entry(states, "PATCH")
+        confirm_or_append_stage_entry(states, "TEST")  # /do-patch chains to /do-test
+
+        assert [e["skill"] for e in states["_sdlc_dispatches"]] == [
+            SKILL_DO_TEST,
+            SKILL_DO_PATCH,
+            SKILL_DO_TEST,
+        ]
+        _, last_skill = compute_same_stage_count(states)
+        assert last_skill == SKILL_DO_TEST
+
+    def test_upgrading_a_slot_restamps_the_time(self):
+        """`_latest_dispatch_at` (rows 8 and 2b) must report when the stage
+        actually started, not when the router queued it."""
+        states: dict = {}
+        record_dispatch(
+            states, SKILL_DO_BUILD, now=datetime(2026, 1, 1, tzinfo=UTC), confirmed=False
+        )
+        confirm_or_append_stage_entry(states, "BUILD", now=datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert states["_sdlc_dispatches"][0]["at"].startswith("2026-06-01")
+
+    def test_only_the_newest_unconfirmed_slot_is_upgraded(self):
+        """A stale unconfirmed slot from a dispatch that never started must not
+        absorb a later entry -- that would merge two entries into one record."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_PR_REVIEW, confirmed=False)
+        record_dispatch(states, SKILL_DO_PR_REVIEW, confirmed=False)
+        confirm_or_append_stage_entry(states, "REVIEW")
+
+        flags = [e["confirmed"] for e in states["_sdlc_dispatches"]]
+        assert flags == [False, True], flags
+
+    def test_unknown_stage_records_nothing_and_does_not_raise(self):
+        """A skill-less record would break every consumer of
+        history[-1]["skill"]."""
+        states: dict = {}
+        confirm_or_append_stage_entry(states, "NOT_A_STAGE")
+        assert states.get("_sdlc_dispatches", []) == []
+
+    def test_stage_field_is_recorded_but_never_enters_the_snapshot(self):
+        """G4 compares snapshots. A per-dispatch-varying field inside one kills
+        oscillation detection outright -- the exact failure this issue is
+        about."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_BUILD)
+        entry = states["_sdlc_dispatches"][0]
+
+        assert entry["stage"] == "BUILD"
+        assert "stage" not in entry["stage_snapshot"]
+        assert "confirmed" not in entry["stage_snapshot"]
+
+    def test_snapshot_key_set_is_unchanged(self):
+        """Pins the projection: widening it silently disarms G4."""
+        states: dict = {"BUILD": "in_progress"}
+        record_dispatch(states, SKILL_DO_BUILD)
+        assert set(states["_sdlc_dispatches"][0]["stage_snapshot"]) == {
+            "stages",
+            "_verdicts",
+            "_patch_cycle_count",
+            "_critique_cycle_count",
+            "pr_number",
+        }
+
+    def test_stage_for_skill_inverts_the_canonical_map(self):
+        from agent.pipeline_graph import STAGE_TO_SKILL
+        from agent.sdlc_router import stage_for_skill
+
+        for stage, skill in STAGE_TO_SKILL.items():
+            assert stage_for_skill(skill) == stage
+        assert stage_for_skill("/do-nonexistent") is None
+        assert stage_for_skill(None) is None

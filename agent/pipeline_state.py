@@ -406,6 +406,9 @@ class PipelineStateMachine:
         # build the instance via __new__) lands with the full attribute set.
         self.stage_skips = {}
         self._skip_precondition_cache: dict[str, tuple[str, str] | None] = {}
+        # (stage, pre-entry status) staged by _activate_stage for _save() to
+        # record as a dispatch entry (#2730).
+        self._pending_stage_entry: tuple[str, str | None] | None = None
 
         def _apply(data: dict) -> None:
             self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
@@ -507,8 +510,10 @@ class PipelineStateMachine:
         key (``_verdicts``, ``_sdlc_dispatches``, or any future ``_*`` key)
         would be silently dropped if we serialized ``self.states`` alone. To
         protect cross-writer invariants — especially the verdict recorder in
-        ``tools.sdlc_verdict`` and the dispatch recorder in
-        ``agent.sdlc_router.record_dispatch`` — we reload the latest raw
+        ``tools.sdlc_verdict`` and the router's dispatch recorder in
+        ``agent.sdlc_router.record_dispatch`` (and, since #2730, ``_save()``
+        itself, which appends the stage-entry record AFTER this merge — see
+        ``_apply_pending_stage_entry``) — we reload the latest raw
         stage-state blob from the active backing store BEFORE writing and
         merge every ``_*`` key we did not manage ourselves. This makes
         ``_save()`` a safe participant in the cross-process stage-state
@@ -549,10 +554,51 @@ class PipelineStateMachine:
                 continue
             data[key] = value
 
+        # #2730: record the stage entry AFTER the merge, so it operates on the
+        # freshest `_sdlc_dispatches` just read from the store rather than a
+        # stale in-memory copy, and lands inside this same single write.
+        self._apply_pending_stage_entry(data)
+
         try:
             self._write_raw(data)
         except Exception as e:
             logger.warning(f"Failed to save stage_states for {self._store_label()}: {e}")
+
+    def _apply_pending_stage_entry(self, data: dict) -> None:
+        """Record a pending stage entry into ``data``'s dispatch history (#2730).
+
+        Every branch of ``start_stage`` funnels through ``_activate_stage``, and
+        so does every actor that starts a stage: the skill bodies via
+        ``sdlc-tool stage-marker``, the PreToolUse hook (which never touches
+        ``write_marker`` and is the dominant marker writer on the bridge), and
+        ``/do-sdlc``'s backfills. Recording here is what makes the dispatch
+        history unbypassable. Previously only the router wrote it, so a stage
+        reached by a skill-to-skill chain such as ``/do-build`` → ``/do-patch``
+        left a marker and no ledger entry, and G4 had nothing to count.
+
+        The double-count question is delegated to
+        ``sdlc_router.confirm_or_append_stage_entry``: the router's own
+        pre-invocation record is an *unconfirmed slot* that this upgrades in
+        place, so a router-driven dispatch still yields exactly one record.
+
+        Called from ``_save()`` after the preserved-metadata merge, so it sees
+        the freshest history and rides the same single write -- there is no
+        second read-modify-write to race with.
+
+        Never raises: a stage must not become unrecordable because its audit
+        entry failed.
+        """
+        pending = self._pending_stage_entry
+        if not pending:
+            return
+        self._pending_stage_entry = None
+        stage, prior_status = pending
+        try:
+            from agent.sdlc_router import confirm_or_append_stage_entry
+
+            confirm_or_append_stage_entry(data, stage, prior_status=prior_status)
+        except Exception as e:  # audit must never block a write
+            logger.debug(f"pipeline_state: stage-entry dispatch record failed for {stage}: {e}")
 
     def _load_preserved_metadata(self) -> dict:
         """Return underscore-prefixed metadata keys from the live backing store.
@@ -597,7 +643,15 @@ class PipelineStateMachine:
 
     def _activate_stage(self, stage: str) -> None:
         """Set stage to in_progress, save, and record analytics."""
+        prior_status = self.states.get(stage)
         self.states[stage] = "in_progress"
+        # #2730: flag the entry for _save() to record. It cannot be applied
+        # here -- _save() re-reads `_sdlc_dispatches` from the backing store and
+        # merges that copy, so an in-memory mutation made now would be silently
+        # discarded by the very next line. The pre-entry status rides along
+        # because the record must snapshot the same side of this transition the
+        # router's slot did; see confirm_or_append_stage_entry.
+        self._pending_stage_entry = (stage, prior_status)
         self._save()
         _record_stage_metric("sdlc.stage_started", stage)
 
