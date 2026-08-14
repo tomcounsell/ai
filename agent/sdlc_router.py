@@ -1256,7 +1256,8 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     deliberate: an approval recorded before the latest patch does not describe
     the code that patch produced, and advancing on it would merge code no review
     ever saw. It converges -- the re-review records a verdict newer than the
-    patch dispatch, which row 9 then owns -- and G4 bounds it otherwise. See
+    patch dispatch, which row 9 then owns. If it does not converge, nothing
+    stops it; see the unbounded-loop note at the end of this docstring. See
     ``TestStaleApprovedIsReReviewedNotAdvanced``.
 
     Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
@@ -1272,9 +1273,16 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
 
     No defensive step-asides are added on the strength of that proof.
 
-    Loop-bound by G4 (``same_stage_dispatch_count``): a verdict that stays
-    permanently stale escalates to a human rather than spinning on
-    ``/do-pr-review``.
+    NOT loop-bounded, despite what this docstring claimed until #2730. The
+    8 -> 8b loop alternates ``/do-patch`` with ``/do-pr-review``, and
+    ``compute_same_stage_count`` requires consecutive entries to share BOTH the
+    skill and the ``stage_snapshot``. The alternation fails the first test, and
+    ``_patch_cycle_count`` -- which ``build_stage_snapshot`` includes and
+    ``complete_stage("PATCH")`` increments every cycle -- fails the second. G2
+    caps critique cycles only; there is no patch-cycle equivalent. So a verdict
+    that stays permanently stale spins on ``/do-pr-review`` without escalating.
+    Tracked on #2801, which carries the measurements and the reason the obvious
+    one-line fix does not work.
     """
     if not meta.get("pr_number"):
         return False
