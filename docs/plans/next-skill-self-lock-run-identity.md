@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-14
 tracking: https://github.com/tomcounsell/ai/issues/2766
 last_comment_id: 5288838467
+revision_applied: true
+revision_applied_at: 2026-08-14T03:21:02Z
 ---
 
 # next-skill takes the caller's run identity instead of guessing it
@@ -65,11 +67,13 @@ intermittently: on a healthy run with a live `eng` session it never fires.
 
 `next-skill` is told who is calling. `sdlc-tool next-skill --run-id {run_id}` peeks the lock
 under the caller's stated identity, so a run can never be told to stand down for its own
-lock. When no `--run-id` is supplied, the blocked payload carries enough signal
-(`peek_identity: "caller" | "session_mirror" | "unresolved"`) that a supervisor can tell
-"I could not determine the caller's identity" apart from "a genuine live rival owns this
-issue" — and `/do-sdlc`'s Step 2 table applies the same `owner_run_id` self-identity check
-to the `ISSUE_LOCKED` rows that Step 3d.6 already applies.
+lock. The blocked payload additionally carries **diagnostic-only** keys
+(`peek_identity: "caller" | "session_mirror" | "unresolved"`, and `session_mirror_run_id`
+on the caller-supplied path) so a human reading a block can tell "I could not determine the
+caller's identity" apart from "a genuine live rival owns this issue" — and `/do-sdlc`'s
+Step 2 table applies the same `owner_run_id` self-identity check to the `ISSUE_LOCKED` rows
+that Step 3d.6 already applies. Neither key drives any automatic supervisor recovery
+branch (see Critique Results, concern 4).
 
 ## Freshness Check
 
@@ -225,9 +229,15 @@ inferring at the last consumer that still does, not to make the inference smarte
 - **Interface changes**: `sdlc-tool next-skill` gains an **optional** `--run-id`.
   `tools/sdlc_next_skill.py::decide()` gains an optional `run_id` keyword. Both are additive
   and backward compatible: omitting `--run-id` preserves today's inference path exactly, with
-  one added diagnostic key in the blocked payload. `decide()` has no in-repo Python callers
-  outside its own CLI `main()` (verified by grep), so the blast radius of the signature change
-  is a single file plus its tests.
+  added diagnostic keys in the blocked payload. **Callers of `decide()` outside its own CLI
+  `main()` are all in the test tree** — and there are three, two of them integration:
+  `tests/integration/test_sdlc_dispatch.py:28` imports and drives `decide()` directly, `:321-350`
+  shells out to `python -m tools.sdlc_next_skill` with an explicit argv list (the exact argparse
+  surface being changed, so it is the argparse regression detector), and
+  `tests/integration/test_sdlc_session_ensure_integration.py:451`/`:497` drive `decide()`
+  end-to-end against real Redis after a real `session-ensure`. Production blast radius is a
+  single file; test blast radius is unit **plus** those two integration suites, all listed in
+  Test Impact.
 - **Coupling**: *decreases*. `decide()`'s correctness stops depending on
   `find_session_by_issue` resolving, removing a hidden coupling between the router's lock
   pre-check and the session-lookup heuristics.
@@ -275,10 +285,16 @@ old rule.
 - **Preserved inference fallback**: when `--run-id` is absent, today's
   `find_session_by_issue(...).active_run_id` path runs unchanged, so every existing caller
   keeps working during and after the rollout.
-- **Diagnostic on the blocked payload**: a `peek_identity` key records where the peek identity
-  came from — `"caller"`, `"session_mirror"`, or `"unresolved"`. A supervisor seeing
-  `ISSUE_LOCKED` + `peek_identity: "unresolved"` knows the block may be a lookup failure, not
-  a rival.
+- **Diagnostics on the blocked payload (no control flow)**: a `peek_identity` key records where
+  the peek identity came from — `"caller"`, `"session_mirror"`, or `"unresolved"`. On the
+  caller-supplied blocked path only, a `session_mirror_run_id` key additionally reports what
+  `find_session_by_issue(...).active_run_id` currently says, so a supervisor whose `--run-id`
+  went stale after an orphaned-lock re-ensure can see that its own id was superseded rather than
+  displaced by a rival. **Both keys are diagnostic. Neither overrides a block, and neither
+  triggers an automatic retry.** An `ISSUE_LOCKED` block is reported to the human as-is;
+  `peek_identity: "unresolved"` is reported as *inconclusive* rather than as a confirmed rival.
+  There is no supervisor recovery branch (critique concern 4 — resolves the former Open
+  Question #1 in favor of keeping the cheap diagnostic and cutting the expensive control flow).
 - **Self-identity belt in the skill body**: `/do-sdlc`'s Step 2 three-way table applies the
   `owner_run_id ∈ {run_ids this run has held}` check to the `ISSUE_LOCKED` rows, exactly as
   Step 3d.6 already does — so a supervisor can never be instructed to stand down for its own
@@ -293,8 +309,11 @@ old rule.
 → **G1-G8 guards evaluate normally** → dispatch decision returned.
 
 Contrast, no `--run-id` supplied and lookup fails → **peek under `None`** → blocked →
-payload carries `peek_identity: "unresolved"` → **supervisor's table reads it as
-inconclusive, not as a foreign holder** → re-ensure and retry rather than abort.
+payload carries `peek_identity: "unresolved"` → **supervisor reports the block to the human as
+inconclusive rather than as a confirmed foreign holder, and stops.** No automatic re-ensure, no
+automatic retry: `session-ensure` is a mutating call and an `unresolved` block is emitted on any
+lookup miss, including one where a genuine rival really does hold the lock. Automatic recovery
+there would turn a designed stop into repeated lock contests against a live foreign owner.
 
 ### Technical Approach
 
@@ -309,6 +328,22 @@ inconclusive, not as a foreign holder** → re-ensure and retry rather than abor
     on a miss or exception.
   - Add `peek_identity` to the `ISSUE_LOCKED` blocked payload only. Do not add keys to the
     dispatch payload.
+  - **Stale-self diagnostic (critique concern 3).** Making a supplied `--run-id` authoritative
+    removes a self-heal that exists today: after an orphaned-lock re-ensure mints a NEW run_id
+    (`.claude/skills-global/do-sdlc/SKILL.md:94`), a supervisor that forgot to rebind currently
+    still passes the peek, because inference reads the session's *updated* `active_run_id`
+    mirror. After this change it asserts its stale id, the mirror is never consulted, and the
+    peek blocks. So: on the `--run-id`-supplied **blocked** path only, additionally resolve
+    `find_session_by_issue(issue_number)` (default args — no `include_terminal`) and emit its
+    `active_run_id` as `session_mirror_run_id`. This is **diagnostic only** and must never be
+    used to override the block; overriding would violate the same boundary
+    `tools/sdlc_session_ensure.py:326-334` draws for `read_run_identities`. Resolve it inside a
+    `try/except` that leaves the key absent on failure — a diagnostic must never turn a block
+    into an error.
+  - **Do not opt into `include_terminal=True`** at this or any call site in this file. The flag
+    exists (`tools/_sdlc_utils.py:255`, honored at `:340`/`:361`) and is a working one-keyword
+    route back to #1915 that would leave `tools/_sdlc_utils.py` untouched and every other
+    Success Criterion satisfied. There is a Verification row for it.
   - **Invariant to preserve and assert in tests**: `touch_issue_lock` is still called with
     `peek=True` on every path. The new argument changes *what identity is compared*, never
     *whether a lock is claimed or renewed*.
@@ -324,13 +359,21 @@ inconclusive, not as a foreign holder** → re-ensure and retry rather than abor
     `next-skill` takes no `--run-id`.)" note at `:122`.
   - Step 2 table (`:93-95`): add the self-identity qualifier to the two `ISSUE_LOCKED` rows so
     the "Foreign holder" row reads as *foreign* only when `owner_run_id` is not one this run
-    has held — matching the wording already at `:269-273`.
-  - Document `peek_identity: "unresolved"` as an inconclusive block: re-ensure, adopt, retry
-    once; do not abort.
+    has held — matching the wording already at `:269-273`. **This file's `:95` is the site
+    genuinely missing the qualifier** (`.claude/skills/sdlc/SKILL.md:202` already documents a
+    "Self-owned continue path"; that one is an amendment, not an addition).
+  - Document `peek_identity` and `session_mirror_run_id` as **diagnostics only**:
+    `peek_identity: "unresolved"` means the block is *inconclusive* — report it to the human as
+    such and stop. **Do not add an automatic re-ensure/retry branch.** `session-ensure` mutates,
+    and `unresolved` is emitted on any lookup miss including a genuine rival's, so automatic
+    recovery would contest a live foreign lock.
 - **`.claude/skills/sdlc/SKILL.md`**
   - `:74`: restate the rule. Writes require `--run-id` (`RUN_ID_REQUIRED`); `next-skill`
     *accepts* `--run-id` as a read-only identity assertion; `stage-query`, `verdict get`, and
     `dispatch get` take none.
+  - `:202`: amend the existing `ISSUE_LOCKED` paragraph — the "Self-owned continue path" wording
+    is already there; add that `next-skill` now accepts `--run-id` and that `peek_identity` /
+    `session_mirror_run_id` are diagnostics on the blocked payload.
   - `:239` and `:266`: add `--run-id {run_id}` to the sample invocations.
   - Check `tests/unit/test_sdlc_skill_md_parity.py` still passes — it asserts Step 4 references
     `sdlc-tool next-skill`, which an added flag does not break.
@@ -349,8 +392,15 @@ inconclusive, not as a foreign holder** → re-ensure and retry rather than abor
       `peek_identity = "unresolved"` and emit a `logger.debug`. Add a test that forces
       `find_session_by_issue` to raise and asserts the blocked payload carries
       `peek_identity == "unresolved"` (observable behavior, not a silent swallow).
-- [ ] `tools/sdlc_next_skill.py:545` — the peek's own `except` path. Assert it is unchanged
-      by this work (still fails open toward the existing behavior).
+- [ ] `tools/sdlc_next_skill.py:605` — `decide()`'s outer `except Exception`: assert unchanged
+      (still returns `{"error": ..., "dispatched": False}` and fails open toward existing
+      behavior). *(The earlier citation of `:545` was wrong — `:545` is the `return {...}` of the
+      blocked payload; the only local handler in that region is the `except Exception` at `:538`,
+      already covered by the row above.)*
+- [ ] The new `session_mirror_run_id` lookup must be wrapped so a raising
+      `find_session_by_issue` leaves the key absent and the block intact — a diagnostic must
+      never convert a block into an error. Add a test that forces the raise on the
+      `--run-id`-supplied blocked path.
 - [ ] No other exception handlers are in scope; `models/session_lifecycle.py` is not modified.
 
 ### Empty/Invalid Input Handling
@@ -388,14 +438,35 @@ inconclusive, not as a foreign holder** → re-ensure and retry rather than abor
 - [ ] `tests/unit/test_sdlc_takeover_regression.py` — REVIEW and keep green: this is the
       #1915-class guard. Nothing in this plan may make it fail. If it does not already cover
       "a foreign run_id supplied via `--run-id` cannot take over a live lock," ADD that case.
+- [ ] `tests/integration/test_sdlc_dispatch.py` — REVIEW: `:28` imports and drives `decide()`
+      directly and `:57-64` calls it with mocked session lookup, so the added keyword must keep a
+      default. `:321-350` shells out to `python -m tools.sdlc_next_skill` with an explicit argv
+      list — **this is the argparse regression surface** for the new `--run-id`. Add a subprocess
+      case exercising `--run-id` there.
+- [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — UPDATE: `:435-497` already
+      runs a real `session-ensure` against real Redis and then calls `sdlc_next_skill.decide()`
+      (`:451`, `:497`). **This is the honest home for the Risk 3 demonstrated-red proof.** A red
+      produced only by `patch("tools._sdlc_utils.find_session_by_issue", return_value=None)`
+      proves the mock, not the bug: it asserts that a function stubbed to return `None` causes a
+      `None` peek identity, which is true by construction. The real reproduction drives a real
+      lock plus a real session record forced terminal / non-`eng`.
 - [ ] NEW `tests/unit/test_sdlc_next_skill.py::TestSelfLockPeekIdentity` — the red-first
-      regression suite (see Success Criteria).
+      regression suite (see Success Criteria). Unit-level cases may use mocks for the branch
+      matrix, but they do **not** satisfy the demonstrated-red requirement on their own.
 
 ## Rabbit Holes
 
-- **Widening `find_session_by_issue` to see terminal or non-`eng` sessions.** It looks like the
-  obvious one-line fix and it is the trap: that filter is #1915's fix, and loosening it lets a
-  dead session be resolved as the live issue owner. Fix the caller, not the lookup.
+- **Widening `find_session_by_issue` to see terminal or non-`eng` sessions — by editing it *or*
+  by passing `include_terminal=True` at the peek call site.** It looks like the obvious one-line
+  fix and it is the trap: that filter is #1915's fix, and loosening it lets a dead session be
+  resolved as the live issue owner. Note that the opt-in already exists
+  (`tools/_sdlc_utils.py:255`, honored at `:340`/`:361`, proven working by
+  `tests/unit/test_sdlc_utils.py:309`), so this is a **live one-keyword bypass**, not a
+  theoretical one: a builder could write `find_session_by_issue(n, include_terminal=True)` inside
+  `tools/sdlc_next_skill.py`, reintroduce #1915, and leave `tools/_sdlc_utils.py` byte-for-byte
+  unchanged — satisfying every other Success Criterion. The Verification table carries a row
+  asserting the token never appears in `tools/sdlc_next_skill.py`. Fix the caller's *identity
+  source*, not the lookup's *visibility*.
 - **Making `next-skill` mint or adopt a run_id when it cannot resolve one.** That would make a
   read-only subcommand an identity source, breaking `session-ensure`'s exclusive-mint invariant
   and reintroducing the multi-owner class of bug wholesale.
@@ -438,11 +509,13 @@ demonstrated-red requirement for guard-shaped work.
 fix lands. The two reproducing conditions are cheap to construct with a session fixture:
 `session_type != "eng"`, and terminal `status`. Paste the red output into the PR body.
 
-### Risk 4: `peek_identity` is added but no supervisor reads it
-**Impact:** The diagnostic exists and the skill bodies still collapse every `ISSUE_LOCKED` to
-"stop," so the belt never engages.
-**Mitigation:** The skill-body edits to `/do-sdlc` Step 2 and Step 3a are in scope for this
-plan, not deferred. Success Criteria requires both the code key and the table row.
+### Risk 4 (dissolved by the revision): `peek_identity` as a control-flow surface
+**Status:** DISSOLVED. `peek_identity` and `session_mirror_run_id` are now specified as pure
+diagnostics on the `ISSUE_LOCKED` payload with no supervisor recovery branch (critique concern
+4). There is no belt to fail to engage: the keys are read by a human reading a block, and by the
+supervisor's existing `owned_run_ids` self-identity check, which was already in scope. The
+expensive half — a `/do-sdlc` retry branch — is cut, which also removes the scope creep that put
+`appetite: Small` under strain. The remaining cost is ~10 lines of code plus unit assertions.
 
 ## Race Conditions
 
@@ -478,6 +551,27 @@ rival. Neither path widens the terminal filter.
 side-effect free by construction; concurrent peeks under the same identity both return
 `acquired=True`. No change to this property is in scope, and it is asserted by the preserved
 `test_peek_never_acquires_or_renews`.
+
+### Race 4: Stale caller-supplied `--run-id` after an orphaned-lock re-ensure
+**Location:** `tools/sdlc_next_skill.py:513-549` ↔ `.claude/skills-global/do-sdlc/SKILL.md:94`
+**Trigger:** the supervisor hits the orphaned-lock row, re-ensures, and `session-ensure` mints a
+**new** run_id. The supervisor fails to rebind and keeps passing its original `--run-id` to
+`next-skill`.
+**Data prerequisite:** the session's `active_run_id` mirror (fresh) vs. the caller's asserted id
+(stale).
+**State prerequisite:** the lock is live and owned by the *new* run_id, which belongs to the same
+supervisor.
+**Why this is new:** today this self-heals by accident — inference reads the *updated* mirror, so
+the peek passes despite the supervisor's stale bookkeeping. Making `--run-id` authoritative
+removes that accidental heal and turns it into a hard block. Race 1 does not cover this; Race 1
+assumes a genuine rival.
+**Mitigation:** the block is **correct** and stays — a run asserting an id it no longer holds
+should be told so, not silently papered over. What the fix adds is legibility: on the
+`--run-id`-supplied blocked path the payload carries `session_mirror_run_id`, so the supervisor's
+existing `owned_run_ids` self-identity check has the data to recognize "this is my own successor
+id" rather than "a rival". Diagnostic only — it never overrides the block. Explicit test case:
+supply run_id `X`, lock held by `Y`, session mirror reads `Y` → blocked, `peek_identity:
+"caller"`, `session_mirror_run_id: "Y"`.
 
 ## No-Gos (Out of Scope)
 
@@ -540,15 +634,22 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 
 ### Skill Bodies
 - [ ] Update `.claude/skills-global/do-sdlc/SKILL.md` — Step 2 refusal table `ISSUE_LOCKED`
-      rows, Step 3a invocation and its `:122` parenthetical, plus `peek_identity` handling.
-- [ ] Update `.claude/skills/sdlc/SKILL.md` — `:74` run-id rule, `:202` ISSUE_LOCKED paragraph,
-      and the `:239` / `:266` sample invocations.
+      rows (`:95` is the row missing the self-identity qualifier), Step 3a invocation and its
+      `:122` parenthetical, plus a sentence describing `peek_identity` / `session_mirror_run_id`
+      as diagnostics. **Do not add a retry or re-ensure branch.**
+- [ ] Update `.claude/skills/sdlc/SKILL.md` — `:74` run-id rule, `:202` ISSUE_LOCKED paragraph
+      (amendment — the self-owned continue path is already documented there), and the `:239` /
+      `:266` sample invocations.
 
 ### Inline Documentation
 - [ ] Docstring on `decide()` documenting the `run_id` parameter as a read-only identity
       assertion that is never minted, adopted, or written.
 - [ ] Comment at the peek block explaining why a supplied `--run-id` skips the session lookup
-      and why the lookup is *not* widened instead (cite #1915).
+      and why the lookup is *not* widened instead (cite #1915). **Do not write the literal token
+      `peek=False` or `include_terminal` in this prose** — the anti-criterion sweeps below are
+      substring greps and would match your own explanatory comment (the same trap Risk 2 warns
+      about). Say "the peek argument is never inverted" and "the terminal filter is never opted
+      out of" instead.
 - [ ] Help text on `--run-id` in `main()` stating it is read-only.
 
 ## Success Criteria
@@ -557,15 +658,24 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
       held under the caller's own `run_id` and the session invisible to `find_session_by_issue`
       (terminal status; and separately, non-`eng` `session_type`), `decide()` returns
       `ISSUE_LOCKED` with `owner_run_id` equal to the caller's own id and
-      `orphaned_lock: false`. Red output pasted into the PR body.
+      `orphaned_lock: false`. Red output pasted into the PR body. **The demonstrated-red case
+      lives in `tests/integration/test_sdlc_session_ensure_integration.py`** driving a real
+      `session-ensure` and a real session record forced terminal/non-`eng`; a red produced by
+      patching `find_session_by_issue` to return `None` proves the mock, not the bug.
 - [ ] The same test passes after the fix when `--run-id` is supplied.
 - [ ] Control case: a **foreign** `run_id` supplied via `--run-id` against a live lock still
       blocks. The flag is not a bypass.
 - [ ] `--run-id ""` and whitespace-only behave exactly as omitted.
 - [ ] `touch_issue_lock` is still called with `peek=True` on every path
       (`test_peek_never_acquires_or_renews` green, unweakened).
-- [ ] `find_session_by_issue`'s eng-only and non-terminal filters are byte-for-byte unchanged.
-- [ ] `peek_identity` appears on `ISSUE_LOCKED` payloads and nowhere else.
+- [ ] `find_session_by_issue`'s eng-only and non-terminal filters are byte-for-byte unchanged,
+      **and `include_terminal` is never passed from `tools/sdlc_next_skill.py`** (the one-keyword
+      bypass).
+- [ ] `peek_identity` appears on `ISSUE_LOCKED` payloads and nowhere else. `session_mirror_run_id`
+      appears only on `ISSUE_LOCKED` payloads produced on the `--run-id`-supplied path, and never
+      overrides the block.
+- [ ] `.claude/skills-global/do-sdlc/SKILL.md` contains **no** automatic re-ensure/retry branch
+      keyed on `peek_identity` — an `unresolved` block is reported to the human, not retried.
 - [ ] `.claude/skills-global/do-sdlc/SKILL.md` Step 3a passes `--run-id`, and its Step 2
       `ISSUE_LOCKED` rows carry the self-identity qualifier.
 - [ ] No doc or skill file still asserts that `next-skill` takes no run-id.
@@ -612,13 +722,20 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 ### 1. Red-first regression tests
 - **Task ID**: test-red-repro
 - **Depends On**: none
-- **Validates**: `tests/unit/test_sdlc_next_skill.py`
+- **Validates**: `tests/unit/test_sdlc_next_skill.py`,
+  `tests/integration/test_sdlc_session_ensure_integration.py`
 - **Assigned To**: `self-lock-test-engineer`
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add `TestSelfLockPeekIdentity` to `tests/unit/test_sdlc_next_skill.py` covering: terminal-status
   session, non-`eng` session_type, and lookup-raises — each with the lock held under the caller's
   own run_id.
+- **The demonstrated-red proof goes in `tests/integration/test_sdlc_session_ensure_integration.py`**
+  alongside the existing `:435-497` block, which already runs a real `session-ensure` against real
+  Redis and then calls `sdlc_next_skill.decide()`. Force the session record terminal (and,
+  separately, non-`eng`) while the lock stays live, then call `decide()`. A red produced by
+  `patch("tools._sdlc_utils.find_session_by_issue", return_value=None)` proves the mock, not the
+  bug — it is not accepted as the red.
 - Assert the failing shape: `reason == "ISSUE_LOCKED"`, `owner_run_id == <own>`,
   `orphaned_lock is False`.
 - Run against `main`, capture the FAIL output verbatim for the PR body. This is the
@@ -640,8 +757,14 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
   `find_session_by_issue` entirely.
 - Set `peek_identity` to `"caller"` / `"session_mirror"` / `"unresolved"`; include it in the
   `ISSUE_LOCKED` payload only.
+- On the `--run-id`-supplied **blocked** path only, add `session_mirror_run_id` from
+  `find_session_by_issue(issue_number).active_run_id`, wrapped in `try/except` so a failure
+  leaves the key absent rather than turning the block into an error. Diagnostic only — it never
+  overrides the block.
 - Log a `logger.debug` on the `"unresolved"` branch — no silent swallow.
 - Do **not** touch `find_session_by_issue`, `touch_issue_lock`, or any `peek=True` argument.
+- Do **not** pass `include_terminal=True` anywhere in this file — it is a working one-keyword
+  route back to #1915 that leaves `tools/_sdlc_utils.py` untouched.
 - Do **not** consult `read_run_identities` against a live lock.
 
 ### 3. Green + control cases
@@ -653,9 +776,15 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 - **Parallel**: false
 - Confirm the Task 1 cases pass when `--run-id` is supplied.
 - Add the bypass control: foreign `run_id` + live lock → still blocked, `peek_identity: "caller"`.
+- Add the Race 4 stale-self case: `--run-id X`, lock held by `Y`, session mirror reads `Y` →
+  still blocked, `peek_identity: "caller"`, `session_mirror_run_id: "Y"`.
+- Add the diagnostic-failure case: `find_session_by_issue` raises on the `--run-id`-supplied
+  blocked path → key absent, block intact, no error payload.
 - Add `--run-id ""` and whitespace-only cases → behave as omitted.
 - Update `test_peek_never_acquires_or_renews`'s `assert_called_once_with` for the new signature
   while keeping the `peek=True` assertion exactly as strict.
+- Add a subprocess case in `tests/integration/test_sdlc_dispatch.py` (near `:321-350`) exercising
+  `python -m tools.sdlc_next_skill ... --run-id ...` — the argparse regression surface.
 
 ### 4. Skill bodies and doc contract
 - **Task ID**: build-doc-contract
@@ -665,8 +794,11 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 - **Agent Type**: documentarian
 - **Parallel**: true
 - `.claude/skills-global/do-sdlc/SKILL.md`: Step 3a invocation + `:122` parenthetical; Step 2
-  table `ISSUE_LOCKED` rows gain the self-identity qualifier; document `peek_identity`.
-- `.claude/skills/sdlc/SKILL.md`: `:74` rule, `:202` paragraph, `:239` / `:266` samples.
+  table `ISSUE_LOCKED` rows gain the self-identity qualifier (`:95` is the one actually missing
+  it); document `peek_identity` and `session_mirror_run_id` as diagnostics. **Add no retry or
+  re-ensure branch** — an `unresolved` block is reported to the human as inconclusive and stops.
+- `.claude/skills/sdlc/SKILL.md`: `:74` rule, `:202` paragraph (amendment — the self-owned
+  continue path is already documented there), `:239` / `:266` samples.
 - `docs/sdlc/do-plan.md`, `do-build.md`, `do-pr-review.md`, `do-plan-critique.md`: the
   `next-skill` clause in each.
 - Run a repo-wide `grep` sweep for the old assertion; paraphrase in any explanatory prose so the
@@ -690,9 +822,11 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every Verification row.
-- Confirm `find_session_by_issue`'s filters are unchanged (`git diff` on `tools/_sdlc_utils.py`
-  must be empty).
+- Confirm `find_session_by_issue`'s filters are unchanged: `git diff main...HEAD --stat --
+  tools/_sdlc_utils.py` empty (three-dot, not two-dot), **and** `include_terminal` absent from
+  `tools/sdlc_next_skill.py`.
 - Confirm the flag is not a bypass.
+- Confirm no automatic retry/re-ensure branch was added to the `/do-sdlc` skill body.
 - Report pass/fail per Success Criteria row.
 
 ## Verification
@@ -705,42 +839,61 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 | SKILL.md parity green | `scripts/pytest-clean.sh tests/unit/test_sdlc_skill_md_parity.py -q` | exit code 0 |
 | `--run-id` exists on next-skill | `sdlc-tool next-skill --help` | output contains `--run-id` |
 | do-sdlc Step 3a passes the flag | `grep -c -- '--run-id' .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
-| Terminal filter untouched | `git diff main --stat -- tools/_sdlc_utils.py` | output does not contain `_sdlc_utils` |
-| Peek is still read-only (anti-criterion) | `grep -c 'peek=False' tools/sdlc_next_skill.py` | match count == 0 |
-| No lock-key repo-scoping crept in (anti-criterion for the #2813 No-Go) | `git diff main -- models/session_lifecycle.py \| grep -c 'issuelock'` | match count == 0 |
+| Integration suites green | `scripts/pytest-clean.sh tests/integration/test_sdlc_dispatch.py tests/integration/test_sdlc_session_ensure_integration.py -q` | exit code 0 |
+| Terminal filter untouched (three-dot, so unrelated main commits don't redden it) | `git diff main...HEAD --stat -- tools/_sdlc_utils.py` | empty output |
+| No `include_terminal` bypass at the call site (anti-criterion) | `grep -c 'include_terminal' tools/sdlc_next_skill.py \|\| true` | `0` |
+| Peek is still read-only (anti-criterion, comment lines excluded per the nit) | `grep -vE '^[[:space:]]*#' tools/sdlc_next_skill.py \| grep -c 'peek=False' \|\| true` | `0` |
+| No lock-key repo-scoping crept in (anti-criterion for the #2813 No-Go) | `git diff main...HEAD -- models/session_lifecycle.py \| grep -c 'issuelock' \|\| true` | `0` |
+| No doc or skill file still asserts `next-skill` takes no run-id | `grep -rn --include='*.md' -e 'take no run-id' -e 'takes no run-id' -e 'no run-id at all' .claude/ docs/ \| grep -- 'next-skill' \| grep -v 'docs/plans/' \| wc -l` | `0` |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+
+**Notes on the sweep rows.** The `grep -- 'next-skill'` filter on the doc-sweep row is
+load-bearing: without it, `docs/sdlc/plan-revising-lock.md:24` and the `tools/sdlc_dispatch.py` /
+`tools/sdlc_verdict.py` docstrings match on correct statements about *other* subcommands and the
+row can never go green. The `grep -v 'docs/plans/'` exclusion is equally load-bearing: this plan
+document itself quotes the old wording repeatedly. Every `grep -c` row carries `|| true` because
+`grep -c` exits 1 on a zero count, which is the passing case here and would abort a `set -e`
+script. The two `git diff` rows use three-dot `main...HEAD` (merge-base) rather than two-dot: the
+files are high-traffic SDLC substrate — the Freshness Check above lists five commits touching
+them in the days before this plan — and a two-dot diff would go red on someone else's unrelated
+change, training everyone to ignore the guard.
 
 ## Critique Results
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| CONCERN | Risk & Robustness | Anti-regression guard has a one-keyword bypass: `find_session_by_issue` already exposes an opt-in `include_terminal: bool = False` (`tools/_sdlc_utils.py:255`, honored at `:340`/`:361`). A builder can call `find_session_by_issue(n, include_terminal=True)` from inside `tools/sdlc_next_skill.py`, reintroduce #1915, and still satisfy every Success Criterion and every Verification row, because `tools/_sdlc_utils.py` stays untouched. | pending | Add a Verification row `grep -c 'include_terminal' tools/sdlc_next_skill.py` expecting `0`, and restate the Rabbit Hole in terms of the *call site*: "Widening the lookup **or opting into `include_terminal=True` at the peek call site**". `tests/unit/test_sdlc_utils.py:309` already proves the flag works, so this is a live bypass, not a theoretical one. |
-| CONCERN | Risk & Robustness + Scope & Value | The `peek_identity: "unresolved"` recovery contract is stated two incompatible ways: Solution/Flow says "re-ensure and retry rather than abort" (unbounded), Technical Approach says "re-ensure, adopt, retry once". `unresolved` is emitted on any lookup miss regardless of whether a genuine rival holds the lock, and `session-ensure` is a mutating call, so the unbounded reading turns a designed stop into repeated lock contests against a live foreign owner. | pending | Pin one bounded contract in both places: at most ONE re-ensure + ONE retry of `next-skill`; if the second call still returns `ISSUE_LOCKED`, stop and report regardless of `peek_identity`. The re-ensure must be a bare `sdlc-tool session-ensure --issue-number N` (which itself refuses to steal a live lock), never a force/steal variant. Delete the unbounded phrasing from the Flow section so the two statements cannot drift. |
-| CONCERN | Risk & Robustness | Making a supplied `--run-id` authoritative ("skip `find_session_by_issue` entirely") creates a NEW hard-block case that today self-heals. `.claude/skills-global/do-sdlc/SKILL.md:94` documents that an orphaned-lock re-ensure mints a new run_id and every downstream call must rebind. A supervisor that fails to rebind currently still passes the peek, because inference reads the session's *updated* `active_run_id` mirror; after this change it asserts its stale id, the mirror is never consulted, and the peek blocks. | pending | On the `--run-id`-supplied blocked path ONLY, additionally resolve `find_session_by_issue(...).active_run_id` and emit it as `session_mirror_run_id` — diagnostic only, never used to override the block (overriding would violate the `read_run_identities` boundary at `tools/sdlc_session_ensure.py:326-334`). The supervisor's `owned_run_ids` self-identity check then has the data to recognize a stale-self block. Add this as an explicit Race Conditions scenario; Race 1 does not cover it (it assumes a genuine rival). |
-| CONCERN | Scope & Value | `peek_identity` plus its "inconclusive" handling is roughly half the surface of a plan whose `appetite: Small` is justified as "one optional argument threaded through one function": a payload key, a `/do-sdlc` skill-body paragraph, a new control-flow branch in the supervisor loop, and four Failure Path test rows. Its value is zero for any caller passing `--run-id`, which this same plan makes every caller do. Risk 4 concedes it may be dead on arrival and mitigates with more scope. Open Question #1 leaves it undecided. | pending | Keep the cheap half, cut the expensive half: retain `peek_identity` as a pure diagnostic key on the `ISSUE_LOCKED` payload with its unit assertions (~10 lines, no behavior change), and REMOVE the "re-ensure, adopt, retry once" branch from `.claude/skills-global/do-sdlc/SKILL.md`. Instead have the supervisor report an `unresolved` block to the human as inconclusive with no automatic recovery. This decides Open Question #1, eliminates the retry branch (concern 2), and dissolves Risk 4. |
-| CONCERN | Scope & Value | Risk 2's mitigation promises "a Verification row asserting zero remaining stale statements" and Success Criteria carries "No doc or skill file still asserts that `next-skill` takes no run-id", but no such row exists in the Verification table — the plan's most drift-prone deliverable is unverifiable. The sweep as described also false-positives: `tests/unit/test_sdlc_dispatch.py:318` says "Read-only subcommands take no run-id", a CORRECT statement about `dispatch get`. | pending | Add the row: `grep -rn --include='*.md' -e 'take no run-id' -e 'takes no run-id' -e 'no run-id at all' .claude/ docs/ ; grep -- 'next-skill' ; grep -v 'docs/plans/' ; wc -l` expecting `0`. The `next-skill` filter is load-bearing — without it `docs/sdlc/plan-revising-lock.md:24` and the `tools/sdlc_dispatch.py` / `tools/sdlc_verdict.py` docstrings match and stay red forever. The `docs/plans/` exclusion is also required: this plan quotes the old wording eight times. |
-| CONCERN | History & Consistency | Architectural Impact asserts "`decide()` has no in-repo Python callers outside its own CLI `main()` (verified by grep)". False for the test tree, and the omission propagates into Test Impact (unit tests only): `tests/integration/test_sdlc_dispatch.py:28` imports and drives `decide()`, `:321-350` shells out to `python -m tools.sdlc_next_skill` with an argv list (the exact argparse surface being changed), and `tests/integration/test_sdlc_session_ensure_integration.py:435-497` drives `decide()` end-to-end after a real `session-ensure`. | pending | Add both suites to Test Impact: `tests/integration/test_sdlc_dispatch.py` (REVIEW — the subprocess CLI invocation at `:321-350` is the argparse regression surface) and `tests/integration/test_sdlc_session_ensure_integration.py` (UPDATE — `:435-497` already runs `session-ensure` then `decide()` against real Redis and is the natural home for the Risk 3 demonstrated-red case). A red produced only by `patch("tools._sdlc_utils.find_session_by_issue", return_value=None)` proves the mock, not the bug. |
-| CONCERN | History & Consistency | The two anti-criterion Verification rows use two-dot `git diff main -- <path>`, which diffs the working tree against main's CURRENT tip. Once main advances with any unrelated commit touching `tools/_sdlc_utils.py` or `models/session_lifecycle.py` — both high-traffic SDLC substrate, and the plan's own Freshness Check lists five such commits from the preceding days — the rows go red on someone else's change and the guard gets trained to be ignored. | pending | Use three-dot merge-base semantics: `git diff main...HEAD --stat -- tools/_sdlc_utils.py` expecting empty output, and `git diff main...HEAD -- models/session_lifecycle.py ; grep -c 'issuelock'` expecting `0`. Note the second row's `grep -c` exits 1 on a zero count, so under `set -e` it must be run with `\|\| true` or compared on stdout rather than exit status. |
-| NIT | Scope & Value | The Verification row `grep -c 'peek=False' tools/sdlc_next_skill.py` expecting `0` is the same anti-criterion-counts-comments trap Risk 2 warns about, applied to a different sweep: the plan mandates (Documentation → Inline Documentation) a comment at the peek block explaining the change, and a natural phrasing of that comment trips the check. | pending | Either scope the grep to non-comment lines (`grep -vE '^[[:space:]]*#' tools/sdlc_next_skill.py ; grep -c 'peek=False'`) or instruct the Inline Documentation checkbox never to write the literal token `peek=False` in prose — say "the peek argument is never inverted" instead. |
-| NIT | History & Consistency | Two citation slips. (1) Failure Path Test Strategy calls `tools/sdlc_next_skill.py:545` "the peek's own `except` path"; `:545` is the `return {...}` of the blocked payload, the only local handler in that region is the `except Exception` at `:538`, and the next enclosing one is `decide()`'s outer handler at `:605`. (2) Technical Approach lists `.claude/skills/sdlc/SKILL.md` sites as `:74`, `:239`, `:266`, while Documentation and Task 4 also list `:202`. | pending | Restate the checkbox as "`tools/sdlc_next_skill.py:605` — `decide()`'s outer `except Exception`: assert unchanged (still fails open toward existing behavior)", and add `:202` to the Technical Approach site list so all three agree. Note for the builder: `:202` ALREADY documents the "Self-owned continue path" for `ISSUE_LOCKED`, so that edit is an amendment; the file genuinely missing the self-identity qualifier is `.claude/skills-global/do-sdlc/SKILL.md:95`. |
+| CONCERN | Risk & Robustness | Anti-regression guard has a one-keyword bypass: `find_session_by_issue` already exposes an opt-in `include_terminal: bool = False` (`tools/_sdlc_utils.py:255`, honored at `:340`/`:361`). A builder can call `find_session_by_issue(n, include_terminal=True)` from inside `tools/sdlc_next_skill.py`, reintroduce #1915, and still satisfy every Success Criterion and every Verification row, because `tools/_sdlc_utils.py` stays untouched. | ✅ Rabbit Holes (widening entry, rewritten in terms of the call site); Technical Approach (explicit "do not pass `include_terminal=True`"); Task 2; Verification row `grep -c 'include_terminal' tools/sdlc_next_skill.py` == 0; Success Criteria | Add a Verification row `grep -c 'include_terminal' tools/sdlc_next_skill.py` expecting `0`, and restate the Rabbit Hole in terms of the *call site*: "Widening the lookup **or opting into `include_terminal=True` at the peek call site**". `tests/unit/test_sdlc_utils.py:309` already proves the flag works, so this is a live bypass, not a theoretical one. |
+| CONCERN | Risk & Robustness + Scope & Value | The `peek_identity: "unresolved"` recovery contract is stated two incompatible ways: Solution/Flow says "re-ensure and retry rather than abort" (unbounded), Technical Approach says "re-ensure, adopt, retry once". `unresolved` is emitted on any lookup miss regardless of whether a genuine rival holds the lock, and `session-ensure` is a mutating call, so the unbounded reading turns a designed stop into repeated lock contests against a live foreign owner. | ✅ Flow + Technical Approach (both rewritten: report inconclusive, stop; no automatic re-ensure or retry); dissolved together with concern 4 | Pin one bounded contract in both places: at most ONE re-ensure + ONE retry of `next-skill`; if the second call still returns `ISSUE_LOCKED`, stop and report regardless of `peek_identity`. The re-ensure must be a bare `sdlc-tool session-ensure --issue-number N` (which itself refuses to steal a live lock), never a force/steal variant. Delete the unbounded phrasing from the Flow section so the two statements cannot drift. |
+| CONCERN | Risk & Robustness | Making a supplied `--run-id` authoritative ("skip `find_session_by_issue` entirely") creates a NEW hard-block case that today self-heals. `.claude/skills-global/do-sdlc/SKILL.md:94` documents that an orphaned-lock re-ensure mints a new run_id and every downstream call must rebind. A supervisor that fails to rebind currently still passes the peek, because inference reads the session's *updated* `active_run_id` mirror; after this change it asserts its stale id, the mirror is never consulted, and the peek blocks. | ✅ Technical Approach (`session_mirror_run_id` diagnostic on the `--run-id`-supplied blocked path); new **Race 4**; Task 2; Task 3 test case | On the `--run-id`-supplied blocked path ONLY, additionally resolve `find_session_by_issue(...).active_run_id` and emit it as `session_mirror_run_id` — diagnostic only, never used to override the block (overriding would violate the `read_run_identities` boundary at `tools/sdlc_session_ensure.py:326-334`). The supervisor's `owned_run_ids` self-identity check then has the data to recognize a stale-self block. Add this as an explicit Race Conditions scenario; Race 1 does not cover it (it assumes a genuine rival). |
+| CONCERN | Scope & Value | `peek_identity` plus its "inconclusive" handling is roughly half the surface of a plan whose `appetite: Small` is justified as "one optional argument threaded through one function": a payload key, a `/do-sdlc` skill-body paragraph, a new control-flow branch in the supervisor loop, and four Failure Path test rows. Its value is zero for any caller passing `--run-id`, which this same plan makes every caller do. Risk 4 concedes it may be dead on arrival and mitigates with more scope. Open Question #1 leaves it undecided. | ✅ Solution Key Elements + Flow + Technical Approach + Documentation + Task 4 (diagnostic keys kept, supervisor control-flow branch cut); Risk 4 marked DISSOLVED; Open Question #1 resolved | Keep the cheap half, cut the expensive half: retain `peek_identity` as a pure diagnostic key on the `ISSUE_LOCKED` payload with its unit assertions (~10 lines, no behavior change), and REMOVE the "re-ensure, adopt, retry once" branch from `.claude/skills-global/do-sdlc/SKILL.md`. Instead have the supervisor report an `unresolved` block to the human as inconclusive with no automatic recovery. This decides Open Question #1, eliminates the retry branch (concern 2), and dissolves Risk 4. |
+| CONCERN | Scope & Value | Risk 2's mitigation promises "a Verification row asserting zero remaining stale statements" and Success Criteria carries "No doc or skill file still asserts that `next-skill` takes no run-id", but no such row exists in the Verification table — the plan's most drift-prone deliverable is unverifiable. The sweep as described also false-positives: `tests/unit/test_sdlc_dispatch.py:318` says "Read-only subcommands take no run-id", a CORRECT statement about `dispatch get`. | ✅ New Verification row with the `next-skill` filter and `docs/plans/` exclusion, plus the sweep-notes paragraph under the table | Add the row: `grep -rn --include='*.md' -e 'take no run-id' -e 'takes no run-id' -e 'no run-id at all' .claude/ docs/ ; grep -- 'next-skill' ; grep -v 'docs/plans/' ; wc -l` expecting `0`. The `next-skill` filter is load-bearing — without it `docs/sdlc/plan-revising-lock.md:24` and the `tools/sdlc_dispatch.py` / `tools/sdlc_verdict.py` docstrings match and stay red forever. The `docs/plans/` exclusion is also required: this plan quotes the old wording eight times. |
+| CONCERN | History & Consistency | Architectural Impact asserts "`decide()` has no in-repo Python callers outside its own CLI `main()` (verified by grep)". False for the test tree, and the omission propagates into Test Impact (unit tests only): `tests/integration/test_sdlc_dispatch.py:28` imports and drives `decide()`, `:321-350` shells out to `python -m tools.sdlc_next_skill` with an argv list (the exact argparse surface being changed), and `tests/integration/test_sdlc_session_ensure_integration.py:435-497` drives `decide()` end-to-end after a real `session-ensure`. | ✅ Architectural Impact corrected (three test callers named); Test Impact gains both integration suites; Success Criteria + Task 1 relocate the demonstrated-red proof to the integration path | Add both suites to Test Impact: `tests/integration/test_sdlc_dispatch.py` (REVIEW — the subprocess CLI invocation at `:321-350` is the argparse regression surface) and `tests/integration/test_sdlc_session_ensure_integration.py` (UPDATE — `:435-497` already runs `session-ensure` then `decide()` against real Redis and is the natural home for the Risk 3 demonstrated-red case). A red produced only by `patch("tools._sdlc_utils.find_session_by_issue", return_value=None)` proves the mock, not the bug. |
+| CONCERN | History & Consistency | The two anti-criterion Verification rows use two-dot `git diff main -- <path>`, which diffs the working tree against main's CURRENT tip. Once main advances with any unrelated commit touching `tools/_sdlc_utils.py` or `models/session_lifecycle.py` — both high-traffic SDLC substrate, and the plan's own Freshness Check lists five such commits from the preceding days — the rows go red on someone else's change and the guard gets trained to be ignored. | ✅ Both anti-criterion rows rewritten to `main...HEAD`; `|| true` added to every `grep -c` row; rationale in the sweep-notes paragraph; Task 6 updated | Use three-dot merge-base semantics: `git diff main...HEAD --stat -- tools/_sdlc_utils.py` expecting empty output, and `git diff main...HEAD -- models/session_lifecycle.py ; grep -c 'issuelock'` expecting `0`. Note the second row's `grep -c` exits 1 on a zero count, so under `set -e` it must be run with `\|\| true` or compared on stdout rather than exit status. |
+| NIT | Scope & Value | The Verification row `grep -c 'peek=False' tools/sdlc_next_skill.py` expecting `0` is the same anti-criterion-counts-comments trap Risk 2 warns about, applied to a different sweep: the plan mandates (Documentation → Inline Documentation) a comment at the peek block explaining the change, and a natural phrasing of that comment trips the check. | ✅ Verification row now excludes comment lines; Inline Documentation checkbox forbids the literal tokens `peek=False` and `include_terminal` in prose | Either scope the grep to non-comment lines (`grep -vE '^[[:space:]]*#' tools/sdlc_next_skill.py ; grep -c 'peek=False'`) or instruct the Inline Documentation checkbox never to write the literal token `peek=False` in prose — say "the peek argument is never inverted" instead. |
+| NIT | History & Consistency | Two citation slips. (1) Failure Path Test Strategy calls `tools/sdlc_next_skill.py:545` "the peek's own `except` path"; `:545` is the `return {...}` of the blocked payload, the only local handler in that region is the `except Exception` at `:538`, and the next enclosing one is `decide()`'s outer handler at `:605`. (2) Technical Approach lists `.claude/skills/sdlc/SKILL.md` sites as `:74`, `:239`, `:266`, while Documentation and Task 4 also list `:202`. | ✅ Failure Path checkbox restated as `tools/sdlc_next_skill.py:605` (`decide()`'s outer handler); `:202` added to the Technical Approach site list, flagged as an amendment; `.claude/skills-global/do-sdlc/SKILL.md:95` named as the row genuinely missing the qualifier | Restate the checkbox as "`tools/sdlc_next_skill.py:605` — `decide()`'s outer `except Exception`: assert unchanged (still fails open toward existing behavior)", and add `:202` to the Technical Approach site list so all three agree. Note for the builder: `:202` ALREADY documents the "Self-owned continue path" for `ISSUE_LOCKED`, so that edit is an amendment; the file genuinely missing the self-identity qualifier is `.claude/skills-global/do-sdlc/SKILL.md:95`. |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-Neither question blocks the build — the plan states a default for each and is buildable as
-written. They are confirmations, raised here as direct inputs to `/do-plan-critique`.
+Both former Open Questions are resolved by this revision pass. Nothing remains blocking.
 
-1. **`peek_identity` on the wire — keep or drop?** The `--run-id` flag alone fixes the bug for
-   every caller that passes it. `peek_identity` exists to protect callers that *don't*, by
-   making an inconclusive block distinguishable from a real one. It costs one key on a blocked
-   payload and one skill-body paragraph. Keep it as belt-and-braces, or drop it and rely on
-   every caller passing `--run-id`?
+1. **`peek_identity` on the wire — keep or drop?** *(was Open Question #1; resolved by critique
+   concern 4.)* **Split the difference: keep the diagnostic, cut the control flow.**
+   `peek_identity` stays as a key on the `ISSUE_LOCKED` payload (with `session_mirror_run_id`
+   added per concern 3) because it costs roughly ten lines and no behavior change, and it makes a
+   block legible to a human and to the supervisor's existing `owned_run_ids` self-identity check.
+   The `/do-sdlc` "re-ensure, adopt, retry once" branch is **removed from scope**: its two
+   statements had already drifted into incompatible unbounded and bounded readings, `unresolved`
+   is emitted on any lookup miss including a genuine rival's, and `session-ensure` mutates — so
+   the branch turned a designed stop into repeated lock contests against a live foreign owner.
+   An `unresolved` block is now reported to the human as inconclusive, and stops. This is also
+   what returns the plan to a defensible `appetite: Small`.
 
-2. **Should `--run-id` be required rather than optional on `next-skill`?** Required would make
-   the bug structurally unreachable and would surface any caller still omitting it as a loud
-   `RUN_ID_REQUIRED` error instead of a silent inference. It would also break any ad-hoc or
-   human invocation of `sdlc-tool next-skill --issue-number N` for inspection, and would make
-   the change non-backward-compatible mid-flight for lanes already running. Optional is the
-   plan's default; confirm that is the right call.
+2. **Should `--run-id` be required rather than optional on `next-skill`?** **Optional, confirmed.**
+   Required would break ad-hoc human inspection (`sdlc-tool next-skill --issue-number N`) and
+   would be non-backward-compatible mid-flight for lanes already running under the old contract.
+   The inference fallback is preserved unchanged, so no existing caller breaks; the skill-body
+   edits are what make every production caller pass the flag, and the `peek_identity` diagnostic
+   is what makes an inference-path block legible when one does not.
