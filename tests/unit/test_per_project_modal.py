@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment, FileSystemLoader
 
+from ui.app import register_template_filters
+
 UI_TEMPLATES = Path(__file__).resolve().parents[2] / "ui" / "templates"
 
 
@@ -29,13 +31,7 @@ UI_TEMPLATES = Path(__file__).resolve().parents[2] / "ui" / "templates"
 def env() -> Environment:
     """Jinja2 environment configured exactly like ``ui/app.py`` does."""
     e = Environment(loader=FileSystemLoader(str(UI_TEMPLATES)), autoescape=True)
-    # The modal template expects these filters to exist; provide minimal
-    # implementations so rendering does not crash. Output formatting is not
-    # what we are asserting on — presence/absence of rows and class names is.
-    e.filters["format_timestamp"] = lambda ts: str(ts) if ts is not None else "-"
-    e.filters["format_duration"] = lambda s: f"{s}s" if s is not None else "-"
-    e.filters["format_interval_filter"] = lambda s: f"{s}s" if s else "-"
-    e.filters["format_relative"] = lambda s: f"{s}s" if s is not None else "-"
+    register_template_filters(e)
     return e
 
 

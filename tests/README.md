@@ -414,7 +414,19 @@ here.
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_nightly_regression_tests.py` | 28 | Nightly regression runner: suite invocation, JSON report parsing, Telegram alerting, version-pinned `claude` canary |
+| unit | `test_template_filter_registry.py` | 4 | Dashboard Jinja filter guards (#2719): every template's filter demand resolves against `ui.app.register_template_filters`; filter-key equality against a `Jinja2Templates`-shaped env; registrar-completeness; no test file hand-copies a `.filters[...]` registration |
+| unit | `test_analytics_stats_render.py` | 3 | Render coverage for `_partials/analytics_stats.html`'s two `\| usd` cost cards, including the sub-cent-renders-as-$0.01 case |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
+
+Dashboard render-test fixtures (`test_session_modal_liveness_render.py`,
+`test_per_project_modal.py`, `test_analytics_stats_render.py`) build a bare
+`jinja2.Environment` and must obtain filters by calling
+`ui.app.register_template_filters(env)` — never by hand-copying individual
+`env.filters["name"] = ...` assignments. Three independent hand-rolled filter
+lists (production, plus two divergent test stand-ins) is exactly what
+shipped `TemplateRuntimeError: No filter named 'usd' found` past all three
+call sites (#2719); `test_template_filter_registry.py`'s no-hand-copy guard
+enforces this in CI, not just in this note.
 
 ## Fixtures
 
