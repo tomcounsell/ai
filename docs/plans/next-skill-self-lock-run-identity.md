@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -718,6 +718,9 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 ---
 
 ## Open Questions
+
+Neither question blocks the build — the plan states a default for each and is buildable as
+written. They are confirmations, raised here as direct inputs to `/do-plan-critique`.
 
 1. **`peek_identity` on the wire — keep or drop?** The `--run-id` flag alone fixes the bug for
    every caller that passes it. `peek_identity` exists to protect callers that *don't*, by
