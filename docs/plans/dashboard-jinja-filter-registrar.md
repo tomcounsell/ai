@@ -593,19 +593,19 @@ only by `create_app` and by test fixtures.
 
 ## Success Criteria
 
-- [ ] `tests/unit/test_session_modal_liveness_render.py::TestJobRowLivenessSignals::test_cost_still_renders_alongside_the_freshness_chip` passes.
-- [ ] `tests/unit/test_session_modal_liveness_render.py::TestModalMetadataSections::test_token_cost_strip_renders_when_present` passes, asserting `$1.24`.
-- [ ] `tests/unit/test_session_modal_liveness_render.py::TestModalLivenessSection::test_renders_timestamps_via_format_filter` passes against production `_filter_format_timestamp` output.
-- [ ] `tests/unit/test_per_project_modal.py` passes unchanged in its assertions.
-- [ ] No test file hand-copies filter registrations — enforced by the no-hand-copy guard test in `tests/unit/test_template_filter_registry.py` (a CI test, not a human-run grep), anchored on `\.filters\s*\[` with the guard file self-exempted.
-- [ ] The guard env's filter keys equal a `Jinja2Templates`-shaped production env's filter keys.
-- [ ] `ui/app.py` registers filters in exactly one place (`register_template_filters`); `create_app` contains no `templates.env.filters[` assignment.
-- [ ] The filter-demand guard fails when a template references an unregistered filter, and the no-hand-copy guard fails when a test file assigns into `.filters[...]` — both proven by red-state demonstrations pasted into the PR description.
-- [ ] `_partials/analytics_stats.html` has render coverage asserting both cost cards.
-- [ ] No production render output changes: `_filter_usd` still uses `math.ceil`, and no file under `ui/templates/` is modified by this PR.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail markers exist in the touched test files (verified: none present today).
+- [x] `tests/unit/test_session_modal_liveness_render.py::TestJobRowLivenessSignals::test_cost_still_renders_alongside_the_freshness_chip` passes.
+- [x] `tests/unit/test_session_modal_liveness_render.py::TestModalMetadataSections::test_token_cost_strip_renders_when_present` passes, asserting `$1.24`.
+- [x] `tests/unit/test_session_modal_liveness_render.py::TestModalLivenessSection::test_renders_timestamps_via_format_filter` passes against production `_filter_format_timestamp` output.
+- [x] `tests/unit/test_per_project_modal.py` passes unchanged in its assertions.
+- [x] No test file hand-copies filter registrations — enforced by the no-hand-copy guard test in `tests/unit/test_template_filter_registry.py` (a CI test, not a human-run grep), anchored on `\.filters\s*\[` with the guard file self-exempted.
+- [x] The guard env's filter keys equal a `Jinja2Templates`-shaped production env's filter keys.
+- [x] `ui/app.py` registers filters in exactly one place (`register_template_filters`); `create_app` contains no `templates.env.filters[` assignment.
+- [x] The filter-demand guard fails when a template references an unregistered filter, and the no-hand-copy guard fails when a test file assigns into `.filters[...]` — both proven by red-state demonstrations pasted into the PR description.
+- [x] `_partials/analytics_stats.html` has render coverage asserting both cost cards.
+- [x] No production render output changes: `_filter_usd` still uses `math.ceil`, and no file under `ui/templates/` is modified by this PR.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail markers exist in the touched test files (verified: none present today).
 
 ## Team Orchestration
 
