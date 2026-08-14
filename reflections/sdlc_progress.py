@@ -2,13 +2,22 @@
 reflections/sdlc_progress.py — Stalled SDLC pipeline auto-resume (state-layer).
 
 Companion to `agent.session_health` (process-layer). This reflection inspects
-open SDLC PRs (`session/sdlc-<N>`) and, when a lane is genuinely stalled, acts
-on it instead of paging a human.
+open lane PRs — every PR whose head branch is in the ``session/`` namespace,
+whatever the rest of the name looks like — and, when a lane is genuinely
+stalled, acts on it instead of paging a human.
 
-Gates, in order, per open non-draft SDLC PR:
+Gates, in order, per open non-draft lane PR:
 
-    1-4  branch shape, not draft, issue still open, last commit older than
-         ``SDLC_STALL_THRESHOLD_HOURS``
+    1-2  head branch in the ``session/`` namespace with a non-empty slug, not
+         draft
+    3    last commit older than ``SDLC_STALL_THRESHOLD_HOURS``
+    4    the **issue resolution ladder** (``_resolve_lane_issue``): recorded
+         ledger by PR number, then the PR's own repo-matched closing
+         reference, then the issue-derived slug shape. Ambiguity and
+         non-resolution both decline and leave a ``gate-unknown`` finding —
+         identity is never guessed.
+    4'   issue still open (consumes the resolved number, so it cannot precede
+         the ladder)
     5    lane liveness, read from the **issue lock**, never from session rows:
          ``session:issuelock:{N}`` is read directly and classified by
          ``models.session_lifecycle._lock_owner_is_live``. Key absent → free.
@@ -22,11 +31,17 @@ Then the action ladder, keyed on ``(slug, head-sha)``:
     escalation key already set                 -> stop acting entirely
     SDLC_STALL_RESUME_ENABLED=false            -> escalate once, stop
     attempts >= SDLC_STALL_RESUME_MAX_ATTEMPTS -> escalate once, stop
-    action cooldown live                       -> skip this tick
     rung 1  live non-ledger eng session        -> steer_session(...)
     rung 2  resumable eng session              -> resume_session(...)
     rung 3  no target                          -> create_session(slug=lane slug)
     rung 4  action failed (non-benign)         -> escalate once, stop
+
+Rung selection runs BEFORE the action-cooldown claim, because every same-tick
+brake needs its result: the per-tick target dedupe keys on the selected
+session_id, and the degraded-create suppression keys on the selected ``kind``.
+So the order below rung selection is: target dedupe, per-tick action cap,
+create brake, degraded-create suppression, and only then the cooldown claim,
+which is taken exclusively by a lane that is genuinely about to dispatch.
 
 Rungs 1 and 2 both rank candidates ``(same_lane, recency)``, so a session
 carrying the stalled lane's own slug always wins and recency decides only among
@@ -57,6 +72,9 @@ Configuration (all optional, all provisional and tunable):
                                                          escalate-once
     SDLC_STALL_RESUME_MAX_ATTEMPTS          default 3    attempts per (slug, sha)
     SDLC_STALL_CREATE_MAX_PER_TICK          default 1    creations per project per tick
+    SDLC_STALL_ACTIONS_MAX_PER_TICK         default 3    steer+resume+create per project
+                                                         per tick; secondary to the
+                                                         per-tick target dedupe
     SDLC_STALL_RESUME_COOLDOWN_HOURS        default 1    action cooldown per (slug, sha)
     SDLC_STALL_ATTEMPTS_TTL_DAYS            default 30   TTL on the attempts key; floored
                                                          at the escalation TTL
@@ -113,9 +131,10 @@ _ESCALATED_KEY = "sdlc:stall:escalated:{slug}:{sha}"
 # touch_issue_lock, which fails OPEN and so cannot express "unknown").
 # _LOCK_KEY is imported from reflections.utilities above.
 
-# Only branches matching session/sdlc-<N> are flagged. Excludes session/<other-slug>
-# and ad-hoc branches — those aren't SDLC pipelines.
-_SDLC_BRANCH_RE = re.compile(r"^session/sdlc-\d+$")
+# `gh pr list` defaults to 30 results. The corpus is now the whole `session/`
+# namespace rather than a handful of shape-matched branches, so the default is
+# a silent truncation of the entire discovery surface. Explicit and generous.
+_GH_PR_LIST_LIMIT = 200
 
 # --- Thresholds -------------------------------------------------------------
 # Every one of these is provisional and tunable via the paired env var. Take
@@ -125,6 +144,14 @@ _DEFAULT_THRESHOLD_HOURS = 4
 _DEFAULT_RESUME_ENABLED = True
 _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_CREATE_MAX_PER_TICK = 1
+# Secondary to the per-tick target dedupe, which is the real burst guard. This
+# bounds steer + resume + create for ONE project tick, so the machine-wide
+# ceiling is this number times the count of owned projects — the same scoping
+# _DEFAULT_CREATE_MAX_PER_TICK already has. Provisional: chosen structurally
+# (a detector with no track record on a newly-visible population should not act
+# on all of it at once), not from a measured distribution. Take it with a grain
+# of salt and tune via SDLC_STALL_ACTIONS_MAX_PER_TICK.
+_DEFAULT_ACTIONS_MAX_PER_TICK = 3
 _DEFAULT_RESUME_COOLDOWN_HOURS = 1
 # INVARIANT: attempts TTL >= escalation TTL. If the attempts key lapsed first,
 # the budget would re-arm while the escalation key still suppressed the page —
@@ -181,6 +208,10 @@ def _create_max_per_tick() -> int:
     return int(_env_float("SDLC_STALL_CREATE_MAX_PER_TICK", _DEFAULT_CREATE_MAX_PER_TICK))
 
 
+def _actions_max_per_tick() -> int:
+    return int(_env_float("SDLC_STALL_ACTIONS_MAX_PER_TICK", _DEFAULT_ACTIONS_MAX_PER_TICK))
+
+
 def _resume_enabled() -> bool:
     raw = os.environ.get("SDLC_STALL_RESUME_ENABLED")
     if raw is None:
@@ -214,10 +245,38 @@ def _run_gh(
         return None
 
 
-def _list_open_sdlc_prs(cwd: str) -> list[dict[str, Any]]:
-    """Return open non-draft PRs whose head ref matches session/sdlc-<N>."""
+def _list_open_lane_prs(cwd: str) -> list[dict[str, Any]]:
+    """Return open non-draft PRs whose head branch is a lane branch.
+
+    The corpus boundary is the ``session/`` **namespace** — the repo's declared
+    lane namespace, built in exactly one place
+    (``tools.lane_identity.lane_branch_name``, used by
+    ``agent.worktree_manager``). The *shape of the rest of the name* is not
+    consulted: both an issue-derived lane name and a human-named one are real,
+    and a detector that reads the shape can only ever see the first kind.
+
+    Membership is expressed through ``_slug_from_branch`` returning a non-empty
+    slug, so this module keeps a single owner of the prefix.
+
+    ``closingIssuesReferences`` is requested here so the resolver's
+    closing-reference rung costs no extra subprocess work. ``gh --json``
+    selects top-level fields only, so each reference arrives as whatever object
+    ``gh`` chooses to emit and the repository is derived from it downstream.
+
+    Drafts stay excluded — a separate, deliberate exclusion this function does
+    not revisit.
+    """
     proc = _run_gh(
-        ["pr", "list", "--state", "open", "--json", "number,headRefName,isDraft,baseRefName"],
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            str(_GH_PR_LIST_LIMIT),
+            "--json",
+            "number,headRefName,isDraft,baseRefName,closingIssuesReferences",
+        ],
         cwd=cwd,
     )
     if proc is None or proc.returncode != 0:
@@ -232,7 +291,7 @@ def _list_open_sdlc_prs(cwd: str) -> list[dict[str, Any]]:
         for pr in prs
         if isinstance(pr, dict)
         and not pr.get("isDraft")
-        and _SDLC_BRANCH_RE.match(pr.get("headRefName") or "")
+        and _slug_from_branch(pr.get("headRefName") or "")
     ]
 
 
@@ -254,16 +313,189 @@ def _issue_is_open(cwd: str, number: int) -> bool | None:
 
 
 def _slug_from_branch(branch: str) -> str | None:
-    """Return 'sdlc-<N>' for 'session/sdlc-<N>', else None."""
+    """Return the lane slug carried by a ``session/<slug>`` branch, else None.
+
+    Shape-agnostic by design: whatever follows the prefix IS the slug, whether
+    it is issue-derived or human-named. This is the module's single owner of
+    the ``session/`` prefix and the only membership test for the corpus.
+
+    Two remainders are rejected rather than returned, both because the slug is
+    formatted straight into Redis keys:
+
+    * **blank** — mirroring ``tools.lane_identity._nonempty``. ``"session/"``
+      would otherwise yield ``""``, and two such branches would share one
+      cooldown, attempts, and escalation key.
+    * **containing a slash** — ``session/<slug>/fixup`` is not a lane, and
+      admitting it would put a separator into every key formatted from it.
+    """
     if not branch.startswith("session/"):
         return None
-    return branch[len("session/") :]
+    slug = branch[len("session/") :].strip()
+    if not slug or "/" in slug:
+        return None
+    return slug
 
 
 def _issue_number_from_slug(slug: str) -> int | None:
-    """Extract numeric issue id from 'sdlc-<N>'."""
+    """Last-resort rung: *derive* an issue number from an issue-derived slug.
+
+    This is the only rung of ``_resolve_lane_issue`` that derives rather than
+    reads, which is exactly why it sits at the bottom. It answers only for a
+    lane whose name happens to encode its issue, so on its own it is blind to
+    every human-named lane — that blindness, when it was the module's whole
+    discovery predicate, is the bug this ladder replaced. It survives because
+    it costs nothing and still answers correctly for the lanes it can see, but
+    both read-based rungs must decline before it is consulted.
+    """
     m = re.match(r"sdlc-(\d+)$", slug)
     return int(m.group(1)) if m else None
+
+
+def _ledger_pr_map(target_repo: str | None) -> dict[int, set[int]] | None:
+    """One repo-scoped ``PipelineLedger`` enumeration per tick: ``{pr_number: {issue}}``.
+
+    ``None`` means the enumeration **errored** (the resolution is degraded, and
+    the caller suppresses the create rung); an empty dict means it cleanly
+    found nothing, including the ``target_repo is None`` case where no query is
+    issued at all — an unscoped enumeration could bind a lane to another repo's
+    issue.
+
+    Values are **sets**, never bare integers. Rung 1 requires exactly one
+    distinct ``issue_number``, and a flat ``{pr_number: issue_number}`` map
+    would silently overwrite on a second record — turning the ambiguity case
+    into an undetectable unique *wrong* answer that then feeds
+    ``adopt_lane_slug``, whose write is permanent.
+
+    Enumerated once per tick rather than once per PR because ``pr_number`` and
+    ``target_repo`` are unindexed plain ``Field``s: Popoto loads every key and
+    filters in Python, so "repo-scoped" scopes nothing at the Redis layer and
+    the cost is O(ledger) either way. Records with a ``None`` ``issue_number``
+    are skipped, matching ``tools.merge_predicate._resolve_tracked_issue``.
+
+    The import is lazy and broadly guarded: a module-level import lets a
+    Popoto client-init failure break module load for the whole reflection.
+    """
+    if not target_repo:
+        return {}
+    try:
+        from agent.pipeline_ledger import PipelineLedger
+
+        records = list(PipelineLedger.query.filter(target_repo=target_repo))
+    except Exception as exc:
+        logger.warning(
+            "sdlc_progress: rung ledger-by-pr enumeration failed for %s: %s", target_repo, exc
+        )
+        return None
+
+    mapping: dict[int, set[int]] = {}
+    for record in records:
+        try:
+            if getattr(record, "target_repo", None) != target_repo:
+                continue
+            pr_number = getattr(record, "pr_number", None)
+            issue_number = getattr(record, "issue_number", None)
+            if pr_number is None or issue_number is None:
+                continue
+            mapping.setdefault(int(pr_number), set()).add(int(issue_number))
+        except Exception as exc:  # pragma: no cover — defensive per-record guard
+            logger.debug("sdlc_progress: ledger map skipped a record: %r", exc)
+    return mapping
+
+
+def _resolve_lane_issue(
+    pr: dict[str, Any],
+    slug: str,
+    target_repo: str | None,
+    ledger_map: dict[int, set[int]],
+) -> tuple[int | None, str]:
+    """Resolve the issue a lane PR belongs to. The module's only PR→issue path.
+
+    Called the *issue resolution ladder* so it does not collide with
+    ``tools/lane_identity.py``'s existing (and inverse) slug ladder. Ordered
+    most-authoritative first:
+
+    1. **Recorded ledger, by PR number** — a lookup into the per-tick
+       ``{pr_number: set[int]}`` map, already repo-scoped by
+       ``_ledger_pr_map``. Precedent: ``merge_predicate._resolve_tracked_issue``.
+       Most authoritative because it *reads recorded identity*, not because it
+       is infallible: ``pr_number`` is never cleared once written, so a stale
+       but repo-matching record yields a unique *wrong* answer that no
+       downstream gate catches. That is why every answer this ladder produces
+       still passes through the unchanged gates.
+    2. **The PR's own closing reference** — the single distinct entry in
+       ``closingIssuesReferences`` **whose repository equals** ``target_repo``.
+       This adopts an identity that exists in the world, and it is what covers
+       the lanes the ledger cannot see. The repo match is not optional: GitHub
+       permits a cross-repo ``Closes owner/repo#N``, a lone such reference
+       would pass the uniqueness test, and the bare number would then be
+       resolved against *this* project's repo.
+    3. **Issue-derived slug shape** — ``_issue_number_from_slug``, the only
+       rung that derives rather than reads, hence last.
+
+    **Unique match required, everywhere.** A rung finding two or more distinct
+    candidates returns ``(None, "ambiguous")`` and does **not** fall through:
+    descending from "two authoritative answers" to "one guessed answer" is
+    strictly worse than declining. A rung that cleanly finds nothing *declines*
+    and falls through normally.
+
+    **Declined is not errored.** An errored rung (a Redis outage on the ledger
+    enumeration) is signalled by the caller receiving ``None`` from
+    ``_ledger_pr_map``, not by this function: resolution still proceeds so
+    steer and resume can act, but the caller suppresses the create rung and
+    emits ``gate-unknown: ledger-degraded``. Create is the only action that
+    writes permanent identity via ``adopt_lane_slug``, and that write is
+    no-overwrite — steering the wrong session is recoverable, minting the wrong
+    identity is not.
+
+    Both read-based rungs are skipped entirely when ``target_repo`` is None.
+
+    Returns ``(issue_number, rung_name)`` or ``(None, "ambiguous" |
+    "unresolved")``.
+    """
+    # Rung 1: recorded ledger, by PR number.
+    pr_number = pr.get("number")
+    if isinstance(pr_number, int):
+        recorded = ledger_map.get(pr_number) or set()
+        if len(recorded) == 1:
+            return (next(iter(recorded)), "ledger-by-pr")
+        if len(recorded) > 1:
+            logger.warning(
+                "sdlc_progress: rung ledger-by-pr ambiguous for %s (PR #%s): %s",
+                slug,
+                pr_number,
+                sorted(recorded),
+            )
+            return (None, "ambiguous")
+
+    # Rung 2: the PR's own repo-matched closing reference.
+    if target_repo:
+        referenced: set[int] = set()
+        for ref in pr.get("closingIssuesReferences") or []:
+            if not isinstance(ref, dict):
+                continue
+            repository = ref.get("repository") or {}
+            owner = (repository.get("owner") or {}).get("login")
+            name = repository.get("name")
+            if not owner or not name or f"{owner}/{name}" != target_repo:
+                continue
+            number = ref.get("number")
+            if isinstance(number, int):
+                referenced.add(number)
+        if len(referenced) == 1:
+            return (next(iter(referenced)), "closing-reference")
+        if len(referenced) > 1:
+            logger.warning(
+                "sdlc_progress: rung closing-reference ambiguous for %s: %s",
+                slug,
+                sorted(referenced),
+            )
+            return (None, "ambiguous")
+
+    # Rung 3: derive from an issue-derived slug.
+    derived = _issue_number_from_slug(slug)
+    if derived is not None:
+        return (derived, "slug-shape")
+    return (None, "unresolved")
 
 
 def _last_commit(cwd: str, branch: str) -> tuple[str, int] | None:
@@ -348,15 +580,20 @@ def _action_cooldown_set(slug: str, sha: str) -> bool:
 
 
 def _action_cooldown_release(slug: str, sha: str) -> None:
-    """Hand the action window back after a tick that dispatched nothing.
+    """Hand the action window back after a claim that dispatched nothing.
 
-    The claim in ``_action_cooldown_set`` happens before rung selection so it
-    can double as the overlapping-tick guard. Paths that then bail without
-    acting (target query unknown, create brake, a declined rung) would
-    otherwise burn a full cooldown on a no-op tick — the plan says a braked
-    lane waits for the *next tick*, not the next hour. Releasing is safe
-    precisely because the releasing tick did nothing: there is no action for a
-    concurrent tick to duplicate.
+    The claim in ``_action_cooldown_set`` is taken *after* rung selection and
+    after every same-tick brake, so a lane deferred by the target dedupe, the
+    action cap, the create brake, or the degraded-create suppression never
+    reaches it — those paths need no release, and their "deferred to next tick"
+    wording is literally true.
+
+    What survives the claim is the narrow window between it and the dispatch
+    itself: the create rung's pre-create lock re-read can still find a benign
+    race, and a rung can still decline. Those paths sent nothing, so they owe
+    the hour back rather than burning a full cooldown on a no-op tick.
+    Releasing is safe precisely because the releasing tick did nothing: there
+    is no action for a concurrent tick to duplicate.
     """
     key = _COOLDOWN_KEY.format(slug=slug, sha=sha)
     try:
@@ -765,9 +1002,12 @@ def _check_project_stalls(project: dict) -> dict:
     # non-`ai` project's lane records under the wrong repo. `None` here is NOT
     # a safe default: `adopt_lane_slug` would fall back to lease-first
     # resolution and, with no live lease, to this process's cwd -- recording the
-    # lane under `ai`. Unreachable today (an SDLC-capable project carries a
-    # `github` block, and the branch filter admits only issue-derived names),
-    # but it is a gap rather than a tolerance, and the write is permanent.
+    # lane under `ai`. It is also what both read-based rungs of the issue
+    # resolution ladder are scoped by, so `None` costs the tick its ledger
+    # lookup and its closing-reference rung as well: an unscoped ledger query
+    # could bind a lane to another repo's issue, and a closing reference cannot
+    # be repo-matched with no repo to match against. An SDLC-capable project
+    # carries a `github` block, so this is a gap rather than a tolerance.
     target_repo = _project_repo(project)
     findings: list[str] = []
     counts = {"steered": 0, "resumed": 0, "created": 0, "escalated": 0}
@@ -777,6 +1017,14 @@ def _check_project_stalls(project: dict) -> dict:
     # session. Accepted at a 30-minute cadence; the per-(slug, sha) attempt
     # budget bounds the total regardless. See the plan's Risks table.
     creates_this_tick = 0
+    # Same per-call, non-atomic status as `creates_this_tick`. `actions_this_tick`
+    # is the secondary count bound; `targets_this_tick` is the PRIMARY burst
+    # guard -- `_pick_steer_target` queries project-wide with same-lane only a
+    # ranking preference, so several newly-visible lanes with no same-lane
+    # session all select the SAME eng session, which a count cap alone would
+    # happily steer three times in one tick with three different issues.
+    actions_this_tick = 0
+    targets_this_tick: set[str] = set()
 
     if not wd or not Path(wd).is_dir():
         return {
@@ -805,18 +1053,50 @@ def _check_project_stalls(project: dict) -> dict:
     threshold = _threshold_seconds()
     max_attempts = _max_attempts()
     create_budget = _create_max_per_tick()
+    action_budget = _actions_max_per_tick()
     resume_enabled = _resume_enabled()
     now = int(time.time())
 
-    prs = _list_open_sdlc_prs(wd)
+    # One enumeration for the whole tick. None = it errored, which degrades
+    # every rung-1 read and suppresses the create rung for this project.
+    ledger_map = _ledger_pr_map(target_repo)
+    ledger_degraded = ledger_map is None
+
+    prs = _list_open_lane_prs(wd)
     for pr in prs:
         branch = pr.get("headRefName") or ""
         slug = _slug_from_branch(branch)
         if not slug:
             continue
-        issue_num = _issue_number_from_slug(slug)
-        if issue_num is None:
+
+        # Staleness first: it needs only the branch, so a fresh healthy lane
+        # never pays for identity resolution or a `gh issue view`. It also
+        # bounds finding noise -- unlike every other gate-unknown here, an
+        # unresolvable identity is a STABLE condition that would otherwise emit
+        # a finding every tick forever.
+        commit = _last_commit(wd, branch)
+        if commit is None:
+            # No local `origin/` ref. Reported rather than skipped silently:
+            # once the corpus is the whole namespace this skip is load-bearing,
+            # and a silently-dropped lane is half of what this detector's
+            # branch-shape era got wrong.
+            findings.append(f"gate-unknown: branch-not-fetched {slug}")
             continue
+        sha, ts = commit
+        age = now - ts
+        if age < threshold:
+            continue
+        age_hours = age // 3600
+
+        issue_num, rung = _resolve_lane_issue(pr, slug, target_repo, ledger_map or {})
+        if issue_num is None:
+            if rung == "ambiguous":
+                findings.append(f"gate-unknown: issue-ambiguous {slug}")
+            else:
+                findings.append(f"gate-unknown: issue-unresolved {slug}")
+            continue
+        if ledger_degraded:
+            findings.append(f"gate-unknown: ledger-degraded {slug}")
 
         issue_open = _issue_is_open(wd, issue_num)
         if issue_open is False:
@@ -824,16 +1104,6 @@ def _check_project_stalls(project: dict) -> dict:
         if issue_open is None:
             findings.append(f"gate-unknown: issue-state {slug}")
             continue
-
-        commit = _last_commit(wd, branch)
-        if commit is None:
-            # Branch not present locally — skip silently.
-            continue
-        sha, ts = commit
-        age = now - ts
-        if age < threshold:
-            continue
-        age_hours = age // 3600
 
         # Gate 5': liveness from the lock.
         live = _lane_is_live(issue_num)
@@ -883,19 +1153,36 @@ def _check_project_stalls(project: dict) -> dict:
             _escalate("attempt budget exhausted", attempts)
             continue
 
-        # Claims the action window; also the overlapping-tick guard.
-        if not _action_cooldown_set(slug, sha):
-            logger.info("sdlc_progress: action cooldown live for %s@%s", slug, sha[:8])
-            continue
-
+        # Rung selection runs BEFORE the cooldown claim: every same-tick brake
+        # below needs its result (the dedupe keys on the target session_id, the
+        # degraded-create suppression keys on `kind`), and a lane deferred
+        # after an hour-long SETNX claim would wait an hour, not a tick.
         kind, target = _pick_steer_target(project_key, lane_slug=slug)
         if kind == "unknown":
             findings.append(f"gate-unknown: target-query {slug}")
-            _action_cooldown_release(slug, sha)
+            continue
+
+        target_id = getattr(target, "session_id", None) or ""
+        if target_id and target_id in targets_this_tick:
+            findings.append(f"action-cap: {slug} deferred to next tick (target already dispatched)")
+            continue
+        if actions_this_tick >= action_budget:
+            findings.append(f"action-cap: {slug} deferred to next tick")
             continue
         if kind == "create" and creates_this_tick >= create_budget:
             findings.append(f"create-brake: {slug} deferred to next tick")
-            _action_cooldown_release(slug, sha)
+            continue
+        if kind == "create" and ledger_degraded:
+            # Create is the only action that writes permanent identity via
+            # `adopt_lane_slug`, and that write is no-overwrite. Steering the
+            # wrong session is recoverable; minting the wrong identity from a
+            # resolution the ledger could not vouch for is not.
+            findings.append(f"create-suppressed: {slug} (ledger degraded)")
+            continue
+
+        # Claims the action window; also the overlapping-tick guard.
+        if not _action_cooldown_set(slug, sha):
+            logger.info("sdlc_progress: action cooldown live for %s@%s", slug, sha[:8])
             continue
 
         message = _steer_message(
@@ -914,8 +1201,12 @@ def _check_project_stalls(project: dict) -> dict:
             target_repo=target_repo,
             message=message,
         )
-        if outcome.dispatched and kind == "create":
-            creates_this_tick += 1
+        if outcome.dispatched:
+            actions_this_tick += 1
+            if target_id:
+                targets_this_tick.add(target_id)
+            if kind == "create":
+                creates_this_tick += 1
         if outcome.charge_failed:
             findings.append(f"charge-failed: attempts-incr {slug}")
 
@@ -946,7 +1237,7 @@ def _check_project_stalls(project: dict) -> dict:
         "status": "ok",
         "findings": findings,
         "summary": (
-            f"sdlc-progress-check: {len(prs)} SDLC PR(s) inspected, "
+            f"sdlc-progress-check: {len(prs)} lane PR(s) inspected, "
             f"{counts['steered']} steered, {counts['resumed']} resumed, "
             f"{counts['created']} created, {counts['escalated']} escalated"
         ),
