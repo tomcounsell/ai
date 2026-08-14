@@ -1,4 +1,7 @@
-"""E2E: a stalled SDLC lane's steer really lands on ``steering:{session_id}`` (#2696).
+"""E2E: a stalled lane's steer really lands on ``steering:{session_id}`` (#2696, #2755).
+
+The lane here is deliberately **human-named**, so the issue resolution ladder
+must resolve it from recorded identity for any of this to work at all.
 
 The unit suite fences ``steer_session`` and ``AgentSession.query`` at the
 boundary. This test does not: it saves a real ``AgentSession`` through the ORM,
@@ -25,21 +28,38 @@ from datetime import UTC, datetime
 
 import pytest
 
+from agent.pipeline_ledger import PipelineLedger
 from agent.steering import peek_steering_messages
 from models.agent_session import AgentSession
 from reflections import sdlc_progress
 
 _PROJECT_KEY = "test-sdlc-stall-2696"
 _ISSUE = 918273
-_SLUG = f"sdlc-{_ISSUE}"
+# A HUMAN-NAMED lane (#2755). Its slug encodes nothing about its issue, so the
+# only way this test can pass is if discovery resolves identity from what the
+# world records -- here, the PR's own closing reference -- rather than from the
+# shape of the branch string. This is the end-to-end proof of the fix.
+_SLUG = "dev-41a59eee"
 _BRANCH = f"session/{_SLUG}"
 _SHA = "e2e0000000000000000000000000000000000001"
+_ORG = "test-sdlc"
+_REPO = "stall-2755"
+_TARGET_REPO = f"{_ORG}/{_REPO}"
 
 
 @pytest.fixture
 def project(tmp_path):
-    """A project dict shaped exactly as ``run_per_project_audit`` yields one."""
-    return {"slug": _PROJECT_KEY, "working_directory": str(tmp_path)}
+    """A project dict shaped exactly as ``run_per_project_audit`` yields one.
+
+    It carries a ``github`` block because both read-based rungs of the issue
+    resolution ladder are repo-scoped: without a repo to match against, a
+    closing reference cannot be trusted and no ledger query is issued.
+    """
+    return {
+        "slug": _PROJECT_KEY,
+        "working_directory": str(tmp_path),
+        "github": {"org": _ORG, "repo": _REPO},
+    }
 
 
 @pytest.fixture
@@ -69,6 +89,10 @@ def eng_session():
         session.delete()
     for leftover in AgentSession.query.filter(project_key=_PROJECT_KEY):
         leftover.delete()
+    # The create rung's `adopt_lane_slug` writes a real ledger record for this
+    # fixture repo. Removed through the ORM, scoped to this test's repo key.
+    for ledger in PipelineLedger.query.filter(target_repo=_TARGET_REPO):
+        ledger.delete()
 
 
 @pytest.fixture
@@ -77,8 +101,29 @@ def stalled_lane(monkeypatch):
     stale_ts = int(time.time()) - 9 * 3600
     monkeypatch.setattr(
         sdlc_progress,
-        "_list_open_sdlc_prs",
-        lambda cwd: [{"number": 4242, "headRefName": _BRANCH, "isDraft": False}],
+        "_list_open_lane_prs",
+        lambda cwd: [
+            {
+                "number": 4242,
+                "headRefName": _BRANCH,
+                "isDraft": False,
+                # The exact object shape `gh --json` emits for a closing
+                # reference: the repository arrives as a nested object, so the
+                # repo-match rule reads it without parsing a URL.
+                "closingIssuesReferences": [
+                    {
+                        "id": "I_e2e",
+                        "number": _ISSUE,
+                        "repository": {
+                            "id": "R_e2e",
+                            "name": _REPO,
+                            "owner": {"id": "O_e2e", "login": _ORG},
+                        },
+                        "url": f"https://github.com/{_TARGET_REPO}/issues/{_ISSUE}",
+                    }
+                ],
+            }
+        ],
     )
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, branch: (_SHA, stale_ts))

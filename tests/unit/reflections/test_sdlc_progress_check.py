@@ -185,8 +185,23 @@ class _FakeProc:
 _PROJECT = {"slug": "valor", "working_directory": "/tmp/fake-valor-repo"}
 
 
-def _pr(number=1237, branch="session/sdlc-1395", draft=False):
-    return {"number": number, "headRefName": branch, "isDraft": draft, "baseRefName": "main"}
+def _pr(number=1237, branch="session/sdlc-1395", draft=False, closing=None):
+    """One ``gh pr list`` row.
+
+    ``closing`` is a list of issue numbers; it defaults to the PR's own issue
+    as derived from the branch, which is what a real issue-derived lane carries.
+    """
+    if closing is None:
+        slug = sdlc_progress._slug_from_branch(branch) or ""
+        derived = sdlc_progress._issue_number_from_slug(slug)
+        closing = [] if derived is None else [derived]
+    return {
+        "number": number,
+        "headRefName": branch,
+        "isDraft": draft,
+        "baseRefName": "main",
+        "closingIssuesReferences": [_closing_ref(n) for n in closing],
+    }
 
 
 def _lock_key(issue_number: int) -> str:
@@ -252,6 +267,42 @@ def fake_query(monkeypatch):
     return q
 
 
+class _LedgerRecord:
+    """Minimal ``PipelineLedger`` row shape the per-tick map actually reads."""
+
+    def __init__(self, pr_number, issue_number, target_repo="tomcounsell/ai"):
+        self.pr_number = pr_number
+        self.issue_number = issue_number
+        self.target_repo = target_repo
+
+
+class _FakeLedgerQuery:
+    """``PipelineLedger.query`` stand-in. No real Redis, no Popoto bring-up."""
+
+    def __init__(self):
+        self.records: list[_LedgerRecord] = []
+        self.raises = False
+        self.calls: list[dict] = []
+
+    def filter(self, **kw):
+        self.calls.append(dict(kw))
+        if self.raises:
+            raise RuntimeError("redis down")
+        return list(self.records)
+
+
+@pytest.fixture
+def fake_ledger(monkeypatch):
+    """Fence ``PipelineLedger.query`` at the boundary, like ``AgentSession.query``.
+
+    Pulled in by ``lab`` so no ladder test can reach a real ledger: post-#2683
+    a unit test that quietly claims a DB is the rotation class that issue closed.
+    """
+    q = _FakeLedgerQuery()
+    monkeypatch.setattr("agent.pipeline_ledger.PipelineLedger.query", q)
+    return q
+
+
 @pytest.fixture
 def owns_project(monkeypatch):
     """Gate 6' passes.
@@ -265,9 +316,10 @@ def owns_project(monkeypatch):
 
 
 @pytest.fixture
-def lab(fake_redis, fake_query, owns_project, monkeypatch):
+def lab(fake_redis, fake_query, fake_ledger, owns_project, monkeypatch):
     """Wire every external boundary the ladder can reach to a recorder."""
     lab = _Lab(fake_redis, fake_query)
+    lab.ledger = fake_ledger
 
     monkeypatch.setattr(sdlc_progress, "_send_alert", lambda msg: lab.alerts.append(msg))
 
@@ -308,11 +360,456 @@ def stub_workdir(monkeypatch):
 def stalled_pr(monkeypatch):
     """Gates 1-4 pass: one open non-draft SDLC PR whose head commit is 9h old."""
     now = int(time.time())
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [_pr(number=1237)])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr(number=1237)])
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
     monkeypatch.setattr(
         sdlc_progress, "_last_commit", lambda cwd, branch: ("abc123def456", now - 9 * 3600)
     )
+
+
+# ---------------------------------------------------------------------------
+# The headline regression (#2755): a human-named lane must be discovered
+#
+# Written red, against the module *before* discovery was converted from branch
+# shape to recorded identity. It drives the whole path for real -- the corpus
+# function parses a real ``gh`` payload and the resolver runs -- so that only a
+# genuinely widened discovery path can make it pass.
+# ---------------------------------------------------------------------------
+
+
+_AI_PROJECT = {
+    "slug": "valor",
+    "working_directory": "/tmp/fake-valor-repo",
+    "github": {"org": "tomcounsell", "repo": "ai"},
+}
+
+
+def _closing_ref(number: int, *, owner: str = "tomcounsell", repo: str = "ai") -> dict:
+    """A ``closingIssuesReferences`` entry in the exact shape ``gh`` emits (spike-6)."""
+    return {
+        "id": f"I_{number}",
+        "number": number,
+        "repository": {"id": f"R_{repo}", "name": repo, "owner": {"id": "O_1", "login": owner}},
+        "url": f"https://github.com/{owner}/{repo}/issues/{number}",
+    }
+
+
+@pytest.fixture
+def gh_payload(monkeypatch):
+    """Serve ``gh pr list`` / ``gh issue view`` from a settable PR list."""
+    state = {"prs": [], "issue_state": "OPEN"}
+
+    def _run_gh(args, *, cwd, timeout=None):
+        if args[:2] == ["pr", "list"]:
+            return _FakeProc(stdout=json.dumps(state["prs"]))
+        if args[:2] == ["issue", "view"]:
+            return _FakeProc(stdout=json.dumps({"state": state["issue_state"]}))
+        return _FakeProc(returncode=1)
+
+    monkeypatch.setattr(sdlc_progress, "_run_gh", _run_gh)
+    return state
+
+
+def test_human_named_lane_is_discovered_and_steered(lab, stub_workdir, gh_payload, monkeypatch):
+    """A stalled lane on ``session/dev-<hash>`` is acted on exactly like ``session/sdlc-<N>``.
+
+    Discovery must key on identity the world records (the PR's own closing
+    reference), not on the shape of the branch string.
+    """
+    now = int(time.time())
+    gh_payload["prs"] = [
+        {
+            "number": 2695,
+            "headRefName": "session/dev-41a59eee",
+            "isDraft": False,
+            "closingIssuesReferences": [_closing_ref(2694)],
+        }
+    ]
+    monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha-dev-1", now - 9 * 3600))
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert len(lab.steers) == 1, f"the human-named lane was never discovered: {result['findings']}"
+    _, message = lab.steers[0]
+    assert "issue #2694" in message
+    assert "dev-41a59eee" in message
+    assert "1 steered" in result["summary"]
+
+
+# ---------------------------------------------------------------------------
+# The issue resolution ladder
+#
+# Three rungs, most-authoritative first: recorded ledger by PR number, then the
+# PR's own repo-matched closing reference, then the issue-derived slug shape.
+# Ambiguity at any rung declines rather than falling through to a weaker one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stale_lanes(gh_payload, monkeypatch):
+    """``gh_payload``, with every branch in it nine hours stale."""
+    now = int(time.time())
+    monkeypatch.setattr(
+        sdlc_progress,
+        "_last_commit",
+        lambda cwd, b: (f"sha-{b.rsplit('/', 1)[-1]}", now - 9 * 3600),
+    )
+    return gh_payload
+
+
+def _lane_pr(number, branch, closing=()):
+    return {
+        "number": number,
+        "headRefName": branch,
+        "isDraft": False,
+        "closingIssuesReferences": [_closing_ref(n) for n in closing],
+    }
+
+
+def test_ledger_rung_resolves_a_lane_the_branch_name_cannot(lab, stub_workdir, stale_lanes):
+    """Rung 1: a recorded ``pr_number`` binds a human-named lane to its issue."""
+    stale_lanes["prs"] = [_lane_pr(2798, "session/dashboard-jinja-filter-registrar")]
+    lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert len(lab.steers) == 1
+    assert "issue #2719" in lab.steers[0][1]
+
+
+def test_ledger_rung_wins_over_a_disagreeing_closing_reference(lab, stub_workdir, stale_lanes):
+    """The entire justification for the rung ordering, asserted directly."""
+    stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[555])]
+    lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert "issue #2719" in lab.steers[0][1]
+    assert "issue #555" not in lab.steers[0][1]
+
+
+def test_deriving_rung_is_not_consulted_when_the_ledger_answers(
+    lab, stub_workdir, stale_lanes, monkeypatch
+):
+    """The last rung is a last resort, not a parallel opinion."""
+    consulted: list[str] = []
+    monkeypatch.setattr(
+        sdlc_progress, "_issue_number_from_slug", lambda slug: consulted.append(slug)
+    )
+    stale_lanes["prs"] = [_lane_pr(2798, "session/sdlc-1395")]
+    lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert consulted == [], "the deriving rung ran even though the ledger answered"
+    assert "issue #2719" in lab.steers[0][1]
+
+
+def test_slug_shape_is_the_last_rung_when_both_read_rungs_decline(lab, stub_workdir, stale_lanes):
+    stale_lanes["prs"] = [_lane_pr(4242, "session/sdlc-1395")]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert "issue #1395" in lab.steers[0][1]
+
+
+def test_two_ledger_records_on_one_pr_are_ambiguous_not_an_overwrite(
+    lab, stub_workdir, stale_lanes
+):
+    """The set-valued map's reason for existing: a flat dict would answer
+    confidently and wrongly, then feed that answer to a permanent write."""
+    stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane")]
+    lab.ledger.records = [
+        _LedgerRecord(pr_number=2798, issue_number=2719),
+        _LedgerRecord(pr_number=2798, issue_number=2720),
+    ]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+    assert "gate-unknown: issue-ambiguous some-lane" in result["findings"]
+
+
+def test_two_closing_references_are_ambiguous_and_produce_no_action(lab, stub_workdir, stale_lanes):
+    """PR #2746's real shape: two ``Closes`` references, both in this repo."""
+    stale_lanes["prs"] = [
+        _lane_pr(2746, "session/hook-validator-target-resolution", closing=[2689, 2738])
+    ]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+    assert "gate-unknown: issue-ambiguous hook-validator-target-resolution" in result["findings"]
+
+
+def test_cross_repo_closing_reference_does_not_resolve(lab, stub_workdir, stale_lanes):
+    """GitHub permits ``Closes owner/repo#N``; a lone one passes uniqueness.
+
+    Trusting it would resolve a bare number against THIS project's repo — very
+    likely a real but unrelated issue — and the create rung would then mint a
+    permanent, uncorrectable identity for it.
+    """
+    stale_lanes["prs"] = [
+        {
+            "number": 3001,
+            "headRefName": "session/some-lane",
+            "isDraft": False,
+            "closingIssuesReferences": [_closing_ref(77, owner="tomcounsell", repo="popoto")],
+        }
+    ]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+    assert "gate-unknown: issue-unresolved some-lane" in result["findings"]
+
+
+@pytest.mark.parametrize("refs", [None, [], "absent"])
+def test_missing_closing_references_decline_and_fall_through(lab, stub_workdir, stale_lanes, refs):
+    """``gh`` omits the key entirely on some payload shapes; all three shapes
+    are one ``pr.get(...) or []`` idiom, so this is one test, not three."""
+    pr = {"number": 4242, "headRefName": "session/sdlc-1395", "isDraft": False}
+    if refs != "absent":
+        pr["closingIssuesReferences"] = refs
+    stale_lanes["prs"] = [pr]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert "issue #1395" in lab.steers[0][1], "the ladder must reach the deriving rung"
+
+
+def test_no_target_repo_issues_no_ledger_query_and_trusts_no_reference(
+    lab, stub_workdir, stale_lanes
+):
+    """Both read-based rungs need a repo to scope by; without one they are skipped."""
+    stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[999])]
+    lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_PROJECT)  # no github block
+
+    assert lab.ledger.calls == [], "an unscoped ledger query could bind another repo's issue"
+    assert (lab.steers, lab.creates, lab.alerts) == ([], [], [])
+    assert "gate-unknown: issue-unresolved some-lane" in result["findings"]
+
+
+def test_the_ledger_is_enumerated_once_per_tick_not_once_per_pr(lab, stub_workdir, stale_lanes):
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+        _lane_pr(3, "session/lane-three", closing=[103]),
+    ]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert lab.ledger.calls == [{"target_repo": "tomcounsell/ai"}]
+
+
+# ---------------------------------------------------------------------------
+# Declined vs. errored: a degraded ledger may steer, but must never create
+# ---------------------------------------------------------------------------
+
+
+def test_errored_ledger_still_lets_a_steer_through(lab, stub_workdir, stale_lanes):
+    """Reading is fail-soft: a Redis outage must not blind the detector."""
+    lab.ledger.raises = True
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert result["status"] == "ok"
+    assert len(lab.steers) == 1
+    assert "issue #2694" in lab.steers[0][1]
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+
+
+def test_errored_ledger_suppresses_the_create_rung(lab, stub_workdir, stale_lanes):
+    """Writing is fail-closed: ``adopt_lane_slug`` is no-overwrite, so an
+    identity minted from a resolution the ledger could not vouch for can never
+    be corrected. Steering the wrong session is recoverable; this is not."""
+    lab.ledger.raises = True
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.creates, lab.adopts, lab.alerts) == ([], [], [])
+    assert any("create-suppressed: dev-41a59eee" in f for f in result["findings"])
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+
+
+class _UnreadableLedgerRecord:
+    """A row that raises while its attributes are read.
+
+    A partially-materialized Popoto record behaves this way. Skipping it would
+    make the map silently incomplete, which is indistinguishable from a clean
+    decline — and a decline does not suppress the create rung.
+    """
+
+    target_repo = "tomcounsell/ai"
+
+    @property
+    def pr_number(self):
+        raise RuntimeError("half-materialized record")
+
+
+def test_an_unreadable_ledger_record_degrades_rather_than_declining(lab, stub_workdir, stale_lanes):
+    """The failure must not be quietly absorbed into an incomplete map: a
+    decline lets the create rung write a permanent identity resolved from a
+    weaker rung, which is the uncorrectable outcome."""
+    lab.ledger.records = [_UnreadableLedgerRecord()]
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.creates, lab.adopts) == ([], [])
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+    assert any("create-suppressed: dev-41a59eee" in f for f in result["findings"])
+
+
+def test_a_degraded_ledger_is_reported_even_when_nothing_resolves(lab, stub_workdir, stale_lanes):
+    """The lane that resolves to nothing while the ledger is dark is the one
+    case where the degradation changed the outcome. Reporting only
+    ``issue-unresolved`` there tells the operator the lane has no identity,
+    hiding that the rung which could have supplied one never ran."""
+    lab.ledger.raises = True
+    # No repo-matched closing reference and a slug nothing can derive from.
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[])]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+    assert "gate-unknown: issue-unresolved dev-41a59eee" in result["findings"]
+    assert (lab.steers, lab.resumes, lab.creates) == ([], [], [])
+
+
+def test_suppressed_create_leaves_no_cooldown_key_claimed(lab, stub_workdir, stale_lanes):
+    """The suppression sits above the claim, so the lane waits a tick not an hour."""
+    lab.ledger.raises = True
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert _cooldown_key("dev-41a59eee", "sha-dev-41a59eee") not in lab.redis.keys_present()
+    assert lab.attempts(slug="dev-41a59eee", sha="sha-dev-41a59eee") == 0
+
+
+# ---------------------------------------------------------------------------
+# First-tick burst guards: the per-tick target dedupe and the action cap
+# ---------------------------------------------------------------------------
+
+
+def test_two_lanes_never_dispatch_to_the_same_session_in_one_tick(lab, stub_workdir, stale_lanes):
+    """The rival-incarnation shape a count cap cannot prevent.
+
+    ``_pick_steer_target`` queries project-wide, so two newly-visible lanes
+    with no same-lane session both select the SAME eng session — which would
+    then be told to work two different issues in one tick.
+    """
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+    ]
+    lab.query.by_project = [_Row("only-eng-session", status="running")]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert [sid for sid, _ in lab.steers] == ["only-eng-session"]
+    assert any(f.startswith("action-cap: lane-two") for f in result["findings"])
+
+
+def test_a_lane_deferred_by_the_target_dedupe_owes_no_cooldown(lab, stub_workdir, stale_lanes):
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+    ]
+    lab.query.by_project = [_Row("only-eng-session", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert _cooldown_key("lane-two", "sha-lane-two") not in lab.redis.keys_present()
+
+
+def test_the_action_cap_bounds_steer_resume_and_create_together(
+    lab, stub_workdir, stale_lanes, monkeypatch
+):
+    """Distinct targets, so the dedupe does not fire — the count cap does."""
+    monkeypatch.setenv("SDLC_STALL_ACTIONS_MAX_PER_TICK", "2")
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+        _lane_pr(3, "session/lane-three", closing=[103]),
+    ]
+    lab.query.by_project = [
+        _Row("eng-a", status="running", slug="lane-one"),
+        _Row("eng-b", status="running", slug="lane-two"),
+        _Row("eng-c", status="running", slug="lane-three"),
+    ]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert len(lab.steers) == 2
+    assert "action-cap: lane-three deferred to next tick" in result["findings"]
+    assert lab.alerts == [], "a deferred lane is not an escalation"
+
+
+def test_a_capped_lane_leaves_no_cooldown_key_claimed(lab, stub_workdir, stale_lanes, monkeypatch):
+    """The single test that catches "cap checked after the claim".
+
+    A lane deferred after the SETNX claim would wait a full
+    SDLC_STALL_RESUME_COOLDOWN_HOURS, which makes the finding text a lie.
+    """
+    monkeypatch.setenv("SDLC_STALL_ACTIONS_MAX_PER_TICK", "1")
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+    ]
+    lab.query.by_project = [
+        _Row("eng-a", status="running", slug="lane-one"),
+        _Row("eng-b", status="running", slug="lane-two"),
+    ]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert _cooldown_key("lane-one", "sha-lane-one") in lab.redis.keys_present()
+    assert _cooldown_key("lane-two", "sha-lane-two") not in lab.redis.keys_present()
+
+    # ...and it really is actionable on the next tick, clock untouched.
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+    assert [sid for sid, _ in lab.steers] == ["eng-a", "eng-b"]
+
+
+def test_escalation_volume_with_resume_disabled_is_one_page_per_visible_lane(
+    lab, stub_workdir, stale_lanes, monkeypatch
+):
+    """Risk 4, pinned rather than discovered in production.
+
+    ``SDLC_STALL_RESUME_ENABLED=false`` is NOT a dry-run mode: it escalates
+    once per newly-visible lane, above the cap, and each escalation key then
+    suppresses action on that ``(slug, sha)`` for its full TTL.
+    """
+    monkeypatch.setenv("SDLC_STALL_RESUME_ENABLED", "false")
+    stale_lanes["prs"] = [
+        _lane_pr(1, "session/lane-one", closing=[101]),
+        _lane_pr(2, "session/lane-two", closing=[102]),
+        _lane_pr(3, "session/lane-three", closing=[103]),
+    ]
+    lab.query.by_project = [_Row("eng-live", status="running")]
+
+    sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert len(lab.alerts) == 3
+    assert (lab.steers, lab.resumes, lab.creates) == ([], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -617,11 +1114,11 @@ def test_create_rung_threads_the_projects_repo_into_adoption(lab, stub_workdir, 
 def test_create_rung_records_a_human_named_slug_verbatim(lab, fake_redis):
     """#2718's shape at the rung itself: the branch name survives the rung.
 
-    `_attempt_action` is exercised directly because the caller's own branch
-    filter (`_SDLC_BRANCH_RE` in `_list_open_sdlc_prs`, then
-    `_issue_number_from_slug`) admits only `session/sdlc-<N>` today. The
-    pass-through is what keeps that filter the only thing standing between a
-    human-named lane and a correctly-named session.
+    `_attempt_action` is exercised directly so the pass-through is pinned at
+    the rung boundary, independently of how a lane reaches it. Discovery now
+    delivers human-named lanes here for real (see the headline regression
+    above), where the old branch-shape filter never did — which is exactly why
+    the rung must not re-derive a name of its own.
     """
     outcome = sdlc_progress._attempt_action(
         "create",
@@ -928,7 +1425,7 @@ def test_create_brake_caps_creations_per_project_per_tick(lab, stub_workdir, mon
     now = int(time.time())
     monkeypatch.setattr(
         sdlc_progress,
-        "_list_open_sdlc_prs",
+        "_list_open_lane_prs",
         lambda cwd: [
             _pr(number=1, branch="session/sdlc-100"),
             _pr(number=2, branch="session/sdlc-200"),
@@ -952,10 +1449,12 @@ def test_create_brake_caps_creations_per_project_per_tick(lab, stub_workdir, mon
 # ---------------------------------------------------------------------------
 # Action-window release — a tick that dispatched nothing must not burn the hour
 #
-# The cooldown is claimed BEFORE rung selection because it doubles as the
-# overlapping-tick guard. Paths that then bail without dispatching anything
-# have to hand the window back, or a lane the plan says "waits for the next
-# tick" actually waits a full SDLC_STALL_RESUME_COOLDOWN_HOURS.
+# The cooldown is claimed AFTER rung selection and after every same-tick brake,
+# so a braked lane never claims it at all. What remains between the claim and
+# the dispatch can still bail — the create rung's pre-create lock re-read, and
+# a declined rung — and those paths must hand the window back, or a lane that
+# "waits for the next tick" actually waits a full
+# SDLC_STALL_RESUME_COOLDOWN_HOURS.
 # ---------------------------------------------------------------------------
 
 
@@ -963,12 +1462,16 @@ def _cooldown_key(slug: str, sha: str) -> str:
     return sdlc_progress._COOLDOWN_KEY.format(slug=slug, sha=sha)
 
 
-def test_create_brake_releases_the_deferred_lanes_action_window(lab, stub_workdir, monkeypatch):
-    """The braked lane must be actionable on the very next tick, not an hour later."""
+def test_create_brake_never_claims_the_deferred_lanes_action_window(lab, stub_workdir, monkeypatch):
+    """The braked lane must be actionable on the very next tick, not an hour later.
+
+    The brake sits above the claim, so the deferred lane owes nothing back —
+    it never took the window in the first place.
+    """
     now = int(time.time())
     monkeypatch.setattr(
         sdlc_progress,
-        "_list_open_sdlc_prs",
+        "_list_open_lane_prs",
         lambda cwd: [
             _pr(number=1, branch="session/sdlc-100"),
             _pr(number=2, branch="session/sdlc-200"),
@@ -994,8 +1497,8 @@ def test_create_brake_releases_the_deferred_lanes_action_window(lab, stub_workdi
     assert [c["slug"] for c in lab.creates] == ["sdlc-100", "sdlc-200"]
 
 
-def test_target_query_failure_releases_the_action_window(lab, stub_workdir, stalled_pr):
-    """Unknown target → no action, no escalation, marker kept, window handed back."""
+def test_target_query_failure_never_claims_the_action_window(lab, stub_workdir, stalled_pr):
+    """Unknown target → no action, no escalation, marker kept, window never taken."""
     lab.query.raise_on.add("project_key")
 
     result = sdlc_progress._check_project_stalls(_PROJECT)
@@ -1061,14 +1564,29 @@ def test_dispatched_action_keeps_the_action_window(lab, stub_workdir, stalled_pr
 
 
 def test_release_failure_is_swallowed(lab, stub_workdir, stalled_pr):
-    """Redis dying on the DELETE degrades to "window stays claimed", never a raise."""
-    lab.query.raise_on.add("project_key")
+    """Redis dying on the DELETE degrades to "window stays claimed", never a raise.
+
+    Driven through the declined create-lock-reread path, which is one of the
+    two paths that still reaches a release now that every same-tick brake sits
+    above the claim.
+    """
+    key = _lock_key(1395)
+    state = {"reads": 0}
+
+    def raise_get(k):
+        if k != key:
+            return False
+        state["reads"] += 1
+        return state["reads"] > 1
+
+    lab.redis.raise_get = raise_get
     lab.redis.raise_delete = True
 
     result = sdlc_progress._check_project_stalls(_PROJECT)
 
     assert result["status"] == "ok"
-    assert "gate-unknown: target-query sdlc-1395" in result["findings"]
+    assert lab.creates == []
+    assert any("create-lock-reread" in f for f in result["findings"])
 
 
 # ---------------------------------------------------------------------------
@@ -1121,7 +1639,7 @@ def test_degradation_marker_distinguishes_from_a_healthy_zero_stall_tick(
     lab.redis.raise_get = lambda key: key == _lock_key(1395)
     degraded = sdlc_progress._check_project_stalls(_PROJECT)
 
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [])
     healthy = sdlc_progress._check_project_stalls(_PROJECT)
 
     assert healthy["findings"] == []
@@ -1131,7 +1649,7 @@ def test_degradation_marker_distinguishes_from_a_healthy_zero_stall_tick(
 
 def test_unknown_issue_state_marks_findings(lab, stub_workdir, monkeypatch):
     now = int(time.time())
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [_pr()])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: None)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha", now - 9 * 3600))
 
@@ -1216,31 +1734,36 @@ def test_resume_disabled_escalates_once_and_acts_on_nothing(
 
 
 def test_draft_prs_not_flagged(lab, stub_workdir, monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [])
     sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
 
 
 def test_closed_issue_skipped(lab, stub_workdir, monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [_pr()])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: False)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda *a: ("x", 0))
     sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
 
 
-def test_missing_local_branch_silently_skipped(lab, stub_workdir, monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [_pr()])
+def test_missing_local_branch_is_reported_not_silently_skipped(lab, stub_workdir, monkeypatch):
+    """A lane with no ``origin/`` ref used to vanish without a trace.
+
+    That skip is load-bearing now that the corpus is the whole namespace: a
+    lane dropped in silence is indistinguishable from a healthy quiet tick.
+    """
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, branch: None)
     result = sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
-    assert result["findings"] == []
+    assert "gate-unknown: branch-not-fetched sdlc-1395" in result["findings"]
 
 
 def test_fresh_commit_is_not_a_stall(lab, stub_workdir, monkeypatch):
     now = int(time.time())
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [_pr()])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
     monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha", now - 600))
     sdlc_progress._check_project_stalls(_PROJECT)
@@ -1256,24 +1779,66 @@ def test_gh_pr_list_filenotfound_returns_empty(monkeypatch):
     monkeypatch.setattr(
         sdlc_progress.subprocess, "run", MagicMock(side_effect=FileNotFoundError("gh"))
     )
-    assert sdlc_progress._list_open_sdlc_prs("/tmp") == []
+    assert sdlc_progress._list_open_lane_prs("/tmp") == []
 
 
-def test_gh_pr_list_filters_non_sdlc_branches(monkeypatch):
+def test_lane_pr_list_admits_the_session_namespace(monkeypatch):
+    """The corpus boundary is the namespace, not the shape of the rest.
+
+    A human-named lane is admitted alongside an issue-derived one; a non-lane
+    branch and a draft are still excluded, and so are the two remainders that
+    would poison a Redis key formatted from the slug.
+    """
     payload = json.dumps(
         [
-            _pr(branch="session/sdlc-1395"),
-            _pr(branch="session/some-feature"),
-            _pr(branch="dependabot/update"),
-            _pr(branch="session/sdlc-9999", draft=True),  # draft → excluded
+            _pr(number=1, branch="session/sdlc-1395"),
+            _pr(number=2, branch="session/some-feature"),
+            _pr(number=3, branch="session/dev-41a59eee"),
+            _pr(number=4, branch="dependabot/update"),
+            _pr(number=5, branch="session/sdlc-9999", draft=True),  # draft → excluded
+            _pr(number=6, branch="session/"),  # empty remainder → excluded
+            _pr(number=7, branch="session/sdlc-2755/fixup"),  # not a lane → excluded
         ]
     )
     monkeypatch.setattr(
         sdlc_progress, "_run_gh", lambda args, cwd, timeout=20: _FakeProc(stdout=payload)
     )
-    out = sdlc_progress._list_open_sdlc_prs("/tmp")
-    assert len(out) == 1
-    assert out[0]["headRefName"] == "session/sdlc-1395"
+    out = sdlc_progress._list_open_lane_prs("/tmp")
+    assert [p["headRefName"] for p in out] == [
+        "session/sdlc-1395",
+        "session/some-feature",
+        "session/dev-41a59eee",
+    ]
+
+
+def test_lane_pr_list_requests_closing_references_and_an_explicit_limit(monkeypatch):
+    """The closing-reference rung is free only if the corpus call carries it.
+
+    The explicit ``--limit`` matters just as much: ``gh`` defaults to 30, which
+    was harmless when almost everything was discarded and is now a silent
+    truncation of the whole discovery surface.
+    """
+    captured: list[list[str]] = []
+
+    def _run_gh(args, cwd, timeout=None):
+        captured.append(args)
+        return _FakeProc(stdout="[]")
+
+    monkeypatch.setattr(sdlc_progress, "_run_gh", _run_gh)
+    sdlc_progress._list_open_lane_prs("/tmp")
+
+    assert "closingIssuesReferences" in captured[0][captured[0].index("--json") + 1]
+    assert "--limit" in captured[0]
+
+
+@pytest.mark.parametrize("branch", ["", "main", "session/", "session/  ", "session/a/b"])
+def test_branches_that_are_not_lanes_yield_no_slug(branch):
+    """Blank and slash-bearing remainders are rejected, not returned falsy.
+
+    ``session/`` would otherwise yield ``""`` and two such branches would share
+    one cooldown, attempts, and escalation key.
+    """
+    assert sdlc_progress._slug_from_branch(branch) is None
 
 
 def test_git_log_failure_returns_none(monkeypatch):
@@ -1298,7 +1863,7 @@ def test_send_alert_swallows_filenotfound(monkeypatch):
 
 
 def test_check_project_returns_canonical_shape(lab, stub_workdir, monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [])
     result = sdlc_progress._check_project_stalls(_PROJECT)
     assert set(result.keys()) >= {"status", "findings", "summary", "duration"}
     assert isinstance(result["findings"], list)
@@ -1306,7 +1871,7 @@ def test_check_project_returns_canonical_shape(lab, stub_workdir, monkeypatch):
 
 
 def test_summary_carries_per_rung_counters(lab, stub_workdir, monkeypatch):
-    monkeypatch.setattr(sdlc_progress, "_list_open_sdlc_prs", lambda cwd: [])
+    monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [])
     summary = sdlc_progress._check_project_stalls(_PROJECT)["summary"]
     for rung in ("steered", "resumed", "created", "escalated"):
         assert rung in summary
