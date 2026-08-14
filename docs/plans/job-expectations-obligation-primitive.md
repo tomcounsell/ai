@@ -496,24 +496,24 @@ read absorbs it.
 
 ## Success Criteria
 
-- [ ] Expectations recorded bidirectionally on Job with `direction`; no separate promise
+- [x] Expectations recorded bidirectionally on Job with `direction`; no separate promise
       model, API, or vocabulary survives outside history entries.
-- [ ] Lane spawn through the session-create core records an outbound expectation when a Job
+- [x] Lane spawn through the session-create core records an outbound expectation when a Job
       resolves (integration-tested), and the PM prime mandates the hygiene.
-- [ ] Discharge path works and discharged expectations disappear from every surfacing
+- [x] Discharge path works and discharged expectations disappear from every surfacing
       query.
-- [ ] A Job with an open expectation cannot be swept to rest; an expectation-less idle Job
+- [x] A Job with an open expectation cannot be swept to rest; an expectation-less idle Job
       still rests by age (both unit-tested).
-- [ ] Reconciler surfaces open outbound expectations with gone owners, steers/respawns per
+- [x] Reconciler surfaces open outbound expectations with gone owners, steers/respawns per
       the ladder, and never respawns when the shipped-work guard finds a pushed branch or
       open/merged PR (tested with fake git/gh fixtures).
-- [ ] Under-recording test: no code path asserts a Job complete from an empty expectation
+- [x] Under-recording test: no code path asserts a Job complete from an empty expectation
       list alone.
-- [ ] Popoto bool-trap regression test on `has_open_expectations`.
-- [ ] Migration is idempotent and preserves promise history verbatim as inbound
+- [x] Popoto bool-trap regression test on `has_open_expectations`.
+- [x] Migration is idempotent and preserves promise history verbatim as inbound
       expectations.
-- [ ] Durability plan amended; #2494's superseded ACs named there.
-- [ ] Tests pass (`/do-test`); documentation updated (`/do-docs`).
+- [x] Durability plan amended; #2494's superseded ACs named there.
+- [x] Tests pass (`/do-test`); documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
