@@ -263,8 +263,8 @@ old rule.
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `sdlc-tool` on PATH | `command -v sdlc-tool` | The CLI under change |
-| Redis reachable | `python -c "from popoto.redis_db import POPOTO_REDIS_DB as R; R.ping()"` | Lock and session state live in Redis |
-| On-pin venv | `python -m tools.venv_health` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+| Redis reachable | `uv run python -c "from popoto.redis_db import POPOTO_REDIS_DB as R; R.ping()"` | Lock and session state live in Redis |
+| On-pin venv | `uv run python -m tools.venv_health` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
 
 ## Solution
 
