@@ -397,8 +397,17 @@ def _ledger_pr_map(target_repo: str | None) -> dict[int, set[int]] | None:
             if pr_number is None or issue_number is None:
                 continue
             mapping.setdefault(int(pr_number), set()).add(int(issue_number))
-        except Exception as exc:  # pragma: no cover — defensive per-record guard
-            logger.debug("sdlc_progress: ledger map skipped a record: %r", exc)
+        except Exception as exc:
+            # A record we could not read makes the map silently incomplete,
+            # which is indistinguishable from a clean decline — and a decline
+            # does not suppress the create rung. Degrade the whole tick rather
+            # than let a weaker rung write a permanent identity.
+            logger.warning(
+                "sdlc_progress: rung ledger-by-pr could not read a record for %s: %s",
+                target_repo,
+                exc,
+            )
+            return None
     return mapping
 
 
@@ -1089,14 +1098,17 @@ def _check_project_stalls(project: dict) -> dict:
         age_hours = age // 3600
 
         issue_num, rung = _resolve_lane_issue(pr, slug, target_repo, ledger_map or {})
+        # Reported before the unresolved bail: a lane that resolved to nothing
+        # while the ledger was dark is the one case where the degradation
+        # changed the outcome, so it is the one case that must say so.
+        if ledger_degraded:
+            findings.append(f"gate-unknown: ledger-degraded {slug}")
         if issue_num is None:
             if rung == "ambiguous":
                 findings.append(f"gate-unknown: issue-ambiguous {slug}")
             else:
                 findings.append(f"gate-unknown: issue-unresolved {slug}")
             continue
-        if ledger_degraded:
-            findings.append(f"gate-unknown: ledger-degraded {slug}")
 
         issue_open = _issue_is_open(wd, issue_num)
         if issue_open is False:

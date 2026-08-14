@@ -648,6 +648,51 @@ def test_errored_ledger_suppresses_the_create_rung(lab, stub_workdir, stale_lane
     assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
 
 
+class _UnreadableLedgerRecord:
+    """A row that raises while its attributes are read.
+
+    A partially-materialized Popoto record behaves this way. Skipping it would
+    make the map silently incomplete, which is indistinguishable from a clean
+    decline — and a decline does not suppress the create rung.
+    """
+
+    target_repo = "tomcounsell/ai"
+
+    @property
+    def pr_number(self):
+        raise RuntimeError("half-materialized record")
+
+
+def test_an_unreadable_ledger_record_degrades_rather_than_declining(lab, stub_workdir, stale_lanes):
+    """The failure must not be quietly absorbed into an incomplete map: a
+    decline lets the create rung write a permanent identity resolved from a
+    weaker rung, which is the uncorrectable outcome."""
+    lab.ledger.records = [_UnreadableLedgerRecord()]
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert (lab.creates, lab.adopts) == ([], [])
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+    assert any("create-suppressed: dev-41a59eee" in f for f in result["findings"])
+
+
+def test_a_degraded_ledger_is_reported_even_when_nothing_resolves(lab, stub_workdir, stale_lanes):
+    """The lane that resolves to nothing while the ledger is dark is the one
+    case where the degradation changed the outcome. Reporting only
+    ``issue-unresolved`` there tells the operator the lane has no identity,
+    hiding that the rung which could have supplied one never ran."""
+    lab.ledger.raises = True
+    # No repo-matched closing reference and a slug nothing can derive from.
+    stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[])]
+
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
+
+    assert "gate-unknown: ledger-degraded dev-41a59eee" in result["findings"]
+    assert "gate-unknown: issue-unresolved dev-41a59eee" in result["findings"]
+    assert (lab.steers, lab.resumes, lab.creates) == ([], [], [])
+
+
 def test_suppressed_create_leaves_no_cooldown_key_claimed(lab, stub_workdir, stale_lanes):
     """The suppression sits above the claim, so the lane waits a tick not an hour."""
     lab.ledger.raises = True
