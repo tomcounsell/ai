@@ -1247,8 +1247,8 @@ class TelegramRelayOutputHandler:
 
         Not to prevent a PM from ignoring the advisory (it can't be
         prevented) — so an ignored advisory is visible instead of silent.
-        Pairs with ``metrics:promises_authored`` (incremented by
-        ``tools/job_tool promise-add``); the at-rest backstop logs both.
+        Pairs with ``metrics:expectations_authored`` (incremented by
+        ``tools/job_tool expectation-add``); the at-rest backstop logs both.
         Plain counter key, non-Popoto. Best-effort, never blocks steering.
         """
         try:
