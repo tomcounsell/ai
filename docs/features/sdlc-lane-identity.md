@@ -123,20 +123,81 @@ The lane would then get a respawned session under an identity nothing else
 would recognize. `adopt_lane_slug` avoids this because it takes no ladder; it
 just records the caller-supplied value, conditional-on-empty.
 
-One caveat on that example, so it is not read as a live failure being fixed:
-the human-named branch cannot presently reach this call site. The respawn's
-candidate list is filtered by `_SDLC_BRANCH_RE` and then by
-`_issue_number_from_slug`, which requires `^sdlc-(\d+)$`, so a human-named lane
-branch is dropped before the rung runs. The pass-through is correct regardless
-and is tested by calling `_attempt_action` directly. Whether that reflection
-should admit human-named lane branches at all is an open question: widening the
-filter needs another source for the issue number, because a human-named branch
-does not carry one.
+This example is no longer hypothetical. `reflections/sdlc_progress.py`'s
+discovery corpus is the `session/` namespace, not a branch-shape probe, so a
+human-named lane branch does reach this call site. Its issue number comes from
+the issue resolution ladder (see "Discovery reads identity" below), not from a
+shape probe alone — the ladder's read-based rungs are the source for the issue
+number that a shape probe on its own cannot supply. The pass-through behavior
+described above is tested by calling `_attempt_action` directly.
 
 `adopt_lane_slug` shares the same conditional-on-empty write path, the same
 `None`-repo guard, and the same `PipelineLedger.get_or_create` as the healing
 arm of `resolve_lane_slug`. It walks no ladder because the caller is not
 asking a question.
+
+## Discovery reads identity
+
+The write direction above answers "what is this lane called." A companion
+question runs the other way: given an open lane PR, which issue does it
+belong to? `reflections/sdlc_progress.py`'s stall detector answers it once per
+tick, per PR, with `_resolve_lane_issue` — the **issue resolution ladder**
+(named separately from the adoption ladder above so the two don't collide in
+conversation; they resolve different things, in opposite directions).
+
+The ladder has three rungs, ordered most-authoritative first:
+
+1. **Recorded ledger, by PR number.** A lookup into a per-tick
+   `{pr_number: set[int]}` map built from one repo-scoped `PipelineLedger`
+   enumeration. A `pr_number` mapping to more than one distinct issue is
+   ambiguous and declines rather than guessing.
+2. **The PR's own closing reference.** The single `closingIssuesReferences`
+   entry whose repository matches the project's `target_repo`. This adopts an
+   identity that exists in the world — the same principle the write-direction
+   rungs above rely on — and it is what covers a lane the ledger has never
+   recorded anything about.
+3. **Issue-derived slug shape.** `_issue_number_from_slug`, which only answers
+   for a lane whose name happens to encode its issue (`sdlc-2755` →`2755`).
+
+The deriving rung sits last for the same reason the adoption ladder's mint
+rung sits last: reading recorded or world-published identity is preferred
+over inferring it from a name, and a lane's name is exactly the kind of
+"mentions the issue" signal this doc's write-direction sections already treat
+as weaker than an adoption. Two-or-more candidates at any rung is an
+ambiguous decline, never a guess.
+
+**Why not a full `PipelineLedger` enumeration keyed by slug?** It was
+measured against production and rejected: `PipelineLedger` only carries
+identity for lanes started after the ledger existed, so a slug-keyed
+enumeration resolved a small minority of the live lane population. The
+closing-reference rung costs nothing extra — the data arrives in the same
+`gh pr list` call that builds the discovery corpus — and together with the
+ledger-by-PR rung it resolves the rest.
+
+**Why ledger-by-recorded-slug is deliberately not a rung.** An earlier draft
+of the ladder read `PipelineLedger.slug` directly and compared it against the
+branch's slug. It cannot fire for the population it would need to serve: as
+"Adopt vs. resolve" above records, a human-named lane's own respawn path
+writes through `adopt_lane_slug`, which is no-overwrite via
+`_record_slug_if_empty`, so a lane whose branch carries a human-named slug
+either already has that exact slug recorded (in which case `pr_number`, if
+present, already answers via rung 1) or has nothing recorded yet — never a
+*different* recorded slug for the same branch to compare against. `ledger.slug
+== branch slug` is therefore permanently false for exactly the lanes this
+rung would exist to help, which is this doc's own evidence for the rung's
+uselessness, not a hypothetical one.
+
+**The `session/` namespace as the discovery boundary.** `session/` is not a
+convention invented for discovery; it is a description of the one place lane
+branches are constructed. `tools/lane_identity.py::lane_branch_name` is the
+sole builder of the prefix, and `agent/worktree_manager.py` is the sole
+caller that turns a slug into a checked-out branch (`session/{slug}`) and a
+worktree (`.worktrees/{slug}/`). The stall detector's corpus fetch simply
+reads that same namespace back: every open, non-draft PR whose head branch
+starts with `session/` is a lane PR, regardless of whether the remainder is
+issue-derived or human-named. This is not a rule aimed at humans and there is
+no hook enforcing it — it is the shape of the one constructor that already
+exists, and automated stall action now keys its discovery on it.
 
 ## The write is conditional-on-empty and takes no lease
 
@@ -235,4 +296,5 @@ lane's run still alive."
   two are lane-start paths (heal and adopt, respectively), the third reads
   with healing off and falls back to `mint_lane_slug()` without recording,
   because a casual issue mention in an eng session's message is not a lane
-  start.
+  start. `reflections/sdlc_progress.py::_resolve_lane_issue` is the read
+  direction described in "Discovery reads identity" above.
