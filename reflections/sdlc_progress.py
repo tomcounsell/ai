@@ -536,7 +536,8 @@ def _last_commit(cwd: str, branch: str) -> tuple[str, int] | None:
         return None
 
     if proc.returncode != 0:
-        # Branch not present locally — silent skip per success criteria.
+        # Branch not present locally. The caller turns this None into a
+        # reported gate-unknown finding, so only the git detail is debug-level.
         logger.debug("sdlc_progress: %s not present locally (rc=%d)", ref, proc.returncode)
         return None
     parts = (proc.stdout or "").strip().split()
