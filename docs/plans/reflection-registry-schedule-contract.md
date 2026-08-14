@@ -6,8 +6,7 @@ owner: Valor Engels
 created: 2026-08-14
 tracking: https://github.com/yudame/ai/issues/2734
 last_comment_id: 5286094986
-revision_applied: true
-revision_applied_at: 2026-08-14T03:28:24Z
+revision_applied: false
 ---
 
 # Reflection registry: schedule contract and worktree-safe resolution
