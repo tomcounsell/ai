@@ -509,7 +509,12 @@ original three-lists divergence reproduced one level up.
 **Mitigation:** The guard asserts filter-**key** equality between its own env and a
 `Jinja2Templates`-shaped env with the registrar applied. Verified at plan time that the two
 differ only in `autoescape` (a `select_autoescape` callable) and a `url_for` global, with
-identical filter sets — so the assertion passes today and fires the moment they diverge.
+identical filter sets. This is a **partial** mitigation, and the boundary matters: the equality
+test constructs its own `Jinja2Templates` and never calls `create_app` (which would mount
+StaticFiles and build every router), so it catches a filter contributed by `Jinja2Templates`
+itself — a FastAPI/Starlette upgrade shipping a new default — but *not* a filter registered by
+one of the three mechanisms above from inside `create_app`. That residual case remains covered
+only by the `ui/app.py` anti-criterion grep, which sees subscript assignment and nothing else.
 
 ### Risk 4: Importing `ui.app` in unit tests pulls in a heavy dependency chain
 **Impact:** `ui/app.py` imports `agent.constants`, which imports the `agent` package and
