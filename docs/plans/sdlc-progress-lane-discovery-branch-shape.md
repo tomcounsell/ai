@@ -244,7 +244,21 @@ Deliberately **not** doing a full `PipelineLedger` enumeration keyed by slug-to-
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py::test_create_rung_records_a_human_named_slug_verbatim` (`:618-643`) — UPDATE the docstring only. It currently states the branch filter "is the only thing standing between a human-named lane and a correctly-named session"; after this change that sentence is false and the test's justification for exercising `_attempt_action` directly no longer holds. The assertions stay.
 - [ ] `tests/unit/reflections/test_sdlc_progress_check.py:579-590` — UPDATE: the comment block describing the shape filter as the boundary goes stale.
 - [ ] `tests/integration/test_sdlc_stall_auto_resume_e2e.py:78-82` — UPDATE: the `stalled_lane` fixture monkeypatches `_list_open_sdlc_prs` with a 3-key dict; retarget the name and add `closingIssuesReferences`. Consider flipping `_BRANCH` to a human-named branch so the e2e path proves the fix end to end.
-- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — ADD: a resolver suite covering all four rungs, the two ambiguity cases (spike-3's real #2746 shape: two closing refs; and two ledger records for one `pr_number`), the `target_repo is None` path, and each rung's exception fall-through.
+- [ ] `tests/unit/reflections/test_sdlc_progress_check.py` — ADD: a resolver suite covering all three rungs, the two ambiguity cases (spike-3's real #2746 shape: two closing refs; and two ledger records for one `pr_number`), the `target_repo is None` path, and each rung's exception fall-through.
+
+**Redis mechanism (mandatory).** This file is 100% `fake_redis` / `monkeypatch` today and references `PipelineLedger` nowhere. The new resolver tests **monkeypatch `PipelineLedger.query`**, consistent with the file's existing `fake_query` fixture (`:247`); no real Redis and no Popoto bring-up. Post-#2683 (test-DB ownership) a unit test that quietly claims a DB is exactly the rotation class that issue closed.
+
+**Red-test-first (mandatory).** Before any implementation, write the headline regression test — a stalled lane on a human-named branch is discovered and acted on — against the *current* module and watch it fail. A passing suite written after the fix never proves a rewritten predicate does what you think it does.
+
+Additional required tests, all of them negative cases the first draft missed:
+
+- [ ] **Cap defers without burning the cooldown.** Assert a capped lane leaves no cooldown key claimed. This is the single test that catches the likely implementation error (checking the cap after `_action_cooldown_set` instead of before).
+- [ ] **Same-target collision.** Two stalled lanes in one tick must not both dispatch to the same `session_id`.
+- [ ] **Cross-repo closing reference** is rejected by the repo-match rule and does not resolve.
+- [ ] **Errored rung vs. declined rung.** Assert that when the ledger rung *raises*, steer/resume may proceed but the **create rung is suppressed** and `gate-unknown: ledger-degraded` is emitted. An exception test that only asserts "does not raise" proves the guard exists, not that it declines correctly.
+- [ ] **Escalation volume.** With `SDLC_STALL_RESUME_ENABLED=false` over a widened corpus, assert the `_send_alert` call count — this is the Risk 4 behavior and it should be pinned, not discovered in production.
+- [ ] **Rung disagreement.** The ledger says issue A, the PR body says issue B: assert A wins. This is the entire justification for the rung ordering, and the first draft tested every rung *except* the case that motivates the order.
+- [ ] **`branch-not-fetched`** finding is emitted when `_last_commit` returns `None`.
 
 No `xfail` markers relate to this bug — grep of `tests/` for `pytest.mark.xfail` / `pytest.xfail(` returns nothing tied to lane discovery, so there is no expected-failure conversion to do.
 
@@ -253,24 +267,28 @@ No `xfail` markers relate to this bug — grep of `tests/` for `pytest.mark.xfai
 - **Backfilling `PipelineLedger` for historical lanes.** Tempting ("then rung 1 always works") and a trap: it means inferring identity for lanes that predate the field, which is the exact derivation-wearing-adoption's-clothes mistake `tools/lane_identity.py:36-42` was written to prevent. The ladder makes backfill unnecessary; the ledger densifies naturally as new lanes start.
 - **Making `pr_number` a second writer.** Discovery knows the PR number and could "helpfully" write it onto the ledger. Do not. `pr_number` is single-writer by design (`sdlc-tool meta-set`), and a reflection that writes identity during a read path is how #2718 happened.
 - **Reconciling the `session/` namespace with `.worktrees/` on disk.** A machine-local worktree listing would seem to enrich discovery. `lane_identity.py:43-46` already rejects this rung: a per-host answer is not an identity.
-- **Generalizing the resolver into a shared `tools/` helper for all three consumers.** `merge_predicate`, `sdlc_upvote_lanes`, and this module each resolve a slightly different question with different failure postures (fail-closed merge gate vs. fail-soft reflection). Unifying them is a separate design exercise; the shared *pattern* is enough here.
+- **Generalizing the resolver into a shared `tools/` helper for all three consumers.** `merge_predicate`, `sdlc_upvote_lanes`, and this module each resolve a slightly different question with different failure postures (fail-closed merge gate vs. fail-soft reflection). Unifying them is a separate design exercise; the shared *pattern* is enough here. **The critique pushed back on this** (see No-Gos): the ledger-by-PR rung is close to a line-for-line restatement of `merge_predicate._resolve_tracked_issue`, and this repo forbids parallel implementations. The deferral is a scope fence, not a disagreement — it is recorded as a follow-up rather than waved away.
 - **Tuning the stall threshold because the corpus just grew.** The threshold is orthogonal. If the widened corpus proves noisy, the per-tick cap is the lever, not the threshold.
 
 ## Risks
 
-### Risk 1: First-tick action burst on a suddenly-visible lane population
-**Impact:** spike-4 measured the corpus going from 0 to 5 lanes. If several are past the 4-hour threshold and not live, the first tick after deploy could steer/resume all of them at once — a batch of unexpected agent activity on lanes nobody asked about, from a detector with no track record on this population.
-**Mitigation:** the per-tick action cap (`SDLC_STALL_ACTIONS_MAX_PER_TICK`, provisional default 3) bounds it, with the deferred lanes reported as `action-cap:` findings so the backlog is visible rather than silent. The create brake (1/tick) and the per-`(slug, sha)` attempt budget and cooldown are unchanged beneath it. `SDLC_STALL_RESUME_ENABLED=false` remains the escape hatch: it degrades the tick to escalate-only.
+### Risk 1: First-tick burst — and, more sharply, first-tick *collision on one session*
+**Impact:** the corpus goes from zero lanes to the full live population in one tick. The count risk (several lanes steered at once) is the obvious one. The sharper risk is that `_pick_steer_target` is **project-wide** (`:544-596`) with same-lane only a ranking preference, so several newly-visible lanes with no same-lane session all resolve to the *same* eng session — which is then steered or resumed repeatedly in one tick with different per-issue instructions. That is the rival-incarnation shape, and a count cap does not prevent it.
+**Mitigation:** the **per-tick target dedupe** is the primary guard — one dispatch per `session_id` per tick, later lanes defer with an `action-cap:` finding. The per-tick action cap (`SDLC_STALL_ACTIONS_MAX_PER_TICK`, provisional default 3) is the secondary bound, checked *before* the cooldown claim so a deferred lane genuinely waits one tick. The create brake (1/tick), the per-`(slug, sha)` attempt budget, and the cooldown are unchanged beneath both. Deferred lanes are reported, not silently dropped.
 
-### Risk 2: Rung 3 binds a lane to the wrong issue
-**Impact:** a PR's `closingIssuesReferences` is authored by whoever wrote the PR body. A wrong or stale `Closes #N` binds the attempt budget, cooldown, escalation key, and any created session to an unrelated issue.
-**Mitigation:** rung 3 sits *below* both recorded-ledger rungs, so it only ever answers where recorded identity is silent. It requires a single distinct reference (spike-3 proved multi-ref PRs are real), and the corpus is already restricted to the `session/` namespace, so a hotfix branch's closing reference can never reach it. The gates downstream are unchanged: a wrong issue that is closed, or whose lock says live, still results in no action.
+### Risk 2: The closing-reference rung binds a lane to the wrong issue
+**Impact:** `closingIssuesReferences` is authored by whoever wrote the PR body. A wrong, stale, or **cross-repo** `Closes #N` binds the attempt budget, cooldown, escalation key, and any created session to an unrelated issue. The cross-repo case is the dangerous one: GitHub permits `Closes owner/repo#N`, a single such reference passes the uniqueness test, and `_issue_is_open` would then resolve that bare number against the *project's* repo — very likely hitting a real but unrelated issue. The create rung's `adopt_lane_slug` write is no-overwrite, so a wrong bind mints a phantom ledger record with a permanent, uncorrectable identity.
+**Mitigation:** the rung sits *below* the recorded-ledger rung, so it only answers where recorded identity is silent. It requires a single distinct reference (spike-3 proved multi-ref PRs are real), **and that reference's repository must equal `target_repo`** — so the rung is skipped entirely when `target_repo is None`. The corpus is restricted to the `session/` namespace, so a hotfix branch's closing reference never reaches it. Downstream gates are unchanged: a wrong issue that is closed, or whose lock says live, still results in no action.
 
-### Risk 3: Ledger query failure degrades discovery silently
-**Impact:** a Redis outage makes rungs 1-2 return nothing. Discovery keeps working via rungs 3-4, which is correct — but if it degrades quietly, an operator cannot tell a healthy tick from a half-blind one.
-**Mitigation:** every rung's exception path logs at `warning` with the rung name and the slug. The tick never crashes (matching `merge_predicate` Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`), and the fall-through is a designed behavior with tests, not an accident.
+### Risk 3: A ledger query *failure* silently degrades into a derived answer
+**Impact:** a Redis outage makes the ledger rung raise. Falling through to the closing-reference and slug-shape rungs keeps discovery working, which is right for *reading* — but it is wrong for *writing*. A lane whose branch is `session/sdlc-2628` but whose ledger records a different issue (the takeover shape `PipelineLedger`'s docstring supports) would resolve to 2628 from the branch string alone during a brownout and then permanently write that identity. The plan refuses to fall through on ambiguity; falling through on error has the same shape and needs the same discipline.
+**Mitigation:** the resolver distinguishes **declined** (cleanly found nothing) from **errored** (raised). On error, steer and resume may still proceed, but the **create rung is suppressed** and a `gate-unknown: ledger-degraded {slug}` finding is emitted. Every rung's exception path logs at `warning` with the rung name and slug. The tick never crashes (matching `merge_predicate` Guard 3 and `sdlc_upvote_lanes._ledger_has_recorded_stage`), and the fall-through is designed behavior with tests, not an accident.
 
-### Risk 4: The `session/` namespace stops being a clean lane boundary
+### Risk 4: The observation-mode reflex makes things worse
+**Impact:** the intuitive safe deploy — run one cycle with `SDLC_STALL_RESUME_ENABLED=false` to watch the finding list before anything fires — is actively harmful. With resume disabled, every stalled non-live lane calls `_escalate` → `_send_alert` (`:873-875`), paging a human once per newly-visible lane on the first tick. Worse, `_escalation_set` is a SETNX with a 30-day TTL and the escalation check short-circuits *before* the action ladder (`:854-856`), so that "observation" cycle suppresses action on those `(slug, sha)` pairs for 30 days. The flag disarms the detector on exactly the lanes it was built to rescue.
+**Mitigation:** do not use it as a deploy procedure; it remains the operator's escape hatch. The burst guards above are the deploy story. A genuine report-only mode would be a separate, explicitly non-escalating path and is out of scope here.
+
+### Risk 5: The `session/` namespace stops being a clean lane boundary
 **Impact:** spike-4 confirmed it is clean today (hotfix work lives on `fix/*`). If someone later pushes a non-lane `session/*` branch, it enters the corpus, and if it happens to carry a `Closes #N` it could draw an action.
 **Mitigation:** accepted, and bounded by the same gates. The `session/` prefix is already the repo's declared lane namespace — `agent/worktree_manager.py` creates `session/{slug}` and `tools/lane_identity.py::lane_branch_name` is its single constructor. Documenting the namespace as load-bearing (in the Documentation section) is the durable mitigation.
 
@@ -288,18 +306,17 @@ No `xfail` markers relate to this bug — grep of `tests/` for `pytest.mark.xfai
 **Trigger:** overlapping project ticks at a 30-minute cadence.
 **Data prerequisite:** the `(slug, sha)` cooldown key.
 **State prerequisite:** exactly one tick may claim the action window.
-**Mitigation:** unchanged — `_action_cooldown_set` is the SETNX claim and is the existing overlapping-tick guard. The resolver is pure-read and idempotent, so concurrent resolution of the same lane yields the same answer. The new per-tick cap is per-call state, deliberately not in Redis, exactly like `creates_this_tick` (`:774-779`) — and carries the same documented non-atomicity.
+**Mitigation:** unchanged — `_action_cooldown_set` is the SETNX claim and is the existing overlapping-tick guard. The resolver is pure-read and idempotent, so concurrent resolution of the same lane yields the same answer even if a concurrent tick's `adopt_lane_slug` lands mid-window: that write is conditional-on-empty and never overwrites, so a lane's identity is stable once recorded (`agent/pipeline_ledger.py:170-180`), and the ladder short-circuits at the first unique answer regardless. The per-tick cap, the target-dedupe set, and the ledger map are all per-call state, deliberately not in Redis, exactly like `creates_this_tick` (`:774-779`) — and carry the same documented non-atomicity. The ledger map is built once at the top of the tick, so a lane whose `pr_number` is recorded mid-tick is simply picked up by the next tick.
 
-### Race 3: A lane's recorded slug appears while rung 3 is answering
-**Location:** `_resolve_lane_issue`, rungs 2 and 3
-**Trigger:** `adopt_lane_slug` writes the identity mid-tick.
-**Data prerequisite:** `PipelineLedger.slug`.
-**State prerequisite:** rung 2's answer and rung 3's answer must not disagree for the same lane.
-**Mitigation:** they cannot disagree destructively — rung 2 matches on the same branch slug rung 3's PR carries, and the ladder short-circuits at the first unique answer. The ledger write is conditional-on-empty and never overwrites, so a lane's identity is stable once recorded (`agent/pipeline_ledger.py:170-180`).
+(The first draft carried a third race about a recorded slug appearing while the ledger-by-slug rung was answering. It is gone with that rung.)
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every relevant item is in scope for this plan. The four acceptance-criteria bullets in the issue's Desired Outcome are all addressed: ledger-driven enumeration (rungs 1-2), `_issue_number_from_slug` demoted to a documented fallback (rung 4), human-named lane detection (rungs 2-3, proven against the live corpus), and `_SDLC_BRANCH_RE` removed outright.
+Three of the issue's four acceptance-criteria bullets are addressed as written: `_issue_number_from_slug` demoted to a documented last-resort fallback, human-named lane detection (proven against the live corpus), and `_SDLC_BRANCH_RE` removed outright.
+
+**AC-1 is amended, not satisfied.** The issue asked for ledger-driven *enumeration*. spike-1 measured that design resolving 1 of the 5 live lanes, because the ledger only carries identity for lanes started after #2792. This plan substitutes a targeted ledger lookup inside a resolution ladder, which resolves all of them. This is a deliberate amendment on evidence, recorded here so the validator has an unambiguous target rather than reading AC-1 as unmet and either failing it or rubber-stamping it.
+
+**Deferred to a follow-up issue:** extracting the tri-state ledger-by-PR-number lookup into `tools/lane_identity.py` as the read-direction sibling of `resolve_lane_slug`, and having `merge_predicate._resolve_tracked_issue` delegate to it. This is the right end state under the repo's no-parallel-implementations doctrine — the rung here is close to a line-for-line restatement of that function — but `tools/merge_predicate.py` and `tools/lane_identity.py` are outside this lane's fence, and a fail-closed merge gate is not something to refactor as a rider on a reflection fix. File the follow-up when this merges.
 
 ## Update System
 
