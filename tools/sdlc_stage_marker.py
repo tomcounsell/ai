@@ -387,6 +387,12 @@ def _skip_precondition_error(
             "produced a verdict actually ran and is never retroactively skippable.",
         )
 
+    # #2730 tightened this: every stage entry now records a dispatch, including
+    # the hook-driven and skill-to-skill paths that previously left no trace. So
+    # a `/do-plan` that entered PLAN and then aborted to ask a question is no
+    # longer retroactively skippable. That is the guard's stated contract read
+    # honestly -- the stage WAS reached -- and it errs toward refusing a skip
+    # rather than granting a false one.
     history = raw.get("_sdlc_dispatches")
     skill = _SKIP_STAGE_SKILL.get(stage)
     if skill and isinstance(history, list):

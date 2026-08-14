@@ -980,6 +980,52 @@ class TestStageEntryUpsert:
     def _skills(self, states):
         return [e["skill"] for e in states.get("_sdlc_dispatches", [])]
 
+    def _router_driven(self, states):
+        """Router records its slot, THEN the stage flips and the entry lands."""
+        record_dispatch(states, SKILL_DO_PATCH, confirmed=False)
+        prior = states.get("PATCH")
+        states["PATCH"] = "in_progress"
+        confirm_or_append_stage_entry(states, "PATCH", prior_status=prior)
+
+    def _bypass(self, states):
+        """`/do-build` chains straight to `/do-patch` -- no router record."""
+        prior = states.get("PATCH")
+        states["PATCH"] = "in_progress"
+        confirm_or_append_stage_entry(states, "PATCH", prior_status=prior)
+
+    def test_a_bypass_record_snapshots_the_pre_entry_status_like_the_router(self):
+        """The two writers must observe the SAME side of the stage transition.
+
+        The router records its slot before invoking, so its snapshot sees the
+        pre-entry status. An appended record is written after `_activate_stage`
+        already flipped the stage, so if it snapshots the live value it sees
+        `in_progress` instead. G4 breaks its walk on the first snapshot
+        mismatch, so mixing the two observation points makes a loop that
+        alternates router-driven and bypass entries count LOWER than it did
+        before this feature existed -- adding the correct record would lower the
+        streak, which is the opposite of the point.
+
+        Every other fixture here starts from a bare `states = {}`, where the
+        diverging field is empty on both sides and the defect is invisible.
+        This one gives PATCH a real pre-entry status.
+        """
+        states: dict = {"PATCH": "failed", "REVIEW": "completed"}
+        self._router_driven(states)
+        states["PATCH"] = "failed"
+        self._bypass(states)
+        states["PATCH"] = "failed"
+        self._router_driven(states)
+
+        snapshots = [e["stage_snapshot"]["stages"].get("PATCH") for e in states["_sdlc_dispatches"]]
+        assert snapshots == ["failed", "failed", "failed"], (
+            f"a bypass record must snapshot the pre-entry status, got {snapshots}"
+        )
+        count, _ = compute_same_stage_count(states)
+        assert count == 3, (
+            "three /do-patch entries over an unchanged snapshot must count 3; "
+            f"got {count} -- the added record is lowering G4's streak"
+        )
+
     def test_router_driven_dispatch_yields_exactly_one_record(self):
         """The double-count hazard. Two writers observe one dispatch; a naive
         append would halve G4's effective threshold."""

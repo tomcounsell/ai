@@ -583,14 +583,15 @@ class PipelineStateMachine:
         Never raises: a stage must not become unrecordable because its audit
         entry failed.
         """
-        stage = getattr(self, "_pending_stage_entry", None)
-        if not stage:
+        pending = getattr(self, "_pending_stage_entry", None)
+        if not pending:
             return
         self._pending_stage_entry = None
+        stage, prior_status = pending
         try:
             from agent.sdlc_router import confirm_or_append_stage_entry
 
-            confirm_or_append_stage_entry(data, stage)
+            confirm_or_append_stage_entry(data, stage, prior_status=prior_status)
         except Exception as e:  # pragma: no cover - audit must never block a write
             logger.debug(f"pipeline_state: stage-entry dispatch record failed for {stage}: {e}")
 
@@ -637,12 +638,15 @@ class PipelineStateMachine:
 
     def _activate_stage(self, stage: str) -> None:
         """Set stage to in_progress, save, and record analytics."""
+        prior_status = self.states.get(stage)
         self.states[stage] = "in_progress"
         # #2730: flag the entry for _save() to record. It cannot be applied
         # here -- _save() re-reads `_sdlc_dispatches` from the backing store and
         # merges that copy, so an in-memory mutation made now would be silently
-        # discarded by the very next line.
-        self._pending_stage_entry = stage
+        # discarded by the very next line. The pre-entry status rides along
+        # because the record must snapshot the same side of this transition the
+        # router's slot did; see confirm_or_append_stage_entry.
+        self._pending_stage_entry = (stage, prior_status)
         self._save()
         _record_stage_metric("sdlc.stage_started", stage)
 

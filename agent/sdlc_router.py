@@ -1798,11 +1798,15 @@ def stage_for_skill(skill: str | None) -> str | None:
     return None
 
 
+_NO_PRIOR_STATUS = object()
+
+
 def confirm_or_append_stage_entry(
     stage_states: dict,
     stage: str,
     now: datetime | None = None,
     pr_number: int | None = None,
+    prior_status: object = _NO_PRIOR_STATUS,
 ) -> dict:
     """Record that ``stage`` was entered, without double-counting the router.
 
@@ -1829,6 +1833,17 @@ def confirm_or_append_stage_entry(
     ``last_dispatched_skill`` (``history[-1]["skill"]``) consequently becomes
     *true* on the bypass path rather than naming whichever skill the router last
     saw. That is the fix, not a side effect: rows 8b/8d gate on it.
+
+    ``prior_status`` is the entering stage's status **before** it flipped to
+    ``in_progress``, and it is what keeps the two writers comparable. The router
+    records its slot before invoking, so its snapshot sees the pre-entry status;
+    an appended record is written after ``_activate_stage`` has already flipped
+    the stage, so without this it would see ``in_progress`` instead. G4 breaks
+    its walk on the first snapshot mismatch, so mixing the two observation
+    points makes a loop that alternates router-driven and bypass entries count
+    *lower* than it did before this feature existed -- adding the correct record
+    would lower the streak. Callers that know the pre-entry status pass it; the
+    snapshot is then built against that value, matching the router.
     """
     history = stage_states.get("_sdlc_dispatches")
     if not isinstance(history, list):
@@ -1869,7 +1884,28 @@ def confirm_or_append_stage_entry(
                 pr_number = snapshot["pr_number"]
                 break
 
-    return record_dispatch(stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True)
+    # Build the snapshot against the stage's PRE-entry status, so this record is
+    # comparable with a router slot recorded before the same transition.
+    if prior_status is _NO_PRIOR_STATUS:
+        return record_dispatch(
+            stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True
+        )
+
+    had_key = stage in stage_states
+    current = stage_states.get(stage)
+    if prior_status is None:
+        stage_states.pop(stage, None)
+    else:
+        stage_states[stage] = prior_status
+    try:
+        return record_dispatch(
+            stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True
+        )
+    finally:
+        if had_key:
+            stage_states[stage] = current
+        else:
+            stage_states.pop(stage, None)
 
 
 def record_dispatch(
