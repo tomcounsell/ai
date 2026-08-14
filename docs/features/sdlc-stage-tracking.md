@@ -39,10 +39,15 @@ This path fires automatically for all sessions initiated through the Telegram br
 Each SDLC skill writes explicit in_progress/completed markers using the `sdlc-tool stage-marker` wrapper (which dispatches into `tools/sdlc_stage_marker.py`):
 
 ```bash
-sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} --run-id {run_id}
 # ... skill work ...
-sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id}
 ```
+
+Do not suppress these with `2>/dev/null || true` (issue #2675). `stage-marker` exits non-zero on an
+ownership refusal, and a discarded exit code leaves the skill reporting a stage the ledger never
+recorded. Check it: an `ISSUE_LOCKED` naming a foreign `owner_run_id` is a stop condition, while a
+`LEASE_ABSENT` means re-ensure the identity, adopt the `run_id` that comes back, and retry once.
 
 The wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd (including target-repo cwds where a shadow `tools/` package would otherwise hijack module resolution). See `docs/features/sdlc-tool-resolver.md` for the full rationale.
 

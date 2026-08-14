@@ -75,8 +75,9 @@ export SDLC_TARGET_REPO
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}"
 ```
 
-Let stderr through and check the exit code. A discarded diagnostic here is a run
-that proceeds under an identity it does not hold.
+Let stderr through and read the JSON payload. `session-ensure` reports a refusal *in the payload*
+(`{"blocked": true, "reason": ...}`), not through the exit code — it exits 0 either way — so a
+discarded diagnostic here is a run that proceeds under an identity it does not hold.
 
 Read the JSON from the tool result and **record the `run_id`** (`{"session_id": ..., "created": ..., "run_id": "<hex>"}`) — carry it through every iteration of the Step 3 loop. Reuses the existing `sdlc-local-{N}` session on re-runs. The ownership contract:
 
@@ -242,7 +243,7 @@ sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 ```
 
 Do **not** append a stderr redirect to `/dev/null`, a trailing `|| true`, or any other form that
-discards the diagnostic or the exit code.
+discards the diagnostic.
 The whole point of this step is the payload; a form that destroys it makes every instruction below
 unfollowable and lets the run continue under an identity it has silently lost.
 
@@ -250,14 +251,18 @@ This is a **continuity proof** — the tool verifies the held `run_id` against t
 record and against the durable issue-keyed run-identity anchor on the ledger — not a lease
 keepalive; it does not renew or extend the TTL (that is the heartbeat's job, issue #2714).
 
-**Adopt the returned `run_id`.** On exit code 0, read `run_id` out of the JSON payload and use
-**that** value as `{run_id}` for every subsequent stage, prompt and `--run-id` flag in this run. It
-may differ from the one you carried in: a lapsed lease is rebound, and a fresh contest mints a new
-identity. Keeping your own stale copy is precisely how a run ends up writing markers nobody accepts.
+**Adopt the returned `run_id`.** When the payload carries no `blocked` flag, read `run_id` out of it
+and use **that** value as `{run_id}` for every subsequent stage, prompt and `--run-id` flag in this
+run. It may differ from the one you carried in: a lapsed lease is rebound, and a fresh contest mints
+a new identity. Keeping your own stale copy is precisely how a run ends up writing markers nobody
+accepts.
 
-**On a non-zero exit**, the diagnostic is on stderr. Route the payload through the **same** three-way
-table and `owner_run_id` self-identity check from Step 2, so the own-ghost abandonment bug does not
-simply relocate from the top of the loop to this stage seam:
+**Branch on the payload, not the exit code.** `session-ensure` exits 0 unconditionally and signals
+refusal as `{"blocked": true, "reason": ...}` on stdout, with the human-readable diagnostic on
+stderr. (Its sibling `stage-marker` *does* exit non-zero — do not generalize one tool's disposition
+to the other.) On a `blocked` payload, route it through the **same** three-way table and
+`owner_run_id` self-identity check from Step 2, so the own-ghost abandonment bug does not simply
+relocate from the top of the loop to this stage seam:
 
 - **Foreign owner** — `ISSUE_LOCKED` whose `owner_run_id` is neither yours nor a self-identity you
   recognize: this run has genuinely lost the issue. **Stop the loop** and report. This is the one
@@ -267,7 +272,8 @@ simply relocate from the top of the loop to this stage seam:
 - **Orphaned lock** — `orphaned_lock: true`: wait out the TTL, re-ensure, adopt what comes back.
 - **Transient** — a Redis/broker error, a timeout, or any payload that is none of the above:
   **surface it and retry**, then continue. Never convert a transient error into a pipeline abort —
-  halting a healthy run on a broker blip is worse than the bug this step exists to catch.
+  halting a healthy run on a broker blip is worse than the bug this step exists to catch. A payload
+  missing `run_id` entirely belongs here too, since the tool cannot report that case as an exit code.
 
 ### 3e. Check exit conditions
 
