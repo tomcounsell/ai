@@ -573,8 +573,8 @@ class TestSelfLockPeekIdentityEndToEnd:
         ``--run-id``, the caller has no way to avoid the self-block. With
         ``--run-id``, the peek succeeds under the caller's own stated
         identity, never consulting the session lookup at all."""
-        from tools._sdlc_utils import find_session_by_issue
         from tools import sdlc_next_skill
+        from tools._sdlc_utils import find_session_by_issue
 
         issue_number = 2_100_000 + random.randint(0, 999)
         session_id, run_id = self._mint_self_lock(
@@ -616,8 +616,8 @@ class TestSelfLockPeekIdentityEndToEnd:
         an equivalent non-eng one under the same session_id/issue_url. The
         real lock (minted by the real ``ensure_session`` call above) is left
         untouched throughout."""
-        from tools._sdlc_utils import find_session_by_issue
         from tools import sdlc_next_skill
+        from tools._sdlc_utils import find_session_by_issue
 
         issue_number = 2_101_000 + random.randint(0, 999)
         session_id, run_id = self._mint_self_lock(

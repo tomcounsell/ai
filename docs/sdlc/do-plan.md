@@ -27,8 +27,11 @@ or `/sdlc` carries it from `session-ensure`). When this skill is invoked
 standalone (no supervisor), run
 `sdlc-tool session-ensure --issue-number {issue_number}` once at the start and
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
-stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
-take no run-id.
+stop and report). Read-only calls `stage-query`, `verdict get`, and `dispatch get` take no
+run-id. `next-skill` *accepts* an optional `--run-id` as a read-only identity
+assertion for its issue-lock peek (issue #2766) -- always pass it so the peek
+runs under this run's own stated identity instead of a session lookup that can
+legitimately miss and produce a false self-block.
 
 **Cross-repo `gh` targeting.** `GH_REPO` is set automatically by `sdk_client.py`;
 `gh` respects it — no `--repo` flags needed.

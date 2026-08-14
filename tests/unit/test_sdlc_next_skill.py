@@ -545,7 +545,9 @@ class TestSelfLockPeekIdentity:
             patch(
                 "models.session_lifecycle.touch_issue_lock", return_value=lock_result
             ) as lock_mock,
-            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+            patch.object(
+                sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}
+            ),
         ):
             sdlc_next_skill.decide(issue_number=5001, run_id="own-run")
 
@@ -575,7 +577,9 @@ class TestSelfLockPeekIdentity:
             patch(
                 "models.session_lifecycle.touch_issue_lock", return_value=lock_result
             ) as lock_mock,
-            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+            patch.object(
+                sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}
+            ),
         ):
             sdlc_next_skill.decide(issue_number=5002, run_id="own-run")
 
@@ -605,7 +609,9 @@ class TestSelfLockPeekIdentity:
             patch(
                 "models.session_lifecycle.touch_issue_lock", return_value=lock_result
             ) as lock_mock,
-            patch.object(sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}),
+            patch.object(
+                sdlc_next_skill, "_recover_stage_states_from_durable_signals", return_value={}
+            ),
         ):
             result = sdlc_next_skill.decide(issue_number=5003, run_id="own-run")
 

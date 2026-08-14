@@ -65,7 +65,7 @@ Once minted, `run_id` is **not** re-derived, re-exported, or adopted anywhere el
 
 A state-mutating `sdlc-tool` subcommand invoked **without** `--run-id` fails loudly with a named non-zero error (`RUN_ID_REQUIRED`) instead of minting a fresh identity or silently adopting the record's `active_run_id`. This is the structural fix for the #1971 failure mode: a missing identity is a hard stop, never a new, unintentionally-independent owner.
 
-Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc-tool verdict record` all require `--run-id` and refuse to run without it (`requires_run_id=True` on their CLI subparsers). `sdlc-tool meta-set`'s state-mutating writes require it too. Read-only subcommands (`stage-query`, `next-skill`, `verdict get`, `dispatch get`) take no run-id at all.
+Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc-tool verdict record` all require `--run-id` and refuse to run without it (`requires_run_id=True` on their CLI subparsers). `sdlc-tool meta-set`'s state-mutating writes require it too. `stage-query`, `verdict get`, and `dispatch get` have nothing to compare against and accept no run-id argument. `next-skill` is the one read-only subcommand that DOES accept `--run-id` (issue #2766) -- not as write authorization, but as a read-only identity assertion for its own issue-lock peek. See "Stated identity vs. inferred identity" below.
 
 ### The `touch_issue_lock` primitive
 
@@ -124,6 +124,52 @@ Stale-owner takeover keeps the existing TTL semantics: an expired lock is claima
 `peek=True` reports the current lock state (same `run_id` comparison) **without** acquiring, renewing, or otherwise mutating the lock. An unheld key reports `acquired=True, owner_run_id=None`.
 
 When a peek finds the lock held by a foreign `run_id`, it also reports `orphaned_lock`: `True` when the lock payload's recorded owner is no longer live. As of issue #2305 (defect 1), that judgment is made by `_lock_owner_is_live(payload)` -- see "Authoritative liveness for `sdlc-local-{N}` runs (issue #2305)" below -- not by `_run_id_has_live_session()`'s prior "any non-terminal session" inference, which is retired.
+
+### Stated identity vs. inferred identity (issue #2766)
+
+`tools/sdlc_next_skill.py::decide()`'s issue-lock peek needs an identity to compare
+against the lock payload's `run_id`. Before this issue, the ONLY source for that
+identity was inference: `find_session_by_issue(issue_number).active_run_id`. That
+lookup has three ordinary ways to come back empty --
+
+1. the session's `status` is terminal (`failed`/`completed`/`killed`) -- excluded
+   by design since incident #1915;
+2. the session's `session_type` is not `eng`;
+3. the lookup itself raises (swallowed to `None`).
+
+-- and a `None` peek identity is indistinguishable from "you are not the owner":
+`touch_issue_lock`'s peek branch only returns `acquired=True` when
+`run_id and owner_run_id == run_id`, so `run_id=None` always fails toward blocked,
+even when the lock's actual owner is the very run asking the question. A
+`/do-sdlc` supervisor that mints its own lock via `session-ensure` and then asks
+`next-skill` what to do next can be told to stand down for its *own* lock the
+moment any one of those three ordinary conditions holds for its session record --
+most commonly a stall-advisory or reaper race that flips the session terminal
+while the lock, renewed independently, is still live.
+
+The fix is not to make the inference smarter or to widen `find_session_by_issue`'s
+visibility (that would trade this bug for a #1915 regression -- a terminal session
+resolving as a live owner is exactly how that incident happened). Instead,
+`next-skill` accepts an optional `--run-id`: a caller-**stated** identity. When
+supplied, it IS the peek identity, full stop -- `find_session_by_issue` is never
+consulted, so the session lookup's blind spots can never produce a false
+self-block. Omitting `--run-id` preserves the original inference path unchanged,
+so every caller that predates this change keeps working exactly as before.
+
+This does not weaken the lock: `touch_issue_lock` is still called with `peek=True`
+on every path (never acquires, renews, or mutates), and a **foreign** `--run-id`
+against a live lock still blocks -- the flag changes only *which identity is
+compared*, never *whether the comparison happens*. The blocked `ISSUE_LOCKED`
+payload additionally carries a diagnostic-only `peek_identity` key
+(`"caller"` | `"session_mirror"` | `"unresolved"`) so a human reading a block can
+tell "the session lookup could not resolve an identity" apart from "a genuine
+live rival owns this issue." On the `--run-id`-supplied blocked path only, a
+`session_mirror_run_id` key additionally reports what the (still-run, still
+best-effort) session lookup currently says -- useful when a supervisor's stated
+`--run-id` went stale after an orphaned-lock re-ensure minted a new one, so the
+block is recognizable as "my own superseded id" rather than a rival. Both keys
+are read-only diagnostics: neither overrides a block, and neither triggers any
+automatic retry or re-ensure in the `/do-sdlc` skill body.
 
 ### Authoritative liveness for `sdlc-local-{N}` runs (issue #2305)
 
@@ -244,7 +290,7 @@ reconciliation gap between two divergent liveness inferences.
 
 Peek is used by two read-only checkpoints -- a routing *decision* must never itself claim or extend a lock:
 
-- `tools/sdlc_next_skill.py::decide()`'s pre-check, ahead of all G1-G8 guard evaluation. It peeks with the identity read back from the resolved issue session's own `active_run_id` (not a caller-supplied `--run-id` -- `next-skill` is a read-only subcommand).
+- `tools/sdlc_next_skill.py::decide()`'s pre-check, ahead of all G1-G8 guard evaluation. When the caller supplies `--run-id` (issue #2766), that stated identity IS the peek identity directly -- no session lookup at all. Otherwise it falls back to the identity read back from the resolved issue session's own `active_run_id`. Either way this remains read-only: `next-skill` never mints, adopts, or renews.
 - `tools/sdlc_dispatch.py::_peek_issue_lock_conflict()`, called by `dispatch record`'s CLI wrapper after a write failure, to disambiguate lock contention from an unrelated write error.
 
 ### Compare-and-delete release
@@ -305,7 +351,7 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 |---|---|---|---|
 | `ensure_session()` -- all return points | `tools/sdlc_session_ensure.py` | Every session resolution for an issue (cold-start create, or any early-return branch) | Mints a fresh candidate per top-level call via `_acquire_run_lock_and_bind()`, invoked immediately before *each* `return` so no branch can silently skip it. |
 | `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | The caller's explicit `run_id` (CLI `--run-id`), falling back to `session.active_run_id` for in-process callers. An issue-scoped session with **no** run identity at all refuses the write outright. |
-| `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G8 guard evaluation | Read-only: peeks with the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews. |
+| `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G8 guard evaluation | Read-only: a caller-supplied `--run-id` (issue #2766) is used directly as the peek identity; otherwise falls back to the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews either way. |
 | `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `active_run_id` re-fetched from Redis each tick via `_fetch_live_active_run_id()` (read-back only; skips the tick if absent or fetch fails). Warns at WARNING on a not-owner result. |
 | `revalidate_ledger_lease()` pre-write gate | `tools/_sdlc_utils.py`, called by `sdlc_stage_marker.py` (3 sites), `sdlc_dispatch.py`, `sdlc_verdict.py`, `sdlc_meta_set.py`, `sdlc_review_finalize.py` | Immediately before every ledger mutation, closing the peek-to-write TOCTOU window | The caller's explicit `--run-id`. Non-peek, so it renews the TTL as a side effect of re-validating; also refreshes the supervised-run signal under an `acquired` result (#2659). |
 

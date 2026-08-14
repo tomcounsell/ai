@@ -95,6 +95,22 @@ self-written history: it is populated only by this session's own winning
 binds, never from a foreign signal or lock record, so a foreign run's
 `run_id` can never appear in it.
 
+**3. `next-skill`'s issue-lock peek self-identity via caller-stated
+`--run-id` (issue #2766).** The two branches above close self-recognition
+gaps in the *write* paths (`session-ensure`'s reuse/bare-ensure). A third
+gap existed in the one *read-only* peek: `tools/sdlc_next_skill.py::decide()`
+used to source its peek identity exclusively from
+`find_session_by_issue(issue_number).active_run_id` -- an inference that
+returns `None` for three structurally ordinary reasons (terminal `status`,
+non-`eng` `session_type`, or a raising lookup), each indistinguishable from
+"you are not the owner." A supervisor holding its own live lock could be
+told to stand down for it on its very first router call. The fix is a
+caller-stated identity rather than a wider `owned_run_ids` self-check: an
+optional `--run-id` that, when supplied, IS the peek identity directly, no
+lookup involved. See [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md)'s
+"Stated identity vs. inferred identity" section for the full mechanism and
+its diagnostic-only `peek_identity` / `session_mirror_run_id` payload keys.
+
 ### Local-supervisor lease heartbeat
 
 The pure-local `/do-sdlc` supervisor -- a per-turn `claude -p` subprocess
