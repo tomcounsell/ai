@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -678,13 +678,13 @@ surface. No new `pyproject.toml [project.scripts]` entry, no new bridge import.
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-issue-ownership-lock.md` with the durable
+- [x] Update `docs/features/sdlc-issue-ownership-lock.md` with the durable
       issue-keyed `_run_identities` corroboration source and the fourth reuse
       proof, replacing (not appending to) the current description of how a reuse
       claim is validated.
-- [ ] Update `docs/sdlc/do-sdlc.md` to describe Step 3d.6's new loud contract and
+- [x] Update `docs/sdlc/do-sdlc.md` to describe Step 3d.6's new loud contract and
       the run_id-adoption requirement.
-- [ ] Update `docs/sdlc/do-plan.md` marker invocations (this is Task 3 — it is
+- [x] Update `docs/sdlc/do-plan.md` marker invocations (this is Task 3 — it is
       both the code change and the doc change).
 
 ## Success Criteria
