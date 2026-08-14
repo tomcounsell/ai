@@ -1826,23 +1826,40 @@ def confirm_or_append_stage_entry(
     if not isinstance(history, list):
         history = []
 
-    # Newest-first: upgrade the most recent unconfirmed slot for this stage.
-    for entry in reversed(history):
-        if not isinstance(entry, dict) or entry.get("stage") != stage:
-            continue
-        if entry.get("confirmed") is False:
-            entry["confirmed"] = True
-            stage_states["_sdlc_dispatches"] = history
-            return stage_states
-        # The newest record for this stage is already confirmed, so this is a
-        # fresh entry into a stage that ran before. Fall through and append.
-        break
+    # ONLY the newest record can be this entry's router slot. The router records
+    # immediately before invoking the sub-skill, so nothing else can land in
+    # between. Scanning further back would let a stale slot -- a dispatch that
+    # was recorded and then never started -- absorb an unrelated later entry,
+    # dropping that entry's record entirely and leaving `last_dispatched_skill`
+    # naming the wrong skill: exactly the defect this function exists to fix.
+    last = history[-1] if history else None
+    if isinstance(last, dict) and last.get("stage") == stage and last.get("confirmed") is False:
+        last["confirmed"] = True
+        # Re-stamp the time: `_latest_dispatch_at` (rows 8 and 2b) must report
+        # when the stage actually started, not when the router queued it.
+        last["at"] = (now or datetime.now(UTC)).isoformat()
+        stage_states["_sdlc_dispatches"] = history
+        return stage_states
 
     skill = STAGE_TO_SKILL.get(stage)
     if skill is None:
         # An unknown stage has no skill to attribute the entry to. Recording a
         # skill-less record would break every consumer of history[-1]["skill"].
         return stage_states
+
+    # Inherit the PR number from the newest record that carries one. The bypass
+    # path has no `_meta` to read it from, and `pr_number` is IN the snapshot
+    # G4 compares -- so recording None beside a router record's real value
+    # breaks the streak at every router/bypass boundary, making the very records
+    # this function adds uncountable.
+    if pr_number is None:
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            snapshot = entry.get("stage_snapshot")
+            if isinstance(snapshot, dict) and snapshot.get("pr_number") is not None:
+                pr_number = snapshot["pr_number"]
+                break
 
     return record_dispatch(stage_states, skill=skill, now=now, pr_number=pr_number, confirmed=True)
 

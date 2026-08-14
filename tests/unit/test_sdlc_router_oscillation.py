@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
 from agent.sdlc_router import (
     MAX_SAME_STAGE_DISPATCHES,
@@ -12,6 +14,7 @@ from agent.sdlc_router import (
     SKILL_DO_PLAN,
     SKILL_DO_PLAN_CRITIQUE,
     SKILL_DO_PR_REVIEW,
+    SKILL_DO_TEST,
     Blocked,
     Dispatch,
     build_stage_snapshot,
@@ -1029,6 +1032,53 @@ class TestStageEntryUpsert:
         confirm_or_append_stage_entry(states, "PATCH")
 
         assert self._skills(states) == [SKILL_DO_PATCH] * 2
+
+    def test_a_bypass_record_inherits_the_pr_number_so_g4_can_count_it(self):
+        """`pr_number` is IN the snapshot G4 compares. The bypass path has no
+        `_meta` to read it from, so recording None beside a router record's real
+        value breaks the streak at every router/bypass boundary -- making the
+        very records this feature adds uncountable, which is worse than the
+        missing records it fixes."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=42, confirmed=False)
+        confirm_or_append_stage_entry(states, "REVIEW")
+        confirm_or_append_stage_entry(states, "REVIEW")
+
+        assert [e["stage_snapshot"]["pr_number"] for e in states["_sdlc_dispatches"]] == [42, 42]
+        count, _ = compute_same_stage_count(states)
+        assert count == 2
+
+    def test_a_stale_slot_for_another_stage_does_not_absorb_this_entry(self):
+        """A dispatch recorded but never started leaves an unconfirmed slot
+        forever. Scanning past intervening records to find it would drop the
+        real entry's record and leave `last_dispatched_skill` naming the wrong
+        skill -- the exact defect this feature exists to fix. Only the NEWEST
+        record can be this entry's slot, since the router records immediately
+        before invoking."""
+        states: dict = {}
+        record_dispatch(states, SKILL_DO_TEST, confirmed=False)  # never started
+        record_dispatch(states, SKILL_DO_PATCH, confirmed=False)
+        confirm_or_append_stage_entry(states, "PATCH")
+        confirm_or_append_stage_entry(states, "TEST")  # /do-patch chains to /do-test
+
+        assert [e["skill"] for e in states["_sdlc_dispatches"]] == [
+            SKILL_DO_TEST,
+            SKILL_DO_PATCH,
+            SKILL_DO_TEST,
+        ]
+        _, last_skill = compute_same_stage_count(states)
+        assert last_skill == SKILL_DO_TEST
+
+    def test_upgrading_a_slot_restamps_the_time(self):
+        """`_latest_dispatch_at` (rows 8 and 2b) must report when the stage
+        actually started, not when the router queued it."""
+        states: dict = {}
+        record_dispatch(
+            states, SKILL_DO_BUILD, now=datetime(2026, 1, 1, tzinfo=UTC), confirmed=False
+        )
+        confirm_or_append_stage_entry(states, "BUILD", now=datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert states["_sdlc_dispatches"][0]["at"].startswith("2026-06-01")
 
     def test_only_the_newest_unconfirmed_slot_is_upgraded(self):
         """A stale unconfirmed slot from a dispatch that never started must not
