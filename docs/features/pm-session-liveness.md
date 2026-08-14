@@ -318,7 +318,7 @@ Every external boundary (gh CLI, git, `valor-telegram`, Redis, Popoto query, `st
 
 - **Redis unavailable for the cooldown, attempts, or escalation keys.** The reflection declines to act (skip this tick). Better to under-act during a Redis flap than to double-act or spam during one.
 - **`AgentSession` query fails** (the ladder's target query). Reads as `None`/"unknown", logged as a `gate-unknown` finding, no action taken. Rung selection runs before the cooldown claim, so a failed target query never claimed the window in the first place; the lane is actionable again on the next tick with nothing to release.
-- **Branch not present locally.** Silently skipped (debug-logged). Common during transient worktree state.
+- **Branch not present locally.** Skipped with a `gate-unknown: branch-not-fetched` finding (the underlying git failure is debug-logged). Common during transient worktree state. The finding matters because the corpus is now every `session/` branch: an unfetched ref is the one condition that could quietly return the detector to seeing nothing, so it reports rather than disappears.
 
 ### Tunables
 

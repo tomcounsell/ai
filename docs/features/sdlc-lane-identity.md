@@ -123,9 +123,9 @@ The lane would then get a respawned session under an identity nothing else
 would recognize. `adopt_lane_slug` avoids this because it takes no ladder; it
 just records the caller-supplied value, conditional-on-empty.
 
-This example is no longer hypothetical. `reflections/sdlc_progress.py`'s
-discovery corpus is the `session/` namespace, not a branch-shape probe, so a
-human-named lane branch does reach this call site. Its issue number comes from
+`reflections/sdlc_progress.py`'s discovery corpus is the `session/` namespace,
+not a branch-shape probe, so a human-named lane branch reaches this call site
+like any other. Its issue number comes from
 the issue resolution ladder (see "Discovery reads identity" below), not from a
 shape probe alone — the ladder's read-based rungs are the source for the issue
 number that a shape probe on its own cannot supply. The pass-through behavior
