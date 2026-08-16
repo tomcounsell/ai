@@ -75,22 +75,37 @@ from scripts.update.service import (  # noqa: E402
     get_process_start_ts,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-# Add rotating file handler for watchdog log
 LOGS_DIR = PROJECT_DIR / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-_watchdog_file_handler = logging.handlers.RotatingFileHandler(
-    LOGS_DIR / "watchdog.log",
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=5,
-)
-_watchdog_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger.addHandler(_watchdog_file_handler)
+WATCHDOG_LOG_FILE = LOGS_DIR / "watchdog.log"  # monkeypatch seam, mirrors worker LOG_FILE
+
+logger = logging.getLogger("monitoring.bridge_watchdog")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+def _configure_logging() -> None:
+    """Attach the rotating file handler. Call from __main__ ONLY (issue #2643).
+
+    Two constraints a future editor must not break:
+      * Called from the `__main__` guard, never at import and never from the top
+        of `main()` — five tests call `main()` directly for `--check-only`.
+      * `WATCHDOG_LOG_FILE` is read here, at call time, from the module global.
+        Do not capture it in a default argument or a closure: tests monkeypatch it.
+
+    No try/except: if `logs/` is unwritable the watchdog must die loudly and let
+    launchd retry in 60 s. A watchdog that runs and records nothing is the worst
+    outcome for an alerting system.
+    """
+    WATCHDOG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    for h in [h for h in logger.handlers if getattr(h, "_watchdog_owned", False)]:
+        logger.removeHandler(h)
+        h.close()
+    fh = logging.handlers.RotatingFileHandler(
+        WATCHDOG_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5
+    )
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    fh._watchdog_owned = True
+    logger.addHandler(fh)
 
 # Files and directories
 LOG_FILE = PROJECT_DIR / "logs" / "bridge.log"
@@ -1082,4 +1097,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _configure_logging()
     sys.exit(main())
