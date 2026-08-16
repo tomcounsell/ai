@@ -284,7 +284,7 @@ The enriched stage query output (`sdlc-tool stage-query`) includes a `_meta` dic
 | `sdlc-tool stage-marker --stage S --status X` | Mark stage progress |
 | `sdlc-tool verdict record --stage S --verdict V` | Record critique/review verdict |
 | `sdlc-tool dispatch record --skill /do-X` | Record a dispatch event |
-| `sdlc-tool next-skill --issue-number N` | Get next dispatch decision |
+| `sdlc-tool next-skill --issue-number N --run-id R` | Get next dispatch decision (pass the caller's own run-id; omitting it infers identity and is how the next-skill self-lock reproduces) |
 | `sdlc-tool meta-set --key K --value V` | Set a whitelisted _meta key |
 | `sdlc-tool session-ensure --issue-number N` | Ensure a PM session exists |
 

@@ -92,7 +92,7 @@ refuse with exactly three payload shapes. Discriminate them; do not collapse all
 |---|---|---|
 | **Hand-off** | `{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id", "owner_run_id", "owner_session_id"}` | This is a **designed hand-off**, not a block. It mints nothing — the supervisor already owns the run. **Pass the self-identity check below first.** If it confirms your own signal: **inherit** `owner_run_id` (carry it forward as `run_id`, pass it back via `--run-id`/`--reuse-run-id`), and **continue** — never stop for a confirmed-own signal. |
 | **Orphaned lock** | `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id", "owner_session_id", "orphaned_lock": true}` | The prior owner died before renewing; the lock frees within its TTL (duration and renewal semantics are #2446's — cross-reference it, do not reimplement). Wait, re-ensure, then **rebind `run_id` to whatever the re-ensure returns** before continuing — a post-TTL fresh contest mints a NEW run_id, and every downstream `--run-id` call must use the rebound value or it silently orphans. |
-| **Foreign holder** | `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id", "owner_session_id", "orphaned_lock": false}` | The **only unconditional stop condition of the three.** A genuine live foreign run owns the issue. Stop and report. |
+| **Foreign holder** | `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id", "owner_session_id", "orphaned_lock": false}` | Apply the same self-identity check as the hand-off row: `owner_run_id ∈ {run_ids this run has held}` means this is your own lock, not a foreign one — **inherit and continue**, never stop. Only when `owner_run_id` is genuinely foreign is this the **unconditional stop condition.** A genuine live foreign run owns the issue. Stop and report. (issue #2766 — always pass `--run-id {run_id}` on Step 3a's `next-skill` call so this row is only ever reached for a genuine rival, never your own lock.) |
 
 **Self-identity check before standing down** (applies to the hand-off row above): `SUPERVISED_RUN_ACTIVE`
 fires only on a LIVE signal — a stale/expired one falls through to the orphaned-lock/foreign-holder
@@ -116,14 +116,24 @@ Repeat the following cycle. **Iteration cap: 15 dispatches** (a happy path is 8 
 ### 3a. Ask the router
 
 ```bash
-sdlc-tool next-skill --issue-number {issue_number}
+sdlc-tool next-skill --issue-number {issue_number} --run-id {run_id}
 ```
 
-(Read-only — `next-skill` takes no `--run-id`.)
+(Read-only — `next-skill` never mints, adopts, or renews the lock. `--run-id` is a read-only
+identity assertion: it peeks under the caller's own stated identity so this run is never told to
+stand down for a lock it holds itself, issue #2766. Always pass it here.)
 
 Interpret the JSON from the tool result:
 
-- `{"blocked": true, ...}` → **STOP the loop.** Report the `reason` and `guard_id` to the human, plus a summary of stages completed so far. Do not retry, do not guess an alternative skill.
+- `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` → the payload additionally carries
+  `peek_identity` (`"caller"` | `"session_mirror"` | `"unresolved"`) and, only when `--run-id` was
+  supplied and did not match the live lock, `session_mirror_run_id`. Both are **diagnostics only**
+  — they never override the block and there is no automatic re-ensure/retry keyed on them.
+  `peek_identity: "unresolved"` means the block is *inconclusive* (the fallback session lookup
+  missed) — report it to the human as such and stop, exactly like any other block; do not retry.
+  Apply the self-identity check below to the row's `owner_run_id` before deciding whether this is
+  actually your own lock.
+- `{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human, plus a summary of stages completed so far. Do not retry, do not guess an alternative skill.
 - `{"skill": "...", "dispatched": true, ...}` → continue to 3b. The router dispatches at most ONE skill per call; there is no parallel-pair shape.
 - Anything else (error key, empty) → STOP and surface the error.
 
@@ -155,7 +165,7 @@ Context:
 - PR: {#pr or "none yet"}
 - Plan: {docs/plans/{slug}.md or "none yet"}
 - Prior stage outcome: {one-line summary, or "None — first stage"}
-- Run identity: {run_id} — pass --run-id {run_id} on every state-mutating sdlc-tool call (stage-marker, verdict record, meta-set, dispatch record); read-only calls take none.
+- Run identity: {run_id} — pass --run-id {run_id} on every state-mutating sdlc-tool call (stage-marker, verdict record, meta-set, dispatch record) and on next-skill (a read-only identity assertion for its lock peek, issue #2766); stage-query/verdict get/dispatch get take none.
 - Commit early: commit to session/{slug} as work lands (small logical checkpoints), not only at the end — a preempt or lease lapse mid-stage must never lose work.
 
 When done, report back (this is data for the supervisor, not prose for a human):

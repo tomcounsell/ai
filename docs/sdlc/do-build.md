@@ -33,8 +33,11 @@ carries `--run-id {run_id}` — the run_id is supplied by the invoking superviso
 invoked standalone (no supervisor), run
 `sdlc-tool session-ensure --issue-number {issue_number}` once at the start and
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
-stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
-take no run-id. Under a live supervised run (#2026), a bare `session-ensure` instead returns
+stop and report). Read-only calls `stage-query`, `verdict get`, and `dispatch get` take no
+run-id. `next-skill` *accepts* an optional `--run-id` as a read-only identity
+assertion for its issue-lock peek (issue #2766) -- always pass it so the peek
+runs under this run's own stated identity instead of a session lookup that can
+legitimately miss and produce a false self-block. Under a live supervised run (#2026), a bare `session-ensure` instead returns
 `{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": ...}` — that is
 inheritance, not a block: use the returned `run_id` and continue; only a foreign
 `ISSUE_LOCKED` (no live supervised signal) means stop and report.
