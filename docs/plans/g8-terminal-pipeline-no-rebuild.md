@@ -705,20 +705,22 @@ rather than being skipped. The router then walks
 
 ### Technical Approach
 
-All edits are in `tools/sdlc_next_skill.py::_verify_stage_artifacts_live` and its
-new helper, plus tests. Line references are at `1c48b97f2`.
+Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
+`tools/sdlc_next_skill.py` (defense in depth) — plus tests. Line references are at
+`1c48b97f2` unless noted.
 
-- **Add `_pipeline_is_terminal_from_states(stage_states: dict) -> bool`** immediately
-  above `_verify_stage_artifacts_live`. Body is a single comparison against
-  `"completed"`. Docstring carries: the definitional-twin note naming
-  `tools/_sdlc_run_identity.py::_pipeline_is_terminal`; why this reads the parameter
-  rather than re-reading the ledger; and the "extract, don't add a third spelling"
-  instruction for a future third consumer.
-- **Short-circuit at the top of `_verify_stage_artifacts_live`** (before the
-  `find_plan_path` / `resolve_lane_slug` block at `:211-219`, so a terminal lane
-  pays for no resolution at all): `if _pipeline_is_terminal_from_states(stage_states):`
-  log at debug and `return {}`. The debug log names the issue number and the reason,
-  in the register of the existing `:259-263` skip.
+- **`tools/sdlc_stage_query.py::_compute_meta` (`:548`) — the primary fix.** Replace
+  the single `_lookup_pr(issue_number, slug=slug, repo=resolved_repo)` with a
+  two-pass fallback: the existing call, then — **only if it returns `None`** — a
+  retry with `state="all"`. Do not change `_lookup_pr`'s own default; other callers
+  depend on it and `sdlc_stage_marker.py` passes `state` explicitly. Carry a comment
+  naming #2539 as precedent and `agent/pipeline_state.py:1564` as the in-repo idiom,
+  and stating why the ordering matters (an open PR must always win over a historical
+  one, so the second pass runs only on `None`).
+- **No new terminal predicate, and no short-circuit in the verifier.** The earlier
+  draft's `_pipeline_is_terminal_from_states` helper is cut entirely — see Key
+  Elements for the four reasons. Nothing is added above the
+  `find_plan_path` / `resolve_lane_slug` block.
 - **Gate the BUILD check on an identifiable artifact.** Fold `pr_number` into the
   claim the way PATCH already does — the cleanest form keeps the `pr_state` fetch
   guard (`:269`) unchanged and rewrites `:272-278` so the mismatch branch is reached
@@ -726,7 +728,12 @@ new helper, plus tests. Line references are at `1c48b97f2`.
   absent, emit a **debug** log ("BUILD claims completed but no PR number is
   recorded; skipping the live PR check rather than reporting a claim it cannot
   verify") and fall through. Do **not** leave the old term behind as an `elif` — the
-  Verification table asserts the removed term is gone, and a demoted copy trips it.
+  behavioral test, not the grep, is what pins this, but a demoted copy would defeat
+  both.
+- **Apply the same guard to the PATCH branch probe.** When `pr_number` is absent,
+  skip the `git ls-remote` check with a debug log noting that a missing branch is
+  indistinguishable from deletion-on-merge without a PR state to consult. This
+  replaces the cut MERGE short-circuit as the fix for spike-4's hole.
 - **Update the function docstring (`:189-210`).** Its `#1267 merged-pipeline
   misfire` paragraph is the natural home: extend it with the #2757 case, stating the
   three-state distinction (verified / falsified / unverifiable) and that the terminal
