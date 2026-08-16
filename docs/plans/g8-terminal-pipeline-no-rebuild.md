@@ -843,12 +843,18 @@ nothing on its own.
 
 ## Rabbit Holes
 
-- **Rebuilding `pr_number` from the world.** "The PR is discoverable from
-  `gh pr list --search`, so resolve it instead of skipping." That is a second
-  identity resolver on a hot path, with the cross-repo and multi-PR ambiguity
-  hazards `tools/merge_predicate.py`'s docstring catalogs, added inside a *gate*
-  whose whole job is to not invent facts. If ledger durability is the problem, fix
-  the ledger (#2730's lane) — do not paper over it in a verifier.
+- **~~Rebuilding `pr_number` from the world.~~ RETRACTED — this was the fix.** The
+  earlier draft listed this as a rabbit hole on the grounds that it would mean "a
+  second identity resolver on a hot path, with the cross-repo and multi-PR ambiguity
+  hazards `tools/merge_predicate.py`'s docstring catalogs." That was a strawman:
+  spike-9 measured that the *existing* resolver already finds the PR when its `state`
+  filter is not artificially restricted to `"open"`. No second resolver is written,
+  no new ambiguity surface is created, and the two-pass ordering (open wins, `all`
+  only on `None`) means the multi-PR hazard is strictly no worse than today's. The
+  genuine rabbit hole nearby — writing a *bespoke* PR search inside the verifier
+  rather than fixing the shared resolver's call site — remains out of scope.
+  Separately, ledger durability is still #2730's lane; this plan fixes a lookup
+  filter, not the ledger.
 - **Making the verifier fail closed on a missing `pr_number`** ("if we cannot verify,
   refuse to advance"). It is superficially the safe posture and it is what the
   current code accidentally does. It is wrong here: the observed consequence is
@@ -861,10 +867,15 @@ nothing on its own.
 - **Adding a terminal dispatch row or verdict.** Filed as #2817. It is a router
   change, it is not needed to stop the false rebuild, and doing it here would
   require the fence extension this plan exists to avoid.
-- **Auditing the other two artifact checks for the same bug.** Tempting for symmetry
-  — but PATCH already has the guard (`:257`) and PLAN already has it (`plan_path is
-  not None`, `:221`). BUILD was the only one missing it. Confirm by reading, then
-  stop; do not restructure all three into a table-driven loop.
+- **Restructuring all three artifact checks into a table-driven loop.** PLAN has its
+  identifiability guard (`plan_path is not None`, `:221`), BUILD gains one, and PATCH
+  gains a second one for the `pr_number`-absent case (its existing `bool(lane_branch)`
+  guard covers a different absence). That is three similar-looking branches, which
+  invites a refactor into a loop — resist it. Each check consults a different service
+  with different failure semantics, and #1267's positioning contract is easier to
+  audit as straight-line code. An earlier draft said "PATCH already has the guard,
+  confirm by reading, then stop", which contradicted spike-4; the correction is that
+  PATCH needed a *second* guard, not that the audit should be skipped.
 
 ## Risks
 
