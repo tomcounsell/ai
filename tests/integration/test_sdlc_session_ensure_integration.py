@@ -500,6 +500,182 @@ class TestStageArtifactVerificationGate:
         assert result["skill"] == "/do-merge", result
         assert result["row_id"] == "10", result
 
+    @staticmethod
+    def _fake_no_pr_anywhere(slug: str, branch_exists: bool):
+        """Build a ``subprocess.run`` fake for "this issue has no PR in any state".
+
+        Answers every ``gh pr list`` (both the ``#N`` body search and the
+        ``--head <branch>`` fallback, under every ``--state`` value) with an
+        empty list, so ``_compute_meta`` cannot resolve a ``pr_number`` by any
+        route. ``git branch -a`` answers according to ``branch_exists``, which
+        is the sole producer of the router's row-5 input.
+        """
+        branches = "  remotes/origin/main\n"
+        if branch_exists:
+            branches += f"  remotes/origin/session/{slug}\n"
+
+        def _fake(cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+            if cmd[:3] == ["gh", "pr", "list"]:
+                proc.stdout = "[]"
+            elif cmd[:2] == ["git", "branch"]:
+                proc.stdout = branches
+            elif cmd[:2] == ["git", "ls-remote"]:
+                proc.stdout = ""
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        return _fake
+
+    @pytest.mark.parametrize("branch_exists", [False, True])
+    def test_no_pr_number_recorded_does_not_redispatch_build(
+        self, monkeypatch, issue_number, cleanup_ledger, branch_exists
+    ):
+        """#2757: a BUILD claim whose PR number is *unresolvable* must never be
+        adjudicated as a *falsified* claim by guard g8.
+
+        "There is no identifier to look up" is not evidence the claim is false
+        -- it is evidence the check could not be performed. Today g8 collapses
+        the two and re-dispatches ``/do-build`` on the strength of a lookup it
+        never made.
+
+        No ``MERGE`` marker is set, deliberately: this test must pin the
+        identifiability guard itself, not any terminal short-circuit.
+
+        The correct outcome differs by ``branch_exists``, and both halves are
+        asserted:
+
+        - ``False`` -> no ``/do-build`` at **any** row (measured:
+          ``Blocked(NO_RULE)``).
+        - ``True``  -> ``/do-build`` at **row 5**, never at ``G8``.
+          ``_rule_branch_exists_no_pr`` is the correct owner of "a branch
+          exists with no PR, so build must create the PR" for a lane that
+          genuinely never opened one; that row is deliberately out of fence
+          and must not be "fixed". The row-id assertion is what proves the
+          guard stopped g8 from manufacturing a verdict.
+        """
+        from agent.pipeline_ledger import PipelineLedger
+        from tools import sdlc_next_skill
+
+        monkeypatch.setenv("GH_REPO", _G8_TEST_REPO_SLUG)
+        monkeypatch.setenv("VALOR_SESSION_ID", "")
+        monkeypatch.setenv("AGENT_SESSION_ID", "")
+
+        slug = f"sdlc-{issue_number}"
+        monkeypatch.setattr("subprocess.run", self._fake_no_pr_anywhere(slug, branch_exists))
+
+        ledger = PipelineLedger.get_or_create(_G8_TEST_REPO_SLUG, issue_number)
+        ledger.stage_states_json = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "BUILD": "completed",
+            }
+        )
+        ledger.pr_number = None
+        ledger.slug = slug
+        ledger.save()
+
+        result = sdlc_next_skill.decide(issue_number=issue_number)
+
+        # decide() catches every exception and returns {"error": ...}, which
+        # would satisfy a negative-only assertion -- pin the absence first.
+        assert "error" not in result, result
+
+        if branch_exists:
+            assert result.get("dispatched") is True, result
+            assert result["skill"] == "/do-build", result
+            assert result["row_id"] == "5", result
+        else:
+            assert result.get("skill") != "/do-build", result
+            assert result.get("blocked") is True, result
+            assert result.get("guard_id") == "NO_RULE", result
+
+    def test_empty_ledger_with_merged_pr_does_not_redispatch_build(
+        self, monkeypatch, issue_number, cleanup_ledger, cleanup_test_sessions
+    ):
+        """#2757 end-to-end reproduction, through the durability-recovery path.
+
+        This is the shape the three reported issues were actually in: the
+        ``PipelineLedger`` reads *entirely* empty, so ``decide()`` reconstructs
+        ``stage_states`` from durable signals -- which read ``("open", "all")``
+        and therefore *do* see the merged PR, setting ``BUILD = completed`` --
+        while ``_compute_meta`` resolves ``pr_number`` under ``state="open"``
+        only and comes back with ``None``. A merged pipeline is then told to
+        rebuild the work it just shipped.
+        """
+        from tools import sdlc_next_skill
+
+        monkeypatch.setenv("GH_REPO", _G8_TEST_REPO_SLUG)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        slug = f"sdlc-{issue_number}"
+        branch = f"session/{slug}"
+        pr_number = 918275
+        pr_body = f"Closes #{issue_number}"
+
+        session_id = f"tg_valor_{TEST_PROJECT_KEY}_{issue_number}"
+        session = AgentSession(
+            session_id=session_id,
+            project_key=TEST_PROJECT_KEY,
+            session_type="eng",
+            chat_id=f"test_chat_2757_{issue_number}",
+            issue_url=f"https://github.com/{_G8_TEST_REPO_SLUG}/issues/{issue_number}",
+            status="running",
+            slug=slug,
+        )
+        session.save()
+        monkeypatch.setenv("VALOR_SESSION_ID", session_id)
+
+        def _fake(cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+            if cmd[:3] == ["gh", "pr", "list"]:
+                state = cmd[cmd.index("--state") + 1] if "--state" in cmd else "open"
+                # The PR is MERGED: invisible under `open`, visible otherwise.
+                if state == "open":
+                    proc.stdout = "[]"
+                else:
+                    proc.stdout = json.dumps(
+                        [
+                            {
+                                "number": pr_number,
+                                "body": pr_body,
+                                "headRefName": branch,
+                                "state": "MERGED",
+                            }
+                        ]
+                    )
+            elif cmd[:3] == ["gh", "pr", "view"]:
+                json_arg = cmd[cmd.index("--json") + 1] if "--json" in cmd else ""
+                if json_arg == "state":
+                    proc.stdout = json.dumps({"state": "MERGED"})
+                elif json_arg == "statusCheckRollup":
+                    proc.stdout = json.dumps({"statusCheckRollup": []})
+                else:
+                    proc.stdout = json.dumps(
+                        {"mergeStateStatus": "UNKNOWN", "statusCheckRollup": []}
+                    )
+            elif cmd[:2] == ["git", "branch"]:
+                proc.stdout = f"  remotes/origin/{branch}\n"
+            elif cmd[:2] == ["git", "ls-remote"]:
+                proc.stdout = ""
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake)
+
+        result = sdlc_next_skill.decide(issue_number=issue_number)
+
+        assert "error" not in result, result
+        assert result.get("skill") != "/do-build", result
+
 
 class TestSelfLockPeekIdentityEndToEnd:
     """Issue #2766: a supervisor that mints its own issue lock via a real
