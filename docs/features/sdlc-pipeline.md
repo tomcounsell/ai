@@ -73,6 +73,13 @@ world.
   `context["stage_artifacts_verified"] is False` (an explicit, verified
   mismatch). Absent/unset/`True` is a no-op — a stage with no claimed
   artifact (or one that verified clean) never sets the flag to `False`.
+  A claimed artifact whose **identifier cannot be resolved** is likewise a
+  no-op, not a mismatch (#2757): with no `pr_number` recorded there is
+  nothing to look up, and reporting a mismatch from a lookup that never ran
+  re-dispatched `/do-build` against already-merged work. Note that this is
+  now a narrow residual — `_compute_meta` retries its PR lookup against
+  merged PRs, so `pr_number` resolves for a merged PR instead of evaporating
+  the moment the lane ships, and BUILD is verified on the merits.
 - **Contract:** on fire, G8 maps `context["unverified_stage"]` to its owning
   skill (`STAGE_TO_SKILL`) and re-dispatches it. A mismatch that can't be
   mapped to a known stage fails open (returns `None`) rather than guessing a
