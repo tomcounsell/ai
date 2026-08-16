@@ -63,9 +63,67 @@ bool(lane_branch)` (`:257`), with a debug log explaining that a missing artifact
 identifier means *skip the probe*, not *fail the claim* (`:258-263`, added by
 #2718). BUILD is the same shape missing the same guard.
 
+**Why `pr_number` is absent in the first place — the proximate cause, one layer up.**
+
+The paragraphs above are a correct description of the verifier, but they stop one
+layer short of the cause, and the critique's war room was right that this changes
+which fix is correct.
+
+`_meta["pr_number"]` is resolved by `tools/sdlc_stage_query.py::_compute_meta`, which
+calls `_lookup_pr(issue_number, slug=slug, repo=resolved_repo)` (`:548`) — without a
+`state` argument. `_lookup_pr`'s signature defaults to **`state: str = "open"`**
+(`:338-342`). A merged PR is not open, so it is invisible to every resolution path in
+that function. That is precisely why the symptom appears "minutes after their merges"
+and not before: the merge is the event that makes the PR unresolvable.
+
+Measured on the three reported issues (2026-08-16, live `gh`):
+
+| Issue | `_lookup_pr(state="open")` | `_lookup_pr(state="all")` |
+|---|---|---|
+| #2638 | `None` | **2686** |
+| #2566 | `None` | **2665** |
+| #2640 | `None` | **2671** |
+
+Those are exactly the PR numbers this plan's own Problem statement names. The
+`pr_number` was never unrecoverable; it was looked up under a filter that excludes
+the only state it could be in.
+
+`tools/sdlc_stage_marker.py:246-250` already fixed this same defect at a sibling call
+site under **#2539**, with a comment that says the quiet part directly: *"the artifact
+question is historical, not in-flight. Under the default `open` a merged PR resolves
+to None and this probe returned False before ever looking for the artifact."* The
+verifier's call site never got the same treatment.
+
+**Why silencing G8 is not sufficient — the rebuild relocates to row 5.**
+
+Making G8 no-op does not stop the rebuild. `agent/sdlc_router.py::_rule_branch_exists_no_pr`
+(`:922-927`) returns `True` on `context["branch_exists"] is True` alone whenever
+`pr_number` is falsy, regardless of `BUILD == "completed"`, and row 5 precedes every
+PR-gated row. Measured through the real router:
+
+| `pr_number` | `branch_exists` | dispatch |
+|---|---|---|
+| absent | `True` | **`/do-build`, row 5** |
+| absent | `False` | `Blocked(NO_RULE)` |
+| **2686** | `True` | **`/do-merge`, row 10** |
+| **2686** | `False` | **`/do-merge`, row 10** |
+
+This repo reports `deleteBranchOnMerge: false` and merged lane branches persist on
+origin, so the `branch_exists: True` row is the **normal** post-merge case here, not
+an exotic one. An earlier draft of this plan asserted only the absence of a *G8*
+`/do-build` — an assertion that would have gone green while the bug continued
+unabated at row 5.
+
+The same table shows the converse: restoring `pr_number` reaches the terminal row
+under **both** branch states, which simultaneously stops the row-5 rebuild, lets G8
+pass on its own merits rather than by being silenced, and deletes the
+`Blocked(NO_RULE)` residual that motivated #2817.
+
 **Desired outcome:**
 
-A terminal pipeline is never told to rebuild. More generally: the artifact verifier
+A terminal pipeline is never told to rebuild — **at any row**, not merely at G8. This
+is achieved primarily by *resolving* the artifact identifier rather than by
+suppressing the check that misses it. Secondarily, the artifact verifier
 distinguishes three states rather than two —
 
 | State | Meaning | Verdict |
@@ -119,6 +177,32 @@ line numbers were re-read at this SHA)
   **after** #2757 was filed and touching `agent/sdlc_router.py`. It did not change
   the verifier, but it is the reason the adjacent test is red (see Spike Results,
   spike-5).
+
+**Foreign-PR reconciliation: PR #2794 / issue #2793 (checked 2026-08-16).**
+
+A closed-unmerged PR edited the same function this plan edits, so its disposition was
+reconciled before any code was written.
+
+- **#2793 is closed `NOT_PLANNED`** (2026-08-13T13:14:04Z, by the repo owner):
+  "Duplicate of #2735 + #2718." Both mechanisms it reported were already tracked and
+  were closed by `docs/plans/sdlc-lane-recorded-slug.md`.
+- **PR #2794 is closed unmerged** (2026-08-14T03:45:20Z), superseded. It was also
+  measured to regress the suite (33 failed / 77 passed) because it removed
+  `find_plan_path` from `tools/_sdlc_utils.py` rather than extending it.
+- **What actually landed instead: PR #2792 (`e50eba258`).** Verified on main today:
+  `find_plan_path` now lives at `tools/lane_identity.py:123` with a single-rung
+  `tracking:`-frontmatter contract, and the bare-`#N` fallback was **deleted as a
+  behavior**, not made suppressible. #2794's proposed `tracking_only=True` kwarg has
+  nothing left to suppress. The `session/{slug}` reconstruction is gated on a
+  *recorded* lane slug, so an unrecorded lane no-ops instead of probing a guess.
+- **Consequence for this plan's scope:** nothing in #2794 is live work, and no part of
+  it needs re-doing here. Its one durable observation — that
+  `test_terminal_merged_pipeline_routes_to_merge_not_build` is red on baseline `main`
+  at row 8e — is independently reproduced by this plan's spike-5 and is picked up
+  inside this fence. The `headRefName` enhancement #2794 also proposed is **not**
+  adopted: it is an enhancement on top of a shipped fix, and this plan's revised
+  approach removes the need for it (an absent `pr_number` is now *resolved*, not
+  worked around).
 
 **Commits on main since issue was filed (touching referenced files):**
 
