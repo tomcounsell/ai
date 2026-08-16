@@ -1054,6 +1054,7 @@ async def _ack_steering_routed(
                 context_advisory,
                 "intake-classifier",
                 is_abort=False,
+                room_id=None,  # session-scoped advisory — legacy key by design
                 front=False,
             )
         except Exception as _adv_err:
