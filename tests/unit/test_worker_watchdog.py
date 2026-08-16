@@ -60,24 +60,61 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 class TestLoggerConfiguration:
-    def test_logger_no_duplicate_handlers(self):
-        """The named logger has exactly one handler after import (regression guard)."""
-        # Re-import the module to ensure handler-add idempotence.
-        importlib.reload(wwd)
-        assert len(wwd.logger.handlers) == 1
+    """Issue #2643: configuration moved to the __main__ guard. `_configure_logger()`
+    is no longer called at import/reload time, so these tests call it explicitly
+    against a monkeypatched LOG_FILE rather than relying on `importlib.reload`."""
 
-    def test_logger_does_not_propagate(self):
+    def test_logger_no_duplicate_handlers(self, tmp_path, monkeypatch):
+        """Calling _configure_logger() twice leaves exactly one owned handler."""
+        monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
+        wwd._configure_logger()
+        try:
+            wwd._configure_logger()
+            owned = [h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]
+            assert len(owned) == 1
+        finally:
+            for h in list(wwd.logger.handlers):
+                if getattr(h, "_watchdog_owned", False):
+                    wwd.logger.removeHandler(h)
+                    h.close()
+
+    def test_logger_does_not_propagate(self, tmp_path, monkeypatch):
         """Named logger must not propagate to root (would cause stdout duplication)."""
-        importlib.reload(wwd)
-        assert wwd.logger.propagate is False
+        monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
+        wwd._configure_logger()
+        try:
+            assert wwd.logger.propagate is False
+        finally:
+            for h in list(wwd.logger.handlers):
+                if getattr(h, "_watchdog_owned", False):
+                    wwd.logger.removeHandler(h)
+                    h.close()
 
-    def test_no_basicconfig_on_root(self):
-        """Root logger should not have handlers attached by this module."""
-        # If basicConfig still ran, root would have a StreamHandler from us.
-        importlib.reload(wwd)
-        # Root may have handlers from pytest itself — we only care that *our*
-        # named logger isn't piggybacking on root via propagation.
-        assert wwd.logger.propagate is False
+    def test_no_basicconfig_on_root(self, tmp_path, monkeypatch):
+        """_configure_logger() must never touch root (no basicConfig, no addHandler)."""
+        monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
+        root_handlers_before = list(logging.getLogger().handlers)
+        wwd._configure_logger()
+        try:
+            assert logging.getLogger().handlers == root_handlers_before
+        finally:
+            for h in list(wwd.logger.handlers):
+                if getattr(h, "_watchdog_owned", False):
+                    wwd.logger.removeHandler(h)
+                    h.close()
+
+    def test_configure_logger_does_not_touch_root(self, tmp_path, monkeypatch):
+        """Regression guard named for the mutation table (#2643 Task 5)."""
+        monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
+        root_handlers_before = list(logging.getLogger().handlers)
+        wwd._configure_logger()
+        try:
+            assert logging.getLogger().handlers == root_handlers_before
+        finally:
+            for h in list(wwd.logger.handlers):
+                if getattr(h, "_watchdog_owned", False):
+                    wwd.logger.removeHandler(h)
+                    h.close()
 
 
 # --- Redis down-tick counter --------------------------------------------------
