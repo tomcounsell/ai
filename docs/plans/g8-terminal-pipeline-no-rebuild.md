@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-14
 tracking: https://github.com/tomcounsell/ai/issues/2757
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-16T04:01:58Z
 ---
 
 # G8 must not rebuild shipped work: an absent PR number is unverifiable, not falsified
