@@ -824,8 +824,11 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
 
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py::TestStageArtifactVerificationGate::test_terminal_merged_pipeline_routes_to_merge_not_build`
   — **UPDATE (currently RED on main)**: add a recorded APPROVED `REVIEW` verdict
-  with a `head_sha`, add `MERGE: "completed"`, and extend the `gh`/`git` fake to
-  answer the head-SHA lookup. Keeps its `row_id == "10"` assertion, which spike-5
+  with a `head_sha`, and extend the `gh`/`git` fake to answer the head-SHA lookup.
+  **Do NOT add `MERGE: "completed"`** — an earlier draft specified it, which would
+  leave neither `gh pr view` nor `git ls-remote` reached and turn the fixture into
+  dead code, destroying the repo's only end-to-end proof that a MERGED PR is an
+  acceptable BUILD artifact. Keeps its `row_id == "10"` assertion, which spike-5
   measured as reachable once the verdict exists. Its docstring must be rewritten:
   the current text explains a #1267 failure mode that is not why it is red.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py::TestStageArtifactVerificationGate::_fake_gh_pr_view_merged`
@@ -838,18 +841,38 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   still produce `row_id == "G8"` and `/do-build`. This is the control proving the
   fix narrowed the gate rather than disarming it.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **ADD**
-  `test_no_pr_number_recorded_does_not_redispatch_build`: `BUILD` and `MERGE`
-  completed, **no** `pr_number`, real ledger — assert the result is not
-  `{"skill": "/do-build", "row_id": "G8"}`. The #2757 regression test proper; it
-  does not exist today in any form.
+  `test_no_pr_number_recorded_does_not_redispatch_build`: `BUILD` completed, **no**
+  `MERGE` marker, **no** `pr_number`, real ledger — assert
+  `result.get("skill") != "/do-build"` (row-agnostic) and **no `error` key**,
+  parametrized over `branch_exists` ∈ {True, False}. The #2757 regression test proper;
+  it does not exist today in any form. Three corrections to the earlier draft are
+  load-bearing here: the row-specific assertion would pass while the rebuild ran at
+  row 5 (spike-8); the `MERGE` marker would have let the now-cut short-circuit mask a
+  reverted guard; and a negative-only assertion is satisfied by `decide()`'s
+  catch-all.
+- [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **ADD** the
+  recovery-path test: an **empty** ledger + a merged PR + an existing branch → no
+  `/do-build` at any row. This is the true reproduction — `decide()` recovers
+  `BUILD = completed` from durable signals (`:576-579` →
+  `agent/pipeline_state.py:1564`, which reads `("open", "all")` and so *does* see the
+  merged PR) while `_compute_meta` leaves `pr_number` as `None`. It replaces the
+  earlier draft's unit assertion that a wholly-empty `stage_states` is "already safe",
+  which is **false at `decide()`**.
+- [ ] `tests/unit/test_sdlc_stage_query.py` — **ADD** two `_compute_meta` cases: the
+  `open` pass returning nothing and the `all` pass returning a PR resolves
+  `pr_number`; and the `open` pass returning a PR does **not** run the `all` pass
+  (pinning the strictly-additive ordering).
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py:19-26` — **UPDATE**:
   the module docstring describes the class as driving "a synthesized false
   BUILD-completion claim"; it gains a second, complementary shape.
 - [ ] `tests/unit/test_sdlc_next_skill.py::TestStageArtifactVerification` — **ADD**
-  four cases: BUILD claimed with no `pr_number` → zero subprocess calls, flags
-  unset; terminal `stage_states` → zero subprocess calls even with a falsifiable
-  BUILD claim and a resolvable plan/branch; `MERGE` in a non-`completed` state →
-  verification still armed; the debug-vs-warning log-level distinction.
+  three cases: BUILD claimed with no `pr_number` → zero subprocess calls, flags unset
+  (parametrized over the falsy forms — missing key, `None`, `0` — in **one** test;
+  three tests for one falsiness check is over-testing); PATCH claimed with no
+  `pr_number` → the branch probe is not run; and the debug-vs-warning log-level
+  distinction, asserted with `caplog.set_level(logging.DEBUG)` — without it the
+  assertion passes vacuously. The terminal-`stage_states` case from the earlier draft
+  is dropped along with the short-circuit.
 - [ ] `tests/unit/test_sdlc_next_skill.py::TestStageArtifactVerification::test_false_build_claim_sets_unverified_stage`
   and the two `test_true_build_claim_*` cases — **UNCHANGED**: all supply
   `pr_number = 555` (spike-6), so none of them touch the modified term. Their
