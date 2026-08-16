@@ -267,9 +267,27 @@ and load-bearing enough that it changes which fix is correct (see Key Elements).
   pattern across all three is worth naming because it is the real subject of this
   plan: *every G8 regression to date has been the verifier reporting "falsified" for
   a check it was not actually in a position to perform.*
-- **#2735 → PR #2792** — reshaped PLAN/PATCH resolution in this function; supplies
-  `find_plan_path` / `resolve_lane_slug` / `lane_branch_name`. Not a fix for this
-  bug; it is the reason the plan's line numbers differ from the issue's.
+- **#2735 and #2718 → the same commit, PR #2792 (`e50eba258`)** — reshaped PLAN/PATCH
+  resolution in this function and supplies `find_plan_path` / `resolve_lane_slug` /
+  `lane_branch_name`. **Reconciling the two descriptions elsewhere in this plan:**
+  Freshness calls it "irrelevant to the root cause" and this section originally
+  called #2718's guard "the closest prior fix — Succeeded". Both are half-right and
+  the combination was misleading. Precisely: it is **irrelevant to the cause** (it did
+  not touch the BUILD branch or the PR lookup) and **relevant as a code template**
+  (its `bool(lane_branch)` guard is the shape this plan mirrors). The "Succeeded"
+  confidence is **downgraded**: that template is one day old and carries two unit
+  tests of coverage, so it is a design precedent, not a battle-tested one.
+- **#2539 → `tools/sdlc_stage_marker.py:246-250`** — the direct precedent for this
+  plan's primary fix: the identical `state="open"` defect at a sibling `_lookup_pr`
+  call site, fixed by passing `state="all"` with a comment explaining that the
+  artifact question is historical rather than in-flight. **Succeeded.** This plan
+  applies the same correction at the call site #2539 did not reach.
+- **#2091 → `docs/plans/completed/fix-sdlc-router-merge-termination.md`** — already
+  adjudicated the stale-router-fixture class this plan's red integration test belongs
+  to, and produced a guardrail note at `docs/sdlc/do-test.md:156-166`. **Succeeded,
+  but under-scoped**: the note covers `tests/unit/test_sdlc_router*.py` only, which is
+  exactly how the integration fixture repaired here escaped it. Widening that scope
+  is folded into this plan's Documentation section.
 - **PR #2033 (#2029) "dispatch precedence, convergence latch, outcome-verified
   advance"** and **PR #2076 (umbrella #2026)** — the two merged PRs a prior-art
   search surfaces for "artifact verification G8". Neither touched the BUILD branch's
@@ -1077,6 +1095,16 @@ new one.
   whose artifact identifier is absent, or a pipeline whose `MERGE` stage is
   completed, is skipped rather than reported as a mismatch. Keep it to one clause —
   this file is read into every SDLC session's context.
+- [ ] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
+  **#2091** (`docs/plans/completed/fix-sdlc-router-merge-termination.md`), which
+  already adjudicated this exact class of defect: a test fixture that encodes a
+  routing expectation invalidated by a later router change. Its scope is currently
+  `tests/unit/test_sdlc_router*.py`, which is precisely why the **integration**
+  fixture repaired by this plan escaped it. Widen the note to cover integration
+  fixtures that assert `row_id`.
+- [ ] Also fix `docs/features/sdlc-router-oscillation-guard.md:133` while in that
+  table — it still describes the PLAN check by slug, which #2792 made false. It is
+  one line inside a table the builder is already editing.
 - [ ] No new feature doc, and therefore no `docs/features/README.md` index entry.
   Creating `docs/features/g8-terminal-*.md` would be a parallel artifact for a
   behavior already documented in two places.
