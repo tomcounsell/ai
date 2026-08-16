@@ -91,14 +91,94 @@ today.
 
 ## Freshness Check
 
-**Baseline commit:** `0babdb2ab` (revision-4 re-measurement, 2026-08-16; previously `8877be374`,
-`1d1830fc4`, originally `3605ff847`).
+**Baseline commit:** `b44cf02f3` (revision-5 re-measurement, 2026-08-16; previously `0babdb2ab`,
+`8877be374`, `1d1830fc4`, originally `3605ff847`).
 **Issue filed at:** 2026-08-07T06:19:13Z
 **Disposition:** **Minor drift.** The three defect sites are verbatim unchanged and the fix is
-unchanged; two commits that landed after the revision-3 baseline moved a number of this plan's
-*coordinates*, and one of them rewrote a test file this plan prescribes edits to. See
-"Revision-4 re-verification" below — it supersedes the coordinates in the round-3 list that follows
-wherever the two disagree.
+unchanged. What has drifted is this plan's *environmental* evidence base — which launchd agents are
+installed on this checkout, and what `logs/watchdog.log` actually contains. See
+"Revision-5 re-measurement" below; it supersedes every earlier statement in this plan about the
+installed agents, the contents of `logs/watchdog.log`, and the No-Go baseline figures. The
+"Revision-4 re-verification" subsection that follows it remains authoritative for *source*
+coordinates.
+
+### Revision-5 re-measurement (2026-08-16, baseline `b44cf02f3`)
+
+Round 6 recorded two BLOCKERs, both measurement failures rather than design failures. Everything
+re-measured here was measured on `/Users/valorengels/src/ai` at `b44cf02f3`.
+
+**Defect sites — still exact, no drift.** Re-read verbatim this round:
+`monitoring/bridge_watchdog.py:78` `logging.basicConfig(`, `:82` `logger = logging.getLogger(__name__)`,
+`:86` `LOGS_DIR.mkdir(...)`, `:93` `logger.addHandler(_watchdog_file_handler)`;
+`monitoring/worker_watchdog.py:162` `logger = _configure_logger()`;
+`scripts/log_rotate.py:62` `logging.basicConfig(` and `:67` `logger = logging.getLogger("log_rotate")`.
+Entry-point guards: `bridge_watchdog.py:1084`, `worker_watchdog.py:873`, `log_rotate.py:190`.
+Symbols: `main()` `:1011`, `run_health_check()` `:903`, `check_bridge_health()` `:557`,
+`kill_zombie_processes()` `:512`. The root cause is untouched and the Solution stands as written.
+
+**The launchd evidence base was inverted, and is now measured.** Earlier revisions asserted that
+`com.valor.bridge-watchdog` is not installed here and that `com.valor.worker-watchdog` is. Both
+statements are false on this checkout. Measured:
+
+| Agent | `launchctl list` | `~/Library/LaunchAgents/` | Plist redirect |
+|---|---|---|---|
+| `com.valor.bridge-watchdog` | **present** (`-  0  com.valor.bridge-watchdog`) | **present** — `com.valor.bridge-watchdog.plist` | `StartInterval 60`; `StandardOutPath` **and** `StandardErrorPath` both `/Users/valorengels/src/ai/logs/watchdog.log` |
+| `com.valor.worker-watchdog` | **absent** | **absent** | n/a — not installed |
+
+The bridge watchdog runs here every 60 s against this very checkout, invoking
+`.venv/bin/python monitoring/bridge_watchdog.py` with `WorkingDirectory` `/Users/valorengels/src/ai`.
+Two consequences run through the rest of this plan: the doubling claim gains a **direct on-machine
+proof** (below), and the "1 copy" control experiment built on `com.valor.worker-watchdog` is
+**withdrawn** — there is no live worker watchdog here to control against.
+
+**`logs/watchdog.log`, measured rather than characterised.** 9,694,277 bytes, 102,627 lines,
+spanning `2026-07-22 08:51:33` to the present tick. `maxBytes` is 10,485,760, so headroom is
+~791 KB. Composition, computed by parsing every line into the watchdog's own bracketed format
+(`%(asctime)s [%(levelname)s] %(message)s`) versus `log_rotate`'s bare root format
+(`%(asctime)s %(levelname)s %(message)s`) and matching on the exact `(timestamp, level, message)`
+triple:
+
+| Class | Lines | What it is |
+|---|---|---|
+| Bracketed with an exact bare twin | **38,706** | `monitoring.bridge_watchdog`'s own records, arriving **twice** — once via the `RotatingFileHandler`, once via root's `StreamHandler` → stderr → plist. This is Data Flow row 1, measured directly on production output |
+| Bare with no bracketed twin | **24,144** | submodule records riding root's handler. **22,230 (92.1%) are the single record `INFO libssl detected, it will be used for encryption`**, one per 60 s tick; the remaining 1,914 are WARNING+ |
+| Bracketed with no bare twin | **1,063** | test pollution — the defect this issue is about (442 at 1x, 207 distinct messages at exactly 3x, the reload-stacking signature) |
+| Unparsed | 8 | one `ModuleNotFoundError` traceback, interpreter → stderr → plist |
+
+Exemplar of the doubling, verbatim at lines 225-226 of the current file:
+
+```
+2026-08-16 03:07:38,488 [INFO] Recovery successful
+2026-08-16 03:07:38,488 INFO Recovery successful
+```
+
+**This replaces the "honest limit" disclaimer with evidence.** The earlier text said the doubling
+"is derived from the plist text and the logging semantics, not from this file's contents". It is now
+derived from both: 38,706 measured duplicate pairs in production output on this machine.
+
+**Rotation is routine, and the gate must survive it.** Backups `.1` through `.5` exist at
+~10,486,xxx bytes each, dated Jul 22 / Jul 18 / Jul 14 / Jul 10 / Jul 7. The file has rolled over
+five times inside the retained window. Growth, measured as bytes per calendar day for Aug 9-15:
+178,678 / 247,355 / 114,654 / 113,665 / 120,925 / 122,959 / 113,665 — mean **144,557 B/day**, so the
+~791 KB of headroom is roughly **5.5 days**. (Round 6's "~1.07 MB/day, rollover within ~18 hours"
+derived megabytes from line counts and overstates the rate by ~7x; the hazard is real, the deadline
+is not that tight.) Either way a rollover during a multi-day build is entirely plausible and has
+happened five times recently, so the No-Go prefix gate **must** treat a rollover as legitimate and
+check `$f.1` before declaring `TRUNCATED`. That fallback is specified in Task 1.
+
+**No literal log baseline appears anywhere in this plan any more.** At ~145 KB/day and a live
+60-second writer, any byte count or hash written into this document is stale before a builder reads
+it. The revision-4 figures (9692506 B / `51cfe6c4…`) and the revision-3 figures (41322 B /
+`2c3c2f2d…`) are both superseded and **must not be used**. Task 1 re-measures at build start; that
+is the only contract.
+
+**`logs/worker_watchdog.log` is not a production control.** 1,017,993 bytes, 8,708 lines, mtime
+`Aug 16 03:02` — the nightly-test burst, not a launchd tick, because no worker-watchdog agent is
+installed. The earlier "13,861 lines, multiplicity histogram entirely 1" control experiment is
+withdrawn wherever it appears. It also has **no live writer**, which simplifies rather than
+complicates the No-Go gate: the prefix-scoped form is retained anyway, because the bridge watchdog
+appends to `logs/watchdog.log` every 60 s and any concurrent agent's pytest run can still append to
+either file until this PR merges.
 
 ### Revision-4 re-verification (2026-08-16, baseline `0babdb2ab`)
 
