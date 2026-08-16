@@ -539,10 +539,10 @@ def test_tc15_log_rotate_script_mode_entrypoint_proof():
 import json, logging, runpy, shutil, sys, tempfile
 from pathlib import Path
 
-# Deliberately dirty the parent's root first to prove the child is unaffected
-# by anything except its own runpy call.
-logging.getLogger().addHandler(logging.NullHandler())
-logging.getLogger().setLevel(logging.WARNING)
+# This probe runs in a fresh subprocess (spawned below via subprocess.run),
+# so it starts with a clean root regardless of how dirty the parent pytest
+# process's root is (LogCaptureHandler, etc.) — that dirtiness is the "parent
+# deliberately dirtied" proof and needs no extra staging here.
 
 tmpdir = Path(tempfile.mkdtemp())
 scripts_dir = tmpdir / "scripts"
