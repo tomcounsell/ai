@@ -551,8 +551,17 @@ def finalize(
     if is_approved:
         from tools.sdlc_stage_marker import write_marker
 
+        # `pr` is threaded so the marker's artifact probe checks the PR we were
+        # actually given rather than re-deriving one from closing keywords: a
+        # PR that references this issue with `Refs #N` resolves to nothing, and
+        # the resulting refusal was permanent (the verdict persists, the marker
+        # never lands, and re-running repeats the same lookup).
         marker_result, marker_exit = write_marker(
-            stage="REVIEW", status="completed", issue_number=issue_number, run_id=run_id
+            stage="REVIEW",
+            status="completed",
+            issue_number=issue_number,
+            run_id=run_id,
+            pr=pr,
         )
         if marker_exit != 0:
             # #2740: this branch is the ONLY layer that knows both facts --

@@ -619,10 +619,13 @@ currently describe the BUILD check in terms this change falsifies.
   it — not to introduce a near-homonym.
 - **`GUARDS` is not reordered, and `agent/sdlc_router.py` is not touched.** Guard
   reordering was the obvious alternative and spike-2 rules it out on evidence: G6
-  cannot fire without a `pr_number`, which is the reported shape. Fixing the
-  verifier makes G8 no-op and lets whatever the dispatch table decides own the
-  outcome, which is the correct division of labor — G8's job is to catch a lie, and
-  silence is not a lie.
+  cannot fire without a `pr_number`, which is the reported shape. The revised plan
+  makes this doubly moot: restoring `pr_number` is what lets G6 and row 10 fire at
+  all, so the ordering question never arises. `_rule_branch_exists_no_pr` is
+  likewise **not** modified — row 5's behavior is correct given a falsy `pr_number`
+  ("build must create the PR"); the defect was that `pr_number` was falsy when a
+  merged PR existed. Fixing the input is the right layer; rewriting the row would
+  paper over it.
 - **Row 8e is left exactly as it is.** spike-5 establishes that the red integration
   test is a stale fixture, not a second hole: it sets `pr_number`, so it never
   reaches G8; its `row_id == "10"` assertion has been unreachable since #2062 WS3a
@@ -661,28 +664,44 @@ currently describe the BUILD check in terms this change falsifies.
 **`sdlc-tool next-skill --issue-number N`** → lock peek → ledger read
 (`stages` + `_meta`) → context assembly → **`_verify_stage_artifacts_live`**:
 
+**Stage 1 — `_compute_meta` resolves the artifact identifier (the primary fix):**
+
 ```
-MERGE == completed?  ──yes──► return {}                (nothing to verify; the pipeline is done)
-        │ no
+_lookup_pr(issue, state="open")  ──found──► pr_number          (unchanged path)
+        │ None
         ▼
+_lookup_pr(issue, state="all")   ──found──► pr_number   ◄── THE FIX (strictly additive)
+        │ None
+        ▼
+pr_number = None                                        (genuinely PR-less lane)
+```
+
+**Stage 2 — `_verify_stage_artifacts_live` (defense in depth):**
+
+```
 PLAN claimed + plan path resolves?  ──► git show main:<path>  ──fail──► unverified PLAN
         │
         ▼
 BUILD claimed?
-   ├─ no pr_number  ──► debug log, skip                (unverifiable, NOT falsified)  ◄── the fix
+   ├─ no pr_number  ──► debug log, skip                (unverifiable, NOT falsified)
    └─ pr_number     ──► gh pr view --json state
                           ├─ OPEN | MERGED ──► verified
                           └─ otherwise     ──► unverified BUILD
         │
         ▼
-PATCH claimed + lane branch resolves?  ──► merged? skip : git ls-remote  ──fail──► unverified PATCH
+PATCH claimed + lane branch resolves?
+   ├─ no pr_number  ──► debug log, skip                ("branch gone" is unreadable)
+   └─ pr_number     ──► merged? skip : git ls-remote  ──fail──► unverified PATCH
         │
         ▼
 return {}
 ```
 
-→ router walks `[G1, G2, G3, G4, G8, G7, G5, G6]` with the flags unset → G8 no-ops →
-the dispatch table owns the outcome.
+In the reported state stage 1 now supplies the `pr_number`, so stage 2 **verifies
+clean on the merits** (`gh pr view` returns `MERGED`, an accepted state since #1267)
+rather than being skipped. The router then walks
+`[G1, G2, G3, G4, G8, G7, G5, G6]`: G8 no-ops, row 5 no longer fires because
+`pr_number` is truthy, and the pipeline reaches `/do-merge` row 10 (spike-10).
 
 ### Technical Approach
 

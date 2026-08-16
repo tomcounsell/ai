@@ -219,7 +219,9 @@ def _critique_verdict_readable(issue_number: int | None) -> bool:
     return _shared(issue_number)
 
 
-def _review_artifact_posted(issue_number: int | None, target_repo: str | None = None) -> bool:
+def _review_artifact_posted(
+    issue_number: int | None, target_repo: str | None = None, pr: int | None = None
+) -> bool:
     """Return True iff a posted REVIEW artifact is verifiable on GitHub.
 
     WS-D (issue #2124): backs the invariant *REVIEW marker-completed ⇒ a posted
@@ -233,6 +235,17 @@ def _review_artifact_posted(issue_number: int | None, target_repo: str | None = 
     Fails CLOSED (False → refusal) on any error — an unverifiable artifact must
     never let the completion marker through; the WS3b recovery row owns the
     refused no-artifact state (re-dispatch ``/do-pr-review``).
+
+    Args:
+        pr: The PR the caller already holds (``verdict finalize --pr``). When
+            given it is used verbatim and no lookup runs: ``_lookup_pr``'s
+            primary leg trusts only a *closing-keyword* body reference, so a PR
+            that references the issue with ``Refs #N`` (a partial-close, common
+            when one PR touches several issues) resolves to nothing and this
+            probe refused an artifact it was handed the coordinates for. A
+            wrong ``pr`` still fails closed — there is deliberately no fallback
+            to the lookup, or a *different* PR's artifact could satisfy the
+            gate for the PR actually named.
     """
     if not issue_number:
         return False
@@ -247,7 +260,7 @@ def _review_artifact_posted(issue_number: int | None, target_repo: str | None = 
         # default "open" a merged PR resolves to None and this probe returned False
         # before ever looking for the artifact -- unreachable for ANY merged PR, in
         # exactly the state where the artifact is guaranteed to exist (issue #2539).
-        pr_number = _lookup_pr(issue_number, repo=target_repo, state="all")
+        pr_number = pr or _lookup_pr(issue_number, repo=target_repo, state="all")
         if not pr_number:
             return False
 
@@ -464,6 +477,7 @@ def write_marker(
     session_id: str | None = None,
     issue_number: int | None = None,
     run_id: str | None = None,
+    pr: int | None = None,
 ) -> tuple[dict, int]:
     """Write a stage marker to the issue-keyed PipelineLedger.
 
@@ -474,6 +488,9 @@ def write_marker(
         issue_number: The GitHub issue number. Required for a real write
             (the ledger key is ``(target_repo, issue_number)``).
         run_id: The caller's run identity (the CLI's ``--run-id``).
+        pr: The PR number the caller already holds, forwarded to the REVIEW
+            artifact probe so it need not re-derive one from closing keywords
+            (see :func:`_review_artifact_posted`). Ignored for other stages.
 
     Returns:
         A ``(result, exit_code)`` tuple (D7 tri-state contract, rebuilt
@@ -492,6 +509,7 @@ def write_marker(
         session_id=session_id,
         issue_number=issue_number,
         run_id=run_id,
+        pr=pr,
     )
     _record_marker_telemetry(result, exit_code, stage, issue_number, run_id)
     return result, exit_code
@@ -521,6 +539,7 @@ def _write_marker_impl(
     session_id: str | None = None,
     issue_number: int | None = None,
     run_id: str | None = None,
+    pr: int | None = None,
 ) -> tuple[dict, int]:
     """The marker-write body (see :func:`write_marker` for the contract)."""
     del session_id  # unused -- CLI-flag backward compat only
@@ -687,17 +706,27 @@ def _write_marker_impl(
                     "error": "review_trailer_missing",
                     "reason": "REVIEW_TRAILER_MISSING",
                 }, 1
-            if stage == "REVIEW" and not _review_artifact_posted(issue_number, target_repo):
+            if stage == "REVIEW" and not _review_artifact_posted(issue_number, target_repo, pr=pr):
                 # WS-D (issue #2124): marker-completed ⇒ posted review artifact.
                 # A readable verdict is necessary but not sufficient — a fork that
                 # exited with its judges still in flight (the #2112 miss) records
                 # no ``## Review:`` comment and no formal review. Refuse with a
                 # NAMED error; the WS3b recovery row owns the no-artifact state
                 # (re-dispatch /do-pr-review) rather than deadlocking.
+                # Name the PR that was probed when one was supplied, and say
+                # "unresolved PR" when none was: the two failures have different
+                # remedies and the old single sentence asserted the first one
+                # for both, sending readers to re-post a review that was
+                # already there.
+                where = (
+                    f"on PR #{pr}"
+                    if pr
+                    else f"for issue #{issue_number} (no PR resolved for it — pass `--pr`)"
+                )
                 print(
                     f"[ERROR] REVIEW_ARTIFACT_MISSING: no posted REVIEW artifact "
-                    f"(GitHub review or `## Review:` comment) verifiable for issue "
-                    f"#{issue_number}; post the review before marking REVIEW completed. "
+                    f"(GitHub review or `## Review:` comment) verifiable {where}; "
+                    "post the review before marking REVIEW completed. "
                     "Marker write refused.",
                     file=sys.stderr,
                 )

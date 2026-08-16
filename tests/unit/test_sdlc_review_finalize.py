@@ -484,6 +484,36 @@ class TestFinalize:
             with pytest.raises(ReviewFinalizeError, match="REVIEW_ARTIFACT_MISSING"):
                 finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
 
+    def test_finalize_threads_its_pr_argument_into_the_marker_write(self):
+        """``--pr`` must reach the marker's artifact probe.
+
+        Without it the probe re-derives a PR number from closing keywords
+        alone, so a PR that says ``Refs #N`` resolves to nothing and finalize
+        dies with ``REVIEW_ARTIFACT_MISSING`` -- error text that blames a
+        missing artifact when the real failure is PR resolution. The verdict is
+        already durable at that point and the marker never lands, so the
+        "re-running is idempotent" remedy in the message never converges.
+        """
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch(
+                "tools.sdlc_verdict.record_verdict",
+                return_value={"verdict": f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"},
+            ),
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)) as mock_marker,
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(pr=4242, issue_number=42, verdict="APPROVED", run_id="run-1")
+
+        assert mock_marker.call_args.kwargs.get("pr") == 4242
+
     def test_readback_failure_after_writes_raises_named_error(self):
         """Even if record+marker writes report success, a failed readback
         (e.g. the marker write silently no-op'd) must still refuse loudly."""

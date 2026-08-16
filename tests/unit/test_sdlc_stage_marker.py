@@ -1152,6 +1152,64 @@ class TestReviewArtifactPosted:
         with patch("tools.sdlc_stage_query._lookup_pr", side_effect=RuntimeError("boom")):
             assert _review_artifact_posted(2124, "o/r") is False
 
+    def test_explicit_pr_is_honored_when_keyword_lookup_cannot_resolve(self):
+        """A caller-supplied PR number must be used instead of re-deriving one.
+
+        ``_lookup_pr``'s primary leg only trusts a *closing-keyword* body
+        reference (``Closes/Fixes/Resolves #N``), and its branch-head fallback
+        no-ops without a slug. A PR that references the issue with ``Refs #N``
+        therefore resolves to None and this probe refused -- even though
+        ``finalize`` was handed the exact PR number on ``--pr`` and the review
+        artifact was sitting on it.
+        """
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        rev = MagicMock(returncode=0, stdout='{"reviews": [{"state": "APPROVED"}]}')
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=None) as lookup,
+            patch("subprocess.run", return_value=rev) as run,
+        ):
+            assert _review_artifact_posted(2124, "o/r", pr=4242) is True
+
+        lookup.assert_not_called()
+        assert "4242" in run.call_args_list[0].args[0]
+
+    def test_explicit_pr_that_carries_no_artifact_still_refuses(self):
+        """A wrong ``--pr`` must fail closed, never fall back to a lookup.
+
+        Honoring ``--pr`` must not become a way to launder a missing artifact:
+        if the named PR has no formal review and no ``## Review:`` comment, the
+        answer is False. Falling back to the keyword lookup here would let a
+        *different* PR's artifact satisfy the gate for the PR actually named.
+        """
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        def fake_run(cmd, *a, **k):
+            if "pr" in cmd and "view" in cmd:
+                return MagicMock(returncode=0, stdout='{"reviews": []}')
+            return MagicMock(returncode=0, stdout="0")
+
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=55) as lookup,
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            assert _review_artifact_posted(2124, "o/r", pr=4242) is False
+
+        lookup.assert_not_called()
+
+    def test_absent_pr_still_falls_back_to_keyword_lookup(self):
+        """Callers with no PR in hand keep the pre-existing resolution path."""
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        rev = MagicMock(returncode=0, stdout='{"reviews": [{"state": "APPROVED"}]}')
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=55) as lookup,
+            patch("subprocess.run", return_value=rev),
+        ):
+            assert _review_artifact_posted(2124, "o/r") is True
+
+        lookup.assert_called_once()
+
     def test_false_when_issue_number_missing(self):
         from tools.sdlc_stage_marker import _review_artifact_posted
 
