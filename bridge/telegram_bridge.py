@@ -1051,7 +1051,11 @@ async def _ack_steering_routed(
     # advisory is for. Splitting the legs (advisory legacy, human Room) would
     # invert drain order — pop_all_steering_messages drains legacy first — and
     # the advisory would displace the human's message for a turn, falsifying
-    # the front=False invariant above.
+    # the front=False invariant above. Carve-out: when the human's text is a
+    # bare abort keyword, push_steering_message demotes the human's message to
+    # the legacy leg while the advisory keeps the Room leg — the legs do split
+    # there, but legacy drains first, so the abort still precedes the advisory
+    # and ordering stays safe.
     if context_advisory:
         try:
             push_steering_message(
