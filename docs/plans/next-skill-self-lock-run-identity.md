@@ -654,7 +654,7 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 
 ## Success Criteria
 
-- [ ] A regression test reproduces the self-block on `main` **before** the fix: with the lock
+- [x] A regression test reproduces the self-block on `main` **before** the fix: with the lock
       held under the caller's own `run_id` and the session invisible to `find_session_by_issue`
       (terminal status; and separately, non-`eng` `session_type`), `decide()` returns
       `ISSUE_LOCKED` with `owner_run_id` equal to the caller's own id and
@@ -662,27 +662,27 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
       lives in `tests/integration/test_sdlc_session_ensure_integration.py`** driving a real
       `session-ensure` and a real session record forced terminal/non-`eng`; a red produced by
       patching `find_session_by_issue` to return `None` proves the mock, not the bug.
-- [ ] The same test passes after the fix when `--run-id` is supplied.
-- [ ] Control case: a **foreign** `run_id` supplied via `--run-id` against a live lock still
+- [x] The same test passes after the fix when `--run-id` is supplied.
+- [x] Control case: a **foreign** `run_id` supplied via `--run-id` against a live lock still
       blocks. The flag is not a bypass.
-- [ ] `--run-id ""` and whitespace-only behave exactly as omitted.
-- [ ] `touch_issue_lock` is still called with `peek=True` on every path
+- [x] `--run-id ""` and whitespace-only behave exactly as omitted.
+- [x] `touch_issue_lock` is still called with `peek=True` on every path
       (`test_peek_never_acquires_or_renews` green, unweakened).
-- [ ] `find_session_by_issue`'s eng-only and non-terminal filters are byte-for-byte unchanged,
+- [x] `find_session_by_issue`'s eng-only and non-terminal filters are byte-for-byte unchanged,
       **and `include_terminal` is never passed from `tools/sdlc_next_skill.py`** (the one-keyword
       bypass).
-- [ ] `peek_identity` appears on `ISSUE_LOCKED` payloads and nowhere else. `session_mirror_run_id`
+- [x] `peek_identity` appears on `ISSUE_LOCKED` payloads and nowhere else. `session_mirror_run_id`
       appears only on `ISSUE_LOCKED` payloads produced on the `--run-id`-supplied path, and never
       overrides the block.
-- [ ] `.claude/skills-global/do-sdlc/SKILL.md` contains **no** automatic re-ensure/retry branch
+- [x] `.claude/skills-global/do-sdlc/SKILL.md` contains **no** automatic re-ensure/retry branch
       keyed on `peek_identity` — an `unresolved` block is reported to the human, not retried.
-- [ ] `.claude/skills-global/do-sdlc/SKILL.md` Step 3a passes `--run-id`, and its Step 2
+- [x] `.claude/skills-global/do-sdlc/SKILL.md` Step 3a passes `--run-id`, and its Step 2
       `ISSUE_LOCKED` rows carry the self-identity qualifier.
-- [ ] No doc or skill file still asserts that `next-skill` takes no run-id.
-- [ ] `tests/unit/test_sdlc_takeover_regression.py` green.
-- [ ] Tests pass (`/do-test`)
+- [x] No doc or skill file still asserts that `next-skill` takes no run-id.
+- [x] `tests/unit/test_sdlc_takeover_regression.py` green.
+- [x] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions required — the expected-failure search over `tests/` found no
+- [x] No xfail conversions required — the expected-failure search over `tests/` found no
       `pytest.mark.xfail` or runtime `pytest.xfail()` related to the issue lock, run identity,
       or `next-skill`.
 
