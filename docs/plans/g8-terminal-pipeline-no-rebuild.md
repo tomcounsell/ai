@@ -558,44 +558,65 @@ currently describe the BUILD check in terms this change falsifies.
 
 ### Key Elements
 
-- **The BUILD check stops treating an absent `pr_number` as a falsified claim.**
+- **PRIMARY — `pr_number` is resolved for merged PRs, not worked around.**
+  `tools/sdlc_stage_query.py::_compute_meta` (`:548`) calls `_lookup_pr` without a
+  `state`, inheriting the `"open"` default that makes every merged PR invisible
+  (spike-9). The fix is a **two-pass fallback**: try `"open"` first, and only if that
+  returns `None`, retry with `"all"`. This shape is chosen over an unconditional
+  `state="all"` deliberately — it is **strictly additive**, resolving a `pr_number`
+  only where the current code resolves `None`, so it cannot change any lookup that
+  succeeds today and cannot newly surface a closed-unmerged PR ahead of an open one.
+  It is also not a new idiom: `agent/pipeline_state.py:1564` already reads
+  `for state in ("open", "all")` for the same reason, and
+  `tools/sdlc_stage_marker.py:246-250` already corrected the identical defect at a
+  sibling call site under #2539. This is the change that makes the outcome *right*
+  rather than merely quiet: it stops the row-5 rebuild, lets G8 pass on its own
+  merits, reaches `/do-merge` row 10, and deletes the `Blocked(NO_RULE)` residual
+  (spike-10). **It requires a fence extension to `tools/sdlc_stage_query.py`.**
+- **SECONDARY — the BUILD check stops treating an absent `pr_number` as a falsified claim.**
   The predicate becomes "claimed *and* identifiable": the check runs only when
   `build_claimed and pr_number`, exactly mirroring `patch_claimed`'s
   `and bool(lane_branch)` two lines above it. When the identifier is absent, log at
   **debug** (matching the PATCH skip's log level and wording at `:258-263`) and
-  no-op. This is the load-bearing change: it is the only one that reaches the
-  partial-loss shape where `MERGE` was the field the ledger dropped (spike-3).
-  It is also the only change that would have prevented the three reported
-  reproductions, since their ledgers carry no `MERGE` marker either.
-- **A terminal pipeline is not verified at all.** A new module-private predicate
-  `_pipeline_is_terminal_from_states(stage_states)` returns
-  `stage_states.get("MERGE") == "completed"`, and `_verify_stage_artifacts_live`
-  returns `{}` immediately when it is true — **above all three artifact checks**,
-  not inside the BUILD branch. Placement matters: it is the only thing that protects
-  the PATCH check, whose merged-skip is unreachable without a `pr_number`
-  (spike-4), and the PLAN check, which currently no-ops on terminal lanes only by
-  accident (`find_plan_path` scans `docs/plans/` non-recursively, so a plan migrated
-  to `docs/plans/completed/` resolves to `None`; a terminal lane whose plan has not
-  yet been migrated still pays for a `git show`).
-- **The terminal predicate is read from the dict in hand, not re-read from the
-  ledger — and this is not a second definition.** `tools/_sdlc_run_identity.py::_pipeline_is_terminal`
-  already owns the notion ("MERGE == completed", fail-open to `False`), and this
-  plan does **not** call it, for three reasons that must appear in the new helper's
-  docstring:
-  1. It reaches the marker through `PipelineStateMachine.for_issue`, i.e. an import
-     of `agent/pipeline_state.py` — a module another lane is actively merging (#2802).
-     Putting this fix's correctness on a concurrently-edited module is a needless
-     coupling.
-  2. It performs a fresh ledger read to obtain the dict `_verify_stage_artifacts_live`
-     was already handed as its first parameter. A next-skill tick is on a hot path;
-     a redundant Redis round-trip per call is a real cost with no information gain —
-     and a *second* read can disagree with the first, which is strictly worse than
-     one consistent view.
-  3. The *predicate* is byte-identical. What differs is the source of the dict, not
-     the definition of terminal. The docstring names `_pipeline_is_terminal` as the
-     definitional twin so a future reader finds both, and states that if a third
-     consumer ever appears, the correct move is to extract one pure
-     `pipeline_is_terminal(states)` helper — not to add a third spelling.
+  no-op. It is **defense in depth**, not the load-bearing fix: after the primary
+  change it is reached only by a genuinely PR-less lane or a still-degraded ledger.
+  Risk 2 states the coverage it gives up.
+- **The same guard is applied to PATCH's branch probe.** With `pr_number` absent the
+  PATCH merged-skip (`pr_state != "MERGED"`, `:281`) cannot engage, so the PATCH
+  verdict rests entirely on `git ls-remote` finding the lane branch — and "branch
+  gone" is then indistinguishable from "deleted on merge." Skip the branch probe when
+  `pr_number` is absent, for the same reason and with the same debug log. This is
+  what actually closes the hole spike-4 identified; the terminal short-circuit only
+  appeared to.
+- **The MERGE short-circuit is CUT.** An earlier draft returned `{}` from
+  `_verify_stage_artifacts_live` whenever `stage_states["MERGE"] == "completed"`.
+  It is removed from the plan for four independent reasons, any one of which is
+  sufficient:
+  1. **It is inert for the actual reproduction.** The three reported issues carry no
+     `MERGE` marker at all — `decide()` recovers `BUILD = completed` from durable
+     signals (`tools/sdlc_next_skill.py:576-579` → `agent/pipeline_state.py:1564`,
+     which reads `("open", "all")` and therefore *does* see the merged PR) while
+     `_compute_meta` leaves `pr_number` as `None` and MERGE is never written. A
+     MERGE-marker check is blind to the exact shape it was introduced to fix.
+  2. **It does not close the hazard it was justified by.** spike-4's PATCH hole is
+     now closed directly, above.
+  3. **It buys coverage by trusting the self-attested channel G8 exists to police**,
+     and nothing ever resets a stage — once MERGE is completed it is permanent, so a
+     reopened issue would run its entire second pipeline with all three artifact
+     checks disarmed.
+  4. **It makes the repaired integration test vacuous** — see the test note below.
+- **No third spelling of the terminal predicate.** The cut above removes the need for
+  one, which is the cleanest resolution: two spellings already exist
+  (`tools/_sdlc_run_identity.py:129`, `agent/pipeline_state.py:1155`) and Development
+  Principle 1 forbids adding a third. The earlier draft's stated reason for not
+  calling the existing helper was also **factually wrong** and is retracted here so
+  it is not repeated: `_pipeline_is_terminal`'s import of `agent/pipeline_state.py`
+  is **function-local** (`tools/_sdlc_run_identity.py:122`), so calling it never
+  couples this fix to that module's module-level surface. Should a future change
+  genuinely need a terminal predicate over a `states` dict in hand, the correct move
+  is to add one pure `pipeline_is_terminal(states: dict) -> bool` to
+  `tools/_sdlc_run_identity.py` and have the existing issue-number helper delegate to
+  it — not to introduce a near-homonym.
 - **`GUARDS` is not reordered, and `agent/sdlc_router.py` is not touched.** Guard
   reordering was the obvious alternative and spike-2 rules it out on evidence: G6
   cannot fire without a `pr_number`, which is the reported shape. Fixing the
@@ -614,15 +635,26 @@ currently describe the BUILD check in terms this change falsifies.
   self-attestation channel whose unverified claim it is currently refusing. So the
   test is repaired rather than the router, nothing ships red, and nothing is
   `xfail`-ed.
-- **The repaired test is split in two, because it was doing one job badly.** The
-  existing test's name promises "terminal merged pipeline routes to merge, not
-  build" but its fixture only ever exercised the merged-PR-state path (#1267's
-  concern). It keeps that job, with the verdict and head-SHA its assertion has
-  required since #2062. A **new** sibling covers #2757's actual shape — `BUILD` and
-  `MERGE` completed with **no** `pr_number` — and asserts the negative that spike-1
-  bounds: the result is not a G8 `/do-build`. It deliberately does not assert
-  `/do-merge`, because spike-1 measured that outcome as `Blocked(NO_RULE)` and
-  pinning a wrong expectation is how the current test became a liability.
+- **The repaired test keeps its fixture live.** `test_terminal_merged_pipeline_routes_to_merge_not_build`
+  is repaired with the recorded APPROVED verdict and the `headRefOid` answer **only**
+  — `MERGE: "completed"` is deliberately **not** added. Adding it (as an earlier
+  draft specified) would, in combination with the now-cut short-circuit, mean neither
+  `gh pr view` nor `git ls-remote` is ever reached: the fixture becomes dead code and
+  the repo's only end-to-end proof that a MERGED PR is an acceptable BUILD artifact
+  stops proving anything. If the name is the concern, rename the test; do not hollow
+  it out to match the name.
+- **The regression test is pinned positively, not only negatively.** `decide()`
+  catches every exception and returns `{"error": ..., "dispatched": False}`
+  (`tools/sdlc_next_skill.py:605-610`), which satisfies any assertion of the form
+  "the result is not `/do-build`". A negative-only regression test therefore goes
+  **green when `decide()` crashes** — which would defeat the mandatory red-test-first
+  step. Every new assertion must additionally require **no `error` key** and pin the
+  measured expected dispatch.
+- **Acceptance is row-agnostic.** Assertions are written as `result.get("skill") !=
+  "/do-build"` at any row, never "not a *G8* `/do-build`", and each carries a
+  `branch_exists: True` variant — because spike-8 measured that the rebuild relocates
+  to row 5 exactly when `branch_exists` is `True`, which is this repo's normal
+  post-merge state.
 
 ### Flow
 
