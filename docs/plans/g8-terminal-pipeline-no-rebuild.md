@@ -775,11 +775,12 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   replaces the cut MERGE short-circuit as the fix for spike-4's hole.
 - **Update the function docstring (`:189-210`).** Its `#1267 merged-pipeline
   misfire` paragraph is the natural home: extend it with the #2757 case, stating the
-  three-state distinction (verified / falsified / unverifiable) and that the terminal
-  short-circuit is the outer belt while the identifiability guard is the load-bearing
-  fix. **Paraphrase the removed condition; do not quote it** — the anti-criterion row
-  in Verification greps the whole file, comments included, and quoting the deleted
-  term in prose explaining its deletion is a self-inflicted red.
+  three-state distinction (verified / falsified / unverifiable) and that the real fix
+  for the reported case is upstream, in how `_compute_meta` resolves the PR number —
+  this guard is defense in depth. **Paraphrase the removed condition; do not quote
+  it** — the advisory grep row in Verification covers the whole file, comments
+  included, and quoting the deleted term in prose explaining its deletion is a
+  self-inflicted red.
 - **Do not touch** `_fetch_pr_state`, `_check_branch_pushed`,
   `_check_plan_committed_on_main`, `_build_context`, the lock-peek block, or
   `_verify_stage_artifacts`'s narrow fail-open catch (`:316-330`). The catch's
@@ -1046,13 +1047,14 @@ reflection) lands between the ledger read and the guard walk. In particular, `ME
 can flip to `completed` in that window.
 **Data prerequisite:** none new — `stage_states` and `meta` are read once, together,
 from one `PipelineLedger` record, and this plan reads only from that snapshot.
-**State prerequisite:** the terminal short-circuit and the BUILD check must agree
-about the same snapshot.
-**Mitigation:** structural, and improved by this plan. Reading `MERGE` from the
-already-materialized `stage_states` guarantees the terminal decision and the artifact
-decision see one consistent view; calling `_pipeline_is_terminal` instead would issue
-a **second** ledger read that could disagree with the first, creating a window where
-the pipeline is judged terminal for one purpose and mid-flight for another. Both
+**State prerequisite:** none. With the terminal short-circuit cut, this function no
+longer reads `MERGE` at all, so a mid-flight flip of that marker cannot split its
+view.
+**Mitigation:** structural, and narrowed by this plan rather than merely mitigated.
+The earlier draft needed an argument here about keeping the terminal decision and the
+artifact decision on one consistent snapshot; cutting the short-circuit removes the
+second decision entirely. `stage_states` and `meta` are still read once, together,
+from one `PipelineLedger` record. Both
 outcomes of a stale read are benign: a just-turned-terminal pipeline read as
 non-terminal now falls through to a BUILD check that no-ops anyway (no `pr_number`
 after merge is the whole premise), and the next tick sees the marker.
@@ -1128,21 +1130,21 @@ new one.
   says BUILD is "verified when state is `OPEN` or `MERGED`", which omits the case
   that matters: no recorded PR number means no check at all. Add the unverifiable
   column/qualifier to the BUILD row, and add a short paragraph after the table
-  stating the three-state distinction (verified / falsified / unverifiable) and the
-  terminal short-circuit, with the reason a MERGE-marker check alone is insufficient.
+  stating the three-state distinction (verified / falsified / unverifiable), and note
+  that the identifiability guard is defense in depth behind the upstream PR-number
+  resolution — a reader who sees only the guard will conclude the gate was weakened.
   The existing note at `:135-136` ("A stage with no claimed artifact ... is a no-op —
   verification never invents a check") is the sentence this fix finally makes true
   for BUILD; extend it rather than writing a parallel one.
 - [ ] Update `docs/features/sdlc-pipeline.md` — the **"Stage-Advance Verification
   Gate (G8, issue #1267)"** section (`:50-80`). Its bullet list describes where
-  verification runs, positioning, firing condition, and contract; add the terminal
-  short-circuit to the firing-condition bullet and note that an unresolvable
-  artifact identifier is a no-op, not a mismatch.
+  verification runs, positioning, firing condition, and contract; note in the
+  firing-condition bullet that an unresolvable artifact identifier is a no-op, not a
+  mismatch, and that `pr_number` now resolves for merged PRs.
 - [ ] Update `.claude/skills/sdlc/SKILL.md:188` — "**G8 makes no live calls**"
   paragraph. It describes the verifier's live checks; add one clause that a stage
-  whose artifact identifier is absent, or a pipeline whose `MERGE` stage is
-  completed, is skipped rather than reported as a mismatch. Keep it to one clause —
-  this file is read into every SDLC session's context.
+  whose artifact identifier is absent is skipped rather than reported as a mismatch.
+  Keep it to one clause — this file is read into every SDLC session's context.
 - [ ] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
   **#2091** (`docs/plans/completed/fix-sdlc-router-merge-termination.md`), which
   already adjudicated this exact class of defect: a test fixture that encodes a
@@ -1158,10 +1160,11 @@ new one.
   behavior already documented in two places.
 
 ### Inline Documentation
-- [ ] `_pipeline_is_terminal_from_states` docstring: the predicate, the definitional
-  twin (`tools/_sdlc_run_identity.py::_pipeline_is_terminal`), why this one reads the
-  parameter instead of re-reading the ledger, the self-attestation trade from Risk 3,
-  and the "extract, don't add a third spelling" instruction.
+- [ ] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
+  `agent/pipeline_state.py:1564` as the in-repo idiom, and why the `all` pass runs
+  only on `None` (an open PR must always win over a historical one).
+- [ ] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
+  is cut, so there is no third spelling of the terminal predicate to document.
 - [ ] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
   merged-pipeline-misfire paragraph with the #2757 case and the three-state
   distinction. **Paraphrase the removed condition** — naming it verbatim trips the
