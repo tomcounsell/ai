@@ -369,6 +369,10 @@ def test_tc7_configure_logging_writes_formatted_record(tmp_path, _snapshot_loggi
         lines = [ln for ln in target.read_text().splitlines() if ln]
         assert len(lines) == 1
         assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] probe$", lines[0])
+        owned = [h for h in bw.logger.handlers if getattr(h, "_watchdog_owned", False)]
+        assert len(owned) == 1
+        assert owned[0].maxBytes == 10 * 1024 * 1024
+        assert owned[0].backupCount == 5
     finally:
         for h in list(bw.logger.handlers):
             if getattr(h, "_watchdog_owned", False):
