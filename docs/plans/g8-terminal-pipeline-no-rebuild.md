@@ -1490,6 +1490,60 @@ integration tests — do not "fix" the row by weakening it.
 
 ## Critique Results
 
+### Round 3 — war room 2026-08-16
+
+**Verdict: READY TO BUILD (with concerns)** — FULL roster (Risk & Robustness, Scope
+& Value, History & Consistency). 4 findings: **0 BLOCKERs**, 3 CONCERNs, 1 NIT.
+
+All three round-2 BLOCKERs are independently re-verified as genuinely fixed, not
+papered over:
+
+**The `merged`-scoped second pass is sound.** Re-measured live by the war-room
+driver against the installed `gh`: #2793 → `None` under both `open` and `merged`
+but **2794 (closed, unmerged)** under `all`; #2638/#2566/#2640 → 2686/2665/2671
+under `merged`, identical to `all`. `_lookup_pr` threads `state` into **both**
+resolution legs (the `#N` body search and the `--head <branch>` fallback), so
+`merged` narrows both identically rather than selectively breaking one; `--state`
+does not filter by base branch, so a PR merged into a non-default branch is still
+found; and a draft PR cannot reach `MERGED`, so drafts are moot. The one residual
+(a reopened issue resolving its prior lifecycle's merged PR) is already named and
+accepted in Risk 3b.
+
+**The split Success Criterion 5 is satisfiable AND still catches a reverted
+guard.** `GUARDS = [G1, G2, G3, G4, G8, G7, G5, G6]` runs before the dispatch
+table, so reverting the BUILD identifiability guard makes G8 fire first and return
+`row_id: "G8"` — row 5 is never reached. The `branch_exists: True` cell's
+`result["row_id"] == "5"` assertion therefore flips on a reversion, and the
+`branch_exists: False` cell's "no `/do-build` at any row" holds independently.
+The criterion is no longer self-contradictory with Risk 2 and is not weakened into
+something trivially true.
+
+**Risk 1's retraction is in place**, with the `decide()`-level recovery mechanism
+named by file:line and the promised coverage relocated to the recovery-path
+integration test.
+
+Three CONCERNs remain. None blocks; each has an Implementation Note the revision
+pass should embed.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Scope | Round-2 BLOCKER 1's fix is not pinned by any Success Criterion. SC 1 asserts only the positive resolution (2686/2665/2671); the negative that makes the fix correct — the #2793 shape resolving to `None` rather than to closed-unmerged PR 2794 — and the strictly-additive ordering property (the second pass runs only when the first returns `None`) exist only as a Test Impact bullet and a task-2 bullet. A builder could satisfy every Success Criterion while silently reverting the second pass to `state="all"`. | pending | Promote the two negatives already written under Test Impact's "Add a `_compute_meta` unit test" bullet into Success Criteria items, anchored on `tools/sdlc_stage_query.py:548`: (a) an issue whose only body-validating PR is closed-unmerged resolves `pr_number` to `None`, not to that PR; (b) when the `open` pass returns a PR, the second pass is not invoked at all. |
+| CONCERN | Scope | Risk 3b's round-2 disposition says the reopened-issue residual is "**Filed as its own issue** during task build-tests-docs", i.e. a second follow-up issue distinct from the gate-gap one. Task 2's bullet list contains only one file-an-issue action (the gate-gap issue). A builder executing the task list literally files one issue, and the round-2 CONCERN this disposition claims to address goes unfulfilled. | pending | Add a second bullet to task `build-tests-docs` mirroring the existing gate-gap bullet: "File the reopened-issue residual as its own GitHub issue, cross-referencing Risk 3b." Nothing in the task list or Success Criteria currently checks for it, which is exactly how a promised follow-up drops during build. |
+| CONCERN | History | The "### Revision status (2026-08-16)" subsection's item 1 still reads "`_compute_meta` gets a two-pass `_lookup_pr` (open, then `all` only on `None`)". Every current-design section (Key Elements, Technical Approach, the Flow diagram, task `build-fix`) was corrected in round 2 to `state="merged"`. The subsection carries the same date as the Round 2 table directly above it and is not labelled round-1-specific, so it reads as a live design summary and a builder landing there first would implement the unscoped `all` pass that round 2 blocked on. | pending | Either rewrite item 1 to say `state="merged"` (noting round 2 corrected it from `all`), or re-title the heading "Revision status after Round 1 (2026-08-16)" so it cannot be mistaken for the post-round-2 design. The corrected phrasing already exists verbatim in Key Elements: "the second pass is scoped to `state="merged"` rather than `"all"` — see the round-2 correction below." |
+| NIT | Structural | The Freshness Check cites `docs/plans/sdlc-lane-recorded-slug.md`, which no longer exists at that path — the plan has since been migrated to `docs/plans/completed/sdlc-lane-recorded-slug.md`. Every other referenced path in the plan resolves. | pending | One-word path fix in the "Foreign-PR reconciliation" bullet under Freshness Check: insert `completed/`. |
+
+**Structural checks:** required sections present and substantive (Documentation
+carries a `docs/features/` checkbox; Update System addresses `migrations.py` as
+not-applicable with a reason; Agent Integration addresses MCP/CLI exposure; Test
+Impact lists UPDATE/ADD/UNCHANGED dispositions per test). Task numbering and
+dependencies valid (`build-red` → `build-fix` → `build-tests-docs` →
+`validate-all`, no cycles, every task carries a validation target). No Popoto model
+change, so no migration is required. All referenced file paths resolve except the
+one NIT above. All three Prerequisites pass live, and spike-7's negative control
+re-measured today still returns `{"skill": "/do-merge", "row_id": "10"}` for #2755.
+**Cross-reference consistency now PASSES** — round-2's two failures (Success
+Criterion 5 vs. Risk 2, and Risk 1's retracted claim) are both resolved.
+
 ### Round 2 — war room 2026-08-16
 
 **Verdict: NEEDS REVISION** — FULL roster (Risk & Robustness, Scope & Value, History & Consistency). 6 findings: 3 BLOCKERs, 3 CONCERNs, 0 NITs.
