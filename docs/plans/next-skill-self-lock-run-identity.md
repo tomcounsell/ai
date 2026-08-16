@@ -681,7 +681,7 @@ Approach, with a Verification row asserting the flag appears in the Step 3a invo
 - [x] No doc or skill file still asserts that `next-skill` takes no run-id.
 - [x] `tests/unit/test_sdlc_takeover_regression.py` green.
 - [x] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 - [x] No xfail conversions required — the expected-failure search over `tests/` found no
       `pytest.mark.xfail` or runtime `pytest.xfail()` related to the issue lock, run identity,
       or `next-skill`.
