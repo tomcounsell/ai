@@ -539,7 +539,7 @@ actually hold.
   1. **The PR is opened with `gh pr create --draft`.** This is the actual gate:
      `tools/merge_predicate.py:465-466` fails any PR whose `mergeStateStatus` is not
      `CLEAN`/`UNSTABLE`, and GitHub reports `DRAFT`, so `/do-merge` refuses fail-closed.
-  2. **The PR carries the `hold` label**, applied with `gh pr edit <N> --add-label hold`. This is
+  2. **The PR carries the `hold` label**, applied with `gh pr edit 2685 --add-label hold`. This is
      the human-visible signal only — no code reads PR labels
      (`grep -rn 'label' tools/merge_predicate.py` returns nothing). The label is `hold`, which is
      what exists in this repo (`gh label list` → `hold #c73f67`); there is **no** `do-not-merge`
@@ -1299,7 +1299,7 @@ Pinned additionally by a runtime test persisting a superseded row and a live row
   **Enforcement, stated identically in D3, Task 8 and Verification: the PR is opened with
   `gh pr create --draft` — that is the gate, because `tools/merge_predicate.py:465-466` fails any
   PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE` and GitHub reports `DRAFT`, so `/do-merge`
-  refuses fail-closed. `gh pr edit <N> --add-label hold` is applied as the human-visible signal
+  refuses fail-closed. `gh pr edit 2685 --add-label hold` is applied as the human-visible signal
   only; no code reads PR labels.** This bullet is documentation of that gate, not the gate itself.
   DOCS is left `in_progress` after the doc edits land, so the router never arms its merge dispatch
   and MERGE is never dispatched (D3). Removal owner: Valor Engels (repo operator). The PR body must carry the removal condition
@@ -1506,7 +1506,7 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
 - [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened with
   `gh pr create --draft` (the enforcing gate: `tools/merge_predicate.py:465-466` fails a `DRAFT`
   `mergeStateStatus`, so `/do-merge` refuses fail-closed) and labelled `hold` via
-  `gh pr edit <N> --add-label hold` (the human-visible signal; no code reads labels), with the
+  `gh pr edit 2685 --add-label hold` (the human-visible signal; no code reads labels), with the
   removal condition and its named owner in the body.
 - [ ] **The router never routes to MERGE.** DOCS is left `in_progress` after the doc edits land, so
   `agent/sdlc_router.py`'s G3 falls to its `else` branch and routes `/do-pr-review`.
@@ -2056,9 +2056,9 @@ Rows deleted or replaced at round 4:
 | **Delivered via the production drain** | `grep -c "_default_steering_pop" tests/integration/test_steering.py` | ≥ 1 (baseline 0) — the durability test must read back through the runner's drain, not a hand-rolled `pop_all_steering_messages` call |
 | **Negative twin passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "room_sibling or superseded"` | exit code 0, ≥ 3 tests collected |
 | **Abort never lands on a Room key** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "abort_rout or abort_keyword"` | exit code 0, ≥ 4 tests collected |
-| **Census test exists and passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::test_every_flipped_writer_passes_room_id" -q` | exit code 0 (anchored by node id so deleting the test fails the gate) |
-| **Census discovers by repo walk, not a fixed table** | `sed -n '/def test_every_flipped_writer_passes_room_id/,/^def \\\|^class /p' tests/unit/test_steering_writer_census.py \| grep -c "rglob\\\|glob("` | ≥ 1 — a hardcoded module list leaves a future writer in a new module silently on the legacy key, which is the failure mode this test exists to close |
-| **Sort census passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0 |
+| **Census test exists and passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestWriterCensus::test_every_flipped_writer_passes_room_id" -q` | exit code 0 (anchored by node id so deleting the test fails the gate) |
+| **Census discovers by repo walk, not a fixed table** | `grep -c "rglob\|glob(" tests/unit/test_steering_writer_census.py` | ≥ 1 — a hardcoded module list leaves a future writer in a new module silently on the legacy key, which is the failure mode this test exists to close |
+| **Sort census passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestRoomDerivationSortCensus::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0 |
 | Steering suite green | `scripts/pytest-clean.sh tests/integration/test_steering.py -q` | exit code 0 |
 | Output-handler unit tests green | `scripts/pytest-clean.sh tests/unit/test_output_handler.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -2069,14 +2069,14 @@ Rows deleted or replaced at round 4:
 | **Writer adds no exception handler** | `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p' agent/steering.py \| grep -c "except"` | == 0 (the span is **54** lines on the baseline and contains no `except`; unlike the deleted `awk` row this fails loudly if a handler is inserted) |
 | **Abort guard sits below the auto-detect** | `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p' agent/steering.py \| grep -n "ABORT_KEYWORDS\\\|_room_queue_key(room_id)"` | the `ABORT_KEYWORDS` line number is **lower** than the `_room_queue_key(room_id)` line number. Reversed order means `is_abort` is read stale and every keyword-detected abort goes to the Room. |
 | **Writer names `is_abort` in the key selection** | `grep -c "_room_queue_key(room_id) if (room_id and not is_abort)" agent/steering.py` | == 1 (baseline **0**). The round-4 row here was `grep -c "not is_abort"` expecting `≥ 1` against a recorded baseline of 0 — but the measured baseline is **1**, because `agent/steering.py:113` already reads `if not is_abort and text.strip().lower() in ABORT_KEYWORDS:`. That row passed on an untouched checkout and could not fail a build that omitted D4's guard entirely — the same vacuous-gate class as the deleted `awk` row. This form pins the exact single expression Task 1 mandates and cannot be satisfied by line 113. |
-| **Re-push forwards the room at all four call sites** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::test_every_flipped_writer_passes_room_id" -q` | exit code 0. The census asserts every `ast.Call` to `_repush_messages` in `agent/health_check.py` carries a `room_id` keyword, pinning 530/536/560/564 including the two retries inside `except` blocks. **This replaces the round-4 grep row** `grep -c "_repush_messages(.*room_id=room_id" … == 4`, which only matched while all four calls stayed on one physical line — a plan-mandated formatting constraint that `ruff format` is free to break, the same coupling that made the `list(AgentSession.query.filter` row unsatisfiable. AST is wrap-insensitive. |
+| **Re-push forwards the room at all four call sites** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestWriterCensus::test_every_flipped_writer_passes_room_id" -q` | exit code 0. The census asserts every `ast.Call` to `_repush_messages` in `agent/health_check.py` carries a `room_id` keyword, pinning 530/536/560/564 including the two retries inside `except` blocks. **This replaces the round-4 grep row** `grep -c "_repush_messages(.*room_id=room_id" … == 4`, which only matched while all four calls stayed on one physical line — a plan-mandated formatting constraint that `ruff format` is free to break, the same coupling that made the `list(AgentSession.query.filter` row unsatisfiable. AST is wrap-insensitive. |
 | Re-push forwards the room internally too | `grep -c "room_id=room_id" agent/health_check.py` | ≥ 6 (baseline 1 at line 514: the existing `pop_all_steering_messages` call; +4 call sites; +1 forward inside `_repush_messages`). The internal forward is `room_id=room_id if msg.get("_leg") == "room" else None`, which still contains the substring — so this row does **not** distinguish D6 from a bare forward. The D6 rows below are what do. |
 | Bridge derives the Room | `grep -c "room_id_for_session" bridge/telegram_bridge.py` | ≥ 1 (baseline 0) |
 | **Bridge sorts before deriving** | `grep -c "created_at is not None" bridge/telegram_bridge.py` | ≥ 5 (baseline **0**) — one per selection at 1803, 1864, 2174, 2594, 2642. The key is `(s.created_at is not None, s.created_at)`; the repo's `created_at or 0` idiom is **not** used here (it raises `TypeError` on a `datetime` `SortedField` — round-4 repro). |
 | **Health-check hook sorts before deriving** | `grep -c "created_at is not None" agent/health_check.py` | ≥ 1 (baseline **0**) — the sixth selection, `agent/health_check.py:621-623`, whose output is the requeue target key. Its enclosing `except Exception` at 628 only `logger.debug`s, so a failure here is silent. |
 | **`created_at or 0` is not reintroduced at the six sites** | `git diff origin/main \| grep -c "^+.*created_at or 0"` | == 0 — the idiom is unsound for this field; the 26 pre-existing uses elsewhere are out of scope (Rabbit Holes) |
-| **Sort census rejects an unmaterialized sort** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0, and the test must include a synthetic-negative case proving it rejects a bare `sessions = AgentSession.query.filter(...)` / `sessions.sort(...)` pair |
-| **Steering fast path does not raise** | `scripts/pytest-clean.sh tests/unit/test_bridge_dispatch_contract.py -q` plus the steering suite | exit code 0 — 1801/1860/2169 have no enclosing `try`/`except`, so an unmaterialized sort there propagates into the Telethon handler |
+| **Sort census rejects an unmaterialized sort** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestRoomDerivationSortCensus::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0, and the test must include a synthetic-negative case proving it rejects a bare `sessions = AgentSession.query.filter(...)` / `sessions.sort(...)` pair |
+| **Steering fast path does not raise** | `scripts/pytest-clean.sh tests/unit/test_bridge_dispatch_contract.py tests/integration/test_steering.py -q` | exit code 0 — 1801/1860/2169 have no enclosing `try`/`except`, so an unmaterialized sort there propagates into the Telethon handler |
 | Runner push derives the Room | `grep -c "room_id_for_session" agent/session_runner/runner.py` | ≥ 3 (baseline 2) |
 | **Watchdog stays legacy (anti-criterion)** | `grep -c "room_id_for_session" monitoring/session_watchdog.py` | == 0 (baseline 0 — must stay 0; D1) |
 | **Session-health stays legacy (anti-criterion)** | `grep -c "room_id_for_session" agent/session_health.py` | == 0 (baseline 0 — must stay 0; D1, and this is what keeps `front=True` from inverting, Risk 3) |
@@ -2107,9 +2107,9 @@ Rows deleted or replaced at round 4:
 | Status peek call untouched (anti-criterion) | `git diff origin/main -- tools/valor_session.py \| grep -c "^[-+].*peek_steering"` | == 0 |
 | Drain helper not removed (anti-criterion) | `git diff origin/main -- agent/steering.py \| grep -c "^-.*def _drain_list"` | == 0 |
 | Legacy write leg still reachable | `grep -c "_queue_key(session_id)" agent/steering.py` | ≥ 7 (baseline 7 — the legacy leg is a fallback, never retired) |
-| **Merge gate (the enforcing one)** | `gh pr view <N> --json isDraft -q .isDraft` | `true`. `tools/merge_predicate.py:465-466` fails any PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE`; GitHub reports `DRAFT`, so `/do-merge` refuses fail-closed. |
-| Merge signal (human-visible only) | `gh pr view <N> --json labels -q '.labels[].name'` | includes `hold` (`gh label list` → `hold #c73f67`). No code reads PR labels — `grep -rn 'label' tools/merge_predicate.py` returns nothing — so this row is a signal, never the gate. |
-| Removal condition recorded | `gh pr view <N> --json body -q .body \| grep -c "fleet-wide"` | ≥ 1, with the named owner |
+| **Merge gate (the enforcing one)** | `gh pr view 2685 --json isDraft -q .isDraft` | `true`. `tools/merge_predicate.py:465-466` fails any PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE`; GitHub reports `DRAFT`, so `/do-merge` refuses fail-closed. |
+| Merge signal (human-visible only) | `gh pr view 2685 --json labels -q '.labels[].name'` | includes `hold` (`gh label list` → `hold #c73f67`). No code reads PR labels — `grep -rn 'label' tools/merge_predicate.py` returns nothing — so this row is a signal, never the gate. |
+| Removal condition recorded | `gh pr view 2685 --json body -q .body \| grep -c "fleet-wide"` | ≥ 1, with the named owner |
 | **Router never routes to MERGE** | `sdlc-tool next-skill --issue-number 2642` | Does **not** print `/do-merge` — DOCS is left `in_progress`, so G3 falls to its `else` and routes `/do-pr-review`. The round-5 form of this row (`stage-query`, expecting "MERGE still `pending`") was **vacuous**: MERGE stays `pending` exactly while `/do-merge` keeps refusing on the draft, so it passed while the run was wedged. |
 | **Held action has a durable carrier** | `gh issue list --search "Un-draft and merge PR" --state open --json number` | ≥ 1 open follow-up issue naming the PR and the removal owner |
 | **Issue amended for superseded criteria** | `gh issue view 2642 --json body -q .body \| grep -c "superseded"` | ≥ 1 — otherwise `/do-pr-review` grades against criteria the plan deliberately reverses |
