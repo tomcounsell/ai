@@ -16,13 +16,21 @@ Cleanup happens in teardown via ``instance.delete()`` per CLAUDE.md's manual
 testing hygiene rule — every test session is created with a recognizable
 ``project_key`` prefix and deleted through the Popoto ORM.
 
-Issue #1267 (TestStageArtifactVerificationGate below): a second, unrelated
-integration test drives ``tools.sdlc_next_skill.decide()`` end-to-end
-(real Redis, real ``PipelineLedger``, real ``docs/plans/`` lookup, real
-issue-lock peek) against a synthesized false BUILD-completion claim, and
-asserts the router re-dispatches ``/do-build`` via guard ``g8`` rather than
-advancing. The only mocked boundary is the live ``gh pr view`` call the
-verification gate itself makes.
+Issue #1267 / #2757 (TestStageArtifactVerificationGate below): a second,
+unrelated group of integration tests drives ``tools.sdlc_next_skill.decide()``
+end-to-end (real Redis, real ``PipelineLedger``, real ``docs/plans/`` lookup,
+real issue-lock peek) across the three states the artifact gate can be in. The
+only mocked boundary is the live ``gh``/``git`` calls the gate itself makes.
+
+- **Falsified** -- a synthesized false BUILD-completion claim (the PR number
+  is recorded, live GitHub says ``CLOSED``): the router must re-dispatch
+  ``/do-build`` via guard ``g8`` rather than advance on the marker alone.
+- **Verified** -- a terminal pipeline whose recorded PR is ``MERGED``: g8 stays
+  silent and the router reaches the terminal ``/do-merge`` row.
+- **Unverifiable** (#2757) -- BUILD claims completed but no PR number resolves
+  in any state: there is no identifier to check, so g8 must not manufacture a
+  verdict from a lookup it never performed. Whichever row then owns the state
+  owns it; g8 is not that row.
 """
 
 from __future__ import annotations
@@ -45,6 +53,14 @@ TEST_PROJECT_KEY = "test-sdlc-ensure-int"
 # repo view` call) -- the ONLY live boundary this test exercises is the `gh
 # pr view` call the verification gate itself makes, and that is monkeypatched.
 _G8_TEST_REPO_SLUG = "test-owner/test-repo-1267-g8"
+
+# The head commit of the merged PR in the terminal-pipeline fixture below.
+# Since #2062 WS3d the router only reaches the terminal row when the recorded
+# REVIEW verdict attributes to the PR's CURRENT head, so this one 40-hex value
+# has to appear in three places at once: the verdict record's ``head_sha``, the
+# `git ls-remote refs/pull/N/head` answer, and the `gh pr view --json
+# headRefOid` cross-check. Naming it once keeps them from drifting apart.
+_G8_MERGED_PR_HEAD_SHA = "4f2b9c1d8e37a05614bd2ce9f80a71d3c6e5b492"
 
 
 @pytest.fixture
@@ -346,15 +362,15 @@ def test_new_anchor_session_created_with_is_ledger_true(monkeypatch, cleanup_tes
 
 
 class TestStageArtifactVerificationGate:
-    """Issue #1267: end-to-end proof that a false BUILD-completion claim
-    re-dispatches ``/do-build`` (guard ``g8``) instead of the router
-    advancing on the self-attested marker alone.
+    """Issues #1267 / #2757: end-to-end proof that guard ``g8`` fires on a
+    **falsified** BUILD-completion claim and stays silent on a **verified**
+    or **unverifiable** one.
 
     Real Redis, real ``PipelineLedger`` storage, real issue-lock peek, real
     ``docs/plans/`` lookup (a throwaway high issue number matches nothing).
-    The single mocked boundary is the live ``gh pr view`` call --
-    synthesizing "the marker claims PR #N is open, but live GitHub says it
-    is CLOSED".
+    The mocked boundary is ``subprocess.run``, i.e. the live ``gh``/``git``
+    reads the gate and the router's context builder make; each test supplies
+    the fake describing the world it is asserting about.
     """
 
     @staticmethod
@@ -380,6 +396,21 @@ class TestStageArtifactVerificationGate:
         """#1267 g8 merged-pipeline misfire: live GitHub says the PR is
         MERGED (branch already deleted under a delete-branch-on-merge
         policy) -- the polar opposite fixture of ``_fake_gh_pr_view`` above.
+
+        Two ``git ls-remote`` shapes are answered, and they answer
+        DIFFERENTLY on purpose -- do not collapse them:
+
+        - ``--heads origin <branch>`` (``_check_branch_pushed``) -> empty,
+          i.e. "branch gone". The PATCH branch probe must never reach this
+          on a MERGED PR; answering "gone" is what proves the merged-state
+          skip is load bearing rather than accidentally satisfied by a
+          branch that still exists.
+        - ``origin refs/pull/N/head`` (``tools.pr_head_resolver``) -> the
+          PR's head SHA. That resolver is git-FIRST (#2404), so without
+          this leg -- and without the ``git remote get-url origin`` answer
+          its cross-repo guard needs -- ``context["pr_head_sha"]`` lands on
+          the fail-closed empty sentinel and the verdict reads stale, which
+          routes to row 8f (``/do-pr-review``) instead of row 10.
         """
         proc = MagicMock()
         if cmd[:3] == ["gh", "pr", "view"]:
@@ -388,17 +419,27 @@ class TestStageArtifactVerificationGate:
             if json_arg == "state":
                 # tools.sdlc_next_skill._fetch_pr_state's live check.
                 proc.stdout = json.dumps({"state": "MERGED"})
+            elif json_arg == "headRefOid":
+                # tools.pr_head_resolver._gh_pr_head's cross-check leg. It
+                # must AGREE with the git answer below, or the resolver logs
+                # a disagreement and the test would be asserting on a
+                # scenario it did not mean to construct.
+                proc.stdout = _G8_MERGED_PR_HEAD_SHA
             else:
                 # tools.sdlc_stage_query._fetch_pr_merge_state's G6 check --
                 # unrelated to this test (row 10 does not consult
                 # pr_merge_state), answered harmlessly.
                 proc.stdout = json.dumps({"mergeStateStatus": "UNKNOWN", "statusCheckRollup": []})
+        elif cmd[:3] == ["git", "remote", "get-url"]:
+            # tools.pr_head_resolver._origin_matches_repo: the authoritative
+            # git read is skipped entirely unless origin points at the repo
+            # the PR lives in.
+            proc.returncode = 0
+            proc.stdout = f"https://github.com/{_G8_TEST_REPO_SLUG}.git\n"
+        elif cmd[:2] == ["git", "ls-remote"] and any("refs/pull/" in str(a) for a in cmd):
+            proc.returncode = 0
+            proc.stdout = f"{_G8_MERGED_PR_HEAD_SHA}\t{cmd[-1]}\n"
         elif cmd[:2] == ["git", "ls-remote"]:
-            # The PATCH branch-pushed check must never even run here -- a
-            # MERGED PR short-circuits it. If it does run, answer "branch
-            # gone" (empty stdout) to prove the merged-state skip is load
-            # bearing, not accidentally passing because the branch is still
-            # present.
             proc.returncode = 0
             proc.stdout = ""
         else:
@@ -457,19 +498,33 @@ class TestStageArtifactVerificationGate:
     def test_terminal_merged_pipeline_routes_to_merge_not_build(
         self, monkeypatch, issue_number, cleanup_ledger
     ):
-        """#1267 regression: a terminal MERGED pipeline must route to the
-        terminal ``/do-merge`` dispatch (row 10), never re-dispatch
-        ``/do-build`` via guard g8.
+        """A MERGED PR is an ACCEPTABLE BUILD artifact, and a terminal
+        pipeline holding one routes to ``/do-merge`` (row 10).
 
-        Before the fix, ``_verify_stage_artifacts_live`` treated "BUILD
-        artifact verified" as strictly ``state == "OPEN"``, so an already
-        MERGED PR (state MERGED, branch deleted) was flagged as an
-        unverified BUILD claim -- g8 fired and re-dispatched ``/do-build``
-        on an issue that had already shipped (duplicate-PR risk). This
-        drives the real ``tools.sdlc_next_skill.decide()`` path end-to-end
-        (real Redis ledger, real guard/dispatch-rule evaluation) with every
-        stage through DOCS marked completed and a live ``gh pr view``
-        response of MERGED.
+        This is the repo's only end-to-end proof of that proposition, and
+        the ``gh pr view --json state`` -> ``MERGED`` answer is what it
+        turns on: ``_verify_stage_artifacts_live`` accepts ``OPEN`` **or**
+        ``MERGED`` for BUILD, so guard g8 stays silent and the router is
+        free to reach its terminal row. No ``MERGE`` marker is set,
+        deliberately -- one would short-circuit the routing before either
+        the ``gh`` or the ``git`` fake was consulted and leave the whole
+        fixture dead.
+
+        Two preconditions of row 10 are supplied explicitly because the
+        router will not reach it without them (#2062 WS3a/WS3d, which is
+        what left this test red on ``main`` -- it long predates the verdict
+        requirement and had never been updated for it):
+
+        - a **recorded APPROVED REVIEW verdict** -- without it
+          ``_rule_ready_to_merge`` is unreachable and row 8e
+          (``/do-pr-review``, "REVIEW completed without a recorded
+          verdict") claims the tick first;
+        - that verdict's ``head_sha`` **matching the live PR head** --
+          an unattributable or mismatched verdict is stale, and the tick
+          goes to row 8f instead.
+
+        Neither is incidental scaffolding: they are the conditions under
+        which "terminal" is a true description of the pipeline.
         """
         from agent.pipeline_ledger import PipelineLedger
         from tools import sdlc_next_skill
@@ -489,6 +544,14 @@ class TestStageArtifactVerificationGate:
                 "TEST": "completed",
                 "REVIEW": "completed",
                 "DOCS": "completed",
+                # #2769 record shape: the head SHA is its own field, not a
+                # trailer inside the verdict token.
+                "_verdicts": {
+                    "REVIEW": {
+                        "verdict": "APPROVED",
+                        "head_sha": _G8_MERGED_PR_HEAD_SHA,
+                    }
+                },
             }
         )
         ledger.pr_number = 918274
