@@ -424,6 +424,15 @@ records stop reaching the file entirely. Rows 2 and 3 are the price of the root 
 stated here, in the PR body, and in `docs/features/watchdog-log-isolation.md` rather than discovered
 by an operator.
 
+**Row 3 is 92% one noise record, and dropping it is a retention win.** Measured on the current file:
+22,230 of the 24,144 submodule-INFO-class lines are `INFO libssl detected, it will be used for
+encryption`, emitted once per 60-second tick by a transitively imported crypto library. That single
+record is the dominant term in the ~145 KB/day growth that rolls genuine incident history out of the
+5-backup budget — the harm the Problem section argues. Row 3 is therefore a loss in form and a gain
+in substance, and the PR body must say so, or an operator will read a 90%+ volume drop as a stopped
+watchdog. Row 2's 1,914 WARNING+ records are the ones that genuinely lose something (their
+timestamp and level prefix), and they survive.
+
 **Measured root state, three points, pinned venv, main checkout:**
 
 | Point | `root.handlers` | `root.level` |
@@ -500,21 +509,37 @@ records: 1 copy today, 1 after. Submodule WARNING+: `lastResort` → stderr → 
 and after. Submodule INFO/DEBUG: dropped today and after. The worker change is purely the removal of
 an import-time side effect, with **zero** operator-visible difference in `logs/worker_watchdog.log`.
 
-**Control experiment for the "1 copy" column.** `com.valor.worker-watchdog` **is** installed and
-running on this machine, under the same both-streams-to-one-file plist shape
-(`scripts/install_worker.sh:243-246`), with `propagate = False` since #1311.
-`logs/worker_watchdog.log` has 13,861 lines and a duplicate-multiplicity histogram of **entirely 1**
-— zero duplication. That is the target topology proven clean in production under exactly the plist
-shape in question.
+**Row 1 is proved directly on this machine's production output.** `com.valor.bridge-watchdog` **is**
+installed and running here every 60 s (`launchctl list`; `~/Library/LaunchAgents/com.valor.bridge-watchdog.plist`
+with `StandardOutPath` and `StandardErrorPath` both `/Users/valorengels/src/ai/logs/watchdog.log`).
+Parsing all 102,627 lines of the current `logs/watchdog.log` and matching bracketed lines against
+bare lines on the exact `(timestamp, level, message)` triple yields **38,706 own-records present in
+both formats** — the `RotatingFileHandler` copy and the root-`StreamHandler`-via-plist copy, side by
+side. Exemplar at lines 225-226:
 
-**Honest limit on the evidence, stated rather than papered over.** `com.valor.bridge-watchdog` is
-**not** installed on this machine (`launchctl list` and `~/Library/LaunchAgents/` show only
-`com.valor.worker-watchdog`; the bridge is deliberately inactive here). `logs/watchdog.log` therefore
-contains **zero launchd-produced lines** — all 369 are test pollution, with a multiplicity histogram
-of 153 unique plus 72 lines at exactly 3x (reload stacking, not plist doubling). **No claim of the
-form "no submodule record reaches `logs/watchdog.log` in production" can be supported from this
-corpus, and this plan makes none.** The doubling in row 1 and the INFO loss in row 3 are derived from
-the plist text and the logging semantics, not from this file's contents.
+```
+2026-08-16 03:07:38,488 [INFO] Recovery successful
+2026-08-16 03:07:38,488 INFO Recovery successful
+```
+
+Row 3 is measured on the same corpus: of the 24,144 bare lines with no bracketed twin,
+**22,230 (92.1%) are the single record `INFO libssl detected, it will be used for encryption`**, one
+per launchd tick, and the other 1,914 are WARNING+ (row 2, which survives unformatted). See
+Risk 1 — the INFO loss is overwhelmingly this one record.
+
+**The earlier "1 copy" control experiment is withdrawn.** Revisions 2-4 cited
+`com.valor.worker-watchdog` as a live production control with a clean multiplicity histogram.
+Measured at revision 5: that agent is in **neither** `launchctl list` nor `~/Library/LaunchAgents/`
+on this checkout, and `logs/worker_watchdog.log` (8,708 lines, mtime `Aug 16 03:02`) is nightly-test
+output, not launchd output. The claim it supported no longer needs a proxy — the bridge watchdog is
+live here and row 1 is proved on its own output.
+
+**Honest limit, re-pointed rather than deleted.** The **"after this change" column remains a
+projection.** It is derived from the plist text, the measured post-fix root state (`[] / 30`), and
+`lastResort`'s documented semantics — not from observing a fixed watchdog under launchd, which
+cannot happen before the PR merges. What has changed is that the *today* column is no longer a
+projection: every "copies today" figure above is now a count taken from production output on the
+machine this build runs on.
 
 ### Production path after the change
 
@@ -1317,13 +1342,24 @@ criterion 3, and the bounds: uncaught tracebacks unchanged, `logs/worker_watchdo
 `logs/log_rotate_error.log` unchanged. `docs/features/watchdog-log-isolation.md` records the same.
 Reversal is one `git revert`.
 **Not mitigated, and deliberately so:** the submodule INFO loss is real and this plan adds no
-mechanism to win it back (see Rabbit Holes). The records in question are incidental `scripts.update.*`
-chatter that reached the file only because a log rotator configured root; nothing in the watchdog's
-own alerting depends on them.
-**Residual, stated plainly:** `com.valor.bridge-watchdog` is not installed on this machine, so
-`logs/watchdog.log` holds zero launchd lines and cannot be used to enumerate *which* submodule INFO
-records production actually loses. The plan asserts only what the plist text and measured logging
-semantics support, and says so rather than implying a survey it did not run.
+mechanism to win it back (see Rabbit Holes). Nothing in the watchdog's own alerting depends on them.
+**The loss is now enumerated rather than estimated, and it is overwhelmingly a win.**
+`com.valor.bridge-watchdog` **is** installed and running on this machine, so `logs/watchdog.log` is
+production output and the survey earlier revisions said they could not run has now been run. Of the
+24,144 submodule-INFO-class lines in the current file, **22,230 (92.1%) are the single record
+`INFO libssl detected, it will be used for encryption`**, one per 60-second tick from a transitively
+imported crypto library. That one record is the dominant term in the file's ~145 KB/day growth and
+therefore in the rollover cadence that evicts genuine incident history from the 5-backup retention
+budget — the harm this issue exists to stop. The remaining ~1,900 submodule records are WARNING+ and
+are **not** lost; they survive via `lastResort`, unformatted (row 2).
+**Framing requirement:** the PR body and `docs/features/watchdog-log-isolation.md` must name this
+record and its share explicitly, so the operator reads a 90%+ line-volume drop in `logs/watchdog.log`
+as the intended outcome rather than as a stopped watchdog. This does **not** reopen the Rabbit Hole:
+no second write path is added, only the characterisation changes.
+**Residual, re-pointed:** the "after this change" column of the Data Flow table remains a projection.
+It cannot be observed under launchd until the PR merges, and it rests on the plist text, the measured
+post-fix root state (`[] / 30`), and `lastResort`'s documented semantics. The *today* column is
+measured production output.
 
 ### Risk 2: `caplog` assertions break under `propagate = False`
 **Impact:** Four existing tests fail. The tempting "fix" is to flip `propagate` back to `True`, which
@@ -1364,8 +1400,15 @@ running the new module together with `tests/unit/test_bridge_watchdog.py` in one
 **Impact:** Running the unfixed suite in the main checkout to demonstrate the bug writes fresh
 synthetic CRITICAL lines into `logs/watchdog.log` — reproducing the exact harm.
 **Mitigation:** The entire demonstrated-red protocol runs inside
-`.worktrees/watchdog-import-time-log-handler/`, whose `logs/` is a separate directory. The main
-checkout's `logs/watchdog.log` is read-only for the duration, enforced by the sha256 baseline gate.
+`.worktrees/watchdog-import-time-log-handler/`, whose `logs/` is a separate directory. **The build
+writes nothing to the main checkout's `logs/watchdog.log`; it is not "read-only for the duration".**
+That earlier phrasing was wrong in both directions and is corrected at revision 5:
+`com.valor.bridge-watchdog` is installed here on a 60-second `StartInterval` and appends to that file
+continuously throughout the build, and any concurrent agent's pytest run in the main checkout can
+append to it too. The invariant the gate enforces is therefore **append-only**, not immutability:
+the recorded prefix must still be present and the file must not shrink. That is exactly what Task 1's
+prefix gate checks, and why it needs the rollover fallback — a legitimate rollover moves the recorded
+prefix into `logs/watchdog.log.1` and is not a violation.
 
 ### Risk 6: Logger-name divergence between script mode and import mode
 Not an active hazard once the pinned name is in place, but the failure it prevents is severe: under
