@@ -4,9 +4,9 @@ type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-07
-revised: 2026-08-08
+revised: 2026-08-16
 revision_applied: true
-revision_applied_at: 2026-08-07T19:40:07Z
+revision_applied_at: 2026-08-16T04:05:00Z
 tracking: https://github.com/tomcounsell/ai/issues/2643
 last_comment_id: none
 ---
@@ -720,9 +720,21 @@ ambiguous and silence would let a reviewer read it either way.
 
 **1. `monitoring/bridge_watchdog.py`**
 
-Delete lines 78-93 outright — the `basicConfig` call, the `LOGS_DIR.mkdir()`, the
-`_watchdog_file_handler` construction, and the `addHandler`. `logging.basicConfig(...)` is **deleted,
-not relocated**: nothing in the new shape configures root.
+Act on **named statements, not a line range** (corrected at revision 4 — "delete lines 78-93" swept
+up two lines the very next paragraph says to keep or rewrite):
+
+- **DELETE** `logging.basicConfig(...)` (`:78-81`) — **deleted, not relocated**: nothing in the new
+  shape configures root.
+- **DELETE** `LOGS_DIR.mkdir(parents=True, exist_ok=True)` (`:86`).
+- **DELETE** the `_watchdog_file_handler` construction and its `setFormatter` (`:87-92`).
+- **DELETE** `logger.addHandler(_watchdog_file_handler)` (`:93`).
+- **KEEP** `LOGS_DIR = PROJECT_DIR / "logs"` (`:85`) — an inert constant.
+- **REPLACE** `:82`, `logger = logging.getLogger(__name__)`, with the pinned literal
+  `logger = logging.getLogger("monitoring.bridge_watchdog")`. It must be re-bound, not deleted: under
+  launchd the module runs as `__main__`, so `getLogger(__name__)` would return a different logger
+  than the one the tests address. The Verification row
+  `grep -c "getLogger(__name__)" monitoring/bridge_watchdog.py` → `0` is the gate that catches
+  leaving it.
 
 Keep at module scope only inert bindings:
 
@@ -883,7 +895,7 @@ corrupts sibling tests in the same xdist worker.
 | **TC2** | Same subprocess: no logger in `logging.root.manager.loggerDict` (plus root) holds a handler with `pathlib.Path(h.baseFilename).name == "watchdog.log"` — exact basename, not `endswith`, so a worker-side leak is never misattributed to the bridge. The iteration is guarded on both sides: skip entries that are not `isinstance(lg, logging.Logger)` (`loggerDict` also holds `logging.PlaceHolder` objects, which have no `.handlers`) and read the path via `getattr(h, "baseFilename", "")` (stream handlers have no `baseFilename`), so the probe reports a real leak rather than an `AttributeError` | `logger.addHandler(_watchdog_file_handler)` at `:93` (and the handler construction at `:87-92`) |
 | **TC3** | Fresh subprocess: after `import monitoring.worker_watchdog`, `root.handlers == []` **and** `root.level == logging.WARNING`. Measured green today (`[] / 30`) — the worker's import graph never reaches `scripts.update` | a `logging.basicConfig(...)` or root `addHandler` reintroduced in the worker |
 | **TC4** | Same subprocess: no handler anywhere has `pathlib.Path(h.baseFilename).name == "worker_watchdog.log"`, using TC2's identical `isinstance(lg, logging.Logger)` / `getattr(h, "baseFilename", "")` guards | `logger = _configure_logger()` at `worker_watchdog.py:162` |
-| **TC5** | Scope-aware AST walk over an **explicit 14-file list** — every `monitoring/*.py` (13 files) plus `scripts/log_rotate.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `try`/`with` bodies and into every module-level `if` **except the entry-point guard**; never enters `def`/`class` bodies. **The file list is hard-coded and asserted to be exactly these 14**, so the guard's advertised breadth cannot silently exceed its real breadth, and a new `monitoring/*.py` file cannot slip past it unnoticed | all three deleted bridge statements, the worker's module-scope configure call, **and `log_rotate.py:62`** — see the exemption note directly below for the measured hit sets in both directions |
+| **TC5** | Scope-aware AST walk over an **explicit 14-file list** — every `monitoring/*.py` (13 files) plus `scripts/log_rotate.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `try`/`with` bodies and into every module-level `if` **except the entry-point guard**; never enters `def`/`class` bodies. **The file set is built by a dynamic glob and asserted for *coverage*, not cardinality** — `files = sorted((REPO_ROOT / "monitoring").glob("*.py")) + [REPO_ROOT / "scripts" / "log_rotate.py"]`, then `assert len(files) >= 14, files` and `assert {p.name for p in files} >= {"bridge_watchdog.py", "worker_watchdog.py", "log_rotate.py"}, files`, printing the full resolved list on failure. **Revised at revision 4** from a frozen 14-entry list: a frozen list turns any future PR adding a clean `monitoring/*.py` into a failure of *this* test, pointing at logging isolation when the cause is an unrelated new file — the exact "fails for a reason unrelated to the code under test" shape Rabbit Holes rejects elsewhere. The glob is also strictly stronger, since it automatically covers a new `monitoring/*.py` that ships a module-scope `basicConfig`. Re-measured with the dynamic form: **5 hits over 14 files**, identical to the frozen form, so no detection power is lost | all three deleted bridge statements, the worker's module-scope configure call, **and `log_rotate.py:62`** — see the exemption note directly below for the measured hit sets in both directions |
 | **TC5b** | AST assertion on the call site, per module: `_configure_logging` (bridge), `_configure_logger` (worker), and `logging.basicConfig` (log_rotate) are each called exactly once outside any function definition, and that call is a direct child of an `if __name__ == "__main__":` block. **TC5b does NOT inherit TC5's exemption** — it is a separate walker whose entire job is to look *inside* the guard. Sharing one scoping rule between the two is what round 3 rejected | moving the configure call to the top of `main()`. This is the only guard that catches that mutation — the import probes never call `main()`, and the entry-point proofs are green either way — and it is what keeps the five `main()` tests in `tests/unit/test_bridge_watchdog.py`, and `test_log_rotate.py`'s two `log_rotate.main()` calls at `:121` and `:166`, from reopening or reconfiguring a production log through a new door |
 | **TC6** | Fresh subprocess: `bw.logger.propagate is False` and `bw.logger.level == logging.INFO` and `bw.logger.isEnabledFor(logging.INFO)` after a bare import | deletion of `logger.propagate = False`; deletion of `logger.setLevel(logging.INFO)` |
 | **TC7** | Monkeypatch `bw.WATCHDOG_LOG_FILE` → `tmp_path/"nested"/"watchdog.log"`; `bw._configure_logging()`; emit one INFO record; flush; assert the file exists and its single line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] probe$` | formatter-string change; removal of `parents=True` from the mkdir; a level regression |
@@ -903,15 +915,32 @@ they cannot flake when another agent's test run appends to the same file concurr
 into `if __name__ == "__main__":`, which *is* a module-level `if`. Without an exemption the walk
 convicts correct code. The `ast.If` branch therefore skips the entry-point guard **before** the
 recursive descent, and the skip covers `node.body` only — `orelse` bodies and every other
-module-level `if` are still walked:
+module-level `if` are still walked. **Corrected at revision 4** on two counts: the round-3 snippet
+ended in a bare `continue`, which skips the whole `ast.If` node *including* its `orelse` and so did
+not do what the prose says; and its predicate matched any comparison against `__name__`, which would
+also exempt `if __name__ != "__main__":`. Tighten to the equality-against-`"__main__"` form and walk
+the `orelse` explicitly:
 
 ```python
 t = node.test
-if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__":
+if (
+    isinstance(t, ast.Compare)
+    and isinstance(t.left, ast.Name)
+    and t.left.id == "__name__"
+    and len(t.ops) == 1
+    and isinstance(t.ops[0], ast.Eq)
+    and len(t.comparators) == 1
+    and isinstance(t.comparators[0], ast.Constant)
+    and t.comparators[0].value == "__main__"
+):
+    walk(node.orelse, path)   # body is exempt; the else-branch is not
     continue
 ```
 
-**Measured over exactly these 14 files, in both directions.** *With* the exemption: **5 hits on
+Harmless on today's source either way — no guarded module puts an `else` on its `__main__` guard,
+and the hit count is 5 under both forms — but the shipped walker now matches its description.
+
+**Measured over the 14 files the glob currently resolves, in both directions.** *With* the exemption: **5 hits on
 today's source** and **0 hits on fixed source**, so Task 4's "zero hits" is reachable and the build
 can go green. *Without* it: **5 hits today** (identical set) and **3 hits on fixed source**. Each hit
 names the exact statement whose presence it reports:
@@ -1162,8 +1191,11 @@ edits** to that file"; that promise is incompatible with `propagate = False` and
   guard would fail on day one: `bridge/telegram_bridge.py:566` has the same module-scope
   `logging.basicConfig`, as do roughly twenty `scripts/migrate_*.py` files, `scripts/debug_catchup.py`,
   and `scripts/backfill_memory_titles.py`. Those belong to other workstreams and other issues. TC5's
-  file list is hard-coded and asserted to be exactly 14 entries so the guard's advertised breadth
-  matches its real breadth, and the plan states the limit rather than implying coverage it lacks.
+  file set is a dynamic glob over `monitoring/*.py` plus `scripts/log_rotate.py`, asserted for
+  **coverage** (`len >= 14` and a required-names subset) rather than exact cardinality, so the
+  guard's advertised breadth matches its real breadth and a newly added `monitoring/*.py` that ships
+  a module-scope `basicConfig` is caught automatically — while a clean new module does not fail this
+  test for an unrelated reason. The plan states the limit rather than implying coverage it lacks.
 - **A session-scoped autouse fixture asserting `logs/watchdog.log` never grows.** It asserts on a file
   every concurrent agent in this checkout may write, so it would flake for reasons unrelated to the
   code under test, and it fails at session teardown where attribution is hardest.
@@ -1480,8 +1512,10 @@ needs no wiring.
       change" heading, carrying the Data Flow table verbatim and the reading of acceptance
       criterion 3: own-record de-duplication, submodule WARNING+ losing its format prefix, and
       submodule INFO being dropped.
-- [ ] Issue **#2678** is no longer describing work this PR does: it is retitled and narrowed to
-      `scripts/update/run.py`, with a comment linking this PR (Task 6).
+- [ ] Issue **#2678** carries a comment linking this PR, and its title and body name only
+      `scripts/update/run.py` (Task 6). **Stated as an end state at revision 4**, not as an edit to
+      perform: the retitle and rescope already happened before this revision, so a criterion phrased
+      as "it is retitled" would be ticked without work. Only the PR-link comment is new.
 - [ ] The No-Go prefix gate prints `LOGS_PREFIX_INTACT`: neither main-checkout log shrank and
       neither one's recorded prefix changed.
 - [ ] Tests pass (`/do-test`)
@@ -1514,16 +1548,34 @@ needs no wiring.
 - **Assigned To**: `watchdog-logging-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- **First**, record the anti-criterion baseline with absolute paths (see No-Gos for why relative
-  paths silently aim at the wrong checkout):
+- **Before any code change**, post a comment on **#2643** recording that acceptance criterion 3's
+  `python monitoring/bridge_watchdog.py --check-only` clause is replaced by an entry-point
+  invocation. The issue text names `--check-only` literally, and this plan's own No-Gos forbid
+  producing that evidence, so a reviewer gating on the issue would otherwise find a criterion with
+  no evidence behind it and no record of why. State the reason in one line: `--check-only` returns
+  from `main()` (`:1011`) before `run_health_check()` (`:903`), every INFO-or-above call on that
+  branch is gated on state a bridgeless machine lacks, and `check_bridge_health()` (`:557`) calls
+  `log_crash("bridge_dead_on_watchdog_check")` → `analytics.collector.record_metric` → SQLite and
+  **production Redis**. Name the replacement explicitly:
+  `sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]` +
+  `runpy.run_path(..., run_name="__main__")`, asserting `SystemExit.code == 2`, then asserting on the
+  attached `_watchdog_owned` handler and one emitted record.
+- **Then**, record the anti-criterion baseline with absolute paths (see No-Gos for why relative
+  paths silently aim at the wrong checkout). **Derive the checkout root — do not hardcode a
+  username.** Revision 3 pinned the literal `/Users/tomcounsell/src/ai`, which does not exist on
+  every machine that runs this pipeline (this checkout is `/Users/valorengels/src/ai`), and the
+  `for` loop would report `BASELINE_INCOMPLETE` on a correct build:
   ```bash
-  for f in /Users/tomcounsell/src/ai/logs/watchdog.log \
-           /Users/tomcounsell/src/ai/logs/worker_watchdog.log; do
+  AI_MAIN=$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" rev-parse --show-toplevel)
+  for f in "$AI_MAIN/logs/watchdog.log" "$AI_MAIN/logs/worker_watchdog.log"; do
     n=$(wc -c < "$f" | tr -d ' ')
     printf '%s %s %s\n' "$f" "$n" "$(head -c "$n" "$f" | shasum -a 256 | cut -d' ' -f1)"
   done > /tmp/watchdog-log-baseline.txt
   test "$(wc -l < /tmp/watchdog-log-baseline.txt)" -eq 2 || { echo BASELINE_INCOMPLETE; exit 1; }
   ```
+  `AI_MAIN` must be captured in the MAIN checkout **before** the worktree is created, and the values
+  are re-measured here rather than read from this plan (see the No-Gos gate: the revision-3 figures
+  are stale and the file has since rotated).
   Nothing else in this plan may run against the main checkout's `logs/`.
 - Create the worktree at `.worktrees/watchdog-import-time-log-handler/` on branch
   `session/watchdog-import-time-log-handler`, provision its `.venv` on the pinned interpreter, and
@@ -1573,7 +1625,10 @@ needs no wiring.
 - **Assigned To**: `watchdog-logging-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Delete lines 78-93. Add `WATCHDOG_LOG_FILE`, the pinned-name `logger` with `setLevel(INFO)` and
+- Apply the named-statement edits from Technical Approach §1 (delete `:78-81`, `:86`, `:87-92`,
+  `:93`; KEEP `:85`; REPLACE `:82` with the pinned-literal `getLogger`) — **not** a blanket
+  "delete 78-93", which would also remove `LOGS_DIR` and the `logger` binding.
+  Add `WATCHDOG_LOG_FILE`, the pinned-name `logger` with `setLevel(INFO)` and
   `propagate = False`, and `_configure_logging()` exactly as specified.
 - Wire `_configure_logging()` into the `__main__` guard only.
 - Convert the two `caplog` sites in `tests/unit/test_bridge_watchdog.py` (:753, :957) and the two in
@@ -1754,14 +1809,18 @@ needs no wiring.
 - Create `docs/features/watchdog-log-isolation.md` carrying the Data Flow table and both propagation
   decisions; add the `docs/features/README.md` row; add the sentences to
   `docs/features/bridge-self-healing.md`; add the test module to `tests/README.md`.
-- **Retarget issue #2678.** This PR ships what #2678's body describes, so leaving it open records
-  shipped work as pending. Post a comment naming this PR and explaining that the `log_rotate` half is
-  absorbed, then narrow the issue rather than closing it — its own closing line already names the
-  remainder ("Verify the same for `scripts/update/run.py`, which may be relying on root being
-  configured for its own output"), and that remainder is real: `run.py` has three
-  `logging.getLogger(__name__).warning(...)` calls and no `basicConfig`, so after this PR they print
-  unformatted via `lastResort`. Retitle it to name `scripts/update/run.py` and rewrite the body to
-  that scope. Close it only if the retitle proves there is nothing left.
+- **Verify issue #2678 is already retargeted, then comment.** **Reworded at revision 4: the retitle
+  and rescope have already happened**, so instructing a builder to perform them again produces
+  either redundant edits or a criterion ticked without work. Confirmed live at revision 4 — #2678 is
+  OPEN and already titled "scripts/update/run.py has no entry-point logging configuration and relied
+  on log_rotate's import side effect", its body is already narrowed to `scripts/update/run.py`
+  (naming `:236`, `:315`, `:381` and the guard at `:2365`), it already carries an "Already handled by
+  #2643, not in scope here" section, and it already links this plan.
+  The remaining work is therefore: **verify** that title and scope still hold, and **post a comment
+  naming this PR** once a PR number exists, explaining that the `log_rotate` half is absorbed. The
+  remainder #2678 retains is real — `run.py` has three `logging.getLogger(__name__).warning(...)`
+  calls and no `basicConfig`, so after this PR they print unformatted via `lastResort`. Edit the
+  title or body **only if the verification fails**. Do not close it.
 - Commit.
 
 ### 7. Final validation and PR body
@@ -1782,7 +1841,11 @@ needs no wiring.
 - **Re-read the Data Flow table against the shipped code before pasting it.** It is published to the
   PR as the authoritative behavior statement, and revisions 2 and 3 both changed rows in it. A stale
   row here is a false claim in a permanent record.
-- Confirm #2678 is retitled/narrowed and carries the link comment.
+- Confirm #2678's title and body name only `scripts/update/run.py` and that it carries the link
+  comment.
+- Confirm **criterion 3's invocation substitution is recorded on #2643** — the Task 1 comment
+  replacing `--check-only` with the entry-point probe. Without it, a reviewer gating on the issue
+  text finds an acceptance criterion this PR deliberately does not satisfy and no record of why.
 
 ## Verification
 
@@ -1840,11 +1903,11 @@ and still holds exactly. The three-module scope, both propagation decisions, the
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | History & Consistency, Risk & Robustness | The Freshness Check is now false. The plan's own verification command, re-run verbatim, returns `fd52fc648` ("Wedge detector: require evidence something was missed, and reset on restart (#2475) (#2670)", 2026-08-10 11:37 +0700) rather than being empty, and the section still reads "**Commits on main since issue was filed (touching referenced files):** none." Three measured consequences. (a) Every `monitoring/bridge_watchdog.py` citation below ~line 200 is wrong: `main()` is at `:1011` not `:968`; the entry-point guard is at `:1084-1085` not `:1041-1042`; `run_health_check()` at `:903` not `:860`; `check_bridge_health()` at `:557` not `:514`; `kill_zombie_processes()` at `:512`, so the INFO lines cited at `:482`/`:494`/`:500` have moved; `:591`, `:604`, `:932`, `:982`, `:1031` no longer hold what the plan says; and `:869-871` — the citation whose correction anchored reversing round 1's root-configuration decision — is now docstring prose. (b) Task 2 aims the caplog conversion at `tests/integration/test_update_loop_wedge_recovery.py` `:156` and `:221`, which no longer contain caplog code; the real sites are `:371` and `:387`, and Test Impact's third site `test_a_wedged_past_ceiling(caplog)` at `:60` **does not exist** — both real sites read `caplog.records` and both break under `propagate = False`. (c) The rejection of the lazy import at `bridge_watchdog.py:72`, which revision 3 says "stands unchanged", is priced at "15 sites" including "10" `patch("monitoring.bridge_watchdog.get_process_start_ts")` calls; that file now contains **1**, and the three symbols appear on **6** lines total across `tests/`. | **resolved (revision 4)** — Freshness Check re-baselined to `0babdb2ab` with a "Revision-4 re-verification" subsection carrying the corrected-coordinate table; Test Impact, Error State Rendering, and Task 2 re-pointed to `:371`/`:387`; the `test_a_wedged_past_ceiling` bullet deleted; the lazy-import rejection re-priced to the measured 6 lines. **Residual noted in-plan:** this critique's own "Re-verified UNCHANGED" list predates `fb00b8542` (2026-08-13) and its `tests/unit/test_worker_watchdog.py` addresses are themselves stale by +19; the revision-4 table supersedes them. Also re-measured: the No-Go log baseline (41322 B / `2c3c2f2d…` → 9692506 B / `51cfe6c4…`, and the 41322-byte *prefix* no longer matches either, so the file was rotated — the gate now re-measures at build start instead of hardcoding). | Set **Baseline commit** to `fd52fc648` and **Disposition** to "Changed (code)". Re-cite: `main()` `:968`→`:1011`; guard `:1041-1042`→`:1084-1085`; `run_health_check()` `:860`→`:903`; `check_bridge_health()` `:514`→`:557`; re-derive the `kill_zombie_processes` INFO lines from `:512`+ and the `--check-only` early return from `:1011`+. In Task 2 and Test Impact replace `(:156, :221)` with `:371` and `:387` (in `test_redis_exception_is_inconclusive` `:363` and `test_unreadable_process_start_suppresses_verdict` `:382`), and DELETE the `test_a_wedged_past_ceiling` bullet — the correct statement is "exactly two caplog sites in this file, both read `caplog.records`, both converted". A repo-wide grep for `logger="monitoring.bridge_watchdog"` / `logger="monitoring.worker_watchdog"` returns exactly four sites total, so the count of four is still right; only the addresses moved. Replace the "15 sites / 10 patch sites" pricing with the measured 6 lines (1 patch at `tests/integration/test_update_loop_wedge_recovery.py`, 5 constant reads at `tests/unit/test_bridge_watchdog.py:872,886,887,889,914`) and re-state whether the lazy-import rejection still follows — it still can, since the 5 constant reads alone break under it, but say so from the measured figure. Drop or re-locate the `:869-871` hibernation citation. **Re-verified UNCHANGED and still correct**: `monitoring/bridge_watchdog.py:78`, `:82`, `:86`, `:87-92`, `:93`; all `tests/unit/test_bridge_watchdog.py` citations (`main()` at 544/571/598/781/805, caplog at 753/957, reload at 1106/1114); all `tests/unit/test_worker_watchdog.py` citations (reloads 47/52/58/1050/1058, ten `addHandler(caplog.handler)` sites, `isolated_state` at `:34`); `monitoring/worker_watchdog.py:135`/`:150-152`/`:162`; `scripts/log_rotate.py:35`/`:58`/`:62`/`:67`/`:176`/`:190`; the 14-file / 5-hit AST baseline; the `[] / 30` → `[StreamHandler] / 20` root measurement; the post-fix `[] / 30` measurement; the `627-630` plist range; and the No-Go baseline (41322 bytes, sha256 `2c3c2f2d…`). This is a targeted re-baseline, not a re-plan. |
-| CONCERN | Risk & Robustness | TC5's "file list is hard-coded and asserted to be exactly these 14" turns any future PR that adds a clean `monitoring/*.py` module into a failure of a watchdog-logging test, pointing at logging isolation when the cause is an unrelated new file. That is the "fails for a reason unrelated to the code under test" shape the plan itself rejects in Rabbit Holes for the session-scoped log fixture. The stated goal — advertised breadth matching real breadth — is met by a dynamic glob, which is strictly stronger because it automatically covers a new `monitoring/*.py` that ships a module-scope `basicConfig`, which a frozen list does not. | pending | Build the set as `files = sorted((REPO_ROOT / "monitoring").glob("*.py")) + [REPO_ROOT / "scripts" / "log_rotate.py"]`, then assert coverage instead of cardinality: `assert len(files) >= 14, files` and `assert {p.name for p in files} >= {"bridge_watchdog.py", "worker_watchdog.py", "log_rotate.py"}, files`. Print the full resolved list in the failure message so real breadth stays visible. Re-measured with the dynamic form plus TC5's entry-point-guard exemption: **5 hits** over **14** files on today's source (`bridge_watchdog.py:78 basicConfig`, `:86 mkdir`, `:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig`) — identical to the hard-coded form, so no detection power is lost. Keep the Rabbit Holes paragraph excluding `bridge/` and `scripts/migrate_*.py`. |
-| CONCERN | Scope & Value | #2643's acceptance criterion 3 literally names `python monitoring/bridge_watchdog.py --check-only`. The plan deletes that Verification row and substitutes an unrecognized-flag `__main__` probe for two sound reasons, and it renegotiates the word "unchanged" under "Reading of acceptance criterion 3" — but it never renegotiates the *invocation*, and it records the substitution only inside the plan document. A reviewer gating on the issue text finds a criterion naming `--check-only` with no evidence for it, while the plan's own No-Gos forbid producing that evidence. | pending | Add a Task 1 bullet, before any code change: post a comment on #2643 recording that criterion 3's `--check-only` clause is replaced by an entry-point invocation, with the one-line reason (that branch returns from `main()` before `run_health_check()`, every INFO-or-above call on it is gated on state a bridgeless machine lacks, and `check_bridge_health()` calls `log_crash("bridge_dead_on_watchdog_check")` → `analytics.collector.record_metric` → SQLite and production Redis). Name the replacement explicitly: `sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]` + `runpy.run_path(..., run_name="__main__")`, asserting `SystemExit.code == 2` then asserting on the attached `_watchdog_owned` handler and one emitted record. Add "criterion 3's invocation substitution is recorded on #2643" to Task 7's confirmation list. Re-derive the line numbers in that justification after the freshness re-baseline (`main()` `:1011`, `check_bridge_health()` `:557`). |
-| NIT | History & Consistency | The TC5 entry-point-guard exemption's prose and its code snippet contradict each other. The prose says "the skip covers `node.body` only — `orelse` bodies and every other module-level `if` are still walked", but the snippet ends in `continue`, which skips the whole `ast.If` node including its `orelse`. Harmless today (no guarded module has an `else` on its `__main__` guard; re-measured 5 hits either way), but the shipped walker would not do what the plan says. | pending | Either change the snippet body to `walk(node.orelse, path); continue`, or delete the "`orelse` bodies ... are still walked" clause from the prose. Also tighten the predicate to the entry-point guard specifically by adding `and isinstance(t.ops[0], ast.Eq)` and checking the comparator is the constant `"__main__"`, so `if __name__ != "__main__":` is not exempted. |
-| NIT | History & Consistency | "Delete lines 78-93 outright" contradicts the paragraph immediately after it. Line `:85` is `LOGS_DIR = PROJECT_DIR / "logs"`, which the plan says to keep, and line `:82` is `logger = logging.getLogger(__name__)`, which must be re-bound to the pinned literal rather than deleted. | pending | Replace the line range with named statements: delete `logging.basicConfig(...)` (`:78-81`), `LOGS_DIR.mkdir(parents=True, exist_ok=True)` (`:86`), the `_watchdog_file_handler` construction and its `setFormatter` (`:87-92`), and `logger.addHandler(_watchdog_file_handler)` (`:93`); KEEP `LOGS_DIR = PROJECT_DIR / "logs"` (`:85`); REPLACE `:82` with `logger = logging.getLogger("monitoring.bridge_watchdog")`. The Verification row `grep -c "getLogger(__name__)" monitoring/bridge_watchdog.py` → `0` is the gate that catches leaving it. |
-| NIT | Scope & Value | Task 6's "Retarget issue #2678" is already done. Fetched live: #2678 is already titled "scripts/update/run.py has no entry-point logging configuration and relied on log_rotate's import side effect", its body is already narrowed to `scripts/update/run.py` (naming `:236`, `:315`, `:381` and the guard at `:2365`), it already carries an "Already handled by #2643, not in scope here" section, and it already links this plan. The task and its Success Criterion will be either redone redundantly or ticked without work. | pending | Reword Task 6 to a verification step: "Verify #2678 is already retitled to name `scripts/update/run.py` and scoped to that remainder; post the PR link as a comment once the PR number exists; edit title/body only if the verification fails." Reword the Success Criterion to the end state — "#2678 carries a comment linking this PR and its title/body name only `scripts/update/run.py`" — rather than to performing an edit that has already happened. |
+| CONCERN | Risk & Robustness | TC5's "file list is hard-coded and asserted to be exactly these 14" turns any future PR that adds a clean `monitoring/*.py` module into a failure of a watchdog-logging test, pointing at logging isolation when the cause is an unrelated new file. That is the "fails for a reason unrelated to the code under test" shape the plan itself rejects in Rabbit Holes for the session-scoped log fixture. The stated goal — advertised breadth matching real breadth — is met by a dynamic glob, which is strictly stronger because it automatically covers a new `monitoring/*.py` that ships a module-scope `basicConfig`, which a frozen list does not. | **resolved (revision 4)** — TC5 row now builds the set via `sorted((REPO_ROOT/"monitoring").glob("*.py")) + [log_rotate.py]` and asserts coverage (`len >= 14` plus a required-names subset) instead of cardinality, printing the resolved list on failure; the Solution-side sentence and the Risks-side restatement were updated to match. Re-measured 5 hits over 14 files, identical to the frozen form. | Build the set as `files = sorted((REPO_ROOT / "monitoring").glob("*.py")) + [REPO_ROOT / "scripts" / "log_rotate.py"]`, then assert coverage instead of cardinality: `assert len(files) >= 14, files` and `assert {p.name for p in files} >= {"bridge_watchdog.py", "worker_watchdog.py", "log_rotate.py"}, files`. Print the full resolved list in the failure message so real breadth stays visible. Re-measured with the dynamic form plus TC5's entry-point-guard exemption: **5 hits** over **14** files on today's source (`bridge_watchdog.py:78 basicConfig`, `:86 mkdir`, `:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig`) — identical to the hard-coded form, so no detection power is lost. Keep the Rabbit Holes paragraph excluding `bridge/` and `scripts/migrate_*.py`. |
+| CONCERN | Scope & Value | #2643's acceptance criterion 3 literally names `python monitoring/bridge_watchdog.py --check-only`. The plan deletes that Verification row and substitutes an unrecognized-flag `__main__` probe for two sound reasons, and it renegotiates the word "unchanged" under "Reading of acceptance criterion 3" — but it never renegotiates the *invocation*, and it records the substitution only inside the plan document. A reviewer gating on the issue text finds a criterion naming `--check-only` with no evidence for it, while the plan's own No-Gos forbid producing that evidence. | **resolved (revision 4)** — Task 1 gains a first bullet, before any code change, requiring a comment on #2643 that records the substitution, its one-line justification (re-derived to `main()` `:1011`, `run_health_check()` `:903`, `check_bridge_health()` `:557`), and the explicit `--__entrypoint_probe__` + `runpy.run_path` replacement; Task 7's confirmation list gains the matching check. | Add a Task 1 bullet, before any code change: post a comment on #2643 recording that criterion 3's `--check-only` clause is replaced by an entry-point invocation, with the one-line reason (that branch returns from `main()` before `run_health_check()`, every INFO-or-above call on it is gated on state a bridgeless machine lacks, and `check_bridge_health()` calls `log_crash("bridge_dead_on_watchdog_check")` → `analytics.collector.record_metric` → SQLite and production Redis). Name the replacement explicitly: `sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]` + `runpy.run_path(..., run_name="__main__")`, asserting `SystemExit.code == 2` then asserting on the attached `_watchdog_owned` handler and one emitted record. Add "criterion 3's invocation substitution is recorded on #2643" to Task 7's confirmation list. Re-derive the line numbers in that justification after the freshness re-baseline (`main()` `:1011`, `check_bridge_health()` `:557`). |
+| NIT | History & Consistency | The TC5 entry-point-guard exemption's prose and its code snippet contradict each other. The prose says "the skip covers `node.body` only — `orelse` bodies and every other module-level `if` are still walked", but the snippet ends in `continue`, which skips the whole `ast.If` node including its `orelse`. Harmless today (no guarded module has an `else` on its `__main__` guard; re-measured 5 hits either way), but the shipped walker would not do what the plan says. | **resolved (revision 4)** — the snippet now walks `node.orelse` explicitly before `continue`, so it matches the prose, and the predicate is tightened to `len(t.ops)==1 and isinstance(t.ops[0], ast.Eq)` with the comparator asserted to be the constant `"__main__"`, so `if __name__ != "__main__":` is no longer exempted. | Either change the snippet body to `walk(node.orelse, path); continue`, or delete the "`orelse` bodies ... are still walked" clause from the prose. Also tighten the predicate to the entry-point guard specifically by adding `and isinstance(t.ops[0], ast.Eq)` and checking the comparator is the constant `"__main__"`, so `if __name__ != "__main__":` is not exempted. |
+| NIT | History & Consistency | "Delete lines 78-93 outright" contradicts the paragraph immediately after it. Line `:85` is `LOGS_DIR = PROJECT_DIR / "logs"`, which the plan says to keep, and line `:82` is `logger = logging.getLogger(__name__)`, which must be re-bound to the pinned literal rather than deleted. | **resolved (revision 4)** — Technical Approach §1 and Task 2 both replaced the line range with named statements: DELETE `:78-81`, `:86`, `:87-92`, `:93`; KEEP `LOGS_DIR` at `:85`; REPLACE `:82` with `logger = logging.getLogger("monitoring.bridge_watchdog")`. | Replace the line range with named statements: delete `logging.basicConfig(...)` (`:78-81`), `LOGS_DIR.mkdir(parents=True, exist_ok=True)` (`:86`), the `_watchdog_file_handler` construction and its `setFormatter` (`:87-92`), and `logger.addHandler(_watchdog_file_handler)` (`:93`); KEEP `LOGS_DIR = PROJECT_DIR / "logs"` (`:85`); REPLACE `:82` with `logger = logging.getLogger("monitoring.bridge_watchdog")`. The Verification row `grep -c "getLogger(__name__)" monitoring/bridge_watchdog.py` → `0` is the gate that catches leaving it. |
+| NIT | Scope & Value | Task 6's "Retarget issue #2678" is already done. Fetched live: #2678 is already titled "scripts/update/run.py has no entry-point logging configuration and relied on log_rotate's import side effect", its body is already narrowed to `scripts/update/run.py` (naming `:236`, `:315`, `:381` and the guard at `:2365`), it already carries an "Already handled by #2643, not in scope here" section, and it already links this plan. The task and its Success Criterion will be either redone redundantly or ticked without work. | **resolved (revision 4)** — Task 6 reworded to a verification-plus-comment step (edit only if verification fails; do not close), and the Success Criterion restated as the end state "#2678 carries a comment linking this PR and its title/body name only `scripts/update/run.py`". Re-confirmed live at revision 4 that the retitle/rescope already holds. | Reword Task 6 to a verification step: "Verify #2678 is already retitled to name `scripts/update/run.py` and scoped to that remainder; post the PR link as a comment once the PR number exists; edit title/body only if the verification fails." Reword the Success Criterion to the end state — "#2678 carries a comment linking this PR and its title/body name only `scripts/update/run.py`" — rather than to performing an edit that has already happened. |
 
 Re-verified sound at round 4 by direct measurement rather than reading: the 14-file / 5-hit AST baseline
 with TC5's exemption; root moving `[] / 30` → `[<StreamHandler <stderr>>] / 20` with log_rotate's
@@ -1910,7 +1973,7 @@ What changed as a consequence, all of it re-measured rather than reasoned:
 | The `lastResort` claim flips back to TRUE for the bridge | **Measured**: `<_StderrHandler <stderr> (WARNING)>`, level 30. Submodule WARNING+ prints unformatted; submodule INFO prints nothing. Data Flow rows 2 and 3 rewritten as losses, and Research, Solution evidence 5, Risk 1, Risk 3, Architectural Impact, Rabbit Holes, and the Documentation tasks all corrected to match |
 | The PR-body behavior-change section grows to three modules | Task 7 now requires all three `logs/watchdog.log` effects plus the `/update` stderr note, with the Data Flow table lifted verbatim and re-read against shipped code before pasting |
 | TC1a / TC1b redundancy | TC1b deleted. TC1a kept and rescoped to both forbidden paths — it survives for caller *attribution*, not coverage, and is still measured red today (recorder returns both `log_rotate.py:62` and `bridge_watchdog.py:78`) |
-| TC5's advertised breadth must match its real breadth | Widened to an explicit, hard-coded **14-file** list (13 `monitoring/*.py` + `scripts/log_rotate.py`), asserted to be exactly 14. Re-run: **5 hits**. Rabbit Holes states plainly what it does not cover and why a repo-wide guard would fail on day one |
+| TC5's advertised breadth must match its real breadth | Widened to a **dynamic glob** over `monitoring/*.py` + `scripts/log_rotate.py` (14 files today), asserted for **coverage** rather than exact cardinality — `len >= 14` plus a required-names subset, resolved list printed on failure. **Revised at revision 4** from a frozen 14-entry list, which would have failed this test whenever an unrelated clean `monitoring/*.py` was added. Re-run under the glob: **5 hits**, identical. Rabbit Holes states plainly what it does not cover and why a repo-wide guard would fail on day one |
 | #2678 must not describe shipped work | **Narrowed, not closed.** Its own closing line names the remainder — `scripts/update/run.py`, which has three `logging` warnings and no `basicConfig` of its own. Task 6 retitles it to that scope and comments the link |
 | The plan must say three modules everywhere | Success Criteria, Key Elements, task list, file list, Update System, Architectural Impact, and Verification all updated. Task list grew from 6 to 7 steps |
 | `log_rotate`'s own test coverage | `tests/unit/test_log_rotate.py` (180 lines) **needs no changes** — verified, it makes no assertion about logging configuration. TC13/TC14/TC15 added as new coverage, each with a named mutation and both directions measured |
