@@ -46,6 +46,7 @@ valor kill --all                    # nuclear
 
 # Inspection / repair
 valor inspect <id>                  # raw fields
+valor progress <id>                 # is it still working? read-only verdict
 valor children <id>                 # child sessions
 valor resume <id> "new message"     # hard-PATCH resume
 valor release --pr 1615             # clear retain_for_resume after PR merge/close
@@ -59,7 +60,7 @@ Two equivalent invocations for create:
 The wrapper detects the shortcut by sniffing argv: if the first token is not a
 known subcommand or a flag, it is prepended with `agent-session` before
 argparse runs. The first token is checked against the module-level
-`KNOWN_SUBCOMMANDS` set (9 names; anything starting with `-` is already
+`KNOWN_SUBCOMMANDS` set (10 names; anything starting with `-` is already
 excluded by the flag check), so an accidental prompt that starts with
 `--kill-the-bug` doesn't get mangled. A unit test asserts the set stays in
 sync with the subparser declarations.
@@ -71,7 +72,8 @@ sync with the subparser declarations.
 The wrapper does not persist anything, does not parse or interpret the prompt,
 does not invent flags. It re-shapes argparse input and forwards to the
 existing `cmd_create`, `cmd_status`, `cmd_list`, `cmd_steer`, `cmd_kill`,
-`cmd_resume`, `cmd_inspect`, `cmd_children`, `cmd_release` functions. Bug
+`cmd_resume`, `cmd_inspect`, `cmd_progress`, `cmd_children`, `cmd_release`
+functions. Bug
 surfaces, help text, and JSON output formats stay in one place.
 
 This means every fix to `valor-session` automatically applies to `valor`. And

@@ -118,3 +118,73 @@ class TestReplayDeadLetters:
         mock_letter.async_delete.assert_not_called()
         mock_letter.async_save.assert_called_once()
         assert mock_letter.attempts == 2
+
+
+class TestReplayPeerParseAgreesWithSendPaths:
+    """Replay must judge a peer the same way every send path does (#2644).
+
+    This path was the fifth hand-rolled copy of the parse. Its local
+    ``int()`` / ``except -> 0`` pair disagreed with ``utils.peer`` on the same
+    stored value: ``int("+5")`` is 5, so a record with ``chat_id="+5"`` was
+    replayed to peer 5, while the relay's send paths drop it. Only legacy rows
+    can carry odd forms — the persist side now rejects them on the way in — so
+    replay is exactly where such a record surfaces.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("odd_chat_id", ["+5", "5.9", "--5", "not-a-peer", "0"])
+    async def test_replay_discards_peers_the_send_paths_would_drop(self, odd_chat_id):
+        from bridge.dead_letters import replay_dead_letters
+        from utils.peer import deliverable_telegram_peer
+
+        assert not deliverable_telegram_peer(odd_chat_id), (
+            f"test premise broken: {odd_chat_id!r} should be undeliverable"
+        )
+
+        mock_letter = MagicMock()
+        mock_letter.chat_id = odd_chat_id
+        mock_letter.text = "legacy record with an odd peer"
+        mock_letter.reply_to = None
+        mock_letter.async_delete = AsyncMock()
+        mock_letter.async_save = AsyncMock()
+        mock_letter.attempts = 0
+
+        mock_client = MagicMock()
+        mock_client.send_message = AsyncMock()
+
+        with patch("bridge.dead_letters.DeadLetter") as mock_dead_letter_cls:
+            mock_dead_letter_cls.query.async_all = AsyncMock(return_value=[mock_letter])
+            replayed = await replay_dead_letters(mock_client)
+
+        mock_client.send_message.assert_not_called()
+        mock_letter.async_delete.assert_called_once()
+        assert replayed == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "good_chat_id,expected", [("-1003900483201", -1003900483201), ("12345", 12345)]
+    )
+    async def test_replay_still_sends_for_deliverable_peers(self, good_chat_id, expected):
+        """The stricter parse must not start discarding ordinary records."""
+        from bridge.dead_letters import replay_dead_letters
+        from utils.peer import deliverable_telegram_peer
+
+        assert deliverable_telegram_peer(good_chat_id)
+
+        mock_letter = MagicMock()
+        mock_letter.chat_id = good_chat_id
+        mock_letter.text = "ordinary record"
+        mock_letter.reply_to = None
+        mock_letter.async_delete = AsyncMock()
+        mock_letter.async_save = AsyncMock()
+        mock_letter.attempts = 0
+
+        mock_client = MagicMock()
+        mock_client.send_message = AsyncMock()
+
+        with patch("bridge.dead_letters.DeadLetter") as mock_dead_letter_cls:
+            mock_dead_letter_cls.query.async_all = AsyncMock(return_value=[mock_letter])
+            replayed = await replay_dead_letters(mock_client)
+
+        mock_client.send_message.assert_called_once_with(expected, "ordinary record", reply_to=None)
+        assert replayed == 1

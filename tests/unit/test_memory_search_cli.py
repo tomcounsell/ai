@@ -12,6 +12,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from tests.db_claim import subprocess_env
+
 _REPO_ROOT = str(Path(__file__).parents[2])
 
 
@@ -365,6 +367,7 @@ class TestStatusSubcommandE2E:
             capture_output=True,
             text=True,
             cwd=_REPO_ROOT,
+            env=subprocess_env(project_root=_REPO_ROOT),
         )
         assert result.returncode == 0
         assert "status" in result.stdout
@@ -378,6 +381,7 @@ class TestStatusSubcommandE2E:
             capture_output=True,
             text=True,
             cwd=_REPO_ROOT,
+            env=subprocess_env(project_root=_REPO_ROOT),
         )
         # Exit 0 when Redis is up; exit 1 when down — both are valid in this test environment
         output = result.stdout.strip()

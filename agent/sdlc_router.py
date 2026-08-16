@@ -146,10 +146,24 @@ class Dispatch:
 
 @dataclass(frozen=True)
 class Blocked:
-    """An escalation decision. The router should stop and surface to the human."""
+    """An escalation decision. The router should stop and surface to the human.
+
+    ``guard_id`` is a short machine-matchable code identifying WHY the router
+    escalated. It does not imply "a numbered guard fired" (#2767b): alongside
+    the ``G1``–``G8`` guard codes it also carries the ``NO_RULE`` sentinel for
+    the dispatch-table fallthrough — a genuine hole in the table rather than a
+    guard verdict. Callers matching on specific guards must compare against the
+    codes they care about, never merely test for presence.
+    """
 
     reason: str
     guard_id: str | None = None
+
+
+# Sentinel ``guard_id`` for the dispatch-table fallthrough (#2767b). Short-code
+# form matches the ``G2``/``G4``/``G7`` convention so downstream consumers can
+# match it without parsing the reason string.
+NO_RULE_GUARD_ID = "NO_RULE"
 
 
 # Type alias for the predicate functions in DISPATCH_RULES. Each takes the
@@ -269,6 +283,33 @@ def _latest_review_verdict(stage_states: dict, meta: dict) -> str:
         return meta["latest_review_verdict"]
     verdicts = stage_states.get("_verdicts") or {}
     return _verdict_text(verdicts.get("REVIEW"))
+
+
+def _latest_review_head_sha(stage_states: dict, meta: dict) -> str:
+    """Return the head SHA the recorded REVIEW verdict judges, or ``""``.
+
+    Issue #2769 moved the head SHA out of the verdict token into its own
+    ``head_sha`` record field. Structural twin of :func:`_latest_review_verdict`:
+    prefers ``meta["latest_review_head_sha"]`` when ``sdlc_stage_query``
+    populated it, then reads the ``_verdicts["REVIEW"]`` record directly.
+
+    The router must stay import-free of ``tools/`` (the import-boundary
+    contract that also owns the duplicated ``_HEAD_SHA_TRAILER_RE`` below), so
+    this reimplements the field-first / legacy-trailer-second precedence
+    locally rather than calling ``tools._sdlc_utils.head_sha_of_record``.
+    """
+    meta_head = meta.get("latest_review_head_sha")
+    if isinstance(meta_head, str) and meta_head.strip():
+        return meta_head.strip()
+    record = (stage_states.get("_verdicts") or {}).get("REVIEW")
+    if isinstance(record, dict):
+        field = record.get("head_sha")
+        if isinstance(field, str) and field.strip():
+            return field.strip()
+    # Legacy fallback: the SHA is still embedded in the (normalize-mangled)
+    # verdict text. Permanent -- pre-split ledgers are never migrated.
+    match = _HEAD_SHA_TRAILER_RE.search(_latest_review_verdict(stage_states, meta))
+    return match.group(1) if match else ""
 
 
 def guard_g1_critique_loop(
@@ -901,14 +942,17 @@ def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
     return result
 
 
-# The stored REVIEW verdict may carry a ``REVIEW_CONTEXT head_sha=<hex>``
-# trailer naming the PR head commit it judged (emitted by /do-pr-review Step 5;
-# the same trailer tools/merge_predicate's freshness check consumes). The text
-# may have passed through ``normalize_verdict`` (uppercased, underscores mapped
-# to spaces), so the pattern matches both the raw and normalized forms, and SHA
-# comparison is case-insensitive. Kept in lockstep with
-# ``tools.merge_predicate._HEAD_SHA_TRAILER_RE`` (duplicated here because the
-# router must stay import-free of tools/ — the import-boundary contract).
+# The LEGACY read path for the head SHA a REVIEW verdict judged: ledgers written
+# before #2769 carry it as a ``REVIEW_CONTEXT head_sha=<hex>`` trailer inside the
+# verdict token itself. The text may have passed through ``normalize_verdict``
+# (uppercased, underscores mapped to spaces), so the pattern matches both the raw
+# and normalized forms, and SHA comparison is case-insensitive. Kept in lockstep
+# with ``tools._sdlc_utils._HEAD_SHA_TRAILER_RE``, which is the single definition
+# every tools/ reader shares; duplicated here because the router must stay
+# import-free of tools/ — the import-boundary contract.
+#
+# Current writes put the SHA in the record's own ``head_sha`` field, reached via
+# ``_latest_review_head_sha`` below.
 _HEAD_SHA_TRAILER_RE = re.compile(
     r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
 )
@@ -933,7 +977,8 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     - key present but EMPTY (the fail-closed lookup-failure sentinel, set
       alongside ``pr_head_sha_lookup_failed``) → **True (stale)** — a lookup
       failure must route toward re-review, never silently pass as fresh
-    - verdict has NO parseable head_sha trailer → **True (stale)** — an
+    - verdict attributes to NO head SHA — neither a ``head_sha`` record field
+      nor a legacy in-token trailer (#2769) → **True (stale)** — an
       unattributable verdict is re-reviewed at the current head, never trusted
       as fresh (re-review records a fresh verdict WITH the trailer, so this
       converges; loop-bound by G4)
@@ -947,10 +992,14 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     head_sha = context.get("pr_head_sha") or ""
     if not head_sha:
         return True
-    trailer = _HEAD_SHA_TRAILER_RE.search(verdict)
-    if not trailer:
+    # #2769: the verdict's head SHA lives in its own `head_sha` record field
+    # now (surfaced as `_meta.latest_review_head_sha`); the in-token trailer is
+    # the legacy fallback inside _latest_review_head_sha. An unattributable
+    # verdict yields "" and stays stale, exactly as before.
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
         return True
-    return trailer.group(1).lower() != head_sha.lower()
+    return recorded_head.lower() != head_sha.lower()
 
 
 def _review_verdict_is_stale(stage_states: dict) -> bool:
@@ -1181,14 +1230,71 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
 
 
 def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: dict) -> bool:
-    """Patch applied after review findings — re-review is required."""
+    """Owns every post-patch state whose REVIEW verdict is no longer trustworthy.
+
+    Two disjuncts, both meaning "a patch landed and the standing verdict does
+    not describe the current code":
+
+    1. ``last_dispatched_skill == /do-patch`` — the patch just ran.
+    2. ``_review_verdict_is_stale(stage_states)`` — the recorded verdict
+       predates the latest ``/do-patch`` dispatch, whatever ran since.
+
+    Disjunct 2 is the #2767(b) widening. Before it, a review → patch → review →
+    patch → review sequence could land on a **stale** verdict with
+    ``last_dispatched_skill == /do-pr-review``, which no row owned: row 7 needs
+    an absent verdict, row 8 steps aside precisely on staleness, rows 8c/8d/8e
+    all need an absent verdict — so the router returned
+    ``Blocked('no matching dispatch rule')``.
+
+    Rows 8 and 8b stay disjoint: row 8 (``_rule_review_has_findings``) returns
+    False whenever ``_review_verdict_is_stale`` is True, so fresh findings still
+    route to ``/do-patch`` at row 8 and only stale ones reach here.
+
+    Disjunct 2 also transfers one state away from the rows BELOW this one. This
+    row precedes 8f/9/10, so a **stale APPROVED** verdict is now re-reviewed
+    rather than advanced to ``/do-docs`` or the merge fast-path. That is
+    deliberate: an approval recorded before the latest patch does not describe
+    the code that patch produced, and advancing on it would merge code no review
+    ever saw. It converges -- the re-review records a verdict newer than the
+    patch dispatch, which row 9 then owns. If it does not converge, nothing
+    stops it; see the unbounded-loop note at the end of this docstring. See
+    ``TestStaleApprovedIsReReviewedNotAdvanced``.
+
+    Disjointness from rows 8c/8d/8e (which have no step-aside against disjunct
+    2, and one of which — 8c — actually *calls* this predicate):
+
+        ``_review_verdict_is_stale`` returns False whenever ``recorded_at`` is
+        absent, and ``recorded_at`` is absent exactly when no verdict was
+        recorded — ``tools.sdlc_verdict.record_verdict`` refuses to write a
+        record at all for an empty/non-string verdict, so the two fields are
+        written together or not at all. Rows 8c/8d/8e all require the ABSENCE
+        of a recorded verdict, therefore disjunct 2 is identically False on
+        every state they own.
+
+    No defensive step-asides are added on the strength of that proof.
+
+    NOT loop-bounded, despite what this docstring claimed until #2730. The
+    8 -> 8b loop alternates ``/do-patch`` with ``/do-pr-review``, and
+    ``compute_same_stage_count`` requires consecutive entries to share BOTH the
+    skill and the ``stage_snapshot``. The alternation fails the first test, and
+    ``_patch_cycle_count`` -- which ``build_stage_snapshot`` includes and
+    ``complete_stage("PATCH")`` increments every cycle -- fails the second. G2
+    caps critique cycles only; there is no patch-cycle equivalent. So a verdict
+    that stays permanently stale spins on ``/do-pr-review`` without escalating.
+    Tracked on #2801, which carries the measurements and the reason the obvious
+    one-line fix does not work.
+    """
     if not meta.get("pr_number"):
         return False
     # PATCH completed after REVIEW failed — need to re-review.
     if stage_states.get("PATCH") != STATUS_COMPLETED:
         return False
     last = meta.get("last_dispatched_skill") or ""
-    return last == SKILL_DO_PATCH
+    if last == SKILL_DO_PATCH:
+        return True
+    # #2767(b): the patch may have been followed by other dispatches. A verdict
+    # older than the latest /do-patch is stale no matter what ran since.
+    return _review_verdict_is_stale(stage_states)
 
 
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1408,7 +1514,10 @@ _rule_branch_exists_no_pr.__doc__ = "Branch exists, no PR"
 _rule_tests_failing.__doc__ = "Tests failing"
 _rule_pr_exists_no_review.__doc__ = "PR exists, no review"
 _rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR tech debt)"
-_rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
+_rule_patch_applied_after_review.__doc__ = (
+    "Patch applied after review findings (last dispatch was /do-patch, "
+    "OR the recorded review verdict is stale against the latest /do-patch)"
+)
 _rule_review_in_progress_no_verdict.__doc__ = (
     "Review in_progress, no verdict recorded (stalled) — re-review"
 )
@@ -1670,10 +1779,139 @@ def decide_next_dispatch(
             )
         return Blocked(
             reason="no matching dispatch rule",
-            guard_id=None,
+            guard_id=NO_RULE_GUARD_ID,
         )
 
     return primary
+
+
+def stage_for_skill(skill: str | None) -> str | None:
+    """Return the pipeline stage a ``/do-*`` skill executes, or ``None``.
+
+    Inverse of ``agent.pipeline_graph.STAGE_TO_SKILL``, derived from it rather
+    than hand-maintained so the two cannot drift (#2730). ``STAGE_TO_SKILL`` is
+    1:1, so the inversion is unambiguous.
+    """
+    for stage, mapped in STAGE_TO_SKILL.items():
+        if mapped == skill:
+            return stage
+    return None
+
+
+_NO_PRIOR_STATUS = object()
+
+
+def confirm_or_append_stage_entry(
+    stage_states: dict,
+    stage: str,
+    now: datetime | None = None,
+    pr_number: int | None = None,
+    prior_status: object = _NO_PRIOR_STATUS,
+) -> dict:
+    """Record that ``stage`` was entered, without double-counting the router.
+
+    Issue #2730. Two different actors observe a stage starting, and before this
+    only one of them recorded it:
+
+    - the router calls ``record_dispatch`` *before* invoking a sub-skill, which
+      is the only signal available if the skill dies before it starts;
+    - the stage itself transitions to ``in_progress``, which happens on EVERY
+      entry path including the ones that never reach the router (a skill-to-skill
+      chain such as ``/do-build`` → ``/do-patch``, and the PreToolUse hook, which
+      is the dominant marker writer on the bridge).
+
+    Recording in both places naively would double every router-driven dispatch
+    and halve G4's effective threshold. Instead the router's record is an
+    **unconfirmed slot** (``confirmed: False``) and this function upgrades it in
+    place. When no unconfirmed slot exists the stage was reached without the
+    router, and a confirmed record is appended.
+
+    The result is exactly one record per stage entry, from either path, while a
+    genuine second entry still appends a second record -- which is the whole G4
+    signal and must not be deduplicated away.
+
+    ``last_dispatched_skill`` (``history[-1]["skill"]``) consequently becomes
+    *true* on the bypass path rather than naming whichever skill the router last
+    saw. That is the fix, not a side effect: rows 8b/8d gate on it.
+
+    ``prior_status`` is the entering stage's status **before** it flipped to
+    ``in_progress``, and it is what keeps the two writers comparable. The router
+    records its slot before invoking, so its snapshot sees the pre-entry status;
+    an appended record is written after ``_activate_stage`` has already flipped
+    the stage, so without this it would see ``in_progress`` instead. G4 breaks
+    its walk on the first snapshot mismatch, so mixing the two observation
+    points makes a loop that alternates router-driven and bypass entries count
+    *lower* than it did before this feature existed -- adding the correct record
+    would lower the streak. Callers that know the pre-entry status pass it; the
+    snapshot is then built against that value, matching the router.
+    """
+    history = stage_states.get("_sdlc_dispatches")
+    if not isinstance(history, list):
+        history = []
+
+    # ONLY the newest record is eligible as this entry's router slot. Scanning
+    # further back would let a stale slot -- a dispatch recorded and then never
+    # started -- absorb an unrelated later entry, dropping that entry's record
+    # and leaving `last_dispatched_skill` naming the wrong skill: exactly the
+    # defect this function exists to fix.
+    #
+    # This narrows the hole rather than closing it. If the sub-skill dies before
+    # `start_stage`, its slot IS the newest record, and a later entry into the
+    # same stage upgrades that dead slot instead of appending -- collapsing two
+    # dispatch events into one record and under-counting G4 by one. Closing it
+    # needs an age-out against `last["at"]`, which needs a defensible staleness
+    # threshold; the under-count is the safe direction (a missed escalation, not
+    # a false one), so it is left open deliberately rather than guessed at.
+    last = history[-1] if history else None
+    if isinstance(last, dict) and last.get("stage") == stage and last.get("confirmed") is False:
+        last["confirmed"] = True
+        # Re-stamp the time: `_latest_dispatch_at` (rows 8 and 2b) must report
+        # when the stage actually started, not when the router queued it.
+        last["at"] = (now or datetime.now(UTC)).isoformat()
+        stage_states["_sdlc_dispatches"] = history
+        return stage_states
+
+    skill = STAGE_TO_SKILL.get(stage)
+    if skill is None:
+        # An unknown stage has no skill to attribute the entry to. Recording a
+        # skill-less record would break every consumer of history[-1]["skill"].
+        return stage_states
+
+    # Inherit the PR number from the newest record that carries one. The bypass
+    # path has no `_meta` to read it from, and `pr_number` is IN the snapshot
+    # G4 compares -- so recording None beside a router record's real value
+    # breaks the streak at every router/bypass boundary, making the very records
+    # this function adds uncountable.
+    if pr_number is None:
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            snapshot = entry.get("stage_snapshot")
+            if isinstance(snapshot, dict) and snapshot.get("pr_number") is not None:
+                pr_number = snapshot["pr_number"]
+                break
+
+    # Build the snapshot against the stage's PRE-entry status, so this record is
+    # comparable with a router slot recorded before the same transition. The
+    # override is an explicit view rather than a mutate-and-restore of the
+    # caller's dict, so the invariant stays local to this function instead of
+    # depending on `build_stage_snapshot` copying eagerly two calls away.
+    snapshot_states = None
+    if prior_status is not _NO_PRIOR_STATUS:
+        snapshot_states = dict(stage_states)
+        if prior_status is None:
+            snapshot_states.pop(stage, None)
+        else:
+            snapshot_states[stage] = prior_status
+
+    return record_dispatch(
+        stage_states,
+        skill=skill,
+        now=now,
+        pr_number=pr_number,
+        confirmed=True,
+        snapshot_states=snapshot_states,
+    )
 
 
 def record_dispatch(
@@ -1681,6 +1919,8 @@ def record_dispatch(
     skill: str,
     now: datetime | None = None,
     pr_number: int | None = None,
+    confirmed: bool = True,
+    snapshot_states: dict | None = None,
 ) -> dict:
     """Append a dispatch record to ``stage_states._sdlc_dispatches``.
 
@@ -1704,14 +1944,27 @@ def record_dispatch(
             ``pr_number`` is ``None`` — the explicit argument is the sole
             provenance (``sdlc_stage_query`` resolves the PR number from the
             ``AgentSession.pr_number`` field into ``_meta.pr_number``).
+        confirmed: ``False`` marks the record a **router slot** — a dispatch the
+            router recorded immediately before invoking a sub-skill, which the
+            stage entry later upgrades in place rather than duplicating. See
+            ``confirm_or_append_stage_entry`` for the protocol. ``True`` (the
+            default) records a dispatch that is already known to have started.
+        snapshot_states: Optional alternative source for the ``stage_snapshot``
+            projection. The record is still appended to ``stage_states``; only
+            the snapshot is built from this. Callers use it to snapshot a stage
+            transition from a specific side without mutating the live dict —
+            see ``confirm_or_append_stage_entry``'s ``prior_status``.
 
     Returns:
-        The mutated stage_states dict.
+        The mutated stage_states dict. The appended record carries ``skill``,
+        ``at``, ``stage_snapshot``, ``stage`` and ``confirmed``; the last two
+        are deliberately outside the snapshot (see below).
     """
     timestamp = (now or datetime.now(UTC)).isoformat()
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
-    view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
+    source = stage_states if snapshot_states is None else snapshot_states
+    view = {k: v for k, v in source.items() if k != "_sdlc_dispatches"}
     snapshot = build_stage_snapshot(view, meta={"pr_number": pr_number})
 
     history = stage_states.setdefault("_sdlc_dispatches", [])
@@ -1722,6 +1975,15 @@ def record_dispatch(
             "skill": skill,
             "at": timestamp,
             "stage_snapshot": snapshot,
+            # #2730: the stage this dispatch executes, so the stage-entry
+            # upgrade path can find its slot without re-deriving it from the
+            # skill string at read time. NOT in `stage_snapshot` -- G4 compares
+            # snapshots, and a per-dispatch-varying field there kills
+            # oscillation detection outright.
+            "stage": stage_for_skill(skill),
+            # False marks a router slot awaiting confirmation that the stage
+            # actually started. See confirm_or_append_stage_entry.
+            "confirmed": confirmed,
         }
     )
     # FIFO-evict oldest entries to bound the list.

@@ -313,7 +313,6 @@ class TestNoReviewStillCannotMerge:
     """Requirement 3: skipping PLAN/CRITIQUE weakens nothing about REVIEW."""
 
     def test_docs_marker_refused_without_a_review_verdict(self, monkeypatch, issue_number, cleanup):
-
         run_id = _mint_run_id(issue_number, monkeypatch)
         for _result, code in _record_skips(issue_number, run_id):
             assert code == 0
@@ -381,7 +380,6 @@ class TestCannotForgeAnApproval:
     """Requirement 4: no call sequence mints a REVIEW completion with no verdict."""
 
     def test_review_cannot_be_skipped(self, monkeypatch, issue_number, cleanup):
-
         run_id = _mint_run_id(issue_number, monkeypatch)
         for stage in ("REVIEW", "DOCS", "MERGE"):
             result, code = _marker(stage, "skipped", issue_number, run_id)
@@ -488,7 +486,7 @@ class TestCannotForgeAnApproval:
         plan = tmp_path / "some-plan.md"
         plan.write_text(f"tracking: #{issue_number}\n")
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+        with patch("tools.lane_identity.find_plan_path", return_value=plan):
             result, code = _marker("CRITIQUE", "skipped", issue_number, run_id)
         assert code == 1
         assert result["reason"] == "PLAN_EXISTS_NOT_SKIPPABLE"
@@ -571,7 +569,7 @@ class TestImplicitSkipIsBoundedTheSameWayAsTheExplicitOne:
         run_id = _mint_run_id(issue_number, monkeypatch)
         plan = f"docs/plans/fake-{issue_number}.md"
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+        with patch("tools.lane_identity.find_plan_path", return_value=plan):
             result, code = _marker("DOCS", "completed", issue_number, run_id)
 
         assert code == 1

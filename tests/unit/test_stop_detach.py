@@ -27,6 +27,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 HOOKS_DIR = Path(__file__).parent.parent.parent / ".claude" / "hooks"
 
 for _p in (str(HOOKS_DIR),):
@@ -162,7 +164,7 @@ class TestStaleLockReaping:
         # A definitely-dead PID: spawn a trivial subprocess and wait for it
         # to exit. Avoids os.fork() in a (possibly multi-threaded) test
         # process, which Python warns can deadlock.
-        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], env=subprocess_env())
         proc.wait()
         dead_pid = proc.pid
 

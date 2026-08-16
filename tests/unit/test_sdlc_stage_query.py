@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
 
+from tests.db_claim import subprocess_env
+
 # Resolve the repo root for subprocess cwd
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -440,8 +442,9 @@ class TestCLIOutput:
         # AGENT_SESSION_ID when no args are given, so inheriting the parent
         # env would cause a real Redis query and a non-empty result when
         # this test runs inside an SDLC session.
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [sys.executable, "-m", "tools.sdlc_stage_query", "--format", "legacy"],
             capture_output=True,
@@ -458,6 +461,7 @@ class TestCLIOutput:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=subprocess_env(project_root=REPO_ROOT),
         )
         assert result.returncode == 0
         assert "--session-id" in result.stdout
@@ -599,8 +603,9 @@ class TestEnrichedPayload:
 
     def test_legacy_flat_shape_preserved(self):
         """--format legacy returns the old flat shape."""
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [
                 sys.executable,
@@ -620,8 +625,9 @@ class TestEnrichedPayload:
 
     def test_default_json_shape_includes_stages_and_meta(self):
         """Default (no --format flag) returns the enriched shape."""
-        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
-        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        clean_env = subprocess_env(project_root=REPO_ROOT)
+        clean_env.pop("VALOR_SESSION_ID", None)
+        clean_env.pop("AGENT_SESSION_ID", None)
         result = subprocess.run(
             [sys.executable, "-m", "tools.sdlc_stage_query"],
             capture_output=True,
@@ -782,7 +788,7 @@ class TestEnrichedPayload:
             "---\n\n# Plan\n"
         )
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -798,7 +804,7 @@ class TestEnrichedPayload:
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("---\nstatus: Ready\nrevision_applied: true\n---\n\n# Plan\n")
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -813,7 +819,7 @@ class TestEnrichedPayload:
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("---\nstatus: Ready\nrevision_applied_at: not-a-date\n---\n\n# Plan\n")
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
@@ -1109,14 +1115,16 @@ class TestResolveTargetRepo:
         assert result == "tomcounsell/ai"
 
     def test_compute_meta_resolves_repo_once(self, monkeypatch):
-        """_resolve_target_repo called exactly once per _compute_meta invocation."""
+        """_resolve_target_repo_fallback called exactly once per _compute_meta."""
         call_count = []
 
         def fake_resolve():
             call_count.append(1)
             return "tomcounsell/ai"
 
-        with patch("tools.sdlc_stage_query._resolve_target_repo", side_effect=fake_resolve):
+        with patch(
+            "tools.sdlc_stage_query._resolve_target_repo_fallback", side_effect=fake_resolve
+        ):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
                 with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
@@ -1127,7 +1135,42 @@ class TestResolveTargetRepo:
                         mock_session.slug = None
                         _compute_meta({}, mock_session, None)
         assert len(call_count) == 1, (
-            f"_resolve_target_repo called {len(call_count)} times, expected 1"
+            f"_resolve_target_repo_fallback called {len(call_count)} times, expected 1"
+        )
+
+    def test_meta_and_lane_slug_share_one_repo_resolution(self, monkeypatch):
+        """One tick, one `gh repo view`.
+
+        `_compute_meta` and `resolve_lane_slug` each need the target repo. The
+        CLI wraps the tick in `cached_target_repo_resolution()` so the two
+        collapse to a single underlying resolution; without the scope this is
+        two `gh repo view` subprocesses per tick whenever GH_REPO is unset.
+        """
+        import tools._sdlc_utils as sdlc_utils
+        from tools._sdlc_utils import cached_target_repo_resolution
+
+        call_count = []
+
+        def fake_resolve():
+            call_count.append(1)
+            return "tomcounsell/ai"
+
+        monkeypatch.setattr(sdlc_utils, "_resolve_target_repo", fake_resolve)
+        monkeypatch.delenv("GH_REPO", raising=False)
+
+        with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    from tools.sdlc_stage_query import _compute_meta
+
+                    mock_session = MagicMock()
+                    mock_session.pr_number = None
+                    mock_session.slug = None
+                    with cached_target_repo_resolution():
+                        _compute_meta({}, mock_session, 927356)
+
+        assert len(call_count) == 1, (
+            f"target repo resolved {len(call_count)} times inside one cached scope, expected 1"
         )
 
 
@@ -1290,3 +1333,98 @@ class TestResolveIssueRecord:
             result = query_enriched(issue_number=700504)
 
         assert result["_meta"]["pr_number"] == 777
+
+
+# ---------------------------------------------------------------------------
+# Issue #2769: `_meta.latest_review_head_sha`.
+#
+# `_extract_verdict_text` flattens a `_verdicts[stage]` record to its `verdict`
+# string and drops every sibling key, so the new `head_sha` FIELD is invisible
+# to the router without this meta slot.
+#
+# All FOUR `_verdicts["REVIEW"]` shapes are exercised, at BOTH the
+# `_compute_meta` and `decide_next_dispatch` levels, because the regression is
+# router-wide. The `None` shape (no "REVIEW" key at all) is the COMMON path --
+# every issue still in PLAN/BUILD/TEST is in it -- and letting `None` reach the
+# trailer regex raises TypeError, which `sdlc_next_skill._resolve_enriched`'s
+# broad `except` swallows into an EMPTY ledger, routing a fully-worked issue
+# back to /do-plan.
+# ---------------------------------------------------------------------------
+
+_2769_SHA = "abcdef0123456789abcdef0123456789abcdef01"
+
+_2769_SHAPES = [
+    ("field-shape", {"REVIEW": {"verdict": "APPROVED", "head_sha": _2769_SHA}}, _2769_SHA),
+    (
+        "legacy-mangled-dict",
+        {"REVIEW": {"verdict": f"APPROVED REVIEW CONTEXT HEAD SHA={_2769_SHA.upper()}"}},
+        _2769_SHA,
+    ),
+    ("bare-str-record", {"REVIEW": f"APPROVED REVIEW_CONTEXT head_sha={_2769_SHA}"}, _2769_SHA),
+    ("no-review-key", {"CRITIQUE": {"verdict": "READY TO BUILD"}}, None),
+]
+
+
+class TestLatestReviewHeadShaMeta:
+    def _meta_for(self, verdicts):
+        from tools.sdlc_stage_query import _compute_meta
+
+        raw_states = {"ISSUE": "completed", "_verdicts": verdicts}
+        with (
+            patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
+            patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
+        ):
+            return _compute_meta(raw_states, MagicMock(pr_number=None), None)
+
+    def test_default_meta_carries_the_key(self):
+        """_default_meta must stay key-for-key with _compute_meta: a key in one
+        and absent from the other makes meta.get() mean different things on the
+        session-found vs session-missing paths."""
+        from tools.sdlc_stage_query import _default_meta
+
+        assert "latest_review_head_sha" in _default_meta()
+        assert _default_meta()["latest_review_head_sha"] is None
+
+    def test_every_verdict_shape_yields_the_expected_head_sha(self):
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            got = meta["latest_review_head_sha"]
+            if expected is None:
+                assert got is None, label
+            else:
+                assert got is not None and got.lower() == expected, label
+
+    def test_no_shape_raises(self):
+        """The whole point: none of the four shapes may raise. A TypeError or
+        AttributeError here is swallowed upstream into an empty ledger."""
+        for label, verdicts, _ in _2769_SHAPES:
+            self._meta_for(verdicts)  # must not raise
+        # Belt and braces: a wholly absent _verdicts key.
+        self._meta_for({})
+
+    def test_decide_next_dispatch_survives_every_shape(self):
+        """Router level: the same four shapes must route without exploding."""
+        from agent.sdlc_router import decide_next_dispatch
+
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            stage_states = {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "_verdicts": verdicts,
+            }
+            decision = decide_next_dispatch(stage_states, meta, {})
+            assert decision is not None, label
+
+    def test_router_head_sha_reader_agrees_with_meta_for_every_shape(self):
+        from agent.sdlc_router import _latest_review_head_sha
+
+        for label, verdicts, expected in _2769_SHAPES:
+            meta = self._meta_for(verdicts)
+            got = _latest_review_head_sha({"_verdicts": verdicts}, meta)
+            assert got.lower() == (expected or ""), label
+            # And with an EMPTY meta (the _resolve_enriched degraded path), the
+            # router still reads the record directly.
+            direct = _latest_review_head_sha({"_verdicts": verdicts}, {})
+            assert direct.lower() == (expected or ""), label

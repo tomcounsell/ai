@@ -17,7 +17,6 @@ class TestExtractSdlcEnvVars:
         session.pr_url = kwargs.get("pr_url", None)
         session.branch_name = kwargs.get("branch_name", None)
         session.slug = kwargs.get("slug", None)
-        session.slug = kwargs.get("slug", None)
         session.plan_url = kwargs.get("plan_url", None)
         session.issue_url = kwargs.get("issue_url", None)
         return session
@@ -141,7 +140,7 @@ class TestSdlcTargetRepoEnvVar:
         """
         from pathlib import Path
 
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         target_repo = tmp_path / "client-repo"
         plans_dir = target_repo / "docs" / "plans"
@@ -164,7 +163,7 @@ class TestSdlcTargetRepoEnvVar:
 
     def test_sdlc_target_repo_unset_uses_git_toplevel(self, tmp_path, monkeypatch):
         """When SDLC_TARGET_REPO is not set, git-toplevel drives resolution."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
         plan = self._write_plan(plans_dir, "f.md", "tracking: #99\n")
@@ -176,6 +175,61 @@ class TestSdlcTargetRepoEnvVar:
             result = find_plan_path(99)
 
         assert result == plan
+
+
+class TestNoSelfIdenticalOrArms:
+    """Guard the #2756 bug class: `X or X`, where the fallback arm is dead.
+
+    `_extract_sdlc_env_vars` carried `getattr(session, "slug", None) or
+    getattr(session, "slug", None)` for two years. Asserting on the one
+    expression would let the same copy-paste reappear on the next field, so
+    this walks every `or` in the module instead.
+    """
+
+    def test_slug_env_var_resolves_from_slug_attribute(self):
+        """SDLC_SLUG comes from `session.slug` with no fallback attribute."""
+        from unittest.mock import MagicMock
+
+        from agent.sdk_client import _extract_sdlc_env_vars
+
+        # spec=[] means any attribute other than those set below raises
+        # AttributeError, so a reintroduced fallback arm reading some other
+        # field would surface here rather than passing silently.
+        session = MagicMock(spec=[])
+        session.status = "running"
+        session.created_at = 1000
+        session.pr_url = None
+        session.branch_name = None
+        session.slug = "lane-identity"
+        session.plan_url = None
+        session.issue_url = None
+
+        with patch("models.agent_session.AgentSession") as mock_as:
+            mock_as.query.filter.return_value = [session]
+            result = _extract_sdlc_env_vars("test-session-id")
+
+        assert result["SDLC_SLUG"] == "lane-identity"
+
+    def test_no_or_expression_repeats_an_operand(self):
+        """No `or` in agent/sdk_client.py has two structurally identical arms."""
+        import ast
+        from pathlib import Path
+
+        source_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
+        tree = ast.parse(source_path.read_text())
+
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.Or):
+                continue
+            dumped = [ast.dump(v) for v in node.values]
+            if len(dumped) != len(set(dumped)):
+                offenders.append(node.lineno)
+
+        assert not offenders, (
+            f"agent/sdk_client.py has `or` expressions with identical arms at "
+            f"lines {offenders} — the fallback arm is dead code (#2756)"
+        )
 
 
 class TestObserverRemoved:

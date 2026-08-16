@@ -11,13 +11,14 @@ It runs the resolver in a real subprocess whose cwd is the temp repo, so the
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.db_claim import subprocess_env
 
 pytestmark = pytest.mark.sdlc
 
@@ -39,10 +40,11 @@ def _make_temp_repo(tmp_path: Path) -> Path:
 
 def _resolve_plan_in(repo: Path, issue_number: int) -> str:
     """Run find_plan_path in a subprocess with cwd=repo and no SDLC_TARGET_REPO."""
-    env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
+    env = subprocess_env(project_root=str(REPO_ROOT))
+    env.pop("SDLC_TARGET_REPO", None)
     code = textwrap.dedent(
         f"""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         p = find_plan_path({issue_number})
         print(p if p else "")
         """
@@ -52,7 +54,7 @@ def _resolve_plan_in(repo: Path, issue_number: int) -> str:
         cwd=str(repo),
         capture_output=True,
         text=True,
-        env={**env, "PYTHONPATH": str(REPO_ROOT)},
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -95,10 +97,9 @@ def test_boundary_longer_issue_number_does_not_match(tmp_path):
 
 def _resolve_plan_with_env(env_repo: Path, issue_number: int) -> str:
     """Run find_plan_path with SDLC_TARGET_REPO set, cwd forced to REPO_ROOT (ai-repo)."""
-    env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
     code = textwrap.dedent(
         f"""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         p = find_plan_path({issue_number})
         print(p if p else "")
         """
@@ -108,11 +109,7 @@ def _resolve_plan_with_env(env_repo: Path, issue_number: int) -> str:
         cwd=str(REPO_ROOT),  # force cwd to ai-repo (simulates sdlc-tool behaviour)
         capture_output=True,
         text=True,
-        env={
-            **env,
-            "PYTHONPATH": str(REPO_ROOT),
-            "SDLC_TARGET_REPO": str(env_repo),
-        },
+        env=subprocess_env(project_root=str(REPO_ROOT), SDLC_TARGET_REPO=str(env_repo)),
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -149,10 +146,11 @@ def test_file_fallback_bare_mention_suppressed(tmp_path):
     non_git_dir = tmp_path / "not-a-repo"
     non_git_dir.mkdir()
 
-    env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
+    env = subprocess_env(project_root=str(REPO_ROOT))
+    env.pop("SDLC_TARGET_REPO", None)
     code = textwrap.dedent(
         """
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
         # Issue 8888888 extremely unlikely to be in the real ai-repo plans dir.
         p = find_plan_path(8888888)
         print(p if p else "")
@@ -163,7 +161,7 @@ def test_file_fallback_bare_mention_suppressed(tmp_path):
         cwd=str(non_git_dir),  # not a git repo — forces __file__ fallback
         capture_output=True,
         text=True,
-        env={**env, "PYTHONPATH": str(REPO_ROOT)},
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     # When __file__ fallback is used and no tracking: match exists, bare-#N

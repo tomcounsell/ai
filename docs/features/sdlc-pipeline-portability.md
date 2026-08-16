@@ -19,7 +19,7 @@ instead of silent lag.
 
 ### D1 — Portable plan resolution
 
-`find_plan_path()` (`tools/_sdlc_utils.py`) resolves the `docs/plans` directory
+`find_plan_path()` (`tools/lane_identity.py`) resolves the `docs/plans` directory
 in this order:
 
 1. `SDLC_TARGET_REPO` env var (explicit override wins — preserves the
@@ -136,7 +136,7 @@ Three complementary fixes close the PLAN↔CRITIQUE loop that occurred when runn
 
 **Fix 1 — SDLC_TARGET_REPO export:** `/do-sdlc` Step 2 now captures `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports `SDLC_TARGET_REPO` for the lifetime of the supervision loop. `sdlc-tool` inherits it (bash `exec` propagates the env). Both the bridge/worker path (`agent/sdk_client.py:1590`) and the local `/do-sdlc` path now export the same env var shape (absolute filesystem path). See `sdlc-tool-resolver.md` for the `SDLC_TARGET_REPO` vs `SDLC_REPO` (GitHub slug) distinction.
 
-**Fix 2 — `find_plan_path` hardening:** When the `__file__`-fallback resolution path is taken (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual fallback now returns `None` instead of a foreign plan. The `tracking:` match remains authoritative on all paths. This scopes the rejection strictly to the ai-repo `__file__` fallback branch, so a same-repo issue without a `tracking:` match still works (the git-toplevel and SDLC_TARGET_REPO paths keep the fallback).
+**Fix 2 — `find_plan_path` resolves on one rung:** a `tracking:` frontmatter line naming the issue. There is no textual-mention fallback on any resolution path. A plan that merely mentions `#N` in prose does not own N, and a "Not building #N" No-Gos line is the *opposite* of ownership — which is exactly where the deleted fallback answered confidently and wrongly (#2735). An issue whose plan carries no `tracking:` line now resolves to `None`; `tests/unit/test_plan_docs.py` is the durable guard that every lane plan carries one.
 
 **Fix 3 — `revision_applied`-stripped plan hash:** `compute_plan_body_hash` (new, in `tools/sdlc_verdict.py`) strips **only** the `revision_applied:` frontmatter key before hashing — all other frontmatter (`status:`, `type:`, `tracking:`, `last_comment_id:`) and the full body still contribute to the hash. G5's staleness input (`context["current_plan_hash"]` in `tools/sdlc_next_skill.py`) and the writer's `_compute_artifact_hash` both use `compute_plan_body_hash`, so a `/do-plan` revision write flipping `revision_applied: true` does NOT bust the G5 cache. A real body or other frontmatter edit still busts it. `compute_plan_hash` (full-bytes) is retained for callers that explicitly want the complete fingerprint.
 
@@ -155,7 +155,9 @@ forward.
 
 ## Key Files
 
-- `tools/_sdlc_utils.py` — `find_plan_path` (D1, D2, D8), `_git_toplevel` helper.
+- `tools/lane_identity.py` — `find_plan_path` (D1, D2, D8); the plans-dir ladder
+  reaches `_git_toplevel` through the `tools._sdlc_utils` module, which still owns it.
+- `tools/_sdlc_utils.py` — `_git_toplevel` helper.
 - `agent/sdlc_router.py` — row-4b/4c predicates (D3), `compute_same_stage_count`
   reset (D5), `guard_g4_oscillation` docstring, G5 transparent-rewrite migration (D8).
 - `tools/sdlc_verdict.py` — `compute_plan_hash` (full-bytes), `compute_plan_body_hash`

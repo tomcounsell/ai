@@ -26,8 +26,26 @@ machine-global registry dir. The lock is held (fd kept open) for the whole
 process lifetime, so no other live process can claim the same db. When a process
 dies — cleanly or via SIGKILL — the OS releases its flocks automatically, so a
 crashed run never strands a db (no PID-liveness heuristic or reaper needed).
-Graceful fallback to the legacy ``worker_id+1`` derivation if the pool is
-exhausted or the registry is unreachable — never worse than before.
+
+Ownership is queryable, and it is enforced (issue #2628). :func:`claimed_test_dbs`
+returns the set of db numbers this process actually owns, and the flush guard in
+``tests/conftest.py`` permits ``flushdb()`` only against that set. Before #2628 a
+call site was trusted to re-derive its own db number, and re-deriving it wrong was
+silent: two call sites kept computing the pre-#2060 ``gw{N} -> db{N+1}`` answer and
+began wiping the datasets of unrelated live pytest processes, which is what made
+the suite's failure set rotate run to run. A test that needs a SECOND database asks
+for one through :func:`claim_scratch_test_db` (or the ``scratch_test_db`` fixture)
+so it is owned too; nothing computes a db number for itself.
+
+Exhaustion policy (issue #2628): when every slot is held by a live process the
+claim polls the pool for ``TEST_DB_CLAIM_WAIT_S`` seconds and then raises. It does
+NOT fall back to the legacy derivation any more — a colliding database is strictly
+worse than a clear failure, because it silently produces the cross-process
+corruption this module exists to prevent. The failure is sticky
+(``_CLAIM_FAILURE``), so the wait is paid once per process rather than once per
+caller. The registry-unreachable path keeps its legacy fallback: no lock can be
+taken there at all, so a collision is unavoidable and degrading loudly beats
+refusing to run.
 """
 
 from __future__ import annotations
@@ -47,10 +65,42 @@ _logger = logging.getLogger("tests.db_claim")
 # server's ``databases`` setting or flushdb() on the claimed db raises).
 _TEST_DB_POOL_MAX = int(os.environ.get("TEST_DB_POOL_MAX", "15"))
 
+# How long to keep polling for a free slot before giving up (#2628).
+# Provisional / tunable — override via TEST_DB_CLAIM_WAIT_S. Deliberately short:
+# in the contention state a wait actually targets (two concurrent ``-n auto``
+# runs on a 10-core box demand 20 of 15 slots, each run taking ~20 minutes) no
+# slot frees inside any tolerable window, so a long wait only delays an
+# identical error. 30 s absorbs a sibling that is already tearing down and stays
+# well inside pytest's ``--timeout=420`` ceiling.
+_TEST_DB_CLAIM_WAIT_S = int(os.environ.get("TEST_DB_CLAIM_WAIT_S", "30"))
+
+# Interval between pool sweeps while waiting, so a freed slot is picked up
+# promptly instead of after one long sleep.
+_TEST_DB_CLAIM_POLL_S = 1.0
+
 # Process-lifetime cache of this process's claimed db number, and the held lock
 # fds (kept open so the flocks persist until the process exits or releases).
 _CLAIMED_TEST_DB: int | None = None
 _CLAIM_LOCK_FDS: list[int] = []
+
+# Every db number this process owns — the primary claim, the scratch claim, and
+# the registry-unreachable fallback number alike. This is the authority the
+# conftest flush guard consults, so a number that is returned but NOT registered
+# here would have its own legitimate flush denied. Populate it on every path that
+# returns a db (#2628).
+_CLAIMED_DB_NUMS: set[int] = set()
+
+# The optional SECOND db, for the rare test that needs a database other than its
+# own. Memoized like the primary claim: an un-memoized scratch claim would take a
+# fresh pool slot per requesting test, with no release path, and walk the pool
+# into the exhaustion error below.
+_CLAIMED_SCRATCH_DB: int | None = None
+
+# Sticky exhaustion memo (#2628). ``_CLAIMED_TEST_DB`` is assigned only on
+# success paths, so without this every later caller would re-enter the poll and
+# pay the wait again — 30 s x ~1200 tests per worker, invisible to
+# ``--timeout=420`` because no single test exceeds it.
+_CLAIM_FAILURE: str | None = None
 
 
 def _test_db_claim_dir() -> str:
@@ -95,6 +145,11 @@ def _try_claim_db_slot(claim_dir: str, n: int) -> bool:
     dead owner's slot is instantly reclaimable with no PID bookkeeping. The fd
     is intentionally leaked into ``_CLAIM_LOCK_FDS`` to hold the lock for the
     process lifetime.
+
+    The db NUMBER is registered in ``_CLAIMED_DB_NUMS`` in the same step that
+    appends the fd, so ownership is observable strictly before any caller can
+    act on the returned number — otherwise the very first flush of a freshly
+    claimed db would race the guard that authorises it (#2628, Race 3).
     """
     path = os.path.join(claim_dir, f"{n}.lock")
     try:
@@ -108,49 +163,122 @@ def _try_claim_db_slot(claim_dir: str, n: int) -> bool:
         os.close(fd)
         return False
     # We own the lock. Record pid/ts for human debugging only (NOT correctness).
+    # Best-effort by design: the file's CONTENTS are never read back anywhere in
+    # this module, so a failed write cannot affect who owns the slot.
     try:
         os.ftruncate(fd, 0)
         os.write(fd, f"{os.getpid()}\n{int(time.time())}\n".encode())
     except OSError:
         pass
     _CLAIM_LOCK_FDS.append(fd)  # keep open -> hold the flock for the process
+    _CLAIMED_DB_NUMS.add(n)  # ownership is observable before the number is used
     return True
+
+
+def _exhaustion_message() -> str:
+    return (
+        f"all {_TEST_DB_POOL_MAX} test-DB slots are held by live processes and none "
+        f"freed within {_TEST_DB_CLAIM_WAIT_S}s. Too many concurrent pytest runs on "
+        "this machine. Free orphaned workers with `scripts/reap-xdist.sh --apply`, or "
+        "wait for a sibling run to finish, then retry. Refusing to fall back to a "
+        "colliding database: that is what wipes another live run's data mid-test "
+        "(#2628)."
+    )
 
 
 def claim_test_db() -> int:
     """Return this process's unique test db, claiming one on first call (#2060).
 
-    Memoized for the process lifetime. Falls back to the legacy per-worker
-    derivation (logging a WARNING) if the registry is unreachable or every slot
-    in the pool is held by a live process.
+    Memoized for the process lifetime. Polls the pool for up to
+    ``_TEST_DB_CLAIM_WAIT_S`` seconds and then raises ``RuntimeError`` rather
+    than returning a database another live process owns (#2628). The registry-
+    unreachable path still degrades to the legacy derivation with a WARNING —
+    there no lock can be taken at all, so refusing to run buys nothing.
     """
-    global _CLAIMED_TEST_DB
+    global _CLAIMED_TEST_DB, _CLAIM_FAILURE
+    # Sticky failure first, AHEAD of the memo: ``_CLAIMED_TEST_DB`` is assigned
+    # only on success, so without this a failed claim would re-enter the poll on
+    # every later call and pay the wait again (#2628).
+    if _CLAIM_FAILURE is not None:
+        raise RuntimeError(_CLAIM_FAILURE)
     if _CLAIMED_TEST_DB is not None:
         return _CLAIMED_TEST_DB
     try:
         claim_dir = _test_db_claim_dir()
     except OSError as e:
         _CLAIMED_TEST_DB = _legacy_test_db_num()
+        # Register the number even though no flock backs it: the flush guard
+        # denies any db absent from this set, so skipping this would turn a
+        # documented graceful degradation into a whole-process setup outage.
+        _CLAIMED_DB_NUMS.add(_CLAIMED_TEST_DB)
         _logger.warning(
             "test-db claim registry unavailable (%s); falling back to legacy db=%d",
             e,
             _CLAIMED_TEST_DB,
         )
         return _CLAIMED_TEST_DB
+    # Bounded poll. Race 1 (hold-and-wait): two concurrent runs can each hold a
+    # partial allocation and wait on the other, so the wait MUST be bounded —
+    # that is what turns a deadlock into a loud, diagnosable failure. The
+    # structural escalation, deliberately deferred until a deadlock is actually
+    # observed, is all-or-nothing allocation by the xdist controller.
+    started = time.monotonic()
+    while True:
+        for n in range(1, _TEST_DB_POOL_MAX + 1):
+            if _try_claim_db_slot(claim_dir, n):
+                _CLAIMED_TEST_DB = n
+                return n
+        # Read the budget as a module attribute on every iteration so tests can
+        # monkeypatch it to 0 — a default argument or an import-time local would
+        # make the patch a silent no-op and every exhaustion test would block.
+        if time.monotonic() - started >= _TEST_DB_CLAIM_WAIT_S:
+            break
+        time.sleep(_TEST_DB_CLAIM_POLL_S)
+    _CLAIM_FAILURE = _exhaustion_message()
+    _logger.error("%s", _CLAIM_FAILURE)
+    raise RuntimeError(_CLAIM_FAILURE)
+
+
+def claimed_test_dbs() -> frozenset[int]:
+    """Every Redis db number this process owns, empty before any claim.
+
+    This is the authority the conftest flush guard consults: a ``flushdb()``
+    against a db outside this set is another live process's data (#2628). Empty
+    means "this process owns nothing", which after the session-start claim can
+    only be the xdist controller (which runs no tests) or the window before
+    ``pytest_configure`` — so denying on empty denies nothing legitimate.
+    """
+    return frozenset(_CLAIMED_DB_NUMS)
+
+
+def claim_scratch_test_db() -> int | None:
+    """Claim a SECOND owned db for a test that needs one, or ``None``.
+
+    For the rare test whose subject is divergence between two databases. Taken
+    from the same flock pool as the primary claim, so it is owned and therefore
+    flushable. Returns ``None`` when the pool is exhausted — never a derived or
+    borrowed number, because an unowned "scratch" db is exactly the bug this
+    module exists to stop.
+
+    Memoized per process: one scratch slot, held for the session, released by
+    :func:`release_test_db_claim`. Without the memo each requesting test would
+    consume a fresh slot with no release path and walk the pool into
+    :func:`claim_test_db`'s exhaustion error.
+    """
+    global _CLAIMED_SCRATCH_DB
+    if _CLAIMED_SCRATCH_DB is not None:
+        return _CLAIMED_SCRATCH_DB
+    try:
+        claim_dir = _test_db_claim_dir()
+    except OSError:
+        return None
     for n in range(1, _TEST_DB_POOL_MAX + 1):
+        if n in _CLAIMED_DB_NUMS:
+            continue
         if _try_claim_db_slot(claim_dir, n):
-            _CLAIMED_TEST_DB = n
+            _CLAIMED_SCRATCH_DB = n
             return n
-    # Pool exhausted — more concurrent pytest processes than test DBs. Fall back
-    # to the legacy derivation (which may collide, i.e. no worse than pre-#2060).
-    _CLAIMED_TEST_DB = _legacy_test_db_num()
-    _logger.warning(
-        "all %d test-DB slots held by live processes; falling back to legacy db=%d "
-        "(may collide with a concurrent process)",
-        _TEST_DB_POOL_MAX,
-        _CLAIMED_TEST_DB,
-    )
-    return _CLAIMED_TEST_DB
+    return None
 
 
 def release_test_db_claim() -> None:
@@ -161,7 +289,7 @@ def release_test_db_claim() -> None:
     lock file itself is left in place (reused by the next claimant); its
     presence is not ownership — the flock is.
     """
-    global _CLAIMED_TEST_DB
+    global _CLAIMED_TEST_DB, _CLAIMED_SCRATCH_DB, _CLAIM_FAILURE
     while _CLAIM_LOCK_FDS:
         fd = _CLAIM_LOCK_FDS.pop()
         try:
@@ -172,7 +300,10 @@ def release_test_db_claim() -> None:
             os.close(fd)
         except OSError:
             pass
+    _CLAIMED_DB_NUMS.clear()
     _CLAIMED_TEST_DB = None
+    _CLAIMED_SCRATCH_DB = None
+    _CLAIM_FAILURE = None
 
 
 atexit.register(release_test_db_claim)
@@ -207,8 +338,18 @@ def subprocess_env(*, project_root: str | None = None, **extra) -> dict[str, str
     naming the main checkout, so the moment cwd stops winning, a worktree's tests
     would silently exercise main's code and could not fail for the right reason.
     Passing ``project_root`` pins it explicitly via ``PYTHONPATH``.
+
+    **``POPOTO_TEST_DB`` is deliberately NOT inherited** (#2628), which is the
+    mirror image of the ``REDIS_URL`` rule above. ``REDIS_URL`` is shared on
+    purpose so a child reads and writes the parent's db. ``POPOTO_TEST_DB`` is
+    read only by popoto's bundled pytest plugin, i.e. only by a NESTED PYTEST
+    child — and such a child claims its own slot, so inheriting the parent's
+    number would point its per-test ``flushdb()`` at the parent's database. An
+    explicit caller value still wins, since ``extra`` is merged afterwards.
     """
-    env = {**os.environ, **{k: str(v) for k, v in extra.items()}}
+    env = {**os.environ}
+    env.pop("POPOTO_TEST_DB", None)
+    env.update({k: str(v) for k, v in extra.items()})
     env["REDIS_URL"] = redis_test_url()
     if project_root is not None:
         existing = env.get("PYTHONPATH", "")

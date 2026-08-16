@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
 from worker.__main__ import (
     WORKER_SUPERVISOR_BASE_BACKOFF_S,
     WORKER_SUPERVISOR_MAX_RESTARTS,
@@ -276,6 +277,7 @@ def test_storm_cap_kills_process():
         cwd=repo_root,
         capture_output=True,
         timeout=30,
+        env=subprocess_env(project_root=repo_root),
     )
 
     os.unlink(script_path)

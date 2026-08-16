@@ -6,14 +6,14 @@ Agent responses are passed through deterministic composition:
 2. Per-medium wire-format is validated
 3. Very long responses are attached as a .txt file
 4. The agent's own text is composed with emoji, stage progress, and link footer
-5. context_summary and expectations are derived for session routing
+5. context_summary and open_questions are derived for session routing
 
 No LLM rewriting of the agent's output. The drafter's job is
 validation + structural composition, not summarization.
 
-Anti-fabrication rule: expectations must NEVER be fabricated.
+Anti-fabrication rule: open_questions must NEVER be fabricated.
 Only explicit questions (from ## Open Questions sections or sentences
-ending in "?") may populate expectations. Declarative plans are NOT questions.
+ending in "?") may populate open_questions. Declarative plans are NOT questions.
 """
 
 import logging
@@ -218,12 +218,11 @@ class MessageDraft:
             _derive_context_summary from the narration-stripped text (first
             non-blank, non-heading line, ≤140 chars). None when the stripped
             text is empty. Not user-facing prose — a routing hint only.
-        expectations: Verbatim questions extracted from ## Open Questions
+        open_questions: Verbatim questions extracted from ## Open Questions
             sections by _extract_open_questions (sole source). None when no
-            questions are found (never ""). The None-vs-empty distinction
-            matters: _persist_routing_fields in output_handler.py only writes
-            expectations when it is not None, preserving any prior persisted
-            value when no new questions are present.
+            questions are found (never ""). A drafter-local concept (what the
+            agent is asking the human right now) — deliberately named apart
+            from the Job obligation primitive (#2708) to avoid collision.
         violations: List of wire-format violations from the per-medium
             validator. Informational — surfaced to the agent for editing
             via the review-gate presentation.
@@ -234,7 +233,7 @@ class MessageDraft:
     needs_self_draft: bool = False
     artifacts: dict[str, list[str]] = field(default_factory=dict)
     context_summary: str | None = None
-    expectations: str | None = None
+    open_questions: str | None = None
     violations: list[Violation] = field(default_factory=list)
     # Advisory promise flow (durability plan #2494 Task 14): populated when
     # the empty-promise gate fired — the revise-or-override suggestion (and
@@ -637,13 +636,13 @@ def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
     (matching ``evaluate_promise``'s disabled-path observability) and the text
     is never blocked.
 
-    Task 14 (#2494) override leg: a BLOCK verdict is downgraded to ALLOW
-    (``promise_recorded_override``) when the PM has stood by the promise —
-    an OPEN promise entry exists on the session's bound Job
-    (``bridge.promise_gate.promise_override_active``, read-only, Job-scoped
-    by design). That is the "override" half of revise-or-override: record
-    the promise via ``tools/job_tool promise-add``, resend, and the gate
-    clears.
+    Task 14 (#2494, carried into #2708) override leg: a BLOCK verdict is
+    downgraded to ALLOW (``promise_recorded_override``) when the PM has
+    stood by the obligation — an OPEN inbound expectation exists on the
+    session's bound Job (``bridge.promise_gate.promise_override_active``,
+    read-only, Job-scoped by design). That is the "override" half of
+    revise-or-override: record the expectation via
+    ``tools/job_tool expectation-add``, resend, and the gate clears.
 
     Returns the :class:`bridge.promise_gate.PromiseVerdict`; callers promote
     ``action == "block"`` to ``needs_self_draft=True``. Never raises: the
@@ -891,6 +890,19 @@ SELF_DRAFT_INSTRUCTION = (
     "If your work produced no substantive results, say so plainly."
 )
 
+# Preamble used instead of SELF_DRAFT_INSTRUCTION when the bounce was raised
+# solely by the context-recall gate (#2694). The base instruction asserts the
+# delivery validator found a wire-format violation or an unsubstantiated
+# promise; on a context-recall bounce the draft was clean and that assertion
+# would be false, so the PM would go looking for a defect that isn't there.
+CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION = (
+    "Your message was held because it asks for context that is probably "
+    "already in the recent conversation. Read the history with the command "
+    "below, then resend a real answer. If you read it and still genuinely need "
+    "the human to decide something, resend your question as-is and it will go "
+    "through."
+)
+
 # Sentinel returned by drafter callers when self-draft steering was injected.
 # Distinguishes "message deferred to agent self-draft" from "send failed" so the
 # bridge callback does not log a spurious error. Retained as a module symbol for
@@ -1052,9 +1064,9 @@ async def draft_message(
        use `tools/send_message.py "<caption>" --file <path>` instead of
        re-pasting a dead local path.
     6. Populate context_summary from _derive_context_summary(stripped_raw_text)
-    7. Populate expectations from _extract_open_questions(raw_response)
+    7. Populate open_questions from _extract_open_questions(raw_response)
        (None when no questions found, never "")
-    8. Return MessageDraft(text=<composed>, context_summary=..., expectations=...,
+    8. Return MessageDraft(text=<composed>, context_summary=..., open_questions=...,
        violations=[...])
 
     Args:
@@ -1086,7 +1098,7 @@ async def draft_message(
     #   - len < 200 chars
     #   - no SDLC session (SDLC needs stage progress + link footer)
     #   - no artifacts (commit hashes, PRs, URLs deserve drafter polish)
-    #   - no explicit question to the human (? triggers expectations handling)
+    #   - no explicit question to the human (? triggers open_questions handling)
     #   - no fenced code block (preserve formatting)
     is_sdlc = bool(session and getattr(session, "sdlc_slug", None))
     has_any_artifacts = any(v for v in artifacts.values())
@@ -1177,12 +1189,12 @@ async def draft_message(
     context_summary = _derive_context_summary(stripped_text)
 
     # Extract open questions; return None when none found (never "")
-    expectations: str | None = None
-    open_questions = _extract_open_questions(raw_response)
-    if open_questions:
-        expectations = "\n".join(f">> {q}" for q in open_questions)
+    open_questions: str | None = None
+    extracted_questions = _extract_open_questions(raw_response)
+    if extracted_questions:
+        open_questions = "\n".join(f">> {q}" for q in extracted_questions)
         logger.info(
-            f"Extracted {len(open_questions)} open questions from ## Open Questions section"
+            f"Extracted {len(extracted_questions)} open questions from ## Open Questions section"
         )
 
     return MessageDraft(
@@ -1191,6 +1203,6 @@ async def draft_message(
         needs_self_draft=False,
         artifacts=artifacts,
         context_summary=context_summary,
-        expectations=expectations,
+        open_questions=open_questions,
         violations=violations,
     )

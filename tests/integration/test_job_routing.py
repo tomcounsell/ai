@@ -106,7 +106,7 @@ class TestPMRoomScope:
     def test_pm_creates_in_own_room_and_is_refused_for_another(self):
         from models.agent_session import AgentSession
         from models.room import room_id as make_room_id
-        from tools.job_tool import JobToolError, add_promise, create_job
+        from tools.job_tool import JobToolError, add_expectation, create_job
 
         key = f"test-jobflow-pm-{uuid.uuid4().hex[:8]}"
         session = AgentSession.create(
@@ -125,7 +125,13 @@ class TestPMRoomScope:
             assert job.room_id == own_rid
 
             with pytest.raises(JobToolError):
-                add_promise(session.session_id, foreign.job_id, "I'll report back")
+                add_expectation(
+                    session.session_id,
+                    foreign.job_id,
+                    "I'll report back",
+                    direction="inbound",
+                    owner="pm",
+                )
         finally:
             foreign.delete()
             for job in Job.query.filter(room_id=own_rid):

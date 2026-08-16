@@ -118,7 +118,7 @@ SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
 # Update-flow / wedged-detector thresholds
 UPDATE_STALENESS_CEILING = 4 * 3600  # 4 hours — primary ceiling for absolute staleness
-UPDATE_STALENESS_WARN = 30 * 60  # 30 minutes — secondary accelerator for recently-active chats
+UPDATE_STALENESS_WARN = 30 * 60  # 30 minutes — secondary accelerator, needs recovery evidence
 STARTUP_GRACE_SECONDS = 5 * 60  # 5 minutes — grace window after bridge start
 # How recent last_probe_ok must be to count as "API layer healthy"
 PROBE_FRESHNESS_SECONDS = 3 * 3600  # 3 hours
@@ -201,16 +201,54 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
 
     Returns (is_live, issue_description).
 
-    PRIMARY rule (always-on, no per-chat precondition):
-      process_running AND recent last_probe_ok AND last_update_received older than
-      UPDATE_STALENESS_CEILING AND bridge is past startup grace window.
-      => verdict: NOT live (wedged), restart needed
+    A wedge verdict needs three things to be true at once, because no two of
+    them are enough (#2475):
 
-    SECONDARY accelerator (optional, fires sooner):
-      If a respond_to_unaddressed chat had bridge:last_event inside the window
-      but has since gone quiet past UPDATE_STALENESS_WARN — and last_probe_ok
-      is recent.
-      => verdict: NOT live (early warning)
+    1. **The API layer is healthy** — ``bridge:last_probe_ok`` is fresh, so the
+       bridge is connected and this is not a disconnect the reconnect ladder
+       already owns.
+    2. **The live update path has delivered nothing**, for longer than
+       ``UPDATE_STALENESS_CEILING``, measured from the later of
+       ``bridge:last_update_received`` and the bridge process's own start time.
+       Measuring from process start matters: the beacon is never seeded on
+       restart, so a verdict measured from the beacon alone survives its own
+       restart and re-fires on the first tick past the startup grace window —
+       one SIGKILL every ~6 minutes, indefinitely, which is what produced the
+       36-crash storm in #2475.
+    3. **Something was actually missed** — the reconciler stamped
+       ``bridge:last_missed_recovery`` within the same window, meaning it found
+       messages on Telegram that the live path never delivered. The stamp must
+       also postdate this process's startup grace: a restart creates a gap that
+       catchup and the reconciler then recover, so every restart stamps this key
+       on the way back up, and that stamp describes the restart rather than the
+       process which came back.
+
+    Point 3 is the one that distinguishes "wedged" from "quiet", and it has to
+    come from outside the ``NewMessage`` handler. Both ``last_update_received``
+    and the per-chat ``bridge:last_event:*`` keys are written by that handler,
+    so neither can corroborate that the handler has stopped: their silence is
+    equally consistent with an idle account. The reconciler reaches Telegram
+    over an independent API path, so its recoveries are real evidence, and a
+    genuinely quiet account produces none.
+
+    SECONDARY accelerator: the same shape at ``UPDATE_STALENESS_WARN`` instead
+    of the ceiling, requiring the recovery evidence to be that recent too — a
+    wedge caught in the last half hour rather than the last four.
+
+    **Known blind spot** — read this before concluding the detector is broken
+    because a wedged bridge never restarted. ``record_probe_ok()`` fires in
+    ``bridge/reconciler.py`` right after ``get_dialogs()`` and *before* the
+    per-chat scan loop, whose body ends in ``except Exception ... continue``.
+    A half-wedged client — dialogs resolve, every per-chat history fetch throws
+    — therefore keeps the probe fresh, recovers nothing, stamps no evidence, and
+    is indistinguishable here from a quiet account. It will not be restarted.
+    That is a deliberate trade, not an oversight: every signal the wedged
+    component itself emits is circular, the reconciler is the only independent
+    observer available, and when *it* is the failing part there is nothing left
+    to ask. Nothing monitors the scan loop, so this state persists until some
+    unrelated cause restarts the bridge; the failure is loud in the logs
+    (``[reconciler] Error scanning`` at ERROR, once per chat per scan) but
+    unwatched. Turning that into a monitored signal is issue #2691.
 
     On signal unreadable past grace window:
       => inconclusive (treated as live), emit WARNING "bridge_update_flow_signal_unreadable"
@@ -218,28 +256,39 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     On missing signal within grace window:
       => healthy (cold start)
     """
-    from bridge.liveness import get_last_probe_ok, get_last_update_received
+    from bridge.liveness import (
+        get_last_missed_recovery,
+        get_last_probe_ok,
+        get_last_update_received,
+    )
 
     now = time.time()
 
-    # Determine if bridge is within startup grace window.
-    within_grace = False
-    if bridge_pid is not None:
-        start_ts = get_process_start_ts(bridge_pid)
-        if start_ts is None:
-            # Cannot determine start time — fail-safe: treat as inconclusive for
-            # grace-window purposes (do not authorise restart).
-            logger.warning(
-                "assess_update_flow: get_process_start_ts returned None for "
-                "pid=%s — suppressing wedge verdict (fail-safe C3)",
-                bridge_pid,
-            )
-            return True, ""
-        within_grace = (now - start_ts) < STARTUP_GRACE_SECONDS
+    # Process age is required, not optional: it is both the grace window and the
+    # floor for the silence measurement. Without it a wedge verdict cannot be
+    # bounded to the current process, so treat it as inconclusive.
+    if bridge_pid is None:
+        logger.warning(
+            "assess_update_flow: no bridge pid — suppressing wedge verdict (fail-safe C3)"
+        )
+        return True, ""
+
+    start_ts = get_process_start_ts(bridge_pid)
+    if start_ts is None:
+        # Cannot determine start time — fail-safe: treat as inconclusive for
+        # grace-window purposes (do not authorise restart).
+        logger.warning(
+            "assess_update_flow: get_process_start_ts returned None for "
+            "pid=%s — suppressing wedge verdict (fail-safe C3)",
+            bridge_pid,
+        )
+        return True, ""
+    within_grace = (now - start_ts) < STARTUP_GRACE_SECONDS
 
     try:
         last_update = get_last_update_received(r)
         last_probe = get_last_probe_ok(r)
+        last_missed = get_last_missed_recovery(r)
     except Exception as e:
         logger.warning(
             "assess_update_flow: bridge_update_flow_signal_unreadable — Redis error: %s", e
@@ -262,74 +311,68 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     if within_grace:
         return True, ""
 
-    # --- PRIMARY rule ---
-    # Corroboration requirement: we only declare a wedge when last_probe_ok is
-    # FRESH.  A stale probe means the API/TCP layer itself may be broken — the
-    # bridge could be mid-reconnect.  Restarting mid-reconnect is counterproductive
-    # and would flood Telegram's rate limiter.  This dual-signal design follows the
-    # "silence != failure" principle from issue #1172: absence of updates alone is
-    # NOT authoritative; a positive probe confirmation is required.
+    # We only declare a wedge when last_probe_ok is FRESH.  A stale probe means
+    # the API/TCP layer itself may be broken — the bridge could be mid-reconnect.
+    # Restarting mid-reconnect is counterproductive and would flood Telegram's
+    # rate limiter.
     #
     # Level cap: the wedge detector contributes at most level 2 (plain restart with
     # catch_up=True).  It must never push recovery_level to 4 (auto-revert).  A
     # wedged update loop is not evidence of a bad commit — it is a known Telethon
     # upstream bug (archived library, issue #1408).
     probe_is_fresh = last_probe is not None and (now - last_probe) < PROBE_FRESHNESS_SECONDS
-    update_is_stale = last_update is None or (now - last_update) >= UPDATE_STALENESS_CEILING
+    if not probe_is_fresh:
+        return True, ""
 
-    if probe_is_fresh and update_is_stale:
-        update_age_h = "never" if last_update is None else f"{(now - last_update) / 3600:.1f}h ago"
-        issue = (
-            f"update loop wedged: last_update_received={update_age_h}, "
-            f"last_probe_ok={((now - last_probe) / 60):.0f}m ago — "
-            f"Telethon stopped delivering events while API layer is healthy"
+    # Silence is measured from the later of "last update delivered" and "this
+    # process started".  A restart clears the accusation; without this the
+    # verdict outlives the restart meant to cure it and re-fires every tick past
+    # the grace window (#2475).
+    silence_since = start_ts if last_update is None else max(last_update, start_ts)
+    update_age = now - silence_since
+
+    # Positive evidence that something was missed, from outside the handler under
+    # suspicion.  Without it, silence is just a quiet account.
+    #
+    # The evidence must also postdate this process's startup grace, for the same
+    # reason the silence clock starts at process start.  Every restart creates a
+    # gap, and catchup plus the reconciler recover that gap on the way back up —
+    # so a routine restart reliably stamps this key within its own grace window.
+    # That recovery is an artifact of the restart, not evidence that the process
+    # which came back is wedged.  Without this floor the two windows are the same
+    # length, so such a stamp stays admissible for a full ceiling and four quiet
+    # hours after any restart could still produce one spurious verdict.
+    evidence_floor = start_ts + STARTUP_GRACE_SECONDS
+    missed_age = None if last_missed is None or last_missed <= evidence_floor else now - last_missed
+
+    def _wedge_issue(label: str, window: float) -> str:
+        seen = "never" if last_update is None else f"{(now - last_update) / 60:.0f}m ago"
+        return (
+            f"update loop {label}: no live update for {update_age / 60:.0f}m "
+            f"(threshold {window / 60:.0f}m, last_update_received={seen}), "
+            f"last_probe_ok={((now - last_probe) / 60):.0f}m ago, and the reconciler "
+            f"recovered missed messages {missed_age / 60:.0f}m ago — Telethon stopped "
+            f"delivering events while the API layer is healthy"
         )
-        return False, issue
+
+    # --- PRIMARY rule ---
+    if (
+        update_age >= UPDATE_STALENESS_CEILING
+        and missed_age is not None
+        and missed_age < UPDATE_STALENESS_CEILING
+    ):
+        return False, _wedge_issue("wedged", UPDATE_STALENESS_CEILING)
 
     # --- SECONDARY accelerator ---
-    # Fires only when a per-chat bridge:last_event key confirms a recently-active
-    # chat has gone quiet — corroborating that the account-wide update silence is
-    # anomalous, not just a quiet period.  Without this per-chat gate the accelerator
-    # would fire for any 30-min lull (since last_probe_ok is refreshed every ~180s
-    # by the reconciler, it is always "fresh" when connected) — re-inheriting the
-    # silence=failure anti-pattern from issue #1172.
-    #
-    # Per the plan: "if a respond_to_unaddressed chat had a bridge:last_event inside
-    # the window and has since gone quiet past UPDATE_STALENESS_WARN".
-    if probe_is_fresh and last_update is not None:
-        update_age = now - last_update
-        if UPDATE_STALENESS_WARN <= update_age < UPDATE_STALENESS_CEILING:
-            # Check per-chat corroboration: scan bridge:last_event:* for a chat
-            # that was recently active but has gone quiet.
-            try:
-                per_chat_corroborated = False
-                for key in r.scan_iter("bridge:last_event:*", count=100):
-                    raw_ts = r.get(key)
-                    if raw_ts is None:
-                        continue
-                    try:
-                        chat_last_event = float(raw_ts)
-                    except (ValueError, TypeError):
-                        continue
-                    chat_silence = now - chat_last_event
-                    if UPDATE_STALENESS_WARN <= chat_silence < UPDATE_STALENESS_CEILING:
-                        per_chat_corroborated = True
-                        break
-            except Exception as e:
-                logger.warning(
-                    "assess_update_flow: per-chat scan failed, skipping secondary accelerator: %s",
-                    e,
-                )
-                per_chat_corroborated = False
-
-            if per_chat_corroborated:
-                issue = (
-                    f"update loop possibly wedged (early warning): "
-                    f"last_update_received={update_age / 60:.0f}m ago "
-                    f"(>{UPDATE_STALENESS_WARN // 60}m), last_probe_ok fresh, "
-                    f"per-chat corroboration confirms recently-active chat went quiet"
-                )
-                return False, issue
+    # Same shape at the warn threshold, requiring recovery evidence that is
+    # itself that recent — a wedge caught in the last half hour, not the last
+    # four.
+    if (
+        update_age >= UPDATE_STALENESS_WARN
+        and missed_age is not None
+        and missed_age < UPDATE_STALENESS_WARN
+    ):
+        return False, _wedge_issue("possibly wedged (early warning)", UPDATE_STALENESS_WARN)
 
     return True, ""
 

@@ -1,12 +1,13 @@
-"""Advisory promise flow (Task 14, docs/plans/durability-room-job-agentrun.md).
+"""Advisory expectation flow (#2494 Task 14, generalized by #2708).
 
 The promise gate is ADVISORY: on a deferral-shaped outbound it returns a
 revise-or-override suggestion to the PM and performs zero writes — no
-obligation model, no mechanical promise writes (Risk 4). The PM either
-revises, or stands by the promise by recording it on the Job
-(tools/job_tool promise-add), which the gate honors as an override on the
-resend. The same outbound pass carries the goal-reset nudge while the
-bound Job's goal is still the mint placeholder.
+mechanical obligation writes from any verdict. The PM either revises, or
+stands by the obligation by recording an INBOUND expectation on the Job
+(tools/job_tool expectation-add --direction inbound), which the gate
+honors as an override on the resend. Outbound expectations (what a lane
+owes the PM) never clear the gate. The same outbound pass carries the
+goal-reset nudge while the bound Job's goal is still the mint placeholder.
 
 Builds on PR #2621's chokepoints (_evaluate_drafter_promise in the drafter,
 _gate_terminal_promise in session_health) — extended, not duplicated.
@@ -96,7 +97,7 @@ class TestAdvisoryContent:
         assert advisory is not None
         # Suggestion, not a command: names both legs of revise-or-override.
         assert "revise" in advisory.lower()
-        assert "promise-add" in advisory
+        assert "expectation-add" in advisory
         assert job.job_id in advisory
 
     def test_goal_placeholder_nudge_present_when_placeholder(self, scratch_session_with_job):
@@ -172,31 +173,41 @@ class TestZeroWrites:
 
 
 class TestPromiseOverride:
-    def test_recorded_open_promise_overrides_the_gate(self, scratch_session_with_job):
-        """The PM stood by the promise: an open promise on the bound Job
-        turns the drafter gate's block into an allow on resend. The
-        override is JOB-scoped by design — any open promise on the bound
-        Job clears the gate until discharge."""
+    def test_recorded_open_inbound_expectation_overrides_the_gate(self, scratch_session_with_job):
+        """The PM stood by the obligation: an open inbound expectation on
+        the bound Job turns the drafter gate's block into an allow on
+        resend. The override is JOB-scoped by design — any open inbound
+        expectation on the bound Job clears the gate until discharge."""
         from bridge.message_drafter import _evaluate_drafter_promise
 
         session, job = scratch_session_with_job
         deferral = "I'll report back once the deploy finishes."
-        # Without a recorded promise: blocked.
+        # Without a recorded expectation: blocked.
         assert _evaluate_drafter_promise(deferral, medium="telegram", session=session).action == (
             "block"
         )
 
-        job.add_promise("Report back once the deploy finishes")
+        job.add_expectation("Report back once the deploy finishes")
         assert promise_override_active(session)
-        # With the promise recorded: allowed through, with the audit reason.
+        # With the expectation recorded: allowed through, with the audit reason.
         verdict = _evaluate_drafter_promise(deferral, medium="telegram", session=session)
         assert verdict.action == "allow"
         assert verdict.reason == "promise_recorded_override"
 
-    def test_discharged_promise_does_not_override(self, scratch_session_with_job):
+    def test_discharged_expectation_does_not_override(self, scratch_session_with_job):
         session, job = scratch_session_with_job
-        pid = job.add_promise("Report back")
-        job.remove_promise(pid)
+        eid = job.add_expectation("Report back")
+        job.discharge_expectation(eid)
+        assert not promise_override_active(session)
+
+    def test_outbound_expectation_never_clears_the_gate(self, scratch_session_with_job):
+        """A spawned lane's obligation (including the spawn chokepoint's
+        mechanical null-fallback) says nothing about what we owe the
+        requester — it must not clear the honesty gate."""
+        session, job = scratch_session_with_job
+        job.add_expectation(
+            "lane delivers the fix", direction="outbound", owner="session/some-lane"
+        )
         assert not promise_override_active(session)
 
 
@@ -212,63 +223,89 @@ class TestDrafterCarriesAdvisory:
         )
         assert draft.needs_self_draft is True
         assert draft.promise_advisory
-        assert "promise-add" in draft.promise_advisory
+        assert "expectation-add" in draft.promise_advisory
 
 
-class TestAtRestBackstop:
-    async def test_backstop_surfaces_at_rest_jobs_with_open_promises(self, caplog):
+class TestAtRestInvariantAlarm:
+    async def test_forced_violation_fires_the_alarm(self, caplog):
+        """The intersection is an invariant-violation alarm now: force the
+        impossible state (direct mark_at_rest bypasses the goal chokepoint)
+        and assert it is surfaced."""
         import logging
 
-        from agent.session_health import _check_jobs_at_rest_with_open_promises
+        from agent.session_health import _check_jobs_at_rest_with_open_expectations
 
         rid = f"test-backstop-{uuid.uuid4().hex[:8]}|telegram:1"
         job = Job.mint(rid, "check the deploy")
-        job.add_promise("I'll report back")
-        job.mark_at_rest()
+        job.add_expectation("I'll report back")
+        job.mark_at_rest()  # forced drift: chokepoint never allows this
         try:
             with caplog.at_level(logging.WARNING):
-                flagged = await _check_jobs_at_rest_with_open_promises()
+                flagged = await _check_jobs_at_rest_with_open_expectations()
             assert flagged >= 1
             assert any(job.job_id in rec.message for rec in caplog.records)
         finally:
             job.delete()
 
-    async def test_stale_active_job_reaches_the_operator_log_end_to_end(self, caplog):
-        """Rest-by-age end-to-end: a STALE-ACTIVE Job (nothing ever called
-        mark_at_rest) with an open promise is swept to rest by the same
-        backstop invocation and produces the operator log line — the
-        correct-logic-over-empty-input shape the review flagged."""
+    async def test_steady_state_is_empty_and_open_expectation_blocks_rest(self, caplog):
+        """Steady state: the sweep runs from the same invocation (rest-by-age
+        end-to-end) but an open expectation PINS the Job active, so the
+        flagged set stays empty — the invariant holds by construction."""
         import logging
         import time
         from datetime import UTC, datetime
 
-        from agent.session_health import _check_jobs_at_rest_with_open_promises
+        from agent.session_health import _check_jobs_at_rest_with_open_expectations
         from models.job import JOB_AT_REST_AGE_SECONDS
 
         rid = f"test-backstop-e2e-{uuid.uuid4().hex[:8]}|telegram:1"
         job = Job.mint(rid, "check the deploy")
-        job.add_promise("I'll report back")
+        job.add_expectation("I'll report back")
         job.last_active_at = datetime.fromtimestamp(
             time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
         )
         job.save()
-        assert job.status == "active"  # nothing has rested it yet
+        assert job.status == "active"
         try:
             with caplog.at_level(logging.WARNING):
-                flagged = await _check_jobs_at_rest_with_open_promises()
-            assert flagged >= 1
-            assert any(job.job_id in rec.message for rec in caplog.records)
+                await _check_jobs_at_rest_with_open_expectations()
+            fresh = Job.query.filter(room_id=rid)[0]
+            # The open expectation pinned it active — never swept to rest,
+            # so it can never enter the flagged intersection.
+            assert fresh.status == "active"
+            assert not any(job.job_id in rec.message for rec in caplog.records)
+        finally:
+            job.delete()
+
+    async def test_sweep_still_rests_expectation_less_jobs(self):
+        """The renamed check remains the Job.sweep_to_rest() caller: an idle
+        Job with no expectations still ages to rest through it."""
+        import time
+        from datetime import UTC, datetime
+
+        from agent.session_health import _check_jobs_at_rest_with_open_expectations
+        from models.job import JOB_AT_REST_AGE_SECONDS
+
+        rid = f"test-backstop-sweep-{uuid.uuid4().hex[:8]}|telegram:1"
+        job = Job.mint(rid, "idle thread")
+        job.last_active_at = datetime.fromtimestamp(
+            time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
+        )
+        job.save()
+        try:
+            await _check_jobs_at_rest_with_open_expectations()
             fresh = Job.query.filter(room_id=rid)[0]
             assert fresh.status == "at-rest"
         finally:
             job.delete()
 
     def test_backstop_is_invoked_from_the_periodic_sweep(self):
-        """No correct-logic-dead-caller: the health sweep calls the backstop."""
+        """No correct-logic-dead-caller: the health sweep calls the alarm
+        (sweep-then-scan ordering preserved)."""
         import pathlib
 
         src = (
             pathlib.Path(__file__).resolve().parents[2] / "agent" / "session_health.py"
         ).read_text(encoding="utf-8")
         at_rest_call = src.index("await _check_at_rest_owed_communication()")
-        assert "await _check_jobs_at_rest_with_open_promises()" in src[at_rest_call:]
+        assert "await _check_jobs_at_rest_with_open_expectations()" in src[at_rest_call:]

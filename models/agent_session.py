@@ -628,6 +628,23 @@ class AgentSession(Model):
     class Meta:
         # 30 days — hard backstop for retain_for_resume BUILD sessions.
         # Sourced from settings so it's .env-overridable (issue #1968 Task 5).
+        #
+        # Measured trap (#2698): this TTL has never actually fired. The
+        # corruption sweep (agent/session_health.py::cleanup_corrupted_agent_
+        # sessions) used to full-save() every hydrated row as a validation
+        # probe, and every save() resets a key's TTL to this ceiling — so the
+        # clock was reset on every worker start, every /update, and every
+        # hourly agent-session-cleanup tick, forever. AgentSession.refresh_ttl()
+        # now holds it there deliberately, via a targeted EXPIRE instead of an
+        # incidental full save. #2698 owns the decision to stop calling it and
+        # let the 30-day expiry actually activate.
+        #
+        # Dropping this attribute does NOT clear TTLs already stamped on
+        # existing keys — measured: a key retained its decaying TTL (595s)
+        # after Meta.ttl was flipped to None and the row was re-saved. Popoto
+        # exposes no ORM-level persist/clear_ttl. So removing this line would
+        # leave the existing population still expiring while new rows never
+        # do — the opposite of "no TTL". Don't "simplify" it away.
         ttl = int(settings.timeouts.agent_session_retain_ttl_s)
 
     # === Worker routing key ===
@@ -989,10 +1006,15 @@ class AgentSession(Model):
             "current_tool_name",
             "last_tool_use_at",
             "current_tool_timeout_s",
+            # SDLC run-identity bookkeeping — the bind runs before every
+            # ensure_session() return, so the stamp would be a per-dispatch
+            # restamp, not a report of activity.
+            "active_run_id",
+            "owned_run_ids",
         }
     )
 
-    def save(self, *args, update_fields=None, **kwargs):
+    def save(self, *args, update_fields=None, preserve_updated_at=False, **kwargs):
         """Override to stamp updated_at with UTC wall-clock time.
 
         Popoto auto_now mints naive local time (bug #1645); instead we stamp
@@ -1002,9 +1024,30 @@ class AgentSession(Model):
         update_fields guard: if update_fields omits 'updated_at', skip the stamp
         entirely (no in-memory mutation without a matching persist, to avoid
         memory/Redis desync).
+
+        preserve_updated_at: when True, skip the stamp unconditionally and log
+        at DEBUG (never WARNING) — the caller is explicitly declaring it owns
+        the value already on the instance. This is the primitive for a full
+        save() that must write every field but must NOT overwrite a carried-in
+        timestamp (e.g. archive restore reproducing an archived row) — a case
+        update_fields can't serve because it constructs a fresh instance and
+        needs every field persisted. If both preserve_updated_at=True and
+        update_fields (omitting 'updated_at') are passed, preserve_updated_at
+        wins: both mean "do not stamp", so they don't actually conflict, but
+        the combination is a caller smell — a WARNING names the caller and no
+        exception is raised (fail-quiet, matching every other guard here).
         """
         from bridge.utc import utc_now
 
+        if preserve_updated_at:
+            if update_fields is not None and "updated_at" not in update_fields:
+                logger.warning(
+                    "save(preserve_updated_at=True) called together with "
+                    "update_fields omitting 'updated_at'; preserve_updated_at "
+                    "wins and the caller-supplied value is kept"
+                )
+            logger.debug("save(preserve_updated_at=True): caller-supplied updated_at kept")
+            return super().save(*args, update_fields=update_fields, **kwargs)
         if update_fields is not None and "updated_at" not in update_fields:
             # Known high-frequency liveness/PID partial saves log at DEBUG;
             # everything else keeps the WARNING so real omissions stay visible.
@@ -1022,6 +1065,32 @@ class AgentSession(Model):
             return super().save(*args, update_fields=update_fields, **kwargs)
         self.updated_at = utc_now()
         return super().save(*args, update_fields=update_fields, **kwargs)
+
+    def refresh_ttl(self) -> bool:
+        """Hold this row's ``Meta.ttl`` at the ceiling without writing any field.
+
+        #2698 placeholder. The corruption sweep used to do this incidentally,
+        as a side effect of its save() probe, so ``Meta.ttl`` has never fired.
+        Deleting this call activates a 30-day expiry on every session row.
+
+        Uses ``self.db_key.redis_key``, never ``self._redis_key``: the latter
+        is ``None`` on query-hydrated rows (``Model.__init__`` only populates
+        it when every KeyField is non-None, and AgentSession has four nullable
+        KeyFields — session_type, chat_id, slug, parent_agent_session_id), so
+        ``POPOTO_REDIS_DB.expire(self._redis_key, ...)`` would raise
+        ``redis.exceptions.DataError`` on most hydrated instances.
+        ``self.db_key.redis_key`` computes the key from current field values
+        and is always populated, matching what popoto's own expire calls use
+        internally.
+
+        Returns False (not an error) when the key does not exist — e.g. the
+        row was deleted concurrently, or its stored key has drifted from the
+        computed one. Callers must not truth-test the return value as a
+        failure signal.
+        """
+        from popoto.models.query import POPOTO_REDIS_DB
+
+        return bool(POPOTO_REDIS_DB.expire(self.db_key.redis_key, self._ttl))
 
     @classmethod
     def _heal_future_updated_at(cls) -> int:

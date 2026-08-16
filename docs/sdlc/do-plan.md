@@ -9,9 +9,17 @@ The leaned body refers to these abstractly; here are the concrete invocations.
 plan is committed and pushed (end of Phase 4):
 
 ```bash
-sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
-sdlc-tool stage-marker --stage PLAN --status completed   --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} --run-id {run_id}
+sdlc-tool stage-marker --stage PLAN --status completed   --issue-number {issue_number} --run-id {run_id}
 ```
+
+Let stderr through and check the exit code on both. A non-zero exit means the
+marker did **not** land: an `ISSUE_LOCKED` naming a foreign `owner_run_id` is a
+**stop condition** — report it, do not proceed as if the stage were recorded.
+A `LEASE_ABSENT` or a transient broker error is not: re-ensure the identity,
+adopt the `run_id` that comes back, and retry the marker once under it. Never
+suppress these with `2>/dev/null` or `|| true` — a discarded diagnostic is a
+plan the ledger never heard about.
 
 Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
 carries `--run-id {run_id}` — supplied by the invoking supervisor (`/do-sdlc`
@@ -56,8 +64,12 @@ SKILL.md Phase 4 step 2a for the exact `date -u` invocation) and pushing,
 clear the lock so the router can route to build:
 
 ```bash
-sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id}
 ```
+
+Same disposition as the stage markers above: check the exit code, and treat a
+foreign-owner refusal as a stop condition rather than leaving the lock set while
+reporting success.
 
 ## Popoto Schema Migration Requirement
 
@@ -144,6 +156,11 @@ When adding output callbacks to the bridge, key them by transport type (e.g., `"
 
 ## Slug Conventions
 
-- Slugs are kebab-case, derived from the plan filename (without `.md`)
-- Slugs tie together: plan doc, GitHub issue, worktree at `.worktrees/{slug}/`, branch `session/{slug}`, task list
-- Create the slug from the GitHub issue title, not from a description of the work
+- Plan document filenames are kebab-case, created from the GitHub issue title,
+  not from a description of the work.
+- The lane's identity — the name of its worktree (`.worktrees/{slug}/`), its
+  branch (`session/{slug}`), and its task list — is recorded once on
+  `PipelineLedger.slug` at lane start and read via `tools/lane_identity.py`. It
+  is never derived from the plan filename. A plan document links to its lane
+  through `tracking:` frontmatter, not by matching names — the two are allowed
+  to differ. See [`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md).

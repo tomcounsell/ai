@@ -883,8 +883,10 @@ def cmd_send(args: argparse.Namespace) -> int:
             text = truncated + "..."
 
     # Build relay-compatible payload
-    # Use synthetic session_id with cli- prefix to avoid collision with bridge session IDs
-    session_id = f"cli-{int(time.time())}"
+    # Use synthetic session_id with cli- prefix to avoid collision with bridge
+    # session IDs, unless the caller supplied its own producer id via
+    # --session-id (e.g. a scheduled reflection anchoring its own ack read).
+    session_id = getattr(args, "session_id", None) or f"cli-{int(time.time())}"
 
     # Promise gate — see docs/features/promise-gate.md
     # Synthetic cli-{epoch} session_id; gate routes to audit JSONL only,
@@ -1068,6 +1070,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         "session_id": session_id,
         "timestamp": time.time(),
     }
+    if getattr(args, "ack_sent_id", False):
+        payload["ack_sent_id"] = True
     if file_path:
         # Relay expects file_paths as a list of absolute paths
         resolved = str(Path(file_path).resolve())
@@ -1304,8 +1308,15 @@ def cmd_chats(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    """Main entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser.
+
+    Extracted from ``main`` so callers that need to validate a command string
+    against the *real* flag definitions can do so without invoking the CLI —
+    see the context-recall advisory's integration test (#2694), which parses
+    the command it emits with this parser so the advisory cannot silently rot
+    if ``read``'s flags ever change.
+    """
     parser = argparse.ArgumentParser(
         prog="valor-telegram",
         description="Read and send Telegram messages",
@@ -1414,6 +1425,30 @@ def main() -> int:
             "footer flag, message ids, timing) as JSON instead of plain prose."
         ),
     )
+    send_parser.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "Overrides the synthetic 'cli-<epoch>' outbox id. Passing a live "
+            "AgentSession id attributes the send to that session's message "
+            "log (pm_sent_message_ids, chat_message_log) — a legitimate use, "
+            "but likely not what a caller reaching for 'give my message a "
+            "stable id' expects. Use a unique producer id for standalone "
+            "sends (e.g. a scheduled reflection's own producer id)."
+        ),
+    )
+    send_parser.add_argument(
+        "--ack-sent-id",
+        action="store_true",
+        help=(
+            "Arm the relay-side ack: once Telethon confirms the send, the "
+            "relay publishes the resulting message id to "
+            "telegram:sent:{session_id} (bridge/outbox_ack.py) for a "
+            "producer to read back with await_sent_message_id(). Requires "
+            "--session-id to be useful — without it, the id is published "
+            "under the synthetic cli-<epoch> id, which no caller has."
+        ),
+    )
 
     # Issue #1203: Read-the-Room (RTR) pre-send pass for Path B.
     # Default behavior (no flag): RTR auto-runs for agent-invoked sends
@@ -1455,6 +1490,12 @@ def main() -> int:
     )
     chats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    return parser
+
+
+def main() -> int:
+    """Main entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.command:

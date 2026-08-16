@@ -1,7 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Write(.claude/hooks/**)",
       "Edit(.claude/hooks/**)"
     ]
   },

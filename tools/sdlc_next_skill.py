@@ -148,28 +148,39 @@ def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
     return resolve_pr_head_sha(pr_number, repo=repo, repo_root=_target_repo_cwd())
 
 
-def _check_branch_pushed(slug: str) -> bool:
-    """Live-check (``git ls-remote``) that ``session/{slug}`` exists on origin.
+def _check_branch_pushed(branch_name: str) -> bool:
+    """Live-check (``git ls-remote``) that ``branch_name`` exists on origin.
+
+    Takes a FULL branch name, not a slug: the ``session/`` prefix is applied
+    by ``tools.lane_identity.lane_branch_name`` and nowhere else, so a caller
+    that has no lane slug gets ``None`` and no-ops instead of probing a name
+    it guessed.
 
     Unlike the local ``git branch -a`` check elsewhere in this module (which
     can be satisfied by a stale remote-tracking ref), this queries the
     remote directly so a claimed "branch pushed" artifact is verified
     against the live world, not local ref cache staleness.
     """
-    cmd = ["git", "ls-remote", "--heads", "origin", f"session/{slug}"]
+    cmd = ["git", "ls-remote", "--heads", "origin", branch_name]
     proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
         return False
     return bool(proc.stdout.strip())
 
 
-def _check_plan_committed_on_main(slug: str) -> bool:
-    """Live-check (``git show``) that ``docs/plans/{slug}.md`` is committed on ``main``.
+def _check_plan_committed_on_main(rel_plan_path: str) -> bool:
+    """Live-check (``git show``) that ``rel_plan_path`` is committed on ``main``.
+
+    Takes a REPO-RELATIVE path, not a slug. The plan doc is resolved by
+    ``find_plan_path`` (``tracking:`` frontmatter), which is independent of
+    the lane slug -- a human-named plan legitimately tracks an issue-derived
+    lane, so building ``docs/plans/{lane_slug}.md`` named a file that does not
+    exist.
 
     Extends the existing ``plan_exists`` context flag (disk presence, may be
     an uncommitted/local-only file) to a real commit check on ``main``.
     """
-    cmd = ["git", "show", f"main:docs/plans/{slug}.md"]
+    cmd = ["git", "show", f"main:{rel_plan_path}"]
     proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     return proc.returncode == 0
 
@@ -197,25 +208,59 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     guard ``g8`` forever instead of routing to the terminal ``/do-merge``
     (row 10) -- a duplicate-PR risk.
     """
-    from tools._sdlc_utils import find_plan_path
+    from tools.lane_identity import find_plan_path, lane_branch_name, resolve_lane_slug
 
-    slug: str | None = None
+    # The PLAN artifact is a plan DOC; the PATCH artifact is a lane BRANCH.
+    # They are resolved from different sources and are not the same string --
+    # sharing one plan-filename-derived slug between them is what probed a
+    # branch that never existed and wedged #2663.
     plan_path = find_plan_path(issue_number)
-    if plan_path is not None:
-        slug = Path(plan_path).stem
+    lane_slug = resolve_lane_slug(issue_number)
+    lane_branch = lane_branch_name(lane_slug)
 
-    if stage_states.get("PLAN") == "completed" and slug:
-        if not _check_plan_committed_on_main(slug):
-            logger.warning(
-                f"stage-artifact-verify: issue #{issue_number} PLAN claims completed "
-                f"but docs/plans/{slug}.md is not committed on main"
+    if stage_states.get("PLAN") == "completed" and plan_path is not None:
+        try:
+            # `git show main:<path>` paths are ALWAYS repo-root-relative,
+            # whatever cwd the subprocess runs in, so the process cwd is never
+            # the right base. `find_plan_path` resolves against the repo root
+            # too; rebasing on cwd makes the two ladders disagree from any
+            # subdirectory and reports a committed plan as unverified -- the
+            # #2718 symptom through a different door.
+            import tools._sdlc_utils as _sdlc_utils
+
+            repo_root = _target_repo_cwd() or _sdlc_utils._git_toplevel() or str(Path.cwd())
+            rel_plan_path = str(Path(plan_path).relative_to(repo_root))
+        except ValueError:
+            # Plan resolved outside the target checkout (a cross-repo
+            # SDLC_TARGET_REPO override). `git show main:<abs>` is meaningless
+            # there, so skip rather than manufacture a false negative.
+            logger.debug(
+                "stage-artifact-verify: issue #%s plan %s is outside the target repo; "
+                "skipping the PLAN-committed-on-main check",
+                issue_number,
+                plan_path,
             )
-            return {"stage_artifacts_verified": False, "unverified_stage": "PLAN"}
+        else:
+            if not _check_plan_committed_on_main(rel_plan_path):
+                logger.warning(
+                    f"stage-artifact-verify: issue #{issue_number} PLAN claims completed "
+                    f"but {rel_plan_path} is not committed on main"
+                )
+                return {"stage_artifacts_verified": False, "unverified_stage": "PLAN"}
 
     pr_number = meta.get("pr_number")
     repo = meta.get("_resolved_target_repo")
     build_claimed = stage_states.get("BUILD") == "completed"
-    patch_claimed = stage_states.get("PATCH") == "completed" and bool(slug)
+    # No recorded lane slug -> no branch to probe -> the PATCH check no-ops.
+    # Probing a guessed name is what force-dispatches `/do-patch` against a
+    # clean worktree until the G4 oscillation cap hard-blocks the lane (#2718).
+    patch_claimed = stage_states.get("PATCH") == "completed" and bool(lane_branch)
+    if stage_states.get("PATCH") == "completed" and not lane_branch:
+        logger.debug(
+            "stage-artifact-verify: issue #%s PATCH claims completed but no lane slug is "
+            "recorded; skipping the branch probe rather than guessing a branch name",
+            issue_number,
+        )
 
     # Resolve the live PR state at most once (used by both checks below) --
     # only when a claim that needs it is actually present, so an unclaimed
@@ -233,10 +278,10 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
             return {"stage_artifacts_verified": False, "unverified_stage": "BUILD"}
 
     if patch_claimed:
-        if pr_state != "MERGED" and not _check_branch_pushed(slug):
+        if pr_state != "MERGED" and not _check_branch_pushed(lane_branch):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
-                f"but branch session/{slug} is not pushed"
+                f"but branch {lane_branch} is not pushed"
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "PATCH"}
 
@@ -323,7 +368,7 @@ def _build_context(
     # no plan path or unreadable file leaves the key unset (G5 then no-ops).
     if issue_number:
         try:
-            from tools._sdlc_utils import find_plan_path
+            from tools.lane_identity import find_plan_path
             from tools.sdlc_verdict import compute_plan_body_hash, compute_plan_hash
 
             plan_path = find_plan_path(issue_number)
@@ -339,23 +384,27 @@ def _build_context(
                     legacy_hash = compute_plan_hash(plan_path)
                     if legacy_hash is not None:
                         context["legacy_plan_hash"] = legacy_hash
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "next-skill: plan-hash context unavailable for issue #%s (%s: %s)",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
 
-    # Check whether the issue-specific session branch already exists (informs Row 5).
-    # Canonical branch shape is `session/{slug}` where the slug is the plan
-    # filename stem (#1915 slug-wins ownership; an issue-number-derived branch
-    # form is fabricated — this repo never creates one). Without a resolvable
-    # plan/slug we cannot affirm existence, so branch_exists stays False (#2003).
+    # Check whether the lane's branch already exists (informs Row 5).
+    # The branch is named by the lane's RECORDED slug, which the lane minted
+    # once at lane start -- both the issue-derived shape and human-named
+    # shapes occur on this remote, so the name is read, never derived. Without
+    # a recorded slug we cannot affirm existence, so branch_exists stays False
+    # (#2003) and no git call is made at all.
     if issue_number:
         context["branch_exists"] = False
         try:
-            from tools._sdlc_utils import find_plan_path
+            from tools.lane_identity import lane_branch_name, resolve_lane_slug
 
-            plan_path = find_plan_path(issue_number)
-            if plan_path is not None:
-                slug = Path(plan_path).stem
-
+            lane_branch = lane_branch_name(resolve_lane_slug(issue_number))
+            if lane_branch is not None:
                 proc2 = subprocess.run(
                     ["git", "branch", "-a"],
                     cwd=_target_repo_cwd(),
@@ -364,7 +413,7 @@ def _build_context(
                     timeout=5,
                 )
                 branch_names = proc2.stdout if proc2.returncode == 0 else ""
-                context["branch_exists"] = f"session/{slug}" in branch_names
+                context["branch_exists"] = lane_branch in branch_names
         except Exception:
             context["branch_exists"] = False
 
@@ -598,11 +647,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    result = decide(
-        issue_number=args.issue_number,
-        session_id=args.session_id,
-        proposed_skill=args.proposed_skill,
-    )
+    # One tick, one repo resolution. The router's stage read and its lane-slug
+    # read both need the target repo; without this scope each pays its own
+    # `gh repo view` whenever GH_REPO is unset.
+    from tools._sdlc_utils import cached_target_repo_resolution
+
+    with cached_target_repo_resolution():
+        result = decide(
+            issue_number=args.issue_number,
+            session_id=args.session_id,
+            proposed_skill=args.proposed_skill,
+        )
 
     if args.format == "pretty":
         print(json.dumps(result, indent=2))

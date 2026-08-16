@@ -411,7 +411,7 @@ class TestFindPlanPath:
 
     def test_resolves_from_cwd_git_root_no_env(self, tmp_path, monkeypatch):
         """D1: with no SDLC_TARGET_REPO, the plans dir comes from the cwd git root."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
         plan = self._write_plan(plans_dir, "feature.md", "tracking: #4242\n")
@@ -424,12 +424,12 @@ class TestFindPlanPath:
 
     def test_env_var_overrides_git_root(self, tmp_path, monkeypatch):
         """D1: SDLC_TARGET_REPO wins over the cwd git root (override semantics)."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         env_repo = tmp_path / "envrepo"
         git_repo = tmp_path / "gitrepo"
-        env_plan = self._write_plan(env_repo / "docs" / "plans", "e.md", "#4242\n")
-        self._write_plan(git_repo / "docs" / "plans", "g.md", "#4242\n")
+        env_plan = self._write_plan(env_repo / "docs" / "plans", "e.md", "tracking: #4242\n")
+        self._write_plan(git_repo / "docs" / "plans", "g.md", "tracking: #4242\n")
 
         monkeypatch.setenv("SDLC_TARGET_REPO", str(env_repo))
         with patch("tools._sdlc_utils._git_toplevel", return_value=git_repo):
@@ -439,7 +439,7 @@ class TestFindPlanPath:
 
     def test_git_failure_falls_through_to_file_fallback(self, tmp_path, monkeypatch):
         """D1: when git resolution fails and no env var, fall to __file__ fallback (no crash)."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
         # _git_toplevel returns None (not a repo / git missing); the __file__
@@ -451,7 +451,7 @@ class TestFindPlanPath:
 
     def test_matches_tracking_url_form(self, tmp_path, monkeypatch):
         """D2: a plan referencing the issue only by tracking URL is found."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
         plan = self._write_plan(
@@ -474,7 +474,7 @@ class TestFindPlanPath:
         never win over the plan whose `tracking:` frontmatter owns the issue,
         regardless of directory iteration order.
         """
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
         # `aaa_other.md` sorts first and merely mentions #1712 as out-of-scope.
@@ -497,25 +497,12 @@ class TestFindPlanPath:
 
         assert result == owner
 
-    def test_falls_back_to_mention_when_no_tracking_owner(self, tmp_path, monkeypatch):
-        """When no plan's tracking field claims the issue, any textual ref still resolves."""
-        from tools._sdlc_utils import find_plan_path
-
-        plans_dir = tmp_path / "docs" / "plans"
-        plan = self._write_plan(plans_dir, "feature.md", "relates to #4242\n")
-
-        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
-        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
-            result = find_plan_path(4242)
-
-        assert result == plan
-
     def test_boundary_1455_does_not_match_145(self, tmp_path, monkeypatch):
         """D2: #1455 must not satisfy a lookup for issue 145."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         plans_dir = tmp_path / "docs" / "plans"
-        self._write_plan(plans_dir, "other.md", "see #1455 and issues/1455\n")
+        self._write_plan(plans_dir, "other.md", "tracking: #1455 and issues/1455\n")
 
         monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
         with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
@@ -531,61 +518,21 @@ class TestFindPlanPath:
         result = _git_toplevel(cwd=tmp_path)
         assert result is None or isinstance(result, os.PathLike)
 
-    # ------------------------------------------------------------------
-    # Tests for the _is_ai_repo_fallback bare-#N suppression (CONCERN 3)
-    # ------------------------------------------------------------------
-
-    def test_file_fallback_bare_mention_returns_none(self, tmp_path, monkeypatch):
-        """CONCERN 3: bare-#N match from __file__ fallback path is suppressed.
-
-        When SDLC_TARGET_REPO is unset and git resolution fails (i.e. we
-        fall back to the __file__-relative ai-repo plans dir), a bare textual
-        mention of the issue number must return None — not a foreign plan.
-        """
-        import tools._sdlc_utils as _utils
-        from tools._sdlc_utils import find_plan_path
-
-        # Point the __file__ fallback at our tmp plans dir so we can plant a
-        # "foreign" plan that merely mentions the issue.
-        plans_dir = tmp_path / "docs" / "plans"
-        self._write_plan(plans_dir, "ai-plan.md", "No-Gos: see #9999 from other repo\n")
-
-        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
-        # Make git resolution fail so the __file__ fallback is used.
-        with patch("tools._sdlc_utils._git_toplevel", return_value=None):
-            # Redirect the __file__ fallback to tmp_path so the test is self-contained.
-            monkeypatch.setattr(
-                _utils,
-                "__file__",
-                str(tmp_path / "tools" / "_sdlc_utils.py"),
-            )
-            # Create the expected fallback path structure: __file__/../.. / docs/plans
-            (tmp_path / "docs" / "plans").mkdir(parents=True, exist_ok=True)
-            self._write_plan(
-                tmp_path / "docs" / "plans",
-                "ai-cross-ref.md",
-                "No-Gos: see #9999 from another repo\n",
-            )
-            result = find_plan_path(9999)
-
-        # The bare-#N fallback must be suppressed when using the __file__ path.
-        assert result is None
-
     def test_file_fallback_tracking_match_still_returned(self, tmp_path, monkeypatch):
         """CONCERN 3: tracking: match is always authoritative, even on __file__ fallback.
 
         If somehow a plan in the ai-repo has a proper tracking: frontmatter
         for this issue, it IS the right plan and must be returned.
         """
-        import tools._sdlc_utils as _utils
-        from tools._sdlc_utils import find_plan_path
+        import tools.lane_identity as lane_identity
+        from tools.lane_identity import find_plan_path
 
         monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
         # Create a plan with a tracking: line in the fallback-path location.
         monkeypatch.setattr(
-            _utils,
+            lane_identity,
             "__file__",
-            str(tmp_path / "tools" / "_sdlc_utils.py"),
+            str(tmp_path / "tools" / "lane_identity.py"),
         )
         plans_dir = tmp_path / "docs" / "plans"
         plan = self._write_plan(
@@ -600,48 +547,14 @@ class TestFindPlanPath:
         # tracking: match is authoritative regardless of resolution path.
         assert result == plan
 
-    def test_sdlc_target_repo_bare_fallback_not_suppressed(self, tmp_path, monkeypatch):
-        """CONCERN 3: when SDLC_TARGET_REPO is set, bare-#N fallback is kept.
-
-        The suppression is ONLY for the __file__ ai-repo fallback.  When
-        SDLC_TARGET_REPO points at the real target repo, a bare mention in
-        that repo's plans is a legitimate textual reference.
-        """
-        from tools._sdlc_utils import find_plan_path
-
-        plans_dir = tmp_path / "docs" / "plans"
-        plan = self._write_plan(plans_dir, "feature.md", "relates to #7777\n")
-
-        monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path))
-        result = find_plan_path(7777)
-
-        assert result == plan
-
     def test_sdlc_target_repo_nonexistent_path_returns_none(self, tmp_path, monkeypatch):
         """When SDLC_TARGET_REPO points at a non-existent directory, return None."""
-        from tools._sdlc_utils import find_plan_path
+        from tools.lane_identity import find_plan_path
 
         monkeypatch.setenv("SDLC_TARGET_REPO", str(tmp_path / "does-not-exist"))
         result = find_plan_path(1234)
 
         assert result is None
-
-    def test_git_toplevel_bare_fallback_not_suppressed(self, tmp_path, monkeypatch):
-        """CONCERN 3: when git-toplevel resolves (path 2), bare-#N fallback is kept.
-
-        Only the __file__ fallback (path 3) suppresses the bare-#N match.
-        Path 2 (git toplevel) is the correct repo and the fallback is legitimate.
-        """
-        from tools._sdlc_utils import find_plan_path
-
-        plans_dir = tmp_path / "docs" / "plans"
-        plan = self._write_plan(plans_dir, "feature.md", "see #5555 for context\n")
-
-        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
-        with patch("tools._sdlc_utils._git_toplevel", return_value=tmp_path):
-            result = find_plan_path(5555)
-
-        assert result == plan
 
 
 class TestFindSessionEnsure:
@@ -1105,3 +1018,100 @@ class TestRenewIssueLockForSession:
         ):
             # Must not raise -- best-effort side effect only.
             renew_issue_lock_for_session(session)
+
+
+class TestRevalidateLedgerLeaseRefreshesSignal:
+    """Issue #2659: a path that extends the lease must extend the signal.
+
+    ``revalidate_ledger_lease`` issues a NON-peek ``touch_issue_lock``, so
+    every stage-marker write (``tools/sdlc_stage_marker.py``) and every
+    dispatch record (``tools/sdlc_dispatch.py``) keeps the lease alive on its
+    own. ``session:supervisedrun:{N}`` shares that TTL.
+
+    Without the refresh the lease could outlive the signal, which is the
+    #2659 wedge: every stage fork reads a bare ``ISSUE_LOCKED`` from its own
+    supervisor's lock and stands down. It is reachable rather than
+    theoretical -- the local heartbeat self-exits at 4h
+    (``SDLC_LEASE_HEARTBEAT_MAX_LIFETIME_SECONDS``), after which these writes
+    are the only renewer left, and the signal lapses 30 minutes later. The
+    observed #2659 incidents were at roughly 3.5h.
+    """
+
+    def test_confirmed_ownership_refreshes_the_signal(self):
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None, session_id="s") is True
+
+        write_signal.assert_called_once()
+        args, kwargs = write_signal.call_args
+        assert args[0] == 2659
+        assert args[1] == "run-mine"
+        assert kwargs.get("session_id") == "s"
+
+    def test_foreign_owner_never_refreshes_the_signal(self):
+        """A foreign run holds the lease -> the gate refuses AND we publish
+        nothing. Writing here would overwrite the true owner's signal, denying
+        their forks the inheritance signal and re-creating the #2659 wedge."""
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False, owner_session_id="other", owner_run_id="foreign-run"
+            )
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None, session_id="s") is False
+
+        write_signal.assert_not_called()
+
+    def test_touch_failure_refuses_and_writes_nothing(self):
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                side_effect=RuntimeError("redis down"),
+            ),
+            patch("agent.supervised_run.write_supervised_run_signal") as write_signal,
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None) is False
+
+        write_signal.assert_not_called()
+
+    def test_signal_failure_never_turns_a_valid_gate_into_a_refusal(self):
+        """The signal is an optimization. A failing refresh must not block a
+        ledger write whose lease ownership was just confirmed."""
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        touch = MagicMock(
+            return_value=IssueLockResult(acquired=True, owner_session_id=None, owner_run_id=None)
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", touch),
+            patch(
+                "agent.supervised_run.write_supervised_run_signal",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            assert revalidate_ledger_lease(2659, "run-mine", None) is True
+
+    def test_missing_identifiers_write_nothing(self):
+        from tools._sdlc_utils import revalidate_ledger_lease
+
+        with patch("agent.supervised_run.write_supervised_run_signal") as write_signal:
+            assert revalidate_ledger_lease(0, "run-mine", None) is False
+            assert revalidate_ledger_lease(2659, "", None) is False
+        write_signal.assert_not_called()

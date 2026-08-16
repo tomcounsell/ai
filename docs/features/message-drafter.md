@@ -63,6 +63,8 @@ class MessageDraft:
     context_summary: str | None = None        # deterministic one-sentence routing hint
     expectations: str | None = None           # open questions (None when absent, never "")
     violations: list[Violation] = []          # wire-format violations for agent review
+    context_recall_advisory: str | None = None  # history-read command when the PM asked the human
+                                                # to re-identify a referent (#2694)
 ```
 
 Note: `was_drafted` has been removed. The drafter no longer calls any LLM — the agent's own text is used after narration stripping and structural composition. There is no Haiku/OpenRouter rewrite path.
@@ -152,6 +154,16 @@ When a blocking flag fires (`needs_self_draft=True`), the delivery path does **n
 
 The base `SELF_DRAFT_INSTRUCTION` constant is unchanged and stays medium-agnostic (it actively says "omit internal code details," which alone does not point the agent at attaching a file) — the addendum is composed at injection time so it fires only for the local-path rule. Other violation types (markdown table, empty promise) get the base instruction alone.
 
+### Context-recall instruction (issue #2694)
+
+When the outbound context-recall check judges that the PM is asking the human to re-identify something the conversation already named — "which PR do you mean?", "which one?" — the draft is held and bounced with `context_recall_advisory` set. The advisory carries a fully-formed history-read command with the session's real chat id interpolated, and it is appended to the same pushed `instruction` string as `promise_advisory`, so both advisories ride one steering push.
+
+This bounce uses `CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION` in place of the base `SELF_DRAFT_INSTRUCTION`. The base text asserts that the delivery validator found a wire-format violation or an unsubstantiated promise; on a context-recall bounce the draft was clean and that assertion would be false, sending the PM hunting for a defect that does not exist. The replacement says plainly that the message was held because it asks for context that is probably already in the recent conversation, and that resending the question as-is after reading the history will let it through.
+
+Unlike every other blocking flag, this check **sets** `needs_self_draft` rather than riding an existing one. Wiring it only into the existing `needs_self_draft` return sites would never fire in the case the feature exists for: a clean `"which PR do you mean?"` returns `needs_self_draft=False` and is sent.
+
+The check cannot hard-exit a CLI send. It lives in `agent/output_handler.py`, not in the promise gate, whose `cli_check_or_exit` consumer calls `sys.exit(1)` on a block across five CLI call sites. Extending that gate would have hard-failed a legitimate `python -m tools.send_message "which one do you mean?"`. `bridge/promise_gate.py` and `bridge/read_the_room.py` are byte-identical to `main`. Full contract: [Context-Recall Advisory](context-recall-advisory.md).
+
 ### Sequential self-draft loop bound
 
 To prevent infinite steering loops (the agent's self-draft also fails validation), the attempt count is tracked in Redis:
@@ -165,7 +177,7 @@ To prevent infinite steering loops (the agent's self-draft also fails validation
 
 ### `_derive_context_summary(raw_text) -> str | None`
 
-Derives a coarse one-sentence routing hint from the narration-stripped text. This is deliberately simple — first non-blank, non-heading line, capped at 140 characters at a word boundary. No NLP, no LLM. Purpose: give `session_router.py` and other routing readers a coarse topic hint. Not a quality deliverable, not user-facing prose. Returns `None` for empty or whitespace-only input.
+Derives a coarse one-sentence routing hint from the narration-stripped text. This is deliberately simple — first non-blank, non-heading line, capped at 140 characters at a word boundary. No NLP, no LLM. Purpose: give `bridge/job_router.py` — the single routing authority — and other routing readers a coarse topic hint. Not a quality deliverable, not user-facing prose. Returns `None` for empty or whitespace-only input.
 
 ### `_extract_open_questions(text) -> list[str]`
 
@@ -258,17 +270,19 @@ Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.m
 
 ## Adjacent suppression layers
 
-After the drafter finalises `delivery_text`, two optional suppression layers may intercept the message before it reaches the outbox:
+After the drafter finalises `delivery_text`, three optional layers may intercept the message before it reaches the outbox:
 
 1. **Redundancy filter** (`bridge/redundancy_filter.py`, issue #1205) — deterministic bigram-Jaccard guard for SDLC sessions. Runs first. Suppresses near-verbatim PM status repeats within a time window. See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md).
 2. **Read-the-Room** (`bridge/read_the_room.py`, issue #1193) — opt-in Haiku verdict for non-SDLC sessions (`send` / `trim` / `suppress`). See [Read-the-Room Pre-Send Pass](read-the-room.md).
+3. **Context-recall** (`bridge/context_recall.py`, issue #2694) — Haiku verdict on short, question-shaped output. Holds the message and bounces it through the self-draft loop with a history-read command instead of suppressing it. On by default (`CONTEXT_RECALL_OUTBOUND_ENABLED`). See [Context-Recall Advisory](context-recall-advisory.md).
 
-Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability.
+The first two queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability. Context-recall neither suppresses nor reacts: the message is returned to its author to rewrite, and on self-draft budget exhaustion the original is sent unchanged.
 
 ## Files
 
 - `bridge/message_drafter.py` — the drafter module. Includes `_truncate_at_sentence_boundary` since the #1074 follow-up, plus `convert_local_paths_to_attachments` (issue #2211), consumed by the terminal-flush chokepoint — see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211).
 - `bridge/redundancy_filter.py` — deterministic redundancy filter for SDLC sessions (issue #1205).
+- `bridge/context_recall.py` — outbound context-recall check and the shared advisory builder (issue #2694). `CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION` lives in `bridge/message_drafter.py` alongside the base instruction it replaces.
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
 - `bridge/telegram_relay.py::_send_queued_message` — belt-and-suspenders length guard.

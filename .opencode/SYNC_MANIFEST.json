@@ -1,15 +1,15 @@
 {
-  "generated_on": "2026-07-31",
+  "generated_on": "2026-08-13",
   "generator_version": 2,
   "settings": {
-    ".claude/settings.json": "a3d257fa7cba3369e5089223fe7d9a49b15bc9970a97514b26c7aeecd5d4b0ec"
+    ".claude/settings.json": "1a6ffe659853e7be65de58e75bf5634e565e1753ddf1a2f4f5cbb95892266f9b"
   },
   "agents": {
     ".claude/agents/baseline-verifier.md": "2fd442ff330058c1994c10b1c14536d9f62f6aabcbff40a9cc0df0089829343d",
     ".claude/agents/builder.md": "8e46bd51fa6ac72a93861c5d708e728a9bccc0ac6632ad46a5fa3a094929ccee",
     ".claude/agents/code-reviewer.md": "44c323be46d598e2e9d68568d42527a627c70b968ee74fea99f9d72f7dd01e79",
     ".claude/agents/cruft-auditor.md": "bc27d2efc21431ea21c153db828356f841e11e618e60ae0222592fd452ab2162",
-    ".claude/agents/dev.md": "b29930de807dca4aed9f8413d96d164ae15dfdcc219cc685f694b2eaa961335d",
+    ".claude/agents/dev.md": "362b67f1c5253559e8d6fafaf682590e72347702dcf582b35e4635c8811de47b",
     ".claude/agents/documentarian.md": "8de00ee1fa86a4b4f2f731d34693a3a47f5372ddf2b67b6b4a88e740663b0488",
     ".claude/agents/frontend-tester.md": "a738a9bece3c54881472a80311db875ed47488ee18d8f0c2b807725088665233",
     ".claude/agents/linear.md": "763288f42cb904d70e47d55bbfc075696ba0655cce32c0f07dae2438b2908ef9",
@@ -24,12 +24,12 @@
     ".claude/agents/validator.md": "84739b3df2f75018ea8dbb1ad130147cb3456f609976beb54a04be0365654e6d"
   },
   "commands": {
-    ".claude/commands/roles/prime-dev-role.md": "bf0f46115e11dbe255bfcd9986efec50435a50e6c5cd48ed1d44c1f5fee5f325",
-    ".claude/commands/roles/prime-pm-role.md": "367c3ea1740ae40432a503299271c6d38a8bb02302b37033e1de6d5d55247fe4",
+    ".claude/commands/roles/prime-dev-role.md": "c932f556ee80f8fcb61c76929497aaa0fb35f0a3de1c31f26c6d0f548dfd1577",
+    ".claude/commands/roles/prime-pm-role.md": "e06d1c1c0eae4983a44940aa40af32394fdf2078ff81f285389fd4869305f8c5",
     ".claude/commands/roles/prime-teammate-role.md": "8796ca012da59226fce17cb7df24d28c49eac102195247c826fe2c02da602b16"
   },
   "hooks": {
-    ".claude/hooks/dispatch/pre_tool_use_bash.py": "70431c926d48f09a20d8b4e38cb49fc05787165b14cff3b63ee921418603ebd3",
+    ".claude/hooks/dispatch/pre_tool_use_bash.py": "d10b5a93859bec72557c2da130199e3e59db45e35992d93668c3cad5962bdb88",
     ".claude/hooks/format_file.py": "90d0543862600afdbb9e19a0ceb3cdbb278ea10f7a75d0b4ccb36c2136f5ba9d",
     ".claude/hooks/hook_utils/__init__.py": "4412fcee776fd2d5cd38d65fc315067d8a42f3a599c788f9dfca29f8296138a8",
     ".claude/hooks/hook_utils/constants.py": "1f90adabe9c222c73c336732f08c51422131652f9d16e3c89e618042161851f8",
@@ -39,10 +39,10 @@
     ".claude/hooks/hook_utils/stop_detach_worker.py": "6f389162065a4836572b106143c792cf4bf2df2553a4ea0d8ab2072b32927d99",
     ".claude/hooks/post_compact.py": "fedc9ba1d999f7766e03f1818848b6620e7f46f83e4f9dfa6a2e74ab6cc413ad",
     ".claude/hooks/post_tool_use.py": "5933267ab42dcc14fc12aef005d1608d437b497614891108b574df2c4e445714",
-    ".claude/hooks/pre_tool_use.py": "b449692377ea4d992a1973434b17179e9dd6dd94c911845e3f3f8036fb64d48f",
+    ".claude/hooks/pre_tool_use.py": "199898c541d5d48b322783b3fdd3c9832364e829cdbc06db6b03d9764e459768",
     ".claude/hooks/sdlc/sdlc_context.py": "30f70ca0308332f8a63d7f6c053aa9f1281262d719b55185b5797e6fdc9bc2f0",
     ".claude/hooks/sdlc/sdlc_reminder.py": "725d3166dc5110e39eb2fa5bbf2004ccf5504f1d3eb50049c1899c7709157f80",
-    ".claude/hooks/sdlc/validate_commit_message_sdlc.py": "3333aef27261b68f946e774137bfc46b8fd672149e785e7ef3727d0e97a2a7ca",
+    ".claude/hooks/sdlc/validate_commit_message_sdlc.py": "6f7713a26db59676d305011453aa8c5e62ef980c9cf62c70037c91aaeec3f998",
     ".claude/hooks/sdlc/validate_sdlc_on_stop.py": "7249199d8cb5587e7dbe02c89ab38f0123b4dc10479e60d285131d4b68e71748",
     ".claude/hooks/sdlc_reminder.py": "b50b086a128b1f24b8a4652c6c970ad240dffce3bb15ca5d23ada6752ebab09b",
     ".claude/hooks/stop.py": "a994e751f88afdf48a1bed678e5732d90c2ab6227570ee5cafe5fc0f8dd9c56a",
@@ -57,12 +57,14 @@
     ".claude/hooks/validators/validate_file_contains.py": "aec46786c7ca37c31676df5da5fdb01f35cfa89027dad9b4d0a4044d12089cb1",
     ".claude/hooks/validators/validate_issue_recon.py": "ea313ed0d79de3669789c220af6a4ebb3412f08a52f771b93460fabdb514e301",
     ".claude/hooks/validators/validate_knowledge_base_section.py": "3289664a0218006a5f74f84fa185a0fde0d28a1dba1fab7eae484c85eceaf697",
-    ".claude/hooks/validators/validate_merge_guard.py": "4128708e934fbc418adb5f1d488bbbf359608b27f9ad7172a73cc8c136f173a4",
+    ".claude/hooks/validators/validate_merge_guard.py": "2d7ad4695f0d93a01ece0f47c623fd3bf50b3dc050a49cf4f7031a50df5041a8",
+    ".claude/hooks/validators/validate_no_broad_process_kill.py": "03398fe452cae1f219dcf70d46ac4832645a9026f28f8a292b70e414c27698b6",
     ".claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py": "9732c64ca44d5952fbc58d87700a8d49b15cb474a7facf6c7c79712535a1e620",
     ".claude/hooks/validators/validate_no_destructive_git_in_worktree.py": "27be3396573414f0e9b1e0894d2e47ba2846f7e5a43c9aff4d381b41b76ba8f7",
-    ".claude/hooks/validators/validate_no_gos_justification.py": "d034700dd31fb0cc42a92e428e947e9abc0e0c39d63a2355a4c13d38c4372c04",
+    ".claude/hooks/validators/validate_no_gos_justification.py": "c917d7a7856e2b2bae2537fa7765761bab6c0443f025301b5e1238ce8f8d24d2",
     ".claude/hooks/validators/validate_no_inline_timeout.py": "50c2b8b48ae726e4b7919e23cdb6d58f9460687c110435854880e2bcba9a5751",
-    ".claude/hooks/validators/validate_no_raw_redis_delete.py": "a5d68e282caeac31f11cadcd13563a4115846f99033f9700a30ff6d795c49780",
+    ".claude/hooks/validators/validate_no_raw_redis_delete.py": "c24d1a9cb4eb1cdc7466c92c0f47b4e1a9349b14b3b66c8c17aa778bb74d4826",
+    ".claude/hooks/validators/validate_no_redis_flush.py": "8d2b5152125a3c23b7ba158334e3052df80314abe79cc8346c7aeaacc25e90b8",
     ".claude/hooks/validators/validate_no_uv_sync_in_worktree.py": "b8f3f190b1479e81b5b24d814e8a2184dc18382d1166700008682058927e9d92",
     ".claude/hooks/validators/validate_sdlc_on_stop.py": "33915c766bedc71481828bf7934020b7ba22fc40466cfc2498bb0ae52f93a7fd",
     ".claude/hooks/validators/validate_test_impact_section.py": "287823060ae13f250f30a35908842949a300392a4a9ecd4129d19c4b17819af0",

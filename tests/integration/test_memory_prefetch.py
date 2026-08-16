@@ -18,7 +18,6 @@ so concurrent tests do not interfere with production data.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -26,6 +25,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+from tests.db_claim import subprocess_env
 
 pytestmark = [pytest.mark.integration]
 
@@ -72,17 +73,15 @@ def _run_user_prompt_submit_hook(
     prompt: str,
     session_id: str,
     project_key: str,
-    redis_url: str,
     cwd: str | None = None,
 ) -> dict | None:
     """Invoke .claude/hooks/user_prompt_submit.py as a subprocess.
 
     Returns the parsed hookSpecificOutput JSON dict (or None if the hook
     produced no output). Forces VALOR_PROJECT_KEY so the prefetch path
-    queries the test-isolated project partition. Forces REDIS_URL to the
-    same per-worker test db that the autouse `redis_test_db` fixture
-    points popoto at -- without this the subprocess would query
-    production Redis and find no seeded records.
+    queries the test-isolated project partition. ``subprocess_env`` points
+    the child's REDIS_URL at this process's claimed test db -- without it
+    the subprocess would query production Redis and find no seeded records.
     """
     payload = {
         "prompt": prompt,
@@ -90,9 +89,7 @@ def _run_user_prompt_submit_hook(
         "cwd": cwd or str(REPO_ROOT),
     }
 
-    env = os.environ.copy()
-    env["VALOR_PROJECT_KEY"] = project_key
-    env["REDIS_URL"] = redis_url
+    env = subprocess_env(VALOR_PROJECT_KEY=project_key)
     # Suppress AgentSession side-effects: no SESSION_TYPE / parent.
     env.pop("SESSION_TYPE", None)
     env.pop("VALOR_PARENT_SESSION_ID", None)
@@ -155,9 +152,7 @@ def isolated_session_id():
 class TestPrefetchEndToEnd:
     """Verify the UserPromptSubmit hook produces prefetched thoughts."""
 
-    def test_prefetch_emits_hookspecific_output(
-        self, isolated_project_key, isolated_session_id, redis_test_url
-    ):
+    def test_prefetch_emits_hookspecific_output(self, isolated_project_key, isolated_session_id):
         """A non-trivial prompt against seeded memories yields <thought> blocks."""
         # Seed a memory matching the prompt content.
         seeded = _seed_memory(
@@ -171,7 +166,6 @@ class TestPrefetchEndToEnd:
             prompt=("investigate auth flow refactor that broke after PR 800 deployment"),
             session_id=isolated_session_id,
             project_key=isolated_project_key,
-            redis_url=redis_test_url,
         )
 
         hso = hook_output["hookSpecificOutput"]
@@ -180,9 +174,7 @@ class TestPrefetchEndToEnd:
         # Both empty-title (no async title-gen yet) and title-present cases include `id="`.
         assert '<thought id="' in hso["additionalContext"]
 
-    def test_prefetch_writes_sidecar_injected_ids(
-        self, isolated_project_key, isolated_session_id, redis_test_url
-    ):
+    def test_prefetch_writes_sidecar_injected_ids(self, isolated_project_key, isolated_session_id):
         """After prefetch, sidecar.injected[] contains the surfaced memory_ids."""
         seeded = _seed_memory(
             "deployment rollback playbook for auth service migration",
@@ -195,7 +187,6 @@ class TestPrefetchEndToEnd:
             prompt=("investigate deployment rollback for auth service migration plan"),
             session_id=isolated_session_id,
             project_key=isolated_project_key,
-            redis_url=redis_test_url,
         )
 
         sidecar_path = REPO_ROOT / "data" / "sessions" / isolated_session_id / "memory_buffer.json"
@@ -213,9 +204,7 @@ class TestPrefetchEndToEnd:
 class TestPrefetchStripsBoilerplate:
     """PM-shaped prompts must query against the MESSAGE: payload only."""
 
-    def test_pm_boilerplate_stripped_before_query(
-        self, isolated_project_key, isolated_session_id, redis_test_url
-    ):
+    def test_pm_boilerplate_stripped_before_query(self, isolated_project_key, isolated_session_id):
         """Worker-shaped FROM:/SCOPE:/MESSAGE: prompt surfaces MESSAGE-matched memory."""
         # Two memories: one matches MESSAGE: payload, one matches FROM:/SCOPE: terms.
         msg_memory = _seed_memory(
@@ -239,7 +228,6 @@ class TestPrefetchStripsBoilerplate:
             prompt=prompt,
             session_id=isolated_session_id,
             project_key=isolated_project_key,
-            redis_url=redis_test_url,
         )
         assert hook_output is not None, "Expected hookSpecificOutput JSON on stdout"
         body = hook_output["hookSpecificOutput"]["additionalContext"]
@@ -259,9 +247,7 @@ class TestPrefetchStripsBoilerplate:
 class TestPrefetchLatencyBudget:
     """A single prefetch must complete well under PREFETCH_LATENCY_WARN_MS."""
 
-    def test_prefetch_completes_under_budget(
-        self, isolated_project_key, isolated_session_id, redis_test_url
-    ):
+    def test_prefetch_completes_under_budget(self, isolated_project_key, isolated_session_id):
         """End-to-end subprocess call returns inside the latency budget on a small fixture."""
         from config.memory_defaults import PREFETCH_LATENCY_WARN_MS
 
@@ -292,7 +278,6 @@ class TestPrefetchLatencyBudget:
             prompt=("test memory verification for latency budget on small fixture set"),
             session_id=isolated_session_id,
             project_key=isolated_project_key,
-            redis_url=redis_test_url,
         )
         elapsed = time.monotonic() - start
 

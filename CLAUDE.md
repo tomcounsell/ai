@@ -21,9 +21,11 @@ Non-obvious behavior that `--help` will not tell you:
 
 ## Manual Testing Hygiene
 
-Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`.
+Never use raw Redis on Popoto-managed keys. All reads (`hgetall`, `hget`, `scan_iter`) and writes (`delete`, `srem`, `sadd`, `zrem`) go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`, which stands down only when the Bash call's cwd resolves inside a *different* git checkout (`~/src/popoto`, where raw Redis is legitimate) and only for commands that could actually execute. A cwd belonging to no repo at all, such as `/tmp`, keeps the guard armed: the Redis is machine-global. See [`docs/features/raw-redis-guard.md`](docs/features/raw-redis-guard.md).
 
 When creating AgentSessions manually to test worker or queue behavior, use a recognizable `project_key` prefix (`test-`, `dbg-`) and delete them afterward via the ORM, scoped by that key. Never run bulk operations unscoped.
+
+Never point a debug script at a test db with `os.environ.setdefault("REDIS_URL", ...)`. `setdefault` is a no-op when the key is already set, and this shell always carries a production `REDIS_URL`, so a script that means to "default" to a test db silently keeps the production one instead. Assign `REDIS_URL` explicitly and assert the resolved db number before any write. Every Python process started inside a repo venv also carries an ambient flush guard (`tools/redis_flush_guard.py`, #2645) that raises `RuntimeError` on `.flushdb()` against db 0 or any `.flushall()`; that error means the client resolved to production, not that the guard is malfunctioning. For a script that genuinely needs a test db, follow `tests/db_claim.py`'s `redis_test_url()` / `tests/conftest.py`'s `_redis_test_db_num()` idiom, which matches the per-process claimed db the `redis_test_db` fixture already picked. See [`docs/features/redis-flush-hardening.md`](docs/features/redis-flush-hardening.md).
 
 ## Development Principles
 
@@ -97,11 +99,11 @@ Work is DONE when:
 
 Fresh messages create new sessions scoped by Telegram thread ID or local session ID; reply-to messages resume the original session and its context. Sessions pause only for genuine open questions. The full 14-state lifecycle is in [`docs/features/session-lifecycle.md`](docs/features/session-lifecycle.md).
 
-Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc conversations get ephemeral thread-scoped lists; planned work created via `/do-plan {slug}` gets a durable slug-scoped list, and the slug ties together the task list, branch, worktree, plan doc, and GitHub issue. Filesystem isolation for planned work lives in `agent/worktree_manager.py` (`.worktrees/{slug}/`, branch `session/{slug}`). See [`docs/features/session-isolation.md`](docs/features/session-isolation.md).
+Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc conversations get ephemeral thread-scoped lists; planned work created via `/do-plan {slug}` gets a durable slug-scoped list, and the lane slug ties together the task list, branch, and worktree. The plan doc is linked by `tracking:` frontmatter, not by name, and may carry a different filename than the lane's recorded slug — see [`docs/features/sdlc-lane-identity.md`](docs/features/sdlc-lane-identity.md). Filesystem isolation for planned work lives in `agent/worktree_manager.py` (`.worktrees/{slug}/`, branch `session/{slug}`). See [`docs/features/session-isolation.md`](docs/features/session-isolation.md).
 
 ## Self-Healing
 
-The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. The crash-storm signal and the restart throttle are computed independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. The watchdog records to `logs/watchdog.log`; it pushes no notification anywhere. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
+The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. A wedge verdict needs positive evidence that something was missed (`bridge:last_missed_recovery`, stamped by the reconciler), not just an absence of inbound messages, and its silence clock runs from the bridge process's start time so a restart clears the verdict that caused it. The crash-storm signal and the restart throttle are computed independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. The watchdog records to `logs/watchdog.log`; it pushes no notification anywhere. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
 
 Recovery entry points: `./scripts/valor-service.sh restart`, `worker-restart`, and `python scripts/telegram_login.py` for Telegram auth.
 
@@ -150,6 +152,7 @@ When reconciling a secret between `.env` and the vault, verify the credential ag
 | `dashboard` | The web UI dashboard (`ui/`) |
 | `bridge` | The Telegram bridge |
 | `testing` | The test suite |
+| `upvote` | Pre-approved for autonomous SDLC pickup — a scheduled reflection may start a lane on this issue without further human input. |
 
 Do NOT use a `feature` label; it adds no signal.
 

@@ -40,7 +40,9 @@ generic steps as follows:
     head ref (main/master/HEAD/empty → no usable slug → FAIL).
   - **(c) REVIEW verdict freshness** (#2003 BLOCKER 2): a recorded verdict must
     exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
-    latest commit — via the `REVIEW_CONTEXT head_sha=` trailer when present,
+    latest commit — via the head SHA the verdict attributes to
+    (`head_sha_of_record()`: the record's `head_sha` field, else a legacy
+    `REVIEW_CONTEXT head_sha=` trailer in the verdict text) when resolvable,
     else recorded-at timestamp vs latest-commit committer date. A stale
     APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`. The
     PR's current head SHA is resolved git-first via

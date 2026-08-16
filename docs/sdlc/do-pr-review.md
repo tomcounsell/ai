@@ -7,6 +7,14 @@ The leaned body refers to these abstractly. The Multi-Judge Consensus and the
 verdict+marker finalize block are documented in their own sections below; this
 section adds what they don't cover.
 
+**Plan resolution.** The generic body's priority list includes "extract the
+slug from the branch name and read `docs/plans/{slug}.md`." In this repo that
+guess is unreliable: the branch is the lane's recorded `{slug}`, but the plan
+document is not required to share that name (see
+[`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md)).
+Prefer `find_plan_path(issue_number)` (`tools/lane_identity.py`), keyed on the
+tracking issue, over a filename guess derived from the branch.
+
 **Review identity (bot account, opt-in per machine).** Pipeline-driven reviews
 MAY post under a dedicated service account. Set `SDLC_AGENT_GH_TOKEN` only on the
 dedicated bot machine; standard machines leave it blank and post under the
@@ -84,29 +92,37 @@ local-pipeline stall. Always pass `--issue-number` (quoted) — it is the
 authoritative session selector:
 
 ```bash
-# ONE atomic call replaces the old 3-call sequence (verdict record +
-# stage-marker completed + verdict get readback). `finalize` computes the PR
-# head SHA itself, records the verdict with the `REVIEW_CONTEXT head_sha=`
-# trailer appended (idempotent if already present), writes the REVIEW
-# `completed` marker on the APPROVED path, and reads all three back —
-# it cannot partially complete.
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+# ONE call replaces the old 3-call sequence (verdict record + stage-marker
+# completed + verdict get readback). `finalize` computes the PR head SHA
+# itself, records the bare verdict token plus the SHA in its own `head_sha`
+# record field (#2769), writes the REVIEW `completed` marker on the APPROVED
+# path, and reads all three back.
+#
+# --blocker-count / --tech-debt-count take integer COUNTS, not findings text.
+# Findings go in the review posted to the PR. Omit for "not assessed"; 0 means
+# "assessed, none found".
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
 # Findings:
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blocker-count $BLOCKERS --tech-debt-count $TECH_DEBT --run-id "$RUN_ID"
 # Preflight short-circuits:
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "BLOCKED_ON_CONFLICT" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "PR_CLOSED" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
 # Multi-judge: same single finalize call after agent.sdlc_review_consensus.compute_consensus
 # (single-writer invariant preserved).
 ```
 
-`finalize` is **atomic and self-verifying**: it exits **non-zero with a named
-error** (`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`,
-`REVIEW_MARKER_INCOMPLETE`) if any of the three writes (verdict, trailer,
-marker) fails to read back — never a silent partial write. **Treat a non-zero
-exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block.** No
-separate `verdict get` readback call is needed — `finalize` already verifies
-persistence before returning 0.
+`finalize` is **self-verifying, and it is honest about partial state rather
+than free of it** (#2740). It exits **non-zero with a named error**
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
+if any of the three writes fails to read back. It is deliberately **not**
+transactional: the verdict is written before the marker is attempted (the
+ordering #2415/#2577 hardened the read sites around), so the marker write can be
+refused after the verdict has already landed durably. When that happens the
+error says so explicitly — it names the verdict as persisted and the marker as
+missing, and re-running the identical command is idempotent. **Treat a non-zero
+exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block** — but
+do not assume nothing was written. No separate `verdict get` readback call is
+needed; `finalize` already verifies persistence before returning 0.
 
 ### PRs with no plan document
 
@@ -170,17 +186,18 @@ These are hard gates. No exceptions.
 
 ## Mandatory Finalize — Verdict + Marker Co-Write (#1642, atomized #2193)
 
-On the approval path, the REVIEW verdict record, the `REVIEW_CONTEXT head_sha=`
-trailer, and the REVIEW completion marker are now written by **one atomic
-`sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
+On the approval path, the REVIEW verdict record, its `head_sha` field, and the
+REVIEW completion marker are written by **one `sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
 hand-run, separable sequence. Never emit the OUTCOME block without a
-successful (exit 0) `finalize` call first. The atomicity is enforced in the
+successful (exit 0) `finalize` call first. The verification is enforced in the
 tool itself (`tools/sdlc_review_finalize.py`, sharing `check_review_persistence`
-with `verdict selfcheck`): `finalize` records the verdict, appends the trailer,
+with `verdict selfcheck`): `finalize` records the verdict and its head SHA,
 writes the marker on the APPROVED path, and reads all three back before
 returning 0 — any gap yields a named non-zero error
-(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
-instead of a silent partial write. The underlying WS3c gate in
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`).
+It is self-verifying, not transactional: on the branch where the verdict landed
+and the marker write was then refused, the error names exactly that, and
+re-running the identical call is idempotent. The underlying WS3c gate in
 `tools/sdlc_stage_marker.py` still refuses `stage-marker --stage REVIEW
 --status completed` with `REVIEW_VERDICT_MISSING` when no substrate verdict is
 readable (and, on the APPROVED path, also requires the trailer — see

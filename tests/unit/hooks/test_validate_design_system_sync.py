@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.db_claim import subprocess_env
 
 HOOK = (
     Path(__file__).resolve().parents[3] / ".claude/hooks/validators/validate_design_system_sync.py"
@@ -25,8 +26,7 @@ def _load_hook_module():
 
 
 def _run_hook(payload: dict, env_extra: dict | None = None) -> tuple[int, str, str]:
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    env = subprocess_env(project_root=str(REPO_ROOT))
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(
@@ -151,8 +151,10 @@ def test_crashed_checker_fails_open(tmp_path: Path):
     real_pen = REPO_ROOT / "tests/fixtures/design_system/design-system.pen"
     (pen_dir / "design-system.pen").write_bytes(real_pen.read_bytes())
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    # project_root only PREPENDS REPO_ROOT to PYTHONPATH; the hook's own
+    # `-m tools.design_system_sync` grandchild still puts its cwd (tmp_path)
+    # ahead of it, so the fake package planted above keeps winning.
+    env = subprocess_env(project_root=str(REPO_ROOT))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -209,8 +211,7 @@ def test_log_path_anchored_to_repo_root_not_cwd(tmp_path: Path):
     log_path = REPO_ROOT / "logs/validate_design_system_sync.jsonl"
     before = log_path.read_text(encoding="utf-8").splitlines() if log_path.is_file() else []
 
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    env = subprocess_env(project_root=str(REPO_ROOT))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git add README.md"}}),

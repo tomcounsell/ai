@@ -6,7 +6,7 @@ Organized by test level and tagged by feature. Run `pytest --collect-only -q` fo
 
 ```bash
 # By level (parallel by default — `-n auto --dist=loadfile` from pyproject.toml)
-pytest tests/unit/               # Unit tests (~40s parallel, ~250s serial)
+pytest tests/unit/               # Unit tests (~20 min parallel; --timeout=420 is pytest-timeout's per-test budget, not a run bound)
 pytest tests/integration/        # Integration tests (~125s parallel, ~330s serial; needs Redis)
 pytest -m e2e                    # E2E tests
 pytest -m slow                   # Performance benchmarks
@@ -30,7 +30,8 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 `pytest-xdist` runs tests across N worker subprocesses (one per CPU). Two patterns matter when authoring tests:
 
-1. **Per-process Redis db (claimed).** The autouse `redis_test_db` fixture (`tests/conftest.py`) gives each pytest **process** a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (issue #2060). This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run + a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the claimed db, not a hardcoded `db=1` — use the `redis_test_url` fixture (which reads the same claim). A subprocess that inherits `POPOTO_REDIS_DB` (e.g. deriving from `connection_pool.connection_kwargs['db']`) picks it up automatically. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) (root cause 3).
+1. **Per-process Redis db (claimed), and ownership is enforced.** Each pytest **process** gets a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (#2060) in `pytest_configure`, before collection and therefore before any fixture. This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run plus a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. **Never construct a `redis.Redis(db=N)` from a number you derived yourself** — not from `PYTEST_XDIST_WORKER`, not from a literal, not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. `tests.db_claim.claim_test_db()` and the `redis_test_url` fixture are the only sources; a test that genuinely needs a *second* db requests the `scratch_test_db` fixture, which claims another owned pool slot. A `flushdb()` against a db this process has not claimed now raises at its own line (#2628), and a subprocess inherits the claim through `tests.db_claim.subprocess_env`. See [`docs/features/test-db-ownership.md`](../docs/features/test-db-ownership.md).
+
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
 3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
 4. **Notify pub/sub is isolated by channel NAME, not by db.** Redis pub/sub is server-global — `PUBLISH`/`SUBSCRIBE` ignore the db `SELECT`, so the per-process db claim (pattern 1) does **not** isolate notifies. A fixture enqueue on db=`N` would otherwise publish to the one global `valor:sessions:new` channel that the launchd **live worker** (db=0) subscribes to, spinning up production queue loops for fixture sessions (issue #2147). The fix: `agent.agent_session_queue.notify_channel_for(client)` derives the channel from the client's db — db=0 keeps the canonical `valor:sessions:new`, any test db (db>=1) gets `valor:sessions:new:db{N}`. So fixture notifies land only on the db-scoped channel; the live worker never sees them. **Any test-spawned worker must connect on the claimed test db** (inherit `POPOTO_REDIS_DB` / `redis_test_url`, never hardcode db=0) so it derives the *same* `valor:sessions:new:db{N}` channel and joins the intra-test notify flow — a worker on db=0 would rejoin the production channel and defeat the isolation. The CI gate is the deterministic dual-channel probe in `tests/integration/test_notify_isolation.py`; the shared `tests/_worker_guard.py::assert_not_live_worker(pid)` guard (unit-covered in `tests/unit/test_worker_guard.py`) backstops the worker-lifecycle kill tests. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) (root cause 4).
@@ -42,11 +43,11 @@ Two cross-file phantom-failure mechanisms were root-caused and fixed in `tests/c
 1. **Popoto db-cache split-brain.** `_popoto_modules_with_redis_db()` (consumed by the autouse `redis_test_db` fixture) memoizes which `popoto.*` submodules hold a `POPOTO_REDIS_DB` symbol so it doesn't walk all of `sys.modules` every test. The cache invalidates on a **compound trigger**: `len(sys.modules)` change (catches a brand-new, never-cached db-holder) **OR** per-entry object-identity divergence (catches an equal-count eviction-then-reimport, where a module is replaced under the same dotted name — e.g. by `mock_claude_sdk_cleanup` evicting `agent.*`). Count/len may gate additions but must **never** be the sole invalidation key — a sole count/name-set signal false-greens an equal-count module replacement (the stale object keeps its pre-swap `POPOTO_REDIS_DB` binding), and identity alone misses never-cached new holders (`any()` over an empty or partial cache is vacuously false). A stale cache leaves some popoto submodule's `POPOTO_REDIS_DB` pointed at the wrong test db, so an in-process write and a subprocess (or `Model.query.filter`) read can silently land on different Redis databases. This fix also subsumes issue #2037 (create-then-`filter` split-brain — same stale-cache mechanism, read path instead of write path).
 2. **agent-hooks hooks-less-parent corruption.** The autouse `agent_hooks_consistency_guard` fixture detects and repairs a state where `sys.modules["agent"]` is cached but lacks a `hooks` attribute even though `sys.modules["agent.hooks"]` is still cached — CPython only rebinds a submodule onto its parent package at fresh-import time, so a partial `sys.modules` mutation (SDK swap, `importlib.reload`, `patch.dict`) can leave the parent "hooks-less" while the submodule cache survives. Any dotted-string `monkeypatch.setattr("agent.hooks...", ...)` then raises `AttributeError` during test setup, before the test body runs. The guard repairs by rebinding every cached `agent.*` submodule onto its parent package, in place. It deliberately does **not** evict: eviction also rebuilds the chain, but it strands any module-level `from agent import X` binding, so the test body calls a stale object while `patch("agent.X.seam")` patches the fresh one and the seam under test is never patched (#2551).
 
-3. **A reload splits a shared exception class in two (#2603).** `importlib.reload(models.session_lifecycle)` keeps the module object and rebinds every class in it, so every module that imported `StatusConflictError` by name — including every test module, at collection time — keeps the old class and its `except`/`pytest.raises` silently stops matching. The autouse `shared_exception_identity_guard` restores the original binding at teardown and warns, naming the test that reloaded (a teardown failure under `-W error::RuntimeWarning`). **Do not reload a shared module in-process.** When you need to observe a genuinely first import, shell out to a fresh interpreter — an in-process reload cannot see one anyway, since everything is already cached.
+3. **A reload splits a shared exception class in two (#2603).** `importlib.reload(models.session_lifecycle)` keeps the module object and rebinds every class in it, so every module that imported `StatusConflictError` by name — including every test module, at collection time — keeps the old class and its `except`/`pytest.raises` silently stops matching. The autouse `shared_module_identity_guard` restores the original binding at teardown and warns, naming the test that reloaded (a teardown failure under `-W error::RuntimeWarning`). Exception classes are not the only casualties: a module-level **registry** is orphaned the same way, so the guard also covers `agent.index_drift`, `monitoring.bridge_watchdog`, and `monitoring.worker_watchdog` (#2628). **Do not reload a shared module in-process, and if you must, restore what it owns.** A test whose restore fixture holds a collection-time `from module import REGISTRY` binding will silently clean the orphan while the test writes into the live one — go through the module object. When you need to observe a genuinely first import, shell out to a fresh interpreter; an in-process reload cannot see one anyway, since everything is already cached.
 
 A **cross-process** family (#2060, #2605) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other, fixed by the per-process db claim described in pattern 1 above. #2605 is the subprocess corollary — a test that shells out must build its environment with `tests/db_claim.py::subprocess_env`, which reads the same claim and pins `PYTHONPATH` to the checkout under test. Re-deriving the db from `PYTEST_XDIST_WORKER` sends the child to a db this process does not own.
 
-New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim and its consumers; `TestSharedExceptionIdentityGuard`: #2603 reload repair) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
+New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim and its consumers; `TestSharedExceptionIdentityGuard`: #2603 reload repair; `TestFlushOwnershipGuard` / `TestSessionClaimHook` / `TestReloadedRegistryIdentity`: #2628 db ownership, the popoto plugin repoint, and the registry reload leak) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
 
 ### Un-awaited-coroutine leak guardrail (issue #2120)
 
@@ -198,6 +199,7 @@ tests/
 | unit | `test_pipeline_state.py` | 15 | Pipeline state transitions |
 | unit | `test_pipeline_state_machine.py` | 137 | `PipelineStateMachine` transitions, outcome classification, opt-in predecessor backfill (`_backfill_predecessors`, `_reaches_issue`) |
 | unit | `test_sdlc_stage_marker.py` | 25 | Stage marker writes via CLI (session resolution, issue-number fallback, opt-in predecessor backfill on `in_progress`/`completed`) |
+| unit | `test_sdlc_lease_helper_binding.py` | 10 | Lease helpers stay unsnapshotted in `sdlc_dispatch`/`sdlc_meta_set`/`sdlc_stage_marker`: per-module globals check, repo-wide AST sweep, and a behavioral late-patch assertion (#2469, #2637) |
 | unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
 | unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
 | unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |
@@ -214,6 +216,7 @@ tests/
 | unit | `test_continuation_pm.py` | 8 | Continuation PM creation, depth cap, dedup, steer failure fallback |
 | unit | `test_do_plan_critique_barrier.py` | — | Roster membership gate: terminal-fence detection, missing-critic gap surfacing, incomplete-roster STOP verdict (#1690) |
 | integration | `test_parent_child_round_trip.py` | 11 | Parent-child linkage, dev session completion steering, continuation PM round-trip |
+| unit | `test_pm_progress_updates.py` | 12 | Locks the PM role doc's evidence-bearing progress-update guidance (prompt-text anchors) and characterizes which taught phrasings clear `bridge/promise_gate.py::_evaluate_promise_heuristic` on the deterministic fallback branch (#2664) |
 
 ### `sessions` — Session lifecycle and health
 
@@ -411,7 +414,19 @@ here.
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_nightly_regression_tests.py` | 28 | Nightly regression runner: suite invocation, JSON report parsing, Telegram alerting, version-pinned `claude` canary |
+| unit | `test_template_filter_registry.py` | 4 | Dashboard Jinja filter guards (#2719): every template's filter demand resolves against `ui.app.register_template_filters`; filter-key equality against a `Jinja2Templates`-shaped env; registrar-completeness; no test file hand-copies a `.filters[...]` registration |
+| unit | `test_analytics_stats_render.py` | 3 | Render coverage for `_partials/analytics_stats.html`'s two `\| usd` cost cards, including the sub-cent-renders-as-$0.01 case |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
+
+Dashboard render-test fixtures (`test_session_modal_liveness_render.py`,
+`test_per_project_modal.py`, `test_analytics_stats_render.py`) build a bare
+`jinja2.Environment` and must obtain filters by calling
+`ui.app.register_template_filters(env)` — never by hand-copying individual
+`env.filters["name"] = ...` assignments. Three independent hand-rolled filter
+lists (production, plus two divergent test stand-ins) is exactly what
+shipped `TemplateRuntimeError: No filter named 'usd' found` past all three
+call sites (#2719); `test_template_filter_registry.py`'s no-hand-copy guard
+enforces this in CI, not just in this note.
 
 ## Fixtures
 
@@ -472,3 +487,53 @@ Source modules with no test coverage. Priority targets for new tests.
 
 **Partially covered** (operational layer added in #936):
 - `bridge/email_bridge.py` — parsing, SMTP output, routing, and thread continuation have full coverage. Operational layer (`main()`, `_poll_imap()` batch cap, `_email_inbox_loop()` health timestamp) now covered via unit and integration tests.
+
+## Subprocess Test-DB Inheritance (issue #2763)
+
+Any test that shells out to a subprocess which can reach Popoto — a Python
+interpreter running a repo module, the sdlc-tool `WRAPPER`, or an inline `-c`
+script against a repo checkout — must pass `env=subprocess_env(...)` from
+`tests.db_claim`.
+
+**Why**: Popoto resolves `REDIS_URL` at *import time* and falls back to
+`redis://localhost:6379` — db0, production — when the variable is unset. The
+parent pytest process claims a test db from the pool `[1..15]` via
+`tests/db_claim.py`'s `fcntl.flock`, but that claim lives only in the parent's
+in-process Popoto client objects; `os.environ` is never mutated. The
+environment is therefore the only channel to a child, and `subprocess_env` is
+the bridge. A child launched without it silently reads and writes production
+db0.
+
+**How to use it**: `subprocess_env(*, project_root=None, **extra)`. Thread
+extra variables as keyword arguments (`subprocess_env(AI_REPO_ROOT=...)`)
+rather than hand-building a dict. If a site also needs keys removed, the
+accepted shape is `env = subprocess_env(); env.pop("NAME", None)` — assign,
+then mutate with `.pop(<literal>, None)` / `.update(...)`, never rebind.
+
+`project_root=` is **opt-in, not a default**. It prepends the path to the
+child's `PYTHONPATH`. Pass it when the child must resolve repo modules from
+this checkout; omit it when the test asserts something about import order or
+module resolution. `tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
+is the worked example of a deliberate omission — it pins the wrapper's own
+module-resolution order against a decoy `tools/` package, so prepending
+`REPO_ROOT` to `PYTHONPATH` would resolve the import for reasons other than
+the wrapper's doing.
+
+Never re-derive a db number by hand. Reading
+`POPOTO_REDIS_DB.connection_pool.connection_kwargs` to rebuild a `REDIS_URL`
+is the anti-pattern this work removed; `claim_test_db()` via `subprocess_env`
+is the only source.
+
+The enforcing guard is `tests/unit/test_subprocess_test_db_isolation.py`, an
+AST scan of `tests/**/*.py`. It matches in-scope call sites on **argv**
+(`sys.executable`, a `PYTHON`-containing identifier, a `"-m"` element,
+`WRAPPER`, or a `scripts/` string); `cwd=` is deliberately not part of the
+predicate, since what determines whether a child can import popoto is what is
+executed, not where it is executed from. Exemptions exist only as
+`SKIP_ARGV0 = {"git"}` (a `git` child never imports Python) and a commented
+`ALLOWLIST` of `path:line` entries, each carrying one of exactly two reasons:
+`[#2628]` (the file is owned by open PR #2683 — fix it there when it lands)
+or `[standalone-script]` (the child imports no repo package). **When
+reachability is unclear, convert the site — do not allowlist it.**
+
+When #2683 lands, this section folds into `docs/features/test-db-ownership.md`.

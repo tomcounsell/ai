@@ -27,6 +27,7 @@ import pytest
 
 import reflections.__main__ as reflections_main
 from agent.reflection_scheduler import ReflectionScheduler
+from tests.db_claim import subprocess_env
 
 
 @pytest.fixture
@@ -73,8 +74,10 @@ class TestDryRun:
 
     def test_dry_run_subprocess_exits_zero(self, empty_registry_env):
         """Smoke test: `python -m reflections --dry-run` exits 0 as a real subprocess."""
-        env = dict(os.environ)
-        env["REFLECTIONS_YAML"] = str(empty_registry_env)
+        env = subprocess_env(
+            REFLECTIONS_YAML=str(empty_registry_env),
+            project_root=str(Path(__file__).parent.parent.parent),
+        )
         result = subprocess.run(
             [sys.executable, "-m", "reflections", "--dry-run"],
             cwd=Path(__file__).parent.parent.parent,

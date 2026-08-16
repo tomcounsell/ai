@@ -40,6 +40,61 @@ _HEAD_SHA_TRAILER_RE = re.compile(
     r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
 )
 
+# The same 40-hex shape the trailer regex requires, applied to the standalone
+# `head_sha` record field (#2769). Both read paths must enforce well-formedness
+# identically: `_review_trailer_present` gates the REVIEW completed marker and
+# tells the operator the verdict "carries no well-formed head SHA", so a field
+# holding arbitrary text must not satisfy that gate when a malformed trailer
+# would not have.
+_HEAD_SHA_FIELD_RE = re.compile(r"\A[0-9A-Fa-f]{40}\Z")
+
+
+def head_sha_of_text(text: str) -> str:
+    """Return the head SHA carried by a verdict *string*, or ``""``.
+
+    Regex-only (issue #2769): for callers that hold a verdict text and nothing
+    else -- a legacy bare-string ``_verdicts[stage]`` entry, or a verdict whose
+    trailer was concatenated into the token before the split landed. Returns
+    ``""`` (never ``None``) so callers can treat it as a plain falsy string.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    match = _HEAD_SHA_TRAILER_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def head_sha_of_record(record: dict) -> str:
+    """Return the head SHA a ``_verdicts[stage]`` record attests to, or ``""``.
+
+    Issue #2769 split the head SHA out of the verdict token into its own
+    ``head_sha`` record field, because ``record_verdict`` normalizes the verdict
+    string and was mangling ``APPROVED REVIEW_CONTEXT head_sha=<hex>`` into
+    ``APPROVED REVIEW CONTEXT HEAD SHA=<HEX>`` -- so the stored verdict token
+    was never the bare ``APPROVED`` any reader expected.
+
+    Precedence (**a well-formed field wins**): the ``head_sha`` field is what
+    the current writer records deliberately; an in-token trailer is either legacy
+    residue or a caller-supplied string the writer already extracted. When both
+    are present and disagree, the field is authoritative.
+
+    Both paths enforce the same 40-hex shape. A field holding anything else is
+    treated as absent, exactly as a malformed trailer is -- ``record_verdict``'s
+    ``head_sha`` kwarg is public, so without this check an arbitrary string
+    would satisfy ``_review_trailer_present`` and open the REVIEW completed
+    marker gate that refuses a malformed trailer.
+
+    The regex fallback over ``record["verdict"]`` is **permanent, not
+    scaffolding**: live ledgers hold mangled verdict strings forever and there is
+    no migration. ``get_verdict`` also coerces a legacy bare-string record to
+    ``{"verdict": <str>}``, a shape with no ``head_sha`` key at all.
+    """
+    if not isinstance(record, dict):
+        return ""
+    field = record.get("head_sha")
+    if isinstance(field, str) and _HEAD_SHA_FIELD_RE.match(field.strip()):
+        return field.strip()
+    return head_sha_of_text(record.get("verdict") or "")
+
 
 # === Request-scoped env-fallback memo (issue #2122) ===
 # `_resolve_target_repo()` shells out to `gh repo view` / `git rev-parse` and
@@ -633,6 +688,46 @@ def is_pipeline_ledger(record) -> bool:
         return False
 
 
+def _anchor_confirmed_run_identity(
+    target_repo: str | None, issue_number: int | None, run_id: str | None
+) -> None:
+    """Record a CONFIRMED lease owner on the issue's durable identity anchor.
+
+    Issue #2675. Continuity used to be corroborated only against the session
+    record, which ``ensure_session``'s create fall-through leaves empty -- so a
+    re-ensure after a lease lapse had nothing to recognize itself by and minted
+    a fresh identity mid-run, orphaning every write that still carried the old
+    one. The anchor is the durable, issue-keyed copy of that history.
+
+    This is the write half, and it sits here deliberately: :func:`resolve_ledger_lease`
+    is the one place a run is *confirmed* to be the live owner of the issue's
+    lease with the pinned ``target_repo`` already in hand, so the record is
+    self-written history with the same provenance as
+    ``AgentSession.owned_run_ids`` -- never read out of a foreign payload -- and
+    it costs no extra repo resolution.
+
+    Skipped when the lease carries no pinned ``target_repo``: there is no ledger
+    key to anchor against, and a phantom ``None:{issue}`` key is worse than no
+    anchor (Risk 5). Fails OPEN and never raises -- the caller's lease is
+    already established and must not be undone by best-effort metadata.
+    """
+    if not target_repo or not issue_number or not run_id:
+        return
+    try:
+        from agent.pipeline_ledger import record_run_identity
+        from tools.sdlc_session_ensure import SDLC_RUN_IDENTITY_HISTORY_MAX
+
+        record_run_identity(target_repo, issue_number, run_id, SDLC_RUN_IDENTITY_HISTORY_MAX)
+    except Exception as e:
+        logger.debug(
+            "_anchor_confirmed_run_identity: skipped for %s#%s (%s: %s)",
+            target_repo,
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+
+
 def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | None, dict | None]:
     """Peek the issue-lock lease and validate ``run_id`` as its confirmed live owner.
 
@@ -664,6 +759,11 @@ def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | N
         established lease at all) or ``"ISSUE_LOCKED"`` (held by a foreign
         run; ``error`` also carries ``owner_run_id``/``owner_session_id``/
         ``orphaned_lock``). Never raises.
+
+    Side effect on the confirmed-owner path: the run's identity is recorded on
+    the issue's durable run-identity anchor (issue #2675, see
+    :func:`_anchor_confirmed_run_identity`). Best-effort and fail-open -- it
+    cannot change what this function returns.
     """
     if not issue_number or not run_id:
         return None, {"reason": "LEASE_ABSENT"}
@@ -682,6 +782,7 @@ def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | N
         return None, {"reason": "LEASE_ABSENT"}
 
     if result.acquired and result.owner_run_id == run_id:
+        _anchor_confirmed_run_identity(result.target_repo, issue_number, run_id)
         return result.target_repo, None
     if result.acquired:
         # Lock unheld -- no established lease for this run_id at all.
@@ -713,6 +814,17 @@ def revalidate_ledger_lease(
     ``False``, fail SAFE for a write gate (the inverse of
     ``touch_issue_lock``'s own fail-open contract, which is correct for
     read-side/renewal-side callers but wrong for a pre-write gate).
+
+    **This extends the lease, so it also refreshes the supervised-run signal**
+    (issue #2659). The call is non-peek, so a stage-marker or dispatch write
+    keeps ``session:issuelock:{N}`` alive on its own. The companion
+    ``session:supervisedrun:{N}`` shares that TTL, so without this the signal
+    would lapse under a lease these writes were holding up -- and every stage
+    fork would then read a bare ``ISSUE_LOCKED`` from its own supervisor's
+    lock and stand down. That is reachable rather than theoretical: the local
+    heartbeat self-exits at ``MAX_LIFETIME_SECONDS`` (4h), after which these
+    writes are the only thing renewing the lease, and the signal would lapse
+    30 minutes later. The #2659 incidents were at roughly 3.5h.
     """
     if not issue_number or not run_id:
         return False
@@ -730,6 +842,25 @@ def revalidate_ledger_lease(
             e,
         )
         return False
+
+    if result.acquired:
+        # Ownership-first, matching the other two renewers: only refresh the
+        # signal on a path that just confirmed (or re-acquired) the lease.
+        # Best-effort -- the signal is an optimization and a failure here must
+        # never turn a valid write gate into a refusal.
+        try:
+            from agent.supervised_run import write_supervised_run_signal
+
+            write_supervised_run_signal(issue_number, run_id, session_id=session_id)
+        except Exception as e:  # noqa: BLE001 - best-effort; never fail the gate
+            logger.debug(
+                "revalidate_ledger_lease: supervised-run signal refresh failed for "
+                "issue #%s (%s: %s) -- lease renewal stands",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
+
     return bool(result.acquired)
 
 
@@ -772,87 +903,3 @@ def session_owns_issue(session, issue_number) -> bool:
         return False
     except Exception:
         return False
-
-
-def find_plan_path(issue_number: int) -> Path | None:
-    """Locate the plan file tracking this issue.
-
-    Walks ``docs/plans/`` and returns the first ``.md`` file referencing the
-    issue, matching either the bare ``#{issue_number}`` or the tracking-URL
-    forms (``issues/{issue_number}``). A trailing digit boundary prevents
-    ``#1455`` from matching issue ``145``. Returns None if not found.
-
-    Plans-directory resolution order (D1 — portability):
-
-    1. ``SDLC_TARGET_REPO`` env var (explicit override wins — preserves
-       backward-compatible cross-repo override semantics).
-    2. Else the cwd's git working-tree root (``git rev-parse --show-toplevel``)
-       so the pipeline finds plans in whatever repo it is invoked from.
-    3. Else the ``__file__``-relative ``~/src/ai/docs/plans`` fallback.
-
-    Each step falls through on failure (not a git repo, ``git`` missing) so a
-    missing env var degrades to "correct" rather than "silently wrong".
-
-    **Bare-#N fallback safety (CONCERN 3):** When resolution reached step 3
-    (``__file__`` fallback — SDLC_TARGET_REPO unset and not inside any git
-    repo), a bare-``#N`` textual match is suppressed and None is returned.
-    A bare mention of an issue number in the ai-repo plans is likely a
-    cross-reference or No-Gos entry referencing a foreign (target-repo) issue,
-    not the plan that actually owns it.  The ``tracking:`` match is always
-    authoritative and is returned immediately regardless of resolution path.
-    """
-    if not issue_number:
-        return None
-
-    # Track whether we fell all the way to the __file__ fallback.  A bare-#N
-    # match from this path is likely a foreign cross-reference and must be
-    # suppressed so the caller knows to trigger plan creation in the target repo.
-    _is_ai_repo_fallback = False
-
-    repo_root_env = os.environ.get("SDLC_TARGET_REPO")
-    if repo_root_env:
-        plans_dir = Path(repo_root_env) / "docs" / "plans"
-    else:
-        toplevel = _git_toplevel()
-        if toplevel is not None:
-            plans_dir = toplevel / "docs" / "plans"
-        else:
-            # Resolution fell back to the ai-repo __file__ path.  Flag this so
-            # the bare-#N fallback can be suppressed below.
-            _is_ai_repo_fallback = True
-            plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
-
-    if not plans_dir.is_dir():
-        return None
-
-    # Match `#145`, `issues/145`, and the full tracking URL, but NOT `#1455`
-    # (the trailing non-digit lookahead enforces the boundary).
-    ref_re = re.compile(rf"(?:#|issues/){issue_number}(?![0-9])")
-    # A `tracking:` frontmatter line pointing at this issue is the AUTHORITATIVE
-    # owner — a plan that merely *mentions* `#{issue}` (e.g. an out-of-scope
-    # cross-reference in another plan's No-Gos) must never win over the plan that
-    # actually tracks the issue. Prefer a tracking-field match; fall back to any
-    # textual reference only when no plan claims ownership.
-    tracking_re = re.compile(rf"^tracking:.*(?:#|issues/){issue_number}(?![0-9])", re.MULTILINE)
-    fallback: Path | None = None
-    try:
-        for entry in plans_dir.iterdir():
-            if not entry.is_file() or entry.suffix != ".md":
-                continue
-            try:
-                text = entry.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            if tracking_re.search(text):
-                # tracking: match is authoritative regardless of resolution path.
-                return entry
-            if fallback is None and ref_re.search(text):
-                fallback = entry
-    except Exception as e:
-        logger.debug(f"find_plan_path walk failed: {e}")
-
-    # When plan resolution fell back to the ai-repo __file__ path
-    # (SDLC_TARGET_REPO unset, not in a git repo), a bare-#N textual match is
-    # likely a foreign plan that merely mentions the issue — return None to
-    # force re-planning in the target repo.
-    return None if (_is_ai_repo_fallback and fallback is not None) else fallback

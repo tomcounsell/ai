@@ -440,7 +440,13 @@ def _rehydrate_row(row: sqlite3.Row) -> None:
     """
     fields = _deserialize_payload(row["payload"])
     archived_id = fields.pop("id")
-    AgentSession(id=archived_id, **fields).save()
+    ts = fields.get("updated_at")
+    # Preserve only a real datetime. None and an unparsed ISO string must fall
+    # through to the normal stamp -- AgentSession.__setattr__ turns both into
+    # None, and preserving either restores a row with no liveness stamp at
+    # all. The key is always present (_serialize_session writes every field
+    # name), so guard on the value's TYPE, never on key presence.
+    AgentSession(id=archived_id, **fields).save(preserve_updated_at=isinstance(ts, datetime))
 
 
 def restore_if_empty(*, dry_run: bool = False) -> dict[str, Any]:

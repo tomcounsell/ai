@@ -48,6 +48,7 @@ import pytest
 import scripts._strip_migration as shared
 import scripts.migrate_strip_pid_fields as strip
 from models.agent_session import AgentSession
+from tests.db_claim import subprocess_env
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -348,6 +349,7 @@ class TestLogsGoToStdout:
             capture_output=True,
             text=True,
             timeout=300,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
 
         assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
@@ -517,9 +519,13 @@ class TestDocstringCorrections:
     """The safety narrative must not assert a property that is false.
 
     It claimed "the worker never writes terminal rows". Observation contradicts
-    it: ``cleanup_corrupted_agent_sessions`` re-saves every hydrated record,
-    terminal ones included, and ``/update`` invokes it at Step 5.5. The
-    atomicity argument holds on its own; the quiescence claim never did.
+    it: ``cleanup_corrupted_agent_sessions`` sweeps every hydrated record,
+    terminal ones included, and ``/update`` invokes it at Step 5.5. That sweep
+    no longer writes field values (issue #2660 replaced its ``save()`` probe
+    with ``is_valid()`` plus a targeted ``EXPIRE`` keepalive), but terminal rows
+    are still reachable by other writers, so quiescence remains an unsafe thing
+    to assume. The atomicity argument holds on its own; the quiescence claim
+    never did.
 
     Asserted against the ENGINE's docstring since #2524. The narrative used to
     be duplicated between engine and delegate, which is the same drift hazard
@@ -544,15 +550,21 @@ class TestDocstringCorrections:
             doc = importlib.import_module(module_name).__doc__ or ""
             assert not QUIESCENCE_CLAIM.search(doc), (
                 f"{module_name} restates the retracted quiescence claim. Terminal rows "
-                "are re-saved by cleanup_corrupted_agent_sessions; the safety property "
-                "is pipeline atomicity, not quiescence."
+                "remain reachable by other writers; the safety property is pipeline "
+                "atomicity, not quiescence."
             )
 
     def test_the_actual_terminal_row_writer_is_named(self):
         assert "cleanup_corrupted_agent_sessions" in (shared.__doc__ or "")
 
     def test_the_ttl_ageout_claim_is_corrected(self):
-        """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
+        """Deferred ``is_ledger`` rows keep a refreshed TTL, so they never age out.
+
+        Their run-lock bind is a two-field partial save since #2660, not the
+        whole-row re-save this bullet used to describe. The conclusion is
+        unchanged because popoto re-issues ``EXPIRE`` on the ``update_fields``
+        path as well (``base.py:1186-1188``).
+        """
         assert "Deferred rows do not age out" in (shared.__doc__ or "")
 
     def test_no_delegate_duplicates_the_narrative(self):

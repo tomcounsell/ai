@@ -1,7 +1,7 @@
 """Tests for open question extraction and stage-aware gate behavior.
 
 Tests the _extract_open_questions() function and its integration with:
-1. draft_message() — populating expectations when open questions found
+1. draft_message() — populating open_questions when open questions found
 2. Stage-aware auto-continue in agent_session_queue.py — pausing when open questions detected
 
 Run with: pytest tests/test_open_question_gate.py -v
@@ -208,13 +208,13 @@ class TestExtractOpenQuestions:
 class TestSummarizeResponseOpenQuestions:
     """Tests for open question integration with draft_message().
 
-    With the pass-through drafter, expectations come directly from
+    With the pass-through drafter, open_questions comes directly from
     _extract_open_questions() — no LLM mock needed.
     """
 
     @pytest.mark.asyncio
-    async def test_open_questions_populate_expectations(self):
-        """When raw output has open questions, expectations are populated."""
+    async def test_open_questions_field_populated(self):
+        """When raw output has open questions, open_questions is populated."""
         raw_output = (
             "Plan created for feature X.\n\n"
             "## Open Questions\n\n"
@@ -224,30 +224,30 @@ class TestSummarizeResponseOpenQuestions:
         )
         result = await draft_message(raw_output)
 
-        assert result.expectations is not None
-        assert "Should we use approach A or B?" in result.expectations
-        assert "What is the acceptable latency?" in result.expectations
+        assert result.open_questions is not None
+        assert "Should we use approach A or B?" in result.open_questions
+        assert "What is the acceptable latency?" in result.open_questions
 
     @pytest.mark.asyncio
-    async def test_no_open_questions_no_expectations(self):
-        """When raw output has no open questions, expectations stay None."""
+    async def test_no_open_questions_field_stays_none(self):
+        """When raw output has no open questions, open_questions stays None."""
         # Long enough to bypass short-output path, no ## Open Questions
         raw_output = "Built the feature. All tests passing. No open questions. " * 5
         result = await draft_message(raw_output)
 
-        assert result.expectations is None
+        assert result.open_questions is None
 
     @pytest.mark.asyncio
-    async def test_empty_open_questions_section_no_expectations(self):
-        """Empty ## Open Questions section does not populate expectations."""
+    async def test_empty_open_questions_section_stays_none(self):
+        """Empty ## Open Questions section does not populate open_questions."""
         raw_output = "Plan created.\n\n## Open Questions\n\n## Solution\n\nBuild it.\n"
         result = await draft_message(raw_output)
 
-        assert result.expectations is None
+        assert result.open_questions is None
 
     @pytest.mark.asyncio
     async def test_anti_fabrication_preserved(self):
-        """Declarative statements do not produce expectations — only real
+        """Declarative statements do not produce open_questions — only real
         ## Open Questions items do."""
         raw_output = (
             "I will implement feature X.\n\n"
@@ -257,11 +257,11 @@ class TestSummarizeResponseOpenQuestions:
         )
         result = await draft_message(raw_output)
 
-        # Expectations contain the real open question
-        assert result.expectations is not None
-        assert "Redis or PostgreSQL" in result.expectations
+        # open_questions contains the real open question
+        assert result.open_questions is not None
+        assert "Redis or PostgreSQL" in result.open_questions
         # Should NOT contain fabricated questions from declarative statements
-        assert "implement feature X" not in result.expectations.lower()
+        assert "implement feature X" not in result.open_questions.lower()
 
 
 class TestStageAwareOpenQuestionGate:
@@ -309,15 +309,15 @@ class TestStageAwareOpenQuestionGate:
         # The extractor finds questions regardless of context
         assert len(questions) == 1
 
-    def test_questions_format_for_expectations(self):
-        """Extracted questions format correctly for expectations field."""
+    def test_questions_format_for_open_questions(self):
+        """Extracted questions format correctly for the open_questions field."""
         text = "## Open Questions\n\n1. Question one?\n2. Question two?\n"
         questions = _extract_open_questions(text)
         # This is how agent_session_queue.py would not format them, but how
-        # draft_message formats them for the expectations field
-        expectations = "\n".join(f"? {q}" for q in questions)
-        assert "? Question one?" in expectations
-        assert "? Question two?" in expectations
+        # draft_message formats them for the open_questions field
+        open_questions = "\n".join(f"? {q}" for q in questions)
+        assert "? Question one?" in open_questions
+        assert "? Question two?" in open_questions
 
     def test_gate_only_triggers_during_plan_stage(self):
         """The open question gate in agent_session_queue.py only checks for questions
@@ -354,14 +354,14 @@ class TestStageAwareOpenQuestionGate:
 
 class TestWorkflowAnnouncementExtraction:
     """Issue #1189: PM workflow-announcement responses end with a
-    ## Open Questions section that must populate session.expectations
+    ## Open Questions section that must populate MessageDraft.open_questions
     verbatim, so the unthreaded-message router can match a `plan` or
     `skip` reply back to the dormant session.
 
     The PM persona overlay tells the agent to emit a literal phrase
     ("Unless you directly instruct me to skip our standard workflow...")
     plus a `## Open Questions` section asking the human to choose between
-    `plan` and `skip`. These tests verify the extraction → expectations
+    `plan` and `skip`. These tests verify the extraction → open_questions
     pipeline works for that exact response shape.
     """
 
@@ -395,9 +395,9 @@ class TestWorkflowAnnouncementExtraction:
         assert len(questions) == 1
 
     @pytest.mark.asyncio
-    async def test_workflow_question_populates_expectations(self):
+    async def test_workflow_question_populates_open_questions(self):
         """When a PM response carries the workflow announcement and a
-        ## Open Questions section, draft_message populates expectations
+        ## Open Questions section, draft_message populates open_questions
         from the section deterministically (no LLM involved)."""
         pm_response = (
             "Unless you directly instruct me to skip our standard workflow, "
@@ -410,14 +410,14 @@ class TestWorkflowAnnouncementExtraction:
         )
         result = await draft_message(pm_response)
 
-        assert result.expectations is not None, (
-            "expectations should be populated from the verbatim ## Open Questions section "
+        assert result.open_questions is not None, (
+            "open_questions should be populated from the verbatim ## Open Questions section "
             "so the unthreaded-message router can match a `plan` or `skip` reply"
         )
         # The workflow question must contain both reply tokens for the
         # semantic router to clear the 0.80 threshold against single-word replies.
-        assert "plan" in result.expectations.lower()
-        assert "skip" in result.expectations.lower()
+        assert "plan" in result.open_questions.lower()
+        assert "skip" in result.open_questions.lower()
 
     @pytest.mark.asyncio
     async def test_workflow_question_verbatim_extraction(self):
@@ -431,6 +431,6 @@ class TestWorkflowAnnouncementExtraction:
         )
         result = await draft_message(pm_response)
 
-        assert result.expectations is not None
-        # Verbatim question text must appear in expectations
-        assert "Should I file an issue" in result.expectations
+        assert result.open_questions is not None
+        # Verbatim question text must appear in open_questions
+        assert "Should I file an issue" in result.open_questions

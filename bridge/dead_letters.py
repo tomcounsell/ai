@@ -11,6 +11,7 @@ import logging
 import time
 
 from models.dead_letter import DeadLetter
+from utils.peer import numeric_peer
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +49,21 @@ async def replay_dead_letters(client) -> int:
             await letter.async_delete()
             continue
 
-        # Guard against invalid chat_id=0 (not a valid Telegram peer).
-        # Clean up any stuck dead letters from previous relay bugs.
+        # Guard against peers Telegram cannot accept. Clean up any stuck dead
+        # letters from previous relay bugs.
         # Narrowed from <= 0 in lockstep with telegram_relay.py:_dead_letter_message —
         # group/supergroup IDs are legitimately negative (#1749 defect 3).
-        try:
-            chat_id_int = int(chat_id)
-        except (ValueError, TypeError):
-            chat_id_int = 0
-        if chat_id_int == 0:
+        # The parse is `utils.peer`'s, the same one every send path and the
+        # persist side use. A local `int()` here disagreed with all of them:
+        # `int("+5")` is 5, so a stored record with chat_id="+5" was replayed to
+        # peer 5 while every send path would have dropped it. Unparseable and
+        # zero collapse to one branch — `numeric_peer` returns None for the
+        # former, which the old `except -> 0` was already folding into the
+        # latter, so the outcome is unchanged for every other input (#2644).
+        chat_id_int = numeric_peer(chat_id)
+        if chat_id_int is None or chat_id_int == 0:
             logger.warning(
-                f"Dead letter replay: discarding record with chat_id=0 "
+                f"Dead letter replay: discarding record with an undeliverable peer "
                 f"(not a valid Telegram peer): {chat_id!r}"
             )
             await letter.async_delete()
@@ -67,7 +72,7 @@ async def replay_dead_letters(client) -> int:
         try:
             if len(text) > 4096:
                 text = text[:4093] + "..."
-            await client.send_message(int(chat_id), text, reply_to=letter.reply_to)
+            await client.send_message(chat_id_int, text, reply_to=letter.reply_to)
             await letter.async_delete()
             replayed += 1
             logger.info(f"Replayed dead letter to chat {chat_id}")

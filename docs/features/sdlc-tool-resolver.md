@@ -78,14 +78,14 @@ Two distinct env vars now govern where things live:
 
 **Fail-loud head-SHA resolution (#2377 + absorbed #2394).** `_fetch_pr_head_sha` no longer returns a silent `None` on failure — it raises the named `HeadShaResolutionError` carrying the concrete cause (missing `gh`, non-zero exit + stderr, timeout, or empty output), logged at `error` level. A silent `None` had produced a false-negative REVIEW gate whose root cause was buried at `debug`. The write path (`finalize`) re-raises it as `ReviewFinalizeError` prefixed `REVIEW_TRAILER_MISSING:` with the cause attached (loud, non-zero exit); the read path (`check_review_persistence`/`selfcheck`) catches it and fails **closed** without raising (reports `reason: REVIEW_TRAILER_MISSING`, exit-0), preserving the read-only contract.
 
-### `find_plan_path` hardening
+### `find_plan_path` (`tools/lane_identity.py`)
 
 Three-level plan-dir resolution (unchanged precedence):
 1. `SDLC_TARGET_REPO` env var — explicit override.
 2. `_git_toplevel()` — cwd's git root (falls through on non-git cwd).
 3. `__file__`-relative fallback — `~/src/ai/docs/plans`.
 
-**New guard (level 3 only):** when resolution fell back to the `__file__` path (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual match is likely a foreign plan that merely *mentions* the issue number. `find_plan_path` now returns `None` instead of the foreign plan — a recoverable signal (router surfaces "plan not found / re-run /do-plan") rather than silent corruption. The `tracking:` match remains authoritative on all resolution levels and is never suppressed.
+**Ownership is one rung on every level:** a `tracking:` frontmatter line naming the issue. A plan that merely *mentions* `#N` in prose does not own N — and a "Not building #N" No-Gos line is the opposite of ownership. There is no textual-mention fallback and no `_is_ai_repo_fallback` suppression flag; both were deleted with #2735, along with the entire class of confident-wrong answers they produced (a scan of `docs/plans/` found 309 issue numbers with no owning plan that nonetheless resolved to one). An issue with no owning plan resolves to `None`, which callers treat as "no plan" rather than probing a guess.
 
 ### G5 transparent-rewrite migration
 
@@ -212,7 +212,7 @@ The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner C
 - `tools.sdlc_verdict.main()` and `tools.sdlc_dispatch.main()` catch internal exceptions, print `{}` to stdout (so existing JSON parsers don't break), log the error to stderr, and `sys.exit(1)`.
 - Skill markdown calling `sdlc-tool verdict record ...` and `sdlc-tool dispatch record ...` does **not** wrap these calls in `2>/dev/null || true` — failures must surface to the operator.
 - `tools.sdlc_stage_marker` exits 1 on ownership-guard rejection (issue #1735) — the only loud case for that module. All other `stage_marker` paths (degraded substrate, no session, idempotent) remain exit 0.
-- `stage_query` and `session_ensure` keep `sys.exit(0)` unconditionally; their callers in skill markdown still use `2>/dev/null || true` because they are best-effort.
+- `stage_query` and `session_ensure` keep `sys.exit(0)` unconditionally. `stage_query`'s callers still use `2>/dev/null || true` because they are best-effort. `session_ensure`'s do **not** (issue #2675): it reports refusals as `{"blocked": true, "reason": ...}` in its JSON payload, and a caller that discards stderr or ignores that flag proceeds under an identity it does not hold. Branch on the payload there, never on the exit code.
 
 The split is enforced by:
 

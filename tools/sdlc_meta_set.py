@@ -62,8 +62,14 @@ import json
 import logging
 import sys
 
+# The lease helpers are reached through the MODULE object, never snapshotted
+# into these globals with a `from`-import: a snapshot taken during a lazy
+# first import that lands inside an active `unittest.mock` patch freezes the
+# MagicMock here for the life of the process and silently inverts every lease
+# check in this file (#2469, #2637). Guarded by
+# tests/unit/test_sdlc_lease_helper_binding.py.
+from tools import _sdlc_utils
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
-from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +176,7 @@ def write_meta(
         logger.debug(f"sdlc_meta_set: value coercion failed for key {key!r}: {e}")
         return {}
 
-    target_repo, lease_error = resolve_ledger_lease(issue_number, run_id)
+    target_repo, lease_error = _sdlc_utils.resolve_ledger_lease(issue_number, run_id)
     if lease_error is not None:
         logger.debug(
             "sdlc_meta_set: lease invalid for issue #%s (reason=%s) -- refusing meta write",
@@ -193,7 +199,7 @@ def write_meta(
     # TOCTOU close (Risk 5): re-validate the lease non-peek immediately
     # before the actual write, never trusting the earlier peek across the
     # gap between resolve and write.
-    if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+    if not _sdlc_utils.revalidate_ledger_lease(issue_number, run_id, target_repo):
         logger.debug(
             "sdlc_meta_set: lease for issue #%s was taken by a foreign run between "
             "resolve and write -- refusing meta write",

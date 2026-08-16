@@ -27,11 +27,11 @@
         <div class="stats-group-cards">
             <div class="stat-card">
                 <span class="stat-card-label">Today</span>
-                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_today_usd) }}</span>
+                <span class="stat-card-value">{{ analytics.cost_today_usd | usd }}</span>
             </div>
             <div class="stat-card">
                 <span class="stat-card-label">7d</span>
-                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_7d_usd) }}</span>
+                <span class="stat-card-value">{{ analytics.cost_7d_usd | usd }}</span>
             </div>
         </div>
     </div>

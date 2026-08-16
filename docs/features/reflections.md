@@ -67,6 +67,7 @@ This is the mechanism behind the current registrations:
 
 - `crash-recovery` (issue #1917)
 - `memory-distill-backfill` (issue #2202 — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3))
+- `sdlc-upvote-pickup` (issue #2717, `register_sdlc_upvote_pickup` in `scripts/update/reflection_register.py`) — cron-scheduled (`0 6-22/2 * * *`, PT), project-scoped, function-type reflection running `reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes`. Picks up the oldest open `upvote`-labeled issue per project and starts an autonomously anchored SDLC lane. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
 
 The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`). `test-baseline-refresh` (issues #1933/#2004) was retired this way when the merge-gate baseline ecosystem was deleted (#2376).
 
@@ -195,6 +196,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 | `merged-branch-cleanup` | `reflections.housekeeping.merged_branch_cleanup.run` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
 | `disk-space-check` | `reflections.housekeeping.disk_space_check.run` | Check free disk space; warn if below 10 GB |
 | `analytics-rollup` | `reflections.housekeeping.analytics_rollup.run` | Aggregate daily analytics; purge old records |
+| `disk-reclaim` | `reflections.housekeeping.disk_reclaim.run` | Age out merged worktree lanes, old Claude session transcripts, and session snapshots; dry-run until `DISK_RECLAIM_APPLY=true` (see [Scheduled Disk Reclaim](scheduled-disk-reclaim.md)) |
 
 **Auditing:**
 

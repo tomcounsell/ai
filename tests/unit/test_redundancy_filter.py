@@ -83,27 +83,27 @@ class TestNoBaseline:
         assert v.reason == "no_baseline"
 
 
-# ── Termination condition 3: non-empty expectations ──────────────────────────
+# ── Termination condition 3: non-empty open_questions ──────────────────────────
 
 
 class TestHasExpectations:
-    def test_non_empty_expectations_sends(self):
+    def test_non_empty_open_questions_sends(self):
         prior = _draft(_repeat_text())
         v = should_suppress(_repeat_text(), {}, [prior], ["please confirm?"], None)
         assert v.action == "send"
-        assert v.reason == "has_expectations"
+        assert v.reason == "has_open_questions"
 
-    def test_empty_list_expectations_does_not_short_circuit(self):
-        """Empty list is falsy — should NOT trigger has_expectations."""
+    def test_empty_list_open_questions_does_not_short_circuit(self):
+        """Empty list is falsy — should NOT trigger has_open_questions."""
         prior = _draft(_repeat_text())
         v = should_suppress(_repeat_text(), {}, [prior], [], None)
-        # Depends on similarity; just assert it's NOT has_expectations
-        assert v.reason != "has_expectations"
+        # Depends on similarity; just assert it's NOT has_open_questions
+        assert v.reason != "has_open_questions"
 
-    def test_none_expectations_does_not_short_circuit(self):
+    def test_none_open_questions_does_not_short_circuit(self):
         prior = _draft(_repeat_text())
         v = should_suppress(_repeat_text(), {}, [prior], None, None)
-        assert v.reason != "has_expectations"
+        assert v.reason != "has_open_questions"
 
 
 # ── Termination condition 4: terminal session status ─────────────────────────

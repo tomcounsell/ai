@@ -383,38 +383,49 @@ def _gate_enabled() -> bool:
     return normalized in ("1", "true", "yes", "on")
 
 
-# === Advisory promise flow (durability plan #2494, Task 14) ===
+# === Advisory expectation flow (#2494 Task 14, generalized by #2708) ===
 #
 # The gate is ADVISORY to the PM: on a deferral-shaped outbound it returns a
 # revise-or-override suggestion instead of mechanically writing an
-# obligation (Risk 4: no trigger class ever writes promises). Standing by a
-# promise means the PM records it on the bound Job via
-# ``tools/job_tool promise-add`` — and a recorded OPEN promise is the
-# override signal the gate honors on the resend (read-only check).
+# obligation (no trigger class ever writes an obligation from a verdict).
+# Standing by an obligation means the PM records an INBOUND expectation on
+# the bound Job via ``tools/job_tool expectation-add --direction inbound``
+# — and a recorded OPEN inbound expectation is the override signal the gate
+# honors on the resend (read-only check). The advisory should also
+# recognize, in prose, the issue-comment grammar: a bare reassurance leaks
+# an inbound obligation; a third-party future ("the lane will ship X")
+# leaks an outbound one worth recording with --direction outbound. No new
+# regexes back this — mechanical broadening is unfalsifiable at ~0.44
+# blocks/day (two false-positive incidents).
 
 
 def promise_override_active(session) -> bool:
-    """True when the PM has stood by a promise on the session's bound Job.
+    """True when the PM has stood by an inbound expectation on the bound Job.
 
     Read-only: resolves the session's Job through the reply index and
-    checks for any OPEN promise entry. An open promise means the deferral
-    is backed by a durable, at-rest-backstopped record, so the honesty
-    gate's premise ("the session ends and nothing will deliver this") no
-    longer holds. Discharged promises do not override.
+    checks for any OPEN **inbound** expectation entry. An open inbound
+    expectation means the deferral is backed by a durable, reconciled
+    record, so the honesty gate's premise ("the session ends and nothing
+    will deliver this") no longer holds. Discharged expectations do not
+    override, and OUTBOUND expectations (what a spawned lane owes the PM —
+    including the spawn chokepoint's mechanical null-fallback entries)
+    never clear this gate: they say nothing about what we owe the
+    requester.
 
     **The override is JOB-scoped by design**, not per-message: ANY open
-    promise on the bound Job clears the gate for every outbound on that Job
-    until discharge. This is the plan's advisory framing (#2494 Task 14) —
-    the gate is a suggestion to the intelligent actor, and once the PM has
-    durably stood by a promise, re-blocking each subsequent deferral on the
-    same Job would be the nag machine Risk 4 forbids. Not an accident; do
-    not "tighten" this to per-message matching without an owner ruling.
+    inbound expectation on the bound Job clears the gate for every outbound
+    on that Job until discharge. This is the advisory framing (#2494 Task
+    14, carried into #2708) — the gate is a suggestion to the intelligent
+    actor, and once the PM has durably stood by an obligation, re-blocking
+    each subsequent deferral on the same Job would be a nag machine. Not an
+    accident; do not "tighten" this to per-message matching without an
+    owner ruling.
     """
     try:
         from bridge.job_router import job_for_session
 
         job = job_for_session(session)
-        return bool(job is not None and job.open_promises())
+        return bool(job is not None and job.open_expectations(direction="inbound"))
     except Exception as e:  # noqa: BLE001 — override check must never break the gate
         logger.debug("[promise-gate] override check failed: %s", e)
         return False
@@ -429,6 +440,11 @@ def build_promise_advisory(text: str, verdict: PromiseVerdict, session) -> str:
     enforces that). While the bound Job's goal is still the mint
     placeholder, the same pass carries the goal-authoring nudge, giving the
     goal mandate its second enforcement point (priming is the first).
+
+    Grammar the advisory recognizes (prose guidance, deliberately NOT new
+    regexes): a bare reassurance ("on it", "handled") leaks an inbound
+    obligation; a third-party future ("the lane will ship the PR") leaks an
+    outbound one the PM should record with ``--direction outbound``.
     """
     job = None
     try:
@@ -444,17 +460,19 @@ def build_promise_advisory(text: str, verdict: PromiseVerdict, session) -> str:
         "false promises — by the time this message is read, this session may "
         "be over.",
         "Either REVISE the message to claim only what is already done (with "
-        "evidence), or STAND BY the promise:",
+        "evidence), or STAND BY the obligation by recording an expectation:",
     ]
     if job is not None:
         lines.append(
-            f"  python -m tools.job_tool promise-add --job-id {job.job_id} "
-            '--text "<exactly what you promised>"'
+            f"  python -m tools.job_tool expectation-add --job-id {job.job_id} "
+            '--direction inbound --owner pm --text "<exactly what you promised>"'
         )
         lines.append(
-            "then resend — a recorded open promise clears this gate, and the "
-            "at-rest backstop will keep it visible until you discharge it "
-            f"(promise-remove) on delivery. This message's Job: {job.job_id}."
+            "then resend — a recorded open inbound expectation clears this "
+            "gate and keeps the Job active until you discharge it "
+            f"(expectation-remove) on delivery. This message's Job: {job.job_id}. "
+            "If a spawned lane will deliver it, also record the lane's side: "
+            "expectation-add --direction outbound --owner <lane id/slug>."
         )
         if job.goal_is_placeholder():
             lines.append(

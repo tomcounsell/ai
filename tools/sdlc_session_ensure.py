@@ -68,6 +68,8 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+from tools.lane_identity import resolve_lane_slug
+
 logger = logging.getLogger(__name__)
 
 # Idle window (in seconds) before a sdlc-local session is considered a zombie
@@ -86,6 +88,17 @@ ORPHAN_AGE_SECONDS = 600
 # re-mints a real run incurs, small enough to bound the JSON blob. Override via
 # the OWNED_RUN_IDS_CAP env var.
 OWNED_RUN_IDS_CAP = int(os.environ.get("OWNED_RUN_IDS_CAP", "32"))
+
+# Cap on the DURABLE, issue-keyed run-identity history (issue #2675) -- the
+# ledger-side ``_run_identities`` anchor that outlives the session record, read
+# as the fourth reuse proof below and written by
+# ``tools/_sdlc_utils.py::_anchor_confirmed_run_identity``.
+# GRAIN OF SALT: SDLC_RUN_IDENTITY_HISTORY_MAX is PROVISIONAL/TUNABLE at 20 --
+# generous enough to cover a long pipeline with repeated lease lapses, bounded
+# so the ledger blob cannot grow without limit over an issue's whole lifetime
+# (it is read on every router poll). Override via the
+# SDLC_RUN_IDENTITY_HISTORY_MAX env var.
+SDLC_RUN_IDENTITY_HISTORY_MAX = int(os.environ.get("SDLC_RUN_IDENTITY_HISTORY_MAX", "20"))
 
 
 def _read_owned_run_ids(session) -> list[str]:
@@ -140,6 +153,38 @@ def _append_owned_run_id(session, run_id: str) -> None:
         )
 
 
+def _supervisor_identity_argv() -> list[str]:
+    """Heartbeat flags naming the supervising ``claude`` process, or ``[]``.
+
+    Issue #2714. Returns ``--supervisor-pid`` / ``--supervisor-create-time`` /
+    ``--supervisor-source`` only when the identity resolves in full. Any
+    failure returns ``[]``, which the heartbeat reads as "unresolved" -- never
+    as "dead", and never as a reason not to spawn at all.
+    """
+    try:
+        from tools.sdlc_supervisor_identity import resolve_supervisor_identity_detailed
+
+        source, pid, create_time = resolve_supervisor_identity_detailed()
+        if pid is None or create_time is None:
+            return []
+        return [
+            "--supervisor-pid",
+            str(pid),
+            "--supervisor-create-time",
+            repr(float(create_time)),
+            "--supervisor-source",
+            str(source),
+        ]
+    except Exception as e:  # noqa: BLE001 - identity is an enhancement, not a precondition
+        logger.debug(
+            "sdlc_session_ensure: supervisor identity resolution failed (%s: %s) "
+            "-- spawning the heartbeat unsupervised",
+            type(e).__name__,
+            e,
+        )
+        return []
+
+
 def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: str) -> None:
     """Spawn the detached lease-heartbeat renewer for a fresh LOCAL mint.
 
@@ -155,6 +200,16 @@ def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: st
       redundant (though harmless -- both are same-owner idempotent extends).
     - under pytest (``PYTEST_CURRENT_TEST`` set): never spawn a lingering
       detached process during the test suite.
+
+    The supervisor's ``(pid, create_time)`` is resolved HERE, not in the child
+    (issue #2714). This process is still inside the supervising ``claude``
+    process's tree; the detached child is not, and is reparented away within
+    seconds of spawn, so this is the only moment the identity is observable.
+    The flags are appended only when both halves resolve -- a partial identity
+    is no identity, and the heartbeat treats it as unresolved. Resolution is
+    strictly an enhancement: if it fails or raises, the heartbeat still spawns
+    (renewing the lease is the load-bearing job) and simply falls back to its
+    shortened unsupervised lifetime ceiling.
 
     Best-effort: any spawn failure is swallowed (the lease TTL is the backstop);
     never raises, never fails the ensure.
@@ -177,18 +232,21 @@ def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: st
         except Exception:
             logf = subprocess.DEVNULL
 
+        argv = [
+            sys.executable,
+            "-m",
+            "tools.sdlc_lease_heartbeat",
+            "--issue-number",
+            str(issue_number),
+            "--run-id",
+            run_id,
+            "--session-id",
+            session_id or "",
+        ]
+        argv.extend(_supervisor_identity_argv())
+
         subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tools.sdlc_lease_heartbeat",
-                "--issue-number",
-                str(issue_number),
-                "--run-id",
-                run_id,
-                "--session-id",
-                session_id or "",
-            ],
+            argv,
             stdout=logf,
             stderr=logf,
             stdin=subprocess.DEVNULL,
@@ -250,13 +308,32 @@ def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) ->
        record's ``active_run_id`` equals the claim -- the mirror written by
        this pipeline's own earlier ``ensure_session()`` corroborates the
        claim after a TTL lapse.
+    3. **Free lock + durable anchor match** (issue #2675): the lock lapsed
+       AND the claim appears in this issue's ``_run_identities`` anchor on
+       the ledger. Every proof above corroborates against the ``AgentSession``,
+       and ``ensure_session``'s resolution order ends in a create
+       fall-through -- a record landing there has no ``active_run_id`` and an
+       empty ``owned_run_ids``, so all of them are structurally unreachable
+       and the run re-mints, orphaning every write that still carries the
+       old id. Worse, each re-mint lands on another empty history, so the
+       failure is self-perpetuating. The anchor is issue-keyed and has no
+       TTL, so it survives what erases the session-side copy.
 
     Anything else returns ``None`` -- never an error: an unverified claim
     simply falls through to the normal fresh-mint contest, where a live
     foreign holder still yields ISSUE_LOCKED. The no-adopt invariant holds:
-    this helper never reads a run_id OUT of the lock or the record to hand
-    to the caller; it only echoes back a claim the caller already carried,
-    and only when the lock/record corroborates it.
+    this helper never reads a run_id OUT of the lock, the record, or the
+    anchor to hand to the caller; it only echoes back a claim the caller
+    already carried, and only when one of them corroborates it. That
+    distinction is load-bearing for the anchor in particular: unlike
+    ``owned_run_ids``, which is session-scoped self-history, the anchor is
+    issue-scoped and can legitimately hold a genuinely foreign run's id, so
+    it corroborates the caller's own claim on a FREE lock and is never
+    consulted to take over a live one.
+
+    The anchor read is fail-open in every direction: an unresolvable target
+    repo, a missing ledger, or a read error all degrade to exactly the three
+    session-side proofs.
     """
     from models.session_lifecycle import touch_issue_lock
 
@@ -299,6 +376,27 @@ def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) ->
             session, "active_run_id", None
         ) == reuse_run_id or reuse_run_id in _read_owned_run_ids(session):
             return reuse_run_id
+        # Fourth proof (issue #2675): the session record knows nothing -- it was
+        # very likely just created by ensure_session's create fall-through -- so
+        # fall back to the DURABLE issue-keyed anchor. The claim is honored only
+        # when this issue's ledger records it as an identity that genuinely held
+        # this lease, which is exactly the self-written history owned_run_ids
+        # was meant to be before the record lost it.
+        try:
+            from agent.pipeline_ledger import read_run_identities
+            from tools._sdlc_utils import _resolve_target_repo_fallback
+
+            anchor_repo = _resolve_target_repo_fallback()
+            if anchor_repo and reuse_run_id in read_run_identities(anchor_repo, issue_number):
+                return reuse_run_id
+        except Exception as e:
+            logger.debug(
+                "sdlc_session_ensure: run-identity anchor read failed for issue #%s "
+                "(%s: %s) -- falling back to fresh mint",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
     return None
 
 
@@ -490,7 +588,13 @@ def _acquire_run_lock_and_bind(
         # active_run_id write; best-effort (never raises -- the post-save
         # readback below only asserts active_run_id, tolerating the list write).
         _append_owned_run_id(session, candidate)
-        session.save()
+        # Partial save, deliberately: this bind runs before EVERY ensure_session()
+        # return point, so a stage dispatch that changes nothing would otherwise
+        # restamp updated_at on the whole row -- this is the writer that kept the
+        # #2660 ledger anchors permanently fresh. Only active_run_id and
+        # owned_run_ids actually changed here; a stage that genuinely advances
+        # still refreshes updated_at via its own stage-state write (see #1676).
+        session.save(update_fields=["active_run_id", "owned_run_ids"])
     except Exception as e:
         release_issue_lock(issue_number, candidate)
         logger.debug(
@@ -637,6 +741,25 @@ def ensure_session(
     if not issue_number or issue_number < 1:
         logger.debug(f"sdlc_session_ensure: invalid issue_number {issue_number}")
         return {}
+
+    # Mint the lane's identity (issues #2735/#2718). ensure_session is the one
+    # component that runs on EVERY lane-start path before any plan or any stage
+    # exists, so this is where the slug is created and recorded on the
+    # PipelineLedger. The call sits on the function's only entry path, above
+    # every branch, so a single invocation covers all six success return points
+    # by construction; it is idempotent and conditional-on-empty, so it can
+    # never double-write. It must swallow: ensure_session's contract is to
+    # return a session dict, and a Redis or git failure inside identity
+    # resolution must not convert a successful ensure into `return {}`.
+    try:
+        resolve_lane_slug(issue_number, allow_heal=True)
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: lane slug resolution failed for #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
 
     try:
         # Env-var short-circuit: bridge-initiated sessions inject VALOR_SESSION_ID

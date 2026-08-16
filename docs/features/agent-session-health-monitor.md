@@ -15,6 +15,13 @@ The previous wall-clock per-session timeout was retired by issue #1172 — see
 philosophy. Cost monitoring is the long-run backstop for genuinely runaway
 sessions.
 
+This in-process loop is not the only reaper that decides `running`-session
+liveness. `/update`'s `_cleanup_stale_sessions` runs a separate,
+out-of-process, one-shot pass every time `/update` executes — see
+[`/update`'s liveness ladder](#updates-liveness-ladder-issue-2660) below and
+[AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md)
+for the full authorship rules that ladder depends on.
+
 This is the **single unified recovery mechanism** — it replaces six competing recovery functions that previously raced against each other. See [Bridge Resilience](bridge-resilience.md) for the full refactoring context.
 
 When a stuck running session is detected, it is automatically recovered by deleting it and re-creating it as `pending`. When an orphaned pending session is found (no live worker), a worker is started for it.
@@ -149,6 +156,47 @@ health_task.add_done_callback(_health_task_done)
 
 The callback guards against unexpected task exits that bypass the health loop's own `except Exception` handler — specifically `BaseException` subclasses (`SystemExit`, `KeyboardInterrupt`) and asyncio-internal exits. Ordinary exceptions are already caught inside the loop's `while True / try-except` block and cannot escape. On normal `SIGTERM` shutdown, `health_task.cancel()` triggers `CancelledError`, which the `if t.cancelled(): return` guard suppresses so no false ERROR is logged.
 
+### `/update`'s liveness ladder (issue #2660)
+
+`scripts/update/run.py::_cleanup_stale_sessions` is a separate, out-of-process
+reaper: it runs once per `/update` invocation, not on the worker's 5-minute
+loop, and has no access to `_active_workers`/`_active_sessions` when `/update`
+runs as a standalone subprocess. It finalizes `running` sessions through a
+6-rung ladder, evaluated in order. Every rung after the first is additive — it
+can only produce a skip, never a finalization:
+
+1. **Live worker in `_active_workers`** → skip, terminal (in-process
+   invocations only).
+2. **`is_ledger`** → skip, terminal, `skipped_ledger`. Checked before the
+   fence so no later rung can reach a #2042 ledger anchor — a row with no
+   subprocess by construction, which this process-liveness reaper is
+   structurally the wrong owner for.
+3. **The `(exec_pid, pid_create_time)` fence.** Fence live → skip, terminal.
+   Fence dead → **does not finalize**; it only selects the finalization
+   reason string and falls through to the rungs below (see
+   [Agent Session Fenced Execution Record](agent-session-fenced-execution-record.md)
+   for the fence itself).
+4. **`last_heartbeat_at`** within `RECENT_ACTIVITY_WINDOW` (30 min) → skip,
+   terminal, `skipped_heartbeat`. Written only by the executor's own
+   heartbeat loop — no maintenance path ever sets it.
+5. **`updated_at`** within `RECENT_ACTIVITY_WINDOW` → skip, `skipped_recent`.
+6. **`created_at`** age ≥ 120 min → finalize.
+
+The `/update` summary line names which of these four counters
+(`skipped_ledger`, `skipped_fence_live`, `skipped_heartbeat`,
+`skipped_recent`) drove each skip, so an operator can see which signal spared
+a row rather than inferring it from a total.
+
+This ladder only works because the fields it reads are honestly authored:
+`updated_at` is no longer restamped by the corruption probe, the archive
+restore, or the SDLC run-lock bind, and `last_heartbeat_at` is written
+exclusively by the execution heartbeat. See
+[AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md)
+for the full write-authorization rules, which row shape each rung protects,
+the split of reaping authority between this reaper and the issue-lock-based
+orphan reaper ([#2677](https://github.com/tomcounsell/ai/issues/2677)), and
+the `Meta.ttl` keepalive this same fix also had to preserve.
+
 ## CLI Usage
 
 ```bash
@@ -216,6 +264,7 @@ Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
 - [agent-session-model.md](agent-session-model.md) -- AgentSession model fields and lifecycle
 - [agent-session-fenced-execution-record.md](agent-session-fenced-execution-record.md) -- The `(exec_pid, pid_create_time)` fence every kill/reprieve/ownership site here consults, and the canonical legacy-row rule
+- [agent-session-liveness-authorship.md](agent-session-liveness-authorship.md) -- Who is authorized to write `updated_at`/`last_heartbeat_at`/the fence; the `/update` reaper's full liveness ladder; the `Meta.ttl` keepalive
 - `agent/session_health.py` -- Health monitor and startup recovery implementation
 - `agent/agent_session_queue.py` -- Queue entry points (re-exports from session_health and other modules)
 - Issue #127 -- Original tracking issue

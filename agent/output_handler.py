@@ -454,7 +454,7 @@ class TelegramRelayOutputHandler:
         Mirrors the relay's own guards (``bridge/telegram_relay.py``): a
         non-numeric or zero chat_id is always dropped there, so it is not a
         deliverable target. Delegates to ``utils.peer`` — the single home
-        for this parse (see ``utils/peer.py::_numeric_peer``). Lives outside
+        for this parse (see ``utils/peer.py::numeric_peer``). Lives outside
         ``models/`` deliberately: importing anything under ``models/`` runs
         ``models/__init__.py`` first, which imports ``popoto``.
         """
@@ -713,14 +713,63 @@ class TelegramRelayOutputHandler:
             if draft.full_output_file is not None:
                 drafter_overflow_file = str(draft.full_output_file)
 
+            # ── Context-recall gate (#2694) ──
+            # A clean "which PR do you mean?" returns needs_self_draft=False and
+            # would otherwise be sent, burning a human round trip for context
+            # the PM could read itself. This check triggers its own bounce.
+            #
+            # The try/except is deliberately at THIS call site rather than
+            # relying on bridge.context_recall's internal fail-open. This whole
+            # block sits inside the drafter's outer try, whose handler skips the
+            # remaining body — including _persist_routing_fields below, the only
+            # writer of session.context_summary, which is what the inbound
+            # intake classifier reads. An escaping exception here would degrade
+            # intent routing for the NEXT message in the chat and disable the
+            # inbound half of this very feature. Import errors escape a module's
+            # own fail-open, so the guard must live here.
+            ctx_advisory: str | None = None
+            ctx_verdict_advised = False
+            try:
+                from bridge.context_recall import (
+                    build_context_recall_advisory,
+                    check_outbound_context_recall,
+                )
+
+                ctx_verdict = await check_outbound_context_recall(delivery_text)
+                ctx_verdict_advised = bool(ctx_verdict.advised)
+                if ctx_verdict_advised:
+                    ctx_advisory = build_context_recall_advisory(
+                        chat_id=getattr(session, "chat_id", None) if session else None,
+                        medium=drafter_medium,
+                        reason=ctx_verdict.reason or None,
+                    )
+            except Exception as _ctx_err:
+                logger.warning(
+                    "Context-recall check failed (non-fatal); sending as drafted: %s",
+                    _ctx_err,
+                )
+                ctx_verdict_advised = False
+
+            # An advisory the builder declined to produce (unusable chat id)
+            # means the bounce has nothing to tell the PM, so do not bounce.
+            ctx_bounce = bool(ctx_verdict_advised and ctx_advisory)
+
             # ── Self-draft fallback via session steering ──
             # When the delivery validator flags a wire-format violation or an
             # empty promise (needs_self_draft=True), inject a steering message
             # asking the agent to rewrite and resend. Silent failure:
             # any error here MUST NOT block delivery.
-            if getattr(draft, "needs_self_draft", False):
-                steering_deferred = self._inject_self_draft_steering(session, draft)
-                if not steering_deferred:
+            if getattr(draft, "needs_self_draft", False) or ctx_bounce:
+                steering_deferred = self._inject_self_draft_steering(
+                    session, draft, context_advisory=ctx_advisory
+                )
+                # The narration fallback stays keyed to its ORIGINAL trigger.
+                # It discards draft.text in favour of the raw pre-drafter text
+                # (and substitutes NARRATION_FALLBACK_MESSAGE outright when that
+                # is narration-shaped), which is correct for a drafter violation
+                # and wrong for a context-recall-only bounce, where the draft
+                # was clean and the human should receive it as drafted.
+                if not steering_deferred and getattr(draft, "needs_self_draft", False):
                     # Steering budget exhausted or push failed — apply narration
                     # gate on the original text as a last resort. Substitutes
                     # NARRATION_FALLBACK_MESSAGE when the raw text is pure
@@ -884,7 +933,7 @@ class TelegramRelayOutputHandler:
                     delivery_text,
                     _draft_artifacts,
                     _recent_drafts,
-                    getattr(draft, "expectations", None) if draft is not None else None,
+                    getattr(draft, "open_questions", None) if draft is not None else None,
                     getattr(session, "status", None),
                 )
 
@@ -1100,7 +1149,7 @@ class TelegramRelayOutputHandler:
         # ── Record the sent draft for future redundancy checks ────────────────
         # Append AFTER a successful rpush so a Redis failure does not pollute
         # the dedup baseline. The helper uses update_fields= to avoid clobbering
-        # concurrent writes to other session fields (context_summary, expectations).
+        # concurrent writes to other session fields (context_summary).
         if _rpush_succeeded and session is not None and getattr(session, "is_sdlc", False):
             try:
                 session.record_recent_sent_draft(delivery_text, _draft_artifacts)
@@ -1117,7 +1166,9 @@ class TelegramRelayOutputHandler:
 
         return DeliveryOutcome.sent
 
-    def _inject_self_draft_steering(self, session: Any, draft: Any) -> bool:
+    def _inject_self_draft_steering(
+        self, session: Any, draft: Any, *, context_advisory: str | None = None
+    ) -> bool:
         """Push a self-draft instruction to the session's steering queue.
 
         Called when ``draft.needs_self_draft`` is True (delivery validator
@@ -1198,11 +1249,20 @@ class TelegramRelayOutputHandler:
         try:
             from agent.steering import push_steering_message
             from bridge.message_drafter import (
+                CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION,
                 LOCAL_FILE_PATH_RULE,
                 SELF_DRAFT_INSTRUCTION,
             )
 
-            instruction = SELF_DRAFT_INSTRUCTION
+            # #2694: the base instruction claims the delivery validator flagged
+            # a wire-format violation or an unsubstantiated promise. That is a
+            # lie for a context-recall-only bounce, where the draft was clean.
+            # Use the honest preamble in that case; keep SELF_DRAFT_INSTRUCTION
+            # verbatim whenever a real drafter violation is present.
+            ctx_only = bool(context_advisory) and not getattr(draft, "needs_self_draft", False)
+            instruction = (
+                CONTEXT_RECALL_SELF_DRAFT_INSTRUCTION if ctx_only else SELF_DRAFT_INSTRUCTION
+            )
             violations = getattr(draft, "violations", None) or []
             if any(getattr(v, "rule", None) == LOCAL_FILE_PATH_RULE for v in violations):
                 instruction += (
@@ -1223,6 +1283,12 @@ class TelegramRelayOutputHandler:
             if promise_advisory:
                 instruction += f"\n\n{promise_advisory}"
                 self._count_promise_advisory_issued(session_id)
+
+            # #2694: appended beside promise_advisory, never instead of it —
+            # the two are independent signals and both can fire on one message.
+            if context_advisory:
+                instruction += f"\n\n{context_advisory}"
+                self._count_context_recall_bounce(session_id)
 
             push_steering_message(
                 session_id,
@@ -1249,12 +1315,12 @@ class TelegramRelayOutputHandler:
             return False
 
     def _count_promise_advisory_issued(self, session_id: str | None) -> None:
-        """Operator metric: advisories issued (vs promises authored).
+        """Operator metric: advisories issued (vs expectations authored).
 
         Not to prevent a PM from ignoring the advisory (it can't be
         prevented) — so an ignored advisory is visible instead of silent.
-        Pairs with ``metrics:promises_authored`` (incremented by
-        ``tools/job_tool promise-add``); the at-rest backstop logs both.
+        Pairs with ``metrics:expectations_authored`` (incremented by
+        ``tools/job_tool expectation-add``); the at-rest backstop logs both.
         Plain counter key, non-Popoto. Best-effort, never blocks steering.
         """
         try:
@@ -1263,6 +1329,22 @@ class TelegramRelayOutputHandler:
             POPOTO_REDIS_DB.incr("metrics:promise_advisories_issued")
         except Exception as e:
             logger.debug("advisory metric incr failed for %s: %s", session_id, e)
+
+    def _count_context_recall_bounce(self, session_id: str | None) -> None:
+        """Operator metric: outbound context-recall bounces issued (#2694).
+
+        The inbound half ships dark, and the flip decision needs evidence, not
+        anecdote: this counter is how an operator sees whether the outbound gate
+        fires at a sane rate or has begun over-suppressing. Sibling of
+        ``_count_promise_advisory_issued``. Plain counter key, non-Popoto.
+        Best-effort, never blocks steering.
+        """
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            POPOTO_REDIS_DB.incr("metrics:context_recall_bounces")
+        except Exception as e:
+            logger.debug("context-recall metric incr failed for %s: %s", session_id, e)
 
     def _apply_narration_fallback(self, text: str) -> str:
         """Substitute NARRATION_FALLBACK_MESSAGE when text is pure narration.
@@ -1297,10 +1379,10 @@ class TelegramRelayOutputHandler:
         ``draft.context_summary`` is consumed by conversation routing. Silent
         failure: persistence errors MUST NOT block delivery.
 
-        Durability plan #2494: the write-only AgentSession expectations field
-        is deleted (spike-4: zero non-empty rows across all live sessions), so
-        the drafter's ``expectations`` is no longer persisted here. Job routing
-        (Milestone 3) replaces the expectations-based semantic router.
+        Only ``context_summary`` persists. The drafter's ``open_questions``
+        (its own transient concept — verbatim questions for the human) is
+        never persisted to the session row; Job expectations (#2708) are the
+        durable obligation record and live on the Job, not here.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)

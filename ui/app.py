@@ -9,14 +9,17 @@ Start with: python -m ui.app
 import datetime
 import json
 import logging
+import math
 import os
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
@@ -113,6 +116,36 @@ def _filter_format_relative(seconds: float | None) -> str:
     return f"in {label}"
 
 
+def _filter_usd(amount: float | None) -> str:
+    """Jinja2 filter: format a USD amount, always rounded UP to the cent.
+
+    Two decimal places, never truncating a fraction of a cent away: a
+    sub-cent cost reads as $0.01, not $0.00.
+    """
+    if amount is None:
+        return "$0.00"
+    cents = math.ceil(Decimal(str(float(amount))) * 100)
+    return f"${cents / 100:.2f}"
+
+
+def register_template_filters(env: Environment) -> None:
+    """Single source of truth for dashboard Jinja2 filter registration.
+
+    Registers the six dashboard filters (`format_timestamp`, `format_duration`,
+    `format_interval_filter`, `format_relative`, `freshness_age`, `usd`) on any
+    `jinja2.Environment`. Registers filters and nothing else — callers own their
+    own loader, autoescape, and globals. Production (`create_app`) and every test
+    fixture call this so a new filter added here is picked up everywhere
+    automatically, instead of being hand-copied per env.
+    """
+    env.filters["format_timestamp"] = _filter_format_timestamp
+    env.filters["format_duration"] = _filter_format_duration
+    env.filters["format_interval_filter"] = _filter_format_interval
+    env.filters["format_relative"] = _filter_format_relative
+    env.filters["freshness_age"] = _filter_freshness_age
+    env.filters["usd"] = _filter_usd
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -132,11 +165,7 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     # Register Jinja2 filters for template use
-    templates.env.filters["format_timestamp"] = _filter_format_timestamp
-    templates.env.filters["format_duration"] = _filter_format_duration
-    templates.env.filters["format_interval_filter"] = _filter_format_interval
-    templates.env.filters["format_relative"] = _filter_format_relative
-    templates.env.filters["freshness_age"] = _filter_freshness_age
+    register_template_filters(templates.env)
 
     # Store templates in app state for access by routers
     app.state.templates = templates
@@ -719,8 +748,11 @@ def create_app() -> FastAPI:
             "display_name": s.display_name,
             "session_type": s.session_type,
             "status": s.status,
+            "initiator": s.initiator,
+            "is_ledger": s.is_ledger,
             "project_key": s.project_key,
             "project_name": s.project_name,
+            "project_metadata": s.project_metadata,
             "slug": s.slug,
             "branch_name": s.branch_name,
             "current_stage": s.current_stage,
@@ -732,7 +764,10 @@ def create_app() -> FastAPI:
             "duration": s.duration,
             "issue_url": s.issue_url,
             "pr_url": s.pr_url,
+            "plan_url": s.plan_url,
             "message_text": s.message_text,
+            "message_user_text": s.message_user_text,
+            "message_system_prompt": s.message_system_prompt,
             "parent_agent_session_id": s.parent_agent_session_id,
             "context_summary": s.context_summary,
             "turn_count": s.turn_count,
@@ -751,6 +786,8 @@ def create_app() -> FastAPI:
             "thread_display_started_at": s.thread_display_started_at,
             "thread_display_run_count": s.thread_display_run_count,
             "unhealthy_reason": s.unhealthy_reason,
+            "stall_advisory": s.stall_advisory,
+            "stall_advisory_reason": s.stall_advisory_reason,
             "priority": s.priority,
             "classification_type": s.classification_type,
             "is_stale": s.is_stale,
@@ -795,6 +832,7 @@ def create_app() -> FastAPI:
             "dev_agent_id": getattr(s, "dev_agent_id", None),
             "runner_cwd": getattr(s, "runner_cwd", None),
             "claude_version": getattr(s, "claude_version", None),
+            "claude_session_uuid": getattr(s, "claude_session_uuid", None),
             # Output routing state (issue #1647).
             "user_facing_routed": _truthy(s.user_facing_routed),
             # Work-item numbers (issue #2519). Additive: the Job grouping keys
@@ -831,6 +869,7 @@ def create_app() -> FastAPI:
             "repo": job.repo,
             "project_key": job.project_key,
             "project_name": job.project_name,
+            "project_metadata": job.project_metadata,
             "status": job.status,
             "is_active": job.is_active,
             "run_count": job.run_count,

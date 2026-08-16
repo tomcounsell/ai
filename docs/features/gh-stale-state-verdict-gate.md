@@ -3,11 +3,10 @@
 ## The hole
 
 The SDLC verdict-staleness gate (#2062) decides whether a recorded REVIEW
-approval still applies to the code in front of it by comparing the verdict's
-`REVIEW_CONTEXT head_sha=<40-hex>` trailer against the PR's **current** head
-commit. If the current-head read is stale in the fail-open direction — it
-returns the *pre-push* value, which is exactly the value the trailer already
-carries — the gate sees a match and passes a verdict that predates newly pushed
+approval still applies to the code in front of it by comparing the head SHA
+the verdict attributes to against the PR's **current** head commit. If the
+current-head read is stale in the fail-open direction — it returns the
+*pre-push* value, which is exactly the value the verdict already records — the gate sees a match and passes a verdict that predates newly pushed
 code. A path deliberately designed fail-closed
 ([`sdlc-verdict-fail-closed-persistence.md`](sdlc-verdict-fail-closed-persistence.md))
 silently becomes fail-open.

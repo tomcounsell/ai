@@ -357,6 +357,34 @@ def _migrate_confirm_is_ledger_field_readable(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_confirm_pipeline_ledger_slug_readable(project_dir: Path) -> str | None:
+    """Confirm PipelineLedger.slug (issues #2735/#2718) is readable on legacy rows.
+
+    Purely additive, nullable field -- no backfill is required, and none is
+    performed. A backfill would have to *guess* the identity of a lane with
+    no branch and no PR, writing exactly the wrong-identity records the lane
+    slug exists to prevent; those lanes heal on their next lane-start call
+    instead. This is a read-only confirmation step: it loads a small sample
+    of existing ledger records and accesses ``.slug`` on each one to prove
+    Popoto's lazy-load descriptor healing resolves cleanly for rows written
+    before the field existed. Mirrors
+    ``_migrate_confirm_is_ledger_field_readable``. Writes nothing.
+    Returns None on success (including "no ledgers to check"), error string
+    on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from agent.pipeline_ledger import PipelineLedger
+
+        for ledger in list(PipelineLedger.query.all())[:5]:
+            _ = ledger.slug  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_backfill_pipeline_ledger(project_dir: Path) -> str | None:
     """Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger.
 
@@ -996,6 +1024,87 @@ def _migrate_confirm_corpus_baseline_readable(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_job_promises_to_expectations(project_dir: Path) -> str | None:
+    """Rewrite every Job's goal JSON ``promises`` list as ``expectations`` (#2708).
+
+    Expectations are now the single obligation primitive on ``Job.goal``, in
+    both directions. The pre-cutover promise model recorded only the inbound
+    one, so each legacy entry migrates to
+    ``direction="inbound", holder="requester", owner="pm"`` — its id,
+    timestamp, text (as ``what``) and ``removed_ts`` history carried across
+    verbatim. NOTHING is deleted: a discharged promise stays a discharged
+    expectation, and the full history remains reconstructable.
+
+    The rewrite delegates to the model rather than reimplementing the
+    mapping: ``Job._goal_data()`` already absorbs a lingering ``promises``
+    key on every read (the merge-on-read self-heal that makes an old-code
+    write landing mid-``/update`` safe), and ``_write_goal_data`` persists
+    that merged form while restamping ``has_open_expectations`` and the
+    ``status`` projection at the one chokepoint. So this migration is the
+    offline sweep of the population, and the read-time merge is what covers
+    the update window — one conversion implementation, two entry points,
+    no way for them to disagree.
+
+    Idempotent: a row whose stored goal carries no ``promises`` key is
+    skipped without a write, so a second pass is reads only. Per-row
+    fault-isolated: an unreadable or unparseable row is logged and the sweep
+    continues — one bad row must never cost the rest of the population.
+    ORM-only; the sweep closes by running ``Job.repair_indexes()``, the
+    sanctioned guarded path, which clears the stale
+    ``$IndexF:Job:has_open_promises`` sets left by the renamed IndexedField
+    and re-derives the new flag.
+
+    Returns None on success, an error string if the enumeration itself fails.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.job import Job
+
+        rewritten = 0
+        for job in Job.query.filter():
+            try:
+                fresh = Job.query.get(id=job.id, room_id=job.room_id)
+                if fresh is None or not fresh.goal:
+                    continue
+                if "promises" not in json.loads(fresh.goal):
+                    continue
+                # _goal_data() returns the merged form; _write_goal_data()
+                # persists it and re-derives the flag + status projection.
+                fresh._write_goal_data(fresh._goal_data())
+                rewritten += 1
+            except Exception as e:  # swallow-ok: one bad row never stops the sweep
+                logger.warning(
+                    "[migration:job_promises_to_expectations] SKIP job=%s -- %s: %s",
+                    getattr(job, "job_id", "?"),
+                    type(e).__name__,
+                    e,
+                )
+
+        if rewritten:
+            logger.info(
+                "[migration:job_promises_to_expectations] rewrote %d Job goal(s)", rewritten
+            )
+
+        # Clear the retired field's index sets and re-derive the new flag.
+        # Failure here is not a migration failure: the same repair runs on
+        # the daily maintenance cadence and on every worker start.
+        try:
+            Job.repair_indexes()
+        except Exception as e:  # swallow-ok: index hygiene retries on its own cadence
+            logger.warning(
+                "[migration:job_promises_to_expectations] index repair failed (%s: %s); "
+                "the daily guarded repair will converge it",
+                type(e).__name__,
+                e,
+            )
+
+        return None
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -1032,6 +1141,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_is_ledger_field_readable": (
         _migrate_confirm_is_ledger_field_readable,
         "Confirm AgentSession.is_ledger (issue #2042) reads cleanly on legacy rows",
+    ),
+    "confirm_pipeline_ledger_slug_readable": (
+        _migrate_confirm_pipeline_ledger_slug_readable,
+        "Confirm PipelineLedger.slug (issues #2735/#2718) reads cleanly on legacy rows",
     ),
     "schema_diet_fields": (
         _migrate_schema_diet_fields,
@@ -1101,6 +1214,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_sweep_legacy_unmarked_global_hooks,
         "Remove the stale unmarked pre-manifest validate_no_raw_redis_delete.py "
         "global registration from ~/.claude/settings.json (issue #2503)",
+    ),
+    "job_promises_to_expectations": (
+        _migrate_job_promises_to_expectations,
+        "Rewrite Job goal promises as inbound expectations and clear the retired "
+        "has_open_promises index sets (issue #2708)",
     ),
 }
 

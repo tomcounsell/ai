@@ -90,24 +90,27 @@ zero-writes test monkeypatches every Redis write command to explode) that
 rides the self-draft steering instruction back to the agent:
 
 - **Revise** — rewrite to claim only delivered work, with evidence.
-- **Override** — stand by the promise by recording it on the bound Job
-  (`python -m tools.job_tool promise-add`) and resend. The drafter core
+- **Override** — stand by the obligation by recording an inbound
+  expectation on the bound Job (`python -m tools.job_tool expectation-add
+  --direction inbound`) and resend. The drafter core
   (`_evaluate_drafter_promise`) downgrades a BLOCK to ALLOW
   (`reason="promise_recorded_override"`, audited) when the session's bound
-  Job carries an **open** promise entry
+  Job carries an **open inbound** expectation
   (`bridge.promise_gate.promise_override_active`, resolved through the
   permanent reply index via `bridge.job_router.job_for_session`).
-  Discharged promises do not override.
+  Discharged expectations do not override, and outbound expectations
+  (what a spawned lane owes the PM) never clear the gate.
 
 While the bound Job's goal is still the router's mint placeholder, the same
 advisory carries the **goal-authoring nudge** — the second enforcement point
 of the PM's goal mandate (the `prime-pm-role` priming is the first).
 
-Promises are PM-authored and PM-discharged only — no trigger class ever
-writes one (Risk 4 of the durability plan). The backstop is the
-`agent/session_health.py` sweep's `_check_jobs_at_rest_with_open_promises`,
-which surfaces Jobs at rest with open promises to the operator log along
-with the `metrics:promise_advisories_issued` vs `metrics:promises_authored`
+Expectations are PM-authored and PM-discharged only — no mechanical
+trigger ever discharges one (Risk 4 of the durability plan, carried into
+#2708). The backstop is the `agent/session_health.py` sweep's
+`_check_jobs_at_rest_with_open_expectations`, which surfaces Jobs at rest
+with open expectations to the operator log along with the
+`metrics:promise_advisories_issued` vs `metrics:expectations_authored`
 counters. See [`durability-model.md`](durability-model.md).
 
 ## Architectural posture
@@ -125,6 +128,41 @@ LLM drafter judges and keep heuristics as the unambiguous fail-closed
 last line"*) and the user-memory record `feedback_llm_drafter_over_regex`
 (*"strengthen the LLM classifier prompt before adding heuristic regex
 patterns to anti-pattern gates"*).
+
+### What the gate actually keys on (#2664)
+
+Measured directly against the live LLM layer on 2026-08-08, 8 samples
+per phrasing. The discriminator is **the presence of a forward-looking
+clause, not the presence of evidence.** Adding a file count, a commit
+hash, or a bare `#102` does not rescue "still running", "is on it", or
+"I'll report back"; only a URL-shaped autonomous-delivery reference does.
+
+| Phrasing | LLM verdict |
+|---|---|
+| Present fact, no forward clause ("what read as one config line is 14 files across `tools/` and `config/`") | allow 8/8 |
+| Past-tense work plus a bare PR number, no forward clause | allow 8/8 |
+| Ongoing clause plus a full `https://github.com/.../pull/N` URL | allow 8/8 |
+| Ongoing clause plus a bare `#102` | allow 6/8 (**unreliable**) |
+| Real evidence but no artifact yet ("dev is on it; no PR yet") | block 8/8 |
+| "Still working on this." | block 8/8 |
+| Evidence plus an explicit "I'll report back" tail | block 8/8 |
+
+Two consequences worth knowing before you touch either layer:
+
+- **A sender cannot make a mid-flight report pass by piling on
+  evidence.** The supported shapes are (a) state only what is already
+  true, with no forward clause, or (b) cite a full PR URL. Callers that
+  legitimately need to defer record the promise on the bound Job
+  instead (see the advisory flow above). `.claude/commands/roles/prime-pm-role.md`
+  teaches this to the PM.
+- **The two layers genuinely disagree, and that is by design.**
+  "Still working on this." is blocked 8/8 by the LLM but *allowed* by
+  the heuristic, because no regex covers it. The heuristic is a narrow
+  fail-closed backstop for the phrases it does match, never a
+  reimplementation of the LLM's judgment. Do not write a test that
+  asserts LLM-equivalent behavior from `_evaluate_promise_heuristic`,
+  and do not write one that asserts an LLM verdict for a phrasing that
+  measured below 8/8.
 
 ### Why the heuristic is fail-closed (vs. RTR's fail-open)
 

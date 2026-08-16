@@ -237,6 +237,28 @@ into exactly the context an operator is watching. `_last_divergence_check_at` st
 `None` rather than `0.0` because `time.monotonic()` counts from boot: a zero would swallow
 the first check of every process opened within 5 minutes of the machine coming up.
 
+## Template Filters
+
+`ui.app.register_template_filters(env)` is the single registration seam for
+the six dashboard Jinja2 filters: `format_timestamp`, `format_duration`,
+`format_interval_filter`, `format_relative`, `freshness_age` (see [Freshness
+chip](#row-level-signals-non-terminal-only) above), and `usd` (ceil-to-cent
+USD formatting, shipped by `96b0f65dd` — a sub-cent cost reads as `$0.01`,
+never `$0.00`). It takes any `jinja2.Environment`, registers filters and
+nothing else (never loader, autoescape, or globals), and `create_app` calls
+it against `templates.env`.
+
+A new filter is added **only** in `register_template_filters` — never as a
+one-off `env.filters["name"] = ...` in a template render fixture. Both
+render-test fixtures (`tests/unit/test_session_modal_liveness_render.py`,
+`tests/unit/test_per_project_modal.py`) call the same registrar, so a new
+production filter is automatically available in every test env with no
+hand-copying. `tests/unit/test_template_filter_registry.py` is the CI
+enforcement of this rule: a filter-demand guard fails a template that
+references a filter the registrar does not provide, and a no-hand-copy guard
+fails any test file that assigns into `.filters[...]` instead of calling the
+registrar.
+
 ## PipelineProgress Model
 
 The `PipelineProgress` Pydantic model is the serialization layer between Redis data and the UI/JSON API.
@@ -281,7 +303,7 @@ strict subset of the 7d window (#2122 is the precedent for watching this fan-out
 
 ## Retention
 
-Inactive sessions are filtered by a configurable retention period (env var `DASHBOARD_RETENTION_HOURS`, default 48h). Active sessions always appear regardless of age.
+Inactive sessions are filtered by a configurable retention period (env var `DASHBOARD_RETENTION_HOURS`, default 48h). Active sessions are exempt from that window but are still subject to a hard cap (env var `DASHBOARD_MAX_AGE_HOURS`, default 240h / 10 days) — a session wedged in `pending`/`running` ages out of the dashboard rather than accumulating forever.
 
 ## Related
 

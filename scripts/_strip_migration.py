@@ -31,12 +31,13 @@ Safety properties:
 - **Atomicity, not quiescence**: only records whose ``status`` is in
   ``models.session_lifecycle.TERMINAL_STATUSES`` are rewritten, but terminal
   rows are **not** quiescent.
-  ``agent.session_health.cleanup_corrupted_agent_sessions`` re-saves every
-  hydrated record -- terminal ones included -- as its "no-op save" corruption
-  probe, and ``/update`` invokes it at Step 5.5, as does worker startup and the
-  ``agent-session-cleanup`` reflection. Because ``AgentSession.save()``
-  restamps ``updated_at``, that pass moves every record's timestamp in one batch
-  at ``/update`` time. So the safety property here is **not** "nobody else
+  ``agent.session_health.cleanup_corrupted_agent_sessions`` sweeps every
+  hydrated record -- terminal ones included -- and ``/update`` invokes it at
+  Step 5.5, as does worker startup and the ``agent-session-cleanup``
+  reflection. That sweep classifies with ``is_valid()`` and issues only a
+  targeted ``EXPIRE`` keepalive per healthy row, so it writes no field value
+  and moves no record's ``updated_at`` (issue #2660). Other writers may still
+  touch a terminal row, so the safety property here is **not** "nobody else
   writes terminal rows"; it is that the delete + recreate is queued on ONE
   transactional Redis pipeline (MULTI/EXEC), so a crash or an interleaved
   writer can never lose a record. A concurrent write that lands between the
@@ -52,10 +53,14 @@ Safety properties:
   ``EXPIRE`` with ``Meta.ttl`` (popoto ``base.py:1186-1190``), so the 30-day
   backstop only fires on a record nothing writes for 30 days. Any record that
   keeps being written holds a perpetually-refreshed TTL -- true of
-  ``is_ledger=True`` SDLC anchors, which are re-saved continuously while their
-  pipeline is open, and true of every record on every tick of the cleanup pass
-  above. A deferred row therefore keeps its stale fields until a later run
-  finds it terminal.
+  ``is_ledger=True`` SDLC anchors, whose run-lock bind writes them on every
+  stage dispatch while their pipeline is open. That bind is a two-field
+  partial save since #2660, which is enough: popoto re-issues ``EXPIRE`` on
+  the ``update_fields`` path too. The cleanup pass above holds every healthy record's TTL at
+  the ceiling too, but deliberately and without a field write, via
+  ``AgentSession.refresh_ttl()`` (issue #2698 owns the decision to stop). A
+  deferred row therefore keeps its stale fields until a later run finds it
+  terminal.
 - **TTL note**: the atomic rewrite refreshes the record's ``Meta.ttl`` (30-day
   backstop) -- acceptable for a one-time migration; stale terminal sessions
   remain subject to the cleanup CLI.

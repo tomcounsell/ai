@@ -20,11 +20,17 @@ alone does not import anything beyond this module.
 from __future__ import annotations
 
 
-def _numeric_peer(chat_id) -> int | None:
+def numeric_peer(chat_id) -> int | None:
     """Parse a chat_id as a Telegram peer int, or None if it is not numeric.
 
     ``lstrip("-")`` strips ALL leading hyphens, so "--5" passes ``isdigit``
     but is not an int — return None, never raise.
+
+    Stricter than a bare ``int()`` on purpose, and the difference is the point:
+    ``int()`` accepts ``"+5"``, ``5.9``, and ``True``, none of which is a
+    Telegram peer. Callers that need the *reason* a chat_id is undeliverable
+    (unparseable vs. the zero placeholder) read it off this return value rather
+    than re-parsing — a second parse is how the two answers drift apart.
     """
     raw = str(chat_id).strip() if chat_id is not None else ""
     if not raw or not raw.lstrip("-").isdigit():
@@ -41,4 +47,4 @@ def deliverable_telegram_peer(chat_id) -> bool:
     Zero is not a valid Telegram peer (the relay's zero-guard drops it), so
     a ``chat_id="0"`` placeholder (chatless sessions) is not deliverable.
     """
-    return _numeric_peer(chat_id) not in (None, 0)
+    return numeric_peer(chat_id) not in (None, 0)

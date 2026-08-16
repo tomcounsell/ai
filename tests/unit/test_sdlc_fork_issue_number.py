@@ -28,6 +28,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # ---------------------------------------------------------------------------
 # Skill-file resolution helpers
 # ---------------------------------------------------------------------------
@@ -506,6 +510,7 @@ class TestIssueNumberArgparseBoundary:
             ],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 2, (
             f"Expected argparse exit code 2 for empty --issue-number, got {result.returncode}.\n"
@@ -532,6 +537,7 @@ class TestIssueNumberArgparseBoundary:
             ],
             capture_output=True,
             text=True,
+            env=subprocess_env(project_root=str(REPO_ROOT)),
         )
         assert result.returncode == 2, (
             f"Expected argparse exit code 2 for empty --issue-number stage-marker, "

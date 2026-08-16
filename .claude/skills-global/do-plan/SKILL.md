@@ -1,7 +1,7 @@
 ---
 name: do-plan
 description: "Use when creating or updating a feature plan document. Triggered by 'make a plan', 'plan this', 'flesh out the idea', or any request to scope and plan work before implementation."
-allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion, ToolSearch, WebSearch
+allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion, ToolSearch, WebSearch, Agent
 ---
 
 # Make a Plan (Shape Up Methodology)
@@ -389,6 +389,8 @@ Please review the Open Questions section at the end of the plan and provide answ
 ```
 
 ### Phase 4: Finalize Plan
+
+> **Never leave `docs/plans/` dirty across an await.** Plan docs commit directly on the shared main checkout, so an uncommitted edit sitting there while you wait on a subagent, a critique, or a human is exposed to every concurrent lane. A peer running `git pull --rebase` autostashes your work-in-progress, and if the pulled commits touch the same file the autostash-apply conflicts — at which point the peer has to quarantine the stash and someone has to prove by content diff which of stash-vs-commit was authoritative. That happened on 2026-08-07 (#2650, shape 1). Commit each revision as soon as it is coherent; a slightly noisy history costs nothing next to a reconciliation.
 
 After receiving answers:
 
