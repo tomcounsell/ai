@@ -545,7 +545,30 @@ def _compute_meta(
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr
     else:
+        # Two-pass lookup (#2757). `_lookup_pr` defaults to `state="open"`, so a
+        # merged PR is invisible to BOTH its resolution legs -- which is exactly
+        # why a lane's `pr_number` evaporates the minute its PR merges, and why
+        # a terminal pipeline was being told to rebuild the work it had just
+        # shipped. #2539 already corrected the identical defect at a sibling
+        # call site (`tools/sdlc_stage_marker.py`), and
+        # `agent/pipeline_state.py:1564` independently walks a two-pass state
+        # ladder for the same reason; this is that in-repo idiom, not a new one.
+        #
+        # The second pass runs ONLY when the first returns None. Ordering is the
+        # whole safety property: an OPEN PR is the lane's live artifact and must
+        # always win over a historical one, so no lookup that succeeds today can
+        # change its answer. The pass is strictly additive.
+        #
+        # It is scoped to `merged`, deliberately NOT `all`. `_gh_pr_search_issue_ref`
+        # returns the FIRST body-validating candidate with no MERGED-over-CLOSED
+        # preference, so `all` can surface a closed-unmerged PR -- measured on
+        # #2793, which resolves to closed PR 2794 under `all` and to None under
+        # `merged`. A closed-unmerged PR is not evidence BUILD produced an
+        # artifact; admitting one would read back as CLOSED and make G8 fire,
+        # converting a silent no-op into an active false rebuild.
         pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo)
+        if pr_number is None:
+            pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo, state="merged")
 
     # Fetch live PR merge state and CI status for G6 guard
     pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
