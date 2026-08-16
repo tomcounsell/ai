@@ -235,14 +235,12 @@ explicit `bw.logger.addHandler(caplog.handler)` / `removeHandler` `try/finally` 
 same reason (they read records off a logger this plan sets `propagate = False`). Only the names and
 line numbers moved, so the Test Impact entry is re-pointed rather than re-designed.
 
-**Bug still reproducible — and materially worse.** `logs/watchdog.log` is now **9,692,506 bytes**
-(mtime `Aug 16 10:48`), up from the 41,322 bytes measured at revision 3, i.e. it has grown ~235x in
-nine days and is approaching the 10 MB `maxBytes` rotation threshold — at which point the rotation
-would discard genuine history in favor of retained test output. **The No-Go gate baseline is
-re-measured to `sha256 = 51cfe6c4d464235c9bc85d9e55449e2487cbdef2c0eb1447d60694e2038f2f9b`,
-9692506 bytes, mtime `Aug 16 10:48`.** The round-3 baseline
-(`2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`, 41322 bytes) is superseded and
-must not be used — a gate comparing against it would fail for a reason unrelated to the change.
+**Bug still reproducible — and materially worse.** `logs/watchdog.log` had grown to ~9.69 MB against
+the 10 MB `maxBytes` rotation threshold, at which point rotation discards genuine history. **The
+literal baseline figures this subsection once carried are deleted at revision 5**, along with
+revision 3's. No baseline figure appears anywhere in this plan: at ~145 KB/day with a live 60-second
+writer, any figure written here is stale before a builder reads it, and a gate comparing against a
+stale one fails for a reason unrelated to the change. Task 1 re-measures at build start.
 
 **Lazy-import rejection — re-priced, conclusion unchanged.** Round 3 rejected the lazy import at
 `monitoring/bridge_watchdog.py:72` on a cost of "15 sites, including 10
@@ -344,9 +342,10 @@ tests/unit/test_bridge_watchdog.py tests/unit/test_worker_watchdog.py` is empty.
 **Active plans in `docs/plans/` overlapping this area:** none. Nothing else touches `monitoring/`.
 
 **Bug still reproducible:** yes. `logs/watchdog.log` carries a synthetic burst at
-`2026-08-07 16:41:52`–`16:43:01`. Baseline for the No-Go gate:
-`sha256 = 2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`, 41322 bytes,
-mtime `Aug 7 16:43`.
+`2026-08-07 16:41:52`–`16:43:01`. (The round-3 baseline figures once quoted here are **deleted at
+revision 5** — no literal baseline appears anywhere in this plan; Task 1 re-measures at build start.
+Revision 5 counts 1,063 test-pollution lines in the current file, 442 at 1x and 207 distinct messages
+at exactly 3x, the reload-stacking signature.)
 
 ## Prior Art
 
