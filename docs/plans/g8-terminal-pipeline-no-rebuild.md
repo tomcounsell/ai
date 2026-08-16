@@ -7,7 +7,7 @@ created: 2026-08-14
 tracking: https://github.com/tomcounsell/ai/issues/2757
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-08-16T04:19:27Z
+revision_applied_at: 2026-08-16T04:38:20Z
 ---
 
 # G8 must not rebuild shipped work: an absent PR number is unverifiable, not falsified
@@ -199,7 +199,7 @@ reconciled before any code was written.
 
 - **#2793 is closed `NOT_PLANNED`** (2026-08-13T13:14:04Z, by the repo owner):
   "Duplicate of #2735 + #2718." Both mechanisms it reported were already tracked and
-  were closed by `docs/plans/sdlc-lane-recorded-slug.md`.
+  were closed by `docs/plans/completed/sdlc-lane-recorded-slug.md`.
 - **PR #2794 is closed unmerged** (2026-08-14T03:45:20Z), superseded. It was also
   measured to regress the suite (33 failed / 77 passed) because it removed
   `find_plan_path` from `tools/_sdlc_utils.py` rather than extending it.
@@ -282,8 +282,13 @@ and load-bearing enough that it changes which fix is correct (see Key Elements).
 - **#2539 → `tools/sdlc_stage_marker.py:246-250`** — the direct precedent for this
   plan's primary fix: the identical `state="open"` defect at a sibling `_lookup_pr`
   call site, fixed by passing `state="all"` with a comment explaining that the
-  artifact question is historical rather than in-flight. **Succeeded.** This plan
-  applies the same correction at the call site #2539 did not reach.
+  artifact question is historical rather than in-flight. **Succeeded — but the rating
+  is scoped.** #2539 succeeded at *recovering merged PRs*; it did not address
+  **candidate selection**, and this plan's own #2793 → closed-unmerged PR 2794
+  measurement shows that sibling call site carries the identical hazard this plan
+  dodges by using `state="merged"`. Filed as its own issue in task build-tests-docs;
+  deliberately **not** fixed here (out of fence). This plan applies the correction at
+  the call site #2539 did not reach, in the safer `merged` form.
 - **#2091 → `docs/plans/completed/fix-sdlc-router-merge-termination.md`** — already
   adjudicated the stale-router-fixture class this plan's red integration test belongs
   to, and produced a guardrail note at `docs/sdlc/do-test.md:156-166`. **Succeeded,
@@ -562,7 +567,11 @@ The change is confined to step 5, and it only ever moves an outcome from
   `_fetch_pr_merge_state`. Accepted as the price of correctness. Deliberately **not**
   mitigated with a cache — that would add persistent state and break this plan's
   "no new dependencies, no new architectural surface" property for a sub-second cost.
-  Lanes with an open PR remain entirely unaffected.
+  Lanes with an open PR remain entirely unaffected. **At batch granularity** the
+  figure multiplies: a dashboard refresh, an operator sweep, or a reflection scan that
+  walks N issues in one pass adds roughly N × 0.89s, serially, each call bounded by the
+  existing 5s timeout. Recorded so whoever next reports a slow dashboard refresh finds
+  the cause here rather than re-deriving it.
 - **Data ownership**: unchanged. The verifier remains read-only.
 - **Reversibility**: very high. Three small edits across two functions; reverting
   restores the present behavior exactly.
@@ -1009,6 +1018,9 @@ surviving stage markers — measured: `{BUILD: completed}` alone routes to
 `/do-plan` (row 1), and a branch-with-no-PR routes to `/do-build` via row 5
 (`_rule_branch_exists_no_pr`), which is the *correct* owner of "build must create
 the PR" and reaches it through evidence rather than through a failed verification.
+**Caveat (round-3):** row 5 is not an unconditional backstop — it fires only when
+`pr_number` is falsy, so the reopened-issue residual in Risk 3b disarms it. Read the
+two risks together.
 The #2003 merge gate remains the hard backstop that a PR-less lane cannot merge. And
 the control test (`test_g8_redispatches_build_on_synthesized_false_pr_claim`) pins
 that a recorded-but-dead PR still fires G8.
@@ -1067,14 +1079,26 @@ exact: the three reported issues resolve to precisely the PRs that closed them.
 lifecycle begins, the `merged` pass still finds the *prior* lifecycle's merged PR
 (its body still reads "Closes #N"). `pr_state` reads `MERGED`, so an unfinished
 second-lifecycle BUILD would be reported verified. This is named rather than fixed,
-for three reasons: it is strictly narrower than the bug being fixed (it over-verifies
-one stage rather than re-dispatching work on every tick); the #2003 merge predicate
+for three reasons: it is narrower than the bug being fixed (it does not re-dispatch
+work on every tick); the #2003 merge predicate
 remains the hard backstop against actually merging an unbuilt lane; and the clean fix
 — trying `_lookup_pr`'s exact `--head <lane branch>` leg before the fuzzy `#N` search,
 since a prior lifecycle's branch cannot match the current lane's — reorders the
 resolution ladder for **every** caller, which is a larger change than this plan's
 fence should absorb on a case nobody has reported. **Filed as its own issue** during
 task build-tests-docs, cross-referencing this paragraph.
+
+**The residual's blast radius is wider than the verifier, and Risk 2 must be read with
+that caveat.** A stale `pr_number` is not merely an over-verified BUILD — it is a
+**falsy→truthy flip of a router input**. `_rule_branch_exists_no_pr`
+(`agent/sdlc_router.py:922-927`) fires only when `pr_number` is falsy, so a reopened
+issue whose second lifecycle has no PR of its own inherits a truthy `pr_number` from
+the prior lifecycle and **silently disarms row 5** — the very row Risk 2 presents as
+the surviving owner of "a branch exists with no PR, so build must create the PR". The
+same value also reaches `_rule_ready_to_merge` (`:1470-1471`). The lane can then fall
+through to `Blocked(NO_RULE)`, which this plan classifies as a human-escalation wedge.
+No router change is in this fence; the deliverable here is an honest statement of the
+residual, and Risk 2's mitigation is qualified accordingly.
 
 ### Risk 4: The repaired integration test is repaired to the wrong expectation
 **Impact:** the test currently asserts `row_id == "10"` on a fixture that cannot
@@ -1240,6 +1264,16 @@ new one.
   `pr_number` = 2686 / 2665 / 2671 for issues #2638 / #2566 / #2640 respectively,
   where it returns `None` today (spike-9). Proven by a test that stubs `gh` for both
   passes, plus a live re-measurement recorded in the PR description.
+- [ ] **The second pass is scoped to `merged`, pinned by its negative.** At
+  `tools/sdlc_stage_query.py:548`, an issue whose only body-validating PR is
+  **closed-unmerged** resolves `pr_number` to `None` — **not** to that PR. This is the
+  criterion that makes the primary fix *correct* rather than merely broader; without
+  it a builder could revert the second pass to `state="all"` and still satisfy every
+  other criterion (round-3 CONCERN). The #2793 → PR 2794 shape is the reference case.
+- [ ] **The two-pass ordering is strictly additive, pinned by its negative.** When the
+  `open` pass returns a PR, the second pass is **not invoked at all** — asserted by
+  call count, not by result equality, so a second pass that runs and happens to agree
+  cannot pass.
 - [ ] **No `/do-build` at ANY row** for a terminal pipeline whose PR is merged —
   asserted as `result.get("skill") != "/do-build"`, never as "not row G8". Tested with
   `branch_exists: True` **and** `branch_exists: False`, because spike-8 measured the
@@ -1418,6 +1452,16 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
 - **File the gate-gap issue**: a red integration test sat on `main` under default
   collection (`pyproject.toml:155` `testpaths = ["tests"]`) without blocking anything.
   That is a CI/collection gap independent of this fix and needs its own issue.
+- **File the reopened-issue residual as its own GitHub issue**, cross-referencing
+  Risk 3b: a reopened issue's second lifecycle resolves the *prior* lifecycle's merged
+  PR, which both over-verifies BUILD and disarms router row 5. Risk 3b's round-2
+  disposition promised this issue; nothing else in the task list or Success Criteria
+  checks for it, which is exactly how a promised follow-up drops during build.
+- **File the `sdlc_stage_marker.py` sibling issue**: `tools/sdlc_stage_marker.py:246-250`
+  passes `state="all"` and is exposed to the *identical* candidate-selection hazard
+  this plan changed its own new call site to `state="merged"` to dodge. Cross-reference
+  this plan's #2793 → 2794 measurement. Do **not** widen this plan's fence to that
+  file — file it and move on.
 
 ### 3. Validate
 - **Task ID**: validate-all
@@ -1529,13 +1573,13 @@ pass should embed.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| CONCERN | Scope | Round-2 BLOCKER 1's fix is not pinned by any Success Criterion. SC 1 asserts only the positive resolution (2686/2665/2671); the negative that makes the fix correct — the #2793 shape resolving to `None` rather than to closed-unmerged PR 2794 — and the strictly-additive ordering property (the second pass runs only when the first returns `None`) exist only as a Test Impact bullet and a task-2 bullet. A builder could satisfy every Success Criterion while silently reverting the second pass to `state="all"`. | pending | Promote the two negatives already written under Test Impact's "Add a `_compute_meta` unit test" bullet into Success Criteria items, anchored on `tools/sdlc_stage_query.py:548`: (a) an issue whose only body-validating PR is closed-unmerged resolves `pr_number` to `None`, not to that PR; (b) when the `open` pass returns a PR, the second pass is not invoked at all. |
-| CONCERN | Scope | Risk 3b's round-2 disposition says the reopened-issue residual is "**Filed as its own issue** during task build-tests-docs", i.e. a second follow-up issue distinct from the gate-gap one. Task 2's bullet list contains only one file-an-issue action (the gate-gap issue). A builder executing the task list literally files one issue, and the round-2 CONCERN this disposition claims to address goes unfulfilled. | pending | Add a second bullet to task `build-tests-docs` mirroring the existing gate-gap bullet: "File the reopened-issue residual as its own GitHub issue, cross-referencing Risk 3b." Nothing in the task list or Success Criteria currently checks for it, which is exactly how a promised follow-up drops during build. |
-| CONCERN | History | The "### Revision status (2026-08-16)" subsection's item 1 still reads "`_compute_meta` gets a two-pass `_lookup_pr` (open, then `all` only on `None`)". Every current-design section (Key Elements, Technical Approach, the Flow diagram, task `build-fix`) was corrected in round 2 to `state="merged"`. The subsection carries the same date as the Round 2 table directly above it and is not labelled round-1-specific, so it reads as a live design summary and a builder landing there first would implement the unscoped `all` pass that round 2 blocked on. | pending | Either rewrite item 1 to say `state="merged"` (noting round 2 corrected it from `all`), or re-title the heading "Revision status after Round 1 (2026-08-16)" so it cannot be mistaken for the post-round-2 design. The corrected phrasing already exists verbatim in Key Elements: "the second pass is scoped to `state="merged"` rather than `"all"` — see the round-2 correction below." |
-| NIT | Structural | The Freshness Check cites `docs/plans/sdlc-lane-recorded-slug.md`, which no longer exists at that path — the plan has since been migrated to `docs/plans/completed/sdlc-lane-recorded-slug.md`. Every other referenced path in the plan resolves. | pending | One-word path fix in the "Foreign-PR reconciliation" bullet under Freshness Check: insert `completed/`. |
-| CONCERN | Risk | Risk 3b's reopened-issue residual is scoped to over-verification of BUILD only ("it over-verifies one stage rather than re-dispatching work on every tick"). The blast radius is wider: the stale `pr_number` is written to `_meta` and therefore also reaches `_rule_branch_exists_no_pr` (`agent/sdlc_router.py:922-927`), which fires only when `pr_number` is **falsy**. A reopened issue whose second lifecycle has no PR of its own gets a truthy `pr_number` from the prior lifecycle, so row 5's "a branch exists with no PR, so build must create the PR" signal is silently disarmed — the exact row Risk 2 relies on as the surviving owner of that state. The lane can then fall through to `Blocked(NO_RULE)`, which the plan itself classifies as a human-escalation wedge. | pending | Widen Risk 3b's residual paragraph to name the router consequence, not just the verifier one: a stale `pr_number` is not merely an over-verified BUILD, it is a **falsy→truthy flip of a router input** consumed by `_rule_branch_exists_no_pr` and by `_rule_ready_to_merge` (`agent/sdlc_router.py:1470-1471`). Do not add a router change to this fence — the deliverable is an honest Risk 3b and a cross-reference to it from Risk 2's mitigation, which currently presents row 5 as an unconditional backstop. |
-| CONCERN | Scope | Architectural Impact and Prior Art both lean on `tools/sdlc_stage_marker.py:246-250` (#2539's `state="all"`) as the "Succeeded" precedent that licenses this plan's two-pass lookup — but this plan's own round-2 evidence (#2793 resolving to closed-unmerged PR **2794** under `all`) demonstrates that that sibling call site is exposed to the identical candidate-selection hazard this plan just changed its own new call site to `state="merged"` to dodge. The plan files follow-ups for two lesser residuals (the reopened-issue case, the CI-collection gap) but is silent on the precedent it cites. | pending | Do **not** widen the fence to `sdlc_stage_marker.py` — file it. Add a bullet to task `build-tests-docs`: file an issue that `tools/sdlc_stage_marker.py:246-250` passes `state="all"` and can resolve a closed-unmerged PR, cross-referencing this plan's #2793→2794 measurement, and note in Prior Art that #2539's "Succeeded" rating is scoped to recovering merged PRs, not to candidate selection. |
-| NIT | Risk | Architectural Impact prices the primary fix's cost per invocation (~0.89s on the no-match path) but never at the caller granularity that matters operationally: the dashboard, an operator sweep, and a reflection scan each call `_compute_meta`/`next-skill` across many issues in one pass, and the plan states the non-lane majority all take the retry path. The per-call figure is honest; the aggregate is undisclosed, and a cache is explicitly rejected. | pending | One sentence in Architectural Impact's Cost bullet stating the multiplier for a batch caller (N non-lane issues → N × ~0.89s added, serial, bounded by the existing 5s per-call timeout) so the tradeoff is visible to whoever next reports a slow dashboard refresh. No code change; the rejection of a cache stands. |
+| CONCERN | Scope | Round-2 BLOCKER 1's fix is not pinned by any Success Criterion. SC 1 asserts only the positive resolution (2686/2665/2671); the negative that makes the fix correct — the #2793 shape resolving to `None` rather than to closed-unmerged PR 2794 — and the strictly-additive ordering property (the second pass runs only when the first returns `None`) exist only as a Test Impact bullet and a task-2 bullet. A builder could satisfy every Success Criterion while silently reverting the second pass to `state="all"`. | **ADDRESSED** — two new Success Criteria promote the negatives to acceptance gates, anchored on `tools/sdlc_stage_query.py:548`: (a) a closed-unmerged-only issue resolves `pr_number` to `None`, not to that PR (#2793 → 2794 reference case); (b) when the `open` pass returns a PR the second pass is not invoked at all, asserted by **call count** rather than result equality so a redundant second pass cannot pass. `state="merged"` is now pinned by acceptance, not only by prose. | Promote the two negatives already written under Test Impact's "Add a `_compute_meta` unit test" bullet into Success Criteria items, anchored on `tools/sdlc_stage_query.py:548`: (a) an issue whose only body-validating PR is closed-unmerged resolves `pr_number` to `None`, not to that PR; (b) when the `open` pass returns a PR, the second pass is not invoked at all. |
+| CONCERN | Scope | Risk 3b's round-2 disposition says the reopened-issue residual is "**Filed as its own issue** during task build-tests-docs", i.e. a second follow-up issue distinct from the gate-gap one. Task 2's bullet list contains only one file-an-issue action (the gate-gap issue). A builder executing the task list literally files one issue, and the round-2 CONCERN this disposition claims to address goes unfulfilled. | **ADDRESSED** — task `build-tests-docs` gains an explicit bullet to file the reopened-issue residual as its own GitHub issue, cross-referencing Risk 3b, alongside the pre-existing gate-gap bullet. | Add a second bullet to task `build-tests-docs` mirroring the existing gate-gap bullet: "File the reopened-issue residual as its own GitHub issue, cross-referencing Risk 3b." Nothing in the task list or Success Criteria currently checks for it, which is exactly how a promised follow-up drops during build. |
+| CONCERN | History | The "### Revision status (2026-08-16)" subsection's item 1 still reads "`_compute_meta` gets a two-pass `_lookup_pr` (open, then `all` only on `None`)". Every current-design section (Key Elements, Technical Approach, the Flow diagram, task `build-fix`) was corrected in round 2 to `state="merged"`. The subsection carries the same date as the Round 2 table directly above it and is not labelled round-1-specific, so it reads as a live design summary and a builder landing there first would implement the unscoped `all` pass that round 2 blocked on. | **ADDRESSED** — the subsection is re-titled **"Revision status after Round 1"** (done by the round-3 critique itself) and item 1 is rewritten to say "a historical retry" with an explicit round-2 correction naming `state="merged"`. Both the stale-`all` reading and the round-1-only count are resolved. | Either rewrite item 1 to say `state="merged"` (noting round 2 corrected it from `all`), or re-title the heading "Revision status after Round 1 (2026-08-16)" so it cannot be mistaken for the post-round-2 design. The corrected phrasing already exists verbatim in Key Elements: "the second pass is scoped to `state="merged"` rather than `"all"` — see the round-2 correction below." |
+| NIT | Structural | The Freshness Check cites `docs/plans/sdlc-lane-recorded-slug.md`, which no longer exists at that path — the plan has since been migrated to `docs/plans/completed/sdlc-lane-recorded-slug.md`. Every other referenced path in the plan resolves. | **ADDRESSED** — path corrected to `docs/plans/completed/sdlc-lane-recorded-slug.md`. | One-word path fix in the "Foreign-PR reconciliation" bullet under Freshness Check: insert `completed/`. |
+| CONCERN | Risk | Risk 3b's reopened-issue residual is scoped to over-verification of BUILD only ("it over-verifies one stage rather than re-dispatching work on every tick"). The blast radius is wider: the stale `pr_number` is written to `_meta` and therefore also reaches `_rule_branch_exists_no_pr` (`agent/sdlc_router.py:922-927`), which fires only when `pr_number` is **falsy**. A reopened issue whose second lifecycle has no PR of its own gets a truthy `pr_number` from the prior lifecycle, so row 5's "a branch exists with no PR, so build must create the PR" signal is silently disarmed — the exact row Risk 2 relies on as the surviving owner of that state. The lane can then fall through to `Blocked(NO_RULE)`, which the plan itself classifies as a human-escalation wedge. | **ADDRESSED** — Risk 3b gains a paragraph naming the router consequence: a stale `pr_number` is a **falsy→truthy flip of a router input** that disarms `_rule_branch_exists_no_pr` (`agent/sdlc_router.py:922-927`) and also reaches `_rule_ready_to_merge` (`:1470-1471`), so the lane can fall through to `Blocked(NO_RULE)`. Risk 2's mitigation now carries a matching caveat that row 5 is **not** an unconditional backstop. No router change added to the fence. | Widen Risk 3b's residual paragraph to name the router consequence, not just the verifier one: a stale `pr_number` is not merely an over-verified BUILD, it is a **falsy→truthy flip of a router input** consumed by `_rule_branch_exists_no_pr` and by `_rule_ready_to_merge` (`agent/sdlc_router.py:1470-1471`). Do not add a router change to this fence — the deliverable is an honest Risk 3b and a cross-reference to it from Risk 2's mitigation, which currently presents row 5 as an unconditional backstop. |
+| CONCERN | Scope | Architectural Impact and Prior Art both lean on `tools/sdlc_stage_marker.py:246-250` (#2539's `state="all"`) as the "Succeeded" precedent that licenses this plan's two-pass lookup — but this plan's own round-2 evidence (#2793 resolving to closed-unmerged PR **2794** under `all`) demonstrates that that sibling call site is exposed to the identical candidate-selection hazard this plan just changed its own new call site to `state="merged"` to dodge. The plan files follow-ups for two lesser residuals (the reopened-issue case, the CI-collection gap) but is silent on the precedent it cites. | **ADDRESSED** — Prior Art now scopes #2539's "Succeeded" rating to *recovering merged PRs*, explicitly excluding candidate selection, and cites this plan's #2793 → 2794 measurement as evidence the sibling carries the same hazard. A bullet in task `build-tests-docs` files it as its own issue. The fence is **not** widened to `sdlc_stage_marker.py`. | Do **not** widen the fence to `sdlc_stage_marker.py` — file it. Add a bullet to task `build-tests-docs`: file an issue that `tools/sdlc_stage_marker.py:246-250` passes `state="all"` and can resolve a closed-unmerged PR, cross-referencing this plan's #2793→2794 measurement, and note in Prior Art that #2539's "Succeeded" rating is scoped to recovering merged PRs, not to candidate selection. |
+| NIT | Risk | Architectural Impact prices the primary fix's cost per invocation (~0.89s on the no-match path) but never at the caller granularity that matters operationally: the dashboard, an operator sweep, and a reflection scan each call `_compute_meta`/`next-skill` across many issues in one pass, and the plan states the non-lane majority all take the retry path. The per-call figure is honest; the aggregate is undisclosed, and a cache is explicitly rejected. | **ADDRESSED** — Architectural Impact's Cost bullet now states the batch multiplier (N issues → ~N × 0.89s, serial, each bounded by the existing 5s timeout) so a future slow-dashboard report finds the cause here. The rejection of a cache stands. | One sentence in Architectural Impact's Cost bullet stating the multiplier for a batch caller (N non-lane issues → N × ~0.89s added, serial, bounded by the existing 5s per-call timeout) so the tradeoff is visible to whoever next reports a slow dashboard refresh. No code change; the rejection of a cache stands. |
 
 **Supplementary war-room pass (2026-08-16, same round).** A second FULL roster ran
 concurrently against the identical plan hash and returned the three findings
@@ -1625,9 +1669,11 @@ code before the revision was written, not taken on the critique's word:
 **The three structural changes this produced:**
 
 1. **The primary fix moved one layer up.** `_compute_meta` gets a two-pass
-   `_lookup_pr` (open, then `all` only on `None`). This makes the outcome *correct*
-   rather than merely silent, and required a **fence extension** to
-   `tools/sdlc_stage_query.py` (recorded in Appetite).
+   `_lookup_pr` (open, then a historical retry only on `None`). This makes the outcome
+   *correct* rather than merely silent, and required a **fence extension** to
+   `tools/sdlc_stage_query.py` (recorded in Appetite). **Round-2 correction:** the
+   retry is scoped to `state="merged"`, not `state="all"` — see Key Elements and
+   Risk 3b.
 2. **The MERGE short-circuit and its new helper are cut entirely** — inert for the
    real shape, redundant against the direct PATCH guard, trust-extending, and it
    would have hollowed out the repaired fixture.
