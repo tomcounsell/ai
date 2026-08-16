@@ -1179,94 +1179,107 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
 - **Task ID**: build-red
 - **Depends On**: none
 - **Validates**: `tests/integration/test_sdlc_session_ensure_integration.py`
-- **Informed By**: spike-6 (no existing test covers the term being changed, so the suite cannot catch a wrong fix), spike-5 (the one test that looks like a regression test does not exercise this shape)
+- **Informed By**: spike-6 (no existing test covers the term being changed), spike-8 (the rebuild relocates to row 5, so a G8-specific assertion is not a regression test), spike-5 (the one test that looks like a regression test does not exercise this shape)
 - **Assigned To**: `g8-verifier-builder`
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Write `test_no_pr_number_recorded_does_not_redispatch_build`: a real
-  `PipelineLedger` with `BUILD` and `MERGE` completed and **no** `pr_number`;
-  assert the result is not `{"skill": "/do-build", "row_id": "G8"}`.
-- Run it against the current module and **watch it fail**. Record the failure text
-  in the PR description.
+- **First, confirm the inherited red reproduces in a clean checkout**:
+  `test_terminal_merged_pipeline_routes_to_merge_not_build` must fail at row **8e**
+  before anything is touched. spike-5 measured this, but it has been red on `main`
+  under default collection for some time — verify rather than assume, and record the
+  output.
+- Write `test_no_pr_number_recorded_does_not_redispatch_build` against a real
+  `PipelineLedger`: `BUILD` completed, **no** `MERGE` marker, **no** `pr_number`.
+  Assert `result.get("skill") != "/do-build"` — **not** row-specific — and assert
+  there is **no `error` key**. Parametrize over `branch_exists` ∈ {True, False}.
+  The absent `MERGE` marker is deliberate: it is what makes this test pin the
+  identifiability guard rather than a short-circuit.
+- Write the recovery-path sibling: an **empty** ledger + a merged PR + an existing
+  branch → no `/do-build` at any row, no `error` key. This is the reproduction end to
+  end (`decide()` recovers `BUILD` from durable signals while `pr_number` stays
+  `None`), and it replaces the earlier draft's false "an empty ledger is already
+  safe" assertion.
+- Run all of them against the current modules and **watch them fail**. Record the
+  failure text in the PR description. A test that passes here is not yet a
+  regression test — check that `decide()` did not simply return an `error` dict.
 - Do not edit `tools/` in this task.
 
-### 1. Fix the verifier
-- **Task ID**: build-verifier
+### 1. Fix the lookup and the guards
+- **Task ID**: build-fix
 - **Depends On**: build-red
-- **Validates**: `tests/unit/test_sdlc_next_skill.py`, `tests/integration/test_sdlc_session_ensure_integration.py`
-- **Informed By**: spike-3 (the identifiability guard is the load-bearing fix; the MERGE short-circuit alone misses partial loss), spike-4 (the short-circuit is not redundant — it covers the PATCH check, whose merged-skip is unreachable without a `pr_number`), spike-2 (guard reordering cannot fix this)
+- **Validates**: `tests/unit/test_sdlc_stage_query.py`, `tests/unit/test_sdlc_next_skill.py`, `tests/integration/test_sdlc_session_ensure_integration.py`
+- **Informed By**: spike-9 (the primary fix: `_lookup_pr` defaults to `state="open"`, so merged PRs are invisible; #2539 is the precedent), spike-10 (restoring `pr_number` reaches `/do-merge` row 10 under both branch states), spike-8 (silencing G8 alone relocates the rebuild to row 5), spike-2 (guard reordering cannot fix this)
 - **Assigned To**: `g8-verifier-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_pipeline_is_terminal_from_states(stage_states) -> bool` above
-  `_verify_stage_artifacts_live`, with the docstring specified in Technical Approach
-  — including the definitional-twin note naming
-  `tools/_sdlc_run_identity.py::_pipeline_is_terminal` and why it is not called.
-- Short-circuit `_verify_stage_artifacts_live` on a terminal pipeline **at the top
-  of the function**, above the `find_plan_path` / `resolve_lane_slug` resolution, with
-  a debug log.
-- Gate the BUILD check on a recorded `pr_number`, mirroring `patch_claimed`'s
-  `bool(lane_branch)` guard; debug-log the skip. Remove the old condition outright —
-  no demoted `elif`.
+- **`tools/sdlc_stage_query.py::_compute_meta` (`:548`) — do this first.** Two-pass
+  `_lookup_pr`: existing call, then a `state="all"` retry **only** when it returns
+  `None`. Do not change `_lookup_pr`'s own default. Comment naming #2539 and
+  `agent/pipeline_state.py:1564`, and why open must win over historical.
+- **`tools/sdlc_next_skill.py`** — gate the BUILD check on a recorded `pr_number`,
+  mirroring `patch_claimed`'s `bool(lane_branch)` guard; debug-log the skip. Remove
+  the old condition outright, no demoted `elif`.
+- Apply the same guard to the **PATCH** branch probe when `pr_number` is absent
+  (a missing branch is unreadable without a PR state to consult).
+- **Add no terminal predicate and no short-circuit.** If a terminal check ever seems
+  needed, add a pure `pipeline_is_terminal(states)` to `tools/_sdlc_run_identity.py`
+  and delegate — never a third near-homonym.
 - Extend the function docstring's merged-pipeline-misfire paragraph. **Paraphrase**
-  the removed condition; never quote it, or the anti-criterion grep trips on the
-  documentation of its own removal.
-- Touch nothing else in the file. `_build_context` and the lock-peek block belong to
-  other active lanes.
+  the removed condition; never quote it.
+- Touch nothing else. `_build_context` and the lock-peek block belong to other
+  active lanes.
 
-### 2. Complete the test surface
-- **Task ID**: build-tests
-- **Depends On**: build-verifier
-- **Validates**: `tests/unit/test_sdlc_next_skill.py`, `tests/integration/test_sdlc_session_ensure_integration.py`
-- **Informed By**: spike-5 (the exact repair: recorded APPROVED verdict + matching `head_sha` + a fake that answers both the git-first and `gh` head-SHA paths, or the fail-closed sentinel routes to row 8f), spike-6 (existing BUILD tests all set `pr_number = 555` and must stay untouched)
+### 2. Test surface, docs, and the follow-up issue
+- **Task ID**: build-tests-docs
+- **Depends On**: build-fix
+- **Validates**: `tests/unit/test_sdlc_next_skill.py`, `tests/unit/test_sdlc_stage_query.py`, `tests/integration/test_sdlc_session_ensure_integration.py`
+- **Informed By**: spike-5 (the exact fixture repair: recorded APPROVED verdict + matching `head_sha` + a fake answering both the git-first and `gh` head-SHA paths, or the fail-closed sentinel routes to row 8f), spike-6 (existing BUILD tests all set `pr_number = 555` and must stay untouched)
 - **Assigned To**: `g8-verifier-builder`
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Repair `test_terminal_merged_pipeline_routes_to_merge_not_build` per Test Impact:
-  add the `_verdicts["REVIEW"]` APPROVED record with `head_sha`, add
-  `MERGE: "completed"`, extend `_fake_gh_pr_view_merged` to answer `headRefOid` and
-  `git ls-remote origin refs/pull/N/head` while preserving its existing
-  branch-gone answer for `git ls-remote --heads`. Rewrite its docstring to say what
-  it actually defends.
-- Add the unit cases from Test Impact, including the parametrized falsy-`pr_number`
-  case, the non-`completed` `MERGE` values, the wholly-empty `stage_states`, the
-  `assert_not_called()` subprocess assertions, and the debug-vs-warning log levels.
+- Repair `test_terminal_merged_pipeline_routes_to_merge_not_build`: add the
+  `_verdicts["REVIEW"]` APPROVED record with `head_sha`, extend
+  `_fake_gh_pr_view_merged` to answer `headRefOid` and
+  `git ls-remote origin refs/pull/N/head` while preserving its branch-gone answer for
+  `git ls-remote --heads`. **Do not add `MERGE: "completed"`** — that would make the
+  fixture dead code. Rewrite its docstring to say what it actually defends; rename it
+  if the name is the concern.
+- Add a `_compute_meta` unit test: `gh` stubbed so the `open` pass returns nothing
+  and the `all` pass returns a PR → `pr_number` resolves. Plus the negative: when the
+  `open` pass returns a PR, the `all` pass is **not** run.
+- Add the unit cases from Test Impact: the parametrized falsy-`pr_number` case, the
+  `assert_not_called()` subprocess assertions, and the debug-vs-warning log levels
+  (with `caplog.set_level(logging.DEBUG)`, or they pass vacuously).
 - Leave `test_g8_redispatches_build_on_synthesized_false_pr_claim` and the three
   `pr_number = 555` unit tests untouched — their passing is an assertion.
+- Apply every checkbox in the Documentation section, including widening the
+  `docs/sdlc/do-test.md:156-166` stale-fixture guardrail to integration fixtures.
+- **File the gate-gap issue**: a red integration test sat on `main` under default
+  collection (`pyproject.toml:155` `testpaths = ["tests"]`) without blocking anything.
+  That is a CI/collection gap independent of this fix and needs its own issue.
 
 ### 3. Validate
-- **Task ID**: validate-verifier
-- **Depends On**: build-tests
-- **Assigned To**: `g8-verifier-validator`
-- **Agent Type**: validator
-- **Parallel**: false
-- Run every Verification row.
-- Confirm each negative independently: the control test still produces `G8`; a
-  terminal pipeline runs zero artifact subprocesses; no file outside the fence
-  differs from `main`; no `xfail`, skip, or weakened assertion was introduced.
-- **Demonstrate the removed-term anti-criterion goes red** against a
-  deliberately-reintroduced condition, then revert it. A grep row never shown to
-  fail has not been verified.
-- Confirm no raw Redis access was introduced in the test setup or teardown.
-
-### 4. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-verifier
-- **Assigned To**: `g8-verifier-documentarian`
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Apply every checkbox in the Documentation section. Update the three existing
-  surfaces; create no new feature doc and add no index entry.
-
-### 5. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: build-tests-docs
 - **Assigned To**: `g8-verifier-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run all Verification rows and confirm all Success Criteria.
+- Run every Verification row and confirm every Success Criterion. This is the only
+  validation pass; there is no second identical one.
+- Confirm each negative independently: the control test still produces `G8`; no
+  `/do-build` at **any** row under **both** `branch_exists` values; no file outside
+  the extended fence differs from the merge base; no `xfail`, skip, or weakened
+  assertion.
+- **Demonstrate demonstrated-red for the guards.** Revert each guard in turn and
+  confirm the corresponding test goes red, then restore. A gate never shown to fail
+  has not been verified. Explicitly include the `_compute_meta` two-pass fix.
+- Verify the new tests do not pass via `decide()`'s catch-all: assert no `error` key
+  is present in any asserted result.
+- Confirm no raw Redis access was introduced in the test setup or teardown
+  (`PipelineLedger.get_or_create` / `.save()` / `.delete()`; `cleanup_ledger` at
+  `:416-429` is the pattern).
 
 ## Verification
 
