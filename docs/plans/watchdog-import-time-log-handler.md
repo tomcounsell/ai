@@ -1438,58 +1438,51 @@ single short-lived process per launchd tick.
 - `[DESTRUCTIVE]` **No modification of existing `logs/` content.** `logs/watchdog.log` and
   `logs/worker_watchdog.log` are production evidence and the record that attributed the #2418
   synthetic lines. Deleting, truncating, rewriting, or filtering them is irreversible.
-  **Gate:** at the start of Task 1, record the baseline with **absolute paths pinned to the main
-  checkout**:
+  **Gate:** the single implementation lives in **Task 1**, and Verification points at it. This
+  section states only the rationale it must satisfy; **no shell block and no literal baseline figure
+  appears here.** Revisions 2-4 kept a second copy of the gate in this section, hardcoded to
+  `/Users/tomcounsell/src/ai`, which does not exist on this checkout and fired `BASELINE_INCOMPLETE`
+  on a correct build — the exact "two implementations of one gate, and Verification aims at the
+  broken one" shape this plan condemns elsewhere. It is deleted.
 
-  ```bash
-  for f in /Users/tomcounsell/src/ai/logs/watchdog.log \
-           /Users/tomcounsell/src/ai/logs/worker_watchdog.log; do
-    n=$(wc -c < "$f" | tr -d ' ')
-    printf '%s %s %s\n' "$f" "$n" "$(head -c "$n" "$f" | shasum -a 256 | cut -d' ' -f1)"
-  done > /tmp/watchdog-log-baseline.txt
-  test "$(wc -l < /tmp/watchdog-log-baseline.txt)" -eq 2 || { echo BASELINE_INCOMPLETE; exit 1; }
-  ```
+  Four properties the Task 1 gate must have, each earned by a measured failure:
 
-  Verification re-checks the recorded **prefix**, from any cwd:
+  1. **Absolute paths, derived not hardcoded.** `shasum` and `wc -c` resolve whatever path string
+     they are handed against the caller's cwd. A relative baseline written in the main checkout and
+     re-checked from the worktree re-resolves onto the *worktree's* `logs/` — the directory Task 1
+     deliberately writes into — reporting a failure on a correct build while never once inspecting
+     the checkout it exists to protect. Reproduced: relative baseline in one directory, check from a
+     sibling, `FAILED`, exit 1. The root must come from
+     `git -C "${AI_REPO_ROOT:-$HOME/src/ai}" rev-parse --show-toplevel`, never from a username
+     literal.
+  2. **Prefix preservation, not whole-file equality.** `com.valor.bridge-watchdog` is installed here
+     on a 60-second `StartInterval` and appends to `logs/watchdog.log` throughout the build, and any
+     concurrent agent's pytest run can append to either file until this PR merges. A whole-file
+     `shasum -c` would fail for a reason the builder did not cause. The recorded prefix is stable
+     under append and still fails loudly on the two things this No-Go forbids: truncation (size
+     shrinks) and rewriting (recorded prefix stops matching).
+  3. **A rollover fallback.** `logs/watchdog.log` is 9.69 MB against a `maxBytes` of 10,485,760 and
+     has rolled over five times inside the retained window (backups `.1`-`.5`, Jul 22 / 18 / 14 / 10
+     / 7). A rollover renames the file this gate recorded into `.1` and starts a fresh empty one, so
+     a naive "size never shrinks" test reads a legitimate rotation as truncation and blocks Tasks 5
+     and 7 on a correct build. The gate must check the recorded prefix against `$f.1` before
+     declaring `TRUNCATED`, and fail only when neither `$f` nor `$f.1` carries it. **Do not raise
+     `maxBytes` to dodge this** — the rotation constants are an explicit No-Go below, and a rollover
+     is not a No-Go violation; only a gate that misreads one is.
+  4. **sha256, not `wc -c`.** A same-length rewrite passes a byte count.
 
-  ```bash
-  while read -r f n h; do
-    cur=$(wc -c < "$f" | tr -d ' ')
-    [ "$cur" -ge "$n" ] || { echo "TRUNCATED $f"; exit 1; }
-    [ "$(head -c "$n" "$f" | shasum -a 256 | cut -d' ' -f1)" = "$h" ] || { echo "REWRITTEN $f"; exit 1; }
-  done < /tmp/watchdog-log-baseline.txt && echo LOGS_PREFIX_INTACT
-  ```
+  Round 1's `git diff --name-only | grep "^logs/"` row is **deleted**: `.gitignore:168` and `:378`
+  make it return 0 unconditionally, including after a truncation — the permanently-green shape this
+  plan condemns elsewhere.
 
-  Current values: `watchdog.log` = 41322 bytes, whole-file sha256
-  `2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`.
+  **No literal baseline figure appears anywhere in this plan.** At ~145 KB/day with a live 60-second
+  writer, any byte count or hash written here is stale before a builder reads it; revisions 3 and 4
+  each shipped one that was already wrong. Task 1 re-measures at build start, and that is the only
+  contract.
 
-  **Prefix preservation rather than whole-file equality, because one of the two files has a live
-  writer.** `com.valor.worker-watchdog` is installed and running on this machine on a 90-second
-  `StartInterval`, so `logs/worker_watchdog.log` legitimately grows during a multi-hour build:
-  measured two whole-file hashes fifteen minutes apart with no watchdog work in between, and they
-  differed. A whole-file `shasum -c` would report `FAILED` for a reason the builder did not cause —
-  a second way of failing on a correct build, next to the relative-path defect this same gate had.
-  The prefix hash is stable under append (measured identical across repeated reads) and still fails
-  loudly on the two things the No-Go actually forbids: truncation (size shrinks) and rewriting
-  (recorded prefix stops matching). `logs/watchdog.log` gets the same treatment, because until this
-  PR merges, any concurrent agent's pytest run in the main checkout can still append to it — that is
-  the bug being fixed.
-
-  **Absolute paths are mandatory and this row is deliberately checkout-absolute while every
-  neighbouring Verification row is worktree-relative.** `shasum` stores whatever path string it is
-  handed and `-c` resolves it against the caller's cwd. A relative baseline written in the main
-  checkout and verified from the worktree re-resolves onto the worktree's `logs/` — the directory
-  Task 1 deliberately writes into — reporting `FAILED` on a correct build while never once inspecting
-  the main checkout it exists to protect. Reproduced: relative baseline in one directory, `-c` from a
-  sibling, `FAILED`, exit 1. Re-measured with absolute paths from `/tmp`: `OK` on both, exit 0.
-  The two-line assertion guards the empty-baseline case (measured: `shasum -c` on an empty file
-  prints "no properly formatted SHA checksum lines found" and exits 1 here, but the assertion costs
-  nothing and does not depend on that behavior).
-
-  sha256 rather than `wc -c`, because a same-length rewrite passes a byte count. Round 1's
-  `git diff --name-only | grep "^logs/"` row is **deleted**: `.gitignore:168` and `:378` make it
-  return 0 unconditionally, including after a truncation — the permanently-green shape this plan
-  condemns elsewhere, and the same misaiming this row's absolute paths now correct.
+  The gate is deliberately checkout-absolute while every neighbouring Verification row is
+  worktree-relative, and Task 1 asserts the baseline file has exactly two lines before any later run
+  is allowed to trust an `OK`.
 - `[DESTRUCTIVE]` **No running of the watchdog's health-check path as a validation step.**
   `python monitoring/bridge_watchdog.py` (no flags) reaches `run_health_check()` →
   `execute_recovery()`, which restarts the bridge. `--check-only` stops earlier but still calls
@@ -1689,6 +1682,19 @@ needs no wiring.
   `sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]` +
   `runpy.run_path(..., run_name="__main__")`, asserting `SystemExit.code == 2`, then asserting on the
   attached `_watchdog_owned` handler and one emitted record.
+- **Then**, record the **environment fingerprint** — which watchdog agents are actually installed on
+  the build machine. Every claim this plan makes about `logs/watchdog.log` being production output
+  depends on it, and it was measured backwards for three revisions:
+  ```bash
+  launchctl list | grep -c com.valor.bridge-watchdog || true
+  launchctl list | grep -c com.valor.worker-watchdog || true
+  ls ~/Library/LaunchAgents/ | grep -E 'bridge-watchdog|worker-watchdog' || true
+  ```
+  Measured at revision 5 on `/Users/valorengels/src/ai`: bridge-watchdog **1** (plist present,
+  `StartInterval 60`, both streams → `logs/watchdog.log`), worker-watchdog **0** (no plist).
+  **Record the actual output in the commit message.** If it differs from that, stop and re-read the
+  Data Flow section before proceeding — the doubling proof and Risk 1's enumeration are both drawn
+  from a live bridge watchdog writing to this checkout.
 - **Then**, record the anti-criterion baseline with absolute paths (see No-Gos for why relative
   paths silently aim at the wrong checkout). **Derive the checkout root — do not hardcode a
   username.** Revision 3 pinned the literal `/Users/tomcounsell/src/ai`, which does not exist on
@@ -1703,9 +1709,37 @@ needs no wiring.
   test "$(wc -l < /tmp/watchdog-log-baseline.txt)" -eq 2 || { echo BASELINE_INCOMPLETE; exit 1; }
   ```
   `AI_MAIN` must be captured in the MAIN checkout **before** the worktree is created, and the values
-  are re-measured here rather than read from this plan (see the No-Gos gate: the revision-3 figures
-  are stale and the file has since rotated).
+  are re-measured here rather than read from this plan — **no literal baseline figure appears
+  anywhere in this document**, because at ~145 KB/day with a live 60-second writer any figure
+  written into a plan is stale before a builder reads it (revisions 3 and 4 each shipped one that
+  was already wrong).
   Nothing else in this plan may run against the main checkout's `logs/`.
+- **The re-check must tolerate a rollover.** This is the single implementation of the gate; No-Gos
+  states its rationale and Verification points here. `logs/watchdog.log` sits at ~9.7 MB against a
+  `maxBytes` of 10,485,760 and has rolled over five times inside the retained window, so a rollover
+  during the build is expected, not exceptional. A rollover renames the recorded file to `.1` and
+  starts a fresh empty one; a naive size-never-shrinks test reads that as truncation and blocks
+  Tasks 5 and 7 on a correct build:
+  ```bash
+  while read -r f n h; do
+    cur=$(wc -c < "$f" | tr -d ' ')
+    if [ "$cur" -ge "$n" ] &&
+       [ "$(head -c "$n" "$f" | shasum -a 256 | cut -d' ' -f1)" = "$h" ]; then
+      continue                                   # still in place, appended to
+    fi
+    # rollover fallback: the recorded prefix moved into $f.1
+    if [ -f "$f.1" ] && [ "$(wc -c < "$f.1" | tr -d ' ')" -ge "$n" ] &&
+       [ "$(head -c "$n" "$f.1" | shasum -a 256 | cut -d' ' -f1)" = "$h" ]; then
+      echo "ROTATED $f (prefix intact in $f.1)"
+      continue
+    fi
+    [ "$cur" -ge "$n" ] || { echo "TRUNCATED $f"; exit 1; }
+    echo "REWRITTEN $f"; exit 1
+  done < /tmp/watchdog-log-baseline.txt && echo LOGS_PREFIX_INTACT
+  ```
+  Fail only when **neither** `$f` nor `$f.1` carries the recorded prefix. Do **not** raise `maxBytes`
+  to avoid the rollover: the rotation constants are an explicit No-Go, and a rollover is not a
+  violation of it — only a gate that misreads one is.
 - Create the worktree at `.worktrees/watchdog-import-time-log-handler/` on branch
   `session/watchdog-import-time-log-handler`, provision its `.venv` on the pinned interpreter, and
   `export PYTHONPATH=$PWD` in every shell.
@@ -1715,7 +1749,7 @@ needs no wiring.
   evidence and the red/green table names all three.
 - Run the red demo and capture output **verbatim** for the PR body:
   ```bash
-  cd /Users/tomcounsell/src/ai/.worktrees/watchdog-import-time-log-handler
+  cd "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" rev-parse --show-toplevel)/.worktrees/watchdog-import-time-log-handler"
   export PYTHONPATH=$PWD
   ./scripts/pytest-clean.sh tests/unit/test_watchdog_log_isolation.py -n0 -q
   ```
@@ -1760,9 +1794,15 @@ needs no wiring.
   Add `WATCHDOG_LOG_FILE`, the pinned-name `logger` with `setLevel(INFO)` and
   `propagate = False`, and `_configure_logging()` exactly as specified.
 - Wire `_configure_logging()` into the `__main__` guard only.
-- Convert the two `caplog` sites in `tests/unit/test_bridge_watchdog.py` (:753, :957) and the two in
-  `tests/integration/test_update_loop_wedge_recovery.py` (:156, :221) to
-  `logger.addHandler(caplog.handler)` in `try/finally`.
+- Convert the two `caplog` sites in `tests/unit/test_bridge_watchdog.py` (`:753`, `:957`) and the two
+  in `tests/integration/test_update_loop_wedge_recovery.py` — **`:371` in
+  `test_redis_exception_is_inconclusive` (defined `:363`) and `:387` in
+  `test_unreadable_process_start_suppresses_verdict` (defined `:382`)**, both of which read
+  `caplog.records` at `:376` / `:395` — to `logger.addHandler(caplog.handler)` in `try/finally`.
+  **Re-grep for `caplog` in the wedge-recovery file before editing.** It was rewritten wholesale once
+  during this plan's life (`fd52fc648`, #2670) and the round-3 addresses `:156`/`:221` no longer
+  exist. Verified at `b44cf02f3`: exactly two `caplog.at_level(..., logger="monitoring.bridge_watchdog")`
+  sites in that file, both listed above.
 - Run both files and confirm green.
 - Commit.
 
@@ -1780,7 +1820,12 @@ needs no wiring.
   body. Delete `logger = _configure_logger()` at line 162 and call it from the `__main__` guard.
 - Rewrite the three `TestLoggerConfiguration` tests per Test Impact, retaining the handler-count,
   propagate, and idempotence assertions against explicit calls under a monkeypatched `LOG_FILE`.
-- Confirm the two `HEARTBEAT_THRESHOLD` reload tests (:1050, :1058) still pass.
+- Confirm the two `HEARTBEAT_THRESHOLD` reload tests still pass:
+  `test_heartbeat_threshold_env_override` (**`:1063`**) and `test_heartbeat_threshold_default_is_180`
+  (**`:1072`**), whose `importlib.reload(wwd)` calls are at `:1069` and `:1077`. The round-3
+  addresses `:1050`/`:1058` are stale by +19 — `fb00b8542` inserted the autouse
+  `_restore_worker_watchdog_constants` fixture above them. The file's other three reloads are at
+  `:66`, `:71`, `:77`.
 - Commit.
 
 ### 4. Fix `scripts/log_rotate.py`
@@ -1792,10 +1837,16 @@ needs no wiring.
 - **Assigned To**: `watchdog-logging-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace lines 60-67 with the inert bindings (`logger = logging.getLogger("log_rotate")`,
-  `logger.setLevel(logging.INFO)`) and move `logging.basicConfig(...)` into the existing
-  `if __name__ == "__main__":` guard at `:190`, preserving `level`, `format`, and `stream=sys.stderr`
-  **verbatim**. Do **not** write `logger.propagate = True`; the default is correct and TC14 pins it.
+- **Act on named statements, not a line range** — the same discipline revision 4 imposed on the
+  bridge, applied here for symmetry (a range edit is a latent trap even where the file has not
+  drifted; verified verbatim at `b44cf02f3`: `:62` `logging.basicConfig(`, `:67`
+  `logger = logging.getLogger("log_rotate")`, `:190` the `__main__` guard):
+  - **MOVE** the module-scope `logging.basicConfig(...)` into the existing
+    `if __name__ == "__main__":` guard, preserving `level`, `format`, and `stream=sys.stderr`
+    **verbatim**.
+  - **KEEP** `logger = logging.getLogger("log_rotate")` where it is, and **ADD**
+    `logger.setLevel(logging.INFO)` immediately after it.
+  - Do **not** write `logger.propagate = True`; the default is correct and TC14 pins it.
 - Move the "Use stderr for diagnostics — the LaunchAgent routes stderr to `logs/log_rotate_error.log`"
   comment with the call, and add the propagate-rationale comment. Add the one docstring sentence about
   configuration living in the guard. The self-rotation paragraph stays verbatim.
@@ -1863,12 +1914,14 @@ needs no wiring.
   `2026-08-08 01:03:53,742 [INFO] entrypoint probe abf58b92…`, token count 1. It fires on a machine
   where the bridge is not installed, which is the machine this build runs on.
 - **`--check-only` is NOT used as the proof, and its Verification row is deleted.** Two independent
-  reasons. First, it cannot fire: `main()` returns at `monitoring/bridge_watchdog.py:982` before
-  `run_health_check()` (`:860`), and every INFO-or-above call reachable on that branch is gated on
-  state this machine lacks (`:591` needs `active_claude_count > SOFT_INSTANCE_LIMIT`; `:604` and
-  `assess_update_flow` need `if running`; the zombie lines `:482`/`:494`/`:500` need
-  `running and logs_fresh`), so the handler opens the file and writes zero bytes. Second, and worse,
-  it is not side-effect free: with the bridge down, `check_bridge_health()` (`:514`) calls
+  reasons. First, it cannot fire: the `--check-only` branch of `main()`
+  (`monitoring/bridge_watchdog.py:1011`) returns before `run_health_check()` (`:903`), and every
+  INFO-or-above call reachable on that branch is gated on state this machine lacks — the
+  instance-limit line, the `if running` block around `assess_update_flow`, and the
+  `kill_zombie_processes()` (`:512`) INFO lines, which need `running and logs_fresh`. The handler
+  opens the file and writes zero bytes. **Re-derive these addresses before quoting them**; they moved
+  once already under `fd52fc648` and are verified here at `b44cf02f3`. Second, and worse,
+  it is not side-effect free: with the bridge down, `check_bridge_health()` (`:557`) calls
   `log_crash("bridge_dead_on_watchdog_check")`, which appends to `data/crash_history.jsonl` **and**
   calls `analytics.collector.record_metric`, which writes to SQLite and **production Redis**. An
   issue about synthetic watchdog evidence must not manufacture a synthetic crash event to prove
@@ -1878,9 +1931,11 @@ needs no wiring.
   second copy comes from the plist's `StandardErrorPath` redirect under launchd, which a shell run
   does not have. The de-duplication claim rests on the plist text at `scripts/valor-service.sh:627-630`
   (`StandardOutPath` key/value then `StandardErrorPath` key/value; `:626` is the `StartInterval`
-  value `<integer>60</integer>`, which revision 3 mis-cited)
-  plus the `logs/worker_watchdog.log` control (13,861 lines, multiplicity histogram entirely 1), and
-  the plan says so rather than staging a local run that proves nothing.
+  value `<integer>60</integer>`, which revision 3 mis-cited) plus the **38,706 measured duplicate
+  pairs** in this machine's live `logs/watchdog.log` (see Data Flow — `com.valor.bridge-watchdog`
+  runs here every 60 s). The earlier `logs/worker_watchdog.log` "13,861 lines / histogram entirely 1"
+  control is **withdrawn**: that agent is not installed on this checkout and the file is
+  nightly-test output. The plan says all this rather than staging a local run that proves nothing.
 - Run the full `tests/unit/` suite once (Risk 3). This is the one run in this plan that is not
   narrowly scoped, and it is the one run that uses the **repo default** rather than `-n0`:
   ```bash
