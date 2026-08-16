@@ -693,11 +693,15 @@ rescoped form because it names *which* module relapsed rather than only that one
 **No lazy import at `bridge_watchdog.py:72`. That decision from revision 2 stands unchanged.** The
 alternative was to move the import inside `assess_update_flow()` so the contamination never reached
 the watchdog's process. It was rejected on measured cost, not taste: those three names are module
-attributes the test suite binds to at **15 sites** —
-`tests/integration/test_update_loop_wedge_recovery.py` patches
-`monitoring.bridge_watchdog.get_process_start_ts` at **10** sites, and 5 further sites read
+attributes the test suite binds to on **6 measured lines** across `tests/` — **1 patch** of
+`monitoring.bridge_watchdog.get_process_start_ts`
+(`tests/integration/test_update_loop_wedge_recovery.py:75`) and **5 constant reads** of
 `bw.UPDATE_REPORT_TTL_SECONDS` / `bw.UPDATE_RESTART_MARKER_TTL_SECONDS`
-(`tests/unit/test_bridge_watchdog.py:872, 886, 887, 889, 914`). A lazy import deletes those names
+(`tests/unit/test_bridge_watchdog.py:872, 886, 887, 889, 914`). Revisions 2-4 priced this at "15
+sites, including 10 patch sites"; that figure was inflated by `fd52fc648`'s rewrite of the
+wedge-recovery file and **must not be re-quoted**. The rejection stands on the true figure: the 5
+constant reads alone break, because a lazy import leaves no module-scope name to read. A lazy import
+deletes those names
 from the module namespace, so every `patch()` target raises `AttributeError` and every constant read
 breaks. Restoring them needs wrapper shims or a PEP-562 module `__getattr__` — a namespace redesign
 smuggled inside a logging fix, and a direct hit on acceptance criterion 4. Fixing `log_rotate` at
@@ -755,8 +759,12 @@ Evidence, in order of weight:
    logger with root configured) writes every watchdog record twice, exactly as #1311 described.
 2. **The sibling already ruled.** `monitoring/worker_watchdog.py:136-148` names this defect verbatim
    and fixed it with `propagate = False`.
-3. **The control is clean.** `com.valor.worker-watchdog` is live on this machine under the identical
-   plist shape; 13,861 lines, multiplicity histogram entirely 1.
+3. **The doubling is measured, not inferred.** `com.valor.bridge-watchdog` is live on this machine on
+   a 60-second `StartInterval` writing to this checkout's `logs/watchdog.log`, and parsing that file
+   finds **38,706 own-records present twice** — once bracketed via the `RotatingFileHandler`, once
+   bare via root's `StreamHandler` → stderr → plist. (Revisions 2-4 used `com.valor.worker-watchdog`
+   as a clean control here; that agent is **not** installed on this checkout and the claim is
+   withdrawn. It is no longer needed — the defect is now visible directly.)
 4. **Round 1's counter-evidence is refuted.** Its only cited submodule record traces to
    `bridge_watchdog.py:869`.
 5. **Submodule records change independently of this decision.** Their routing changes because
@@ -1061,7 +1069,7 @@ names the exact statement whose presence it reports:
 | with exemption | today | **5** | `monitoring/bridge_watchdog.py:78` the module-scope `logging.basicConfig` this plan deletes; `:86` the module-scope `LOGS_DIR.mkdir`; `:93` the module-scope `logger.addHandler(_watchdog_file_handler)`; `monitoring/worker_watchdog.py:162` the module-scope `logger = _configure_logger()`; `scripts/log_rotate.py:62` the module-scope `logging.basicConfig` |
 | with exemption | fixed | **0** | — |
 | without exemption | today | **5** | identical set to the row above |
-| without exemption | fixed | **3** | `monitoring/bridge_watchdog.py:1049 _configure_logging()`, `monitoring/worker_watchdog.py:874 _configure_logger()`, `scripts/log_rotate.py:189 logging.basicConfig(...)` — i.e. the three relocated calls the fix is *supposed* to produce, each a direct child of its `__main__` guard. This is the round-3 BLOCKER |
+| without exemption | fixed | **3** | the `_configure_logging()` call in `monitoring/bridge_watchdog.py`, the `_configure_logger()` call in `monitoring/worker_watchdog.py`, and the `logging.basicConfig(...)` call in `scripts/log_rotate.py` — i.e. the three relocated calls the fix is *supposed* to produce, each a direct child of its `__main__` guard. This is the round-3 BLOCKER. **Line numbers are deliberately omitted:** they are addresses inside source that does not exist yet, they drifted twice already (round 3 measured `:1049`/`:874`/`:189`, round 5 measured `:1089`/`:876`/`:187`), and the statement identities carry the whole meaning |
 
 **TC5b is a separate walker and does not share TC5's exemption.** TC5b asserts the configure call
 *is* a direct child of the `__main__` guard, so it must descend into exactly the block TC5 skips.
@@ -1530,9 +1538,11 @@ module, and docs — all propagated by the ordinary `git pull` in `scripts/remot
   re-executed from scratch by launchd every 60 s / 90 s / 30 min, so a pull is sufficient.
 - **Operator note for the deploy:** the first tick after this lands changes what
   `logs/watchdog.log` looks like on any machine where the bridge watchdog is installed — fewer lines
-  in three distinct ways. Flag all three in the deploy notes so nobody reads the reduction as a
-  stopped watchdog. `logs/log_rotate_error.log` and `logs/worker_watchdog.log` look exactly the same
-  as before.
+  in three distinct ways, and on this machine's measured composition that is a **>90% drop in line
+  volume** (22,230 of 24,144 submodule-INFO lines are one per-tick `libssl detected` record, plus
+  38,706 duplicated own-records collapsing to one copy each). Flag all three effects and the
+  expected magnitude in the deploy notes so nobody reads the reduction as a stopped watchdog.
+  `logs/log_rotate_error.log` and `logs/worker_watchdog.log` look exactly the same as before.
 
 ## Agent Integration
 
@@ -1551,8 +1561,10 @@ needs no wiring.
       opposite `propagate = True` decision and the two-different-files plist that justifies it,
       including the measured fact that `propagate = False` there silences the script completely; the
       precise Data Flow table of what reaches `logs/watchdog.log` before and after, naming the
-      submodule WARNING+ format loss and the submodule INFO loss; and how the 14-file AST guard
-      enforces the invariant along with what it deliberately does not cover.
+      submodule WARNING+ format loss and the submodule INFO loss — **including the measured
+      composition, so the >90% line-volume drop reads as intended rather than as a stopped
+      watchdog**; and how the 14-file AST guard enforces the invariant along with what it
+      deliberately does not cover.
 - [ ] Add a row for it to the `docs/features/README.md` index table.
 - [ ] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
       watchdog itself writes to `logs/watchdog.log` now comes from a real entry-point invocation and
@@ -1981,7 +1993,10 @@ needs no wiring.
   | delete `logging.basicConfig(...)` entirely instead of relocating it | **TC15** (measured in the subprocess probe: `root.handlers == []`, `root.level == 30`, no `StreamHandler`, no `_fmt`, empty stderr) | yes — measured: root ends `['StreamHandler'] / 20`, `stream is sys.stderr`, `_fmt == "%(asctime)s %(levelname)s %(message)s"` |
   | change log_rotate's `level` / `format` / `stream` argument | **TC15** (asserts all three explicitly on the child's reported state) | yes — rehearsed against the real fixed source text in the subprocess shape |
   | move log_rotate's `basicConfig` from the `__main__` guard to the top of `main()` | **TC5b** (its log_rotate leg). No runtime probe catches it: `tests/unit/test_log_rotate.py:121` and `:166` call `main()` directly, and both would then reconfigure root mid-suite | yes |
-- Confirm the prefix gate prints `LOGS_PREFIX_INTACT` for both main-checkout logs (No-Gos).
+- Confirm **Task 1's** rollover-tolerant prefix gate prints `LOGS_PREFIX_INTACT` for both
+  main-checkout logs. A `ROTATED …(prefix intact in …1)` line on the way is a pass — `logs/watchdog.log`
+  is near its 10 MB `maxBytes` and a rollover during the build is expected. Only `TRUNCATED` or
+  `REWRITTEN` is a No-Go violation.
 
 ### 6. Documentation
 
@@ -2022,6 +2037,18 @@ needs no wiring.
   acceptance criterion 3, all **three** operator-visible effects on `logs/watchdog.log`, the
   `/update` stderr note, and the statement that uncaught tracebacks, `logs/worker_watchdog.log`, and
   `logs/log_rotate_error.log` are unaffected.
+- **The "Behavior change" section must name the volume drop and its cause**, or the first operator to
+  look will read it as a stopped watchdog. State it as measured: 22,230 of the 24,144 submodule-INFO
+  lines in the pre-fix file are the single record `INFO libssl detected, it will be used for
+  encryption`, one per 60-second tick, so `logs/watchdog.log` is expected to shrink by well over 90%
+  in line count while **gaining** genuine retention — that record is the dominant term in the
+  ~145 KB/day growth that was rolling real incident history out of the 5-backup budget. Pair it with
+  the 38,706 measured duplicate own-record pairs, which is the doubling this PR removes.
+- **State which launchd agents the evidence came from.** The doubling proof and the Risk 1
+  enumeration are drawn from a machine where `com.valor.bridge-watchdog` is installed and
+  `com.valor.worker-watchdog` is not; record the Task 1 fingerprint output in the PR so a reader can
+  tell measured claims from projected ones. The "after this change" column of the Data Flow table is
+  a projection and must be labelled as one.
 - **Re-read the Data Flow table against the shipped code before pasting it.** It is published to the
   PR as the authoritative behavior statement, and revisions 2 and 3 both changed rows in it. A stale
   row here is a false claim in a permanent record.
@@ -2064,7 +2091,7 @@ Zero-count `grep -c` rows exit 1 on no match. Run them with `|| true`, or outsid
 | Worker log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/worker_watchdog.py` | `> 0` |
 | Entry point configures and writes | the Task 5 real-invocation proof, run from the worktree with `cwd` and `PYTHONPATH` pinned to it | exit 0; one `_watchdog_owned` `RotatingFileHandler` on `monitoring.bridge_watchdog` at the worktree's `logs/watchdog.log`, `maxBytes=10485760`, `backupCount=5`, `_fmt == "%(asctime)s [%(levelname)s] %(message)s"`, logger level INFO, `propagate False`; the probe record appears once, matching the timestamped format |
 | Configure call sits in the `__main__` guard | TC5b | passes for all three modules |
-| Anti-criterion: production logs untouched | the No-Gos prefix gate over `/tmp/watchdog-log-baseline.txt` (absolute paths; this row is deliberately checkout-absolute while every other row here is worktree-relative, and prefix-scoped because `com.valor.worker-watchdog` appends to one of the two files every 90 s) | `LOGS_PREFIX_INTACT`, from any cwd |
+| Anti-criterion: production logs untouched | **Task 1's** rollover-tolerant prefix gate over `/tmp/watchdog-log-baseline.txt` — the single implementation; No-Gos carries only its rationale. Deliberately checkout-absolute while every other row here is worktree-relative, and prefix-scoped rather than whole-file because `com.valor.bridge-watchdog` appends to `logs/watchdog.log` every 60 s | `LOGS_PREFIX_INTACT`, from any cwd. A `ROTATED <path> (prefix intact in <path>.1)` line is a **pass**, not a failure: `logs/watchdog.log` is ~9.7 MB against a 10 MB `maxBytes` and has rolled over five times in the retained window |
 | Feature doc exists | `test -f docs/features/watchdog-log-isolation.md && echo DOC_OK` | output contains `DOC_OK` |
 | Feature doc indexed | `grep -c "watchdog-log-isolation.md" docs/features/README.md` | `> 0` |
 | Lint clean | `python -m ruff check .` | exit code 0 |
