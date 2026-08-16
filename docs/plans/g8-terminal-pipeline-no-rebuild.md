@@ -1412,6 +1412,52 @@ integration tests — do not "fix" the row by weakening it.
 
 ## Critique Results
 
+### Round 2 — war room 2026-08-16
+
+**Verdict: NEEDS REVISION** — FULL roster (Risk & Robustness, Scope & Value, History & Consistency). 6 findings: 3 BLOCKERs, 3 CONCERNs, 0 NITs.
+
+The restructure is a genuine improvement and the round-1 dispositions hold up under
+re-measurement: #2539's `state="all"` at `tools/sdlc_stage_marker.py:246-250`,
+`agent/pipeline_state.py:1564`'s `for state in ("open", "all")`, PR #2792's scope, and
+#2817's still-open status were all independently re-verified, and no reverted prior
+attempt at widening this call site exists in `git log`. All three plan prerequisites pass
+live, and spike-7's negative control still returns `row_id: "10"` for #2755.
+
+Three findings block. Two are defects in the **new** design, not leftovers:
+
+**The "strictly additive" guarantee does not cover candidate selection inside the `all`
+pass.** The two-pass ordering makes the second pass run only on `None`, which is sound.
+But `_gh_pr_search_issue_ref` (`tools/sdlc_stage_query.py:284-335`) returns the *first*
+body-validating candidate and has no preference for `MERGED` over `CLOSED` (`:325-332`).
+An issue with an abandoned closed-unmerged attempt alongside the PR that shipped — the
+exact shape the plan's own Freshness Check documents for PR #2794 — can resolve to the
+closed one. `pr_state` is then `CLOSED`, `pr_state not in ("OPEN", "MERGED")` fires, and
+G8 re-dispatches `/do-build`. The primary fix would convert a silent no-op into an
+*active* false rebuild in that shape.
+
+**Success Criterion 5 is unsatisfiable as written.** It requires no `/do-build` at any row
+for a BUILD-completed, unresolvable-`pr_number` ledger under both `branch_exists` values,
+while the plan deliberately leaves `_rule_branch_exists_no_pr` (`agent/sdlc_router.py:922-927`)
+outside the fence — and that row fires on `branch_exists is True` alone whenever
+`pr_number` is falsy, without consulting `BUILD`. Risk 2's own mitigation calls that
+routing *correct*. The criterion and the plan's stated-correct router behavior are mutually
+exclusive for the identical input.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| BLOCKER | Risk | The two-pass fallback's "cannot newly surface a closed-unmerged PR ahead of an open one" guarantee covers only the ordering *between* passes, not candidate selection *within* the `all` pass. `_gh_pr_search_issue_ref` (`tools/sdlc_stage_query.py:284-335`) returns the first body-validating candidate (`:325-332`) with no MERGED-over-CLOSED preference, so an issue with a superseded closed-unmerged PR plus the shipped one can resolve to the closed one — `pr_state` reads `CLOSED`, G8 fires, and `/do-build` re-dispatches on shipped work. The primary fix would turn a silent no-op into an active false rebuild in that shape. | pending | Prefer MERGED explicitly: either make the second pass `state="merged"` (verify the value against the installed `gh` before adopting) or re-check the `all`-pass result with `_fetch_pr_state` and accept a non-MERGED candidate only as a last fallback. Cover it with a unit test whose `gh pr list --state all` stub returns two body-validating candidates CLOSED-first and asserts the MERGED one is chosen. |
+| BLOCKER | Scope | Success Criterion 5 and `test_no_pr_number_recorded_does_not_redispatch_build` require `result.get("skill") != "/do-build"` at any row for a BUILD-completed, no-MERGE, unresolvable-`pr_number` ledger under **both** `branch_exists` values — but `_rule_branch_exists_no_pr` (`agent/sdlc_router.py:922-927`, deliberately out of fence) dispatches `/do-build` at row 5 whenever `pr_number` is falsy and `branch_exists is True`, regardless of `BUILD`. Key Elements and Risk 2 both call that routing *correct*. The criterion is unsatisfiable without a router change the plan forbids. | pending | `_rule_branch_exists_no_pr` returns `True` on `meta.get("pr_number")` falsy and `context.get("branch_exists") is True` without reading `BUILD`. Either drop the `branch_exists: True` cell from this specific test (the recovery-path test covers it with a genuinely-resolvable merged PR) or restate SC 5 to carve out the branch-exists-True / genuinely-unresolvable-PR cell as accepted `/do-build`, matching Risk 2's own concession. Do not let the builder "fix" this by weakening the assertion silently. |
+| BLOCKER | History | Risk 1's Mitigation still asserts "A wholly-empty ledger is already safe (`build_claimed` is `False`, so G8 cannot fire) and is asserted as a test case" — the exact claim round-1 BLOCKER 3 forced retracted, and which the plan retracts in three other places (Empty/Invalid Input Handling, Success Criteria, the round-1 table). A builder working from Risk 1 writes the wrong test and skips the recovery-path coverage that is the true reproduction. | pending | The stale sentence is in Risk 1's Mitigation; the corrected framing already exists verbatim under Empty/Invalid Input Handling ("this is not 'already safe' ... is retracted"). Copy it, and point at the recovery-path integration test rather than claiming a unit-level assertion that no longer exists. Also drop "and is asserted as a test case" — no such unit test is planned. |
+| CONCERN | Risk | A reopened issue is not covered by either fix. With a new BUILD in flight and no new PR, the `open` pass returns `None` and the `all` pass finds the *prior lifecycle's* merged PR (its body still says "Closes #N"). `pr_state` reads `MERGED`, so an unfinished second-lifecycle BUILD is reported **verified**, and the lane can advance toward `/do-merge` on an artifact that was never checked. Same class as the bug being fixed: trusting an identifier never validated as belonging to the current attempt. | pending | `_lookup_pr` (`tools/sdlc_stage_query.py:338-381`) tries the fuzzy `#N` body search before the exact `--head <lane branch>` leg. Trying the branch-head leg first when a slug is recorded closes this case without touching the `state` ladder, since a prior lifecycle's branch cannot match the current lane's. At minimum name it as an accepted residual in Risk 3b rather than leaving it unstated. |
+| CONCERN | Risk | Architectural Impact frames the extra `gh` call as paid "only on the path that currently resolves nothing," implying the degraded-ledger minority. `_compute_meta`'s own comment (`tools/sdlc_stage_query.py:529-530`) says it "runs for any issue number the router, the dashboard, or an operator names — most of which are not lanes," and those have no PR at all, so the `open` pass already returns `None` today. The majority case pays a second full `gh pr list --search --state all` round-trip per invocation. | pending | No code change is strictly required — restate the cost honestly for the non-lane majority in Architectural Impact. If a cheaper shape is wanted, skip the `all` retry when the `open` pass returned zero raw candidates before body-validation; do not add a persistent cache, which would break the plan's "no new dependencies / no new architectural surface" claim. |
+| CONCERN | History | The Inline Documentation checklist names the two new debug logs as "unverifiable BUILD; terminal pipeline". "Terminal pipeline" is leftover text describing the cut MERGE short-circuit's log, which exists nowhere else in the revised plan; Error State Rendering and Technical Approach both correctly say "unverifiable BUILD" and "unverifiable PATCH". | pending | One-word fix: change "terminal pipeline" to "unverifiable PATCH" so all three enumerations of the two new debug logs agree. The correct phrasing already exists under Error State Rendering ("Both new debug logs (unverifiable BUILD, unverifiable PATCH)") — reuse it verbatim. |
+
+**Structural checks:** required sections present and substantive; task numbering and
+dependencies valid (build-red → build-fix → build-tests-docs → validate-all, no cycles,
+every task carries a validation target); all 21 referenced file paths exist; all three
+Prerequisites pass live. Cross-reference consistency **FAILS** on Success Criterion 5
+(BLOCKER 2 above) and on Risk 1's retracted claim (BLOCKER 3).
+
 ### Revision status (2026-08-16)
 
 **All 7 BLOCKERs and all 11 CONCERNs addressed; plan restructured, ready for
