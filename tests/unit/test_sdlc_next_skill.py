@@ -1115,6 +1115,162 @@ class TestStageArtifactVerification:
         assert "stage_artifacts_verified" not in context
         run_mock.assert_not_called()
 
+    # -- Issue #2757: unverifiable is not falsified ------------------------
+    #
+    # Three states, not two. An artifact is VERIFIED when its identifier
+    # resolves and the world confirms it, FALSIFIED when the identifier
+    # resolves and the world contradicts it, and UNVERIFIABLE when there is no
+    # identifier to resolve at all. Only the middle one may set
+    # stage_artifacts_verified=False. The gate previously collapsed the first
+    # and third, reporting a mismatch on the strength of a `gh` call it had
+    # never placed -- which re-dispatched /do-build against already-merged
+    # work.
+
+    @pytest.mark.parametrize(
+        "meta,label",
+        [
+            ({}, "pr_number key absent entirely"),
+            ({"pr_number": None}, "pr_number is None"),
+            ({"pr_number": 0}, "pr_number is 0"),
+        ],
+    )
+    def test_unverifiable_build_claim_makes_no_live_call(self, monkeypatch, meta, label):
+        """BUILD claims completed with no usable PR number -> ZERO subprocess
+        calls and both flags left unset.
+
+        assert_not_called() is the load-bearing half (following
+        test_no_claimed_artifact_is_a_noop): asserting only that the flags are
+        unset would also pass for an implementation that calls `gh`, gets
+        nothing back, and then declines to conclude -- a different, slower,
+        rate-limit-consuming behavior. The guard must run BEFORE the
+        subprocess, not after it.
+
+        The falsy forms are parametrized rather than split into three tests:
+        this is one falsiness check, and `bool(pr_number)` is what decides it.
+        """
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: None)
+        run_mock = MagicMock()
+        monkeypatch.setattr("subprocess.run", run_mock)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2757,
+            stage_states={"BUILD": "completed"},
+            meta=dict(meta),
+        )
+
+        assert "stage_artifacts_verified" not in context, label
+        assert "unverified_stage" not in context, label
+        run_mock.assert_not_called()
+
+    def test_unverifiable_patch_claim_skips_the_branch_probe(self, monkeypatch, tmp_path):
+        """PATCH claims completed with a resolvable lane branch but no PR
+        number -> the `git ls-remote` branch probe never runs.
+
+        The branch name alone is not enough to adjudicate this claim. With no
+        PR state to consult, `pr_state` stays None, the MERGED skip below it
+        cannot engage, and the entire verdict collapses onto "does the branch
+        still exist on origin" -- where "branch gone" is indistinguishable
+        from "deleted on merge". Probing anyway manufactures a PATCH mismatch
+        out of a successful merge.
+        """
+        plan_path = tmp_path / "my-slug.md"
+        plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: plan_path)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "my-slug")
+
+        calls = []
+
+        def _record(cmd, **kwargs):
+            calls.append(list(cmd))
+            proc = MagicMock()
+            proc.returncode = 1
+            proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _record)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2757,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": None},
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+        # `git branch -a` is _build_context's unrelated branch_exists signal and
+        # is expected. What must be absent is the verification gate's own live
+        # reads: the branch probe (`git ls-remote`) and any `gh` call.
+        assert [c for c in calls if c[:2] == ["git", "ls-remote"]] == [], calls
+        assert [c for c in calls if c[:1] == ["gh"]] == [], calls
+
+    def test_unverifiable_build_skip_logs_at_debug_not_warning(self, monkeypatch, caplog):
+        """The skip is a normal, expected state and logs at DEBUG.
+
+        The level is the user-visible contract here, not decoration: a
+        ledger-degraded issue is re-evaluated every tick, so a WARNING would
+        emit once per tick per affected issue and train operators to ignore
+        the channel the genuine falsified-claim mismatch also uses.
+
+        `caplog.set_level(logging.DEBUG)` is mandatory -- caplog's default
+        floor is WARNING, so without it "a DEBUG record exists" would assert
+        against an empty list and pass vacuously whatever level the code used.
+        The assertion is deliberately one-directional: it pins the level of
+        the NEW log and the ABSENCE of a warning for this input, without
+        re-pinning the existing mismatch warning's level as an interface.
+        """
+        caplog.set_level(logging.DEBUG, logger="tools.sdlc_next_skill")
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: None)
+        monkeypatch.setattr("subprocess.run", MagicMock())
+
+        sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2757,
+            stage_states={"BUILD": "completed"},
+            meta={"pr_number": None},
+        )
+
+        verify_logs = [r for r in caplog.records if "stage-artifact-verify" in r.getMessage()]
+        assert verify_logs, "the skip must be observable to an operator debugging the tick"
+        assert all(r.levelno == logging.DEBUG for r in verify_logs), [
+            (r.levelname, r.getMessage()) for r in verify_logs
+        ]
+        # Reason and issue number both present, so the log answers "why did
+        # next-skill skip that check" without a code read.
+        assert any(
+            "2757" in r.getMessage() and "no PR number" in r.getMessage() for r in verify_logs
+        )
+
+    def test_unverifiable_build_claim_is_a_noop_even_if_subprocess_would_raise(self, monkeypatch):
+        """Positive proof of ordering: the guard runs before the subprocess.
+
+        With a `subprocess.run` that raises on ANY call, the unverifiable
+        BUILD claim must still return cleanly with no flags set. If the guard
+        ran after the call, this would instead take the fail-open infra path
+        (returning {} for a different reason) or re-raise -- both of which
+        would mean a `pr_number`-less claim still costs a live call.
+        """
+
+        def _explode(cmd, **kwargs):
+            raise AssertionError(f"no subprocess may run for an unverifiable claim: {cmd}")
+
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: None)
+        monkeypatch.setattr("subprocess.run", _explode)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2757,
+            stage_states={"BUILD": "completed"},
+            meta={"pr_number": None},
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
 
 class TestPrHeadShaContext:
     """WS3d (#2062): _build_context assembles the live PR-head signal for the

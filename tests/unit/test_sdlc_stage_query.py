@@ -1428,3 +1428,108 @@ class TestLatestReviewHeadShaMeta:
             # router still reads the record directly.
             direct = _latest_review_head_sha({"_verdicts": verdicts}, {})
             assert direct.lower() == (expected or ""), label
+
+
+# ---------------------------------------------------------------------------
+# Issue #2757: `_compute_meta`'s two-pass PR lookup.
+#
+# `_lookup_pr` defaults to `state="open"`, which excludes merged PRs from BOTH
+# of its resolution legs. A lane's `pr_number` therefore evaporated the moment
+# its PR merged -- and a `pr_number`-less terminal pipeline is what got told to
+# rebuild the work it had just shipped. Measured live before the fix: #2638 ->
+# None under `open` / 2686 under `merged`; #2566 -> None / 2665; #2640 -> None
+# / 2671.
+#
+# All three cases below drive the REAL `_lookup_pr` / `_gh_pr_search_issue_ref`
+# through a stubbed `gh`, so the assertions are about the `--state` values
+# actually placed on the wire rather than about a mock's return value.
+# ---------------------------------------------------------------------------
+
+
+class TestComputeMetaTwoPassPrLookup:
+    @staticmethod
+    def _gh_stub(by_state: dict[str, list[dict]], states_seen: list[str]):
+        """Stub `gh pr list`, recording every `--state` value it is asked for.
+
+        ``by_state`` maps a `--state` value to the JSON candidate list `gh`
+        returns for it; an unlisted state answers empty.
+        """
+
+        def _run(cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.stdout = "[]"
+            if cmd[:3] == ["gh", "pr", "list"]:
+                state = cmd[cmd.index("--state") + 1] if "--state" in cmd else "open"
+                states_seen.append(state)
+                proc.stdout = json.dumps(by_state.get(state, []))
+            return proc
+
+        return _run
+
+    def _compute(self, by_state):
+        from tools.sdlc_stage_query import _compute_meta
+
+        states_seen: list[str] = []
+        with (
+            patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
+            patch("tools.sdlc_stage_query.resolve_lane_slug", return_value=None),
+            patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("subprocess.run", self._gh_stub(by_state, states_seen)),
+        ):
+            meta = _compute_meta({}, MagicMock(pr_number=None, slug=None), 2757)
+        return meta, states_seen
+
+    def test_merged_pr_resolves_when_the_open_pass_finds_nothing(self):
+        """The headline fix: a shipped lane's pr_number survives its own merge."""
+        meta, states_seen = self._compute(
+            {"merged": [{"number": 2686, "body": "Closes #2757"}]},
+        )
+
+        assert meta["pr_number"] == 2686
+        assert states_seen == ["open", "merged"], states_seen
+
+    def test_open_pass_hit_does_not_run_the_merged_pass_at_all(self):
+        """Strictly-additive ordering, pinned by CALL COUNT, not by result.
+
+        An OPEN PR is the lane's live artifact and must always win over a
+        historical one. Asserting only that the answer is 2900 would be
+        satisfied by a second pass that runs anyway and happens to agree --
+        which is a real behavior change (an extra `gh` call per tick, and a
+        different answer the day the two passes disagree). The zero-merged-
+        calls assertion is the one that cannot be faked.
+        """
+        meta, states_seen = self._compute(
+            {
+                "open": [{"number": 2900, "body": "Closes #2757"}],
+                "merged": [{"number": 2686, "body": "Closes #2757"}],
+            },
+        )
+
+        assert meta["pr_number"] == 2900
+        assert states_seen == ["open"], states_seen
+        assert "merged" not in states_seen
+
+    def test_closed_unmerged_pr_resolves_to_none_not_to_that_pr(self):
+        """The second pass is scoped to `merged`, deliberately NOT `all`.
+
+        `_gh_pr_search_issue_ref` returns the FIRST body-validating candidate
+        with no MERGED-over-CLOSED preference, so an `all` pass surfaces a
+        closed-unmerged PR -- measured on #2793, whose only body-validating PR
+        is closed 2794. That is not evidence BUILD produced an artifact: it
+        reads back as CLOSED, which makes guard g8 fire and converts a silent
+        no-op into an ACTIVE false rebuild. Without this case a builder could
+        revert the second pass to `state="all"` and still satisfy every other
+        criterion in the plan.
+
+        Simulated exactly as `gh` behaves: the PR is visible under `all`, and
+        under neither `open` nor `merged`.
+        """
+        meta, states_seen = self._compute(
+            {"all": [{"number": 2794, "body": "Closes #2757"}]},
+        )
+
+        assert meta["pr_number"] is None
+        assert states_seen == ["open", "merged"], states_seen
+        assert "all" not in states_seen
