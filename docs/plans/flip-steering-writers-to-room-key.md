@@ -1420,11 +1420,11 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
 
 ## Success Criteria
 
-- [ ] **The durability property holds end to end:** a steer written for session A is delivered to
+- [x] **The durability property holds end to end:** a steer written for session A is delivered to
   a different session B serving the same Room, after A is gone. Asserted by
   `test_steer_survives_target_session_and_reaches_room_sibling`, with a `room_id=None` negative
   twin proving the test measures the Room leg.
-- [ ] `push_steering_message` targets `steering:room:{room_id}` when the caller supplies a truthy
+- [x] `push_steering_message` targets `steering:room:{room_id}` when the caller supplies a truthy
   `room_id` **and the message is not an abort**, and `steering:{session_id}` in every other case.
   **Every non-test caller passes `room_id` explicitly.** Of the thirteen: **five** originating
   callers pass a derived Room; **three** requeue callers pass a per-message expression (D6);
@@ -1438,16 +1438,16 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   own write is the `:979` site already counted among the originating five) and it passes
   `room_id=None` because it holds no session row (Race 4). Four writer sites plus that helper
   caller is what the `>= 5` `room_id=None` Verification row expects.
-- [ ] **No requeue laundering, in either direction (D6).** The three writers that re-push an
+- [x] **No requeue laundering, in either direction (D6).** The three writers that re-push an
   already-drained message — `agent/health_check.py::_repush_messages`,
   `agent/session_runner/runner.py::_default_steering_push`, `agent/session_executor.py:1933` —
   target the leg the message came from, read from the transient `_leg` stamp
   `pop_all_steering_messages` applies, defaulting to legacy when absent. A legacy-written diagnostic
   never reaches a Room key; a Room-written steer is never demoted to a mortal legacy key on requeue.
   Each also forwards the entry's original `timestamp`, so a requeue does not restart D5's clock.
-- [ ] **No abort ever lands on a Room key**, whether `is_abort` was passed explicitly or set by the
+- [x] **No abort ever lands on a Room key**, whether `is_abort` was passed explicitly or set by the
   `ABORT_KEYWORDS` auto-detect. The key selection sits *below* the auto-detect block.
-- [ ] **The Room leg is age-bounded by time since origination, across every Room-leg reader that has
+- [x] **The Room leg is age-bounded by time since origination, across every Room-leg reader that has
   a production caller.** A drain-and-requeue cycle does not reset the clock: `push_steering_message`
   takes an optional `timestamp` and the three requeue writers forward the entry's own.
   `_drain_list` discards Room-key entries older than `steering_room_max_age_s` and `_peek_list`
@@ -1458,9 +1458,9 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   would not resolve. `pop_steering_message`, `has_steering_messages` and `peek_steering_sender` are
   deliberately untouched (the first two have zero production callers; the third reads the legacy
   leg only).
-- [ ] `push_steering_message` performs no ORM query and adds no exception handler. A steering
+- [x] `push_steering_message` performs no ORM query and adds no exception handler. A steering
   write costs the same Redis round trips it costs today.
-- [ ] **No caller derives a Room from an unmaterialized or unsorted row selection.** All **six**
+- [x] **No caller derives a Room from an unmaterialized or unsorted row selection.** All **six**
   multi-row selections — `bridge/telegram_bridge.py` 1803, 1864, 2174, 2594, 2642 and
   `agent/health_check.py:623` — are materialized with `list(...)` and sorted newest-first by
   `created_at` before selecting. **Materialization is the load-bearing half**: `query.filter(...)`
@@ -1472,20 +1472,20 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   The sort key is `(s.created_at is not None, s.created_at)`, **not** `created_at or 0`, which
   raises `TypeError` on a `datetime` field. `bridge/telegram_bridge.py:2070` — which holds no row —
   passes `room_id=None` rather than fabricating one.
-- [ ] **The invariant is machine-checked, and the check is not scoped to a fixed module list.** A
+- [x] **The invariant is machine-checked, and the check is not scoped to a fixed module list.** A
   census test discovers `push_steering_message` call sites by walking the repo's non-test Python
   files and fails if any call omits an explicit `room_id`, with exactly one allowlisted path. A
   writer added in a new module later is caught by the same test.
-- [ ] `_repush_messages` receives and forwards `_handle_steering`'s resolved `room_id` at **all
+- [x] `_repush_messages` receives and forwards `_handle_steering`'s resolved `room_id` at **all
   four** call sites (530, 536, 560, 564) — including the two retries inside `except` blocks.
-- [ ] No provenance tag appears in the JSON payload persisted to Redis (the payload dict is
+- [x] No provenance tag appears in the JSON payload persisted to Redis (the payload dict is
   byte-identical to today's). D6's `_leg` is a transient reader-set key on the dicts
   `pop_all_steering_messages` returns; it is never a `push_steering_message` parameter and a
   requeued entry read back raw from Redis does not contain it.
-- [ ] **`peek_steering_sender` is unmodified and `agent/output_handler.py:1160-1162` is
+- [x] **`peek_steering_sender` is unmodified and `agent/output_handler.py:1160-1162` is
   unmodified** (verifiable from the diff). The drafter self-draft guard keeps observing exactly the
   messages it observes today because the drafter's own push stays on the legacy key.
-- [ ] **Four of the five dual-read drain consumers are unmodified; the fifth changes by exactly one
+- [x] **Four of the five dual-read drain consumers are unmodified; the fifth changes by exactly one
   keyword.** `agent/health_check.py:514`, `agent/session_runner/runner.py:599`,
   `agent/session_executor.py:1905` and `agent/session_pickup.py:224` are byte-unmodified as drains.
   `agent/session_executor.py:2468` — the terminal leftover drain that feeds
@@ -1493,17 +1493,17 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   shared-Room instruction is never converted into new work at another session's teardown. The
   `valor-session status` peek call at `tools/valor_session.py:1031` is unmodified (verifiable from
   the diff).
-- [ ] `agent/session_health.py` and `monitoring/session_watchdog.py` gain **no**
+- [x] `agent/session_health.py` and `monitoring/session_watchdog.py` gain **no**
   `room_id_for_session` import — the diagnostic writers stay legacy, which is also what keeps the
   `front=True` priority contract from inverting.
-- [ ] The steering suite is green via `scripts/pytest-clean.sh tests/integration/test_steering.py`.
-- [ ] All four stale "writers are unchanged" claims removed (`agent/steering.py` module docstring
+- [x] The steering suite is green via `scripts/pytest-clean.sh tests/integration/test_steering.py`.
+- [x] All four stale "writers are unchanged" claims removed (`agent/steering.py` module docstring
   and `_room_queue_key`, `agent/health_check.py:511-513`,
   `agent/session_runner/runner.py:589-591`); no "formerly"/"used to" narration.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `python -m ruff check` and `python -m ruff format` clean.
-- [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened with
+- [x] `python -m ruff check` and `python -m ruff format` clean.
+- [x] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened with
   `gh pr create --draft` (the enforcing gate: `tools/merge_predicate.py:465-466` fails a `DRAFT`
   `mergeStateStatus`, so `/do-merge` refuses fail-closed) and labelled `hold` via
   `gh pr edit 2685 --add-label hold` (the human-visible signal; no code reads labels), with the
@@ -1515,7 +1515,7 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   draft awareness (D3). Neither DOCS nor MERGE can be marked `skipped` (`SKIPPABLE_STAGES` excludes
   both), so an open follow-up operator issue is the durable carrier for the un-draft-and-merge
   action.
-- [ ] **Issue #2642's body is amended** to record the two superseded constraints (internal
+- [x] **Issue #2642's body is amended** to record the two superseded constraints (internal
   resolution; provenance tag) with the spike evidence, so `/do-pr-review` grades the PR against the
   criteria it actually implements.
 
