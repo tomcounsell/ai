@@ -881,12 +881,16 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   fix narrowed the gate rather than disarming it.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **ADD**
   `test_no_pr_number_recorded_does_not_redispatch_build`: `BUILD` completed, **no**
-  `MERGE` marker, **no** `pr_number`, real ledger — assert
-  `result.get("skill") != "/do-build"` (row-agnostic) and **no `error` key**,
-  parametrized over `branch_exists` ∈ {True, False}. The #2757 regression test proper;
+  `MERGE` marker, **no** `pr_number` resolvable in any state, real ledger. **The
+  assertion differs by `branch_exists`** (round-2 BLOCKER 2 — a blanket "never
+  `/do-build`" is unsatisfiable here):
+  `False` → `result.get("skill") != "/do-build"`;
+  `True` → `result["row_id"] == "5"`, i.e. `/do-build` **from row 5, never from G8**,
+  which is the correct owner of "a branch exists with no PR" (Risk 2).
+  Both cases additionally assert **no `error` key**. The #2757 regression test proper;
   it does not exist today in any form. Three corrections to the earlier draft are
-  load-bearing here: the row-specific assertion would pass while the rebuild ran at
-  row 5 (spike-8); the `MERGE` marker would have let the now-cut short-circuit mask a
+  load-bearing here: a G8-specific negative would pass while the rebuild ran at row 5
+  (spike-8); the `MERGE` marker would have let the now-cut short-circuit mask a
   reverted guard; and a negative-only assertion is satisfied by `decide()`'s
   catch-all.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **ADD** the
@@ -978,11 +982,21 @@ established — the correlation is recorded, not asserted. What matters here is 
 the verifier must be correct on partial state, not just on the happy path. The
 dangerous case is **partial** loss: `BUILD == completed` survives while `MERGE` and
 `pr_number` are gone. A MERGE-marker short-circuit is blind to it by construction.
-**Mitigation:** the identifiability guard, not the short-circuit, is the fix for
-this shape, and the plan is ordered to say so (spike-3). A wholly-empty ledger is
-already safe (`build_claimed` is `False`, so G8 cannot fire) and is asserted as a
-test case. The partial shape gets its own test. Measured routing for partial shapes
-with G8 silent: `Blocked(NO_RULE)` or `/do-plan` — never a rebuild.
+**Mitigation:** the primary fix is what actually addresses this risk — a lost
+`pr_number` is now *re-resolved* from the merged PR rather than worked around, so the
+degraded ledger stops mattering for the reported shape. The identifiability guard
+covers the residual where no PR exists to find.
+
+**A wholly-empty ledger is NOT "already safe"** — that claim appeared here in an
+earlier draft and is **retracted** (round-1 BLOCKER 3). It is true only of
+`_verify_stage_artifacts_live` in isolation, where `build_claimed` is `False`. It is
+false at `decide()`, which first recovers `stage_states` from durable signals
+(`tools/sdlc_next_skill.py:576-579` → `agent/pipeline_state.py:1564`, which reads
+`("open", "all")` and therefore *does* see the merged PR) and so sets
+`BUILD = completed` while `_compute_meta` leaves `pr_number` as `None`. That is the
+reported reproduction end to end. The corresponding coverage is an **integration**
+test on the recovery path, not the unit assertion this paragraph used to promise —
+see Test Impact and task build-red.
 
 ### Risk 2: The gate is narrowed on the one branch nobody tests, so a real false claim slips through
 **Impact:** G8's purpose is to catch a self-attested BUILD marker with no PR behind
@@ -1239,10 +1253,23 @@ new one.
   (`decide()` recovers `BUILD = completed` from durable signals while `pr_number`
   stays `None` and MERGE is never written), and it replaces the earlier draft's claim
   that a wholly-empty `stage_states` is "already safe" — which is false at `decide()`.
-- [ ] A `BUILD == "completed"` claim with no resolvable `pr_number` produces no
-  `/do-build` at any row, with **no** `MERGE` marker present — the partial-loss shape.
-  This is the case that pins the identifiability guard specifically; with a `MERGE`
-  marker present the earlier draft's short-circuit would have masked a reverted guard.
+- [ ] **A `BUILD == "completed"` claim with a genuinely unresolvable `pr_number`**
+  (no PR exists in any state), **no** `MERGE` marker — the residual shape that pins
+  the identifiability guard. This criterion is **split by `branch_exists`, because the
+  two cases have different correct answers**, and an earlier revision's blanket "no
+  `/do-build` at any row" was **unsatisfiable** here (round-2 BLOCKER 2):
+  - `branch_exists: False` → **no `/do-build` at any row**. G8 must not fire, and no
+    other row owns the state.
+  - `branch_exists: True` → **`/do-build` at row 5, and specifically NOT at G8.**
+    This is correct and must not be "fixed": `_rule_branch_exists_no_pr` owns
+    "a branch exists with no PR, so build must create the PR", which is exactly right
+    for a lane that genuinely never opened one (Risk 2). Assert
+    `result["row_id"] == "5"` — the assertion proves the guard stopped G8 from
+    manufacturing a verdict *without* disturbing a row the plan deliberately leaves
+    out of fence.
+
+  With a `MERGE` marker present, the earlier draft's short-circuit would have masked a
+  reverted guard, which is why this criterion requires its absence.
 - [ ] A recorded `pr_number` whose live state is `CLOSED` **still** sets
   `stage_artifacts_verified: False` and still re-dispatches `/do-build` via G8
   (`test_g8_redispatches_build_on_synthesized_false_pr_claim`, unchanged and green).
@@ -1317,11 +1344,14 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
   under default collection for some time — verify rather than assume, and record the
   output.
 - Write `test_no_pr_number_recorded_does_not_redispatch_build` against a real
-  `PipelineLedger`: `BUILD` completed, **no** `MERGE` marker, **no** `pr_number`.
-  Assert `result.get("skill") != "/do-build"` — **not** row-specific — and assert
-  there is **no `error` key**. Parametrize over `branch_exists` ∈ {True, False}.
-  The absent `MERGE` marker is deliberate: it is what makes this test pin the
-  identifiability guard rather than a short-circuit.
+  `PipelineLedger`: `BUILD` completed, **no** `MERGE` marker, and **no** `pr_number`
+  resolvable in any state. Parametrize over `branch_exists`, asserting the two
+  different correct outcomes per Success Criteria: `False` → no `/do-build` at any
+  row; `True` → `/do-build` at **row 5** and **not** at G8. Both assert **no `error`
+  key**. The absent `MERGE` marker is deliberate: it is what makes this test pin the
+  identifiability guard rather than a short-circuit. Do **not** "fix" the row-5
+  dispatch — it is the designed behavior for a lane that genuinely never opened a PR,
+  and `_rule_branch_exists_no_pr` is deliberately out of fence.
 - Write the recovery-path sibling: an **empty** ledger + a merged PR + an existing
   branch → no `/do-build` at any row, no `error` key. This is the reproduction end to
   end (`decide()` recovers `BUILD` from durable signals while `pr_number` stays
