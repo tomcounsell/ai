@@ -2057,7 +2057,7 @@ Rows deleted or replaced at round 4:
 | **Negative twin passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "room_sibling or superseded"` | exit code 0, ≥ 3 tests collected |
 | **Abort never lands on a Room key** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "abort_rout or abort_keyword"` | exit code 0, ≥ 4 tests collected |
 | **Census test exists and passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestWriterCensus::test_every_flipped_writer_passes_room_id" -q` | exit code 0 (anchored by node id so deleting the test fails the gate) |
-| **Census discovers by repo walk, not a fixed table** | `grep -c "rglob\|glob(" tests/unit/test_steering_writer_census.py` | ≥ 1 — a hardcoded module list leaves a future writer in a new module silently on the legacy key, which is the failure mode this test exists to close |
+| **Census discovers by repo walk, not a fixed table** | `grep -c "rglob" tests/unit/test_steering_writer_census.py` | ≥ 1 — a hardcoded module list leaves a future writer in a new module silently on the legacy key, which is the failure mode this test exists to close |
 | **Sort census passes** | `scripts/pytest-clean.sh "tests/unit/test_steering_writer_census.py::TestRoomDerivationSortCensus::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0 |
 | Steering suite green | `scripts/pytest-clean.sh tests/integration/test_steering.py -q` | exit code 0 |
 | Output-handler unit tests green | `scripts/pytest-clean.sh tests/unit/test_output_handler.py -q` | exit code 0 |
