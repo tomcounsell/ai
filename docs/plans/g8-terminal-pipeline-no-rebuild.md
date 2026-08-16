@@ -133,9 +133,21 @@ distinguishes three states rather than two —
 | **unverifiable** | there is no identifier to resolve | **no-op, with a debug log** |
 
 Today the third collapses into the second. After this change it collapses into the
-first, matching the PATCH check, matching `_fetch_pr_state`'s stated contract, and
-matching the general rule that a gate must not manufacture evidence it never
-gathered.
+first, matching `_fetch_pr_state`'s stated contract and the general rule that a gate
+must not manufacture evidence it never gathered.
+
+Two honest caveats on that secondary change, which an earlier draft glossed:
+
+- **It is a real reduction in coverage, not a free win.** #2718's PATCH guard skipped
+  a *guessed* identifier, so skipping lost nothing. An absent `pr_number` is
+  different: a lane that genuinely never opened a PR stops tripping G8. Risk 2 states
+  this plainly and names the surviving owners. The PATCH↔BUILD analogy is a guide to
+  the *code shape*, not a claim that the two cases are equivalent in what they give
+  up.
+- **After the primary fix it is rarely reached.** Once `pr_number` resolves for
+  merged PRs, the unverifiable branch covers only a genuinely PR-less lane or a
+  degraded ledger. It ships as defense in depth against the residual, not as the
+  mechanism that fixes #2757.
 
 ## Freshness Check
 
@@ -281,10 +293,24 @@ All spikes were run read-only against the live system on 2026-08-14 at `1c48b97f
 Router spikes call `agent.sdlc_router.decide_next_dispatch` directly (a pure
 function over three dicts — no Redis, no `gh`).
 
+> **Spike status after the 2026-08-14 war room and the 2026-08-16 re-measurement.**
+> spike-1 is **partially invalidated** (it built its context by hand and so never saw
+> `branch_exists`); spike-3 and spike-4 are **superseded** by spike-8/9/10, which
+> locate the cause one layer up. They are retained below with correction notes
+> because their measurements are still true of the code they probed — the error was
+> in scope, not in arithmetic. spike-2, spike-5, spike-6 and spike-7 stand unamended.
+
 ### spike-1: After the verifier is fixed, where does a terminal no-`pr_number` pipeline actually route?
 - **Assumption**: "Stopping G8 from firing lets the terminal rows (G6 / row 10) own the outcome."
 - **Method**: prototype (direct `decide_next_dispatch` calls)
-- **Finding**: **False, and this is the plan's most important scoping result.** With
+- **CORRECTION (2026-08-16)**: this spike passed a **hand-built context** to
+  `decide_next_dispatch`, bypassing `_build_context` — the only producer of
+  `branch_exists`. With that key absent, row 5 cannot fire, and the spike concluded
+  `Blocked(NO_RULE)` was the only residual. Supplying `branch_exists: True` (the
+  normal case in this repo) routes to `/do-build` at **row 5**. See spike-8. The
+  conclusion drawn from this spike — "the deliverable is precisely to stop the false
+  rebuild" — survives; the belief that stopping G8 *achieves* that does not.
+- **Finding (as measured, context hand-built)**: With
   the G8 flags unset and `pr_number` absent:
   - all stages completed including `MERGE` and `PATCH`, no verdict →
     `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')`
@@ -294,12 +320,14 @@ function over three dicts — no Redis, no `gh`).
   `guard_g6_terminal_merge_ready` returns `None` without it (`:739-741`). A terminal
   pipeline that lost its `pr_number` has **no owner in the dispatch table at all**.
 - **Confidence**: high
-- **Impact on plan**: the deliverable is precisely "stop the false rebuild," not
-  "produce a terminal verdict." `Blocked(NO_RULE)` is honest (there is nothing to
-  dispatch and no work is invented) but its reason string reads like a routing bug.
-  Naming a terminal verdict is a router change and is filed as **#2817**, listed
-  under No-Gos. The Success Criteria assert the *absence* of a `/do-build` G8
-  dispatch, never the presence of `/do-merge`.
+- **Impact on plan (superseded)**: this originally justified asserting only the
+  absence of a **G8** `/do-build`. That assertion is now known to be satisfiable
+  while the bug persists, and is replaced throughout by `result.get("skill") !=
+  "/do-build"` at **any** row, with an explicit `branch_exists: True` variant.
+  `Blocked(NO_RULE)` is also **not** the benign no-op this spike assumed — the router
+  documents it as a genuine hole in the table and the SDLC skill surfaces it and
+  waits, i.e. it is a human-escalation wedge. Under the primary fix the residual
+  disappears entirely and #2817 becomes moot (spike-10).
 
 ### spike-2: Would reordering `GUARDS` (G6 before G8) fix the reported case?
 - **Assumption**: "Letting the terminal verdict preempt the artifact check is the invasive-but-viable alternative."
@@ -406,6 +434,57 @@ function over three dicts — no Redis, no `gh`).
 - **Confidence**: high
 - **Impact on plan**: #2755 is named in Verification as the live negative control,
   and the fix must leave its routing unchanged.
+
+### spike-8: Does silencing G8 actually stop the rebuild?
+- **Assumption**: "G8 is the only row that re-dispatches `/do-build` on this shape." (spike-1's implicit premise.)
+- **Method**: prototype — `decide_next_dispatch` with a full terminal `stage_states`, varying `pr_number` and `branch_exists`
+- **Finding**: **No. The rebuild relocates to row 5.** `_rule_branch_exists_no_pr`
+  (`agent/sdlc_router.py:922-927`) returns `True` on `context["branch_exists"] is
+  True` alone when `pr_number` is falsy — it does not consult `BUILD` at all in that
+  branch — and row 5 precedes every PR-gated row. Measured:
+  `pr_number` absent + `branch_exists: True` → **`/do-build`, row 5**;
+  `pr_number` absent + `branch_exists: False` → `Blocked(NO_RULE)`.
+  `deleteBranchOnMerge` is `false` on this repo and merged lane branches persist, so
+  the row-5 column is the normal post-merge state here.
+- **Confidence**: high (measured through the real router)
+- **Impact on plan**: this is the finding that forced the restructure. A
+  verifier-only fix cannot deliver the plan's own stated outcome, and the original
+  Success Criterion 1 would have certified it anyway. Every acceptance assertion is
+  now row-agnostic.
+
+### spike-9: Is `pr_number` actually unrecoverable after merge, or just looked up wrong?
+- **Assumption**: "The ledger lost `pr_number`; recovering it means inventing a second identity resolver on a hot path." (The original Rabbit Hole.)
+- **Method**: prototype — live `_lookup_pr` calls against the three reported issues, both `state` values
+- **Finding**: **It is looked up wrong, and the fix is one keyword argument.**
+  `tools/sdlc_stage_query.py::_compute_meta` calls `_lookup_pr(...)` at `:548`
+  without `state`; the signature defaults to `state="open"` (`:338-342`), which
+  excludes merged PRs by construction. Measured live: #2638 → `None` under `open`,
+  **2686** under `all`; #2566 → `None` / **2665**; #2640 → `None` / **2671**. Those
+  are the exact PRs this plan's Problem section names.
+  `tools/sdlc_stage_marker.py:246-250` already carries the identical fix under
+  **#2539**, and `agent/pipeline_state.py:1564` independently uses a
+  `for state in ("open", "all")` two-pass fallback with the rationale spelled out in
+  its docstring.
+- **Confidence**: high (measured live against `gh`)
+- **Impact on plan**: the Rabbit Hole "Rebuilding `pr_number` from the world" was
+  attacking a strawman — this is the *existing* resolver with the filter corrected,
+  not a new one. Restoring `pr_number` becomes the plan's load-bearing fix.
+
+### spike-10: Does restoring `pr_number` produce the right outcome, not merely a different one?
+- **Assumption**: "Even with `pr_number` restored, a terminal pipeline still needs a new router row to land somewhere sane." (The premise behind #2817.)
+- **Method**: prototype — same terminal `stage_states`, `pr_number = 2686`, recorded APPROVED verdict with a `head_sha` matching `context["pr_head_sha"]`
+- **Finding**: **It reaches the terminal row under both branch states.**
+  `pr_number: 2686` + `branch_exists: True` → **`/do-merge`, row 10**;
+  `branch_exists: False` → **`/do-merge`, row 10**. One dependency is worth naming
+  because it caused a false start: with the verdict's `head_sha` absent or mismatched
+  against `pr_head_sha`, the same state routes to **row 8f** (`/do-pr-review`), not
+  row 10 — the #2062 WS3d stale-verdict row. The head-SHA attribution is load-bearing
+  for reaching row 10, which is the same dependency spike-5 identified in the
+  integration fixture.
+- **Confidence**: high (measured)
+- **Impact on plan**: the primary fix produces a *correct* terminal outcome rather
+  than a merely silent one, and it deletes the `Blocked(NO_RULE)` residual. **#2817
+  is moot** and moves from a No-Go to a close-with-evidence action.
 
 ## Data Flow
 
