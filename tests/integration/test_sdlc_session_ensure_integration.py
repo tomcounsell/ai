@@ -738,6 +738,13 @@ class TestStageArtifactVerificationGate:
 
         assert "error" not in result, result
         assert result.get("skill") != "/do-build", result
+        # Pin the row, not just the negative. Asserting only "not /do-build"
+        # stays green when the _compute_meta fix is reverted: `pr_number` goes
+        # back to None, no plan doc matches this throwaway issue number, and
+        # row 1 (/do-plan) preempts row 5 for an unrelated reason. Row 7 is
+        # reachable only once the merged PR resolves, so this is the assertion
+        # that actually fails on a reverted primary fix.
+        assert result.get("row_id") == "7", result
 
 
 class TestSelfLockPeekIdentityEndToEnd:
