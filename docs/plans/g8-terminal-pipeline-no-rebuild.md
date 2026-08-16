@@ -80,7 +80,7 @@ and not before: the merge is the event that makes the PR unresolvable.
 
 Measured on the three reported issues (2026-08-16, live `gh`):
 
-| Issue | `_lookup_pr(state="open")` | `_lookup_pr(state="all")` |
+| Issue | `_lookup_pr(state="open")` | `_lookup_pr(state="merged")` |
 |---|---|---|
 | #2638 | `None` | **2686** |
 | #2566 | `None` | **2665** |
@@ -488,7 +488,7 @@ function over three dicts — no Redis, no `gh`).
   `tools/sdlc_stage_query.py::_compute_meta` calls `_lookup_pr(...)` at `:548`
   without `state`; the signature defaults to `state="open"` (`:338-342`), which
   excludes merged PRs by construction. Measured live: #2638 → `None` under `open`,
-  **2686** under `all`; #2566 → `None` / **2665**; #2640 → `None` / **2671**. Those
+  **2686** under `merged`; #2566 → `None` / **2665**; #2640 → `None` / **2671**. Those
   are the exact PRs this plan's Problem section names.
   `tools/sdlc_stage_marker.py:246-250` already carries the identical fix under
   **#2539**, and `agent/pipeline_state.py:1564` independently uses a
@@ -551,9 +551,18 @@ The change is confined to step 5, and it only ever moves an outcome from
   `_pipeline_is_terminal_from_states` is cut, avoiding a third spelling of a
   predicate that already has two.
 - **Coupling**: unchanged. Nothing gains an import of `agent/pipeline_state.py`.
-- **Cost**: one additional `gh` call, and **only** on the path that currently
-  resolves nothing. Lanes with an open PR are unaffected; the extra call is paid
-  exactly where the current code returns a wrong answer for free.
+- **Cost**: one additional `gh` call whenever the `open` pass returns `None`.
+  **Stated honestly, that is the majority of invocations, not a degraded minority.**
+  `_compute_meta`'s own comment (`tools/sdlc_stage_query.py:529-530`) notes it "runs
+  for any issue number the router, the dashboard, or an operator names — most of which
+  are not lanes", and a non-lane issue has no open PR, so it already takes the `None`
+  path today and will now pay the retry. Measured on this machine: **~0.89s** added on
+  the no-match path (bounded by `_lookup_pr`'s existing 5s subprocess timeout), against
+  a function that already makes several `gh` round-trips including
+  `_fetch_pr_merge_state`. Accepted as the price of correctness. Deliberately **not**
+  mitigated with a cache — that would add persistent state and break this plan's
+  "no new dependencies, no new architectural surface" property for a sub-second cost.
+  Lanes with an open PR remain entirely unaffected.
 - **Data ownership**: unchanged. The verifier remains read-only.
 - **Reversibility**: very high. Three small edits across two functions; reverting
   restores the present behavior exactly.
@@ -604,9 +613,11 @@ surfaces that currently describe the BUILD check in terms this change falsifies.
   `state`, inheriting the `"open"` default that makes every merged PR invisible
   (spike-9). The fix is a **two-pass fallback**: try `"open"` first, and only if that
   returns `None`, retry with `"all"`. This shape is chosen over an unconditional
-  `state="all"` deliberately — it is **strictly additive**, resolving a `pr_number`
-  only where the current code resolves `None`, so it cannot change any lookup that
-  succeeds today and cannot newly surface a closed-unmerged PR ahead of an open one.
+  `state="all"` deliberately, and the second pass is scoped to **`state="merged"`**
+  rather than `"all"` — see the round-2 correction below. It is **strictly additive**:
+  it resolves a `pr_number` only where the current code resolves `None`, so it cannot
+  change any lookup that succeeds today, and because neither pass can return a
+  closed-unmerged PR it cannot surface one at all.
   It is also not a new idiom: `agent/pipeline_state.py:1564` already reads
   `for state in ("open", "all")` for the same reason, and
   `tools/sdlc_stage_marker.py:246-250` already corrected the identical defect at a
@@ -711,7 +722,7 @@ surfaces that currently describe the BUILD check in terms this change falsifies.
 _lookup_pr(issue, state="open")  ──found──► pr_number          (unchanged path)
         │ None
         ▼
-_lookup_pr(issue, state="all")   ──found──► pr_number   ◄── THE FIX (strictly additive)
+_lookup_pr(issue, state="merged") ─found──► pr_number   ◄── THE FIX (merged-scoped)
         │ None
         ▼
 pr_number = None                                        (genuinely PR-less lane)
@@ -753,8 +764,8 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
 - **`tools/sdlc_stage_query.py::_compute_meta` (`:548`) — the primary fix.** Replace
   the single `_lookup_pr(issue_number, slug=slug, repo=resolved_repo)` with a
   two-pass fallback: the existing call, then — **only if it returns `None`** — a
-  retry with `state="all"`. Do not change `_lookup_pr`'s own default; other callers
-  depend on it and `sdlc_stage_marker.py` passes `state` explicitly. Carry a comment
+  retry with **`state="merged"`**. Do not change `_lookup_pr`'s own default; other
+  callers depend on it and `sdlc_stage_marker.py` passes `state` explicitly. Carry a comment
   naming #2539 as precedent and `agent/pipeline_state.py:1564` as the in-repo idiom,
   and stating why the ordering matters (an open PR must always win over a historical
   one, so the second pass runs only on `None`).
@@ -887,8 +898,8 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   earlier draft's unit assertion that a wholly-empty `stage_states` is "already safe",
   which is **false at `decide()`**.
 - [ ] `tests/unit/test_sdlc_stage_query.py` — **ADD** two `_compute_meta` cases: the
-  `open` pass returning nothing and the `all` pass returning a PR resolves
-  `pr_number`; and the `open` pass returning a PR does **not** run the `all` pass
+  `open` pass returning nothing and the `merged` pass returning a PR resolves
+  `pr_number`; and the `open` pass returning a PR does **not** run the `merged` pass
   (pinning the strictly-additive ordering).
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py:19-26` — **UPDATE**:
   the module docstring describes the class as driving "a synthesized false
@@ -927,8 +938,9 @@ nothing on its own.
   hazards `tools/merge_predicate.py`'s docstring catalogs." That was a strawman:
   spike-9 measured that the *existing* resolver already finds the PR when its `state`
   filter is not artificially restricted to `"open"`. No second resolver is written,
-  no new ambiguity surface is created, and the two-pass ordering (open wins, `all`
-  only on `None`) means the multi-PR hazard is strictly no worse than today's. The
+  no new ambiguity surface is created, and the two-pass ordering (open wins,
+  `merged` only on `None`) means the multi-PR hazard is strictly no worse than
+  today's. The
   genuine rabbit hole nearby — writing a *bespoke* PR search inside the verifier
   rather than fixing the shared resolver's call site — remains out of scope.
   Separately, ledger durability is still #2730's lane; this plan fixes a lookup
@@ -1004,10 +1016,29 @@ artifact checks disarmed. That last point alone is disqualifying for a
 short-circuit whose only benefit was avoiding a few subprocesses.
 
 ### Risk 3b: The primary fix resolves the wrong PR
-**Impact:** widening the `state` filter to `all` enlarges the candidate set, so a
-lookup that previously returned `None` could now return a PR that is not the lane's
-— an incorrect `pr_number` is worse than a missing one, because G8 would then verify
+**Impact:** widening the `state` filter enlarges the candidate set, so a lookup that
+previously returned `None` could now return a PR that is not the lane's — an
+incorrect `pr_number` is worse than a missing one, because G8 would then verify
 against a stranger's artifact.
+
+**Round-2 correction — this risk was real and the mitigation was insufficient.** An
+earlier revision used `state="all"` for the second pass and claimed the two-pass
+ordering made it safe. That covers ordering *between* passes but not candidate
+selection *within* a pass: `_gh_pr_search_issue_ref` (`tools/sdlc_stage_query.py:284-335`)
+returns the **first** body-validating candidate (`:325-332`) with no MERGED-over-CLOSED
+preference. Demonstrated live on this repo:
+
+| Issue | `open` | `merged` | `all` |
+|---|---|---|---|
+| #2793 | `None` | `None` | **2794 — closed UNMERGED** |
+
+Under the `all` shape, #2793 would resolve `pr_number = 2794`, `_fetch_pr_state` would
+read `CLOSED`, and G8 would fire — converting today's silent no-op into an **active
+false rebuild**. The second pass is therefore scoped to **`state="merged"`**, which
+returns `None` for that shape while still resolving all three reported issues
+(#2638→2686, #2566→2665, #2640→2671, identical to the `all` result). This is not
+merely safer, it is more correct: a closed-unmerged PR is not evidence that BUILD
+produced an artifact.
 **Mitigation:** three layers, none of them new. The two-pass ordering means the
 second pass runs **only** when the first returns `None`, so no lookup that succeeds
 today can change. `_lookup_pr`'s own validation is unchanged and is already strict:
@@ -1017,6 +1048,19 @@ and the branch-head fallback requires an exact head-ref match on the lane's
 **recorded** slug. Fuzzy digit matches are rejected on both paths. Finally, #2539
 shipped this same widening at a sibling call site and the measured results here are
 exact: the three reported issues resolve to precisely the PRs that closed them.
+
+**Accepted residual — a reopened issue.** If an issue is reopened and a second
+lifecycle begins, the `merged` pass still finds the *prior* lifecycle's merged PR
+(its body still reads "Closes #N"). `pr_state` reads `MERGED`, so an unfinished
+second-lifecycle BUILD would be reported verified. This is named rather than fixed,
+for three reasons: it is strictly narrower than the bug being fixed (it over-verifies
+one stage rather than re-dispatching work on every tick); the #2003 merge predicate
+remains the hard backstop against actually merging an unbuilt lane; and the clean fix
+— trying `_lookup_pr`'s exact `--head <lane branch>` leg before the fuzzy `#N` search,
+since a prior lifecycle's branch cannot match the current lane's — reorders the
+resolution ladder for **every** caller, which is a larger change than this plan's
+fence should absorb on a case nobody has reported. **Filed as its own issue** during
+task build-tests-docs, cross-referencing this paragraph.
 
 ### Risk 4: The repaired integration test is repaired to the wrong expectation
 **Impact:** the test currently asserts `row_id == "10"` on a fixture that cannot
@@ -1163,8 +1207,10 @@ new one.
 
 ### Inline Documentation
 - [ ] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
-  `agent/pipeline_state.py:1564` as the in-repo idiom, and why the `all` pass runs
-  only on `None` (an open PR must always win over a historical one).
+  `agent/pipeline_state.py:1564` as the in-repo idiom, why the second pass runs only
+  on `None` (an open PR must always win over a historical one), and why it is scoped
+  to `merged` rather than `all` (a closed-unmerged PR is not a build artifact, and
+  admitting one would make G8 fire — demonstrated on #2793).
 - [ ] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
   is cut, so there is no third spelling of the terminal predicate to document.
 - [ ] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
@@ -1172,7 +1218,7 @@ new one.
   distinction. **Paraphrase the removed condition** — naming it verbatim trips the
   plan's own anti-criterion grep.
 - [ ] The two new debug logs carry their reasons inline (unverifiable BUILD;
-  terminal pipeline), in the register of the existing PATCH skip at `:258-263`.
+  unverifiable PATCH), in the register of the existing PATCH skip at `:258-263`.
 
 ## Success Criteria
 
@@ -1295,8 +1341,8 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
 - **Agent Type**: builder
 - **Parallel**: false
 - **`tools/sdlc_stage_query.py::_compute_meta` (`:548`) — do this first.** Two-pass
-  `_lookup_pr`: existing call, then a `state="all"` retry **only** when it returns
-  `None`. Do not change `_lookup_pr`'s own default. Comment naming #2539 and
+  `_lookup_pr`: existing call, then a **`state="merged"`** retry **only** when it
+  returns `None`. Do not change `_lookup_pr`'s own default. Comment naming #2539 and
   `agent/pipeline_state.py:1564`, and why open must win over historical.
 - **`tools/sdlc_next_skill.py`** — gate the BUILD check on a recorded `pr_number`,
   mirroring `patch_claimed`'s `bool(lane_branch)` guard; debug-log the skip. Remove
@@ -1328,8 +1374,10 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
   fixture dead code. Rewrite its docstring to say what it actually defends; rename it
   if the name is the concern.
 - Add a `_compute_meta` unit test: `gh` stubbed so the `open` pass returns nothing
-  and the `all` pass returns a PR → `pr_number` resolves. Plus the negative: when the
-  `open` pass returns a PR, the `all` pass is **not** run.
+  and the `merged` pass returns a PR → `pr_number` resolves. Plus two negatives: when
+  the `open` pass returns a PR the second pass is **not** run; and an issue whose only
+  body-validating PR is **closed-unmerged** resolves to `None`, not to that PR (the
+  #2793 shape — the regression test for round-2 BLOCKER 1).
 - Add the unit cases from Test Impact: the parametrized falsy-`pr_number` case, the
   `assert_not_called()` subprocess assertions, and the debug-vs-warning log levels
   (with `caplog.set_level(logging.DEBUG)`, or they pass vacuously).
