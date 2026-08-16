@@ -909,19 +909,36 @@ The #2003 merge gate remains the hard backstop that a PR-less lane cannot merge.
 the control test (`test_g8_redispatches_build_on_synthesized_false_pr_claim`) pins
 that a recorded-but-dead PR still fires G8.
 
-### Risk 3: The terminal short-circuit trusts a self-attested marker
-**Impact:** `MERGE == completed` arrives through the same `<!-- OUTCOME {...} -->`
-self-attestation channel that G8 exists to distrust. A lane that falsely marks
-MERGE completed would switch off all three artifact checks for itself.
-**Mitigation:** bounded and accepted. The short-circuit only ever *removes* a
-re-dispatch; it cannot cause one. A falsely-terminal lane therefore gets less
-nagging, not a wrong action — and it still has no `pr_number`-bearing route to
-`/do-merge` (spike-1), so it cannot merge on the strength of the lie either.
-Recorded in the helper's docstring so the trade is visible rather than implicit.
-`MERGE` is also the one marker that the stage-marker write path already refuses to
-record casually, and `tools/_sdlc_run_identity.py` already treats it as terminal for
-a strictly more consequential decision (declining to re-mint a run identity) — so
-this plan is not extending trust, it is matching existing trust.
+### Risk 3: ~~The terminal short-circuit trusts a self-attested marker~~ — RESOLVED BY CUTTING IT
+**Status:** the MERGE short-circuit is no longer in the plan, so this risk is
+retired rather than mitigated. It is kept on the record because two of its original
+mitigations were wrong and should not be revived with the idea.
+
+**What was wrong.** The mitigation claimed a falsely-terminal lane "still has no
+`pr_number`-bearing route to `/do-merge`" — true only in the branch where `pr_number`
+is absent, and silent about the branch where it is present. It also cited a
+MERGE-specific write-path property that **does not exist**: the real protection is
+generic, namely `_backfill_predecessors` plus the #2554 verdict invariant
+(`tools/sdlc_stage_marker.py:744-766`), reinforced by MERGE being non-skippable
+(`:328-336`). And nothing ever resets a stage, so once `MERGE` is completed it is
+permanent — a reopened issue would have run its entire second pipeline with all three
+artifact checks disarmed. That last point alone is disqualifying for a
+short-circuit whose only benefit was avoiding a few subprocesses.
+
+### Risk 3b: The primary fix resolves the wrong PR
+**Impact:** widening the `state` filter to `all` enlarges the candidate set, so a
+lookup that previously returned `None` could now return a PR that is not the lane's
+— an incorrect `pr_number` is worse than a missing one, because G8 would then verify
+against a stranger's artifact.
+**Mitigation:** three layers, none of them new. The two-pass ordering means the
+second pass runs **only** when the first returns `None`, so no lookup that succeeds
+today can change. `_lookup_pr`'s own validation is unchanged and is already strict:
+the issue-number search trusts a match only when the PR body carries a literal
+word-boundary closing-keyword reference to the exact issue (`_gh_pr_search_issue_ref`),
+and the branch-head fallback requires an exact head-ref match on the lane's
+**recorded** slug. Fuzzy digit matches are rejected on both paths. Finally, #2539
+shipped this same widening at a sibling call site and the measured results here are
+exact: the three reported issues resolve to precisely the PRs that closed them.
 
 ### Risk 4: The repaired integration test is repaired to the wrong expectation
 **Impact:** the test currently asserts `row_id == "10"` on a fixture that cannot
@@ -977,13 +994,16 @@ removes one call path.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2817] **A named terminal verdict for next-skill.** spike-1
-  measured that a terminal pipeline with no recoverable `pr_number` returns
-  `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` once G8 stops
-  firing. That is honest but reads like a routing bug, and every terminal route
-  (row 10, G6) is gated on `pr_number`. Producing a real "pipeline complete" verdict
-  is a change to `agent/sdlc_router.py`'s guard/dispatch surface, outside this
-  plan's fence, and filed as #2817.
+- [**MOOT — close #2817 with evidence**] **A named terminal verdict for next-skill.**
+  #2817 was filed on spike-1's belief that a terminal pipeline is left at
+  `Blocked(NO_RULE)` once G8 stops firing. spike-10 measures that restoring
+  `pr_number` routes the same ledger to `/do-merge` **row 10** under both branch
+  states, so the residual this issue exists to name does not survive the primary fix.
+  Post-merge, comment the spike-10 measurement on #2817 and close it rather than
+  leaving a phantom follow-up open. `Blocked(NO_RULE)` is also not the benign state
+  spike-1 assumed — the router documents it as a genuine hole in the table and the
+  SDLC skill surfaces it and waits, i.e. it is a human-escalation wedge that would
+  have been *routine* post-merge under the earlier draft.
 - [SEPARATE-SLUG #2730] **Fixing the ledger loss itself.** The empty ledgers on
   #2638/#2566/#2640 are the precondition for this bug, not the bug. The
   ledger-durability lane owns them. This plan's obligation is to behave correctly on
