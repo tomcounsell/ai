@@ -25,11 +25,8 @@ import logging.handlers
 import os
 import pathlib
 import re
-import runpy
-import shutil
 import subprocess
 import sys
-import tempfile
 
 import pytest
 
@@ -238,7 +235,13 @@ def _is_entrypoint_guard(node) -> bool:
     )
 
 
-_FORBIDDEN_CALL_NAMES = {"basicConfig", "addHandler", "mkdir", "_configure_logger", "_configure_logging"}
+_FORBIDDEN_CALL_NAMES = {
+    "basicConfig",
+    "addHandler",
+    "mkdir",
+    "_configure_logger",
+    "_configure_logging",
+}
 
 
 def _module_scope_forbidden_calls(tree, path: pathlib.Path) -> list[str]:
@@ -563,7 +566,10 @@ except SystemExit as e:
 
 root = logging.getLogger()
 handler_kinds = [type(h).__name__ for h in root.handlers]
-stream_handlers = [h for h in root.handlers if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)]
+stream_handlers = [
+    h for h in root.handlers
+    if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+]
 fmt = stream_handlers[0].formatter._fmt if stream_handlers else None
 stream_is_stderr = stream_handlers[0].stream is sys.stderr if stream_handlers else False
 lr_logger = logging.getLogger("log_rotate")

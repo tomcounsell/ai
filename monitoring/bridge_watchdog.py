@@ -107,6 +107,7 @@ def _configure_logging() -> None:
     fh._watchdog_owned = True
     logger.addHandler(fh)
 
+
 # Files and directories
 LOG_FILE = PROJECT_DIR / "logs" / "bridge.log"
 ERROR_LOG = PROJECT_DIR / "logs" / "bridge.error.log"
