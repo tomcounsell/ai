@@ -924,17 +924,22 @@ if the builder had truncated the file. It is replaced by a sha256 baseline check
       criterion 5 — a branch that does not depend on logging cannot demonstrate that logging works.
       Task 5 uses the `__main__` guard directly instead.
 - [ ] The four `caplog` assertions (`tests/unit/test_bridge_watchdog.py:753`, `:957`;
-      `tests/integration/test_update_loop_wedge_recovery.py:156`, `:221`) are the error-state
+      `tests/integration/test_update_loop_wedge_recovery.py` **`:371`, `:387`** — re-pointed at
+      revision 4, see Freshness Check) are the error-state
       rendering checks for the watchdog's warning and critical paths. Under `propagate = False` they
       **will fail unmodified** — this is measured, not assumed (see Test Impact) — and each is
       converted to the explicit-handler pattern.
 
 ## Test Impact
 
-**All four `caplog` sites re-verified at revision 2**, with their exact locations:
+**All four `caplog` sites re-verified at revision 4** (`0babdb2ab`), with their exact locations:
 `tests/unit/test_bridge_watchdog.py:753` and `:957`, and
-`tests/integration/test_update_loop_wedge_recovery.py:156` and `:221` — the latter file is under
-`tests/integration/`, never `tests/unit/`. The remedy is proven rather than speculative:
+`tests/integration/test_update_loop_wedge_recovery.py` **`:371`** and **`:387`** — the latter file is
+under `tests/integration/`, never `tests/unit/`, and its two sites were **re-pointed at revision 4**
+after #2670 rewrote the file (revision 3 cited `:156`/`:221`, which no longer exist). A repo-wide
+grep for `logger="monitoring.bridge_watchdog"` / `logger="monitoring.worker_watchdog"` still returns
+exactly four sites, so the count of four is unchanged; only two addresses moved.
+The remedy is proven rather than speculative:
 `tests/unit/test_worker_watchdog.py` runs ten live instances of the
 `logger.addHandler(caplog.handler)` + `try/finally` pattern against an already-`propagate = False`
 logger. Acceptance criterion 4 holds under the edited tests.
@@ -1188,8 +1193,26 @@ single short-lived process per launchd tick.
   done < /tmp/watchdog-log-baseline.txt && echo LOGS_PREFIX_INTACT
   ```
 
-  Current values: `watchdog.log` = 41322 bytes, whole-file sha256
-  `2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`.
+  **The baseline must be RE-MEASURED as the first action of the build, not read from this plan.**
+  Revision 4 measured `watchdog.log` at **9,692,506 bytes**, whole-file sha256
+  `51cfe6c4d464235c9bc85d9e55449e2487cbdef2c0eb1447d60694e2038f2f9b`, mtime `Aug 16 10:48` — against
+  revision 3's 41,322 bytes / `2c3c2f2d…`. The file grew ~235x in nine days, and the revision-3
+  **prefix** no longer holds either: `head -c 41322 logs/watchdog.log | shasum -a 256` now returns
+  `a2e77fe312d90bb8a0b553cfd175da58013e906f25b922f0cf55d9a797522912`, not `2c3c2f2d…`. So the file
+  was rotated or replaced, not merely appended to — the prefix design does not rescue a stale
+  baseline here.
+
+  Two consequences the builder must honor:
+
+  1. Any hardcoded baseline in this plan will be stale by the time the build runs, and the gate
+     would report `REWRITTEN` for a reason that has nothing to do with the change. Generate
+     `/tmp/watchdog-log-baseline.txt` fresh at build start and treat the numbers above as
+     illustrative only.
+  2. At 9.7 MB the file is near the handler's 10 MB `maxBytes` threshold, so a rotation can fire
+     *during* the build and trip the gate spuriously. If the gate reports `TRUNCATED` or
+     `REWRITTEN`, check `ls logs/watchdog.log*` for a new `.1` backup before concluding the change
+     wrote to the log; a rotation is an expected, benign cause and calls for re-baselining, not for
+     reverting.
 
   **Prefix preservation rather than whole-file equality, because one of the two files has a live
   writer.** `com.valor.worker-watchdog` is installed and running on this machine on a 90-second
@@ -1466,8 +1489,11 @@ needs no wiring.
   `propagate = False`, and `_configure_logging()` exactly as specified.
 - Wire `_configure_logging()` into the `__main__` guard only.
 - Convert the two `caplog` sites in `tests/unit/test_bridge_watchdog.py` (:753, :957) and the two in
-  `tests/integration/test_update_loop_wedge_recovery.py` (:156, :221) to
-  `logger.addHandler(caplog.handler)` in `try/finally`.
+  `tests/integration/test_update_loop_wedge_recovery.py` (**:371** in
+  `test_redis_exception_is_inconclusive`, **:387** in
+  `test_unreadable_process_start_suppresses_verdict` — re-pointed at revision 4; the old `:156`/`:221`
+  were removed by #2670) to `logger.addHandler(caplog.handler)` in `try/finally`.
+  Re-grep `caplog` in that file before editing rather than trusting these line numbers.
 - Run both files and confirm green.
 - Commit.
 
