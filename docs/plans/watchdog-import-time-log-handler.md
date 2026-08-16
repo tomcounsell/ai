@@ -507,7 +507,13 @@ No external dependencies: no API keys, no services, no new packages.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Pinned interpreter available | `python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); v='.'.join(map(str,sys.version_info[:2])); assert pin.startswith(v), (pin, v); print('PIN_OK')"` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+| Pinned interpreter available | `.venv/bin/python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); v='.'.join(map(str,sys.version_info[:2])); assert pin.startswith(v), (pin, v); print('PIN_OK')"` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+
+**The interpreter check must invoke `.venv/bin/python`, not bare `python`** (corrected at revision
+4). `python` on PATH is whatever the ambient shell provides — measured as 3.12.13 on this machine
+while `.venv/bin/python` is 3.14.3 and `.python-version` pins `3.14` — so the bare form reports
+`AssertionError: ('3.14', '3.12')` and fails `scripts/check_prerequisites.py` on a **correctly
+provisioned** checkout. Under `.venv/bin/python` the same check prints `PIN_OK`.
 
 Two setup steps are part of Task 1 rather than prerequisites, because the build creates the thing
 they check:
