@@ -536,15 +536,24 @@ The change is confined to step 5, and it only ever moves an outcome from
 
 **Size:** Medium
 
-**Team:** Solo dev, validator, documentarian
+**Team:** Solo dev + validator (two agents — see Team Orchestration)
 
 **Interactions:**
-- PM check-ins: 1 (only if the builder believes the fence must widen — it should not)
+- PM check-ins: 1 — **already spent**, on the fence extension below
 - Review rounds: 1
 
-The code is roughly ten lines. The Medium sizing is bought by the test-fixture
-reconstruction (spike-5's two-part repair) and by three documentation surfaces that
-currently describe the BUILD check in terms this change falsifies.
+**FENCE EXTENSION (operator-visible).** The earlier draft fenced this work to
+`tools/sdlc_next_skill.py` plus tests. The war room established that the fix which
+makes the outcome *correct* rather than merely silent lives one layer up, so the
+fence now also includes **`tools/sdlc_stage_query.py::_compute_meta`** — a two-pass
+`_lookup_pr` call, following #2539's precedent at a sibling call site. This is a
+deliberate, evidence-backed widening, not scope creep: without it the reported
+rebuild simply relocates from G8 to router row 5 (spike-8). `agent/sdlc_router.py`,
+`agent/pipeline_state.py`, and `tools/sdlc_session_ensure.py` remain outside.
+
+The code is roughly fifteen lines across two modules. The Medium sizing is bought by
+the test-fixture reconstruction (spike-5's two-part repair) and by three documentation
+surfaces that currently describe the BUILD check in terms this change falsifies.
 
 ## Prerequisites
 
@@ -1127,18 +1136,22 @@ new one.
 
 ## Team Orchestration
 
-Three agents. One function, two test files, three doc surfaces — a separate
-test-engineer would cost a full context handoff for a test file the builder is
-already editing line by line, and the red-test-first step makes the builder the
-person who must hold both halves anyway.
+**Two agents, three tasks.** The earlier draft specified three agents and six tasks
+for roughly fifteen lines plus tests, with tasks 3 and 5 being the same validation
+work run twice. That is ceremony, not rigor. The documentarian role folds into the
+builder — three prose edits to existing files, made by the person who just changed
+the behavior they describe — and validation runs once, at the end, when there is
+something complete to validate. A separate test-engineer would cost a full context
+handoff for test files the builder is already editing line by line, and the
+red-test-first step makes the builder hold both halves anyway.
 
 ### Team Members
 
 - **Builder (verifier)**
   - Name: `g8-verifier-builder`
-  - Role: write the red regression test first; then the terminal predicate, the
-    identifiability guard, and the full unit + integration test surface in
-    `tools/sdlc_next_skill.py` and its two test files
+  - Role: write the red regression tests first; then the `_compute_meta` two-pass
+    lookup, the BUILD and PATCH identifiability guards, the full unit + integration
+    test surface, and the three documentation edits
   - Agent Type: builder
   - Domain: Redis/Popoto data (the integration test drives a real `PipelineLedger`)
   - Resume: true
@@ -1146,16 +1159,10 @@ person who must hold both halves anyway.
 - **Validator (verifier)**
   - Name: `g8-verifier-validator`
   - Role: verify every acceptance criterion, especially the negatives — the gate
-    still fires on a dead recorded PR, zero subprocesses on a terminal pipeline, no
-    file outside the fence changed, nothing left red or `xfail`-ed
+    still fires on a dead recorded PR, no `/do-build` at any row under both
+    `branch_exists` values, no file outside the (extended) fence changed, nothing
+    left red or `xfail`-ed
   - Agent Type: validator
-  - Resume: true
-
-- **Documentarian**
-  - Name: `g8-verifier-documentarian`
-  - Role: update `sdlc-router-oscillation-guard.md`, `sdlc-pipeline.md`, and the one
-    clause in `.claude/skills/sdlc/SKILL.md` — no new feature doc, no index entry
-  - Agent Type: documentarian
   - Resume: true
 
 ### Available Agent Types
