@@ -1066,23 +1066,38 @@ new one.
 
 ## Success Criteria
 
-- [ ] A pipeline with `BUILD == "completed"` and **no** recorded `pr_number` produces
-  **no** G8 `/do-build` dispatch, proven by an integration test against a real
-  `PipelineLedger`.
-- [ ] The same holds when `MERGE == "completed"` is also absent — the partial-loss
-  shape (spike-3), which a MERGE-marker check cannot see. This is the criterion that
-  distinguishes a real fix from a narrow one.
-- [ ] A pipeline with `MERGE == "completed"` runs **zero** artifact subprocesses —
-  no `gh pr view`, no `git ls-remote`, no `git show` — proven by an
-  `assert_not_called()` unit test.
+- [ ] **The primary fix resolves the reported PRs.** `_compute_meta` returns
+  `pr_number` = 2686 / 2665 / 2671 for issues #2638 / #2566 / #2640 respectively,
+  where it returns `None` today (spike-9). Proven by a test that stubs `gh` for both
+  passes, plus a live re-measurement recorded in the PR description.
+- [ ] **No `/do-build` at ANY row** for a terminal pipeline whose PR is merged —
+  asserted as `result.get("skill") != "/do-build"`, never as "not row G8". Tested with
+  `branch_exists: True` **and** `branch_exists: False`, because spike-8 measured the
+  rebuild relocating to row 5 exactly in the `True` case, which is this repo's normal
+  post-merge state.
+- [ ] **Every new assertion also requires no `error` key** and pins the measured
+  expected dispatch. A negative-only assertion is satisfied by `decide()`'s catch-all
+  (`:605-610`), so it would go green on a crash.
+- [ ] **The recovery path is covered end to end**: an empty ledger + a merged PR + an
+  existing branch produces no `/do-build` at any row. This is the true reproduction
+  (`decide()` recovers `BUILD = completed` from durable signals while `pr_number`
+  stays `None` and MERGE is never written), and it replaces the earlier draft's claim
+  that a wholly-empty `stage_states` is "already safe" — which is false at `decide()`.
+- [ ] A `BUILD == "completed"` claim with no resolvable `pr_number` produces no
+  `/do-build` at any row, with **no** `MERGE` marker present — the partial-loss shape.
+  This is the case that pins the identifiability guard specifically; with a `MERGE`
+  marker present the earlier draft's short-circuit would have masked a reverted guard.
 - [ ] A recorded `pr_number` whose live state is `CLOSED` **still** sets
   `stage_artifacts_verified: False` and still re-dispatches `/do-build` via G8
   (`test_g8_redispatches_build_on_synthesized_false_pr_claim`, unchanged and green).
   The gate is narrowed, not disarmed.
 - [ ] `test_terminal_merged_pipeline_routes_to_merge_not_build` is **green**, with no
-  `xfail`, no skip, and no weakened assertion.
+  `xfail`, no skip, and no weakened assertion — and its fixture stays **live**: the
+  `gh pr view` / `git ls-remote` calls are still reached, so it still proves a MERGED
+  PR is an acceptable BUILD artifact.
 - [ ] `agent/sdlc_router.py`, `agent/pipeline_state.py`, and
-  `tools/sdlc_session_ensure.py` are **byte-identical to `main`** in the PR diff.
+  `tools/sdlc_session_ensure.py` are **byte-identical to the merge base** in the PR
+  diff. (`tools/sdlc_stage_query.py` is now **inside** the fence — see Appetite.)
 - [ ] The unverifiable-BUILD skip logs at debug and the falsified-BUILD mismatch
   still logs at warning, asserted by level.
 - [ ] `sdlc-tool next-skill --issue-number 2755` still returns row 10 (the live
@@ -1236,22 +1251,33 @@ raw Redis, and the existing `cleanup_ledger` fixture (`:416-429`) is the pattern
 | Router tests unaffected | `scripts/pytest-clean.sh tests/unit/test_sdlc_router_oscillation.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| The falsified-on-absence term is gone | `! grep -q 'not pr_number' tools/sdlc_next_skill.py` | exit code 0 |
-| Terminal predicate exists and is named | `grep -q '_pipeline_is_terminal_from_states' tools/sdlc_next_skill.py` | exit code 0 |
-| The definitional twin is cross-referenced | `grep -q '_sdlc_run_identity' tools/sdlc_next_skill.py` | exit code 0 |
-| Fence held — router and off-limits modules untouched | `git diff --quiet origin/main -- agent/sdlc_router.py agent/pipeline_state.py tools/sdlc_session_ensure.py` | exit code 0 |
-| No expected-failure marker introduced | `! grep -rq 'xfail' tests/unit/test_sdlc_next_skill.py tests/integration/test_sdlc_session_ensure_integration.py` | exit code 0 |
+| Stage-query tests pass (fence extended) | `scripts/pytest-clean.sh tests/unit/test_sdlc_stage_query.py -q` | exit code 0 |
+| **The absent-PR branch is behaviorally gone** (load-bearing) | `scripts/pytest-clean.sh tests/unit/test_sdlc_next_skill.py -k unverifiable -q` | exit code 0 |
+| The old term is not textually present (advisory only) | `! grep -q 'not pr_number' tools/sdlc_next_skill.py` | exit code 0 |
+| Fence held — router and off-limits modules untouched | `git fetch origin main && git diff --quiet "$(git merge-base origin/main HEAD)" -- agent/sdlc_router.py agent/pipeline_state.py tools/sdlc_session_ensure.py` | exit code 0 |
+| No expected-failure marker introduced | `! grep -rqE 'pytest\.mark\.xfail\|pytest\.xfail\(' tests/unit/test_sdlc_next_skill.py tests/integration/test_sdlc_session_ensure_integration.py` | exit code 0 |
 | Live negative control still routes terminal | `.venv/bin/python -m tools.sdlc_next_skill --issue-number 2755` | output contains `"row_id": "10"` |
 
-**Three notes on these rows.**
+**Four notes on these rows.**
 
-The removed-term row is the plan's anti-criterion and it greps the **whole file,
-comments and docstrings included**. This plan mandates a rewritten docstring
-explaining what changed — if the builder names the deleted condition verbatim in
-that prose, the gate trips on its own documentation. Paraphrase ("the old
-absent-PR-number branch"), never quote. The validator must demonstrate this row goes
-**red** against a deliberately-reintroduced condition before trusting it green: a
-gate that cannot fail is worse than no gate.
+**The string greps are advisory; the behavioral tests are the gate.** `! grep -q 'not
+pr_number'` is trivially evaded by writing `if pr_number is None or ...`, so it can
+pass while the defect is fully present — it is not sound as an acceptance criterion.
+It is retained only as a cheap smoke check for a literal revert, explicitly demoted,
+and the `assert_not_called()` / no-`/do-build`-at-any-row tests are what actually pin
+the behavior. The same grep also still trips on its own documentation: the mandated
+docstring rewrite must **paraphrase** the removed condition ("the old
+absent-PR-number branch"), never quote it.
+
+**The `xfail` row is anchored on the marker forms**, not the bare substring. The
+earlier `! grep -rq 'xfail'` matched this plan's own mandated docstring sentence
+stating that nothing was left xfail-ed — an anti-criterion that fails on prose
+describing its own satisfaction.
+
+**The fence row diffs against the merge base, not `origin/main`.** Diffing a moving
+ref fails spuriously whenever main advances and touches those files (#2802 was
+actively merging one of them) and passes vacuously against a stale ref. The explicit
+`git fetch` plus `git merge-base` pins it to the lane's actual divergence point.
 
 The "must not appear" rows use `! grep -q` rather than a count compared to zero.
 `grep -c` exits 1 on zero matches, which a `set -e` runner scores as a failure, and
