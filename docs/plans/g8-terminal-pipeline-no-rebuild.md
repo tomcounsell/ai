@@ -375,10 +375,15 @@ function over three dicts — no Redis, no `gh`).
   `{ISSUE, PLAN, CRITIQUE, BUILD} completed`, no `pr_number` → `Blocked(NO_RULE)`;
   `{BUILD}` alone → `Dispatch(/do-plan, row 1)`. Neither rebuilds.
 - **Confidence**: high
-- **Impact on plan**: the `not pr_number` correction is the **load-bearing** fix and
-  the MERGE short-circuit is the **outer belt**, not the reverse. The plan is
-  written in that order and the Success Criteria test the partial-loss shape
-  explicitly, because it is the shape a MERGE-marker check cannot see.
+- **Impact on plan (superseded by spike-9)**: this correctly established that a
+  MERGE-marker short-circuit is inert for the reported shape — which is now one of
+  the four reasons the short-circuit is **cut entirely** rather than demoted to an
+  "outer belt". What this spike did not ask is *why* `pr_number` was absent; spike-9
+  answers that, and the answer makes the identifiability guard defense-in-depth
+  rather than the load-bearing fix. One claim here is also **retracted**: "a wholly
+  empty ledger is already safe" is false at `decide()`, which recovers `BUILD` from
+  durable signals before the verifier runs. The over-reading of a now-empty ledger as
+  testimony about its state a day earlier is likewise noted and not relied on.
 
 ### spike-4: Is the MERGE short-circuit redundant once the `not pr_number` term is fixed?
 - **Assumption**: "Fixing BUILD is sufficient; a terminal short-circuit adds nothing."
@@ -395,9 +400,13 @@ function over three dicts — no Redis, no `gh`).
   work, in any such repo, whenever a lane slug is recorded.
 - **Confidence**: high for the mechanism; high for the local `deleteBranchOnMerge`
   reading; the "other repo" case is structural, not observed.
-- **Impact on plan**: both changes ship. The short-circuit is placed at the **top of
-  the function**, above all three checks, so it covers PLAN and PATCH as well as
-  BUILD rather than being bolted onto one branch.
+- **Impact on plan (superseded)**: the hole this spike found is real, but the
+  short-circuit was the wrong instrument for it — it closes the hole only when a
+  `MERGE` marker survives, which is precisely the case the reported shape does not
+  have (spike-3). The hole is now closed **directly**: the PATCH branch probe gets
+  the same `pr_number` identifiability guard as BUILD. And after spike-9's primary
+  fix, `pr_number` is normally present post-merge, so the PATCH merged-skip engages
+  on its own and the hole is largely closed at the source as well.
 
 ### spike-5: Why is `test_terminal_merged_pipeline_routes_to_merge_not_build` red, and does this plan's fix turn it green?
 - **Assumption**: "The test defends #2757's behavior, so fixing G8 makes it pass."
@@ -532,23 +541,26 @@ The change is confined to step 5, and it only ever moves an outcome from
 
 ## Architectural Impact
 
-- **New dependencies**: none. No new import, no new subprocess, no new model access.
-  The change *removes* one condition and adds one dict read against data already in
-  the function's parameters.
-- **Interface changes**: none externally. `_verify_stage_artifacts_live` keeps its
-  signature and return contract. One new module-private helper,
-  `_pipeline_is_terminal_from_states(stage_states) -> bool`, exists to give the
-  terminal predicate a name, a docstring, and a grep anchor.
-- **Coupling**: unchanged, and deliberately so. The verifier does **not** gain an
-  import of `agent/pipeline_state.py` or of `tools/_sdlc_run_identity.py` — see
-  Key Elements for why calling the existing `_pipeline_is_terminal` is the wrong
-  move here despite being the same predicate.
+- **New dependencies**: none. No new import, no new model access. One conditional
+  second call to a function already imported and already called at the same site.
+- **Interface changes**: none externally. `_verify_stage_artifacts_live` and
+  `_compute_meta` both keep their signatures and return contracts, and `_lookup_pr`'s
+  default is untouched. **No new helper is introduced** — the earlier draft's
+  `_pipeline_is_terminal_from_states` is cut, avoiding a third spelling of a
+  predicate that already has two.
+- **Coupling**: unchanged. Nothing gains an import of `agent/pipeline_state.py`.
+- **Cost**: one additional `gh` call, and **only** on the path that currently
+  resolves nothing. Lanes with an open PR are unaffected; the extra call is paid
+  exactly where the current code returns a wrong answer for free.
 - **Data ownership**: unchanged. The verifier remains read-only.
-- **Reversibility**: very high. Two edits in one function; reverting restores the
-  present behavior exactly.
-- **Behavioral blast radius**: G8 fires strictly less often than before. Every state
-  in which it fired *and* had a `pr_number` is unchanged (spike-6 confirms the
-  existing tests pin those). No state that previously advanced now blocks.
+- **Reversibility**: very high. Three small edits across two functions; reverting
+  restores the present behavior exactly.
+- **Behavioral blast radius**: two directions, both narrow. `_compute_meta` resolves
+  a `pr_number` in strictly more cases and never a different one in a case it already
+  resolves — which *arms* G8 and row 10 where they were previously inert. The
+  verifier fires strictly less often, and every state in which it fired *and* had a
+  `pr_number` is unchanged (spike-6 confirms the existing tests pin those). No state
+  that previously advanced now blocks.
 
 ## Appetite
 
@@ -796,20 +808,28 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   (`test_fails_open_on_infra_error`, `test_fails_open_on_os_error`,
   `test_non_infra_exception_does_not_silently_advance`,
   `test_missing_stage_states_or_meta_skips_verification`) must still pass untouched.
-- [ ] The terminal short-circuit runs **before** any subprocess, so it cannot itself
-  raise an infra error. Assert this positively: a terminal `stage_states` with a
-  `subprocess.run` mock that raises on any call must still return `{}`.
+- [ ] The identifiability guards run **before** their respective subprocesses, so a
+  `pr_number`-less claim cannot raise an infra error at all. Assert this positively:
+  a BUILD-claimed, `pr_number`-less `meta` with a `subprocess.run` mock that raises on
+  any call must still return `{}`.
+- [ ] The `_compute_meta` second pass inherits `_lookup_pr`'s existing internal error
+  handling; it adds no new handler. If the `open` pass raises, behavior is unchanged
+  (the exception propagates as today) — the fallback is reached only on a clean
+  `None`.
 
 ### Empty/Invalid Input Handling
 - [ ] `meta` missing `pr_number` entirely, `pr_number = None`, and `pr_number = 0`
   all take the unverifiable path. Parametrize into one test — three tests for one
   falsiness check is over-testing.
-- [ ] `stage_states` missing `MERGE`, `MERGE = None`, `MERGE = "pending"`,
-  `MERGE = "failed"` all read non-terminal. Only the exact string `"completed"` is
-  terminal; anything else must leave verification armed.
-- [ ] `stage_states = {}` (the wholly-empty ledger) — `build_claimed` is `False`, so
-  G8 cannot fire regardless. Assert it, since it is the state the three reported
-  issues are in right now and a reader will ask.
+- [ ] `stage_states = {}` (the wholly-empty ledger) — **this is not "already safe",
+  and the earlier draft's claim that it was is retracted.** At the
+  `_verify_stage_artifacts_live` level `build_claimed` is indeed `False`, but the
+  function is not the entry point: `decide()` recovers `stage_states` from durable
+  signals first (`:576-579`), which sets `BUILD = completed` for a merged PR. The
+  correct coverage is therefore the **integration** test on the recovery path, not a
+  unit assertion about the empty dict.
+- [ ] The `MERGE`-value matrix from the earlier draft is dropped — with the
+  short-circuit cut, `stage_states["MERGE"]` is no longer read by this function.
 
 ### Error State Rendering
 - [ ] The unverifiable-BUILD skip logs at **debug**, not warning: it is a normal,
@@ -817,8 +837,13 @@ Edits span **two** modules — `tools/sdlc_stage_query.py` (the primary fix) and
   that trains operators to ignore the channel. The existing falsified-BUILD warning
   (`:274-277`) stays at warning and keeps its wording. Both are asserted by
   `caplog` level in tests — the level distinction is the user-visible contract.
-- [ ] The terminal short-circuit logs at debug with the issue number, so an operator
-  debugging "why did next-skill do nothing" can see the reason in the log.
+- [ ] Both new debug logs (unverifiable BUILD, unverifiable PATCH) name the issue
+  number and the reason, so an operator debugging "why did next-skill skip that
+  check" finds it in the log.
+- [ ] Log-level assertions require `caplog.set_level(logging.DEBUG)`; without it they
+  pass vacuously regardless of the level actually used. Note also that re-asserting
+  the **existing** warning's level pins a log level as an interface — do it only for
+  the new debug logs, where the level is the contract being introduced.
 
 ## Test Impact
 
