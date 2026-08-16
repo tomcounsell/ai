@@ -1944,15 +1944,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # can push to the Redis steering list (agent.steering) to steer the
         # session externally.
         #
-        # Single-consumer invariant: pop_all_steering_messages() drains via
-        # sequential LPOPs, not one atomic multi-pop. That is safe only because
-        # exactly one process drains a given session's list at a time (this
-        # turn-boundary read). Each individual LPOP is still atomic against a
-        # concurrent RPUSH, so a steer pushed mid-drain either lands in this
-        # pass or sits in the list for the next turn boundary — it is never
-        # silently lost. Do not assume whole-drain atomicity in future
-        # refactors, and do not add a second concurrent drainer for the same
-        # session_id without revisiting this invariant.
+        # Two-leg drain invariant: pop_all_steering_messages() drains via
+        # sequential LPOPs, not one atomic multi-pop. The LEGACY leg
+        # (steering:{session_id}) has a single consumer — exactly one process
+        # drains a given session's list at this turn-boundary read. The ROOM
+        # leg (steering:room:{room_id}) is shared: any session serving the
+        # Room may drain it concurrently, and a drainer that takes an entry
+        # and then fails loses what it took (see agent/steering.py for the
+        # authoritative statement). Each individual LPOP is still atomic
+        # against a concurrent RPUSH, so a steer pushed mid-drain either lands
+        # in this pass or sits in the list for the next turn boundary. Do not
+        # assume whole-drain atomicity or legacy-style exclusivity on the Room
+        # leg in future refactors.
         _turn_input = enriched_text
         if agent_session:
             try:

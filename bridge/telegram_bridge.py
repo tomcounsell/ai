@@ -1044,9 +1044,14 @@ async def _ack_steering_routed(
     # for that turn. At the back, the human's message is always consumed first
     # and the advisory is at worst one turn late.
     #
-    # The advisory deliberately carries no room_id (legacy session key): under
-    # the writer-flip taxonomy it is session-scoped advisory content, and
-    # stranding a hint with its dead session is the correct failure mode.
+    # The advisory rides the SAME leg as the human message it accompanies
+    # (same room_id value). It is message-scoped, not session-scoped: whichever
+    # session drains the human's message — the original target on the legacy
+    # leg, or a Room successor on the Room leg — is exactly the session the
+    # advisory is for. Splitting the legs (advisory legacy, human Room) would
+    # invert drain order — pop_all_steering_messages drains legacy first — and
+    # the advisory would displace the human's message for a turn, falsifying
+    # the front=False invariant above.
     if context_advisory:
         try:
             push_steering_message(
@@ -1054,7 +1059,7 @@ async def _ack_steering_routed(
                 context_advisory,
                 "intake-classifier",
                 is_abort=False,
-                room_id=None,  # session-scoped advisory — legacy key by design
+                room_id=room_id,  # same leg as the human message — see comment above
                 front=False,
             )
         except Exception as _adv_err:

@@ -319,7 +319,15 @@ def pop_steering_message(session_id: str, room_id: str | None = None) -> dict | 
 
 
 def clear_steering_queue(session_id: str, room_id: str | None = None) -> int:
-    """Clear all pending steering messages (both legs). Returns count cleared."""
+    """Clear all pending steering messages (both legs). Returns count cleared.
+
+    Cross-session blast radius: the Room leg is SHARED by every session
+    serving that Room, so passing ``room_id`` deletes queued steers addressed
+    to sibling sessions, not just ``session_id``'s. Pass ``room_id`` only when
+    the intent is to clear the whole conversation's pending steers (e.g. an
+    operator wiping a Room); for a single session's cleanup, omit it and only
+    the legacy ``steering:{session_id}`` list is touched.
+    """
     r = _get_redis()
     keys = [_queue_key(session_id)]
     if room_id:
