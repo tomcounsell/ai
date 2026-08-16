@@ -91,12 +91,105 @@ today.
 
 ## Freshness Check
 
-**Baseline commit:** `8877be374` (revision-2 re-measurement; previously `1d1830fc4`, originally
-`3605ff847`). No commits have touched `monitoring/`, `tests/unit/test_bridge_watchdog.py`,
-`tests/unit/test_worker_watchdog.py`, or `tests/integration/test_update_loop_wedge_recovery.py`
-between those points.
+**Baseline commit:** `0babdb2ab` (revision-4 re-measurement, 2026-08-16; previously `8877be374`,
+`1d1830fc4`, originally `3605ff847`).
 **Issue filed at:** 2026-08-07T06:19:13Z
-**Disposition:** Unchanged (code), **Minor drift (this plan's own citations — corrected below)**
+**Disposition:** **Minor drift.** The three defect sites are verbatim unchanged and the fix is
+unchanged; two commits that landed after the revision-3 baseline moved a number of this plan's
+*coordinates*, and one of them rewrote a test file this plan prescribes edits to. See
+"Revision-4 re-verification" below — it supersedes the coordinates in the round-3 list that follows
+wherever the two disagree.
+
+### Revision-4 re-verification (2026-08-16, baseline `0babdb2ab`)
+
+**Defect sites — still exact, no drift.** `monitoring/bridge_watchdog.py:78` `basicConfig`, `:86`
+`mkdir`, `:93` `addHandler`; `monitoring/worker_watchdog.py:162` `logger = _configure_logger()`;
+`scripts/log_rotate.py:62` `basicConfig`. All five re-read verbatim at the cited lines. The root
+cause is untouched and the Solution stands as written.
+
+**Two commits landed on main since the revision-3 baseline, both touching referenced files:**
+
+- **`fd52fc648`** — "Wedge detector: require evidence something was missed, and reset on restart
+  (#2475) (#2670)". Rewrote 213 lines of `monitoring/bridge_watchdog.py` and **rewrote
+  `tests/integration/test_update_loop_wedge_recovery.py` wholesale** (486 lines, the entire file).
+  It did not touch the import-time logging block.
+- **`fb00b8542`** — "Enforce test-DB ownership so the unit suite stops rotating (#2628) (#2683)".
+  Added 19 lines to `tests/unit/test_worker_watchdog.py`: an autouse
+  `_restore_worker_watchdog_constants` fixture that snapshots and restores
+  `_WWD_MODULE_SCALARS = ("HEARTBEAT_THRESHOLD",)` around every test in the file, because
+  `importlib.reload(wwd)` was leaving the constant mutated for later tests. Every line number in
+  that file below the insertion point shifted by **+19**.
+
+**Corrected coordinates (round-3 citations that have drifted):**
+
+| Round-3 citation | Correct at `0babdb2ab` |
+|---|---|
+| `monitoring/bridge_watchdog.py:968` — `def main()` | **`:1011`** |
+| `monitoring/bridge_watchdog.py:1041-1042` — `__main__` guard | **`:1084-1085`** |
+| `monitoring/bridge_watchdog.py:860` — `def run_health_check()` | **`:903`** |
+| `monitoring/bridge_watchdog.py:514` — `def check_bridge_health()` | **`:557`** |
+| `monitoring/bridge_watchdog.py` — `def kill_zombie_processes()` | **`:512`** (the INFO lines round 3 cited at `:482`/`:494`/`:500` move with it; re-derive from `:512`+) |
+| `monitoring/bridge_watchdog.py:869-871` — hibernation `logger.info` | **`:913`** (`:869-871` is now docstring prose) |
+| `bridge/hibernation.py:99` — hibernation `logger.error` | **`:100`** |
+| `tests/integration/test_update_loop_wedge_recovery.py:26` — import site | **`:37`** |
+| `tests/unit/test_worker_watchdog.py` reloads `47, 52, 58, 1050, 1058` | **`66, 71, 77, 1069, 1077`** |
+| `tests/unit/test_worker_watchdog.py` ten `addHandler(caplog.handler)` sites `275, 372, 402, 712, 732, 749, 773, 802, 826, 886` | **`294, 391, 421, 731, 751, 768, 792, 821, 845, 905`** |
+| `tests/unit/test_worker_watchdog.py::test_heartbeat_threshold_env_override` (:1050) / `::test_heartbeat_threshold_default_is_180` (:1058) | **`:1063` / `:1072`** |
+
+**No drift** in `tests/unit/test_bridge_watchdog.py`: its two `caplog.at_level` sites are still at
+`:753` and `:957`, its five `main()` calls still at `544, 571, 598, 781, 805`, and its two
+`importlib.reload(bw)` sites still at `1106, 1114`. That file was not touched by either commit.
+
+**The one substantive change: `tests/integration/test_update_loop_wedge_recovery.py` no longer
+contains the tests this plan named.** #2670 replaced the file. The round-3 Test Impact entry cites
+caplog at `:156` and `:221` plus an inert third mention at `:60`; none of those exist now. The file's
+current caplog surface is **two tests, both new**, and both read `caplog.records` after
+`caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog")`:
+
+- `test_redis_exception_is_inconclusive(caplog)` — `at_level` at `:371`, `caplog.records` at `:376`
+- `test_unreadable_process_start_suppresses_verdict(caplog)` — `at_level` at `:387`,
+  `caplog.records` at `:395`
+
+There is no longer an inert third mention. **The remedy is unchanged** — both sites need the same
+explicit `bw.logger.addHandler(caplog.handler)` / `removeHandler` `try/finally` conversion, for the
+same reason (they read records off a logger this plan sets `propagate = False`). Only the names and
+line numbers moved, so the Test Impact entry is re-pointed rather than re-designed.
+
+**Bug still reproducible — and materially worse.** `logs/watchdog.log` is now **9,692,506 bytes**
+(mtime `Aug 16 10:48`), up from the 41,322 bytes measured at revision 3, i.e. it has grown ~235x in
+nine days and is approaching the 10 MB `maxBytes` rotation threshold — at which point the rotation
+would discard genuine history in favor of retained test output. **The No-Go gate baseline is
+re-measured to `sha256 = 51cfe6c4d464235c9bc85d9e55449e2487cbdef2c0eb1447d60694e2038f2f9b`,
+9692506 bytes, mtime `Aug 16 10:48`.** The round-3 baseline
+(`2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`, 41322 bytes) is superseded and
+must not be used — a gate comparing against it would fail for a reason unrelated to the change.
+
+**Lazy-import rejection — re-priced, conclusion unchanged.** Round 3 rejected the lazy import at
+`monitoring/bridge_watchdog.py:72` on a cost of "15 sites, including 10
+`patch("monitoring.bridge_watchdog.get_process_start_ts")` calls". Measured at `0babdb2ab`, the
+three symbols appear on **6** lines across `tests/` in this module's namespace: **1** patch
+(`tests/integration/test_update_loop_wedge_recovery.py:75`) and **5** constant reads
+(`tests/unit/test_bridge_watchdog.py:872, 886, 887, 889, 914`). The rejection **still holds** — the
+five constant reads alone break under a lazy import, since a module-scope name would no longer
+exist to read — but it now rests on the measured figure rather than the inflated one. State it that
+way; do not re-quote "15 sites".
+
+**Note on the round-5 critique's own freshness.** The round-5 findings table (see Critique Results)
+recorded this drift as a BLOCKER and is the basis for most of this section. That critique was
+committed `2026-08-10 12:02 +0700`, which is **after** `fd52fc648` (11:37 same day) but **before**
+`fb00b8542` (2026-08-13). Its "**Re-verified UNCHANGED**" list therefore still cites
+`tests/unit/test_worker_watchdog.py` reloads at `47/52/58/1050/1058` and the ten
+`addHandler(caplog.handler)` sites at their pre-`fb00b8542` addresses. Those are now stale by +19;
+the table above supersedes them. Everything else in that critique's unchanged list was re-checked
+here and still holds.
+
+**Sibling issue re-check:** **#2678** is still **OPEN**, retitled to "scripts/update/run.py has no
+entry-point logging configuration and relied on log_rotate's import side effect" — matching the
+narrowed scope revision 3 assigned it. No change to this plan's relationship with it.
+
+**Active plans overlapping this area:** still none.
+
+### Round-3 file:line re-verification (superseded where the table above disagrees)
 
 **File:line references re-verified:**
 
@@ -924,22 +1017,17 @@ if the builder had truncated the file. It is replaced by a sha256 baseline check
       criterion 5 — a branch that does not depend on logging cannot demonstrate that logging works.
       Task 5 uses the `__main__` guard directly instead.
 - [ ] The four `caplog` assertions (`tests/unit/test_bridge_watchdog.py:753`, `:957`;
-      `tests/integration/test_update_loop_wedge_recovery.py` **`:371`, `:387`** — re-pointed at
-      revision 4, see Freshness Check) are the error-state
+      `tests/integration/test_update_loop_wedge_recovery.py:156`, `:221`) are the error-state
       rendering checks for the watchdog's warning and critical paths. Under `propagate = False` they
       **will fail unmodified** — this is measured, not assumed (see Test Impact) — and each is
       converted to the explicit-handler pattern.
 
 ## Test Impact
 
-**All four `caplog` sites re-verified at revision 4** (`0babdb2ab`), with their exact locations:
+**All four `caplog` sites re-verified at revision 2**, with their exact locations:
 `tests/unit/test_bridge_watchdog.py:753` and `:957`, and
-`tests/integration/test_update_loop_wedge_recovery.py` **`:371`** and **`:387`** — the latter file is
-under `tests/integration/`, never `tests/unit/`, and its two sites were **re-pointed at revision 4**
-after #2670 rewrote the file (revision 3 cited `:156`/`:221`, which no longer exist). A repo-wide
-grep for `logger="monitoring.bridge_watchdog"` / `logger="monitoring.worker_watchdog"` still returns
-exactly four sites, so the count of four is unchanged; only two addresses moved.
-The remedy is proven rather than speculative:
+`tests/integration/test_update_loop_wedge_recovery.py:156` and `:221` — the latter file is under
+`tests/integration/`, never `tests/unit/`. The remedy is proven rather than speculative:
 `tests/unit/test_worker_watchdog.py` runs ten live instances of the
 `logger.addHandler(caplog.handler)` + `try/finally` pattern against an already-`propagate = False`
 logger. Acceptance criterion 4 holds under the edited tests.
@@ -988,13 +1076,20 @@ in-repo at `tests/unit/test_worker_watchdog.py:275` and nine sibling sites. Reso
       therefore cannot fire — the #2658 failure mode. That claim is carried by TC1/TC3, which run in
       a fresh subprocess with a genuinely empty root. Rename the test to
       `test_configure_logger_does_not_touch_root` and note the delegation in a comment.
-- [ ] `tests/unit/test_worker_watchdog.py::test_heartbeat_threshold_env_override` (:1050) and
-      `::test_heartbeat_threshold_default_is_180` (:1058) — VERIFY, no edit expected. Both
+- [ ] `tests/unit/test_worker_watchdog.py::test_heartbeat_threshold_env_override` (**:1063**) and
+      `::test_heartbeat_threshold_default_is_180` (**:1072**) — VERIFY, no edit expected. Both
       `importlib.reload(wwd)` and assert only on `HEARTBEAT_THRESHOLD`. They re-open the real log on
       every reload today and stop doing so after the fix. Run and confirm rather than assume.
+      **Revision-4 note:** #2683 (`fb00b8542`) added an autouse `_restore_worker_watchdog_constants`
+      fixture to this file that snapshots and restores `_WWD_MODULE_SCALARS =
+      ("HEARTBEAT_THRESHOLD",)` around every test, because these reloads were leaking a mutated
+      constant into later tests (#2628). That fixture restores *module scalars only* — it does not
+      touch `wwd.logger` or its handlers, so it neither fixes nor interferes with this plan's
+      concern. Do not treat it as already having solved the reload-reopens-the-log problem.
 - [ ] `tests/unit/test_worker_watchdog.py` — the ten `wwd.logger.addHandler(caplog.handler)` sites
-      (lines 275, 372, 402, 712, 732, 749, 773, 802, 826, 886) — VERIFY, no edit expected. They keep
-      working, and the owned-only clearing change is what protects them from being swept.
+      (**lines 294, 391, 421, 731, 751, 768, 792, 821, 845, 905** — all shifted +19 by `fb00b8542`)
+      — VERIFY, no edit expected. They keep working, and the owned-only clearing change is what
+      protects them from being swept.
 - [ ] `tests/unit/test_bridge_watchdog.py::test_hibernating_logs_message` (caplog at :753) — UPDATE:
       wrap with `bw.logger.addHandler(caplog.handler)` / `removeHandler` in `try/finally`, matching
       `test_worker_watchdog.py:275`.
@@ -1004,10 +1099,21 @@ in-repo at `tests/unit/test_worker_watchdog.py:275` and nine sibling sites. Reso
       the two `importlib.reload(bw)` sites (1106, 1114) — VERIFY, no edit expected. All five are
       `--check-only` asserting on `capsys` and never reach `_configure_logging()`; both reload sites
       assert only on `CRASH_STORM_THRESHOLD` / `WEDGE_DOMINANCE_FRACTION`.
-- [ ] `tests/integration/test_update_loop_wedge_recovery.py` (caplog at :156 and :221) — UPDATE: same
-      explicit-handler conversion against `monitoring.bridge_watchdog`'s logger. Its third caplog
-      mention, `test_a_wedged_past_ceiling(caplog)` at `:60`, requests the fixture and never touches
-      `caplog.records` — no edit, and not a missed site.
+- [ ] `tests/integration/test_update_loop_wedge_recovery.py` — UPDATE: same explicit-handler
+      conversion against `monitoring.bridge_watchdog`'s logger, at the **two** current caplog sites.
+      **Re-pointed at revision 4** — #2670 (`fd52fc648`) rewrote this file wholesale, so the
+      round-3 coordinates (`:156`, `:221`, plus an inert `:60`) no longer exist and the inert third
+      site is gone. The current sites, both of which read `caplog.records` and therefore both of
+      which break under `propagate = False`:
+      - `test_redis_exception_is_inconclusive(caplog)` — `caplog.at_level(logging.WARNING,
+        logger="monitoring.bridge_watchdog")` at `:371`, `caplog.records` at `:376`
+      - `test_unreadable_process_start_suppresses_verdict(caplog)` — `at_level` at `:387`,
+        `caplog.records` at `:395`
+
+      Both assert on WARNING-level messages (`bridge_update_flow_signal_unreadable` / `Redis error`,
+      and `fail-safe` respectively). The conversion is mechanical and identical to the two
+      `test_bridge_watchdog.py` sites. **Re-grep for `caplog` in this file before editing** rather
+      than trusting these line numbers — it has been rewritten once already during this plan's life.
 - [ ] `tests/integration/test_watchdog_recovery.py` — VERIFY, no edit expected. It imports
       `monitoring.worker_watchdog` at `:67` and `:138` but uses no `caplog` against `wwd.logger`.
       Absent from round 1 entirely; added here.
@@ -1193,26 +1299,8 @@ single short-lived process per launchd tick.
   done < /tmp/watchdog-log-baseline.txt && echo LOGS_PREFIX_INTACT
   ```
 
-  **The baseline must be RE-MEASURED as the first action of the build, not read from this plan.**
-  Revision 4 measured `watchdog.log` at **9,692,506 bytes**, whole-file sha256
-  `51cfe6c4d464235c9bc85d9e55449e2487cbdef2c0eb1447d60694e2038f2f9b`, mtime `Aug 16 10:48` — against
-  revision 3's 41,322 bytes / `2c3c2f2d…`. The file grew ~235x in nine days, and the revision-3
-  **prefix** no longer holds either: `head -c 41322 logs/watchdog.log | shasum -a 256` now returns
-  `a2e77fe312d90bb8a0b553cfd175da58013e906f25b922f0cf55d9a797522912`, not `2c3c2f2d…`. So the file
-  was rotated or replaced, not merely appended to — the prefix design does not rescue a stale
-  baseline here.
-
-  Two consequences the builder must honor:
-
-  1. Any hardcoded baseline in this plan will be stale by the time the build runs, and the gate
-     would report `REWRITTEN` for a reason that has nothing to do with the change. Generate
-     `/tmp/watchdog-log-baseline.txt` fresh at build start and treat the numbers above as
-     illustrative only.
-  2. At 9.7 MB the file is near the handler's 10 MB `maxBytes` threshold, so a rotation can fire
-     *during* the build and trip the gate spuriously. If the gate reports `TRUNCATED` or
-     `REWRITTEN`, check `ls logs/watchdog.log*` for a new `.1` backup before concluding the change
-     wrote to the log; a rotation is an expected, benign cause and calls for re-baselining, not for
-     reverting.
+  Current values: `watchdog.log` = 41322 bytes, whole-file sha256
+  `2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`.
 
   **Prefix preservation rather than whole-file equality, because one of the two files has a live
   writer.** `com.valor.worker-watchdog` is installed and running on this machine on a 90-second
@@ -1489,11 +1577,8 @@ needs no wiring.
   `propagate = False`, and `_configure_logging()` exactly as specified.
 - Wire `_configure_logging()` into the `__main__` guard only.
 - Convert the two `caplog` sites in `tests/unit/test_bridge_watchdog.py` (:753, :957) and the two in
-  `tests/integration/test_update_loop_wedge_recovery.py` (**:371** in
-  `test_redis_exception_is_inconclusive`, **:387** in
-  `test_unreadable_process_start_suppresses_verdict` — re-pointed at revision 4; the old `:156`/`:221`
-  were removed by #2670) to `logger.addHandler(caplog.handler)` in `try/finally`.
-  Re-grep `caplog` in that file before editing rather than trusting these line numbers.
+  `tests/integration/test_update_loop_wedge_recovery.py` (:156, :221) to
+  `logger.addHandler(caplog.handler)` in `try/finally`.
 - Run both files and confirm green.
 - Commit.
 
@@ -1754,7 +1839,7 @@ and still holds exactly. The three-module scope, both propagation decisions, the
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency, Risk & Robustness | The Freshness Check is now false. The plan's own verification command, re-run verbatim, returns `fd52fc648` ("Wedge detector: require evidence something was missed, and reset on restart (#2475) (#2670)", 2026-08-10 11:37 +0700) rather than being empty, and the section still reads "**Commits on main since issue was filed (touching referenced files):** none." Three measured consequences. (a) Every `monitoring/bridge_watchdog.py` citation below ~line 200 is wrong: `main()` is at `:1011` not `:968`; the entry-point guard is at `:1084-1085` not `:1041-1042`; `run_health_check()` at `:903` not `:860`; `check_bridge_health()` at `:557` not `:514`; `kill_zombie_processes()` at `:512`, so the INFO lines cited at `:482`/`:494`/`:500` have moved; `:591`, `:604`, `:932`, `:982`, `:1031` no longer hold what the plan says; and `:869-871` — the citation whose correction anchored reversing round 1's root-configuration decision — is now docstring prose. (b) Task 2 aims the caplog conversion at `tests/integration/test_update_loop_wedge_recovery.py` `:156` and `:221`, which no longer contain caplog code; the real sites are `:371` and `:387`, and Test Impact's third site `test_a_wedged_past_ceiling(caplog)` at `:60` **does not exist** — both real sites read `caplog.records` and both break under `propagate = False`. (c) The rejection of the lazy import at `bridge_watchdog.py:72`, which revision 3 says "stands unchanged", is priced at "15 sites" including "10" `patch("monitoring.bridge_watchdog.get_process_start_ts")` calls; that file now contains **1**, and the three symbols appear on **6** lines total across `tests/`. | pending | Set **Baseline commit** to `fd52fc648` and **Disposition** to "Changed (code)". Re-cite: `main()` `:968`→`:1011`; guard `:1041-1042`→`:1084-1085`; `run_health_check()` `:860`→`:903`; `check_bridge_health()` `:514`→`:557`; re-derive the `kill_zombie_processes` INFO lines from `:512`+ and the `--check-only` early return from `:1011`+. In Task 2 and Test Impact replace `(:156, :221)` with `:371` and `:387` (in `test_redis_exception_is_inconclusive` `:363` and `test_unreadable_process_start_suppresses_verdict` `:382`), and DELETE the `test_a_wedged_past_ceiling` bullet — the correct statement is "exactly two caplog sites in this file, both read `caplog.records`, both converted". A repo-wide grep for `logger="monitoring.bridge_watchdog"` / `logger="monitoring.worker_watchdog"` returns exactly four sites total, so the count of four is still right; only the addresses moved. Replace the "15 sites / 10 patch sites" pricing with the measured 6 lines (1 patch at `tests/integration/test_update_loop_wedge_recovery.py`, 5 constant reads at `tests/unit/test_bridge_watchdog.py:872,886,887,889,914`) and re-state whether the lazy-import rejection still follows — it still can, since the 5 constant reads alone break under it, but say so from the measured figure. Drop or re-locate the `:869-871` hibernation citation. **Re-verified UNCHANGED and still correct**: `monitoring/bridge_watchdog.py:78`, `:82`, `:86`, `:87-92`, `:93`; all `tests/unit/test_bridge_watchdog.py` citations (`main()` at 544/571/598/781/805, caplog at 753/957, reload at 1106/1114); all `tests/unit/test_worker_watchdog.py` citations (reloads 47/52/58/1050/1058, ten `addHandler(caplog.handler)` sites, `isolated_state` at `:34`); `monitoring/worker_watchdog.py:135`/`:150-152`/`:162`; `scripts/log_rotate.py:35`/`:58`/`:62`/`:67`/`:176`/`:190`; the 14-file / 5-hit AST baseline; the `[] / 30` → `[StreamHandler] / 20` root measurement; the post-fix `[] / 30` measurement; the `627-630` plist range; and the No-Go baseline (41322 bytes, sha256 `2c3c2f2d…`). This is a targeted re-baseline, not a re-plan. |
+| BLOCKER | History & Consistency, Risk & Robustness | The Freshness Check is now false. The plan's own verification command, re-run verbatim, returns `fd52fc648` ("Wedge detector: require evidence something was missed, and reset on restart (#2475) (#2670)", 2026-08-10 11:37 +0700) rather than being empty, and the section still reads "**Commits on main since issue was filed (touching referenced files):** none." Three measured consequences. (a) Every `monitoring/bridge_watchdog.py` citation below ~line 200 is wrong: `main()` is at `:1011` not `:968`; the entry-point guard is at `:1084-1085` not `:1041-1042`; `run_health_check()` at `:903` not `:860`; `check_bridge_health()` at `:557` not `:514`; `kill_zombie_processes()` at `:512`, so the INFO lines cited at `:482`/`:494`/`:500` have moved; `:591`, `:604`, `:932`, `:982`, `:1031` no longer hold what the plan says; and `:869-871` — the citation whose correction anchored reversing round 1's root-configuration decision — is now docstring prose. (b) Task 2 aims the caplog conversion at `tests/integration/test_update_loop_wedge_recovery.py` `:156` and `:221`, which no longer contain caplog code; the real sites are `:371` and `:387`, and Test Impact's third site `test_a_wedged_past_ceiling(caplog)` at `:60` **does not exist** — both real sites read `caplog.records` and both break under `propagate = False`. (c) The rejection of the lazy import at `bridge_watchdog.py:72`, which revision 3 says "stands unchanged", is priced at "15 sites" including "10" `patch("monitoring.bridge_watchdog.get_process_start_ts")` calls; that file now contains **1**, and the three symbols appear on **6** lines total across `tests/`. | **resolved (revision 4)** — Freshness Check re-baselined to `0babdb2ab` with a "Revision-4 re-verification" subsection carrying the corrected-coordinate table; Test Impact, Error State Rendering, and Task 2 re-pointed to `:371`/`:387`; the `test_a_wedged_past_ceiling` bullet deleted; the lazy-import rejection re-priced to the measured 6 lines. **Residual noted in-plan:** this critique's own "Re-verified UNCHANGED" list predates `fb00b8542` (2026-08-13) and its `tests/unit/test_worker_watchdog.py` addresses are themselves stale by +19; the revision-4 table supersedes them. Also re-measured: the No-Go log baseline (41322 B / `2c3c2f2d…` → 9692506 B / `51cfe6c4…`, and the 41322-byte *prefix* no longer matches either, so the file was rotated — the gate now re-measures at build start instead of hardcoding). | Set **Baseline commit** to `fd52fc648` and **Disposition** to "Changed (code)". Re-cite: `main()` `:968`→`:1011`; guard `:1041-1042`→`:1084-1085`; `run_health_check()` `:860`→`:903`; `check_bridge_health()` `:514`→`:557`; re-derive the `kill_zombie_processes` INFO lines from `:512`+ and the `--check-only` early return from `:1011`+. In Task 2 and Test Impact replace `(:156, :221)` with `:371` and `:387` (in `test_redis_exception_is_inconclusive` `:363` and `test_unreadable_process_start_suppresses_verdict` `:382`), and DELETE the `test_a_wedged_past_ceiling` bullet — the correct statement is "exactly two caplog sites in this file, both read `caplog.records`, both converted". A repo-wide grep for `logger="monitoring.bridge_watchdog"` / `logger="monitoring.worker_watchdog"` returns exactly four sites total, so the count of four is still right; only the addresses moved. Replace the "15 sites / 10 patch sites" pricing with the measured 6 lines (1 patch at `tests/integration/test_update_loop_wedge_recovery.py`, 5 constant reads at `tests/unit/test_bridge_watchdog.py:872,886,887,889,914`) and re-state whether the lazy-import rejection still follows — it still can, since the 5 constant reads alone break under it, but say so from the measured figure. Drop or re-locate the `:869-871` hibernation citation. **Re-verified UNCHANGED and still correct**: `monitoring/bridge_watchdog.py:78`, `:82`, `:86`, `:87-92`, `:93`; all `tests/unit/test_bridge_watchdog.py` citations (`main()` at 544/571/598/781/805, caplog at 753/957, reload at 1106/1114); all `tests/unit/test_worker_watchdog.py` citations (reloads 47/52/58/1050/1058, ten `addHandler(caplog.handler)` sites, `isolated_state` at `:34`); `monitoring/worker_watchdog.py:135`/`:150-152`/`:162`; `scripts/log_rotate.py:35`/`:58`/`:62`/`:67`/`:176`/`:190`; the 14-file / 5-hit AST baseline; the `[] / 30` → `[StreamHandler] / 20` root measurement; the post-fix `[] / 30` measurement; the `627-630` plist range; and the No-Go baseline (41322 bytes, sha256 `2c3c2f2d…`). This is a targeted re-baseline, not a re-plan. |
 | CONCERN | Risk & Robustness | TC5's "file list is hard-coded and asserted to be exactly these 14" turns any future PR that adds a clean `monitoring/*.py` module into a failure of a watchdog-logging test, pointing at logging isolation when the cause is an unrelated new file. That is the "fails for a reason unrelated to the code under test" shape the plan itself rejects in Rabbit Holes for the session-scoped log fixture. The stated goal — advertised breadth matching real breadth — is met by a dynamic glob, which is strictly stronger because it automatically covers a new `monitoring/*.py` that ships a module-scope `basicConfig`, which a frozen list does not. | pending | Build the set as `files = sorted((REPO_ROOT / "monitoring").glob("*.py")) + [REPO_ROOT / "scripts" / "log_rotate.py"]`, then assert coverage instead of cardinality: `assert len(files) >= 14, files` and `assert {p.name for p in files} >= {"bridge_watchdog.py", "worker_watchdog.py", "log_rotate.py"}, files`. Print the full resolved list in the failure message so real breadth stays visible. Re-measured with the dynamic form plus TC5's entry-point-guard exemption: **5 hits** over **14** files on today's source (`bridge_watchdog.py:78 basicConfig`, `:86 mkdir`, `:93 addHandler`, `worker_watchdog.py:162 _configure_logger`, `log_rotate.py:62 basicConfig`) — identical to the hard-coded form, so no detection power is lost. Keep the Rabbit Holes paragraph excluding `bridge/` and `scripts/migrate_*.py`. |
 | CONCERN | Scope & Value | #2643's acceptance criterion 3 literally names `python monitoring/bridge_watchdog.py --check-only`. The plan deletes that Verification row and substitutes an unrecognized-flag `__main__` probe for two sound reasons, and it renegotiates the word "unchanged" under "Reading of acceptance criterion 3" — but it never renegotiates the *invocation*, and it records the substitution only inside the plan document. A reviewer gating on the issue text finds a criterion naming `--check-only` with no evidence for it, while the plan's own No-Gos forbid producing that evidence. | pending | Add a Task 1 bullet, before any code change: post a comment on #2643 recording that criterion 3's `--check-only` clause is replaced by an entry-point invocation, with the one-line reason (that branch returns from `main()` before `run_health_check()`, every INFO-or-above call on it is gated on state a bridgeless machine lacks, and `check_bridge_health()` calls `log_crash("bridge_dead_on_watchdog_check")` → `analytics.collector.record_metric` → SQLite and production Redis). Name the replacement explicitly: `sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]` + `runpy.run_path(..., run_name="__main__")`, asserting `SystemExit.code == 2` then asserting on the attached `_watchdog_owned` handler and one emitted record. Add "criterion 3's invocation substitution is recorded on #2643" to Task 7's confirmation list. Re-derive the line numbers in that justification after the freshness re-baseline (`main()` `:1011`, `check_bridge_health()` `:557`). |
 | NIT | History & Consistency | The TC5 entry-point-guard exemption's prose and its code snippet contradict each other. The prose says "the skip covers `node.body` only — `orelse` bodies and every other module-level `if` are still walked", but the snippet ends in `continue`, which skips the whole `ast.If` node including its `orelse`. Harmless today (no guarded module has an `else` on its `__main__` guard; re-measured 5 hits either way), but the shipped walker would not do what the plan says. | pending | Either change the snippet body to `walk(node.orelse, path); continue`, or delete the "`orelse` bodies ... are still walked" clause from the prose. Also tighten the predicate to the entry-point guard specifically by adding `and isinstance(t.ops[0], ast.Eq)` and checking the comparator is the constant `"__main__"`, so `if __name__ != "__main__":` is not exempted. |
