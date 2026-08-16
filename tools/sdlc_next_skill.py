@@ -9,9 +9,14 @@ skill it returns — the LLM no longer authors routing decisions.
 
 Usage::
 
-    sdlc-tool next-skill --issue-number 1040
-    sdlc-tool next-skill --issue-number 1040 --proposed-skill /do-build
-    sdlc-tool next-skill --issue-number 1040 --format pretty
+    sdlc-tool next-skill --issue-number 1040 --run-id <caller-run-id>
+    sdlc-tool next-skill --issue-number 1040 --run-id <caller-run-id> --proposed-skill /do-build
+    sdlc-tool next-skill --issue-number 1040 --run-id <caller-run-id> --format pretty
+
+    ``--run-id`` states the caller's own run identity for the issue-lock peek
+    (issue #2766). Omitting it falls back to inferring identity from the
+    session mirror, which is exactly how the next-skill self-lock reproduces
+    -- always pass the caller's run-id explicitly.
 
 Environment:
     No rollout flags -- this module is the sole routing source of truth.
