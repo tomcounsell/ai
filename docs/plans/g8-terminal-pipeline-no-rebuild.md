@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -1234,7 +1234,7 @@ new one.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sdlc-router-oscillation-guard.md` — the G8 doc of
+- [x] Update `docs/features/sdlc-router-oscillation-guard.md` — the G8 doc of
   record. Its **"Verified artifact set (top 3, deterministic)"** table (`:127-134`)
   says BUILD is "verified when state is `OPEN` or `MERGED`", which omits the case
   that matters: no recorded PR number means no check at all. Add the unverifiable
@@ -1245,42 +1245,42 @@ new one.
   The existing note at `:135-136` ("A stage with no claimed artifact ... is a no-op —
   verification never invents a check") is the sentence this fix finally makes true
   for BUILD; extend it rather than writing a parallel one.
-- [ ] Update `docs/features/sdlc-pipeline.md` — the **"Stage-Advance Verification
+- [x] Update `docs/features/sdlc-pipeline.md` — the **"Stage-Advance Verification
   Gate (G8, issue #1267)"** section (`:50-80`). Its bullet list describes where
   verification runs, positioning, firing condition, and contract; note in the
   firing-condition bullet that an unresolvable artifact identifier is a no-op, not a
   mismatch, and that `pr_number` now resolves for merged PRs.
-- [ ] Update `.claude/skills/sdlc/SKILL.md:188` — "**G8 makes no live calls**"
+- [x] Update `.claude/skills/sdlc/SKILL.md:188` — "**G8 makes no live calls**"
   paragraph. It describes the verifier's live checks; add one clause that a stage
   whose artifact identifier is absent is skipped rather than reported as a mismatch.
   Keep it to one clause — this file is read into every SDLC session's context.
-- [ ] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
+- [x] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
   **#2091** (`docs/plans/completed/fix-sdlc-router-merge-termination.md`), which
   already adjudicated this exact class of defect: a test fixture that encodes a
   routing expectation invalidated by a later router change. Its scope is currently
   `tests/unit/test_sdlc_router*.py`, which is precisely why the **integration**
   fixture repaired by this plan escaped it. Widen the note to cover integration
   fixtures that assert `row_id`.
-- [ ] Also fix `docs/features/sdlc-router-oscillation-guard.md:133` while in that
+- [x] Also fix `docs/features/sdlc-router-oscillation-guard.md:133` while in that
   table — it still describes the PLAN check by slug, which #2792 made false. It is
   one line inside a table the builder is already editing.
-- [ ] No new feature doc, and therefore no `docs/features/README.md` index entry.
+- [x] No new feature doc, and therefore no `docs/features/README.md` index entry.
   Creating `docs/features/g8-terminal-*.md` would be a parallel artifact for a
   behavior already documented in two places.
 
 ### Inline Documentation
-- [ ] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
+- [x] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
   `agent/pipeline_state.py:1564` as the in-repo idiom, why the second pass runs only
   on `None` (an open PR must always win over a historical one), and why it is scoped
   to `merged` rather than `all` (a closed-unmerged PR is not a build artifact, and
   admitting one would make G8 fire — demonstrated on #2793).
-- [ ] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
+- [x] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
   is cut, so there is no third spelling of the terminal predicate to document.
-- [ ] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
+- [x] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
   merged-pipeline-misfire paragraph with the #2757 case and the three-state
   distinction. **Paraphrase the removed condition** — naming it verbatim trips the
   plan's own anti-criterion grep.
-- [ ] The two new debug logs carry their reasons inline (unverifiable BUILD;
+- [x] The two new debug logs carry their reasons inline (unverifiable BUILD;
   unverifiable PATCH), in the register of the existing PATCH skip at `:258-263`.
 
 ## Success Criteria
