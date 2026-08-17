@@ -568,10 +568,12 @@ The change is confined to step 5, and it only ever moves an outcome from
   mitigated with a cache — that would add persistent state and break this plan's
   "no new dependencies, no new architectural surface" property for a sub-second cost.
   Lanes with an open PR remain entirely unaffected. **At batch granularity** the
-  figure multiplies: a dashboard refresh, an operator sweep, or a reflection scan that
-  walks N issues in one pass adds roughly N × 0.89s, serially, each call bounded by the
-  existing 5s timeout. Recorded so whoever next reports a slow dashboard refresh finds
-  the cause here rather than re-deriving it.
+  figure multiplies: any caller that walks N issues in one pass adds roughly N × 0.89s,
+  serially, each call bounded by the existing 5s timeout. The dashboard is **not** such
+  a caller — `ui/data/sdlc.py` reads pipeline state via `PipelineStateMachine.for_issue()`
+  and never enters `query_enriched`. Risk 3c names the three real callers and the tail
+  latency; recorded so whoever next reports a slow session completion or a `gh`
+  rate-limit warning finds the cause there rather than re-deriving it.
 - **Data ownership**: unchanged. The verifier remains read-only.
 - **Reversibility**: very high. Three small edits across two functions; reverting
   restores the present behavior exactly.
