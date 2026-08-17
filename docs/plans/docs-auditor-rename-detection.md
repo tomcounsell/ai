@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
 revision_applied: true
-revision_applied_at: 2026-08-17T05:21:41Z
+revision_applied_at: 2026-08-17T05:42:26Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -29,10 +29,10 @@ channel uniformly. Enumerated per call site:
 |---|---|---|
 | `:441` `_detect_renamed_link_fixes` | `renames[0][1]` as the replacement | **fully** — no correct output exists |
 | `:465` `_detect_renamed_symbol_fixes` | `renames[0][1]` behind the `!= path` guard | **fully** — guard never holds, detector is dead |
-| `:495` `_detect_readme_broken_entries` | both: `renames` is the `if`/`else` branch condition, and inside the `if` arm (`:497-499`) it consumes `renames[0][1]` as the replacement exactly as `:441` and `:465` do | **partially** — the `if` arm is dead for the same reason as the other two; the `else` arm at `:501-502` emits `(line, "")` and is **correct working code** that never reads the query result |
+| `:495` `_detect_readme_broken_entries` | both: `renames` is the `if`/`else` branch condition, and inside the `if` arm (`:496-498`) it consumes `renames[0][1]` as the replacement exactly as `:441` and `:465` do | **partially** — the `if` arm is dead for the same reason as the other two; the `else` arm at `:499-500` emits `(line, "")` and is **correct working code** that never reads the query result |
 | `:1076` `_detect_deleted_target_issues` | `renames` as a *suppression* condition | **inverted** — the suppression defers to a fix channel that can never fix anything |
 
-The `else` arm at `:501-502` is the one piece of this channel that works: when a README
+The `else` arm at `:499-500` is the one piece of this channel that works: when a README
 index entry points at a genuinely-deleted `.md` file and the rename query returns nothing,
 it deletes that index line. It applies cleanly (`_absent_new_path_refs("")` yields no
 refs, so the existence invariant never rejects it) and has live coverage in
@@ -94,7 +94,7 @@ channel — the regex channel — with no vestigial parameter, loop, or sentinel
 | `reflections/docs_auditor.py:373` | `_git_log_follow_renames` definition, `--follow` query unchanged | holds |
 | `reflections/docs_auditor.py:441` | `_detect_renamed_link_fixes` call site, `renames[0][1]` | holds |
 | `reflections/docs_auditor.py:465` | `_detect_renamed_symbol_fixes` call site with `renames[0][1] != path` guard | holds |
-| `reflections/docs_auditor.py:495` | `_detect_readme_broken_entries` rename call site. Re-verified 2026-08-17: `renames` here is a **branch condition**, not a replacement source. The `else` arm at `:501-502` emits `(line, "")` — a working README index-line delete that does **not** depend on the query. Deleting it is an approved scope decision (Risk 1), not a dead-code removal. | holds |
+| `reflections/docs_auditor.py:495` | `_detect_readme_broken_entries` rename call site. Re-verified 2026-08-17: `renames` here is a **branch condition**, not a replacement source. The `else` arm at `:499-500` emits `(line, "")` — a working README index-line delete that does **not** depend on the query. Deleting it is an approved scope decision (Risk 1), not a dead-code removal. | holds |
 | `reflections/docs_auditor.py:1076` | `_detect_deleted_target_issues` suppression `if renames: continue` | holds |
 | `reflections/docs_auditor.py:1359-1360` | per-run `_RENAME_QUERY_COUNT` reset inside `audit()` | holds |
 | `reflections/docs_auditor.py:1414/1416-1417` | detector registrations in the audit loop | holds (README arm at `:1414`, else-arm at `:1416-1417`) |
@@ -441,7 +441,7 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
 ## Risks
 
 ### Risk 1: Deleting `_detect_readme_broken_entries` removes working README self-healing, and nothing else covers that path shape
-**Impact:** The detector's `else` arm (`:501-502`) is not dead code. When a README index entry
+**Impact:** The detector's `else` arm (`:499-500`) is not dead code. When a README index entry
 links a `.md` file that is genuinely gone and the rename query returns nothing, it deletes that
 index line — correctly, and cleanly past the existence invariant. After this change a broken
 README index entry is **neither auto-repaired nor reported**. The two detectors match disjoint
@@ -751,7 +751,7 @@ that read `fixes_withheld` need no code change.
 - Delete the `:1076` `renames`/`continue` suppression in `_detect_deleted_target_issues`;
   restate the `:1052` narrow-pattern comment standalone; drop the `(non-renamed)` qualifier
   from its `:1041` docstring.
-- Deleting `_detect_readme_broken_entries` includes its working `else` arm (`:501-502`).
+- Deleting `_detect_readme_broken_entries` includes its working `else` arm (`:499-500`).
   **Do not "preserve" it** by de-indenting `fixes.append((line, ""))` out of the `else` — that
   is explicitly ruled out in No-Gos and would keep the literal channel alive, invalidating the
   collapse below.
@@ -834,19 +834,54 @@ that read `fixes_withheld` need no code change.
 | Tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Rename query gone | `[ "$(grep -rn "_git_log_follow_renames" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| Link detector gone | `[ "$(grep -rn "_detect_renamed_link_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| Symbol detector gone | `[ "$(grep -rn "_detect_renamed_symbol_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| README detector gone | `[ "$(grep -rn "_detect_readme_broken_entries" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| Follow cap constant gone | `[ "$(grep -rn "GIT_LOG_FOLLOW_CAP" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| Rename query counter gone | `[ "$(grep -rn "_RENAME_QUERY_COUNT" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Rename query gone | `grep -rn "_git_log_follow_renames" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
+| Link detector gone | `grep -rn "_detect_renamed_link_fixes" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
+| Symbol detector gone | `grep -rn "_detect_renamed_symbol_fixes" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
+| README detector gone | `grep -rn "_detect_readme_broken_entries" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
+| Follow cap constant gone | `grep -rn "GIT_LOG_FOLLOW_CAP" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
+| Rename query counter gone | `grep -rn "_RENAME_QUERY_COUNT" --include="*.py" --include="*.md" reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/ \| wc -l` | match count == 0 |
 | Reporter docstring un-blinded | `grep -c "(non-renamed)" reflections/docs_auditor.py` | match count == 0 |
 | Literal channel gone | `grep -c 'new == ""' reflections/docs_auditor.py` | match count == 0 |
 | Reporter makes no rename query | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "_git_log"` | match count == 0 |
-| Reporter shells out to nothing | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess"` | match count == 0 |
+| Reporter stays subprocess-free (non-regression guard — already green pre-change) | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess"` | match count == 0 |
 | Basename cache reset survives | `grep -c "_BASENAME_INDEX_CACHE.clear()" reflections/docs_auditor.py` | output > 0 |
 | Rename regression exists | `grep -c "rename destination" tests/unit/test_docs_auditor_substrate.py` | output > 0 |
 | Existence-invariant coverage survives the channel collapse | `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` | output > 3 |
+
+**Every row above was executed against unmodified `main` on 2026-08-17** — validated by running,
+not by reasoning about grep's output format. Three rounds of critique broke these rows via three
+different mechanisms (unquoted `--include` globs aborting under zsh; a `^./docs/plans/` anchor
+that matched nothing; then a `^docs/plans/` anchor that was equally inert because `grep -r .`
+emits `./`-prefixed paths, while that same `.` descended into 29 sibling worktrees). The durable
+fix is to stop grepping `.` at all: the rows enumerate real source roots, which removes the
+`docs/plans/` exclusion, the anchor, and the worktree contamination in one move. Confirmed by
+execution — the survivor set for every symbol is exactly `reflections/docs_auditor.py` and
+`tests/unit/test_docs_auditor_substrate.py`, with zero lines from this plan document or any
+worktree.
+
+Red/green state on unmodified `main`, so a reviewer can tell which rows prove the work happened:
+
+| Row | Pre-change | Meaning |
+|---|---|---|
+| The six symbol-absence rows | 12, 4, 8, 7, 7, 9 | demonstrated red — must reach 0 |
+| Reporter docstring un-blinded | 1 | demonstrated red — must reach 0 |
+| Literal channel gone | 5 | demonstrated red — must reach 0 |
+| Reporter makes no rename query | 1 | demonstrated red — must reach 0 |
+| Rename regression exists | 0 | demonstrated red — must become > 0 |
+| Reporter stays subprocess-free | 0 | **already green** — a non-regression guard, not evidence of completion |
+| Basename cache reset survives | 1 | already green — non-regression guard |
+| Existence-invariant coverage | 5 | already green — non-regression guard, floor of 3 |
+| Lint / format clean | pass | `python -m ruff check .` verified clean and does not descend into worktrees |
+
+**Two execution hazards found while validating these rows, both recorded so the builder does not
+rediscover them.** First, `grep` on this machine is **ugrep 7.5.0**, not GNU grep — the rows above
+were executed under it and behave correctly, but do not assume GNU-only flags will work if a row
+is edited. Second, and more dangerous: if the root list is ever collapsed into a single shell
+word (for example by putting it in an unquoted variable), ugrep emits `No such file or directory`
+on **stderr** and `0` on **stdout**. A `match count == 0` row reads stdout, so a completely broken
+command **false-passes**. Keep the roots as literal arguments in the row, never behind a variable,
+and treat an unexpected `0` on a row that was previously red as a reason to inspect stderr rather
+than as success.
 
 ## Critique Results
 
