@@ -1751,3 +1751,36 @@ This repo has `deleteBranchOnMerge: false` and `session/sdlc-2755` is still on o
 | CONCERN | Scope | Six tasks and three agents for roughly ten lines plus tests; tasks 3 and 5 are the same work run twice. | **ADDRESSED** — exactly that: builder + validator, with validation collapsed to a single pass (build-red / build-fix / build-tests-docs / validate-all). The documentarian folds into the builder. | Collapse to two agents and three tasks. |
 | NIT | Risk, Scope, History | Log-level assertions need `caplog.set_level(logging.DEBUG)` or they pass vacuously. Re-asserting the existing warning's level pins a log level as an interface. `_pipeline_is_terminal_from_states` contains `_pipeline_is_terminal` as a substring, making cross-reference greps ambiguous. `docs/features/sdlc-router-oscillation-guard.md:133` still describes the PLAN check by slug, false post-#2792, in the same table the documentarian edits. spike-3 over-reads a now-empty ledger as testimony about its state a day earlier. | **ADDRESSED** — `caplog.set_level(logging.DEBUG)` mandated and the existing-warning re-assertion dropped (Error State Rendering); the near-homonym is gone with the helper; `sdlc-router-oscillation-guard.md:133`'s stale slug wording added to Documentation; spike-3's over-read of the empty ledger flagged in its correction note. | Address inline during revision. |
 
+
+### Round 4 — staleness re-critique 2026-08-17
+
+**Verdict: READY TO BUILD (no concerns)** — LITE roster (Consolidated Critic).
+0 BLOCKERs, 0 CONCERNs, 0 NITs.
+
+Scoped re-critique triggered by router row 2b only: the plan doc's commit time moved
+past the round-3 verdict time. The plan was already BUILT, TESTED (252 passing),
+PATCHED twice, and REVIEWED to APPROVED at head `f40611a42`.
+
+Diff `4dec5d5d5..HEAD` on the plan carries exactly one substantive change — the
+additive **Risk 3c** section. Every other changed line is a checkbox tick; each
+changed checkbox line was verified to pair exactly with its counterpart modulo
+`[ ]` vs `[x]`, so no criterion text, task step, acceptance criterion, or scope moved.
+
+Risk 3c's factual claims were re-verified live against the repo:
+
+| Claim | Status |
+|---|---|
+| `query_enriched` has exactly three non-test callers | **CONFIRMED** — `tools/sdlc_next_skill.py:96`, `tools/sdlc_stage_query.py:860` (its own CLI `main`), `agent/session_runner/runner.py:1397` (`_load_ledger`) |
+| The dashboard is **not** a caller | **CONFIRMED** — `ui/data/sdlc.py:944` reads through `PipelineStateMachine.for_issue()` |
+| 4 `gh` calls worst case instead of 2 | **CONFIRMED** — `_lookup_pr` has two legs (`_gh_pr_search_issue_ref`, `_gh_pr_list`); two passes double them |
+| 5s per-call timeout | **CONFIRMED** — `tools/sdlc_stage_query.py:319` and `:247` both `timeout=5` |
+| ~10s added tail reconciles with Architectural Impact's ~0.89s typical | **CONFIRMED** — Risk 3c states the distinction explicitly; the two figures measure the hang tail and the fast path, not the same quantity |
+| Short-circuit rejection consistent with Rabbit Holes / No-Gos | **CONFIRMED** — no entry proposes it; the rationale matches the existing cache rejection |
+
+Risk 3c documents an already-shipped, already-reviewed cost at the explicit direction
+of the PR review. It proposes no new work. No revision pass is required; the lane
+proceeds to DOCS and MERGE.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| — | Consolidated Critic | No findings from the war room. Risk 3c is accurate and internally consistent; nothing else of substance moved. | n/a | n/a |
