@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2636
-last_comment_id: none-incorporated-yet
+last_comment_id: 5215674953
 ---
 
 # Bound Job.recent_for_room via a direct bounded reverse-range read
