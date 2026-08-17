@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
 revision_applied: true
-revision_applied_at: 2026-08-17T06:05:09Z
+revision_applied_at: 2026-08-17T06:23:07Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -242,7 +242,7 @@ approved scope is that it is not.
 - PM check-ins: 0 (scope is pre-approved by the human, 2026-08-17)
 - Review rounds: 1
 
-The code deletion is an afternoon. The cost is concentrated in the test migration: eleven
+The code deletion is an afternoon. The cost is concentrated in the test migration: **twelve**
 `TestExistenceInvariant` cases drive `_apply_fixes_to_file` through the literal channel and
 must be re-expressed on the regex channel, which has different suppression semantics (see
 Rabbit Holes).
@@ -350,9 +350,9 @@ tautology.
 ### Error State Rendering
 - The user-visible output is the `withheld` list surfacing as `fixes_withheld` in the PR body,
   the Telegram notification, and the liveness record. Two tests cover that end-to-end chain
-  today — `TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` (`:1104-1150`)
+  today — `TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` (`:1111-1144`)
   and `TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
-  (`:1243-1320`) — and **both are driven by the literal channel this plan deletes**, not by the
+  (`:1243-1319`) — and **both are driven by the literal channel this plan deletes**, not by the
   regex channel. Each patches `_detect_renamed_symbol_fixes` to return a literal fix and then
   asserts `fixes_withheld == 1` out of a real `audit()` run. They must be REPLACED (re-pointed at
   the surviving regex producer), not merely stripped of their patches — see Test Impact. The
@@ -395,17 +395,39 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       time, not from a stale detection-time index) is still real: the regex loop mutates
       `new_text` across iterations. Rewrite it with two regex fixes where the first shortens
       the text ahead of the second's match.
-- [ ] `TestExistenceInvariant` (`:830-1151`), eleven `_apply_fixes_to_file` call sites at
-      `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016`
+- [ ] `TestExistenceInvariant` (`:830-1151`), **twelve** `_apply_fixes_to_file` call sites at
+      `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087`
       — REPLACE: each drives `_apply_fixes_to_file` with a literal `fixes` list. Re-express on
       the regex channel. **This is not a mechanical `re.compile(re.escape(old))` swap** — see
       Rabbit Holes. `test_regex_channel_is_also_guarded` (`:994`) is already the correct shape
-      and is the model to follow; it may become the base for the rewritten cases.
+      and is the model to follow; it may become the base for the rewritten cases. The twelfth
+      site (`:1087`) gets its own entry directly below, because its rewrite has a shape the
+      other eleven do not.
 - [ ] `TestExistenceInvariant::test_empty_or_whitespace_doc_with_no_fixes_writes_nothing`
       (`:1013`) — UPDATE: passes `[]` as the literal arg; re-point at `regex_fixes=[]`.
-- [ ] `TestExistenceInvariant::test_ls_files_failure_warns_and_yields_empty_index` (call at
-      `:1087`) — UPDATE: same signature change. (There is no class named
-      `TestDegradedBasenameIndex`; `:1087` sits inside `TestExistenceInvariant`.)
+- [ ] `TestExistenceInvariant::test_dir_prefixed_decisions_unaffected_by_degraded_index`
+      (def `:1076`, call at `:1087`) — **REPLACE, same treatment as the other eleven.** This
+      is the twelfth call site and it is *not* a signature-only edit. (Earlier drafts
+      mis-attributed `:1087` to `test_ls_files_failure_warns_and_yields_empty_index`, which is
+      defined at `:1044` and calls `_repo_basename_index`, never `_apply_fixes_to_file`. There
+      is likewise no class named `TestDegradedBasenameIndex`; `:1087` sits inside
+      `TestExistenceInvariant`.) The case drives the **literal** channel with two path-shaped
+      pairs — `[("agent/real.py", "agent/ghost.py"), ("agent/other.py", "agent/renamed.py")]` —
+      and asserts `applied == 1` plus one `target-absent` withheld record (`:1093-1101`).
+      A mechanical `re.compile(re.escape("agent/real.py"))` swap is the exact Risk 2 failure
+      mode: the pattern matches a **path token**, so `_make_stale_term_replacer`'s
+      `_match_inside_path_token` suppression (#2744) refuses the rewrite *before*
+      `_absent_new_path_refs` runs, yielding `applied == 0` and `withheld == []` — the case goes
+      red and the cheap repair is to weaken its assertions into vacuity. Use the
+      `test_regex_channel_is_also_guarded` (`:994`) shape: two **prose-anchored** patterns whose
+      *replacements* carry the path-shaped strings — e.g.
+      `(re.compile(r"\bghost\b"), "agent/ghost.py")` (must withhold) and
+      `(re.compile(r"\brenamed\b"), "agent/renamed.py")` (must apply, with
+      `(repo / "agent" / "renamed.py")` still created at `:1085`) — and a fixture doc carrying
+      those two words in ordinary prose, never as path tokens. Keep the `subprocess.run` failure
+      patch (`:1086`) and **both** `failure` parametrisations (`:1063-1075`): the property under
+      test — dir-prefixed targets never consult the degraded basename index — is
+      channel-independent and must survive the migration intact.
 - [ ] `TestWithheldRateNonRegression` (`:1419-1567`, call at `:1502`) — UPDATE: it already runs
       "under one regex arm" per its own docstring, but passes the literal arg positionally.
       Re-point at the new signature. Its corpus baseline must not change.
@@ -415,10 +437,10 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       decision (Risk 1 / No-Gos), not because they were ever wrong. Deleting them is the
       correct move under NO LEGACY CODE TOLERANCE once the sentinel has no producer; do not
       preserve them in adapted form.
-- [ ] `TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` (`:1104-1150`,
-      patches at `:1116,1123`) and
+- [ ] `TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` (`:1111-1144`,
+      patches at `:1120,1123`) and
       `TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
-      (`:1243-1320`, patches at `:1256,1263`) — **REPLACE, not UPDATE.** Both patch
+      (`:1243-1319`, patches at `:1260,1263`) — **REPLACE, not UPDATE.** Both patch
       `_detect_renamed_symbol_fixes` to *return* a literal fix
       (`[("agent/real.py", "agent/ghost.py")]` and `[("session_runner.py", "ghost_module.py")]`
       respectively) and then assert `result["fixes_withheld"] == 1` and `withheld[0]["new"]`
@@ -518,6 +540,26 @@ outcome available from this change.
 `_absent_new_path_refs` to return `[]`, confirm the case fails, revert. Path-token suppression
 makes a vacuous pass the *default* failure mode here, so a green-only proof is not acceptable.
 Record the red-state output in the PR description.
+
+**The demonstrated-red proof is the only real guard here; the `target-absent > 3` Success
+Criterion is not a second one.** That criterion is implemented as
+`grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` → `output > 3`, which is a
+**textual presence check, not a liveness check**. It counts the string, so it cannot tell a live
+assertion from a vacuous one: a builder who rewrites every migrated case into a tautology still
+passes the row at its pre-change count of 5. The five occurrences on `main` are `:850, 926, 1010,
+1099, 1227`; `:1227` is a hand-written dict inside
+`TestWithheldBlocksAutoMerge::test_pr_body_carries_marker_when_fixes_withheld` (`:1215`) that
+never calls `_apply_fixes_to_file` at all. The row is kept as a **floor** — it catches wholesale
+deletion of the coverage — and nothing more. It cannot be strengthened by grep, and no attempt
+should be made to do so.
+
+**Therefore the demonstrated-red mandate is scoped by assertion, not by class membership.** It
+covers **every** case that both asserts `target-absent` **and** calls `_apply_fixes_to_file` —
+on `main` that is `:850, 926, 1010, 1099`. Note explicitly that `:1099` belongs to
+`test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at `:1087`), the twelfth
+`TestExistenceInvariant` site, which earlier drafts filed as a mechanical signature update and
+which falls outside any "the eleven cases" phrasing. A red-state transcript for `:1099` is
+mandatory on exactly the same terms as for the other three. Task 3's validator enforces this.
 
 ### Risk 3: Removing the `:1076` suppression un-blinds an unknown number of findings
 **Impact:** `_detect_deleted_target_issues` currently drops any broken `.py` reference whose
@@ -771,9 +813,13 @@ that read `fixes_withheld` need no code change.
       branch.
 - [ ] `_detect_deleted_target_issues` makes no subprocess call and reports a broken reference
       whose path was once a rename destination — proven by a new test on a real git checkout.
-- [ ] Every rewritten `TestExistenceInvariant` case was demonstrated red (with
-      `_absent_new_path_refs` neutered) before being accepted green, with the red output pasted
-      into the PR description.
+- [ ] Every rewritten `TestExistenceInvariant` case — **all twelve**, including
+      `test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at `:1087`) — was
+      demonstrated red (with `_absent_new_path_refs` neutered) before being accepted green, with
+      the red output pasted into the PR description. In particular, every case that asserts
+      `target-absent` **and** calls `_apply_fixes_to_file` (`:850, 926, 1010, 1099` on `main`)
+      has a transcript; `:1099` is the one that falls outside any "the eleven" phrasing and is
+      explicitly in scope.
 - [ ] The PR body carries Risk 3's disclosure: removing the `:1076` suppression un-blinds an
       unknown number of previously-suppressed broken references and may raise
       `_detect_deleted_target_issues` finding volume; the per-run filing cap of 5 and the
@@ -791,7 +837,10 @@ that read `fixes_withheld` need no code change.
       regex channel. Neither was deleted.
 - [ ] The existence invariant still has direct test coverage after the channel collapse,
       checked mechanically against the test file rather than production source — the
-      `target-absent` rejection path must still be asserted more than three times.
+      `target-absent` rejection path must still be asserted more than three times. **This is a
+      textual presence check and a floor only: it is blind to vacuity and cannot substitute for
+      the demonstrated-red criterion above** (Risk 2). It catches wholesale deletion of the
+      coverage, nothing more.
 - [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] Lint and format clean
@@ -860,8 +909,8 @@ that read `fixes_withheld` need no code change.
 - **Depends On**: build-delete-channel
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`
 - **Informed By**: the Rabbit Holes entry on path-token suppression — a naive
-  `re.compile(re.escape(path))` rewrite produces vacuous green tests. Eleven call sites, at
-  `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016`.
+  `re.compile(re.escape(path))` rewrite produces vacuous green tests. **Twelve** call sites, at
+  `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087`.
 - **Assigned To**: `auditor-test-migrator`
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -869,22 +918,26 @@ that read `fixes_withheld` need no code change.
 - Remove the `_RENAME_QUERY_COUNT` fixture lines, the `_git_log_follow_renames` patches
   (`:804, 1683, 1703`), and the `_detect_renamed_link_fixes` silencer patches (`:1123, 1263`).
 - **Re-point, do not delete, the two `audit()`-driven withheld tests**
-  (`TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` at `:1104-1150` and
+  (`TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` at `:1111-1144` and
   `TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
-  at `:1243-1320`). Replace their `_detect_renamed_symbol_fixes` patch (`:1116`, `:1256`) with a
+  at `:1243-1319`). Replace their `_detect_renamed_symbol_fixes` patch (`:1120`, `:1260`) with a
   `_detect_stale_term_fixes` patch returning a prose-anchored regex whose replacement is a bare
   absent path — see the Test Impact entry for the exact shape. These are the only end-to-end
   coverage of `fixes_withheld` → PR marker → auto-merge-ineligibility → Telegram → liveness;
   a red suite is not licence to remove them.
-- Re-express the eleven `TestExistenceInvariant` cases on the regex channel using
+- Re-express **all twelve** `TestExistenceInvariant` cases on the regex channel using
   `test_regex_channel_is_also_guarded` as the model: match prose, let the **replacement** carry
   the path-shaped string. For each, neuter `_absent_new_path_refs` to prove red, then revert.
+  The twelfth is `test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at `:1087`);
+  it gets the same prose-anchored treatment as the other eleven, keeping its `subprocess.run`
+  failure patch and both `failure` parametrisations. See its Test Impact entry for the exact
+  pattern/replacement pair.
 - Rewrite `test_suppression_survives_an_earlier_line_deletion` with two regex fixes where the
   first shortens text ahead of the second's match.
 - Update the signature at **every** remaining `_apply_fixes_to_file` call site. Derive the list
   mechanically — `grep -n "_apply_fixes_to_file" tests/unit/test_docs_auditor_substrate.py`
   yields 744, 771, 812, 841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087, 1167,
-  1175, 1502 — rather than from the enumerated eleven `TestExistenceInvariant` sites. `:744` and
+  1175, 1502 — rather than from the enumerated twelve `TestExistenceInvariant` sites. `:744` and
   `:771` (`TestStaleTermWordBoundary`) pass `[]` positionally *and* `regex_fixes=` by keyword and
   will raise `TypeError` under the new signature; drop the `[]` at both. Confirm
   `TestWithheldRateNonRegression`'s corpus baseline is unchanged.
@@ -896,8 +949,28 @@ that read `fixes_withheld` need no code change.
 - **Assigned To**: `auditor-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every `## Verification` row.
-- Confirm each rewritten existence-invariant case has a recorded red-state proof.
+- Run every `## Verification` row **except the three symbol-absence rows that are still blocked
+  by the not-yet-done documentation sweep.** Task 4 edits `docs/features/docs-auditor.md`, and at
+  this point in the chain it has not run, so three symbols still have one doc-surface match each:
+  `_detect_renamed_symbol_fixes` (`docs/features/docs-auditor.md:239`),
+  `_detect_readme_broken_entries` (`:164`), and `GIT_LOG_FOLLOW_CAP` (`:246`). Those three rows
+  are **expected red here and are not defects** — do not "fix" them by re-rooting the rows away
+  from `docs/features/`, which would destroy the coverage Risk 4 depends on, and do not report
+  them as a pipeline failure. Expected Task 3 counts, so an expected red is distinguishable from
+  a real one:
+
+  - `_git_log_follow_renames` → **0**, `_detect_renamed_link_fixes` → **0**, `_RENAME_QUERY_COUNT` → **0** (must be clean already)
+  - `_detect_renamed_symbol_fixes` → **1**, `_detect_readme_broken_entries` → **1**, `GIT_LOG_FOLLOW_CAP` → **1** (doc-blocked until Task 4)
+
+  All six must reach 0 at Task 5, which re-runs the full table after the documentation sweep.
+  Any deviation from the counts above is a real failure.
+- Confirm each rewritten existence-invariant case has a recorded red-state proof. This is
+  scoped by assertion, not by class membership: **every** case that both asserts `target-absent`
+  and calls `_apply_fixes_to_file` needs a transcript — on `main` those are `:850, 926, 1010,
+  1099`. `:1099` belongs to `test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at
+  `:1087`), so a validator that checks only "the eleven" misses it. A missing transcript for any
+  of the four is a hard fail: the `target-absent` count row is a presence check and cannot
+  substitute for it (Risk 2).
 - Confirm `_BASENAME_INDEX_CACHE.clear()` survives in `audit()`.
 - Confirm the PR body carries Risk 3's plain disclosure (the `:1076` removal un-blinds an
   unknown number of previously-suppressed broken references; the per-run cap of 5 and the
@@ -1014,10 +1087,22 @@ migration or task ordering*, steering repair in a wrong direction rather than le
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk \& Robustness | Test Impact dispositions the `_apply_fixes_to_file` call at `tests/unit/test_docs_auditor_substrate.py:1087` as "UPDATE: same signature change", attributed to `TestExistenceInvariant::test_ls_files_failure_warns_and_yields_empty_index`. Both halves are wrong. `test_ls_files_failure_warns_and_yields_empty_index` (def `:1044`) calls `_repo_basename_index`, not `_apply_fixes_to_file` at all; `:1087` sits inside `test_dir_prefixed_decisions_unaffected_by_degraded_index` (def `:1076`), which drives the **literal** channel with two path-shaped literal pairs and asserts `applied == 1` plus a `target-absent` withheld record. It needs exactly the non-mechanical prose-anchored rewrite the plan reserves for "the eleven `TestExistenceInvariant` cases" — and it is not among the eleven. `TestExistenceInvariant` spans `:830-1151` and contains **twelve** call sites, not eleven. Task 2 re-derives the list mechanically and does include `1087`, but files it under "Update the signature at every remaining call site" — so the site is enumerated everywhere and correctly classified nowhere. The round-7 NIT fix replaced one wrong class name (`TestDegradedBasenameIndex`) with a different wrong case name. | pending | Move `:1087` into the REPLACE set (eleven becomes twelve) under its real name. A mechanical swap here is the exact Risk 2 failure mode: `regex_fixes=[(re.compile(re.escape("agent/real.py")), "agent/ghost.py"), ...]` matches a **path token**, so `_make_stale_term_replacer`'s `_match_inside_path_token` suppression (#2744) refuses the rewrite before `_absent_new_path_refs` runs, yielding `applied == 0` and `withheld == []` — the test goes red and the cheap repair is to weaken the assertions into vacuity. Correct rewrite follows `test_regex_channel_is_also_guarded` (`:994`): two prose-anchored patterns whose **replacements** carry the path-shaped strings, e.g. `(re.compile(r"\bghost\b"), "agent/ghost.py")` (must withhold) and `(re.compile(r"\brenamed\b"), "agent/renamed.py")` (must apply, with `(repo / "agent" / "renamed.py")` still created), fixture doc carrying those words in ordinary prose. Keep the `subprocess.run` failure patch and both `failure` parametrisations — the property under test (dir-prefixed targets never consult the degraded basename index) is channel-independent. |
-| CONCERN | Risk \& Robustness | The Success Criterion "the `target-absent` rejection path must still be asserted more than three times" is implemented as `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` → `output > 3`. That is a **textual** count and cannot distinguish a live assertion from a vacuous one. The five current occurrences are at `:850, 926, 1010, 1099, 1227`; `:1099` is the withheld-record assertion of the mis-dispositioned `:1087` test above, and `:1227` is a hand-written dict in `test_pr_body_carries_marker_when_fixes_withheld` that never calls `_apply_fixes_to_file`. A builder who rewrites the migrated cases vacuously still passes this row at count 5. The one mechanical guard the plan offers against its self-declared "worst outcome available from this change" is blind to that outcome. | pending | Keep the row as a floor but state in Risk 2 that it is a presence check, not a liveness check, and that the demonstrated-red proof is the only real guard. The row cannot be strengthened by grep. Make Task 3's validator require a recorded red-state transcript for **every** case that both asserts `target-absent` and calls `_apply_fixes_to_file` — currently `:850, 926, 1010, 1099` — rather than for "the eleven", since `:1099`/`:1087` falls outside that set. |
-| CONCERN | History \& Consistency | Task 3 ("Validate the deletion") depends on `build-test-migration` and instructs "Run every `## Verification` row", but Task 4 (the documentation sweep) runs *after* it. Three of the six symbol-absence rows match `docs/features/docs-auditor.md`, which Task 4 has not yet edited at that point. Verified per-symbol survivor sets at HEAD: `_detect_renamed_symbol_fixes` (`docs-auditor.md:239`), `_detect_readme_broken_entries` (`:164`), and `GIT_LOG_FOLLOW_CAP` (`:246`) each carry exactly one doc-surface match; the other three symbols carry none. Task 3 is therefore *guaranteed* to report three red rows that are not defects, on a plan whose `## Verification` section already spent four rounds eliminating structurally-permanent reds. A validator hitting red at Task 3 is likely to loop or hand the pipeline a spurious failure before Task 4 has run. | pending | Do **not** change the rows — they are correct as final gates, and re-rooting them to skip `docs/features/` would destroy the coverage Risk 4 depends on. Change Task 3's wording from "Run every `## Verification` row" to: run all rows except the three symbol-absence rows still matching `docs/features/docs-auditor.md` (`_detect_renamed_symbol_fixes`, `_detect_readme_broken_entries`, `GIT_LOG_FOLLOW_CAP`), which are expected red until Task 4 lands and are re-run at Task 5 (which already says "Re-run all `## Verification` rows"). Record the expected Task 3 counts so a reader can tell an expected red from a real one: 0, 0, 0 for the three clean symbols and 1, 1, 1 for the three doc-blocked ones. |
-| NIT | History \& Consistency | Two patch-coordinate slips introduced by the round-7 revision. The `_detect_renamed_symbol_fixes` patches are cited at `:1116` and `:1256`; the actual `patch.object` target strings are at `:1120` and `:1260` (`:1116` is a blank line, `:1117` is the `with (`). The first test's span is given as `:1104-1150`; the case actually runs `:1111-1143` (`:1104` belongs to the preceding case, and `TestLineDeleteSentinel` opens at `:1152`). The sibling `_detect_renamed_link_fixes` silencer coordinates (`:1123`, `:1263`) are correct, as are `:804`, `:1683`, `:1703`, and the eleven enumerated REPLACE sites. | pending | n/a (NIT) |
+| CONCERN | Risk \& Robustness | Test Impact dispositions the `_apply_fixes_to_file` call at `tests/unit/test_docs_auditor_substrate.py:1087` as "UPDATE: same signature change", attributed to `TestExistenceInvariant::test_ls_files_failure_warns_and_yields_empty_index`. Both halves are wrong. `test_ls_files_failure_warns_and_yields_empty_index` (def `:1044`) calls `_repo_basename_index`, not `_apply_fixes_to_file` at all; `:1087` sits inside `test_dir_prefixed_decisions_unaffected_by_degraded_index` (def `:1076`), which drives the **literal** channel with two path-shaped literal pairs and asserts `applied == 1` plus a `target-absent` withheld record. It needs exactly the non-mechanical prose-anchored rewrite the plan reserves for "the eleven `TestExistenceInvariant` cases" — and it is not among the eleven. `TestExistenceInvariant` spans `:830-1151` and contains **twelve** call sites, not eleven. Task 2 re-derives the list mechanically and does include `1087`, but files it under "Update the signature at every remaining call site" — so the site is enumerated everywhere and correctly classified nowhere. The round-7 NIT fix replaced one wrong class name (`TestDegradedBasenameIndex`) with a different wrong case name. | Test Impact (`:1087` entry, rewritten under its real case name `test_dir_prefixed_decisions_unaffected_by_degraded_index`); `TestExistenceInvariant` count corrected to **twelve** in Test Impact, Appetite, and Task 2 | Move `:1087` into the REPLACE set (eleven becomes twelve) under its real name. A mechanical swap here is the exact Risk 2 failure mode: `regex_fixes=[(re.compile(re.escape("agent/real.py")), "agent/ghost.py"), ...]` matches a **path token**, so `_make_stale_term_replacer`'s `_match_inside_path_token` suppression (#2744) refuses the rewrite before `_absent_new_path_refs` runs, yielding `applied == 0` and `withheld == []` — the test goes red and the cheap repair is to weaken the assertions into vacuity. Correct rewrite follows `test_regex_channel_is_also_guarded` (`:994`): two prose-anchored patterns whose **replacements** carry the path-shaped strings, e.g. `(re.compile(r"\bghost\b"), "agent/ghost.py")` (must withhold) and `(re.compile(r"\brenamed\b"), "agent/renamed.py")` (must apply, with `(repo / "agent" / "renamed.py")` still created), fixture doc carrying those words in ordinary prose. Keep the `subprocess.run` failure patch and both `failure` parametrisations — the property under test (dir-prefixed targets never consult the degraded basename index) is channel-independent. |
+| CONCERN | Risk \& Robustness | The Success Criterion "the `target-absent` rejection path must still be asserted more than three times" is implemented as `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` → `output > 3`. That is a **textual** count and cannot distinguish a live assertion from a vacuous one. The five current occurrences are at `:850, 926, 1010, 1099, 1227`; `:1099` is the withheld-record assertion of the mis-dispositioned `:1087` test above, and `:1227` is a hand-written dict in `test_pr_body_carries_marker_when_fixes_withheld` that never calls `_apply_fixes_to_file`. A builder who rewrites the migrated cases vacuously still passes this row at count 5. The one mechanical guard the plan offers against its self-declared "worst outcome available from this change" is blind to that outcome. | Risk 2 (new paragraphs: presence-check-not-liveness-check disclosure, demonstrated-red mandate scoped by assertion to `:850, 926, 1010, 1099`); Task 3 validator bullet; both affected Success Criteria | Keep the row as a floor but state in Risk 2 that it is a presence check, not a liveness check, and that the demonstrated-red proof is the only real guard. The row cannot be strengthened by grep. Make Task 3's validator require a recorded red-state transcript for **every** case that both asserts `target-absent` and calls `_apply_fixes_to_file` — currently `:850, 926, 1010, 1099` — rather than for "the eleven", since `:1099`/`:1087` falls outside that set. |
+| CONCERN | History \& Consistency | Task 3 ("Validate the deletion") depends on `build-test-migration` and instructs "Run every `## Verification` row", but Task 4 (the documentation sweep) runs *after* it. Three of the six symbol-absence rows match `docs/features/docs-auditor.md`, which Task 4 has not yet edited at that point. Verified per-symbol survivor sets at HEAD: `_detect_renamed_symbol_fixes` (`docs-auditor.md:239`), `_detect_readme_broken_entries` (`:164`), and `GIT_LOG_FOLLOW_CAP` (`:246`) each carry exactly one doc-surface match; the other three symbols carry none. Task 3 is therefore *guaranteed* to report three red rows that are not defects, on a plan whose `## Verification` section already spent four rounds eliminating structurally-permanent reds. A validator hitting red at Task 3 is likely to loop or hand the pipeline a spurious failure before Task 4 has run. | Task 3 ("Validate the deletion") — rewritten to exclude the three doc-blocked symbol rows and to record their expected Task 3 counts; rows unchanged | Do **not** change the rows — they are correct as final gates, and re-rooting them to skip `docs/features/` would destroy the coverage Risk 4 depends on. Change Task 3's wording from "Run every `## Verification` row" to: run all rows except the three symbol-absence rows still matching `docs/features/docs-auditor.md` (`_detect_renamed_symbol_fixes`, `_detect_readme_broken_entries`, `GIT_LOG_FOLLOW_CAP`), which are expected red until Task 4 lands and are re-run at Task 5 (which already says "Re-run all `## Verification` rows"). Record the expected Task 3 counts so a reader can tell an expected red from a real one: 0, 0, 0 for the three clean symbols and 1, 1, 1 for the three doc-blocked ones. |
+| NIT | History \& Consistency | Two patch-coordinate slips introduced by the round-7 revision. The `_detect_renamed_symbol_fixes` patches are cited at `:1116` and `:1256`; the actual `patch.object` target strings are at `:1120` and `:1260` (`:1116` is a blank line, `:1117` is the `with (`). The first test's span is given as `:1104-1150`; the case actually runs `:1111-1143` (`:1104` belongs to the preceding case, and `TestLineDeleteSentinel` opens at `:1152`). The sibling `_detect_renamed_link_fixes` silencer coordinates (`:1123`, `:1263`) are correct, as are `:804`, `:1683`, `:1703`, and the eleven enumerated REPLACE sites. | Test Impact and Task 2 patch coordinates corrected to `:1120` / `:1260`; spans corrected to `:1111-1144` and `:1243-1319` | n/a (NIT) |
+
+**Round-8 revision note (all four items closed; coordinates re-verified against live source at
+`bc3051ee4`, not copied from the critique).** Two spans differ by one line from the NIT's text
+because the NIT itself was off by one: `test_audit_surfaces_withheld_without_writing` runs
+`:1111-1144` — its last statement is `assert "agent/ghost.py" not in p.read_text()` at `:1144`,
+with `:1145-1146` blank before the `TestLineDeleteSentinel` banner — and
+`test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness` runs `:1243-1319`, its last
+statement being `assert liveness.call_args.kwargs["fixes_withheld"] == 1` at `:1319`. The patch
+coordinates `:1120` / `:1260` and the silencers `:1123` / `:1263` reproduce exactly as the NIT
+states. The twelve-site enumeration, the `target-absent` occurrence set (`:850, 926, 1010, 1099,
+1227`), and the three doc-blocked symbol counts (`docs-auditor.md:239`, `:164`, `:246`) were each
+re-executed against live source this pass.
 
 **Verified this round and found sound (so round 9, if any, does not re-litigate):**
 
