@@ -89,21 +89,16 @@ class TestLoggerConfiguration:
                     wwd.logger.removeHandler(h)
                     h.close()
 
-    def test_no_basicconfig_on_root(self, tmp_path, monkeypatch):
-        """_configure_logger() must never touch root (no basicConfig, no addHandler)."""
-        monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
-        root_handlers_before = list(logging.getLogger().handlers)
-        wwd._configure_logger()
-        try:
-            assert logging.getLogger().handlers == root_handlers_before
-        finally:
-            for h in list(wwd.logger.handlers):
-                if getattr(h, "_watchdog_owned", False):
-                    wwd.logger.removeHandler(h)
-                    h.close()
-
     def test_configure_logger_does_not_touch_root(self, tmp_path, monkeypatch):
-        """Regression guard named for the mutation table (#2643 Task 5)."""
+        """Regression guard named for the mutation table (#2643 Task 5).
+
+        Covers the root-`addHandler` half of the claim only. The
+        no-`basicConfig` half is delegated to TC1/TC3 in
+        `test_watchdog_log_isolation.py`, which assert it in a fresh
+        subprocess — an in-process `basicConfig` call is a silent no-op under
+        pytest's already-configured root, so asserting it here would prove
+        nothing.
+        """
         monkeypatch.setattr(wwd, "LOG_FILE", tmp_path / "worker_watchdog.log")
         root_handlers_before = list(logging.getLogger().handlers)
         wwd._configure_logger()

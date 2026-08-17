@@ -15,6 +15,13 @@ logger's level and handler list plus both named loggers' handlers,
 `propagate`, and `level`, and `close()`s every handler it created — this
 module mutates process-global logging state, and leaking it corrupts sibling
 tests in the same xdist worker.
+
+The path globals `bridge_watchdog.WATCHDOG_LOG_FILE` and
+`worker_watchdog.LOG_FILE` are process-global in the same way but are NOT
+covered by that fixture — always redirect them with `monkeypatch.setattr`,
+never by plain assignment. A plain assignment survives the test and leaves a
+`tmp_path` pytest later deletes wired into every subsequent test file in the
+same worker (`--dist=loadfile` reuses the process).
 """
 
 from __future__ import annotations
@@ -127,6 +134,12 @@ print(json.dumps(callers))
 
 # --------------------------------------------------------------------------
 # TC2 — no logger anywhere holds a handler on watchdog.log
+#
+# TC2 and TC4 assert on handler STATE, never on the log file's size or
+# content. The real `com.valor.bridge-watchdog` launchd job appends to
+# `logs/watchdog.log` every 60 seconds on an operator machine, so any
+# byte-count or line-count assertion against that path is a concurrent-writer
+# flake waiting to happen. Do not "strengthen" these into size checks.
 # --------------------------------------------------------------------------
 
 
@@ -157,6 +170,9 @@ print(json.dumps(hits))
 
 # --------------------------------------------------------------------------
 # TC3 / TC4 — worker watchdog import leaves root untouched, no log handle
+#
+# TC4 asserts handler state rather than file size, for the concurrent-writer
+# reason spelled out above TC2.
 # --------------------------------------------------------------------------
 
 
@@ -261,7 +277,7 @@ def _module_scope_forbidden_calls(tree, path: pathlib.Path) -> list[str]:
             return f.id
         return None
 
-    def walk(body, in_try_or_with_ok=True):
+    def walk(body):
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
@@ -286,8 +302,6 @@ def _module_scope_forbidden_calls(tree, path: pathlib.Path) -> list[str]:
                 name = call_name(sub)
                 if name in _FORBIDDEN_CALL_NAMES:
                     hits.append(f"{path}:{getattr(sub, 'lineno', '?')} {name}")
-
-    import ast as _ast  # noqa: F401
 
     walk(tree.body)
     return hits
@@ -358,11 +372,13 @@ print(json.dumps({{
 # --------------------------------------------------------------------------
 
 
-def test_tc7_configure_logging_writes_formatted_record(tmp_path, _snapshot_logging_state):
+def test_tc7_configure_logging_writes_formatted_record(
+    tmp_path, monkeypatch, _snapshot_logging_state
+):
     import monitoring.bridge_watchdog as bw
 
     target = tmp_path / "nested" / "watchdog.log"
-    bw.WATCHDOG_LOG_FILE = target
+    monkeypatch.setattr(bw, "WATCHDOG_LOG_FILE", target)
     try:
         bw._configure_logging()
         bw.logger.info("probe")
@@ -383,11 +399,11 @@ def test_tc7_configure_logging_writes_formatted_record(tmp_path, _snapshot_loggi
                 h.close()
 
 
-def test_tc8_configure_logging_does_not_touch_root(tmp_path, _snapshot_logging_state):
+def test_tc8_configure_logging_does_not_touch_root(tmp_path, monkeypatch, _snapshot_logging_state):
     import monitoring.bridge_watchdog as bw
 
     target = tmp_path / "watchdog.log"
-    bw.WATCHDOG_LOG_FILE = target
+    monkeypatch.setattr(bw, "WATCHDOG_LOG_FILE", target)
     root_handlers_before = list(logging.getLogger().handlers)
     try:
         bw._configure_logging()
@@ -400,11 +416,11 @@ def test_tc8_configure_logging_does_not_touch_root(tmp_path, _snapshot_logging_s
                 h.close()
 
 
-def test_tc9_configure_logging_is_idempotent(tmp_path, _snapshot_logging_state):
+def test_tc9_configure_logging_is_idempotent(tmp_path, monkeypatch, _snapshot_logging_state):
     import monitoring.bridge_watchdog as bw
 
     target = tmp_path / "watchdog.log"
-    bw.WATCHDOG_LOG_FILE = target
+    monkeypatch.setattr(bw, "WATCHDOG_LOG_FILE", target)
     try:
         bw._configure_logging()
         bw._configure_logging()
@@ -422,11 +438,13 @@ def test_tc9_configure_logging_is_idempotent(tmp_path, _snapshot_logging_state):
                 h.close()
 
 
-def test_tc12_configure_logging_preserves_unowned_handlers(tmp_path, _snapshot_logging_state):
+def test_tc12_configure_logging_preserves_unowned_handlers(
+    tmp_path, monkeypatch, _snapshot_logging_state
+):
     import monitoring.bridge_watchdog as bw
 
     target = tmp_path / "watchdog.log"
-    bw.WATCHDOG_LOG_FILE = target
+    monkeypatch.setattr(bw, "WATCHDOG_LOG_FILE", target)
     sentinel = logging.NullHandler()
     bw.logger.addHandler(sentinel)
     try:
@@ -446,11 +464,13 @@ def test_tc12_configure_logging_preserves_unowned_handlers(tmp_path, _snapshot_l
 # --------------------------------------------------------------------------
 
 
-def test_tc10_worker_configure_logger_writes_formatted_record(tmp_path, _snapshot_logging_state):
+def test_tc10_worker_configure_logger_writes_formatted_record(
+    tmp_path, monkeypatch, _snapshot_logging_state
+):
     import monitoring.worker_watchdog as wwd
 
     target = tmp_path / "nested" / "worker_watchdog.log"
-    wwd.LOG_FILE = target
+    monkeypatch.setattr(wwd, "LOG_FILE", target)
     try:
         wwd._configure_logger()
         wwd.logger.info("probe")
@@ -471,11 +491,11 @@ def test_tc10_worker_configure_logger_writes_formatted_record(tmp_path, _snapsho
                 h.close()
 
 
-def test_tc11_worker_configure_logger_is_idempotent(tmp_path, _snapshot_logging_state):
+def test_tc11_worker_configure_logger_is_idempotent(tmp_path, monkeypatch, _snapshot_logging_state):
     import monitoring.worker_watchdog as wwd
 
     target = tmp_path / "worker_watchdog.log"
-    wwd.LOG_FILE = target
+    monkeypatch.setattr(wwd, "LOG_FILE", target)
     try:
         wwd._configure_logger()
         wwd._configure_logger()
