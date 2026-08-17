@@ -5,8 +5,8 @@ appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2716
-last_comment_id: none
-revised: 2026-08-10
+last_comment_id: 5312083426
+revised: 2026-08-17
 revision_applied: true
 revision_applied_at: 2026-08-11T03:27:10Z
 ---
@@ -44,7 +44,9 @@ This is why no evidence-freshness gating is required: the counter is not trying 
 
 ## Freshness Check
 
-**Disposition: Unchanged.** Baseline `origin/main` = `1e3fdd6f5`.
+**Disposition: Unchanged.** Re-verified 2026-08-17 against `origin/main` = `c23fb0e00`, seven days and ~10 SDLC-substrate merges after the original 2026-08-10 pass at `1e3fdd6f5`. Full evidence table in [issue comment 5312083426](https://github.com/tomcounsell/ai/issues/2716#issuecomment-5312083426). Every load-bearing claim still holds: `STALL_REACTION_EMOJI = "⏳"` (`session_watchdog.py:112`) still contradicts `INVALID_REACTIONS` (`response.py:86`); `_apply_stall_reaction` (`:578`), `_clear_stall_reaction_dedup` (`:674`), the `watchdog:stall_reaction_applied:` key (`:636`) and the `WATCHDOG_STALL_REACTION_ENABLED` gate (`:622`) are all intact; `build_custom_emoji_index`'s only non-test caller is `rebuild_custom_emoji_index`, itself test-only; `data/custom_emoji_embeddings.json` still does not exist. The single watchdog change since filing (`ac190fb26`, the #2642 steering flip) is 5 lines and touches no stall-reaction symbol. One detail went stale — branch `wip/session-heartbeat-ticker` (`78443c3f6`) is gone, unreachable, with no commit anywhere containing `PREMIUM_DIGIT_REACTIONS`; corrected in `10ebf7bbd` and reflected in Technical Approach / Task 2.
+
+Original 2026-08-10 pass, still valid:
 
 - Issue #2716 was filed 2026-08-10T08:55:49Z; `git log origin/main --since=<that>` returns no commits. All issue claims were verified against this exact tree during `/do-issue` recon, minutes before planning.
 - [#2710](https://github.com/tomcounsell/ai/pull/2710) (`sdlc-stall-auto-resume`) merged shortly before filing and sounded adjacent. Verified with `git show --stat 6a9e2b66c`: it touches no watchdog, reaction, `response.py`, or emoji file. It handles stalled *SDLC runs*; this plan handles the *user-visible* signal. No collision.
@@ -188,7 +190,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 
 ### Technical Approach
 
-- **Anchor:** the counter measures time since the last *evidence of progress the watchdog can see itself* — not since session start, and never a self-report from the session. Candidate anchors in preference order: last observed turn transition, then `updated_at`, then session creation. The chosen anchor must be stated in the code comment, because [`bridge/liveness.py`](../../bridge/liveness.py) establishes the governing rule: *a handler that has stopped firing cannot testify to its own failure.*
+- **Anchor:** counter start — session start, re-anchored to each forced progress message. Pure duration, per the semantics decided in the Problem section and restated under Data Flow. There is deliberately **no** evidence-freshness probe (no transcript mtime, no `tool_use.jsonl` mtime, no `updated_at` staleness gate): the counter makes no claim about the session's internal state, so there is no liveness inference to defend. State the anchor in the code comment, and state alongside it *why* no self-report is consulted — [`bridge/liveness.py`](../../bridge/liveness.py) establishes the governing rule that *a handler that has stopped firing cannot testify to its own failure*, which is why the tick is emitted by the watchdog rather than by the session.
 - **Constants must be written from scratch.** An earlier draft of this plan pointed at branch `wip/session-heartbeat-ticker` (`78443c3f6`) for `PREMIUM_DIGIT_REACTIONS`, `HEARTBEAT_FALLBACK_ARC`, `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and a ceiling-raising `heartbeat_reaction(tick)`. **That branch and commit no longer exist** — verified 2026-08-17: the object is unreachable and no commit in the repo contains `PREMIUM_DIGIT_REACTIONS`. It was temp progress, never a design commitment, so nothing is lost but the typing. Write these fresh in `bridge/response.py` against the behavior this plan specifies; do not spend time recovering the branch.
 - **Payload:** the outbox already supports `custom_emoji_document_id` (`bridge/telegram_relay.py`), so no transport change is needed. The payload literal must stay schema-compatible with `_build_reaction_payload`.
 - **Do not route ticks through `find_best_emoji`.** It uses cosine similarity plus `_softmax_sample` at a temperature — deliberately random among top-K. Correct for "pick a feeling", wrong for "this is tick 4".
@@ -209,7 +211,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 ### Error State Rendering
 
 - Terminal error must win the slot and stay. A tick must never overwrite a completed or errored session's reaction.
-- `REACTION_ERROR` is pinned to 🤔 — see Open Questions, this collides with the proposed arc.
+- `REACTION_ERROR` is pinned to 🤔, which is why the fallback arc avoids that glyph (Resolved Question 4) — a healthy session must never wear the error face.
 
 ## Test Impact
 
@@ -316,8 +318,8 @@ No agent integration required — this is a bridge-internal change. The watchdog
 - Tests first: terminal-wins and no-flicker are the highest-value assertions in this plan.
 
 ### 2. Land the reaction constants
-- Write the reaction constants fresh in `bridge/response.py` (the `wip/session-heartbeat-ticker` draft is gone — see Technical Approach).
-- **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses 👀 or 🤔 stops the bridge from starting. The arc is a sequence, not a constant registry entry.
+- Write the reaction constants fresh in `bridge/response.py` (the `wip/session-heartbeat-ticker` draft is gone — see Technical Approach): the pinned digit table, the fallback arc (👀 then alternating 🥱/👨‍💻 — see Resolved Question 4), `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and a `heartbeat_reaction(tick)` that raises past the ceiling.
+- **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses an already-registered glyph (👀, 🤔, ✍, ⚠) stops the bridge from starting. The arc is a sequence, not a constant registry entry.
 - Add a test asserting the arc is disjoint from `_reaction_constants()` values, so a future edit cannot reintroduce the import-time crash.
 
 ### 3. Rewrite the watchdog path
@@ -377,12 +379,14 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 ## Resolved Questions
 
-All three questions from the first draft are decided. Kept here rather than deleted, because each rules out an approach a future reader would otherwise re-propose.
+All four questions are decided. Kept here rather than deleted, because each rules out an approach a future reader would otherwise re-propose.
 
 1. **Counter semantics — DECIDED (owner, 2026-08-10).** The counter asserts watchdog attention; the number is duration; it makes no stall claim; the ceiling forces a PM progress message at minimum every 100 minutes. Full statement in the Problem section. This supersedes both the "advancing liveness signal" framing of the first draft and the critique's "gated duration" counter-proposal — no evidence-freshness gating is needed, because the counter never infers session state.
 2. **Scope — DECIDED (owner, 2026-08-10).** Kept whole, appetite raised to Large. Not split into a separate reaction-slot-ownership issue: precedence is a prerequisite for the counter, and shipping the counter without it produces exactly the flicker the plan exists to avoid.
 3. **Anchor — DECIDED, follows from (1).** Anchor is counter start (session start, re-anchored at each forced progress message). Pure duration. The transcript-mtime / `updated_at` / turn-transition debate is moot: with no liveness inference there is no mirage to defend against.
 
+4. **Fallback arc glyph — DECIDED 2026-08-17.** The arc is **👀 then alternating 🥱/👨‍💻**. The original 🤔 is dropped: it is `REACTION_ERROR`'s pinned glyph (`bridge/response.py:143`), so in fallback mode every odd tick would show the system's "error" face on a healthy session. 🥱 is in `VALIDATED_REACTIONS` (`response.py:68`), unclaimed by any constant, and reads as honest elapsed time. There is no crash risk on either choice — the arc stays out of `_reaction_constants()` per Task 2, and the disjointness test enforces that.
+
 ## Open Questions
 
-1. **Fallback arc glyph — one open call, low stakes.** The specified arc is 👀 then alternating 🤔/👨‍💻. Two facts, now verified: registering any arc glyph in `_reaction_constants()` raises `ImportError` at import, which Task 2 avoids by keeping the arc out of the registry entirely — so **there is no crash risk either way**. What remains is cosmetic: 🤔 is `REACTION_ERROR`'s pinned glyph, so in fallback mode (digits unavailable) every odd tick shows the system's "error" face. The specified arc is retained as-is pending a call, since the collision is visible only in a degraded mode that a Premium account rarely enters. Swapping 🤔 → 🥱 or 😴 removes the ambiguity and reads as honest elapsed time; both are in `VALIDATED_REACTIONS` and unclaimed. Builder may proceed with the specified arc; this is reversible in one line.
+None — all four questions above are decided. The plan is ready for critique.
