@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
+revision_applied: true
+revision_applied_at: 2026-08-17T05:20:13Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -369,7 +371,8 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       time, not from a stale detection-time index) is still real: the regex loop mutates
       `new_text` across iterations. Rewrite it with two regex fixes where the first shortens
       the text ahead of the second's match.
-- [ ] `TestExistenceInvariant` (`:830-1030`), eleven cases at `:841,856,861,876,892,917,938,961,985`
+- [ ] `TestExistenceInvariant` (`:830-1030`), eleven `_apply_fixes_to_file` call sites at
+      `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016`
       — REPLACE: each drives `_apply_fixes_to_file` with a literal `fixes` list. Re-express on
       the regex channel. **This is not a mechanical `re.compile(re.escape(old))` swap** — see
       Rabbit Holes. `test_regex_channel_is_also_guarded` (`:994`) is already the correct shape
@@ -381,7 +384,11 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       "under one regex arm" per its own docstring, but passes the literal arg positionally.
       Re-point at the new signature. Its corpus baseline must not change.
 - [ ] `TestLineDeleteSentinel` (`:1152-1185`) — DELETE: the entire class tests the `new == ""`
-      sentinel, which is being removed.
+      sentinel. **Note what this deletion means:** these are passing tests covering working
+      behavior, not tests of a defect. They go because the behavior goes, by the human's scope
+      decision (Risk 1 / No-Gos), not because they were ever wrong. Deleting them is the
+      correct move under NO LEGACY CODE TOLERANCE once the sentinel has no producer; do not
+      preserve them in adapted form.
 - [ ] `TestAuditSubstrate` patches at `:1120,1123` and `:1260,1263`
       (`patch.object(docs_auditor, "_detect_renamed_symbol_fixes"/"_detect_renamed_link_fixes")`)
       — UPDATE: remove the patches; the symbols no longer exist and `patch.object` will raise.
@@ -506,7 +513,20 @@ functions that do not exist — the exact failure this auditor exists to catch.
 **Mitigation:** A `## Verification` anti-criterion greps the whole repo (excluding
 `docs/plans/`) for each deleted symbol name and requires zero matches. Note the
 `feedback_grep_anticriterion_counts_comments` lesson: the plan's own text quotes these symbol
-names, so the grep must exclude `docs/plans/` or it fails on this document.
+names, so the grep must exclude `docs/plans/` — including `docs/plans/completed/` — or it fails
+on this document. Three mechanical requirements, each of which broke the previous draft's rows:
+
+1. **Quote the globs.** This shell is zsh; a bare `--include=*.py` is glob-expanded by the
+   shell and aborts with `no matches found` before `grep` ever runs. Write `--include="*.py"`.
+2. **Anchor the exclusion to grep's real output.** `grep -r` against `.` emits bare relative
+   paths (`docs/plans/foo.md`), never `./docs/plans/foo.md`, so an exclusion regex anchored at
+   `^./docs/plans/` matches nothing. Verified live on 2026-08-17: the previous draft's "Follow
+   cap gone" pipeline returned a nonzero count on an untouched tree, i.e. the safety net was
+   permanently inert. Anchor at `^docs/plans/`.
+3. **Do not read these rows by exit code alone.** `grep -c` and `grep -vc` exit **1** when the
+   count is zero, so an exit-code-driven harness reads every "expected 0" row as a failure.
+   Each row is therefore wrapped as `[ "$(... | grep -vc '^docs/plans/')" = 0 ]`, whose exit
+   code is 0 exactly when the count is 0.
 
 ### Risk 5: Coordination collision with `docs/plans/docs-auditor-review-gate.md` (#2739)
 **Impact:** Both plans edit `reflections/docs_auditor.py`. If #2739 builds first or
@@ -535,9 +555,20 @@ it while leaving it intact is the required outcome.
   out of #2739 specifically to keep that work scoped. No review gate, dry-run default, or
   human-approval step is added to `audit()` here.
 - Rebuilding rename detection correctly. Not deferred — **decided against**, by the human on
-  2026-08-17 and on the evidence in the issue: the channel has no correct-output path for any
-  input, and a rebuild reintroduces an automated-write class whose sibling already produced a
-  bad commit on `main`. Nothing else is deferred; every remaining item is in scope.
+  2026-08-17 and on the evidence in the issue: no rename *fix* the channel proposes can be
+  correct, and a rebuild reintroduces an automated-write class whose sibling already produced a
+  bad commit on `main`.
+- **Preserving README index-line self-healing in any reduced form.** `_detect_readme_broken_entries`'
+  `else` arm works today. Keeping it — by stripping only the rename branch and de-indenting the
+  `fixes.append((line, ""))` out of the `else` — is a real, cheap option and is **ruled out** by
+  the human on 2026-08-17. The auditor is not to delete lines from a human's index file
+  unreviewed. Accepted consequence: broken README `.md` index entries lose both repair and
+  reporting (Risk 1). Do not reintroduce it under any name.
+- **Widening `_detect_deleted_target_issues` to cover `.md` link targets** so it would backstop
+  the lost README arm. Tempting once Risk 1's disjoint-pattern table is read, but it is a
+  detector-pattern widening ruled unchanged in #2759 and it spends the per-run issue cap. It
+  belongs in the follow-up issue Risk 1 requires, not in this PR.
+- Nothing else is deferred; every remaining item is in scope.
 
 ## Update System
 
@@ -611,6 +642,10 @@ that read `fixes_withheld` need no code change.
       `fixes` list (which carries the `new == ""` line-delete sentinel)". No such list exists.
 - [ ] `_detect_deleted_target_issues` comment at `:1052` — restate the narrow-pattern rationale
       standalone, without the `_detect_renamed_symbol_fixes` cross-reference.
+- [ ] `_detect_deleted_target_issues` docstring at `:1041` — currently reads "File issues for
+      references to deleted **(non-renamed)** targets". That qualifier *is* the `:1076`
+      suppression this plan removes. Drop it. No pre-existing Verification row covered in-source
+      docstrings; the "Reporter docstring un-blinded" row was added for exactly this.
 
 ### Test Index
 - [ ] `tests/README.md:272` — recount `test_docs_auditor_substrate.py` cases.
@@ -627,8 +662,15 @@ that read `fixes_withheld` need no code change.
 - [ ] Every rewritten `TestExistenceInvariant` case was demonstrated red (with
       `_absent_new_path_refs` neutered) before being accepted green, with the red output pasted
       into the PR description.
-- [ ] The dry-run finding-count delta from removing the `:1076` suppression is measured and
-      recorded in the PR description.
+- [ ] The un-blinding delta is measured by summing `len(_detect_deleted_target_issues(...))`
+      over the `NEIGHBORHOOD_CAP`-bounded file list on both `main` and the branch — **not** by
+      reading `audit()`'s `issues_filed`, which is structurally 0 in dry-run — and the number
+      plus the Risk 3 gate decision are recorded in the PR description.
+- [ ] The PR body states plainly that broken README `.md` index entries lose both automated
+      repair and automated reporting (Risk 1), and a follow-up issue for the `.md` reporting
+      gap has been filed.
+- [ ] `_detect_deleted_target_issues`' docstring no longer carries the `(non-renamed)`
+      qualifier, which encoded the removed suppression.
 - [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] Lint and format clean
@@ -676,7 +718,12 @@ that read `fixes_withheld` need no code change.
 - Delete `GIT_LOG_FOLLOW_CAP`, `_RENAME_QUERY_COUNT`, `_git_log_follow_renames`,
   `_detect_renamed_link_fixes`, `_detect_renamed_symbol_fixes`, `_detect_readme_broken_entries`.
 - Delete the `:1076` `renames`/`continue` suppression in `_detect_deleted_target_issues`;
-  restate the `:1052` narrow-pattern comment standalone.
+  restate the `:1052` narrow-pattern comment standalone; drop the `(non-renamed)` qualifier
+  from its `:1041` docstring.
+- Deleting `_detect_readme_broken_entries` includes its working `else` arm (`:501-502`).
+  **Do not "preserve" it** by de-indenting `fixes.append((line, ""))` out of the `else` — that
+  is explicitly ruled out in No-Gos and would keep the literal channel alive, invalidating the
+  collapse below.
 - Delete the `global _RENAME_QUERY_COUNT` reset in `audit()`. **Leave
   `_BASENAME_INDEX_CACHE.clear()` intact.**
 - Delete the README/else detector branches in the audit loop; remove the `fixes` local.
@@ -692,16 +739,27 @@ that read `fixes_withheld` need no code change.
 - **Assigned To**: `auditor-deletion-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Run `audit(scope_mode="rotation", apply_mode="dry-run")` against a representative primary
-  path on both `main` and the branch; record the `issues_filed` / finding-count delta.
-- Write the numbers into the PR description. A large delta is expected and correct.
+- **Do not use `audit()`'s return value.** `issues_filed` is gated behind `apply_mode ==
+  "apply"` (`:1456`) and `_ok_result` exposes no findings list, so a dry-run delta is
+  structurally 0 vs 0. See Risk 3.
+- Write a throwaway measurement script (scratchpad, not committed) that: resolves the same
+  file list `audit()` walks via `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`,
+  reads each file's content, calls `_detect_deleted_target_issues(path, content, root)`
+  directly, and sums `len(...)`. It is a pure function with no filing side effect.
+- Run it against a checkout of `main` and against the branch. The difference is the delta.
+- **Never run with `apply_mode="apply"`** to force a nonzero `issues_filed` — that files real
+  GitHub issues, which is the flood being bounded.
+- Apply Risk 3's gate: if the delta exceeds **10 additional findings**, split the `:1076`
+  suppression removal out of this PR and sequence it behind #2739. Record the measured number
+  and the gate decision in the PR description either way.
 
 ### 3. Migrate the tests
 - **Task ID**: build-test-migration
 - **Depends On**: build-delete-channel
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`
 - **Informed By**: the Rabbit Holes entry on path-token suppression — a naive
-  `re.compile(re.escape(path))` rewrite produces vacuous green tests
+  `re.compile(re.escape(path))` rewrite produces vacuous green tests. Eleven call sites, at
+  `:841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016`.
 - **Assigned To**: `auditor-test-migrator`
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -726,7 +784,12 @@ that read `fixes_withheld` need no code change.
 - Run every `## Verification` row.
 - Confirm each rewritten existence-invariant case has a recorded red-state proof.
 - Confirm `_BASENAME_INDEX_CACHE.clear()` survives in `audit()`.
-- Confirm the dry-run delta is recorded.
+- Confirm the un-blinding delta was measured by direct `_detect_deleted_target_issues` summation
+  (not `audit()`'s `issues_filed`) and that Risk 3's threshold gate was evaluated and recorded.
+- Confirm the PR body carries Risk 1's disclosure (README `.md` entries lose repair *and*
+  reporting) and that the follow-up issue for the `.md` reporting gap exists.
+- Confirm no reduced-form README line-delete survives: `_apply_fixes_to_file` must have no
+  literal `fixes` parameter at all.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -753,11 +816,12 @@ that read `fixes_withheld` need no code change.
 | Tests pass | `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Rename query gone | `grep -rn "_git_log_follow_renames" --include=*.py --include=*.md . \| grep -vc "^./docs/plans/"` | match count == 0 |
-| Link detector gone | `grep -rn "_detect_renamed_link_fixes" --include=*.py --include=*.md . \| grep -vc "^./docs/plans/"` | match count == 0 |
-| Symbol detector gone | `grep -rn "_detect_renamed_symbol_fixes" --include=*.py --include=*.md . \| grep -vc "^./docs/plans/"` | match count == 0 |
-| README detector gone | `grep -rn "_detect_readme_broken_entries" --include=*.py --include=*.md . \| grep -vc "^./docs/plans/"` | match count == 0 |
-| Follow cap gone | `grep -rn "GIT_LOG_FOLLOW_CAP\|_RENAME_QUERY_COUNT" --include=*.py --include=*.md . \| grep -vc "^./docs/plans/"` | match count == 0 |
+| Rename query gone | `[ "$(grep -rn "_git_log_follow_renames" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Link detector gone | `[ "$(grep -rn "_detect_renamed_link_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Symbol detector gone | `[ "$(grep -rn "_detect_renamed_symbol_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| README detector gone | `[ "$(grep -rn "_detect_readme_broken_entries" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Follow cap gone | `[ "$(grep -rn "GIT_LOG_FOLLOW_CAP\|_RENAME_QUERY_COUNT" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Reporter docstring un-blinded | `grep -c "(non-renamed)" reflections/docs_auditor.py` | match count == 0 |
 | Literal channel gone | `grep -c 'new == ""' reflections/docs_auditor.py` | match count == 0 |
 | Reporter is subprocess-free | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess\|_git_log"` | match count == 0 |
 | Basename cache reset survives | `grep -c "_BASENAME_INDEX_CACHE.clear()" reflections/docs_auditor.py` | output > 0 |
@@ -767,14 +831,14 @@ that read `fixes_withheld` need no code change.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; History & Consistency | The plan's central premise — the channel "cannot produce a correct output for any input" — is false for `_detect_readme_broken_entries`. Its `else` arm (`reflections/docs_auditor.py:501-502`) never uses the rename query: when `_git_log_follow_renames` returns nothing it emits `(line, "")`, deleting a README index line whose target genuinely no longer exists. That arm is reachable, applies cleanly (`_absent_new_path_refs("")` yields no refs, so the existence invariant never rejects it), and has live coverage in `TestLineDeleteSentinel` (`tests/unit/test_docs_auditor_substrate.py:1152-1185`). The plan deletes working README self-healing with no mention in Risks or No-Gos. The Problem section, the Freshness Check row for `:495`, and the Test Impact entry for `TestLineDeleteSentinel` contradict each other on this point. | pending | Minimal preserving edit inside `_detect_readme_broken_entries`: delete `renames = _git_log_follow_renames(str(rel), repo_root)`, the `if renames:` test and its `fixes.append((target, new_target))`, then de-indent `fixes.append((line, ""))` out of the `else`. This keeps the literal `fixes` channel and the `new == ""` sentinel alive, which invalidates Technical Approach step 2 and the whole eleven-case `TestExistenceInvariant` migration — both are justified solely by "step 2's `fixes` list has no producer". |
-| BLOCKER | Risk & Robustness | Task 2 ("Measure the un-blinding delta"), Risk 2's only quantitative mitigation, and Success Criterion 5 all rest on a measurement that cannot produce a number. `audit()` gates issue filing behind `if apply_mode == "apply" and scope_mode == "rotation":` (`reflections/docs_auditor.py:1456`), so under the prescribed `apply_mode="dry-run"` the returned `issues_filed` is always `0` on both sides. `_ok_result` (`:117,134`) exposes no findings list, so the `issue_findings` built at `:1444` are discarded before any caller sees them. The delta is structurally 0 vs 0 — a false green on the control meant to bound the issue-tracker flood. | pending | Respecify Task 2 to call `_detect_deleted_target_issues(doc_path, content, repo_root) -> list[dict]` directly over the same `NEIGHBORHOOD_CAP`-bounded file list `audit()` walks, summing `len(...)` per side. It is a pure function over already-read content. Do NOT switch to `apply_mode="apply"` to make `issues_filed` nonzero — that files real GitHub issues, which is exactly the flood Risk 2 exists to bound. |
-| BLOCKER | History & Consistency | A second Ready plan for this same issue exists and the Freshness Check's "Active plans overlapping this area" does not mention it: `docs/plans/rename-detection-docs-auditor.md` (`appetite: Small`, same `tracking:` URL for #2741), committed as `92cd46ae9` 91 seconds before this plan's finalize commit `fe32898d2`. Two Ready plans claim one issue, and they disagree on scope — the sibling records "losing README broken-entry line deletion" as its Risk 1, the exact regression this plan omits. `find_plan_path(2741)` currently resolves to this document, but that resolution is order-dependent and `/do-build`, `/do-docs`, and the Step 5.5 findings-table write all key off it. | pending | Delete or retire one document on `main`, then re-verify with `.venv/bin/python -c "from tools.lane_identity import find_plan_path; print(find_plan_path(2741))"`. `find_plan_path` matches `tracking:` frontmatter only and does not read `status:`, so marking the loser `status: Superseded` does not remove the ambiguity — the `tracking:` line itself must go. |
-| CONCERN | Risk & Robustness | Risk 3's only mitigation is the repo-wide symbol-absence anti-criteria, and none of those rows can run. Two independent defects: the shell is zsh, where the unquoted `--include=*.py` in five rows aborts with `no matches found` before grep executes; and `grep -r` against `.` emits bare paths (`docs/plans/foo.md`), so the exclusion regex `^./docs/plans/` never matches. Verified live — the "Follow cap gone" pipeline returns 25, not 0, on a tree where the deletion has not happened. The doc-sweep safety net fails permanently regardless of builder correctness. | pending | Quote the globs and anchor to grep's real output: `grep -rn "SYMBOL" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/"`. Note `grep -c` / `grep -vc` exit **1** when the count is 0, so an exit-code-driven harness reads every "expected 0" row as a failure — wrap as `[ "$(... \| grep -vc '^docs/plans/')" = 0 ]`. `docs/plans/completed/` and the sibling `docs/plans/rename-detection-docs-auditor.md` also carry these symbol names and must fall inside the exclusion. |
-| CONCERN | Scope & Value | Nearly all of this plan's cost and its self-declared worst risk come from one optional scope decision resting on the falsified premise above. The issue asks for deletion of the `git log --follow` query and its rename arms — a few dozen lines. The `_apply_fixes_to_file` signature collapse is what drags in the eleven-case `TestExistenceInvariant` rewrite that Appetite calls the cost centre and Risk 1 calls "the worst outcome available from this change". | pending | Drop Technical Approach step 2 and Task 3 bullets 3-5; keep `_apply_fixes_to_file(path, repo_root, fixes, regex_fixes=None)` and `TestLineDeleteSentinel` untouched. Remaining test work becomes mechanical: delete `TestGitLogFollowCap` and `TestRenamedSymbolFixesDegenerate`, remove the `_RENAME_QUERY_COUNT` fixture lines at `tests/unit/test_docs_auditor_substrate.py:55,57`, and drop the `patch.object` calls naming deleted symbols — no vacuous-green failure mode. |
-| CONCERN | History & Consistency | "Why Previous Fixes Failed" diagnoses the root cause as "hardening downstream of a defective producer" and concludes "delete the producer." The producer is not uniformly defective, so applying that lesson wholesale mirrors PR #2728's own error: #2728 generalized a query defect into a target-selection guard; this plan generalizes the same query defect into a whole-channel deletion. Both fail to localize the defect boundary. | pending | Narrow the stated root cause to the `git log --follow` query and enumerate per-arm dependence. The split is visible at the call sites: `:441` and `:465` consume `renames[0][1]` and are wholly rename-dependent; `:495` consumes `renames` only as a branch condition and its `else` arm is not; `:1076` consumes it as a suppression and is the arm the plan is already right to un-blind. |
-| CONCERN | Scope & Value | The one user-facing change — `_detect_deleted_target_issues` filing issues it previously suppressed — ships with no measured bound, because the sizing measurement cannot run. None of Risk 2's three controls bounds steady-state volume: `NEIGHBORHOOD_CAP` bounds files per run, the per-run cap at `:1455` bounds filings to 5 per rotation, and `_open_issue_exists` dedupes against **open** issues only, so a finding closed without fixing the doc is re-filed later. Rotation repeats, so a backlog drains at 5 issues per run indefinitely rather than as a one-time surge. | pending | Make the corrected delta a gate, not a report line: if the counted finding delta exceeds a stated threshold, land the un-blinding behind #2739's review gate instead of ahead of it. The open-only dedup semantics are documented at `reflections/docs_auditor.py:1439-1441` and flow through `_open_issue_exists` (`:1169`) via `_file_issue_if_new` (`:1253`) on the rotation path too. |
-| NIT | Scope & Value | Test Impact enumerates "eleven cases at `:841,856,861,876,892,917,938,961,985`" — nine line numbers for eleven cases. The remaining `_apply_fixes_to_file` call sites in `TestExistenceInvariant` are at `:1002` and `:1016`. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness; History & Consistency | The plan's central premise — the channel "cannot produce a correct output for any input" — is false for `_detect_readme_broken_entries`. Its `else` arm (`reflections/docs_auditor.py:501-502`) never uses the rename query: when `_git_log_follow_renames` returns nothing it emits `(line, "")`, deleting a README index line whose target genuinely no longer exists. That arm is reachable, applies cleanly (`_absent_new_path_refs("")` yields no refs, so the existence invariant never rejects it), and has live coverage in `TestLineDeleteSentinel` (`tests/unit/test_docs_auditor_substrate.py:1152-1185`). The plan deletes working README self-healing with no mention in Risks or No-Gos. The Problem section, the Freshness Check row for `:495`, and the Test Impact entry for `TestLineDeleteSentinel` contradict each other on this point. | **RESOLVED — premise restated, scope stands.** Problem now carries a per-call-site table naming `:501-502` as working code; the `else` arm's deletion is reclassified as an approved policy call, not a dead-code removal. Freshness Check `:495` row reconciled. New **Risk 1** discloses the loss, with the disjoint-pattern evidence (`.py`-backtick vs `.md`-link) proving `_detect_deleted_target_issues` does **not** backstop it. New No-Go forbids the reduced-form preservation. Test Impact's `TestLineDeleteSentinel` row now states it deletes working coverage by decision. Human approved deleting the whole detector 2026-08-17 — scope unchanged. | Minimal preserving edit inside `_detect_readme_broken_entries`: delete `renames = _git_log_follow_renames(str(rel), repo_root)`, the `if renames:` test and its `fixes.append((target, new_target))`, then de-indent `fixes.append((line, ""))` out of the `else`. This keeps the literal `fixes` channel and the `new == ""` sentinel alive, which invalidates Technical Approach step 2 and the whole eleven-case `TestExistenceInvariant` migration — both are justified solely by "step 2's `fixes` list has no producer". |
+| BLOCKER | Risk & Robustness | Task 2 ("Measure the un-blinding delta"), Risk 2's only quantitative mitigation, and Success Criterion 5 all rest on a measurement that cannot produce a number. `audit()` gates issue filing behind `if apply_mode == "apply" and scope_mode == "rotation":` (`reflections/docs_auditor.py:1456`), so under the prescribed `apply_mode="dry-run"` the returned `issues_filed` is always `0` on both sides. `_ok_result` (`:117,134`) exposes no findings list, so the `issue_findings` built at `:1444` are discarded before any caller sees them. The delta is structurally 0 vs 0 — a false green on the control meant to bound the issue-tracker flood. | **RESOLVED.** Task 2 respecified to sum `len(_detect_deleted_target_issues(path, content, root))` over the `_resolve_neighborhood(..., cap=NEIGHBORHOOD_CAP)` file list on each side, via a throwaway scratchpad script. `audit()`'s `issues_filed` is explicitly forbidden as the measurement source, and `apply_mode="apply"` is explicitly forbidden as a workaround. Success Criterion rewritten to match. | Respecify Task 2 to call `_detect_deleted_target_issues(doc_path, content, repo_root) -> list[dict]` directly over the same `NEIGHBORHOOD_CAP`-bounded file list `audit()` walks, summing `len(...)` per side. It is a pure function over already-read content. Do NOT switch to `apply_mode="apply"` to make `issues_filed` nonzero — that files real GitHub issues, which is exactly the flood Risk 2 exists to bound. |
+| BLOCKER | History & Consistency | A second Ready plan for this same issue exists and the Freshness Check's "Active plans overlapping this area" does not mention it: `docs/plans/rename-detection-docs-auditor.md` (`appetite: Small`, same `tracking:` URL for #2741), committed as `92cd46ae9` 91 seconds before this plan's finalize commit `fe32898d2`. Two Ready plans claim one issue, and they disagree on scope — the sibling records "losing README broken-entry line deletion" as its Risk 1, the exact regression this plan omits. `find_plan_path(2741)` currently resolves to this document, but that resolution is order-dependent and `/do-build`, `/do-docs`, and the Step 5.5 findings-table write all key off it. | **RESOLVED by deletion.** Supervisor ruling: the sibling was written by a concurrent unsupervised writer (`cc4cc1f4d`, `92cd46ae9`) one minute before this plan; this lane holds the issue lock. `git rm docs/plans/rename-detection-docs-auditor.md` committed on `main` as `1f15d3756`. Re-verified: `find_plan_path(2741)` returns exactly `docs/plans/docs-auditor-rename-detection.md`. Its Risk 1 substance is salvaged into this plan's Problem table, Risk 1, and No-Gos — strengthened with the disjoint-pattern evidence the sibling lacked. Its critique's `(non-renamed)` docstring finding is salvaged into Documentation and a new Verification row. Overlap note added to Freshness Check. | Delete or retire one document on `main`, then re-verify with `.venv/bin/python -c "from tools.lane_identity import find_plan_path; print(find_plan_path(2741))"`. `find_plan_path` matches `tracking:` frontmatter only and does not read `status:`, so marking the loser `status: Superseded` does not remove the ambiguity — the `tracking:` line itself must go. |
+| CONCERN | Risk & Robustness | Risk 3's only mitigation is the repo-wide symbol-absence anti-criteria, and none of those rows can run. Two independent defects: the shell is zsh, where the unquoted `--include=*.py` in five rows aborts with `no matches found` before grep executes; and `grep -r` against `.` emits bare paths (`docs/plans/foo.md`), so the exclusion regex `^./docs/plans/` never matches. Verified live — the "Follow cap gone" pipeline returns 25, not 0, on a tree where the deletion has not happened. The doc-sweep safety net fails permanently regardless of builder correctness. | **RESOLVED.** All five rows rewritten as `[ "$(grep -rn "SYM" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` — quoted globs, `^docs/plans/` anchor, exit-code-safe wrapper. Risk 4 now enumerates all three mechanical requirements with the live 2026-08-17 falsification recorded. `docs/plans/completed/` falls inside the `^docs/plans/` prefix; the sibling file no longer exists. | Quote the globs and anchor to grep's real output: `grep -rn "SYMBOL" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/"`. Note `grep -c` / `grep -vc` exit **1** when the count is 0, so an exit-code-driven harness reads every "expected 0" row as a failure — wrap as `[ "$(... \| grep -vc '^docs/plans/')" = 0 ]`. `docs/plans/completed/` and the sibling `docs/plans/rename-detection-docs-auditor.md` also carry these symbol names and must fall inside the exclusion. |
+| CONCERN | Scope & Value | Nearly all of this plan's cost and its self-declared worst risk come from one optional scope decision resting on the falsified premise above. The issue asks for deletion of the `git log --follow` query and its rename arms — a few dozen lines. The `_apply_fixes_to_file` signature collapse is what drags in the eleven-case `TestExistenceInvariant` rewrite that Appetite calls the cost centre and Risk 1 calls "the worst outcome available from this change". | **ACKNOWLEDGED — scope stands, justification replaced.** The narrowing is declined: the human approved deleting `_detect_readme_broken_entries` outright on 2026-08-17, so all three literal-fix detectors go and the literal `fixes` channel has zero producers repo-wide. That producer count — not the falsified "cannot produce correct output" premise — is the NO LEGACY CODE TOLERANCE argument, and it is now stated as such in Data Flow and Technical Approach. Retaining a reduced-form README arm is a new explicit No-Go. Risk 2 (formerly Risk 1) keeps the demonstrated-red mandate as the control on the vacuous-green failure mode. | Drop Technical Approach step 2 and Task 3 bullets 3-5; keep `_apply_fixes_to_file(path, repo_root, fixes, regex_fixes=None)` and `TestLineDeleteSentinel` untouched. Remaining test work becomes mechanical: delete `TestGitLogFollowCap` and `TestRenamedSymbolFixesDegenerate`, remove the `_RENAME_QUERY_COUNT` fixture lines at `tests/unit/test_docs_auditor_substrate.py:55,57`, and drop the `patch.object` calls naming deleted symbols — no vacuous-green failure mode. |
+| CONCERN | History & Consistency | "Why Previous Fixes Failed" diagnoses the root cause as "hardening downstream of a defective producer" and concludes "delete the producer." The producer is not uniformly defective, so applying that lesson wholesale mirrors PR #2728's own error: #2728 generalized a query defect into a target-selection guard; this plan generalizes the same query defect into a whole-channel deletion. Both fail to localize the defect boundary. | **RESOLVED.** "Why Previous Fixes Failed" now states the root cause as the query direction only, and adds an explicit paragraph naming where this plan goes *beyond* the root cause and why that is a policy call rather than a deduction — with the same #2728-mirror argument the critic raised. The per-arm table is reproduced in Problem. | Narrow the stated root cause to the `git log --follow` query and enumerate per-arm dependence. The split is visible at the call sites: `:441` and `:465` consume `renames[0][1]` and are wholly rename-dependent; `:495` consumes `renames` only as a branch condition and its `else` arm is not; `:1076` consumes it as a suppression and is the arm the plan is already right to un-blind. |
+| CONCERN | Scope & Value | The one user-facing change — `_detect_deleted_target_issues` filing issues it previously suppressed — ships with no measured bound, because the sizing measurement cannot run. None of Risk 2's three controls bounds steady-state volume: `NEIGHBORHOOD_CAP` bounds files per run, the per-run cap at `:1455` bounds filings to 5 per rotation, and `_open_issue_exists` dedupes against **open** issues only, so a finding closed without fixing the doc is re-filed later. Rotation repeats, so a backlog drains at 5 issues per run indefinitely rather than as a one-time surge. | **RESOLVED.** Risk 3 now separates rate-bounding from volume-bounding, states that no control converges (open-only dedup re-files closed findings; rotation drains at 5/run indefinitely), and converts the corrected delta into a **gate**: >10 additional findings splits the `:1076` un-blinding out of this PR to sequence behind #2739. Threshold is marked provisional and tunable per `feedback_provisional_magic_numbers`. | Make the corrected delta a gate, not a report line: if the counted finding delta exceeds a stated threshold, land the un-blinding behind #2739's review gate instead of ahead of it. The open-only dedup semantics are documented at `reflections/docs_auditor.py:1439-1441` and flow through `_open_issue_exists` (`:1169`) via `_file_issue_if_new` (`:1253`) on the rotation path too. |
+| NIT | Scope & Value | Test Impact enumerates "eleven cases at `:841,856,861,876,892,917,938,961,985`" — nine line numbers for eleven cases. The remaining `_apply_fixes_to_file` call sites in `TestExistenceInvariant` are at `:1002` and `:1016`. | **RESOLVED** — all eleven enumerated in Test Impact and in Task 3's Informed By. | n/a (NIT) |
 
 ---
 
