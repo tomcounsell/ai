@@ -1,7 +1,7 @@
 """Pure-Python consensus rules for the multi-judge Review gate.
 
 This module is consumed by ``.claude/skills-global/do-pr-review/SKILL.md``
-when ``SDLC_REVIEW_JUDGES`` enables ≥2 judges. The parent skill collects per-judge
+when the repo addendum declares ≥2 judges. The parent skill collects per-judge
 dicts in memory, calls :func:`compute_consensus`, then makes a single
 ``record_verdict(... judges=[...], consensus=meta)`` call.
 

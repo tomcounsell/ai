@@ -232,8 +232,9 @@ If the PR modifies `bridge/`, `agent/`, or `worker/`, flag for restart-after-dep
 
 ## Multi-Judge Consensus
 
-This repo opts in to multi-judge consensus at the REVIEW stage by default
-(`SDLC_REVIEW_JUDGES=code-quality,risk`, `SDLC_REVIEW_K=2`). Reviewers should
+This repo runs multi-judge consensus at the REVIEW stage by default, with two
+judges: **`code-quality`** and **`risk`**. That roster is declared here and
+nowhere else — there is no environment variable for it. Reviewers should
 expect:
 
 - Two per-judge comments (`## Review (Judge code-quality):`, `## Review (Judge risk):`)
@@ -246,8 +247,8 @@ expect:
 - Cost containment: trivial PRs force the legacy single-judge path. A PR is
   trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
   docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
-  `pyproject.toml` only). Operators can also set `SDLC_REVIEW_JUDGES=none` or
-  `SDLC_REVIEW_K=1` as independent kill switches.
+  `pyproject.toml` only). This is the only cost control on this surface, and
+  it needs no operator action.
 
 Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-consensus.md).
 

@@ -91,24 +91,25 @@ record_verdict(
 
 ## Configuration
 
-Two env vars control the multi-judge surface; both default to safe values.
+**The judge roster is declared, not configured.** Two judges run on
+non-trivial PRs — `code-quality` and `risk` — declared in
+[`docs/sdlc/do-pr-review.md`](../sdlc/do-pr-review.md)'s Multi-Judge
+Consensus section, which the review skill reads at runtime. Changing the
+roster means editing that declaration: a reviewed, versioned change, visible
+to everyone, rather than an unversioned per-machine override that would
+silently halve review strength on one box.
 
-| Env var | Default | Purpose |
-|---|---|---|
-| `SDLC_REVIEW_JUDGES` | `code-quality,risk` | Comma-list of enabled judge IDs. Set to `none` or empty to use the legacy single-judge path. |
-| `SDLC_REVIEW_K` | `2` | K-of-N for consensus arithmetic. Auto-clamped to `min(SDLC_REVIEW_K, len(enabled_judges))`. |
+There is no env var for the roster or the judge count. The only env controls
+on this surface are the four cross-vendor toggles, documented in
+[Env vars (all provisional/tunable)](#env-vars-all-provisionaltunable) below.
 
 ### Cost containment
 
-Three independent layers limit cost:
-
-1. **Trivial-diff check**: PRs whose changed files are all docs
-   (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
-   `pyproject.toml` only) force the legacy single-judge path.
-2. **Per-judge disable**: `SDLC_REVIEW_JUDGES=code-quality` runs only the
-   code-quality judge, halving cost without losing K-of-N math entirely.
-3. **K kill switch**: `SDLC_REVIEW_K=1` reverts to legacy behavior even
-   if `SDLC_REVIEW_JUDGES` lists multiple.
+One layer, and it needs no operator action: **the trivial-diff check.** PRs
+whose changed files are all docs (`docs/**`, `**/*.md`) or all lockfile sync
+(`uv.lock` / `pyproject.toml` only) force the legacy single-judge path. It is
+automatic and per-PR, which is what makes it the right shape for this — cost
+scales with what a PR actually is, not with what someone remembered to export.
 
 ## Consensus rules
 
@@ -121,6 +122,13 @@ Two rules, implemented in `agent/sdlc_review_consensus.py`:
   human escalation, no fourth judge.
 - **`unanimous-approved`** (opt-in). Top-level `APPROVED` only if all K
   judges approved with zero blockers.
+
+**`_consensus.k` is a count, not a threshold.** `compute_consensus` takes
+`(judges, rule)` and nothing else; it assigns `k` and `n` the same value — the
+number of judges whose verdicts it aggregated. Neither rule consults a
+threshold: `any-blocker-wins` is 1-of-N by construction, and
+`unanimous-approved` is N-of-N. `K` throughout this document means "how many
+judges ran", never "how many must agree", and there is no K to tune.
 
 The `_consensus.tied` flag is `true` when judges disagreed (i.e. at least
 one judge approved AND at least one blocked). It is descriptive — the
