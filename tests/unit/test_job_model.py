@@ -909,6 +909,54 @@ class TestGuardedRepair:
             to_unix_ts(fresh.last_active_at), abs=1.0
         )
 
+    def test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs(
+        self, scratch_room_id, monkeypatch
+    ):
+        """Fail-open contract: a broken enumeration returns (0, 0) rather than
+        raising into repair_indexes(), and repair_indexes still reaches
+        backfill_open_expectations_index()."""
+
+        def boom(*args, **kwargs):
+            raise ConnectionError("redis is unhappy")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Job.query, "filter", boom)
+            assert Job.renormalize_last_active_scores() == (0, 0)
+
+        # repair_indexes half: only the score sweep's enumeration fails (the
+        # raising patch is scoped inside the real renormalize call, so the
+        # rebuild and backfill keep a working query); the backfill spy proves
+        # the guard let repair_indexes reach it, and the drifted flag proves
+        # the index actually got stamped.
+        job = Job.mint(scratch_room_id, "stamp me despite the sweep failing")
+        job.add_expectation("expectation A")
+        drifted = Job.query.get(id=job.id, room_id=scratch_room_id)
+        drifted.has_open_expectations = False
+        drifted.save(update_fields=["has_open_expectations"])
+
+        real_renormalize = Job.renormalize_last_active_scores
+
+        def failing_renormalize():
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(Job.query, "filter", boom)
+                return real_renormalize()
+
+        backfill_calls = []
+        real_backfill = Job.backfill_open_expectations_index
+
+        def spying_backfill():
+            backfill_calls.append(True)
+            return real_backfill()
+
+        monkeypatch.setattr(Job, "renormalize_last_active_scores", failing_renormalize)
+        monkeypatch.setattr(Job, "backfill_open_expectations_index", spying_backfill)
+
+        Job.repair_indexes()
+
+        assert backfill_calls == [True]
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.has_open_expectations is True
+
 
 class TestDriftCoverage:
     """Risk 3: drift detection must not silently narrow — Job registers."""

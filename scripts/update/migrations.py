@@ -1136,7 +1136,12 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     (92 Jobs / 0.03s full hydrate, 2026-08-17); the total count is logged
     each run.
 
-    Returns None on success, an error string if the enumeration itself fails.
+    Returns None on success; an error string only if the import/call path
+    itself fails. An enumeration failure *inside* the sweep (e.g. Redis
+    unreachable) is swallowed by ``renormalize_last_active_scores`` as
+    ``(0, 0)``: this migration logs a 0-scanned pass, returns None, and is
+    recorded applied. That is accepted — the daily ``Job.repair_indexes``
+    sweep is the retry/backstop that eventually repairs the scores.
     """
     try:
         import sys

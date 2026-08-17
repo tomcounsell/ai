@@ -692,7 +692,11 @@ class Job(Model):
         is negligible; past roughly 10,000 Jobs the full hydrate + one
         ``zscore`` round trip per row needs pipelining or a cursor.
 
-        Returns ``(scanned, repaired)``.
+        Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
+        the return when the enumeration itself fails (Redis down, popoto
+        decode blow-up) — the guard logs a WARNING and swallows the error so
+        :meth:`repair_indexes` still reaches
+        :meth:`backfill_open_expectations_index`.
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
