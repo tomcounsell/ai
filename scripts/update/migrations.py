@@ -1145,9 +1145,10 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
         from models.job import Job
 
         scanned, repaired = Job.renormalize_last_active_scores()
-        logger.info("[migration:backfill_job_last_active_scores] scanning %d Job(s)", scanned)
         logger.info(
-            "[migration:backfill_job_last_active_scores] repaired %d skewed score(s)",
+            "[migration:backfill_job_last_active_scores] "
+            "scanned %d Job(s), repaired %d skewed score(s)",
+            scanned,
             repaired,
         )
         return None

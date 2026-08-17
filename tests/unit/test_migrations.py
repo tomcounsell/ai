@@ -379,7 +379,7 @@ class TestBackfillJobLastActiveScores:
         assert POPOTO_REDIS_DB.zscore(partition, member) == pytest.approx(
             to_unix_ts(fresh.last_active_at), abs=1.0
         )
-        assert "scanning" in caplog.text, "the pass must log the population count"
+        assert "scanned 1 Job(s)" in caplog.text, "the pass must log the population count"
         assert "repaired 1 skewed score(s)" in caplog.text
 
     def test_second_pass_repairs_zero(self, scratch_room_id, tmp_path, caplog):

@@ -643,11 +643,12 @@ class Job(Model):
             # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
             # host the rebuild itself re-skews every recency score. Sweep the
             # scores back so the daily maintenance path is score-preserving.
-            _scanned, renormalized = cls.renormalize_last_active_scores()
+            scanned, renormalized = cls.renormalize_last_active_scores()
             if renormalized:
-                logger.warning(
-                    "[job] re-normalized %d recency score(s) skewed by the index rebuild",
+                logger.info(
+                    "[job] re-normalized %d of %d recency score(s) after the index rebuild",
                     renormalized,
+                    scanned,
                 )
             cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
@@ -684,13 +685,32 @@ class Job(Model):
         repaired score is inside tolerance next pass) and per-row failure
         tolerant (one bad row logs and the sweep continues).
 
+        Scale note: because :meth:`repair_indexes` calls this after every
+        daily rebuild, the uncursored full-population pass here is a DAILY
+        commitment against an immortal, unboundedly growing model — not a
+        one-shot migration cost. At the measured population (92 Jobs) that
+        is negligible; past roughly 10,000 Jobs the full hydrate + one
+        ``zscore`` round trip per row needs pipelining or a cursor.
+
         Returns ``(scanned, repaired)``.
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
         from bridge.utc import to_unix_ts
 
-        jobs = list(cls.query.filter())
+        # Maintenance path never raises: an enumeration failure (Redis down,
+        # popoto decode blow-up) logs and returns (0, 0) so repair_indexes
+        # still reaches backfill_open_expectations_index().
+        try:
+            jobs = list(cls.query.filter())
+        except Exception as e:  # noqa: BLE001 — maintenance path never raises
+            logger.warning(
+                "[job] score renormalization SKIPPED -- enumeration failed %s: %s",
+                type(e).__name__,
+                e,
+            )
+            return (0, 0)
+        logger.info("[job] renormalizing recency scores across %d Job(s)", len(jobs))
         repaired = 0
         for job in jobs:
             try:

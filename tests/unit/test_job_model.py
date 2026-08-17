@@ -24,6 +24,9 @@ from models.job import (
     mint_placeholder_goal,
 )
 
+# Spike-2's measured rebuild skew on a UTC+07 host: 7 hours in seconds.
+UTC_PLUS_7_REBUILD_SKEW_SECONDS = 25200.0
+
 
 @pytest.fixture
 def scratch_room_id():
@@ -894,7 +897,7 @@ class TestGuardedRepair:
         def skewing_rebuild():
             result = real_rebuild()
             true_score = POPOTO_REDIS_DB.zscore(partition, member)
-            POPOTO_REDIS_DB.zadd(partition, {member: true_score - 25200.0})
+            POPOTO_REDIS_DB.zadd(partition, {member: true_score - UTC_PLUS_7_REBUILD_SKEW_SECONDS})
             return result
 
         monkeypatch.setattr(Job, "rebuild_indexes", skewing_rebuild)
