@@ -30,11 +30,16 @@ vault source (``~/Desktop/Valor/reflections.yaml``), refreshed by
 the entry only to the in-repo copy is silently clobbered the next time that copy
 step runs, so registration for real means appending the entry to the *vault*
 file. The target is resolved via
-``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which
-prioritizes the vault over the config copy -- a builder who hardcoded the config
-copy would reproduce #1539's "looks wired, never lands" failure. This step runs
-BEFORE Step 1.66's vault->config copy (critique NIT) so the appended entry
-propagates into the per-machine ``config/reflections.yaml`` on the same cycle.
+``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which in
+the primary checkout -- where this module always runs, via the ``/update`` step
+-- picks the vault ahead of the config copy: that resolver's fourth,
+owning-checkout-fallback level (issue #2734) is only reached when the local
+config copy is absent, and in the primary checkout it is present. A builder who
+hardcoded the config copy would reproduce #1539's "looks wired, never lands"
+failure; see ``_resolve_target``'s docstring for the worktree-caller caveat this
+qualification exists to flag. This step runs BEFORE Step 1.66's vault->config
+copy (critique NIT) so the appended entry propagates into the per-machine
+``config/reflections.yaml`` on the same cycle.
 
 Guarded on (mirroring ``reflection_arm.py``):
   - the vault ``reflections.yaml`` existing (fresh machines with no vault copy
@@ -182,10 +187,36 @@ def _resolve_target() -> Path:
     """Resolve the registry file to write, prioritizing the vault (critique C6).
 
     Delegates to ``agent.reflection_scheduler._resolve_registry_path`` -- the
-    same vault-first resolver the scheduler reads at runtime -- so the entry
-    lands where the scheduler will actually look, not in the soon-clobbered
-    config copy. Imported lazily because the scheduler transitively imports
-    heavy models; the update step only needs it at call time.
+    same resolver the scheduler reads at runtime. That resolver gained a
+    fourth fallback level (issue #2734): when *this* checkout's
+    ``config/reflections.yaml`` is absent, it reads the owning checkout's copy
+    instead of the vault. C6 -- "the entry lands where the scheduler will
+    actually look, not in the soon-clobbered config copy" -- still holds for
+    every real caller of this function, but only because of a reachability
+    condition, not because the resolver always prefers the vault: the fourth
+    level is reached only when this checkout's local ``config/reflections.yaml``
+    is absent, which never holds in the **primary checkout**, where ``/update``
+    (and therefore this function) runs. There the vault branch is hit first,
+    exactly as C6 assumed.
+
+    That reachability condition is caller-specific, not resolver-enforced. A
+    hypothetical caller of this function running from a **worktree** under
+    ``VALOR_LAUNCHD=1`` -- where the local config copy is genuinely absent --
+    would have this function resolve to the *primary checkout's* install-time
+    ``config/reflections.yaml`` and write the registration there. That copy is
+    live scheduler input, so the write would silently succeed, but the next
+    ``/update`` overwrites it from the vault and the registration is lost with
+    no error. See Risk 3 in
+    ``docs/plans/reflection-registry-schedule-contract.md`` for why this is a
+    contained CONCERN rather than a blocker: no such caller exists today --
+    ``_this_machine_owns_valor`` fails closed and this module runs only as an
+    ``/update`` step in the primary checkout -- and the containment must not be
+    relaxed without first splitting this shared resolver into distinct read
+    and write functions (the ``[ORDERED]`` No-Go in that plan; a separate,
+    sequenced change, not done here).
+
+    Imported lazily because the scheduler transitively imports heavy models;
+    the update step only needs it at call time.
     """
     from agent.reflection_scheduler import _resolve_registry_path
 
