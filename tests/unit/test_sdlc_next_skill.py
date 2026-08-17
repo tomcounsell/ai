@@ -1368,3 +1368,138 @@ class TestLedgerDurabilityRecovery:
         result = sdlc_next_skill._recover_stage_states_from_durable_signals(9999)
 
         assert result == {}
+
+
+class TestConcernRoundCountReachesTheRouterThroughTheCLI:
+    """#2787 gate item 3: the `_meta` plumb, end-to-end through the real CLI.
+
+    Every other test in this feature calls ``decide_next_dispatch`` with a
+    hand-built ``meta`` dict, so all of them pass whether or not
+    ``_concern_round_count`` is actually projected. The production path is
+    ``sdlc-tool next-skill`` -> ``_resolve_enriched`` -> ``query_enriched``,
+    and ``query_enriched`` threads only ``("_verdicts", "_sdlc_dispatches")``
+    out of raw stage_states into ``stages``. A bare underscore key is dropped
+    on the floor. This is the ONLY test that fails if the counter loses its
+    ``_meta`` projection -- without it the feature is green everywhere and
+    inert in production.
+
+    Real ``PipelineLedger`` in the claimed Redis test db, real plan file, real
+    frontmatter parser, real ``query_enriched``, real ``main()``. Only the
+    ``gh`` network reads are stubbed.
+    """
+
+    TARGET_REPO = "test-2787/with-concerns-fixture"
+    ISSUE = 927871
+    T_VERDICT = "2026-08-17T02:00:00"
+    T_REVISION = "2026-08-17T03:00:00"  # postdates the verdict -> state S2
+
+    def _write_plan(self, root: Path) -> Path:
+        """Real git repo with the plan committed on main.
+
+        G8's stage-artifact verification is live and correct: an uncommitted
+        plan under a ``PLAN: completed`` marker really is unverified, and G8
+        re-dispatches /do-plan before the CRITIQUE rows are ever reached. The
+        fixture has to satisfy it or this test measures G8, not the plumb.
+        """
+        subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+        plan = root / "docs" / "plans" / "wc-2787-fixture.md"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "---\n"
+            "status: Ready\n"
+            f"tracking: https://github.com/{self.TARGET_REPO}/issues/{self.ISSUE}\n"
+            "revision_applied: true\n"
+            f"revision_applied_at: {self.T_REVISION}\n"
+            "---\n\n# Plan\n\nBody.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-C",
+                str(root),
+                "commit",
+                "-m",
+                "plan",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return plan
+
+    def _seed_ledger(self, concern_round_count: int, artifact_hash: str):
+        from agent.pipeline_ledger import PipelineLedger
+
+        ledger = PipelineLedger.get_or_create(self.TARGET_REPO, self.ISSUE)
+        ledger.stage_states_json = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "BUILD": "pending",
+                "_verdicts": {
+                    "CRITIQUE": {
+                        "verdict": "READY TO BUILD (WITH CONCERNS)",
+                        "recorded_at": self.T_VERDICT,
+                        "artifact_hash": artifact_hash,
+                    }
+                },
+                # The raw underscore key, exactly as record_verdict writes it.
+                "_concern_round_count": concern_round_count,
+            }
+        )
+        ledger.save()
+        return ledger
+
+    def _run_cli(self, concern_round_count, tmp_path, monkeypatch, capsys) -> dict:
+        from tools.sdlc_verdict import compute_plan_body_hash
+
+        root = tmp_path / "target"
+        root.mkdir()
+        plan = self._write_plan(root)
+        # Matching hash so G5's cached-verdict branch is genuinely LIVE here:
+        # this exercises the with-concerns step-aside as well as the plumb.
+        artifact_hash = compute_plan_body_hash(plan)
+        assert artifact_hash, "fixture plan must hash"
+
+        monkeypatch.setenv("GH_REPO", self.TARGET_REPO)
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(root))
+
+        ledger = self._seed_ledger(concern_round_count, artifact_hash)
+        try:
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                rc = sdlc_next_skill.main(["--issue-number", str(self.ISSUE)])
+            assert rc == 0
+            return json.loads(capsys.readouterr().out)
+        finally:
+            # Scoped ORM delete of exactly what this test created.
+            ledger.delete()
+
+    def test_below_the_bound_the_cli_returns_do_plan_critique(self, tmp_path, monkeypatch, capsys):
+        """State S2 below the bound: the concern-closing revision is judged."""
+        out = self._run_cli(1, tmp_path, monkeypatch, capsys)
+        assert out.get("dispatched") is True, out
+        assert out["skill"] == "/do-plan-critique", out
+        assert out["row_id"] == "2b", out
+
+    def test_at_the_bound_the_cli_returns_do_build(self, tmp_path, monkeypatch, capsys):
+        """The projection-drop detector.
+
+        Below the bound and a DROPPED counter both read as ``0``, so only the
+        at-the-bound case can tell them apart: if ``_concern_round_count``
+        never reaches ``_meta``, the router sees ``0``, stays below the bound,
+        and answers ``/do-plan-critique`` here instead of ``/do-build`` --
+        an unbounded loop in production that every unit test misses.
+        """
+        from agent.pipeline_graph import MAX_CONCERN_RECRITIQUE_ROUNDS
+
+        out = self._run_cli(MAX_CONCERN_RECRITIQUE_ROUNDS, tmp_path, monkeypatch, capsys)
+        assert out.get("dispatched") is True, out
+        assert out["skill"] == "/do-build", out
+        assert out["row_id"] == "4c", out
+        assert "residual concerns accepted unreviewed" in out["reason"].lower(), out

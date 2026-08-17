@@ -23,6 +23,7 @@ Usage:
 """
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,25 @@ MAX_PATCH_CYCLES = 3
 # Maximum number of CRITIQUE -> PLAN cycles before escalating to human.
 # Prevents infinite plan revision loops when critique findings don't converge.
 MAX_CRITIQUE_CYCLES = 2
+
+# Maximum number of READY TO BUILD (with concerns) rounds before the concern-closing
+# revision is built on rather than re-critiqued (#2787). Counts *with-concerns rounds
+# on this lane* -- NEEDS REVISION / MAJOR REWORK rounds never consume it.
+#
+# Provisional and tunable: 3 is a judgement call, not a measurement. Every round runs
+# a full-depth war room, so each is expensive; 3 still admits two rounds of genuine
+# concern-closing after the first verdict. Revisit after five with-concerns lanes have
+# run -- if any hits the bound carrying concerns a fourth round would plausibly have
+# closed, raise it.
+#
+# Set to 0 as a kill switch: the latch then engages on every with-concerns verdict,
+# restoring exactly the pre-#2787 routing.
+#
+# The asymmetry that makes this safe (Risk 1): the counter only ever INCREMENTS, so
+# every round strictly tightens the bound. A count derived from `_sdlc_dispatches`
+# would instead SHRINK as entries age out past MAX_DISPATCH_HISTORY -- the re-arming
+# shape that made #1925/#1968 recur.
+MAX_CONCERN_RECRITIQUE_ROUNDS = int(os.getenv("MAX_CONCERN_RECRITIQUE_ROUNDS", "3"))
 
 # Canonical directed graph: (current_stage, outcome) -> next_stage
 # "success" = stage completed successfully, move forward

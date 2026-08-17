@@ -108,7 +108,7 @@ Detailed procedures for each step live in `WORKFLOW.md` (Steps 0-5.6) and
 `PR_AND_CLEANUP.md` (Steps 6-9) — load them at the phases the sub-file table names.
 
 1. **Resolve the plan path** using the Plan Resolution logic above; derive `{slug}` from the plan filename.
-2. **Read the plan** at `PLAN_PATH`.
+2. **Read the plan** at `PLAN_PATH`. If the pipeline's state substrate records that this build was reached by exhausting a critique bound, record the accepted residual concerns in the plan before building. The context file names how to read that condition and where the note goes; with no context file, skip.
 3. **Resume check (if the context file declares a pipeline state machine)** — load any existing build state for `{slug}`; if a prior stage is recorded, resume from it and skip completed stages. Otherwise treat this as a fresh build.
 4. **Freshness check (if the context file declares one)** — verify the plan has incorporated the latest tracking-issue comments. If stale, stop and report that `/do-plan` must run first. Generic default: skip.
 5. **Prerequisite validation (if the context file declares a checker, or the plan has a `## Prerequisites` section)** — run each prerequisite check command; if any fails, report and stop. No section ⇒ passes automatically.
