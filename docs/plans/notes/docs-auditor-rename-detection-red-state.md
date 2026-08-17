@@ -165,3 +165,36 @@ demonstrated-red transcripts required by Task 2 of
 It lives under `docs/plans/notes/` because that prefix is exempt from the issue-disposition
 commit hook and `find_plan_path` iterates `docs/plans/` non-recursively, so a `notes/`
 subdirectory cannot be mistaken for a rival plan for #2741.
+
+## Post-review patch re-proof (2026-08-17)
+
+The review's tech-debt finding 1 deleted `test_regex_channel_is_also_guarded` as
+redundant: it drove the identical fix pair `(re.compile(r"\breal\b"),
+"agent/ghost.py")` as `test_fix_introducing_absent_path_is_rejected_and_reported`
+and asserted a strict subset of its assertions. That case was one of the four
+mandated demonstrated-red cases (`:1010` on `main`), so the proof was re-run after
+the deletion to confirm the coverage did not go with it.
+
+Same neutering as above (`return []` at the head of `_absent_new_path_refs`):
+
+```
+FAILED ...TestExistenceInvariant::test_fix_introducing_absent_path_is_rejected_and_reported
+FAILED ...TestExistenceInvariant::test_rejection_is_logged_with_offending_path
+FAILED ...TestExistenceInvariant::test_sibling_valid_fix_still_applies
+FAILED ...TestExistenceInvariant::test_all_fixes_rejected_writes_nothing
+FAILED ...TestExistenceInvariant::test_fix_introducing_absent_bare_name_is_withheld
+FAILED ...TestExistenceInvariant::test_ambiguous_bare_name_passes_and_debug_logs
+FAILED ...TestExistenceInvariant::test_dir_prefixed_decisions_unaffected_by_degraded_index[nonzero-rc]
+FAILED ...TestExistenceInvariant::test_dir_prefixed_decisions_unaffected_by_degraded_index[oserror]
+FAILED ...TestExistenceInvariant::test_audit_surfaces_withheld_without_writing
+FAILED ...TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness
+10 failed, 120 passed in 22.94s
+```
+
+Ten red instead of eleven — exactly the deleted case, and nothing else. The three
+surviving mandated cases (`test_fix_introducing_absent_path_is_rejected_and_reported`,
+`test_fix_introducing_absent_bare_name_is_withheld`,
+`test_dir_prefixed_decisions_unaffected_by_degraded_index` in both parametrisations)
+are all still red, and the deleted case's code path is covered by the first of them,
+which asserts the full withheld dict plus file content rather than the reason alone.
+Revert confirmed (`grep -c NEUTERED_RED_PROOF` → 0); green after revert: 130 passed.
