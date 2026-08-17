@@ -7,7 +7,7 @@ created: 2026-08-16
 tracking: https://github.com/yudame/ai/issues/2787
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-16T05:09:00Z
+revision_applied_at: 2026-08-17T02:54:44Z
 ---
 
 # A "READY TO BUILD (with concerns)" verdict must route the concern-closing revision back through critique
@@ -103,7 +103,7 @@ file:line references below were re-read against this tree, not carried forward)
 
 **Active plans in `docs/plans/` overlapping this area:** `g8-terminal-pipeline-no-rebuild.md` (#2757) touches SDLC routing but on the *G8 / terminal-stage* axis, not the CRITIQUE rows. Its frontmatter is the live evidence quoted in the Recon Summary. No edit collision: this plan touches rows 4b/4c, G7 gate 3, and Step 5.6; #2757 touches G8 and the terminal-pipeline predicates. Coordination signal only, not a blocker.
 
-**Notes:** The one genuine drift is that PR #2790 landed 24 minutes after the issue was filed and shifted line numbers within `agent/sdlc_router.py`. All line references in this plan are re-read against `8b13098bc`.
+**Notes:** The one genuine drift is that PR #2790 landed 24 minutes after the issue was filed and shifted line numbers within `agent/sdlc_router.py`. All line references in this plan are re-read against `2dce9812d`.
 
 ## Prior Art
 
@@ -360,7 +360,7 @@ that module and needs the `os` import; do not describe it as "like
 
 Why 3 and not 4: the `verdict-finalize-cluster` round-4 datapoint counted *mixed*
 rounds on a lane-total basis and does not transfer to a loop-scoped counter, so
-there is no empirical basis for 4. With the scoped pass deferred (§5) every
+there is no empirical basis for 4. With the scoped pass deferred (§6) every
 re-critique round is full depth, so each round is expensive; 3 bounds the cost
 while still admitting two rounds of genuine concern-closing after the first
 verdict. Revisit after five with-concerns lanes have run.
@@ -657,7 +657,7 @@ provably cannot arm is exactly the half-migration the repo forbids.
 - **Making the whole thing a state machine.** There will be a pull to unify rows 2b/3/4a/4b/4c and the latch into a single verdict-kind × event-ordering matrix. It is probably right eventually and it is not this plan. Predicates that each fail safe beat one matrix nobody can review.
 - **Deleting the `plan_revising` lock.** Tempting — the latch bound and the rows do the real work and the lock is currently inert. But G7 is referenced in `docs/sdlc/plan-revising-lock.md`, `.claude/skills/sdlc/SKILL.md`, `/do-plan` Phase 4 step 2b, and `/do-plan-critique` Step 5.6. Repair it here; propose removal separately with the full blast radius in hand.
 - **Building a general "was artifact X reviewed after change Y?" abstraction.** G5's artifact-hash cache, G8's artifact verification, row 2b's staleness, and this predicate are four instances of one idea. Generalizing them is a real refactor with a real risk of re-introducing #1925. Not now.
-- **Making the scoped re-critique cheap by cutting critics.** Moot in this plan — the scoped pass is deferred to a follow-up issue (§5) and every round runs at full depth. Carried forward as guidance for that issue: the saving must come from narrowing *what is judged* (prior concerns + revision diff), not from thinning the roster. A two-critic war room that misses the round-2 defect costs more than it saves.
+- **Making the scoped re-critique cheap by cutting critics.** Moot in this plan — the scoped pass is deferred to a follow-up issue (§6) and every round runs at full depth. Carried forward as guidance for that issue: the saving must come from narrowing *what is judged* (prior concerns + revision diff), not from thinning the roster. A two-critic war room that misses the round-2 defect costs more than it saves.
 - **Exempting `/do-plan-critique` entries from `_sdlc_dispatches` eviction.** Round 1 raised this as one way to make a dispatch-derived bound durable. Rejected: `MAX_DISPATCH_HISTORY` exists to bound memory, and selective retention breaks `compute_same_stage_count`'s contiguous-recency assumption (`agent/sdlc_router.py:1997+`), which would need its own G4 regression suite. The `_concern_round_count` integer gets the same durability without touching G4's substrate at all.
 - **Plumbing `row_id` into dispatched skill invocations.** A real and probably-good idea — `/do-build` and others could act on *why* they were dispatched. It is a separate blast radius (`tools/sdlc_next_skill.py`, the `/sdlc` router contract, every skill's Step 1) and this plan gets what it needs by re-deriving row 4c's predicate from `stage-query`. Do not let it in through the side door.
 
@@ -707,9 +707,9 @@ inertness directly so a future reader cannot delete the bound believing G4 catch
 
 ### Risk 2: The re-critique is expensive enough that lanes get slower than the defect is costly
 
-**Impact:** Every with-concerns plan pays extra war-room rounds at full depth, since the scoped pass is deferred (§5). A lane that hits the bound pays 3 war rooms.
+**Impact:** Every with-concerns plan pays extra war-room rounds at full depth, since the scoped pass is deferred (§6). A lane that hits the bound pays 3 war rooms.
 
-**Mitigation:** the bound is the only mitigation, and it is now the *whole* mitigation — that is why the default dropped from 4 to 3. `MAX_CONCERN_RECRITIQUE_ROUNDS` is genuinely env-overridable (`os.getenv` in `agent/pipeline_graph.py`), so a lane-level or machine-level override needs no code change. If cost proves to be the binding constraint in practice, the follow-up issue from §5 ships the concerns-scoped pass with a mechanically-assertable escalation trigger; the honest sequencing is correctness first, then cost.
+**Mitigation:** the bound is the only mitigation, and it is now the *whole* mitigation — that is why the default dropped from 4 to 3. `MAX_CONCERN_RECRITIQUE_ROUNDS` is genuinely env-overridable (`os.getenv` in `agent/pipeline_graph.py`), so a lane-level or machine-level override needs no code change. If cost proves to be the binding constraint in practice, the follow-up issue from §6 ships the concerns-scoped pass with a mechanically-assertable escalation trigger; the honest sequencing is correctness first, then cost.
 
 ### Risk 3: The `revision_applied_at` field is unreliable on live ledgers
 
@@ -864,7 +864,7 @@ inert in production. This is a build task and a Success Criterion.
 
 - **Test engineer**
   - Name: `router-tester`
-  - Role: The demonstrated-red captures, the must-pass gate set (task 6a) and the remaining coverage (task 6b)
+  - Role: The demonstrated-red captures, the must-pass gate set (task 10a) and the remaining coverage (task 10b)
   - Agent Type: test-engineer
   - Resume: true
 
@@ -1007,7 +1007,7 @@ inert in production. This is a build task and a Success Criterion.
 - **Assigned To**: router-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Round 2 flagged that a single undifferentiated test task lets a builder under pressure drop whichever obligation is last, including the ones that are the only proof the feature exists. These six are the gate; `build-tests` is not done until all six pass.
+- Round 2 flagged that a single undifferentiated test task lets a builder under pressure drop whichever obligation is last, including the ones that are the only proof the feature exists. These six are the gate; `build-tests-gate` is not done until all six pass.
 - (1) **The G5 alive test in all three states** (§4.5 a/b/c), each asserting `row_id != "G5"`.
 - (2) **The #1760 split**: `test_1760_inverse_guarantee_preserved` flipped with a captured red, **and** every test in `TestConvergenceLatchRevisionAppliedAt` plus `tests/unit/test_sdlc_stage_query.py:880-921` green and byte-identical.
 - (3) **The `_meta` plumb**: `sdlc-tool next-skill` end-to-end on a #2757-shaped ledger returns `/do-plan-critique`. This is the only test that catches the projection-drop failure.
@@ -1209,10 +1209,10 @@ concerns a fourth round would plausibly have closed, raise it.
 **D2 — Cap-reached behavior: `/do-build` with a recorded acceptance, not `Blocked`.**
 CONCERNs are non-blocking by definition and a `Blocked` strands the lane on a human
 who is usually not watching. This is only defensible because the Accepted Residual
-Concerns note now has a working delivery channel — `/do-build` re-derives row 4d's
+Concerns note now has a working delivery channel — `/do-build` re-derives row 4c's
 predicate from `sdlc-tool stage-query` rather than depending on a `row_id` that is
-never plumbed into skill invocations (§4). **The decision is conditional and the
-condition is written into task 5:** if that derivation cannot be made reliable at
+never plumbed into skill invocations (§5). **The decision is conditional and the
+condition is written into task 8:** if that derivation cannot be made reliable at
 build time, the builder stops and the cap-reached behavior flips to `Blocked`. A
 silent build at the cap is the failure mode this plan exists to prevent, one level
 up.
@@ -1220,7 +1220,7 @@ up.
 **D3 — Scoped vs. full re-critique: full depth, every round. Scoping deferred.**
 The scoped pass was the plan's largest new surface, had no test, was justified by
 cost rather than correctness, and its escalation trigger was unassertable prose.
-It is deferred to a follow-up issue (task 5.5) carrying a mechanical trigger —
+It is deferred to a follow-up issue (task 9) carrying a mechanical trigger —
 the changed `^## `/`^### ` header set intersected with `{Solution, Technical
 Approach, Step by Step Tasks, Verification}` — which is assertable over two plan
 fixtures. **Revisit when** a with-concerns lane's war-room cost is measured and
