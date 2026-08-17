@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Large
 owner: Valor Engels
@@ -288,16 +288,16 @@ No agent integration required — this is a bridge-internal change. The watchdog
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/session-liveness-tick-counter.md` covering the tick derivation, the reaction-slot precedence table, the ceiling and forced-progress behavior, and the Premium/fallback split.
-- [ ] Add the entry to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/bridge-self-healing.md` if it references the ⏳ stall reaction.
+- [x] Create `docs/features/session-liveness-tick-counter.md` covering the tick derivation, the reaction-slot precedence table, the ceiling and forced-progress behavior, and the Premium/fallback split.
+- [x] Add the entry to the `docs/features/README.md` index table.
+- [x] Update `docs/features/bridge-self-healing.md` if it references the ⏳ stall reaction.
 
 ### External Documentation Site
-- [ ] No changes — internal mechanism, not user-facing product surface.
+- [x] No changes — internal mechanism, not user-facing product surface.
 
 ### Inline Documentation
-- [ ] Update the `monitoring/session_watchdog.py` module docstring: it currently documents the ⏳ behavior being removed.
-- [ ] Record in `bridge/response.py` why digits require the custom-emoji schema, so nobody re-adds a keycap to `VALIDATED_REACTIONS`.
+- [x] Update the `monitoring/session_watchdog.py` module docstring: it currently documents the ⏳ behavior being removed.
+- [x] Record in `bridge/response.py` why digits require the custom-emoji schema, so nobody re-adds a keycap to `VALIDATED_REACTIONS`.
 
 ## Success Criteria
 
