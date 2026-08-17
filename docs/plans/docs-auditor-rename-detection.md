@@ -127,6 +127,16 @@ channel — the regex channel — with no vestigial parameter, loop, or sentinel
   should land first, because #2739's design treats a nonzero `fixes_withheld` as a real
   signal, which is only true once the permanent generator is gone. Surfaced for coordination,
   not a blocker.
+- `docs/plans/rename-detection-docs-auditor.md` — **was** a second `status: Ready` plan
+  carrying this same `tracking:` URL for #2741, written by a concurrent unsupervised writer
+  (commits `cc4cc1f4d`, `92cd46ae9`) roughly one minute before this plan's finalize commit.
+  Two plans claimed one issue and `find_plan_path(2741)` resolution was order-dependent.
+  **Resolved by deletion** on `main` (commit `1f15d3756`); its one substantive contribution —
+  that deleting `_detect_readme_broken_entries` loses working README index-line deletion — is
+  salvaged into this plan's Problem section, Risk 1, and No-Gos, strengthened with the
+  disjoint-pattern evidence showing `_detect_deleted_target_issues` does **not** backstop it.
+  Re-verified after deletion: `find_plan_path(2741)` returns exactly
+  `docs/plans/docs-auditor-rename-detection.md`.
 
 **Notes:** The issue body's original line numbers are stale by ~30 (it was written pre-#2728).
 The table above supersedes them. The issue's own premise re-check comments already corrected
@@ -412,7 +422,38 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
 
 ## Risks
 
-### Risk 1: The `TestExistenceInvariant` rewrite produces vacuous tests
+### Risk 1: Deleting `_detect_readme_broken_entries` removes working README self-healing, and nothing else covers that path shape
+**Impact:** The detector's `else` arm (`:501-502`) is not dead code. When a README index entry
+links a `.md` file that is genuinely gone and the rename query returns nothing, it deletes that
+index line — correctly, and cleanly past the existence invariant. After this change a broken
+README index entry is **neither auto-repaired nor reported**. The two detectors match disjoint
+path shapes and one does not backstop the other:
+
+| Detector | Pattern | Matches |
+|---|---|---|
+| `_detect_readme_broken_entries` (`:478`) | `re.search(r"\(([^)]+\.md)\)", line)` | markdown-link `.md` targets |
+| `_detect_deleted_target_issues` (`:1056`) | `` re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`") `` | backticked `.py` paths |
+
+A broken `.md` index entry matches neither the surviving reporter nor anything else in the
+module. It goes fully silent. **Do not claim in the PR body that un-blinding
+`_detect_deleted_target_issues` compensates for this — it does not, and asserting so would put a
+false statement in front of the reviewer.**
+
+**Mitigation:** None available within this scope, and none is sought. This is an accepted,
+human-approved trade-off (2026-08-17): an auditor that deletes lines from a human's index file
+on its own judgment is precisely the unreviewed-write class that produced `d7bf3ad99` and that
+#2739 exists to gate. The repo prefers losing the capability to keeping an ungated one. What
+this plan owes the reviewer is disclosure, not repair:
+
+- [ ] State plainly in the PR body that broken README `.md` index entries lose **both**
+      automated repair and automated reporting, with the disjoint-pattern table above as
+      evidence, so the reviewer rules on it deliberately rather than discovering it in the diff.
+- [ ] File a follow-up issue recording that `.md`-shaped broken references have no reporting
+      path, so a future widening of `_detect_deleted_target_issues` (or #2739's gated rebuild)
+      has somewhere to attach. Do **not** widen the reporter in this PR — that is ruled out in
+      Rabbit Holes and No-Gos.
+
+### Risk 2: The `TestExistenceInvariant` rewrite produces vacuous tests
 **Impact:** The existence invariant — the guard standing between the auditor and a repeat of
 `d7bf3ad99` — silently loses its coverage while the suite stays green. This is the worst
 outcome available from this change.
@@ -421,7 +462,7 @@ outcome available from this change.
 makes a vacuous pass the *default* failure mode here, so a green-only proof is not acceptable.
 Record the red-state output in the PR description.
 
-### Risk 2: Removing the `:1076` suppression floods the issue tracker
+### Risk 3: Removing the `:1076` suppression floods the issue tracker
 **Impact:** `_detect_deleted_target_issues` files deduped GitHub issues. Un-blinding it could
 surface a backlog of genuinely-broken references all at once on the first rotation run.
 **What the existing controls actually bound — and what they do not.** Filing is rotation-only
@@ -457,7 +498,7 @@ it is set at roughly two rotations' worth of the per-run cap so that a backlog w
 about two runs is treated as a surge and anything larger is treated as a standing source.
 Record the measured number and the gate decision in the PR description either way.
 
-### Risk 3: A doc surface is missed and describes a deleted function
+### Risk 4: A doc surface is missed and describes a deleted function
 **Impact:** `docs/features/docs-auditor.md` is 569 lines and references the rename channel in
 at least eight places, several of them load-bearing rationale rather than passing mentions.
 The two `/do-docs` surfaces are user-facing skill text. A miss leaves the repo documenting
@@ -467,7 +508,7 @@ functions that do not exist — the exact failure this auditor exists to catch.
 `feedback_grep_anticriterion_counts_comments` lesson: the plan's own text quotes these symbol
 names, so the grep must exclude `docs/plans/` or it fails on this document.
 
-### Risk 4: Coordination collision with `docs/plans/docs-auditor-review-gate.md` (#2739)
+### Risk 5: Coordination collision with `docs/plans/docs-auditor-review-gate.md` (#2739)
 **Impact:** Both plans edit `reflections/docs_auditor.py`. If #2739 builds first or
 concurrently, the merge conflicts in `audit()` and `_apply_fixes_to_file`.
 **Mitigation:** #2739 is still in `status: Planning` — it has not built. Land this first; its
@@ -742,5 +783,5 @@ that read `fixes_withheld` need no code change.
 None. Scope was approved by the human on 2026-08-17 (delete the channel, extend to the `:1076`
 suppression, collapse the literal `fixes` channel, add the rename-destination regression). The
 one coordination point — that this should land before `docs/plans/docs-auditor-review-gate.md`
-(#2739) — is recorded in the Freshness Check and Risk 4 rather than raised as a question,
+(#2739) — is recorded in the Freshness Check and Risk 5 rather than raised as a question,
 because #2739 has not started building.
