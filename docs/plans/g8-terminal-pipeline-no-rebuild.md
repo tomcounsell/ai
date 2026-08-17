@@ -1109,16 +1109,21 @@ instead of 2, adding up to ~10s of latency when `gh` hangs against each call's
 existing 5s timeout, and the `gh pr list --search` leg draws on the tighter search-API
 rate limit rather than the general one. Architectural Impact records the measured
 ~0.89s typical case; this entry names the tail and the call-count, which it did not.
-**Mitigation:** accepted, bounded, and documented rather than engineered around. Only
-the router tick path and the `sdlc-tool` CLI reach `query_enriched`, so the blast
-radius is a per-tick and per-invocation cost, not a request-path one. A short-circuit
-(skipping the second pass for callers that only want in-flight state) is deliberately
-**not** implemented: it would add a caller-intent parameter to a function this plan
-otherwise leaves signature-stable, and the plan's cache rejection applies for the same
-reason. The cost is recorded in
-`docs/features/sdlc-router-oscillation-guard.md` beside the cwd-threading note so
-whoever next reports a slow dashboard refresh or a `gh` rate-limit warning finds the
-cause here instead of re-deriving it.
+**Mitigation:** accepted, bounded, and documented rather than engineered around.
+`query_enriched` has three non-test callers: `tools/sdlc_next_skill.py` (router tick
+and `next-skill` CLI), `tools/sdlc_stage_query.py`'s own CLI entry point, and
+`agent/session_runner/runner.py::_load_ledger`, the completion guard from #2158. The
+first two are per-tick and per-invocation costs. The third is the one that matters:
+it runs in the long-lived worker on every SDLC session completion, so the doubled
+lookup stalls a completing session rather than a one-shot command. The dashboard is
+**not** a caller — `ui/data/sdlc.py` reads pipeline state via
+`PipelineStateMachine.for_issue()`. A short-circuit (skipping the second pass for
+callers that only want in-flight state) is deliberately **not** implemented: it would
+add a caller-intent parameter to a function this plan otherwise leaves
+signature-stable, and the plan's cache rejection applies for the same reason. The cost
+is recorded in `docs/features/sdlc-router-oscillation-guard.md` beside the
+cwd-threading note so whoever next reports a slow session completion or a `gh`
+rate-limit warning finds the cause here instead of re-deriving it.
 
 ### Risk 4: The repaired integration test is repaired to the wrong expectation
 **Impact:** the test currently asserts `row_id == "10"` on a fixture that cannot
