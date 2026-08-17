@@ -5,6 +5,9 @@ appetite: Small
 owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2831
+revised: 2026-08-17
+revision_applied: true
+revision_applied_at: 2026-08-17T06:36:00Z
 ---
 
 # Retire the inert multi-judge review kill switches
@@ -126,41 +129,63 @@ The edits touch only the *override* prose. Mitigation: the reworded `docs/sdlc/d
 
 ### Risk 3: The new guard is written so it can never fail
 
-The classic failure mode for an anti-claim test. Mitigation is a demonstrated-red requirement in Task 5: the test must be run against unmodified docs and observed to FAIL naming both variables, and only then run against the edited docs and observed to pass. A green-only run is not acceptable evidence. The guard is also written as a *positive* predicate (every `SDLC_REVIEW_*` token in these docs must have a settings field), not a blocklist of two strings, so it cannot be satisfied by the absence of the words alone and it stays useful against a third var added tomorrow.
+The classic failure mode for an anti-claim test. Mitigation is a demonstrated-red requirement in Task 1, which is ordered FIRST for exactly this reason: the test must be run against unmodified docs and observed to FAIL naming both variables, and only then run against the edited docs and observed to pass. A green-only run is not acceptable evidence. The guard is also written as a *positive* predicate (every `SDLC_REVIEW_*` token in these docs must have a settings field), not a blocklist of two strings, so it cannot be satisfied by the absence of the words alone and it stays useful against a third var added tomorrow.
 
 ### Risk 4: The guard trips on its own text or on archived plans
 
-`docs/plans/` is full of legitimate historical mentions of both names (`completed/multi-judge-consensus-gates.md`, `completed/cross_vendor_review_judge.md`, and this plan). Mitigation: the test scans exactly two files by explicit path — `docs/features/multi-judge-consensus.md` and `docs/sdlc/do-pr-review.md` — never a tree walk. It never reads `docs/plans/`, `.claude/`, or itself, so it is free to name the retired variables in its own assertions and comments.
+`docs/plans/` is full of legitimate historical mentions of both names (`completed/multi-judge-consensus-gates.md`, `completed/cross_vendor_review_judge.md`, and this plan). Mitigation: the test scans exactly three files by explicit path — `docs/features/multi-judge-consensus.md`, `docs/sdlc/do-pr-review.md`, and `docs/features/README.md` — never a tree walk. It never reads `docs/plans/`, `.claude/`, or itself, so it is free to name the retired variables in its own assertions and comments.
 
 ## Step by Step Tasks
 
-### 1. Rewrite the feature doc's configuration and cost-containment sections
+**Execute in the order given.** The guard is Task 1 deliberately: its value is the demonstrated-red observation, and that observation is destroyed the moment any doc edit lands. Do not reorder.
+
+### 1. Add the regression guard and observe it RED
+
+Write `tests/unit/test_review_judge_env_docs.py` (contract in Test Impact) and run it against the **unedited** tree. Record that it FAILS naming both `SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K`. A green-only run is not acceptable evidence that the guard works.
+
+The contract requires a module-level `_scan(paths: tuple[Path, ...]) -> set[str]` seam with a thin test pinning the three real paths. That seam is what makes the red observation repeatable after the fact: point the same predicate at pre-edit copies obtained with `git show main:<path>` written to a tmp dir. Do **not** use `git stash` in this checkout — other lanes are live.
+
+Both the red and the later green output go in the PR body.
+
+### 2. Rewrite the feature doc's configuration and cost-containment sections
 
 Edit `docs/features/multi-judge-consensus.md`: replace the `## Configuration` env table (`:92-99`) with a roster declaration plus a table scoped to the four `SDLC_REVIEW_CROSS_VENDOR*` vars that actually exist, or a pointer to the existing cross-vendor env table at `:223-230` if that avoids duplication. Collapse `### Cost containment` (`:101-111`) to the single working layer. Add the `_consensus.k == _consensus.n == judge count, not a threshold` sentence near the consensus-rules section.
 
-### 2. Rewrite the addendum's multi-judge declaration
+**Bare `K`-as-judge-count prose is accurate and stays.** `:8` ("can spawn K parallel judges"), `:120` ("disagreement at K=2"), `:122` ("all K judges"), and the `# With K=2` comment at `agent/sdlc_review_consensus.py:126` all use `K` to mean the number of judges that ran — which is exactly what the code does. They sit outside every range this task edits. Do not churn them, and do not treat them as escaped instances of the defect: the defect is `K` presented as an operator-settable *threshold*, not `K` used as a count.
 
-Edit `docs/sdlc/do-pr-review.md`: reword `:235-236` to a roster declaration with no `VAR=value` syntax; delete the kill-switch sentence at `:249-250`. Leave the trivial-PR sentence, the in-turn-await contract (`:254-269`), and the cross-vendor paragraph (`:152-157`) untouched.
+### 3. Rewrite the addendum's multi-judge declaration
 
-### 3. Fix the features index
+Edit `docs/sdlc/do-pr-review.md`: reword `:235-236` to a roster declaration with no `VAR=value` syntax.
+
+**The kill-switch deletion boundary is intra-line — do not delete lines 249-250 wholesale.** Line 249 currently reads:
+
+```
+  `pyproject.toml` only). Operators can also set `SDLC_REVIEW_JUDGES=none` or
+```
+
+The trivial-PR sentence (which stays) and the kill-switch sentence (which goes) share that line. Truncate line 249 after `` `pyproject.toml` only). `` so the trivial-PR bullet ends at that period, and delete line 250 entirely. A whole-line delete of both amputates the trivial-PR sentence and leaves "…or all lockfile sync (`uv.lock` /" dangling — silently destroying the one cost control that actually works, in the same edit that removes the two that don't.
+
+Leave the trivial-PR sentence's surviving text, the in-turn-await contract (`:254-269`), and the cross-vendor paragraph (`:152-157`) untouched.
+
+### 4. Fix the features index
 
 Edit `docs/features/README.md:122` to drop "K-of-N". Keep the row's position — `validate_features_readme_sort.py` enforces ordering, so do not move it.
 
-### 4. Fix the two source docstrings
+### 5. Fix the two source docstrings
 
 `agent/sdlc_review_consensus.py:3-4` and `tests/unit/test_skill_agent_tool_consistency.py:11-12`. Docstring text only; no code, no assertions.
 
-### 5. Add the regression guard, demonstrated red first
+### 6. Re-run the guard and observe it GREEN
 
-Write `tests/unit/test_review_judge_env_docs.py` (contract in Test Impact). Run it BEFORE Tasks 1-4 land — or against `git stash`-free copies of the pre-edit files read from `git show main:<path>` — and record that it fails naming both `SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K`. Then run it against the edited tree and record that it passes. Both outputs go in the PR body. Do not use `git stash` in this checkout.
+Run `tests/unit/test_review_judge_env_docs.py` against the edited tree. It must now pass, with the four `SDLC_REVIEW_CROSS_VENDOR*` tokens resolving to real fields. Paste alongside the Task 1 red output.
 
-### 6. Validation
+### 7. Validation
 
 `python -m ruff check .` and `python -m ruff format --check .` clean. Run only the three named test files (`scripts/pytest-clean.sh tests/unit/test_review_judge_env_docs.py tests/unit/test_review_multi_judge.py tests/unit/test_skill_agent_tool_consistency.py`); no full-suite run.
 
-### 7. Documentation
+### 8. Documentation
 
-Covered by Tasks 1-3, which ARE the deliverable. Confirm the three files agree with each other by re-running the grep in the Verification table.
+Covered by Tasks 2-4, which ARE the deliverable. Confirm the three files agree with each other by re-running the grep in the Verification table.
 
 ## Test Impact
 
@@ -175,9 +200,16 @@ What IS testable is the property that actually broke: a document claiming an env
 
 ### New: `tests/unit/test_review_judge_env_docs.py`
 
-- `test_documented_review_env_vars_have_a_settings_field` — read `docs/features/multi-judge-consensus.md` and `docs/sdlc/do-pr-review.md` by explicit path. Extract every `SDLC_REVIEW_[A-Z0-9_]+` token. Assert each has a corresponding field in `config/settings.py` (lowercased name present as a field, e.g. `sdlc_review_cross_vendor_model`). Today: RED, naming `SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K`. After the edits: GREEN, with the four `SDLC_REVIEW_CROSS_VENDOR*` tokens all resolving to real fields at `config/settings.py:973-1006`.
-- `test_scanned_docs_exist` — guard the guard. Assert both scanned paths exist and are non-empty, so a rename can never make the check vacuously pass.
-- `test_settings_field_extraction_finds_a_known_field` — assert the extractor finds `sdlc_review_cross_vendor` in `config/settings.py`, so a broken regex cannot make every token trivially "declared".
+Expose a module-level `_scan(paths: tuple[Path, ...]) -> set[str]` returning the `SDLC_REVIEW_*` tokens found, so the predicate can be pointed at pre-edit copies for the Task 1 red demo. The tests below pin the real paths through it.
+
+- `test_documented_review_env_vars_have_a_settings_field` — read **three** files by explicit path: `docs/features/multi-judge-consensus.md`, `docs/sdlc/do-pr-review.md`, and `docs/features/README.md`. Extract every `SDLC_REVIEW_[A-Z0-9_]+` token. Assert each has a corresponding field in `config/settings.py`. Today: RED, naming `SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K`. After the edits: GREEN, with the four `SDLC_REVIEW_CROSS_VENDOR*` tokens all resolving to real fields at `config/settings.py:973-1006`.
+
+  **`docs/features/README.md` is in the scan list deliberately.** It is the third defect file, and it is free to include: it already contains `SDLC_REVIEW_CROSS_VENDOR=1` (`:122`), which resolves to `config/settings.py:974`, so it is green today on that token and red only on the `K-of-N` row's removal target. Omitting it would fix the index in Task 4 while leaving a future re-addition uncaught by the very test written to prevent it.
+
+- **Match field declarations with an anchor, not a substring.** Use `^\s*{lowered}\s*:` against `config/settings.py` lines. A bare substring test would let `SDLC_REVIEW_CROSS_VENDOR` resolve against the *longer* `sdlc_review_cross_vendor_model` (`:983`) by prefix collision, and — worse — `config/settings.py:978, 987, 996, 1004` carry the uppercase env names inside `description=` strings, so any case-insensitive substring approach would let a doc-only variable pass merely because someone mentioned it in a description. Neither produces a false green for `JUDGES`/`K` today, but both would silently defeat the guard against the third variable added tomorrow, which is its stated purpose.
+
+- `test_scanned_docs_exist` — guard the guard. Assert all three scanned paths exist and are non-empty, so a rename can never make the check vacuously pass.
+- `test_settings_field_extraction_finds_a_known_field` — assert the extractor finds `sdlc_review_cross_vendor` in `config/settings.py`, **and** that a plausible-but-absent name such as `sdlc_review_cross` does NOT resolve. The negative half is what proves the anchoring works; without it a regex that matches everything would pass this test too.
 
 ### Unchanged
 
@@ -213,7 +245,7 @@ Not applicable. This repo publishes no external documentation site; `docs/` is t
 
 Mapped to the issue's acceptance criteria:
 
-- [ ] **`SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K` appear in no documentation as operator controls.** `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K"` outside `docs/plans/` returns zero hits.
+- [ ] **`SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K` appear in no documentation as operator controls.** `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K" --include="*.md" --include="*.py" . | grep -v "^./docs/plans/" | grep -v test_review_judge_env_docs` returns no output. **The `test_review_judge_env_docs` exclusion is required, not optional** — the new guard names both variables in its own assertions and comments, by design (Risk 4). A criterion demanding literally zero hits would push a builder to strip those names out of the test and weaken the very guard this plan adds. Use the exclusion verbatim; it must match the Verification-table command exactly.
 - [ ] **`docs/sdlc/do-pr-review.md` and `docs/features/multi-judge-consensus.md` agree with actual behavior, with no half-migration.** Both describe a fixed two-judge roster and the trivial-diff classifier as the only cost control. `docs/features/README.md` is brought along in the same commit so the index does not contradict them.
 - [ ] **"If Option A" criterion — NOT APPLICABLE.** Option A is not chosen. The plan states why per variable (K names a nonexistent algorithm; JUDGES is better served by a versioned roster declaration than by an unversioned per-machine env var), and why the execution test that criterion asks for is not writable against prose-driven behavior in this repo.
 - [ ] **"If Option B" criterion — APPLIES and is met.** No remaining prose describes an env-var control that nothing reads, across all three files plus the two module docstrings.
@@ -228,6 +260,7 @@ Mapped to the issue's acceptance criteria:
 - **The other 12 reader-less `SDLC_*` names** (`SDLC_HOLDER_TOKEN`, `SDLC_STAGES`, `SDLC_WORKFLOW`, and eight `SDLC_STALL_*`) surfaced while sizing the guard. They are a different subsystem with different owners and would turn a bounded documentation correction into an unbounded audit; the guard added here is deliberately scoped to the two review docs so it stays green and useful. [SEPARATE-SLUG #2831] tracks only the review surface; the wider sweep needs its own recon before anyone can say whether those names are inert or read through a path this grep missed, and asserting either without that recon would be the same unverified-claim defect this plan exists to fix.
 - **Editing `docs/plans/completed/multi-judge-consensus-gates.md` or `docs/plans/completed/cross_vendor_review_judge.md`.** Completed plans are the archived record of what was planned at the time, not descriptions of current behavior. Rewriting them would destroy the evidence of how this drift happened. The NO-LEGACY rule targets docs that *describe the status quo*; `docs/plans/completed/` describes history and is explicitly excluded from the new guard's scan.
 - **`.claude/skills-global/do-pr-review/SKILL.md`.** Already correct and already generic. Touching it would risk leaking repo-specific roster names into a global skill body.
+- **The `shape` derivation in the cross-vendor paragraph** (`docs/sdlc/do-pr-review.md:152-157`). It gates on `shape == feature` without naming what computes `shape`, and no `pr_shape_classify` module exists anywhere in the tree (`ls scripts/pr_shape_classify.py tools/pr_shape_classify.py` → neither). That is arguably the same defect class in the adjacent paragraph, but the mechanism it gates — `python -m tools.cross_vendor_judge` — **does** exist (`tools/cross_vendor_judge.py`), and this plan's Research claim is about the *cost-containment* classifier at `:246-249`, which is genuinely prose-driven and works. Named here so the builder neither "fixes" it nor reads it as contradicting Research. If it deserves attention it deserves its own issue.
 
 ## Verification
 
