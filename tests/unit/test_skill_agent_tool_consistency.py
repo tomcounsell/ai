@@ -8,8 +8,8 @@ something it has forbidden itself.
 
 `do-pr-review` was in exactly that state: `context: fork`, an `allowed-tools`
 list without `Agent`, and a body mandating judge subagents — with this repo
-opting into multi-judge consensus by default
-(`SDLC_REVIEW_JUDGES=code-quality,risk`, `docs/sdlc/do-pr-review.md`). The
+running multi-judge consensus by default with the `code-quality` and `risk`
+judges declared in `docs/sdlc/do-pr-review.md`. The
 failure is silent: the driver inlines the judges instead, so reviews still post
 and no gate trips, they just lose the independent-context property that makes a
 second judge worth having.
