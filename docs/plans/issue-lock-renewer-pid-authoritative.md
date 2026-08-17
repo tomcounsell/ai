@@ -630,14 +630,21 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
 
 ## Success Criteria
 
-1. A payload with a fresh `renewed_at`, a `renewer_pid` that psutil cannot
-   find, and a `renewed_at` older than the grace window reads
+1. **Red half (a).** A payload with a fresh `renewed_at`, a `renewer_pid` that
+   psutil cannot find, and a `renewed_at` older than the grace window reads
    `_lock_owner_is_live is False` — with a test that is **red on `main`** and
-   green after the fix.
+   green after the fix, both runs captured in the PR body.
 2. The same payload with the renewer pid ALIVE reads `True`.
 3. The same payload inside the grace window reads `True`.
-4. A payload with no `renewer_pid` reads exactly as it does today (all 14
-   pre-existing lock-liveness tests green, unmodified).
+4. **Green-both half (b).** A payload with no durable renewer identity reads
+   exactly as it does today: fresh-in-window still reads LIVE. This case must be
+   run and shown **GREEN before the fix AND green after it** — a single
+   post-fix green does not discharge it, because the risk being ruled out is
+   precisely that the tightening ate the #2703/#2620 fallback. At suite level
+   the same obligation is: all 14 pre-existing lock-liveness tests green,
+   unmodified, on both sides of the change. Criteria 1 and 4 are one pair of
+   evidence, not two independent checks; a build that produces only one of them
+   has not demonstrated red.
 5. `tools/sdlc_lease_heartbeat.py` and `agent/session_executor.py` are the ONLY
    call sites passing `stamp_renewer_identity=True` (anti-criterion).
 6. `ISSUE_LOCK_RENEWER_GRACE_SECONDS` is a named, env-overridable, GRAIN OF
@@ -665,16 +672,51 @@ and a critique round, not a same-day PR").
 
 ### 1. Capture the demonstrated red baseline
 
+**PATCH-LOCATION TRAP — read before writing a single test.**
+`_lock_owner_is_live` does NOT import the pid helper at module scope. It does a
+**lazy, function-body import**: `from agent.session_health import
+_psutil_process_for_pid`, executed on every call. Consequences a builder will
+hit immediately:
+
+- The only patch target that works is
+  `patch("agent.session_health._psutil_process_for_pid", ...)`.
+- `patch("models.session_lifecycle._psutil_process_for_pid", ...)` raises
+  `AttributeError` — the name does not exist in that module's namespace. It is
+  not a silently-ineffective patch; the test errors out.
+- **The #2648 issue body's forensics predate the move and will mislead anyone
+  who copies them verbatim.** Do not lift patch targets from the issue.
+- The same applies to the sibling helpers the predicate reaches lazily; confirm
+  the import site by reading the function body rather than assuming module
+  scope. Every pre-existing test in `tests/unit/test_session_lifecycle.py`'s
+  `TestLockOwnerIsLive` already uses the `agent.session_health` target — copy
+  the patch stanza from there, not from the issue.
+
+Now the work:
+
 - Add `tests/unit/test_session_lifecycle.py::TestRenewerIdentityLiveness` with,
   at minimum: dead-renewer-past-grace (must be RED on `main`),
   live-renewer (green both), dead-renewer-inside-grace (green both),
   no-renewer-identity (green both, the #2620 guard),
-  partial-identity (`renewer_pid` without `renewer_create_time`),
+  partial-identity (a renewer pid recorded without its create_time),
   cross-machine renewer, recycled renewer pid (create_time mismatch), and
   psutil-raises.
-- Run the new class against `main` BEFORE touching source and capture the
-  failure output verbatim for the PR body. The dead-renewer-past-grace case
-  MUST fail; if every case passes on `main`, the test does not construct the
+- **The demonstrated-red evidence is a PAIR, and both halves are required.**
+  Neither one alone proves the change is correct:
+  - **(a) The tightening works.** A stamp-then-die payload that DOES carry a
+    durable renewer identity, past the grace window, must read DEAD. This half
+    is **RED on `main`** and green after the fix. Capture the failure output
+    verbatim.
+  - **(b) The #2703 protection survives.** The fallback payload — fresh
+    `renewed_at`, NO durable renewer identity — must still read LIVE inside the
+    freshness window. This half must be shown **GREEN both before AND after**
+    the fix, run twice and both runs pasted into the PR body. A half-(b) that
+    is only run after the fix proves nothing: the whole risk is that the
+    tightening quietly ate the fallback, and only a before/after pair rules
+    that out. Success Criterion 4's "unmodified pre-existing tests stay green"
+    is the same obligation stated at suite level; this is the explicit
+    per-case form of it.
+- Run the new class against `main` BEFORE touching source. The (a) case MUST
+  fail; if every case passes on `main`, the test does not construct the
   stamp-then-die state and must be rewritten.
 - Do not use `pytest` bare — `scripts/pytest-clean.sh` only.
 
@@ -711,6 +753,14 @@ and a critique round, not a same-day PR").
   `renew_only=True` extend.
 - `agent/session_executor.py:246` — add `stamp_renewer_identity=True`.
 - Confirm by grep that no other call site carries the flag (Verification row 5).
+- **Do not name the flag, even in a comment, inside the four ephemeral-renewer
+  files** (`tools/_sdlc_utils.py`, `tools/sdlc_stage_marker.py`,
+  `tools/sdlc_next_skill.py`, `tools/sdlc_session_ensure.py`). The
+  anti-criterion row greps exactly those four files for the token, so a
+  well-meant "deliberately does not opt in here" comment tallies as a
+  violation and turns a correct build red. Paraphrase instead — e.g. "renews
+  without recording a durable renewer identity (see #2648)" — and put the
+  rationale in the `touch_issue_lock` docstring, which the row does not grep.
 
 ### 5. Prove the reaper is unharmed
 
@@ -731,13 +781,30 @@ and a critique round, not a same-day PR").
 - `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/test_sdlc_session_ensure.py -q`
 - `python -m ruff check .` and `python -m ruff format --check .`
 - Run every row in **## Verification**.
-- Paste the step-1 red output and the step-3 green output into the PR body.
+- Paste the full demonstrated-red PAIR into the PR body: half (a) red on `main`
+  then green after, and half (b) green on `main` AND green after. Four runs,
+  four pasted outputs. A PR carrying only the (a) red/green pair is incomplete.
 
 ## Verification
 
 Verification commands enumerate roots explicitly (`models/ tools/ agent/
 tests/ docs/ .claude/`) rather than anchoring on `^./` — `ugrep` on this machine
 prints no `./` prefix and such an anchor silently matches nothing.
+
+**Anti-criterion scoping — the row must never count its own prose.** The
+"no ephemeral CLI renewer stamps" row greps an explicit four-file list, not a
+recursive root. That is deliberate and must stay that way:
+
+- This plan document, the PR description, and the test module all legitimately
+  name the flag; none of them is in the row's file list, so none is tallied.
+  Do NOT widen the row to `grep -r ... tools/` — that would sweep the
+  `touch_issue_lock` docstring, the heartbeat's own opt-in, and every future
+  comment, and the row would report a violation against a correct build.
+- Inside the four listed files the token must not appear at all, in code OR in
+  a comment. Prose there must paraphrase (see Task 4). This is the standing
+  trap where a comment quoting the very string a gate forbids fails the gate.
+- The two "opts in" rows above are positive checks over the two durable
+  renewers only, so they cannot collide with the anti-criterion's file set.
 
 | Check | Command | Expected |
 |-------|---------|----------|
