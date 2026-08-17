@@ -15,6 +15,7 @@ from agent.sdlc_router import (
     SKILL_DO_PR_REVIEW,
     Blocked,
     Dispatch,
+    _concern_revision_is_unjudged,
     _critique_verdict_is_stale,
     _review_verdict_is_stale,
     _rule_patch_applied_after_review,
@@ -1885,20 +1886,48 @@ class TestG5AliveOnWithConcerns:
 class TestConcernBoundScoping:
     """The bound counts with-concerns rounds only, and terminates the loop."""
 
-    def test_needs_revision_rounds_do_not_consume_the_bound(self):
-        """Three NEEDS REVISION rounds then one with-concerns -> still below bound.
+    def test_a_lane_with_a_long_needs_revision_history_still_gets_re_critique(self):
+        """A NEEDS REVISION history must not arrive at the loop with the bound spent.
 
-        The counter is written only on a WITH CONCERNS verdict, so a lane's
-        NEEDS REVISION history cannot push it to the bound and skip re-critique
-        for exactly the plans needing the most scrutiny.
+        The counter is written only on a WITH CONCERNS verdict, so `count` is 1
+        on the first with-concerns round no matter how many NEEDS REVISION
+        rounds preceded it. Here the ledger carries a dispatch history of five
+        prior /do-plan-critique turns; routing must still be row 2b, not the
+        bound-exhausted row 4c. (That the *counter* ignores NEEDS REVISION is
+        proven writer-side in
+        tests/unit/test_sdlc_verdict.py::TestConcernRoundCounter.)
         """
         states = _wc_states(
             _iso("2026-08-17T02:00:00"),
             plan_dispatch_at=_iso("2026-08-17T02:30:00"),
         )
+        states["_sdlc_dispatches"] = [
+            {"skill": SKILL_DO_PLAN_CRITIQUE, "at": _iso("2026-08-17T00:00:00")},
+            {"skill": SKILL_DO_PLAN, "at": _iso("2026-08-17T00:10:00")},
+            {"skill": SKILL_DO_PLAN_CRITIQUE, "at": _iso("2026-08-17T00:20:00")},
+            {"skill": SKILL_DO_PLAN, "at": _iso("2026-08-17T00:30:00")},
+            {"skill": SKILL_DO_PLAN_CRITIQUE, "at": _iso("2026-08-17T00:40:00")},
+            {"skill": SKILL_DO_PLAN, "at": _iso("2026-08-17T02:30:00")},
+        ]
         meta = _wc_meta(_iso("2026-08-17T03:00:00"), count=1)
         result = decide_next_dispatch(states, meta, {"current_plan_hash": _PLAN_HASH})
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
         assert result.row_id == "2b"
+
+    def test_mixed_timezone_awareness_falls_safe_to_a_revision_pass(self):
+        """A naive frontmatter timestamp vs a tz-aware recorded_at must not build.
+
+        `recorded_at` is always tz-aware (`datetime.now(UTC).isoformat()`), while
+        `revision_applied_at` is parsed out of hand-editable plan frontmatter and
+        may be naive. Comparing the two raises TypeError; the predicate swallows
+        it to False, so the lane routes to a revision pass rather than to a build.
+        """
+        states = _wc_states("2026-08-17T02:00:00+00:00")
+        meta = _wc_meta("2026-08-17T03:00:00", count=3)
+        assert _concern_revision_is_unjudged(states, meta) is False
+        result = decide_next_dispatch(states, meta, {"current_plan_hash": _PLAN_HASH})
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "4b"
 
     def test_no_concerns_verdict_with_settled_revision_still_routes_to_4a(self):
         """The with-concerns branch must not leak into the clean path."""

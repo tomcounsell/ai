@@ -25,7 +25,7 @@ The table below is listed in evaluation order:
 | G3: PR lock | PR open AND last/proposed dispatch is plan-stage skill | Redirect to appropriate PR-stage skill |
 | G4: Oscillation | Same skill dispatched `MAX_SAME_STAGE_DISPATCHES` times without state change | `blocked` |
 | G8: Stage-advance verification | `context["stage_artifacts_verified"] is False` (a claimed stage artifact failed live verification) | Re-dispatch the unverified stage's skill |
-| G7: Plan-revising lock | `plan_revising=True` AND `revision_applied!=True` AND no open PR | `/do-plan` or `blocked` |
+| G7: Plan-revising lock | `plan_revising=True` AND no `/do-plan` revision has landed since the latest CRITIQUE verdict AND no open PR | `/do-plan` or `blocked` |
 | G5: Unchanged plan hash | Critique verdict exists with matching `artifact_hash` | Reuse cached verdict |
 | G6: Terminal merge | PR open, CI green, DOCS done, review APPROVED (head_sha-fresh, #2062) | `/do-merge` |
 
@@ -88,23 +88,29 @@ Without G7, the pipeline had a race condition: a second critique round could rev
 
 ### How it works
 
-1. **Critique sets the lock**: `/do-plan-critique` Step 5.6 calls `sdlc-tool meta-set --key plan_revising --value true` when the verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns) _and_ `revision_applied` is not already true in the plan frontmatter.
+1. **Critique sets the lock**: `/do-plan-critique` Step 5.6 calls `sdlc-tool meta-set --key plan_revising --value true` when the verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns). The rule is the verdict kind and nothing else: a *prior* revision says nothing about whether *this* verdict has been answered, and an exemption keyed on it made the lock permanently inert on every plan that had been round the loop once (#2787).
 
-2. **Router blocks build**: G7 in `agent/sdlc_router.py::guard_g7_plan_revising` fires when `_meta.plan_revising` is truthy and `revision_applied` is falsy. If critique just ran (last dispatch was `/do-plan-critique`), G7 returns `Dispatch(/do-plan)`. If the lock has been set for more than `MAX_PLAN_REVISING_DISPATCHES + 1` router turns with no `/do-plan` in the recent dispatch history, G7 escalates to `Blocked`.
+2. **Router blocks build**: G7 in `agent/sdlc_router.py::guard_g7_plan_revising` fires when `_meta.plan_revising` is truthy and no `/do-plan` revision has landed since the latest CRITIQUE verdict (event-scoped, #2787 — not the sticky `revision_applied` boolean). If critique just ran (last dispatch was `/do-plan-critique`), G7 returns `Dispatch(/do-plan)`. If the lock has been set for more than `MAX_PLAN_REVISING_DISPATCHES + 1` router turns with no `/do-plan` in the recent dispatch history, G7 escalates to `Blocked`.
 
 3. **Plan clears the lock**: `/do-plan` Phase 4 calls `sdlc-tool meta-set --key plan_revising --value false` in the same step that writes `revision_applied: true` to the plan frontmatter. The two signals always move together.
 
-4. **Build proceeds normally**: Once the lock is cleared and `revision_applied: true` is set, the dispatch table routes to `/do-build` via Row 4c.
+4. **Build proceeds normally**: Once the lock is cleared, the dispatch table routes onward — row 4a for a clean verdict, and for a with-concerns verdict row 2b re-critiques the revision until `MAX_CONCERN_RECRITIQUE_ROUNDS` is spent, at which point row 4c builds with the residual concerns recorded as accepted (#2787).
 
 ### Self-healing
 
 If the lock-clear step is skipped (e.g. the plan skill crashes after writing `revision_applied: true` but before calling `meta-set`), G7 self-heals:
 
 ```python
-# G7 gate 3: self-heal
-if meta.get("revision_applied"):
-    return None  # Lock informational only; revision_applied is the source of truth
+# G7 gate 3: self-heal (event-scoped, #2787)
+if _concern_revision_is_unjudged(stage_states, meta):
+    return None  # a revision landed AFTER the latest CRITIQUE verdict
 ```
+
+The predicate is verdict-kind-agnostic on purpose, so this gate keeps releasing a
+lock left by a NEEDS REVISION or MAJOR REWORK round too. With no CRITIQUE verdict
+recorded at all it returns `False`, so the lock survives and G7's own deadlock
+backstop escalates — the documented manual recovery is
+`sdlc-tool meta-set --key plan_revising --value false`.
 
 ### Deadlock backstop
 

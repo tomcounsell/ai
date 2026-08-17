@@ -665,9 +665,13 @@ def guard_g7_plan_revising(
     1. If ``pr_number`` is set → return None (G3/G6 own PR-stage routing; an
        already-shipped PR is never blocked by plan revisions).
     2. If ``plan_revising`` is falsy → return None (lock not set, fall through).
-    3. Self-heal: if ``plan_revising`` is truthy AND ``revision_applied`` is also
-       truthy → return None (plan was revised but the lock-clear step never ran,
-       e.g. skill crashed mid-step; revision_applied is the source of truth).
+    3. Self-heal: if ``plan_revising`` is truthy AND a ``/do-plan`` revision has
+       landed since the latest CRITIQUE verdict → return None (plan was revised
+       but the lock-clear step never ran, e.g. skill crashed mid-step). Keyed on
+       the event-scoped ``_concern_revision_is_unjudged``, NOT on the sticky
+       ``revision_applied`` boolean: that boolean is set on every revision pass
+       and never resets, so keying the release on it made the lock permanently
+       unarmable after a plan's first revision (#2787).
     4. If lock is set AND ``last_dispatched_skill`` is ``/do-plan-critique``
        (critique just finished) → return Dispatch(/do-plan): the obvious next
        step is to apply the revision.
@@ -1300,9 +1304,19 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     Marker-agnostic by design: the #1639 dead-end leaves CRITIQUE at
     ``in_progress``, so this rule must NOT require any particular marker value.
 
-    Loop-bound: G5 (``guard_g5_artifact_hash_cache``) runs before this row and
-    short-circuits re-critique when the plan hash is unchanged, so this rule can
-    only progress on a genuinely revised plan. See the docstring on row 2b.
+    Loop-bound, by verdict kind:
+
+    - **No-concerns / NEEDS REVISION / MAJOR REWORK:** G5
+      (``guard_g5_artifact_hash_cache``) runs before this row and short-circuits
+      re-critique when the plan hash is unchanged, so the rule can only progress
+      on a genuinely revised plan.
+    - **READY TO BUILD (with concerns):** G5 steps aside unconditionally (#2787),
+      so this row CAN progress on an unchanged plan hash — deliberately. The
+      terminating bound there is ``MAX_CONCERN_RECRITIQUE_ROUNDS`` via
+      ``_concern_round_count``, enforced inside ``_critique_verdict_is_stale``.
+      Do not delete that bound believing G5 or G4 backstops it: G5 no longer runs
+      here, and G4 counts consecutive same-skill dispatches while this loop
+      alternates two skills.
     """
     if not _critique_verdict_is_stale(stage_states, meta):
         return False
@@ -1721,7 +1735,9 @@ DISPATCH_RULES: list[DispatchRule] = [
     # stale → re-critique wins over row 3's stale-text → /do-plan match. Mirrors
     # REVIEW row 8b. Disjoint from G1 (which fires only when the last dispatch
     # was /do-plan-critique; the #1639 dead-end has last dispatch = /do-plan),
-    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash).
+    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash) --
+    # except on the with-concerns path, where G5 steps aside and the bound is
+    # MAX_CONCERN_RECRITIQUE_ROUNDS instead (#2787).
     DispatchRule(
         row_id="2b",
         state_predicate=_rule_critique_verdict_stale,
