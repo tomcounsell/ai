@@ -1337,3 +1337,104 @@ class TestFinalizeCountFlagSpellings:
         assert "--blockers" in out and "--tech-debt" in out
         assert "COUNT" in out
         assert "NOT the findings text" in out
+
+
+class TestConcernRoundCounter:
+    """#2787: ``record_verdict`` owns the with-concerns round counter.
+
+    ``_concern_round_count`` is the SDLC router's only terminator for the
+    PLAN <-> CRITIQUE loop a with-concerns verdict opens (G4 cannot see the
+    alternation), so both halves of its contract are load-bearing: it must
+    advance on every with-concerns CRITIQUE round, and it must advance on
+    nothing else.
+    """
+
+    def _count(self, session) -> int:
+        return json.loads(session.stage_states).get("_concern_round_count", 0)
+
+    def test_with_concerns_critique_verdict_increments(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert self._count(session) == 1
+
+    def test_counter_lives_in_stage_states_not_the_returned_record(
+        self, fake_session_reload_patched
+    ):
+        """The returned record shape is unchanged — existing assertions on it stay green."""
+        session = fake_session_reload_patched
+        record = record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert "_concern_round_count" not in record
+        assert set(record) == {"verdict", "recorded_at", "artifact_hash"}
+        assert record["verdict"] == normalize_verdict("READY TO BUILD (with concerns)")
+
+    def test_no_concerns_critique_verdict_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (no concerns)")
+        assert self._count(session) == 0
+
+    def test_bare_ready_to_build_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD")
+        assert self._count(session) == 0
+
+    def test_needs_revision_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert self._count(session) == 0
+
+    def test_major_rework_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "MAJOR REWORK")
+        assert self._count(session) == 0
+
+    def test_review_stage_with_concerns_does_not_increment(self, fake_session_reload_patched):
+        """The bound is CRITIQUE-scoped; a REVIEW verdict must never consume it."""
+        session = fake_session_reload_patched
+        record_verdict(session, "REVIEW", "APPROVED WITH CONCERNS")
+        assert self._count(session) == 0
+
+    def test_needs_revision_rounds_do_not_consume_the_bound(self, fake_session_reload_patched):
+        """Gate item 4: three NEEDS REVISION rounds then one with-concerns -> 1.
+
+        Without loop-scoping, the plans that needed the MOST scrutiny would
+        arrive at the with-concerns loop with the bound already spent and skip
+        re-critique entirely — the exact inverted gradient #2787 exists to fix.
+        """
+        session = fake_session_reload_patched
+        for _ in range(3):
+            record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert self._count(session) == 0
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert self._count(session) == 1
+
+    def test_every_recorded_round_counts_no_dedupe(self, fake_session_reload_patched):
+        """Two identical records -> 2. Pins the deliberate no-dedupe decision.
+
+        A replay and a genuine round on unchanged plan bytes are byte-identical
+        inputs, so any dedupe that suppresses the first risks suppressing the
+        second — and a bound that can silently fail to advance has no backstop.
+        Over-counting costs a build with a RECORDED acceptance one round early.
+        """
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert self._count(session) == 2
+
+    def test_monotonic_across_a_mixed_verdict_history(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        for verdict in (
+            "READY TO BUILD (with concerns)",
+            "NEEDS REVISION",
+            "READY TO BUILD (with concerns)",
+            "MAJOR REWORK",
+            "READY TO BUILD (with concerns)",
+        ):
+            record_verdict(session, "CRITIQUE", verdict)
+        assert self._count(session) == 3
+
+    def test_corrupt_existing_counter_recovers_to_one(self, fake_session_reload_patched):
+        """A non-integer value must not raise inside the single-writer transaction."""
+        session = fake_session_reload_patched
+        session.stage_states = json.dumps({"_concern_round_count": "not-a-number"})
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert self._count(session) == 1
