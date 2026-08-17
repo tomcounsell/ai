@@ -51,9 +51,6 @@ writes the SDLC stage marker and updates the plan frontmatter.
 
 | Detector | What it catches | Mechanism |
 |----------|-----------------|-----------|
-| Renamed markdown links | `[label](old/path.md)` after a rename | `git log --follow --diff-filter=R` |
-| Renamed paths/symbols | `` `old/module.py` `` after a rename | `git log --follow --diff-filter=R` |
-| README broken entries | Index entries pointing at deleted files | filesystem check + rename probe |
 | Stale-term dictionary | `SessionLog`, `RedisJob`, `session_log`, `redis_job` | `STALE_TERMS` dict at module top, matched on word boundaries |
 
 The dictionary's current entries are model and field renames: `SessionLog` and
@@ -104,10 +101,10 @@ and `-` are all word boundaries, so a key equal to a whole path segment still
 matches. Gate 3 is what closes that.
 
 Detection and application share one matching semantics: `_detect_stale_term_fixes`
-returns compiled `(pattern, replacement)` pairs on a dedicated `regex_fixes`
-channel, applied by `_apply_fixes_to_file` through `pattern.subn()`. The literal
-`fixes` channel used by the three rename detectors is untouched, so the
-`new == ""` line-delete sentinel keeps its exact-line-equality semantics.
+returns compiled `(pattern, replacement)` pairs on the `regex_fixes` channel,
+applied by `_apply_fixes_to_file` through `pattern.subn()`. It is the **only**
+fix channel `_apply_fixes_to_file` takes — there is no literal `fixes`
+parameter, and no `new == ""` whole-line-delete sentinel.
 
 #### Gate 1: the migration-context hatch is document-scoped
 
@@ -160,14 +157,13 @@ nothing else; the channel contract is unchanged. The suppression callable is
 built inside `_apply_fixes_to_file`'s regex loop by `_make_stale_term_replacer`,
 which wraps that plain string.
 
-That placement is load-bearing, not stylistic. `_apply_fixes_to_file` applies the
-literal `fixes` list **first** (including `_detect_readme_broken_entries`'
-`new == ""` whole-line-delete sentinel) and only then runs the regex fixes over
-the already-mutated text. Any line index computed at detection time is stale the
-moment a line ahead of it disappears, and it fails **silently**: a
-plausible-looking wrong rewrite rather than an error, which is precisely the
-corruption class these gates exist to close. The callable instead re-derives
-context from `match.string` (the text currently being rewritten) and
+That placement is load-bearing, not stylistic. `_apply_fixes_to_file`'s regex
+loop applies its fixes in sequence over the same `new_text`, mutating it after
+each one, so any line index computed once against the pre-loop `content` goes
+stale the moment an earlier fix changes what precedes it — and it fails
+**silently**: a plausible-looking wrong rewrite rather than an error, which is
+precisely the corruption class these gates exist to close. The callable instead
+re-derives context from `match.string` (the text currently being rewritten) and
 `match.start()` (the live offset into it), so there is no index to go stale.
 
 Keeping the callable local also keeps `_reject` receiving the replacement
@@ -234,19 +230,17 @@ symmetrically and pre-existing references are never re-validated. Measured
 self-baselining over `docs/features/*.md` (narrow `+` arm versus shipped `*` arm
 in one run), the widening produces **zero** new withholds.
 
-#### Why the sibling patterns stay narrower
+#### Why the detector pattern stays narrower
 
-`_detect_renamed_symbol_fixes` and `_detect_deleted_target_issues` each carry
-their own `` `((?:[\w.-]+/)+[\w.-]+\.py)` `` pattern that still *requires* a
-directory segment. The asymmetry with `_PATH_REF_RE` is deliberate, and a
-comment at each site records why.
+`_detect_deleted_target_issues` carries its own `` `((?:[\w.-]+/)+[\w.-]+\.py)` ``
+pattern that still *requires* a directory segment. The asymmetry with
+`_PATH_REF_RE` is deliberate, and a comment at the site records why.
 
-Those two are **detector** patterns, governing what the auditor *proposes*.
-`_PATH_REF_RE` is the only one of the three on the write path. Widening the
-detectors enlarges the candidate set and spends the `GIT_LOG_FOLLOW_CAP` per-run
-`git log --follow` budget and the per-run issue cap on bare names that are not
-resolvable to a single path anyway. That is a scope and volume change with its
-own failure modes, not a safety fix.
+`_detect_deleted_target_issues` is a **detector** pattern, governing what the
+auditor *reports*. `_PATH_REF_RE` is the only one of the two on the write path.
+Widening the detector enlarges the candidate set and spends the per-run issue
+cap on bare names that are not resolvable to a single path anyway. That is a
+scope and volume change with its own failure modes, not a safety fix.
 
 - **Attributed per term, not per occurrence.** Only the offending fix is
   dropped; valid sibling fixes in the same file still apply, and the file is
@@ -260,9 +254,11 @@ own failure modes, not a safety fix.
   pre-existing prose that names a long-gone module. The residual hole: if a
   doc already mentions an absent path somewhere, that path is in the original
   reference set, so a fix that rewrites a *valid* path into that same absent
-  one passes the invariant. No live instance is known; the reachable route to
-  it is the rename-target selection defect tracked as **#2725**, and closing it
-  requires span-level (rather than document-level) attribution.
+  one passes the invariant. No live instance is known, and there is no known
+  reachable route to it: the sole detector left on the write path
+  (`_detect_stale_term_fixes`) proposes replacements from a fixed, curated
+  dictionary, not from a query that could ever select an absent path as a
+  rewrite target.
 - **Rejections are reported, not silently discarded.** Each one logs a warning
   naming the offending path and lands in the result contract.
 - **An all-rejected run writes nothing** — no file write, therefore no empty
@@ -275,9 +271,9 @@ Rejected fixes surface on the `audit()` result:
 | `fixes_withheld` | `int` | count of fixes rejected by the existence invariant |
 | `withheld` | `list[dict]` | one entry per rejection: `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"` |
 
-`old` is whatever the emitting channel matched on: a literal string for the
-three rename detectors, but the **regex source** for a stale-term rejection
-(`\bsession_log\b`, not `session_log`). A caller that echoes `old` verbatim —
+`old` is always the **regex source** of the withheld stale-term fix
+(`\bsession_log\b`, not `session_log`) — there is no other channel left to
+emit a literal string. A caller that echoes `old` verbatim —
 `.claude/skill-context/do-docs.md` does — will show the pattern, which is the
 accurate thing to show, since that is what was withheld.
 
@@ -310,7 +306,7 @@ cascade.
 
 | Detector | What it catches | Action |
 |----------|-----------------|--------|
-| Deleted target | `` `path.py` `` references with no rename in history, after placeholder / fenced-block / deletion-heading filtering | `gh issue create` (deduped) |
+| Deleted target | `` `path.py` `` references to a target absent from the working tree, after placeholder / fenced-block / deletion-heading filtering | `gh issue create` (deduped) |
 | Stub doc | Docs with <5 content lines | `gh issue create` (deduped) |
 | Orphan plan | `docs/plans/*.md` lacking a tracking-issue link | `gh issue create` (deduped) |
 
@@ -541,15 +537,22 @@ asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
 
 The four gates are covered by `TestStaleTermDictionary` (cue tiers across
 backticked, cased, alias, and arrow forms; the channel stays
-`(re.Pattern, str)`), `TestStaleTermWordBoundary` (path-token suppression, and a
-`README.md` fixture where an earlier line is deleted by the `new == ""` sentinel
-before a later stale term is evaluated, the case detection-time indices fail
-silently), `TestExistenceInvariant` (bare-name withhold, doc-relative
-resolution, ambiguous-but-present pass, no re-validation of pre-existing refs),
-and `TestWithheldBlocksAutoMerge` (a bare-name withhold reaching the PR body,
-Telegram, and liveness). `TestWithheldRateNonRegression` self-baselines the
-narrow and widened `_PATH_REF_RE` arms in one run inside a disposable detached
-`git worktree`, asserting the widening adds no withholds.
+`(re.Pattern, str)`), `TestStaleTermWordBoundary` (path-token suppression, and
+`test_suppression_survives_an_earlier_shortening_fix`, a fixture with two regex
+fixes where the first shortens the text ahead of the second's match, proving
+context is derived at match time rather than from a stale detection-time
+index), `TestExistenceInvariant` (bare-name withhold, doc-relative resolution,
+ambiguous-but-present pass, no re-validation of pre-existing refs — every case
+is expressed as a prose-anchored regex fix whose *replacement*, not its match,
+carries the path-shaped string, so gate 3's path-token suppression cannot eat
+the case before the invariant runs), and `TestWithheldBlocksAutoMerge` (a
+bare-name withhold reaching the PR body, Telegram, and liveness).
+`TestWithheldRateNonRegression` self-baselines the narrow and widened
+`_PATH_REF_RE` arms in one run inside a disposable detached `git worktree`,
+asserting the widening adds no withholds. `TestDeletedTargetFiltering::
+test_rename_destination_reference_is_reported` runs on a real git checkout
+(commit, `git mv`, delete) and asserts a reference to a former rename
+destination is now reported rather than suppressed.
 
 ```bash
 pytest tests/unit/test_docs_auditor_substrate.py -v
