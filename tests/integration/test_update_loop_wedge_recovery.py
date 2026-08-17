@@ -42,6 +42,7 @@ from monitoring.bridge_watchdog import (
     assess_update_flow,
     get_process_start_ts,
 )
+from monitoring.bridge_watchdog import logger as bw_logger
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -368,8 +369,14 @@ def test_redis_exception_is_inconclusive(caplog):
     now = time.time()
     start_ts = now - (STARTUP_GRACE_SECONDS + 3600)
 
-    with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
-        is_live, issue = _assess(r, start_ts)
+    # bw_logger.propagate is False (issue #2643), so caplog's root-attached
+    # handler never sees its records; attach explicitly and detach after.
+    bw_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
+            is_live, issue = _assess(r, start_ts)
+    finally:
+        bw_logger.removeHandler(caplog.handler)
 
     assert is_live is True, "Redis error must be treated as inconclusive (not wedged)"
     assert issue == ""
@@ -384,8 +391,14 @@ def test_unreadable_process_start_suppresses_verdict(caplog):
     now = time.time()
     r = _make_redis(now - (UPDATE_STALENESS_CEILING + 3600), now - 300, now - 60)
 
-    with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
-        is_live, issue = _assess(r, start_ts=None)
+    # bw_logger.propagate is False (issue #2643), so caplog's root-attached
+    # handler never sees its records; attach explicitly and detach after.
+    bw_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="monitoring.bridge_watchdog"):
+            is_live, issue = _assess(r, start_ts=None)
+    finally:
+        bw_logger.removeHandler(caplog.handler)
 
     assert is_live is True, (
         "None start_ts must suppress the verdict — process age is the floor for "

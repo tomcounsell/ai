@@ -26,6 +26,11 @@ FD-hold problem we are solving. The files are excluded via
 
 Exits 0 even if individual files fail so launchd does not thrash the
 agent into a throttle window.
+
+Logging configuration (``logging.basicConfig``) lives in the ``__main__``
+guard, not at module scope (issue #2643): this module is also imported as a
+library by ``scripts/update/log_cleanup.py``, and configuring the importer's
+root logger at import time silently redirected unrelated diagnostics.
 """
 
 from __future__ import annotations
@@ -57,14 +62,12 @@ SELF_EXCLUDED_FILES = frozenset({"log_rotate.log", "log_rotate_error.log"})
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 
-# Use stderr for diagnostics — the LaunchAgent routes stderr to
-# logs/log_rotate_error.log (which is self-excluded from rotation).
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    stream=sys.stderr,
-)
+# Configuration lives in the __main__ guard (issue #2643): this module is
+# imported as a library by scripts/update/log_cleanup.py, and configuring the
+# importer's root logger at import time is the defect this issue removes.
+# `propagate` stays at its True default on purpose — see the docstring note.
 logger = logging.getLogger("log_rotate")
+logger.setLevel(logging.INFO)
 
 
 def _rotate_one(log_file: Path) -> bool:
@@ -188,4 +191,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Use stderr for diagnostics — the LaunchAgent routes stderr to
+    # logs/log_rotate_error.log (which is self-excluded from rotation).
+    # basicConfig configures ROOT, so `logger` must keep propagate = True to
+    # reach it. Setting propagate = False here silences this script entirely
+    # (measured: exit 0, empty stderr, both INFO lines gone).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     sys.exit(main())

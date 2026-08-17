@@ -57,6 +57,18 @@ should_revert, commit_sha = detect_crash_pattern()
 
 A separate process that monitors bridge health and executes recovery. Runs via launchd every 60 seconds.
 
+**Log isolation (issue #2643).** Logging configuration (`_configure_logging()`: mkdir + the rotating
+file handler + formatter) runs only from the `if __name__ == "__main__":` guard, never at import.
+Importing this module — including transitively, via `scripts.update.service` → `scripts.log_rotate`,
+which had the same defect — has zero logging side effects. Every line the watchdog writes to
+`logs/watchdog.log` now comes from a real entry-point invocation and appears **once** rather than
+twice (the plist previously doubled every record: once via the module's `RotatingFileHandler`, once
+via a `propagate = True` leak to root's `StreamHandler` → stderr → the plist's redirect of both
+streams into the same file). Submodule records that used to ride root's handler now arrive unformatted
+via `logging.lastResort` (WARNING+) or not at all (INFO — dropped at the call site). See
+[Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data Flow table and the
+`scripts/log_rotate.py` counterpart.
+
 **Health Checks**:
 - Process running (`pgrep -f telegram_bridge.py`)
 - Logs fresh (written within 5 minutes)
