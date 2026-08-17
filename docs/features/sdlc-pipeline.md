@@ -122,6 +122,13 @@ A second metadata field, `_plan_hash_at_build_start` (str|None), is written by `
 
 ## Convergence Latch (`revision_applied_at`, issue #1760)
 
+**Scope: the no-concerns path only (#2787).** This latch bounds bare
+`READY TO BUILD` verdicts. The `READY TO BUILD (with concerns)` path is
+bounded instead by `MAX_CONCERN_RECRITIQUE_ROUNDS` and the
+`_concern_round_count` counter; see
+[With-Concerns Re-Critique Gate](with-concerns-recritique-gate.md) for that
+path's S1/S2 state split and terminating bound.
+
 `revision_applied` is a **sticky** boolean — `/do-plan` sets it `true` on every
 revision pass and it stays `true` forever after. That's insufficient for one
 consumer: `agent/sdlc_router.py::_critique_verdict_is_stale()` (which feeds
@@ -262,6 +269,7 @@ The enriched stage query output (`sdlc-tool stage-query`) includes a `_meta` dic
 |-------|------|--------|-------------|
 | `patch_cycle_count` | int | `_patch_cycle_count` | Number of patch cycles run |
 | `critique_cycle_count` | int | `_critique_cycle_count` | Number of critique cycles run |
+| `concern_round_count` | int | `_concern_round_count` | Number of recorded `READY TO BUILD (with concerns)` CRITIQUE verdicts on this lane; incremented by `tools/sdlc_verdict.py::record_verdict` (its sole writer) inside the transaction that records the verdict, projected by `tools/sdlc_stage_query.py::_compute_meta`. Bounds the with-concerns re-critique loop against `MAX_CONCERN_RECRITIQUE_ROUNDS` (#2787) — see [With-Concerns Re-Critique Gate](with-concerns-recritique-gate.md) |
 | `latest_critique_verdict` | str\|None | `_verdicts["CRITIQUE"]` | Most recent critique verdict text |
 | `latest_review_verdict` | str\|None | `_verdicts["REVIEW"]` | Most recent review verdict text |
 | `revision_applied` | bool | Plan frontmatter | Whether `revision_applied: true` is in the plan doc (sticky) |

@@ -51,7 +51,7 @@ that ever worked it is deleted).
 | `ledger_key` | `KeyField` | Composite string key, `f"{target_repo}:{issue_number}"` |
 | `target_repo` | `Field(null=True)` | The `owner/name` GitHub slug, stored redundantly (also embedded in `ledger_key`) so inspection/migration tooling can filter without parsing the composite key |
 | `issue_number` | `IntField(null=True)` | The GitHub issue number, stored redundantly for the same reason |
-| `stage_states_json` | `Field(default="{}")` | JSON blob holding the stage-status map plus all underscore-prefixed metadata (`_verdicts`, `_sdlc_dispatches`, `_patch_cycle_count`, `_critique_cycle_count`, `_run_identities`) — the same wire format `AgentSession.stage_states` already used |
+| `stage_states_json` | `Field(default="{}")` | JSON blob holding the stage-status map plus all underscore-prefixed metadata (`_verdicts`, `_sdlc_dispatches`, `_patch_cycle_count`, `_critique_cycle_count`, `_concern_round_count`, `_run_identities`) — the same wire format `AgentSession.stage_states` already used |
 | `pr_number` | `IntField(null=True)` | Field-backed, single-writer (`sdlc-tool meta-set --key pr_number`) — mirrors how `AgentSession.pr_number` was already a field, not a key inside the JSON blob |
 
 `PipelineLedger.get_or_create(target_repo, issue_number)` returns the
