@@ -529,13 +529,16 @@ concurrent finalizer as success. Every non-deferred completion path now
 reaches a terminal status regardless of what `complete_transcript()` did
 upstream.
 
-## Stall Reaction Dedup Reset (issue #1313)
+## Liveness Counter Re-Anchoring (issue #2716)
 
-When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visible ⏳ reaction for a stalled session (see [Bridge Self-Healing § 4a](bridge-self-healing.md#4a-user-visible-stall-alerts-monitoringsession_watchdogpy-issue-1313)), it claims the dedup key `watchdog:stall_reaction_applied:{session_id}` so the reaction is queued at most once per stall period.
+The session watchdog advances a liveness tick counter on a session's
+originating Telegram message. The counter's anchor is reset — and its
+forced-progress marker released — by `bridge/telegram_relay.py` whenever the
+session actually delivers a message, keyed on the relay's own record of sent
+message ids rather than on any lifecycle transition in this module. A delivery
+that returns no message id stops the counter instead of re-anchoring it.
 
-**Reset on healthy observation:** the same iteration loop in `check_stalled_sessions` calls `_clear_stall_reaction_dedup(session_id)` whenever the session's duration is within its threshold. This is the only point where the dedup key is deleted — there is no lifecycle hook in `models/agent_session.py` for this, by design. The watchdog-side placement keeps the diff inside `monitoring/session_watchdog.py` only and avoids threading reaction state through the broader transition machinery in this module.
-
-**Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
+See [Session Liveness Tick Counter](session-liveness-tick-counter.md).
 
 ## Deferred Self-Draft Fallback Delivery (issues #1730, #1794, #1797)
 

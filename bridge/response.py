@@ -23,6 +23,7 @@ What remains here:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -126,12 +127,119 @@ REACTION_WORKER_DOWN = "⚠"  # Worker not alive — enqueued but not being proc
 # resolved lazily via find_best_emoji() on first access with hardcoded fallbacks.
 
 
+# =============================================================================
+# Session liveness tick counter (#2716)
+# =============================================================================
+#
+# The watchdog advances a counter on the session's originating message so the
+# human can see that an independent observer still has eyes on the session.
+# The number is DURATION and nothing else: tick 4 means "roughly forty minutes
+# since this counter started". It makes no claim about whether the session is
+# making progress — a busy session and a wedged one tick identically.
+#
+# Why digits need the custom-emoji schema: keycap digits (1️⃣ … 9️⃣, in either
+# the U+FE0F-suffixed or bare U+20E3 encoding) are NOT among the 74 standard
+# reactions Telegram's server advertises. Do not add one to VALIDATED_REACTIONS
+# — it will be rejected at the API exactly as ⏳ was. The only way to render a
+# digit is ReactionCustomEmoji with a sticker-pack document_id, which requires
+# a Premium sender, which is why every tick also carries a standard-glyph
+# fallback that set_reaction degrades to automatically.
+
+# Seconds per tick. Overridable locally for testing the ceiling without waiting
+# 100 minutes. Grain of salt: 600s is a provisional, tunable choice — it is the
+# smallest interval that keeps reaction traffic negligible against the relay's
+# shared FLOOD_WAIT exposure.
+HEARTBEAT_TICK_INTERVAL_SECONDS = int(os.environ.get("HEARTBEAT_TICK_INTERVAL_SECONDS", "600"))
+
+# Highest tick the counter will render. Past it the counter refuses to advance
+# and the session is steered to publish a progress message instead. With the
+# default interval that is 9 digits over 90 minutes, plus the slot-0 👀 the
+# ingestion path already placed — a forced progress message every 100 minutes.
+HEARTBEAT_MAX_TICKS = 9
+
+# Pinned custom-emoji document ids, tick number → document_id.
+#
+# EMPTY UNTIL PINNED. The digit glyphs live in the `Birthday Collection` pack
+# (sticker set id 1901206392136531984), which is already installed on this
+# account, but the per-digit document ids were never recorded anywhere in the
+# repo and can only be read from a live authenticated Telethon client:
+#
+#     from telethon.tl.functions.messages import GetStickerSetRequest
+#     from telethon.tl.types import InputStickerSetID
+#
+# Until this table is populated the counter runs entirely on
+# HEARTBEAT_FALLBACK_ARC — which is the same degradation path taken when the
+# pack is uninstalled or the account loses Premium, so the feature is correct
+# either way; it simply shows an alternating arc instead of digits.
+PREMIUM_DIGIT_REACTIONS: dict[int, int] = {}
+
+# Standard-glyph fallback, used both when a digit is unpinned and when Telegram
+# rejects the custom emoji. Slot 0 is 👀 (the acknowledgement the ingestion path
+# already set); every later tick alternates 🥱 / 👨‍💻 so the human can see the
+# reaction change even without digits.
+#
+# 🤔 is deliberately absent: it is REACTION_ERROR's pinned glyph, and a healthy
+# session must never wear the error face. This tuple is NOT registered in
+# _reaction_constants() — see heartbeat_reaction() for why that matters.
+HEARTBEAT_FALLBACK_ARC = ("👀", "🥱", "👨‍💻")
+
+
+def heartbeat_reaction(tick: int):
+    """Return the ``EmojiResult`` for liveness tick ``tick``.
+
+    Deterministic lookup, never ``find_best_emoji`` — that function samples
+    from a softmax over semantically similar candidates, which is correct for
+    "pick a feeling" and wrong for "this is tick 4".
+
+    The returned result carries the pinned custom-emoji ``document_id`` when
+    one exists for this tick and the standard arc glyph as ``emoji``, so
+    ``set_reaction`` renders the digit when it can and falls back silently
+    when it cannot.
+
+    Args:
+        tick: Tick number, ``0`` through :data:`HEARTBEAT_MAX_TICKS`.
+
+    Returns:
+        An ``EmojiResult`` whose glyph is always a legal Telegram reaction.
+
+    Raises:
+        ValueError: For a negative tick, or one past
+            :data:`HEARTBEAT_MAX_TICKS`. It never clamps — a clamped counter
+            would sit at the last digit forever, which is precisely the
+            "runs forever" failure the ceiling exists to prevent.
+    """
+    from tools.emoji_embedding import EmojiResult
+
+    if tick < 0:
+        raise ValueError(f"Liveness tick must be non-negative, got {tick}")
+    if tick > HEARTBEAT_MAX_TICKS:
+        raise ValueError(
+            f"Liveness tick {tick} exceeds HEARTBEAT_MAX_TICKS={HEARTBEAT_MAX_TICKS}. "
+            f"The counter refuses to advance past the ceiling; the caller must force "
+            f"a progress message and re-anchor instead of clamping."
+        )
+
+    glyph = HEARTBEAT_FALLBACK_ARC[0] if tick == 0 else HEARTBEAT_FALLBACK_ARC[1 + (tick - 1) % 2]
+    document_id = PREMIUM_DIGIT_REACTIONS.get(tick)
+    return EmojiResult(
+        emoji=glyph,
+        document_id=document_id,
+        is_custom=document_id is not None,
+    )
+
+
 def _reaction_constants() -> dict[str, str]:
     """Name → glyph mapping of every reaction constant this module exposes.
 
     The lazily-resolved EmojiResult constants (REACTION_SUCCESS,
     REACTION_COMPLETE, REACTION_ERROR) are compared by their str() glyph value;
     they are already resolved by this module's top-of-file import.
+
+    HEARTBEAT_FALLBACK_ARC is deliberately NOT registered here. It is a
+    sequence, not a constant, and it reuses 👀 (REACTION_RECEIVED) at slot 0 on
+    purpose — the counter's first slot IS the acknowledgement. Registering it
+    would make _assert_distinct() raise ImportError and the bridge would not
+    start. tests/unit/test_heartbeat_reactions.py asserts the non-registration.
     """
     return {
         "REACTION_RECEIVED": REACTION_RECEIVED,

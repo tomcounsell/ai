@@ -1488,7 +1488,11 @@ class TelegramRelayOutputHandler:
         that line — a system-transport session drops before any outbox write
         at all.)
         """
-        payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
+        from agent.reaction_priority import PRIORITY_PICKUP
+
+        payload = self._build_reaction_payload(
+            chat_id, reply_to_msg_id, emoji, session_id, priority=PRIORITY_PICKUP
+        )
         queue_key = f"telegram:outbox:{session_id}"
         try:
             r = self._get_redis()
@@ -1506,6 +1510,7 @@ class TelegramRelayOutputHandler:
         session_id: str,
         *,
         timestamp: float | None = None,
+        priority: int | None = None,
     ) -> dict[str, Any]:
         """Build a reaction payload dict for the Redis outbox.
 
@@ -1522,7 +1527,17 @@ class TelegramRelayOutputHandler:
                 serves them from one queue.
             timestamp: Override timestamp (for tests). Defaults to
                 ``time.time()`` when None.
+            priority: Precedence rank for the single reaction slot (#2716);
+                lower wins. Defaults to a glyph→rank derivation, which is what
+                the terminal writer relies on: it never builds its own payload
+                (``agent/session_executor.py`` calls ``react_cb`` → ``react()``
+                → here), so threading the rank through four ``react()``
+                signatures would be a wider blast radius for no gain. New code
+                with the parameter in hand must pass it explicitly — see
+                ``agent/reaction_priority.py``.
         """
+        from agent.reaction_priority import priority_for_glyph
+
         return {
             "type": "reaction",
             "chat_id": chat_id,
@@ -1530,6 +1545,7 @@ class TelegramRelayOutputHandler:
             "emoji": str(emoji) if emoji is not None else None,
             "session_id": session_id,
             "timestamp": timestamp if timestamp is not None else time.time(),
+            "priority": priority if priority is not None else priority_for_glyph(emoji),
         }
 
     async def react(

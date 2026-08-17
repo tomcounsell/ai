@@ -55,10 +55,9 @@ Backward compatibility is preserved: `str(result)` returns the Unicode emoji cha
 The core module that maps feelings to emojis.
 
 **Key functions:**
-- `find_best_emoji(feeling: str) -> EmojiResult` -- embeds a feeling word and returns the nearest emoji (standard or custom) by cosine similarity (agent-driven reactions)
+- `find_best_emoji(feeling: str) -> EmojiResult` -- embeds a feeling word and returns the nearest STANDARD emoji by cosine similarity (agent-driven reactions). It never returns a custom emoji: the embedding index that fed that branch was deleted in #2716.
 - `find_best_emoji_for_message(text: str, work_type: str | None) -> EmojiResult` -- maps `work_type` to an action category and selects a random emoji from `ACTION_EMOJI_MAP`; ignores text content at selection time
 - `clear_cache()` -- clears the in-memory cache (for testing)
-- `rebuild_custom_emoji_index(client)` -- async function to query Telethon for available custom emoji packs and rebuild the custom embedding cache
 
 **Action vocabulary:** `WORKTYPE_TO_ACTION` maps work-type labels to action intent categories. `ACTION_EMOJI_MAP` maps each category to a list of valid Telegram reaction emoji candidates. All candidates are confirmed in `VALIDATED_REACTIONS`.
 
@@ -75,13 +74,11 @@ The core module that maps feelings to emojis.
 
 **Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is the single source of truth for reactions that must never target a user. It is a frozenset covering the middle finger 🖕 (also removed entirely from `VALIDATED_REACTIONS` and `EMOJI_LABELS`) plus five hostile faces that stay valid Telegram reactions but are excluded from selection: thumbs down 👎, face with symbols on mouth 🤬, pouting face 😡, face vomiting 🤮, and face screaming in fear 😱. `find_best_emoji()` skips any emoji in this set at selection time, so no semantically-resolved reaction can ever draw a hostile face, even if one scores as the nearest match. Self-directed sadness (😢 😭 😨) is not blocked. It expresses empathy rather than hostility, so it stays selectable. Offensive reactions are structurally impossible from `find_best_emoji_for_message` because the `ACTION_EMOJI_MAP` action vocabulary never contains them.
 
-**Custom emoji labels:** Custom emoji from Premium sticker packs are labeled using the associated emoji character plus the sticker set title (e.g., "party celebration confetti" for a party popper custom emoji). These are embedded with the same model and stored separately.
+**Custom emoji:** semantic search over custom (Premium) emoji was removed in #2716 — the index it needed had no production caller, could not work as written, and never produced a cache file. The transport half is untouched and live: `EmojiResult` still carries `document_id` / `is_custom`, and `set_reaction()` still dispatches `ReactionCustomEmoji` with automatic fallback. Custom emoji ids are now pinned statically by the caller (see [Session Liveness Tick Counter](session-liveness-tick-counter.md)) rather than searched.
 
-**Caching:** Standard embeddings are cached to `data/emoji_embeddings.json`. Custom emoji embeddings are cached separately to `data/custom_emoji_embeddings.json`. Both are computed lazily on first use via OpenRouter (`text-embedding-3-small`) and loaded from disk on subsequent starts.
+**Caching:** Standard embeddings are cached to `data/emoji_embeddings.json`, computed lazily on first use via OpenRouter (`text-embedding-3-small`) and loaded from disk on subsequent starts.
 
-**Unified search:** `find_best_emoji()` searches both standard and custom emoji embeddings in a single pass. Custom emoji wins only when its similarity score exceeds the best standard match by a delta of 0.05, keeping behavior conservative.
-
-**Fallback:** If the embedding API is unavailable, the API key is not set, or any error occurs, the default thinking emoji is returned. If the account is not Premium or custom emoji API calls fail at startup, custom emoji indexing is disabled for the session and all lookups return standard emoji only.
+**Fallback:** If the embedding API is unavailable, the API key is not set, or any error occurs, the default thinking emoji is returned.
 
 ### Reaction Mode (`tools/react_with_emoji.py`)
 
@@ -180,9 +177,7 @@ The two emoji paths have different performance profiles:
 | `bridge/telegram_relay.py` | Reaction and custom emoji message payload delivery |
 | `bridge/response.py` | `set_reaction()` with standard and custom emoji dispatch |
 | `data/emoji_embeddings.json` | Disk cache for standard emoji embeddings |
-| `data/custom_emoji_embeddings.json` | Disk cache for custom (Premium) emoji embeddings |
 | `tests/unit/test_emoji_embedding.py` | Embedding index and EmojiResult tests |
-| `tests/unit/test_custom_emoji_index.py` | Custom emoji index building and cache tests |
 | `tests/unit/test_react_with_emoji.py` | Reaction and standalone emoji message tests |
 
 ## Terminal Reactions

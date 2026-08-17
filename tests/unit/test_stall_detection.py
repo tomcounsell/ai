@@ -4,8 +4,14 @@ Tests check_stalled_sessions (detection) and fix_unhealthy_session (abandon).
 The old stall retry mechanisms (_recover_stalled_pending, _kill_stalled_worker,
 _enqueue_stall_retry) were deleted in the bridge-resilience refactor.
 Recovery is now handled by the unified _agent_session_health_check in agent/agent_session_queue.py.
+
+Also covers the session liveness tick counter (#2716) that replaced the dead
+⏳ stall reaction: tick derivation, the ceiling, re-anchoring, reaction-slot
+precedence at the relay drain, and payload schema parity across every
+hand-mirrored outbox writer.
 """
 
+import json
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -302,32 +308,43 @@ class TestToTimestamp:
 
 
 # ===================================================================
-# _apply_stall_reaction (issue #1313)
+# Liveness tick counter (issue #2716)
 # ===================================================================
 
 
-def _make_stall_session(
+def _make_tick_session(
     session_id="tg_user_-100_42",
     chat_id="-100",
     telegram_message_id=42,
     agent_session_id="as-001",
+    age_seconds=0.0,
 ):
-    """Build a SimpleNamespace mimicking AgentSession for stall-reaction tests."""
+    """SimpleNamespace mimicking an AgentSession with a Telegram origin."""
+    now = time.time()
     return SimpleNamespace(
         session_id=session_id,
         agent_session_id=agent_session_id,
         chat_id=chat_id,
         telegram_message_id=telegram_message_id,
+        status="running",
+        started_at=now - age_seconds,
+        created_at=now - age_seconds,
+        updated_at=now - age_seconds,
+        project_key="testproj",
     )
 
 
 class _FakeRedis:
-    """Minimal in-memory Redis stub supporting set NX EX, rpush, expire, delete."""
+    """In-memory stub for the get/set-NX-EX/rpush/expire/delete surface used
+    by the tick publisher and bridge/liveness_ticks.py."""
 
     def __init__(self):
         self.store: dict[str, str] = {}
         self.lists: dict[str, list[str]] = {}
         self.expires: dict[str, int] = {}
+
+    def get(self, key):
+        return self.store.get(key)
 
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.store:
@@ -359,157 +376,395 @@ def fake_redis(monkeypatch):
     return fr
 
 
-class TestStallReaction:
-    def test_reaction_queued_on_first_stall(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
+def _run_publisher(sessions_by_status):
+    from monitoring import session_watchdog
 
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session()
-        result = _apply_stall_reaction(session)
-        assert result is True
-        # Dedup key claimed
-        assert "watchdog:stall_reaction_applied:tg_user_-100_42" in fake_redis.store
-        # Outbox payload written
-        queue_key = "telegram:outbox:tg_user_-100_42"
-        assert queue_key in fake_redis.lists
-        import json as _json
+    def filter_fn(**kwargs):
+        return sessions_by_status.get(kwargs.get("status", ""), [])
 
-        payload = _json.loads(fake_redis.lists[queue_key][0])
+    with patch(
+        "monitoring.session_watchdog.AgentSession.query",
+        SimpleNamespace(filter=filter_fn),
+    ):
+        return session_watchdog._publish_liveness_ticks()
+
+
+class TestLivenessTickPublisher:
+    def test_fresh_session_publishes_nothing(self, fake_redis):
+        """Slot 0 is the 👀 ingestion already placed; the counter starts at tick 1."""
+        session = _make_tick_session(age_seconds=0)
+        assert _run_publisher({"running": [session]}) == 0
+        assert fake_redis.lists == {}
+
+    def test_first_interval_publishes_tick_one(self, fake_redis):
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS, heartbeat_reaction
+
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+        assert _run_publisher({"running": [session]}) == 1
+
+        payload = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
         assert payload["type"] == "reaction"
         assert payload["chat_id"] == "-100"
         assert payload["reply_to"] == 42
-        assert payload["emoji"] == "⏳"
-        assert payload["session_id"] == "tg_user_-100_42"
-        assert "timestamp" in payload
-        # TTL set on the queue
-        assert fake_redis.expires[queue_key] == 3600
+        assert payload["emoji"] == heartbeat_reaction(1).emoji
+        assert payload["heartbeat_tick"] == 1
+        assert fake_redis.expires["telegram:outbox:tg_user_-100_42"] == 3600
 
-    def test_reaction_deduped_on_second_call(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
+    def test_tick_is_derived_from_wall_clock_not_incremented(self, fake_redis):
+        """WATCHDOG_INTERVAL (300s) is half a tick — a rescan must recompute, not add."""
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
 
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session()
-        first = _apply_stall_reaction(session)
-        second = _apply_stall_reaction(session)
-        assert first is True
-        assert second is False
-        # Only one payload was queued
-        queue_key = "telegram:outbox:tg_user_-100_42"
-        assert len(fake_redis.lists[queue_key]) == 1
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS * 3 + 5)
+        assert _run_publisher({"running": [session]}) == 1
+        payload = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
+        assert payload["heartbeat_tick"] == 3
 
-    def test_skip_when_no_telegram_message_id(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
+    def test_second_scan_within_the_same_interval_is_a_noop(self, fake_redis):
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
 
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session(telegram_message_id=None)
-        assert _apply_stall_reaction(session) is False
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+        _run_publisher({"running": [session]})
+        assert _run_publisher({"running": [session]}) == 0
+        assert len(fake_redis.lists["telegram:outbox:tg_user_-100_42"]) == 1
+
+    def test_tick_priority_is_explicit_and_lowest(self, fake_redis):
+        from agent.reaction_priority import PRIORITY_HEARTBEAT, priority_for_glyph
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
+
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+        _run_publisher({"running": [session]})
+        payload = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
+        assert payload["priority"] == PRIORITY_HEARTBEAT
+        # And not the glyph derivation, which would misrank the slot-0 arc entry.
+        assert payload["priority"] != priority_for_glyph("👀")
+
+    def test_running_status_is_swept(self):
+        """The load-bearing case: check_all_sessions queries active only, and
+        worker-executed Telegram sessions live at running."""
+        from monitoring.session_watchdog import HEARTBEAT_STATUSES
+
+        assert "running" in HEARTBEAT_STATUSES
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"chat_id": None},
+            {"telegram_message_id": None},
+            {"telegram_message_id": 0},
+            {"session_id": "", "agent_session_id": None},
+        ],
+    )
+    def test_non_telegram_sessions_are_skipped_silently(self, fake_redis, kwargs):
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
+
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5, **kwargs)
+        assert _run_publisher({"running": [session]}) == 0
         assert fake_redis.store == {}
         assert fake_redis.lists == {}
 
-    def test_skip_when_no_chat_id(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
-
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session(chat_id=None)
-        assert _apply_stall_reaction(session) is False
-        assert fake_redis.store == {}
-
-    def test_skip_when_telegram_message_id_zero(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
-
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        # 0 is treated as falsy -- no real Telegram message id is 0.
-        session = _make_stall_session(telegram_message_id=0)
-        assert _apply_stall_reaction(session) is False
-        assert fake_redis.store == {}
-
-    def test_skip_when_session_id_empty(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
-
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session(session_id="", agent_session_id=None)
-        assert _apply_stall_reaction(session) is False
-
-    def test_skip_when_flag_disabled(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
-
-        monkeypatch.setenv("WATCHDOG_STALL_REACTION_ENABLED", "0")
-        session = _make_stall_session()
-        assert _apply_stall_reaction(session) is False
-        # No Redis writes when disabled
-        assert fake_redis.store == {}
-        assert fake_redis.lists == {}
-
-    def test_redis_exception_is_fail_quiet(self, monkeypatch):
-        from monitoring.session_watchdog import _apply_stall_reaction
-
+    def test_redis_failure_is_fail_quiet(self, monkeypatch):
         class _BoomRedis:
-            def set(self, *a, **kw):
-                raise RuntimeError("redis down")
+            def __getattr__(self, _name):
+                def _boom(*a, **kw):
+                    raise RuntimeError("redis down")
 
-            def rpush(self, *a, **kw):
-                raise RuntimeError("redis down")
-
-            def expire(self, *a, **kw):
-                raise RuntimeError("redis down")
-
-            def delete(self, *a, **kw):
-                raise RuntimeError("redis down")
+                return _boom
 
         monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", _BoomRedis())
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session()
-        # Must not raise
-        assert _apply_stall_reaction(session) is False
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
 
-    def test_payload_matches_build_reaction_payload(self, fake_redis, monkeypatch):
-        """Schema parity test: the watchdog's inlined payload literal must match
-        agent.output_handler.OutputHandler._build_reaction_payload byte-for-byte.
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+        assert _run_publisher({"running": [session]}) == 0
 
-        This is the ONLY mechanical defense against schema drift between the
-        two outbox writers. If this test fails, either reconcile the watchdog's
-        literal or update _build_reaction_payload (and probably the bridge relay).
-        """
+
+class TestLivenessCeiling:
+    def _aged_past_ceiling(self):
+        from bridge.response import HEARTBEAT_MAX_TICKS, HEARTBEAT_TICK_INTERVAL_SECONDS
+
+        return _make_tick_session(
+            age_seconds=(HEARTBEAT_MAX_TICKS + 1) * HEARTBEAT_TICK_INTERVAL_SECONDS + 5
+        )
+
+    def test_ceiling_steers_instead_of_ticking(self, fake_redis):
+        session = self._aged_past_ceiling()
+        with patch("agent.steering.push_steering_message") as push:
+            assert _run_publisher({"running": [session]}) == 0
+        push.assert_called_once()
+        # No reaction was queued past the ceiling.
+        assert fake_redis.lists == {}
+
+    def test_ceiling_steer_uses_the_session_scoped_leg(self, fake_redis):
+        """room_id=None: 'publish your progress' is a diagnostic about THIS
+        session; on the Room leg a sibling could consume it (#2642)."""
+        session = self._aged_past_ceiling()
+        with patch("agent.steering.push_steering_message") as push:
+            _run_publisher({"running": [session]})
+        assert push.call_args.kwargs["room_id"] is None
+        assert push.call_args.kwargs["sender"] == "watchdog"
+
+    def test_ceiling_fires_once_across_two_scans(self, fake_redis):
+        session = self._aged_past_ceiling()
+        with patch("agent.steering.push_steering_message") as push:
+            _run_publisher({"running": [session]})
+            _run_publisher({"running": [session]})
+        assert push.call_count == 1
+
+    def test_unhonored_steer_leaves_the_counter_frozen(self, fake_redis):
+        """A wedged session never drains the steer, so no progress message
+        appears and no re-anchor happens. The counter stays frozen at the
+        ceiling — the intended terminal display. Do not 'fix' this with a
+        retry or timeout escalation."""
+        session = self._aged_past_ceiling()
+        with patch("agent.steering.push_steering_message"):
+            for _ in range(5):
+                _run_publisher({"running": [session]})
+        assert fake_redis.lists == {}
+        from bridge.liveness_ticks import ceiling_key
+
+        assert ceiling_key(session.session_id) in fake_redis.store
+
+
+class TestReAnchoring:
+    def test_delivered_message_restarts_the_counter(self, fake_redis):
+        from bridge.liveness_ticks import read_anchor, read_last_tick
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
+        from bridge.telegram_relay import _reanchor_liveness_counter
+
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS * 2 + 5)
+        _run_publisher({"running": [session]})
+        assert read_last_tick(session.session_id) == 2
+
+        _reanchor_liveness_counter({"session_id": session.session_id}, 4242)
+
+        assert read_last_tick(session.session_id) == 0
+        anchor_ts, anchor_msg = read_anchor(session.session_id)
+        assert anchor_msg == 4242
+        assert time.time() - anchor_ts < 5
+
+    def test_delivered_no_id_clears_the_marker_without_reanchoring(self, fake_redis):
+        """The DELIVERED_NO_ID hole: the human was answered but there is no
+        message to anchor to, so the counter stops rather than latching."""
+        from bridge.liveness_ticks import ceiling_key, read_anchor
+        from bridge.response import HEARTBEAT_MAX_TICKS, HEARTBEAT_TICK_INTERVAL_SECONDS
+        from bridge.telegram_relay import _reanchor_liveness_counter
+
+        session = _make_tick_session(
+            age_seconds=(HEARTBEAT_MAX_TICKS + 1) * HEARTBEAT_TICK_INTERVAL_SECONDS + 5
+        )
+        with patch("agent.steering.push_steering_message"):
+            _run_publisher({"running": [session]})
+        assert ceiling_key(session.session_id) in fake_redis.store
+
+        _reanchor_liveness_counter({"session_id": session.session_id}, None)
+
+        assert ceiling_key(session.session_id) not in fake_redis.store
+        assert read_anchor(session.session_id) is None
+
+
+class TestReactionSlotPrecedence:
+    """Drain-side guard (bridge/telegram_relay.py). Terminal-wins and
+    no-flicker are the highest-value assertions in this change."""
+
+    def _tick_payload(self):
+        from agent.reaction_priority import PRIORITY_HEARTBEAT
+
+        return {
+            "type": "reaction",
+            "chat_id": "-100",
+            "reply_to": 42,
+            "emoji": "🥱",
+            "session_id": "tg_user_-100_42",
+            "timestamp": time.time(),
+            "priority": PRIORITY_HEARTBEAT,
+            "heartbeat_tick": 3,
+        }
+
+    def test_tick_dropped_when_terminal_owns_the_slot(self, fake_redis):
+        from agent.reaction_priority import PRIORITY_TERMINAL
+        from bridge.liveness_ticks import record_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        record_slot_owner("-100", 42, PRIORITY_TERMINAL)
+        assert _reaction_yields_slot(self._tick_payload()) is True
+
+    def test_tick_dropped_when_any_higher_rank_owns_the_slot(self, fake_redis):
+        from agent.reaction_priority import PRIORITY_SUPPRESS
+        from bridge.liveness_ticks import record_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        record_slot_owner("-100", 42, PRIORITY_SUPPRESS)
+        assert _reaction_yields_slot(self._tick_payload()) is True
+
+    def test_tick_delivered_on_an_unowned_slot(self, fake_redis):
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        assert _reaction_yields_slot(self._tick_payload()) is False
+
+    def test_tick_dropped_for_a_terminal_session(self, fake_redis):
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        with patch("bridge.telegram_relay._session_reached_terminal_status", return_value=True):
+            assert _reaction_yields_slot(self._tick_payload()) is True
+
+    def test_budget_reaction_dropped_after_terminal(self, fake_redis):
+        """Latent bug predating the counter: nothing stopped 🤯 landing after a
+        session's terminal reaction."""
+        from agent.reaction_priority import PRIORITY_INGESTION, PRIORITY_TERMINAL
+        from bridge.liveness_ticks import record_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        record_slot_owner("-100", 42, PRIORITY_TERMINAL)
+        payload = {
+            "chat_id": "-100",
+            "reply_to": 42,
+            "emoji": "🤯",
+            "priority": PRIORITY_INGESTION,
+        }
+        assert _reaction_yields_slot(payload) is True
+
+    def test_pickup_still_overwrites_worker_down(self, fake_redis):
+        """⚠ (2) → ✍ (3) must keep working: the guard is not a blanket
+        monotonic-rank rule."""
+        from agent.reaction_priority import PRIORITY_INGESTION, PRIORITY_PICKUP
+        from bridge.liveness_ticks import record_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        record_slot_owner("-100", 42, PRIORITY_INGESTION)
+        payload = {
+            "chat_id": "-100",
+            "reply_to": 42,
+            "emoji": "✍",
+            "priority": PRIORITY_PICKUP,
+        }
+        assert _reaction_yields_slot(payload) is False
+
+    def test_terminal_reaction_always_wins(self, fake_redis):
+        from agent.reaction_priority import PRIORITY_HEARTBEAT, PRIORITY_TERMINAL
+        from bridge.liveness_ticks import record_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot
+
+        record_slot_owner("-100", 42, PRIORITY_HEARTBEAT)
+        payload = {
+            "chat_id": "-100",
+            "reply_to": 42,
+            "emoji": "👏",
+            "priority": PRIORITY_TERMINAL,
+        }
+        assert _reaction_yields_slot(payload) is False
+
+
+class TestReactionPayloadSchemaParity:
+    """Every hand-mirrored reaction payload must match the canonical builder.
+
+    Replaces the deleted ``test_payload_matches_build_reaction_payload``, which
+    pinned the ⏳ design. There are five mirrors of a schema whose only source
+    of truth is a static method they deliberately do not import; without this
+    test they drift silently the first time the schema moves.
+    """
+
+    # Keys a mirror may add on top of the canonical schema.
+    EXTRA_KEYS = {"custom_emoji_document_id", "heartbeat_tick", "ack_sent_id"}
+
+    def _assert_parity(self, payload, *, chat_id, reply_to, emoji, session_id):
         from agent.output_handler import TelegramRelayOutputHandler
-        from monitoring.session_watchdog import _apply_stall_reaction
-
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session()
-        assert _apply_stall_reaction(session) is True
-        import json as _json
-
-        queue_key = "telegram:outbox:tg_user_-100_42"
-        actual = _json.loads(fake_redis.lists[queue_key][0])
 
         expected = TelegramRelayOutputHandler._build_reaction_payload(
-            chat_id=str(session.chat_id),
-            reply_to_msg_id=session.telegram_message_id,
-            emoji="⏳",
-            session_id=session.session_id,
-            timestamp=actual["timestamp"],
+            chat_id,
+            reply_to,
+            emoji,
+            session_id,
+            timestamp=payload["timestamp"],
+            priority=payload["priority"],
         )
-        assert actual == expected
+        assert set(payload) - set(expected) <= self.EXTRA_KEYS
+        for field, value in expected.items():
+            assert payload[field] == value, f"{field} drifted"
 
-    def test_clear_dedup_removes_key(self, fake_redis, monkeypatch):
-        from monitoring.session_watchdog import (
-            _apply_stall_reaction,
-            _clear_stall_reaction_dedup,
+    def test_canonical_builder_emits_priority(self):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        payload = TelegramRelayOutputHandler._build_reaction_payload("-100", 42, "👀", "s1")
+        assert payload["priority"] is not None
+
+    def test_watchdog_liveness_tick_mirror(self, fake_redis):
+        from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS
+
+        session = _make_tick_session(age_seconds=HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+        _run_publisher({"running": [session]})
+        payload = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
+        self._assert_parity(
+            payload,
+            chat_id="-100",
+            reply_to=42,
+            emoji=payload["emoji"],
+            session_id="tg_user_-100_42",
         )
 
-        monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-        session = _make_stall_session()
-        # Apply once, then clear, then apply again -- should succeed twice.
-        assert _apply_stall_reaction(session) is True
-        _clear_stall_reaction_dedup(session.session_id)
-        assert "watchdog:stall_reaction_applied:tg_user_-100_42" not in fake_redis.store
-        # Second apply succeeds because the dedup key was cleared.
-        assert _apply_stall_reaction(session) is True
-        queue_key = "telegram:outbox:tg_user_-100_42"
-        assert len(fake_redis.lists[queue_key]) == 2
+    def test_tool_budget_mirror(self, fake_redis):
+        from agent.tool_budget import BUDGET_REACTION_EMOJI, _queue_budget_reaction
 
-    def test_clear_dedup_empty_session_id_is_noop(self, fake_redis):
-        from monitoring.session_watchdog import _clear_stall_reaction_dedup
+        session = _make_tick_session()
+        _queue_budget_reaction(session)
+        payload = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
+        self._assert_parity(
+            payload,
+            chat_id="-100",
+            reply_to=42,
+            emoji=BUDGET_REACTION_EMOJI,
+            session_id="tg_user_-100_42",
+        )
 
-        # Should not raise, no Redis call needed.
-        _clear_stall_reaction_dedup("")
-        _clear_stall_reaction_dedup(None)  # type: ignore[arg-type]
+    def test_session_completion_suppress_mirror(self, fake_redis, monkeypatch):
+        from agent import session_completion
+
+        captured = {}
+
+        class _FakeRedisModule:
+            @staticmethod
+            def from_url(*a, **kw):
+                return fake_redis
+
+        monkeypatch.setattr(session_completion, "_OUTBOX_TTL", 3600, raising=False)
+        with patch.dict("sys.modules", {"redis": SimpleNamespace(Redis=_FakeRedisModule)}):
+            parent = SimpleNamespace(session_id="tg_user_-100_42")
+            assert session_completion._queue_completion_suppress_reaction(parent, "-100", 42)
+        captured["payload"] = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
+        self._assert_parity(
+            captured["payload"],
+            chat_id="-100",
+            reply_to=42,
+            emoji="👀",
+            session_id="tg_user_-100_42",
+        )
+
+    def test_react_with_emoji_mirror(self, monkeypatch):
+        import tools.react_with_emoji as rwe
+        from tools.emoji_embedding import EmojiResult
+
+        fr = _FakeRedis()
+        monkeypatch.setattr(rwe, "_get_redis", lambda: fr)
+        monkeypatch.setattr(rwe, "_resolve_transport", lambda: "telegram")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100")
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "42")
+        monkeypatch.setenv("VALOR_SESSION_ID", "tg_user_-100_42")
+        with patch("tools.emoji_embedding.find_best_emoji", return_value=EmojiResult(emoji="🔥")):
+            rwe.react("excited")
+        payload = json.loads(fr.lists["telegram:outbox:tg_user_-100_42"][0])
+        self._assert_parity(
+            payload,
+            chat_id="-100",
+            reply_to=42,
+            emoji="🔥",
+            session_id="tg_user_-100_42",
+        )
+
+    def test_worker_down_reactions_uses_the_builder_directly(self):
+        """The fifth mirror imports _build_reaction_payload rather than
+        re-inlining it, so parity is structural — assert that stays true."""
+        import inspect
+
+        from agent import worker_down_reactions
+
+        src = inspect.getsource(worker_down_reactions)
+        assert "_build_reaction_payload(" in src
+        assert '"type": "reaction"' not in src

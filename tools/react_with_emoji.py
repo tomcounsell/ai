@@ -95,6 +95,16 @@ def react(feeling: str) -> None:
 
     result = find_best_emoji(feeling.strip())
 
+    from agent.reaction_priority import priority_for_glyph
+
+    # Mirror of TelegramRelayOutputHandler._build_reaction_payload; parity is
+    # enforced by tests/unit/test_stall_detection.py.
+    #
+    # This path is deliberately UNRANKED in the precedence model (#2716): an
+    # agent reacting on purpose should not be silently overridden, so it takes
+    # the glyph derivation, which lands on rank 1 for any emoji the model
+    # picks. It simply wins whenever it runs, and the next liveness tick
+    # overwrites it.
     payload = {
         "type": "reaction",
         "chat_id": chat_id,
@@ -102,9 +112,8 @@ def react(feeling: str) -> None:
         "emoji": str(result),
         "session_id": session_id,
         "timestamp": time.time(),
+        "priority": priority_for_glyph(str(result)),
     }
-    if result.is_custom and result.document_id is not None:
-        payload["custom_emoji_document_id"] = result.document_id
 
     queue_key = f"telegram:outbox:{session_id}"
     try:

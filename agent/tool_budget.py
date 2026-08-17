@@ -308,13 +308,19 @@ def _auto_pause_and_notify(session, verdict: BudgetVerdict) -> None:
 def _queue_budget_reaction(session) -> None:
     """Queue a user-visible reaction on the originating Telegram message.
 
-    Mirrors ``monitoring/session_watchdog.py::_apply_stall_reaction`` — the same
-    atomic ``SET NX EX`` dedup + reaction-queue write. Skips silently when the
-    session has no ``chat_id`` / ``telegram_message_id`` / resolvable id, or when
-    the dedup key already exists.
+    Shares the shape of the watchdog's outbox writes — atomic ``SET NX EX``
+    dedup plus a reaction-queue write. Skips silently when the session has no
+    ``chat_id`` / ``telegram_message_id`` / resolvable id, or when the dedup key
+    already exists.
+
+    The payload is a hand-mirror of
+    ``TelegramRelayOutputHandler._build_reaction_payload``; parity across all
+    five mirrors is enforced by tests/unit/test_stall_detection.py.
     """
     import json
     import time
+
+    from agent.reaction_priority import PRIORITY_INGESTION
 
     chat_id = getattr(session, "chat_id", None)
     msg_id = getattr(session, "telegram_message_id", None)
@@ -336,6 +342,7 @@ def _queue_budget_reaction(session) -> None:
         "emoji": BUDGET_REACTION_EMOJI,
         "session_id": session_id,
         "timestamp": time.time(),
+        "priority": PRIORITY_INGESTION,
     }
     queue_key = f"telegram:outbox:{session_id}"
     POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))

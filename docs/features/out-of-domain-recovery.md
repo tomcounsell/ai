@@ -221,7 +221,7 @@ and the adapter/worker all read them directly. Only when
 `TOOL_BUDGET_AUTO_PAUSE` is set does the first deny per session additionally
 call `transition_status(session, "paused_budget", ...)` (the CAS-protected
 status-owner path) and queue a Telegram reaction on the originating message,
-mirroring `monitoring/session_watchdog.py::_apply_stall_reaction`'s dedup
+sharing the shape of the session watchdog's outbox writes — the same dedup
 pattern. All of this surfacing is fail-quiet — a surfacing error never flips
 a deny into an allow, and never crashes the hook; only the notification is
 best-effort.
