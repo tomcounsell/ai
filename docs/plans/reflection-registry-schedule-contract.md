@@ -7,7 +7,7 @@ created: 2026-08-14
 tracking: https://github.com/yudame/ai/issues/2734
 last_comment_id: 5286094986
 revision_applied: true
-revision_applied_at: 2026-08-17T04:06:37Z
+revision_applied_at: 2026-08-17T05:14:17Z
 ---
 
 # Reflection registry: schedule contract and worktree-safe resolution
@@ -28,13 +28,13 @@ The two stack: SDLC lane work and the nightly regression detector both run in `.
 
 - In a worktree under `VALOR_LAUNCHD=1`: **7** call sites in `tests/unit/test_reflection_scheduler.py` (lines 71, 90, 653, 661, 682, 709, 717) and 1 in `tests/unit/test_plan_migration_invariant.py:78` resolve to a nonexistent path and error — **8 total**. The failure is not uniformly `FileNotFoundError`: lines 71 and 653 in-module, and the cross-module site at `test_plan_migration_invariant.py:78`, `assert registry_path.exists()` before opening and so raise `AssertionError`; the remaining 5 in-module sites `open()` directly and raise `FileNotFoundError`. Measured at `5e47b0cef` with `grep -n "= _registry_path()"` — a bare `grep -c "_registry_path()"` returns 9 because it also counts the `def` at line 40 and the `_resolve_registry_path()` substring at line 48. The nightly detector reports a path error instead of the contract error it was written to catch.
 - `load_registry()` compounds this by failing open — `return []` at both `agent/reflection_scheduler.py:230-241` (the `~/Desktop` realpath guard) and `243-245` (missing path). So `TestRegistryLoading::test_load_registry_returns_only_enabled` iterates an empty list and **passes while asserting nothing**, and any production process inheriting `VALOR_LAUNCHD=1` from a worktree silently schedules **zero reflections** behind a single WARNING.
-- In the primary checkout, Defect 1 is plainly red: `TestRegistryIntegrity` → `2 failed, 3 passed`.
+- In the primary checkout, Defect 1 is plainly red and is now the *only* failure there: `TestRegistryIntegrity` → `1 failed, 4 passed` (re-measured at `bc3051ee4`; it was `2 failed, 3 passed` before #2708 landed `reflections/expectation_reconciler.py` and fixed `test_all_callables_resolve` — see spike-4).
 
 **Desired outcome:**
 
 - The registry resolves from *any* checkout — worktree or primary — without weakening the launchd TCC guard.
 - The required-fields test accepts every schedule shape the loader accepts, and still fails loudly on an entry with no schedule at all.
-- When the resolver genuinely cannot find a registry anywhere, it says so once — a single log line naming every candidate it tried — instead of silently handing back a path that is not there. (Revision round 4 narrowed this to the resolver side. After the fix there are no eight path failures left to collapse, so the test-side single-failure-cause workstream was cut; see the Scope & Value CONCERN in Critique Results.)
+- When the resolver genuinely cannot find a registry anywhere, it says so once — a single log line naming every candidate it tried — instead of silently handing back a path that is not there. (Revision round 4 narrowed this to the resolver side. After the fix there are no eight path failures left to collapse, so the test-side single-failure-cause workstream — converting `_registry_path()` into a failing fixture — was cut as scaffolding for a state the resolver fix makes unreachable. Technical Approach and the `[NOT DOING]` No-Go record the cut in full.)
 
 ## Freshness Check
 
@@ -152,8 +152,8 @@ Two files change. The cost here is in getting the decision right and in proving 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Reflections registry present on this machine | `test -f ~/Desktop/Valor/reflections.yaml -o -f config/reflections.yaml` | The tests read the live registry; without either copy there is nothing to assert against |
-| A registered git worktree to verify against | `.venv/bin/python -c "import subprocess,sys; out=subprocess.run(['git','worktree','list'],capture_output=True,text=True).stdout; sys.exit(0 if '.worktrees/' in out else 1)"` | Defect 2 only reproduces in a worktree |
-| That worktree has a synced, on-pin venv | from the worktree: `uv sync --all-extras` then `.venv/bin/python --version` matches `.python-version` | The four env-carrying Verification rows run `scripts/pytest-clean.sh` inside the worktree, and it **aborts** on an off-pin venv — an unsynced worktree makes those rows unrunnable rather than red |
+| This lane's own build worktree exists and holds the build under test | from the build worktree: `test -f .git` (in a linked worktree `.git` is a file, not a directory) | Defect 2 only reproduces in a worktree. It must be *this* lane's worktree: SC1/SC2/SC4 assert on the code this plan adds, so a worktree that does not contain the build cannot verify it |
+| That build worktree has a synced, on-pin venv | from the build worktree: `uv sync --all-extras` then `.venv/bin/python --version` matches `.python-version` | The three env-carrying Verification blocks (SC1, SC2, SC4) run `scripts/pytest-clean.sh` inside that worktree, and it **aborts** on an off-pin venv — an unsynced worktree makes those blocks unrunnable rather than red |
 
 ## Solution
 
@@ -179,7 +179,7 @@ The fourth candidate path is built by the **resolver**, not by the locator, so i
 - **Option 3 (set `REFLECTIONS_YAML` in the tests) — rejected as the primary fix.** It is the established pattern for tests that construct their *own* fixture registry (`tests/unit/test_reflection_arm.py`, `test_reflection_register.py`), but that is a different job from these eight sites, which must read the **live** registry. It also leaves the production hole entirely open: a worktree process under launchd still schedules zero reflections silently. And it scales badly — eight edits now, plus one more for every future site, each of which fails open if forgotten. Comment 5 on the issue puts the decisive argument well: turning `FileNotFoundError` into a skip or a fixture preserves the detection outage, and `test_all_callables_resolve` is the only guard between an unreviewed registry and a reflection that errors every 30 minutes in production.
 - **Option 2 — selected.** One change at the single point every consumer funnels through. It fixes the production hole and all eight test sites together, it keeps the tests reading the live registry (preserving the guard's whole purpose), and it never touches `~/Desktop`, so the TCC hazard is sidestepped rather than gambled against.
 
-**Mechanism.** Two pieces with a hard division of labour, because collapsing them is what made the fourth candidate unnameable in the diagnostic (revision round 4 BLOCKER): a **pure locator** that answers "which checkout owns this one?" from git's on-disk worktree metadata, and an **existence check owned by the resolver**.
+**Mechanism.** Two pieces with a hard division of labour, because collapsing them into a single locator that also checks existence is what leaves the fourth candidate unnameable in the diagnostic: a **pure locator** that answers "which checkout owns this one?" from git's on-disk worktree metadata, and an **existence check owned by the resolver**.
 
 **`_owning_checkout_root() -> Path | None`** — the locator. It does the git-metadata walk and **nothing else**. It performs **no `exists()` check on any registry path**; it does not know what a registry is.
 
@@ -192,7 +192,7 @@ The fourth candidate path is built by the **resolver**, not by the locator, so i
 
 **`_resolve_registry_path` owns the fourth candidate.** When the locator returns a `root`, the resolver builds `primary_candidate = root / "config" / "reflections.yaml"` and returns it if `primary_candidate.exists()`. If it does not exist, the resolver appends `str(primary_candidate)` to the candidate list it names in the exhausted-candidates error. When the locator returns `None`, the resolver appends the literal `"<owning checkout not resolvable>"` to that list instead. Either way the message enumerates **four** slots.
 
-This split is what makes Success Criteria 7 implementable. Had the `exists()` check lived inside the locator, the only state in which the diagnostic fires — nothing reachable anywhere — would also be the state in which the fourth path had already been discarded into a `None`, leaving the resolver with three slots to name and nothing to say about the fourth. It also collapses three distinct causes ("not a worktree", "malformed `.git`", "owning checkout has no registry") into one indistinguishable return; the split keeps the third of those visible as a concrete path in the log.
+This split is what makes Success Criteria 7 implementable, and collapsing the two pieces is what made the fourth candidate unnameable in an earlier draft's diagnostic. Had the `exists()` check lived inside the locator, the only state in which the diagnostic fires — nothing reachable anywhere — would also be the state in which the fourth path had already been discarded into a `None`, leaving the resolver with three slots to name and nothing to say about the fourth. It also collapses three distinct causes ("not a worktree", "malformed `.git`", "owning checkout has no registry") into one indistinguishable return; the split keeps the third of those visible as a concrete path in the log.
 
 Deliberately **not** shelling out to the git CLI: `REGISTRY_PATH` is computed at import time (line 98) in a launchd worker, and putting a subprocess on that path reintroduces exactly the shape of hazard — a blocking call during scheduler startup — that the surrounding code exists to prevent. The rationale comment in the code must state this **without reproducing the `git rev-parse` token verbatim**, so the anti-criterion that guards against a subprocess is not tripped by prose about not using one (see Verification, and the Documentation task).
 
@@ -223,7 +223,7 @@ The inline comment must say the check is **stricter than the loader by policy**,
 
 ### Empty/Invalid Input Handling
 - [ ] `.git` file present but empty → `_owning_checkout_root()` returns `None`, resolver falls back. Test it.
-- [ ] `.git` file with a `gitdir:` pointing at a nonexistent directory → the locator still returns a `root` (it does no `exists()` check by design); the **resolver** finds `root / "config" / "reflections.yaml"` absent and falls back, naming that concrete path in the exhausted-candidates message. Test both halves — this pair is the direct regression test for the round-3 BLOCKER.
+- [ ] `.git` file with a `gitdir:` pointing at a nonexistent directory → the locator still returns a `root` (it does no `exists()` check by design); the **resolver** finds `root / "config" / "reflections.yaml"` absent and falls back, naming that concrete path in the exhausted-candidates message. Test both halves — this pair is the direct regression test for the locator/resolver division of labour described in Technical Approach.
 - [ ] `.git` file with a **short** `gitdir:` (fewer than three parents, e.g. `gitdir: /a`) → the `len(parents) > 2` guard returns `None` rather than letting `IndexError` reach the broad `except`. Test it.
 - [ ] Locator return-shape test: for a synthesized worktree layout, assert `_owning_checkout_root()` returns a directory that **contains** a `.git` entry — i.e. the checkout root, not the `.git` directory itself. This is the anti-regression for the two branches diverging on `.parent`. Because the locator does no registry `exists()` check, the `tmp_path` layout needs only `<primary>/.git/worktrees/<name>/` plus the worktree's `.git` file — no synthesized `config/reflections.yaml`.
 - [ ] Primary-checkout no-op: `.git` is a **directory** → locator returns `None`, and the resolver's fourth slot in the exhausted message reads `<owning checkout not resolvable>`. Assert the literal, since it is the contract that keeps the message at four slots.
@@ -260,7 +260,7 @@ The inline comment must say the check is **stricter than the loader by policy**,
 
 ### Risk 1: Worktree tests now depend on the primary checkout's install-time copy
 **Impact:** The worktree fix reads `<primary>/config/reflections.yaml`. On a machine that has never run `/update` or an installer, that file does not exist and worktree tests stay red — with a better error, but still red.
-**Mitigation:** The vault branch still covers every non-launchd context, which is the common developer case. The exhausted-candidates error names all three candidates so the remedy (`/update`) is obvious from the log line. The Prerequisites table makes the dependency explicit rather than implicit.
+**Mitigation:** The vault branch still covers every non-launchd context, which is the common developer case. The exhausted-candidates error names all four candidates (including the owning-checkout slot, which reads `<owning checkout not resolvable>` when the locator returns `None`) so the remedy (`/update`) is obvious from the log line. The Prerequisites table makes the dependency explicit rather than implicit.
 
 ### Risk 2: The primary copy could revert to a symlink and silently re-trip the realpath guard
 **Impact:** If `config/reflections.yaml` ever becomes a symlink into `~/Desktop` again, `load_registry()`'s guard at lines 230-241 rejects it under launchd and reflections go silent — the June 2026 wedge, one layer removed.
@@ -349,7 +349,7 @@ The one agent-visible consequence is indirect and is the point of the work: SDLC
 
 - **Builder (test contract)**
   - Name: `contract-builder`
-  - Role: Sole owner of `tests/unit/test_reflection_scheduler.py` — the Defect 1 contract fix, the `_registry_path` fixture conversion, and every resolver failure-path test.
+  - Role: Sole owner of `tests/unit/test_reflection_scheduler.py` — the Defect 1 contract fix and every resolver failure-path test. The `_registry_path` fixture conversion is CUT (revision round 4); do not touch `_registry_path()` (line 40) or its seven call sites.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -373,8 +373,8 @@ The one agent-visible consequence is indirect and is the point of the work: SDLC
 - **Assigned To**: `worktree-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- From a `.worktrees/{slug}` checkout with `VALOR_LAUNCHD=1`, run `tests/unit/test_reflection_scheduler.py` and `tests/unit/test_plan_migration_invariant.py`; record the exact `FileNotFoundError` set.
-- From the primary checkout, run `TestRegistryIntegrity`; record the 2-failed/3-passed split and both failure messages verbatim.
+- From this lane's own `.worktrees/{slug}` build checkout with `VALOR_LAUNCHD=1`, run `tests/unit/test_reflection_scheduler.py` and `tests/unit/test_plan_migration_invariant.py`; record the exact `FileNotFoundError` set. Expect `TestRegistryIntegrity` to be **`5 failed`**, split **4 `FileNotFoundError` + 1 `AssertionError`** — measured pre-build at `bc3051ee4` and reproduced in two independent current worktrees. The lone `AssertionError` is Defect 1 (`Entry sdlc-upvote-pickup missing every`); the four `FileNotFoundError`s are Defect 2.
+- From the primary checkout, run `TestRegistryIntegrity`; record the **1-failed/4-passed** split and the failure message verbatim. It is 1/4, not 2/3: `test_all_callables_resolve` has passed since #2708 landed `reflections/expectation_reconciler.py` (`aa8015ba3`), which is the same re-measurement the Freshness Check records, so Defect 1 is the only primary-checkout failure left.
 - **Capture the registry fingerprint** so the "registry untouched" anti-criterion has something to compare against (a `git diff` cannot serve: the file is gitignored and untracked). **Capture absolute paths** — `shasum -c` resolves recorded paths against the *current* cwd, and tasks 4 and 6 run from a worktree, where a relative `config/reflections.yaml` prints `FAILED open or read` plus `WARNING: 1 listed file could not be read` (measured). That is a false alarm on the very row that replaced the round-1 unfalsifiable `git diff`.
   ```bash
   # Run from the PRIMARY checkout. `git rev-parse --show-toplevel` in a worktree
@@ -423,9 +423,9 @@ The one agent-visible consequence is indirect and is the point of the work: SDLC
 - **Assigned To**: `worktree-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- First, sync the worktree venv (`uv sync --all-extras` from the worktree) and confirm it is on the `.python-version` pin. `scripts/pytest-clean.sh` aborts on an off-pin venv, and an aborted run is *unrunnable*, not green.
+- First, sync this lane's build-worktree venv (`uv sync --all-extras` from that worktree) and confirm it is on the `.python-version` pin. `scripts/pytest-clean.sh` aborts on an off-pin venv, and an aborted run is *unrunnable*, not green. Run SC1/SC2/SC4 **in place from the build worktree** — never against an arbitrary worktree picked off `git worktree list`, which on this machine lands on a branch that predates #2708 and fails `test_all_callables_resolve` for unrelated reasons.
 - Re-run every command from `capture-baseline` and diff against the recorded red state.
-- Run the four environment-carrying Verification rows (SC1, SC2, SC4, whole-module) explicitly — they are the only rows that go red if the Defect 2 resolver fix is absent.
+- Run SC1, SC4 and the whole-module row explicitly — they are the rows that go red if the Defect 2 resolver fix is reverted (SC1/SC4 exercise the fourth candidate directly; the whole-module row via the new `_owning_checkout_root()` unit tests). Also run SC2: with `VALOR_LAUNCHD` unset the vault branch short-circuits before the fourth candidate, so SC2 passes today regardless of the resolver fix — it guards the pre-existing vault path against regression and cross-checks SC1 on the shared projection.
 - Confirm both `VALOR_LAUNCHD=1` and unset produce identical results (Success Criteria 1 and 2).
 - Confirm `TestRegistryIntegrity` is **fully green (5 passed)**. There is no carve-out: any failure, including `test_all_callables_resolve`, is a regression.
 - Confirm both registry copies are unmodified with `shasum -a 256 -c /tmp/2734-registry-baseline.txt` (two `OK` lines). `git status` / `git diff` cannot serve here — `config/reflections.yaml` is gitignored and untracked.
@@ -450,17 +450,19 @@ The one agent-visible consequence is indirect and is the point of the work: SDLC
 
 ## Verification
 
+Every command lives in a fenced block beneath this table, keyed by the label in the Command cell. A raw shell pipe cannot sit inside a markdown table cell — escaping it (`\|`) turns the pipe *operator* into a literal pipe *character* passed as an argument, so an escaped-pipe command is not runnable as written. The blocks below are the authoritative, copy-pasteable form; run them verbatim.
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Registry integrity fully green (the #2810 carve-out expired — see Freshness Check re-verification at `5e47b0cef`; `reflections/expectation_reconciler.py` landed with #2708 in `aa8015ba3` on 2026-08-14 and `test_all_callables_resolve` now passes) | `./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `5 passed` and does **not** contain `failed` |
-| **(SC1) The defect-2 environment: worktree cwd + `VALOR_LAUNCHD=1`.** This is the row that fails if the resolver fix is reverted; every row that does not carry the env goes green on a build that only widened the line-667 assertion. The worktree is resolved at run time rather than hardcoding a slug. Requires the worktree venv to be on-pin (see Prerequisites) — `pytest-clean.sh` aborts otherwise, which is *unrunnable*, not a pass. | `cd "$(git worktree list --porcelain \| grep "^worktree .*/.worktrees/" \| head -1 \| sed "s/^worktree //")" && VALOR_LAUNCHD=1 ./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `5 passed` and does **not** contain `failed` |
-| **(SC2) Same worktree, `VALOR_LAUNCHD` unset** — reads the vault instead of the config copy; must agree with SC1 on the projection the tests read (see the copies-agree row below for the `DRIFT` explanation if it does not). | `cd "$(git worktree list --porcelain \| grep "^worktree .*/.worktrees/" \| head -1 \| sed "s/^worktree //")" && env -u VALOR_LAUNCHD ./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `5 passed` and does **not** contain `failed` |
-| **(SC4) The cross-module eighth call site, in the same environment** — fixed for free by the resolver change, and red today from a worktree. | `cd "$(git worktree list --porcelain \| grep "^worktree .*/.worktrees/" \| head -1 \| sed "s/^worktree //")" && VALOR_LAUNCHD=1 ./scripts/pytest-clean.sh tests/unit/test_plan_migration_invariant.py -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `passed` and does **not** contain `failed` |
-| **Whole module green from the primary checkout** — this is what makes the new `_owning_checkout_root()` / fourth-candidate tests load-bearing. Without it, every one of those tests can fail with `AssertionError` while the `grep -c "FileNotFoundError"` row still reports 0. | `./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `passed` and does **not** contain `failed` |
-| The callable guard is green on its own merits, not skipped | `./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity::test_all_callables_resolve" -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `1 passed` |
-| No FileNotFoundError anywhere in the module. Note this row is **not** sufficient evidence on its own: two of the seven call sites (lines 71, 653) `assert registry_path.exists()` first and so raise `AssertionError`, which this grep never sees. The env-carrying rows below are what actually gate the resolver fix. | `./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q 2>&1 \| grep -c "FileNotFoundError"` | match count == 0 |
-| Registry loading tests fully green | `./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryLoading" -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `passed` **and does NOT contain** `failed` (`TestRegistryLoading` holds a fixed test set, so pin the exact `N passed` observed in task 1's baseline once it is known) |
-| Plan-migration invariant fixed for free | `./scripts/pytest-clean.sh tests/unit/test_plan_migration_invariant.py -p no:randomly -n0 -q 2>&1 \| tail -3` | output contains `passed` **and does NOT contain** `failed` |
+| Registry integrity fully green (the #2810 carve-out expired — see Freshness Check re-verification at `5e47b0cef`; `reflections/expectation_reconciler.py` landed with #2708 in `aa8015ba3` on 2026-08-14 and `test_all_callables_resolve` now passes) | block `SC0` | output contains `5 passed` and does **not** contain `failed` |
+| **(SC1) The defect-2 environment: build-worktree cwd + `VALOR_LAUNCHD=1`.** This is the row that fails if the resolver fix is reverted; every row that does not carry the env goes green on a build that only widened the line-667 assertion. Run it **in place from this lane's own build worktree** — see the worktree-selection note under the blocks. Requires that worktree's venv to be on-pin (see Prerequisites) — `pytest-clean.sh` aborts otherwise, which is *unrunnable*, not a pass. | block `SC1` | output contains `5 passed` and does **not** contain `failed` |
+| **(SC2) Same build worktree, `VALOR_LAUNCHD` unset** — reads the vault instead of the config copy; must agree with SC1 on the projection the tests read (see the copies-agree row below for the `DRIFT` explanation if it does not). | block `SC2` | output contains `5 passed` and does **not** contain `failed` |
+| **(SC4) The cross-module eighth call site, in the same environment** — fixed for free by the resolver change, and red today from a build worktree (measured pre-build: `1 failed, 4 passed`, versus `5 passed` from the primary checkout). | block `SC4` | output contains `5 passed` and does **not** contain `failed` |
+| **Whole module green from the primary checkout** — this is what makes the new `_owning_checkout_root()` / fourth-candidate tests load-bearing. Without it, every one of those tests can fail with `AssertionError` while the `grep -c "FileNotFoundError"` row still reports 0. | block `MOD` | output contains `passed` and does **not** contain `failed` |
+| The callable guard is green on its own merits, not skipped | block `CALL` | output contains `1 passed` |
+| No FileNotFoundError anywhere in the module. Note this row is **not** sufficient evidence on its own: two of the seven call sites (lines 71, 653) `assert registry_path.exists()` first and so raise `AssertionError`, which this grep never sees. The env-carrying rows are what actually gate the resolver fix. | block `FNF` | match count == 0 |
+| Registry loading tests fully green | block `LOAD` | output contains exactly `7 passed` and does **not** contain `failed` (`TestRegistryLoading` holds a fixed test set; `7 passed` measured pre-build at `bc3051ee4` and this work adds no test to that class, so the count is pinned rather than left open) |
+| Plan-migration invariant fixed for free (primary checkout; measured pre-build: `5 passed`) | block `MIG` | output contains `5 passed` and does **not** contain `failed` |
 | Docstring no longer claims "always present" | `grep -c "always present" agent/reflection_scheduler.py` | match count == 0 |
 | Anti-criterion: registry not edited to add `every:` to the cron entry (resolver-routed so it works from either checkout; run post-fix, since resolution is the thing under repair) | `.venv/bin/python -c "import yaml;from agent.reflection_scheduler import _resolve_registry_path as p;d=yaml.safe_load(open(p()));print(sum(1 for r in d['reflections'] if r.get('name')=='sdlc-upvote-pickup' and 'every' in r))"` | output contains `0` |
 | Anti-criterion: neither registry copy modified at all (replaces the `git diff` row — `config/reflections.yaml` is gitignored and untracked, so `git diff` prints `0` whether or not it was edited, asserting nothing). Baseline captured in task 1 with **absolute** paths, so this row is cwd-independent and runnable from a worktree. | `shasum -a 256 -c /tmp/2734-registry-baseline.txt` | two lines, both ending `OK` |
@@ -470,20 +472,107 @@ The one agent-visible consequence is indirect and is the point of the work: SDLC
 | Anti-criterion: no import-time git subprocess in the resolver, form 2 (see previous row) | `grep -c "^from subprocess" agent/reflection_scheduler.py` | match count == 0 |
 | Documentation: symlink claims in the reflections doc corrected to the real-file form. Baseline measured at `5e47b0cef`: 10 matching lines (62, 94, 102, 104, 105, 143, 144, 795, 813, 831). Lines 143-144 describe `reflection_machine_filter` refusing to write *through* a symlink — a defensive check, not a claim the file is one — and may legitimately survive; every other occurrence must go. | `grep -ci symlink docs/features/reflections.md` | match count <= 2 |
 | Documentation: the unqualified C6 claim is gone from the `reflection_register` module docstring | `grep -c "prioritizes the vault over the config copy" scripts/update/reflection_register.py` | match count == 0 |
-| Exhausted-candidates diagnostic does not multiply across call sites | `./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q -k "exhausted" 2>&1 \| tail -3` | output contains `passed`, **does NOT contain** `failed`, **and does NOT contain** `no tests ran` (a `-k` filter matching nothing prints only `N deselected` and is otherwise indistinguishable from a pass at `tail -3`) |
+| Exhausted-candidates diagnostic does not multiply across call sites | block `EXH` | output contains `passed` and **does NOT contain** `failed`. The `passed` requirement is what carries this row: a `-k` filter matching nothing prints `N deselected` with no `passed` anywhere (measured pre-build at `bc3051ee4`: `57 deselected in 2.24s`), so a fully-deselected run fails this row on the missing `passed` alone. An earlier draft also guarded against the literal `no tests ran`; that string is not what pytest emits for a zero-match `-k`, so the guard was inert and has been dropped rather than left as decoration. |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+
+### Verification command blocks
+
+**Where to run each block.** `MOD`, `CALL`, `FNF`, `LOAD`, `MIG` and every pipe-free row above run from the **primary checkout** (`/Users/valorengels/src/ai`). `SC0` runs there too. `SC1`, `SC2` and `SC4` run **in place from this lane's own build worktree** — the one holding `session/<this plan's slug>`.
+
+That in-place rule replaces an earlier form that resolved the worktree at run time with `git worktree list ... | head -1`. That form is broken on this machine and was measured broken at `bc3051ee4`: `head -1` selects `.worktrees/ask-me-telegram-polls`, whose branch predates #2708 and therefore lacks `reflections/expectation_reconciler.py`, so `test_all_callables_resolve` fails there for a reason this plan has nothing to do with (`2 failed, 3 passed` instead of the `1 failed, 4 passed` the same command gives in a current worktree). Twelve of the fourteen registered worktrees are pre-#2708, so the arbitrary pick is very likely to land on one and the `5 passed` expectation would be unreachable even after a flawless build. A worktree that does not contain the build under test cannot verify it; running in place is what guarantees it does.
+
+Each SC block opens with a guard rather than a `cd`: in a linked worktree `.git` is a *file* (a `gitdir:` pointer), while in the primary checkout it is a directory. The guard warns and does not exit, so pasting the whole block never kills an interactive shell.
+
+```bash
+# SC0 — registry integrity, primary checkout
+./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# SC1 — build worktree + VALOR_LAUNCHD=1 (the row that gates the Defect 2 resolver fix)
+test -f .git || echo "WARNING: not a linked worktree — SC1 measures nothing here"
+VALOR_LAUNCHD=1 ./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# SC2 — same build worktree, VALOR_LAUNCHD unset (vault path; parity cross-check against SC1)
+test -f .git || echo "WARNING: not a linked worktree — SC2 measures nothing here"
+env -u VALOR_LAUNCHD ./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity" -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# SC4 — cross-module eighth call site, build worktree + VALOR_LAUNCHD=1
+test -f .git || echo "WARNING: not a linked worktree — SC4 measures nothing here"
+VALOR_LAUNCHD=1 ./scripts/pytest-clean.sh tests/unit/test_plan_migration_invariant.py -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# MOD — whole module, primary checkout
+./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# CALL — the callable guard on its own merits, primary checkout
+./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryIntegrity::test_all_callables_resolve" -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# FNF — no FileNotFoundError anywhere in the module, primary checkout
+./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q 2>&1 | grep -c "FileNotFoundError"
+```
+
+```bash
+# LOAD — registry loading tests, primary checkout
+./scripts/pytest-clean.sh "tests/unit/test_reflection_scheduler.py::TestRegistryLoading" -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# MIG — plan-migration invariant, primary checkout
+./scripts/pytest-clean.sh tests/unit/test_plan_migration_invariant.py -p no:randomly -n0 -q 2>&1 | tail -3
+```
+
+```bash
+# EXH — exhausted-candidates diagnostic does not multiply across call sites, primary checkout
+./scripts/pytest-clean.sh tests/unit/test_reflection_scheduler.py -p no:randomly -n0 -q -k "exhausted" 2>&1 | tail -3
+```
+
+### Pre-build measurements
+
+Every block above was executed verbatim at `bc3051ee4`, before any of this plan's code exists, to prove each one parses and runs to a defined state rather than a syntax error. Blocks that must go from red to green are the ones this work is accountable for.
+
+| Block / row | Pre-build result | Reading |
+|-------------|------------------|---------|
+| `SC0` | `1 failed, 4 passed` | Defect 1 only; the primary checkout never hits Defect 2 |
+| `SC1` | `5 failed` | full Defect 2 red — the resolver gate, as designed |
+| `SC2` | `1 failed, 4 passed` | matches `SC0`, confirming the vault branch short-circuits before the fourth candidate |
+| `SC4` | `1 failed, 4 passed` | red from a worktree; the same command gives `5 passed` from the primary checkout |
+| `MOD` | `1 failed, 56 passed` | Defect 1 is the only module-wide failure today |
+| `CALL` | `1 passed` | already green; the #2810 carve-out is genuinely expired |
+| `FNF` | `0` | confirms the row's own caveat — it sees nothing today because the failures are `AssertionError` |
+| `LOAD` | `7 passed` | pins the expected count |
+| `MIG` | `5 passed` | green from the primary checkout |
+| `EXH` | `57 deselected` | the target test does not exist yet; no `passed`, so the row is correctly red |
+| always-present grep | `1` | → must become `0` |
+| `every:` anti-criterion | `0` | already satisfied; guards against regression |
+| registry-baseline shasum | `No such file` (exit 2) | the baseline is created in task 1; runs to its defined pre-build state |
+| copies-agree | `MATCH` | no sync drift today |
+| launchd guard count | `4` | satisfies `> 2` |
+| subprocess forms 1 and 2 | `0`, `0` | already satisfied; guards against regression |
+| symlink count | `10` | → must become `<= 2` |
+| C6 claim | `1` | → must become `0` |
+| ruff check / format | clean | — |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency, Scope & Value | Eleven Verification-table commands - including all four rows round 4 added to close the previous "no environment-carrying row" BLOCKER (SC1, SC2, SC4, whole-module) - carry their shell pipes in markdown-escaped form (a backslash immediately before the pipe character), because a raw pipe cannot sit inside a table cell. To bash an escaped pipe is a literal pipe *character* passed as an argument, not the pipe *operator*. Measured live: `bash -c 'echo hello \| tail -3'` echoes the literal text `hello`, a pipe character, and `tail -3` (no pipe fires), and the SC1 command run exactly as written dies with ``error: unknown switch `1` `` because the escaped-pipe text is parsed as extra arguments to `git worktree list`. So the rows that round 4 made load-bearing for Defect 2 are not executable as literally written. This is the fourth consecutive round of the same class of defect - unfalsifiable/unrunnable Verification rows - migrated from wrong expected-result strings (rounds 1-3) to wrong command syntax, and again the round-4 fix was applied only where it was named (row 469 was split to dodge the escaping; its ten siblings were left carrying it). | pending | Two acceptable fixes; pick one and apply it to EVERY affected row (lines 455, 456, 457, 458, 459, 460, 461, 462, 463, 473). (a) Move each piped command out of the table into a fenced ```bash block immediately beneath the Verification table, keyed by a short label the row's Command cell references (e.g. `see block SC1`); inside a fenced block a raw pipe needs no escaping and is a real shell pipe. (b) Make each command pipe-free: `CMD > /tmp/2734-<row>.log 2>&1; tail -3 /tmp/2734-<row>.log`. Do NOT choose the third option of adding a prose note telling the reader to unescape - the plan's own row-469 measurement is the evidence that unescaping does not reliably happen. Whichever form is chosen, no Command cell may retain an escaped pipe that is intended to act as a shell pipe. Note the interaction with the findings-table parser `(?<!\\)\|`: this is why the commands must leave the table rather than be un-escaped in place. |
-| CONCERN | Risk & Robustness, History & Consistency | Task 4 line 428 asserts "Run the four environment-carrying Verification rows (SC1, SC2, SC4, whole-module) explicitly - they are the only rows that go red if the Defect 2 resolver fix is absent." That is false for SC2. Measured from `.worktrees/ask-me-telegram-polls` at HEAD: with `VALOR_LAUNCHD` unset, `_resolve_registry_path()` already returns `/Users/valorengels/Desktop/Valor/reflections.yaml` with `exists=True` today, with zero resolver changes - the vault branch at `agent/reflection_scheduler.py:88-92` short-circuits before the in-repo candidate is ever built. With Defect 1 fixed alone and the Defect 2 resolver change reverted, SC2 still reaches `5 passed`. SC2 is a parity/no-regression check against SC1, not a gate on the resolver fix; only SC1, SC4 and the whole-module row exercise the reverted branch. | pending | Reword line 428 to: "Run SC1, SC4 and the whole-module row explicitly - they are the rows that go red if the Defect 2 resolver fix is reverted (SC1/SC4 exercise the fourth candidate directly; the whole-module row via the new `_owning_checkout_root()` unit tests). Also run SC2: with `VALOR_LAUNCHD` unset the vault branch short-circuits before the fourth candidate, so SC2 passes today regardless of the resolver fix - it guards the pre-existing vault path against regression and cross-checks SC1 on the shared projection." The SC2 Verification row's own description (line 457) is already correctly scoped and needs no change; do not let the correction leak into it. |
-| CONCERN | Risk & Robustness, Scope & Value, History & Consistency | Team Orchestration line 352 still describes `contract-builder`'s role as "Sole owner of `tests/unit/test_reflection_scheduler.py` - the Defect 1 contract fix, the `_registry_path` fixture conversion, and every resolver failure-path test." The `_registry_path` fixture conversion was cut entirely in revision round 4 and is recorded as cut everywhere else (Technical Approach line 203, Test Impact line 241, task 3 line 414, the `[NOT DOING]` No-Go at line 296). A builder reading the roster before the task list is handed a deliverable that its own assigned task explicitly forbids ("Do NOT touch `_registry_path()`"). Dangling residue of the round-4 cut, and the plan's only surviving internal contradiction on that cut. | pending | Replace line 352 with: "Role: Sole owner of `tests/unit/test_reflection_scheduler.py` - the Defect 1 contract fix and every resolver failure-path test. The `_registry_path` fixture conversion is CUT (revision round 4); do not touch `_registry_path()` (line 40) or its seven call sites." Simply deleting the middle clause is sufficient for correctness; the explicit do-not-touch restatement is what keeps a roster-first reader from re-deriving it. |
-| CONCERN | Scope & Value | Risk 1's mitigation (line 263) still reads "The exhausted-candidates error names all three candidates so the remedy (`/update`) is obvious from the log line." Round 4's locator/resolver split moved the diagnostic to four slots everywhere else in the plan - Key Elements line 163 ("The candidate list always enumerates four slots"), Flow lines 170-172, Technical Approach line 193 ("Either way the message enumerates **four** slots"), Success Criterion 7 line 334 ("names **all four** slots"), Failure Path Test Strategy line 230. Risk 1 is the one place the pre-split count survived, so the plan asserts both three and four for the same message. | pending | Line 263: change "names all three candidates" to "names all four candidates (including the owning-checkout slot, which reads `<owning checkout not resolvable>` when the locator returns `None`)". This is the same stale-count sweep the round-4 rewrite performed elsewhere; no mechanism change is implied. |
-| NIT | Risk & Robustness | The exhausted-candidates Verification row (line 473) guards against the literal string `no tests ran`, but its own parenthetical rationale says a zero-match `-k` filter "prints only `N deselected`" - a different signature. Measured: `pytest -k <nomatch> -n0 -q` prints `N deselected`, not `no tests ran`. The row is still safe today only because the same cell also requires the output to contain `passed`, so a fully-deselected run fails anyway; the guard clause simply does not guard what its rationale claims. | pending | N/A (NIT). |
-| NIT | Aggregator (structural) | Problem section line 37 cites "see the Scope & Value CONCERN in Critique Results" and Technical Approach line 195 reasons from the round-4 BLOCKER. The Critique Results table is overwritten wholesale by each critique round (per `docs/sdlc/do-plan-critique.md` Step 5.5), so both citations now point at rows that are no longer in the table. | pending | N/A (NIT). |
+| BLOCKER | History & Consistency, Scope & Value | Eleven Verification-table commands - including all four rows round 4 added to close the previous "no environment-carrying row" BLOCKER (SC1, SC2, SC4, whole-module) - carry their shell pipes in markdown-escaped form (a backslash immediately before the pipe character), because a raw pipe cannot sit inside a table cell. To bash an escaped pipe is a literal pipe *character* passed as an argument, not the pipe *operator*. Measured live: `bash -c 'echo hello \| tail -3'` echoes the literal text `hello`, a pipe character, and `tail -3` (no pipe fires), and the SC1 command run exactly as written dies with ``error: unknown switch `1` `` because the escaped-pipe text is parsed as extra arguments to `git worktree list`. So the rows that round 4 made load-bearing for Defect 2 are not executable as literally written. This is the fourth consecutive round of the same class of defect - unfalsifiable/unrunnable Verification rows - migrated from wrong expected-result strings (rounds 1-3) to wrong command syntax, and again the round-4 fix was applied only where it was named (row 469 was split to dodge the escaping; its ten siblings were left carrying it). | revision round 5 | Two acceptable fixes; pick one and apply it to EVERY affected row (lines 455, 456, 457, 458, 459, 460, 461, 462, 463, 473). (a) Move each piped command out of the table into a fenced ```bash block immediately beneath the Verification table, keyed by a short label the row's Command cell references (e.g. `see block SC1`); inside a fenced block a raw pipe needs no escaping and is a real shell pipe. (b) Make each command pipe-free: `CMD > /tmp/2734-<row>.log 2>&1; tail -3 /tmp/2734-<row>.log`. Do NOT choose the third option of adding a prose note telling the reader to unescape - the plan's own row-469 measurement is the evidence that unescaping does not reliably happen. Whichever form is chosen, no Command cell may retain an escaped pipe that is intended to act as a shell pipe. Note the interaction with the findings-table parser `(?<!\\)\|`: this is why the commands must leave the table rather than be un-escaped in place. |
+| CONCERN | Risk & Robustness, History & Consistency | Task 4 line 428 asserts "Run the four environment-carrying Verification rows (SC1, SC2, SC4, whole-module) explicitly - they are the only rows that go red if the Defect 2 resolver fix is absent." That is false for SC2. Measured from `.worktrees/ask-me-telegram-polls` at HEAD: with `VALOR_LAUNCHD` unset, `_resolve_registry_path()` already returns `/Users/valorengels/Desktop/Valor/reflections.yaml` with `exists=True` today, with zero resolver changes - the vault branch at `agent/reflection_scheduler.py:88-92` short-circuits before the in-repo candidate is ever built. With Defect 1 fixed alone and the Defect 2 resolver change reverted, SC2 still reaches `5 passed`. SC2 is a parity/no-regression check against SC1, not a gate on the resolver fix; only SC1, SC4 and the whole-module row exercise the reverted branch. | revision round 5 | Reword line 428 to: "Run SC1, SC4 and the whole-module row explicitly - they are the rows that go red if the Defect 2 resolver fix is reverted (SC1/SC4 exercise the fourth candidate directly; the whole-module row via the new `_owning_checkout_root()` unit tests). Also run SC2: with `VALOR_LAUNCHD` unset the vault branch short-circuits before the fourth candidate, so SC2 passes today regardless of the resolver fix - it guards the pre-existing vault path against regression and cross-checks SC1 on the shared projection." The SC2 Verification row's own description (line 457) is already correctly scoped and needs no change; do not let the correction leak into it. |
+| CONCERN | Risk & Robustness, Scope & Value, History & Consistency | Team Orchestration line 352 still describes `contract-builder`'s role as "Sole owner of `tests/unit/test_reflection_scheduler.py` - the Defect 1 contract fix, the `_registry_path` fixture conversion, and every resolver failure-path test." The `_registry_path` fixture conversion was cut entirely in revision round 4 and is recorded as cut everywhere else (Technical Approach line 203, Test Impact line 241, task 3 line 414, the `[NOT DOING]` No-Go at line 296). A builder reading the roster before the task list is handed a deliverable that its own assigned task explicitly forbids ("Do NOT touch `_registry_path()`"). Dangling residue of the round-4 cut, and the plan's only surviving internal contradiction on that cut. | revision round 5 | Replace line 352 with: "Role: Sole owner of `tests/unit/test_reflection_scheduler.py` - the Defect 1 contract fix and every resolver failure-path test. The `_registry_path` fixture conversion is CUT (revision round 4); do not touch `_registry_path()` (line 40) or its seven call sites." Simply deleting the middle clause is sufficient for correctness; the explicit do-not-touch restatement is what keeps a roster-first reader from re-deriving it. |
+| CONCERN | Scope & Value | Risk 1's mitigation (line 263) still reads "The exhausted-candidates error names all three candidates so the remedy (`/update`) is obvious from the log line." Round 4's locator/resolver split moved the diagnostic to four slots everywhere else in the plan - Key Elements line 163 ("The candidate list always enumerates four slots"), Flow lines 170-172, Technical Approach line 193 ("Either way the message enumerates **four** slots"), Success Criterion 7 line 334 ("names **all four** slots"), Failure Path Test Strategy line 230. Risk 1 is the one place the pre-split count survived, so the plan asserts both three and four for the same message. | revision round 5 | Line 263: change "names all three candidates" to "names all four candidates (including the owning-checkout slot, which reads `<owning checkout not resolvable>` when the locator returns `None`)". This is the same stale-count sweep the round-4 rewrite performed elsewhere; no mechanism change is implied. |
+| NIT | Risk & Robustness | The exhausted-candidates Verification row (line 473) guards against the literal string `no tests ran`, but its own parenthetical rationale says a zero-match `-k` filter "prints only `N deselected`" - a different signature. Measured: `pytest -k <nomatch> -n0 -q` prints `N deselected`, not `no tests ran`. The row is still safe today only because the same cell also requires the output to contain `passed`, so a fully-deselected run fails anyway; the guard clause simply does not guard what its rationale claims. | revision round 5 | N/A (NIT). |
+| NIT | Aggregator (structural) | Problem section line 37 cites "see the Scope & Value CONCERN in Critique Results" and Technical Approach line 195 reasons from the round-4 BLOCKER. The Critique Results table is overwritten wholesale by each critique round (per `docs/sdlc/do-plan-critique.md` Step 5.5), so both citations now point at rows that are no longer in the table. | revision round 5 | N/A (NIT). |
 
 ---
 
