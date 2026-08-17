@@ -1113,7 +1113,7 @@ inert in production. This is a build task and a Success Criterion.
 - **Assigned To**: loop-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row below. **Judge the `grep -c` rows on their printed stdout, not their exit code** — `grep -c` exits 1 on zero matches, so an exit-code-based harness reads those passes as failures (round 3, nit 2).
+- Run every Verification row below. The absence checks are written as `! grep -q ...` so a zero-match pass exits 0; do not rewrite them back to `grep -c ... | match count == 0`, which exits 1 on a pass and reads as a failure under any exit-code-based harness (round 3, nit 2).
 - Confirm all Success Criteria.
 
 ## Verification
@@ -1130,14 +1130,14 @@ inert in production. This is a build task and a Success Criterion.
 | No new dispatch row was registered | `.venv/bin/python -c "from agent.sdlc_router import DISPATCH_RULES; print(len(DISPATCH_RULES))"` | output is `19` |
 | The bound constant exists and is env-overridable | `grep -A3 'MAX_CONCERN_RECRITIQUE_ROUNDS' agent/pipeline_graph.py \| grep -c 'getenv'` | output > 0 |
 | The latch is bounded, not bypassed | `grep -c 'MAX_CONCERN_RECRITIQUE_ROUNDS' agent/sdlc_router.py` | output >= 2 (latch branch + row 4c) |
-| The #1871 short-circuit survives | `git diff origin/main -- agent/sdlc_router.py \| grep -c '^-.*plan_revising") and not meta.get("revision_applied")'` | **prints** `0` — judge stdout, not the exit code: `grep -c` exits 1 on zero matches, so an exit-code-based harness would read this pass as a failure (round 3, nit 2) |
+| The #1871 short-circuit survives | `! git diff origin/main -- agent/sdlc_router.py \| grep -q '^-.*plan_revising") and not meta.get("revision_applied")'` | exit code 0 (no deleted line matches) |
 | G5 steps aside unconditionally on with-concerns | `grep -c 'WITH CONCERNS' agent/sdlc_router.py` | output >= 4 (rows 4a/4b/4c + G5 + latch branch) |
 | The with-concerns decision is dispatch-history-free | `scripts/pytest-clean.sh tests/unit/test_sdlc_router_decision.py -k with_concerns_no_plan_dispatch -q` | exit code 0 — a ledger with a with-concerns verdict at the bound and **no** `/do-plan` entry in `_sdlc_dispatches` dispatches row `4b`, never `4c`. Replaces round 2's `grep -c` row, which proved only textual non-co-occurrence on one line rather than control-flow independence (round 3, concern 3). |
 | The counter is written by the verdict recorder | `grep -c '_concern_round_count' tools/sdlc_verdict.py` | output > 0 |
 | The counter reaches the router | `grep -c 'concern_round_count' tools/sdlc_stage_query.py` | output >= 2 (`_compute_meta` + `_default_meta`) |
-| Step 5.6 sticky exemption is gone from the global skill | `sed -n '/^### Step 5.6/,/^## /p' .claude/skills-global/do-plan-critique/SKILL.md \| grep -c 'revision_applied: true'` | **prints** `0` — judge stdout, not the exit code: `grep -c` exits 1 on zero matches, so an exit-code-based harness would read this pass as a failure (round 3, nit 2) |
-| Step 5.6 sticky exemption is gone from the addendum | `sed -n '/plan_revising --value true/,/^## /p' docs/sdlc/do-plan-critique.md \| grep -c 'revision_applied: true'` | **prints** `0` — judge stdout, not the exit code: `grep -c` exits 1 on zero matches, so an exit-code-based harness would read this pass as a failure (round 3, nit 2) |
-| The global do-build body stays generic | `grep -c 'sdlc-tool\|_concern_round_count\|MAX_CONCERN_RECRITIQUE_ROUNDS' .claude/skills-global/do-build/SKILL.md` | **prints** `0` — judge stdout, not the exit code: `grep -c` exits 1 on zero matches, so an exit-code-based harness would read this pass as a failure (round 3, nit 2) |
+| Step 5.6 sticky exemption is gone from the global skill | `! sed -n '/^### Step 5.6/,/^## /p' .claude/skills-global/do-plan-critique/SKILL.md \| grep -q 'revision_applied: true'` | exit code 0 |
+| Step 5.6 sticky exemption is gone from the addendum | `! sed -n '/plan_revising --value true/,/^## /p' docs/sdlc/do-plan-critique.md \| grep -q 'revision_applied: true'` | exit code 0 |
+| The global do-build body stays generic | `! grep -qE 'sdlc-tool\|_concern_round_count\|MAX_CONCERN_RECRITIQUE_ROUNDS' .claude/skills-global/do-build/SKILL.md` | exit code 0 |
 | SKILL.md row count corrected | `grep -c 'dispatch rules (19 rows)' .claude/skills/sdlc/SKILL.md` | output == 1 |
 | No hand-authored row table was added | `scripts/pytest-clean.sh tests/unit/test_sdlc_skill_md_parity.py::test_step4_has_no_hand_authored_dispatch_table -q` | exit code 0 |
 | Feature doc exists | `test -f docs/features/with-concerns-recritique-gate.md` | exit code 0 |
