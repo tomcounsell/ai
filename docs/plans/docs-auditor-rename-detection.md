@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
 revision_applied: true
-revision_applied_at: 2026-08-17T05:20:13Z
+revision_applied_at: 2026-08-17T05:21:41Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -455,10 +455,10 @@ this plan owes the reviewer is disclosure, not repair:
 - [ ] State plainly in the PR body that broken README `.md` index entries lose **both**
       automated repair and automated reporting, with the disjoint-pattern table above as
       evidence, so the reviewer rules on it deliberately rather than discovering it in the diff.
-- [ ] File a follow-up issue recording that `.md`-shaped broken references have no reporting
-      path, so a future widening of `_detect_deleted_target_issues` (or #2739's gated rebuild)
-      has somewhere to attach. Do **not** widen the reporter in this PR — that is ruled out in
-      Rabbit Holes and No-Gos.
+- [x] Filed as **#2834** — records that `.md`-shaped broken references have no reporting path,
+      so a future widening of `_detect_deleted_target_issues` (or #2739's gated rebuild) has
+      somewhere to attach. Do **not** widen the reporter in this PR — that is ruled out in
+      Rabbit Holes and No-Gos. Cite #2834 in the PR body alongside the disclosure above.
 
 ### Risk 2: The `TestExistenceInvariant` rewrite produces vacuous tests
 **Impact:** The existence invariant — the guard standing between the auditor and a repeat of
@@ -566,8 +566,10 @@ it while leaving it intact is the required outcome.
   reporting (Risk 1). Do not reintroduce it under any name.
 - **Widening `_detect_deleted_target_issues` to cover `.md` link targets** so it would backstop
   the lost README arm. Tempting once Risk 1's disjoint-pattern table is read, but it is a
-  detector-pattern widening ruled unchanged in #2759 and it spends the per-run issue cap. It
-  belongs in the follow-up issue Risk 1 requires, not in this PR.
+  detector-pattern widening ruled unchanged in #2759 and it spends the per-run issue cap.
+- [SEPARATE-SLUG #2834] Giving `.md`-shaped broken references a reporting path. Filed, with the
+  report-don't-repair constraint, the volume-sizing requirement, and the doc-relative
+  re-relativization trap recorded on it. Out of scope here for the reason directly above.
 - Nothing else is deferred; every remaining item is in scope.
 
 ## Update System
@@ -667,10 +669,13 @@ that read `fixes_withheld` need no code change.
       reading `audit()`'s `issues_filed`, which is structurally 0 in dry-run — and the number
       plus the Risk 3 gate decision are recorded in the PR description.
 - [ ] The PR body states plainly that broken README `.md` index entries lose both automated
-      repair and automated reporting (Risk 1), and a follow-up issue for the `.md` reporting
-      gap has been filed.
+      repair and automated reporting (Risk 1), and cites #2834, which records the `.md`
+      reporting gap.
 - [ ] `_detect_deleted_target_issues`' docstring no longer carries the `(non-renamed)`
       qualifier, which encoded the removed suppression.
+- [ ] The existence invariant still has direct test coverage after the channel collapse,
+      checked mechanically against the test file rather than production source — the
+      `target-absent` rejection path must still be asserted more than three times.
 - [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] Lint and format clean
@@ -787,7 +792,7 @@ that read `fixes_withheld` need no code change.
 - Confirm the un-blinding delta was measured by direct `_detect_deleted_target_issues` summation
   (not `audit()`'s `issues_filed`) and that Risk 3's threshold gate was evaluated and recorded.
 - Confirm the PR body carries Risk 1's disclosure (README `.md` entries lose repair *and*
-  reporting) and that the follow-up issue for the `.md` reporting gap exists.
+  reporting) and that it cites #2834 for the `.md` reporting gap.
 - Confirm no reduced-form README line-delete survives: `_apply_fixes_to_file` must have no
   literal `fixes` parameter at all.
 
@@ -826,6 +831,7 @@ that read `fixes_withheld` need no code change.
 | Reporter is subprocess-free | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess\|_git_log"` | match count == 0 |
 | Basename cache reset survives | `grep -c "_BASENAME_INDEX_CACHE.clear()" reflections/docs_auditor.py` | output > 0 |
 | Rename regression exists | `grep -c "rename destination" tests/unit/test_docs_auditor_substrate.py` | output > 0 |
+| Existence-invariant coverage survives the channel collapse | `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` | output > 3 |
 
 ## Critique Results
 
@@ -839,6 +845,21 @@ that read `fixes_withheld` need no code change.
 | CONCERN | History & Consistency | "Why Previous Fixes Failed" diagnoses the root cause as "hardening downstream of a defective producer" and concludes "delete the producer." The producer is not uniformly defective, so applying that lesson wholesale mirrors PR #2728's own error: #2728 generalized a query defect into a target-selection guard; this plan generalizes the same query defect into a whole-channel deletion. Both fail to localize the defect boundary. | **RESOLVED.** "Why Previous Fixes Failed" now states the root cause as the query direction only, and adds an explicit paragraph naming where this plan goes *beyond* the root cause and why that is a policy call rather than a deduction — with the same #2728-mirror argument the critic raised. The per-arm table is reproduced in Problem. | Narrow the stated root cause to the `git log --follow` query and enumerate per-arm dependence. The split is visible at the call sites: `:441` and `:465` consume `renames[0][1]` and are wholly rename-dependent; `:495` consumes `renames` only as a branch condition and its `else` arm is not; `:1076` consumes it as a suppression and is the arm the plan is already right to un-blind. |
 | CONCERN | Scope & Value | The one user-facing change — `_detect_deleted_target_issues` filing issues it previously suppressed — ships with no measured bound, because the sizing measurement cannot run. None of Risk 2's three controls bounds steady-state volume: `NEIGHBORHOOD_CAP` bounds files per run, the per-run cap at `:1455` bounds filings to 5 per rotation, and `_open_issue_exists` dedupes against **open** issues only, so a finding closed without fixing the doc is re-filed later. Rotation repeats, so a backlog drains at 5 issues per run indefinitely rather than as a one-time surge. | **RESOLVED.** Risk 3 now separates rate-bounding from volume-bounding, states that no control converges (open-only dedup re-files closed findings; rotation drains at 5/run indefinitely), and converts the corrected delta into a **gate**: >10 additional findings splits the `:1076` un-blinding out of this PR to sequence behind #2739. Threshold is marked provisional and tunable per `feedback_provisional_magic_numbers`. | Make the corrected delta a gate, not a report line: if the counted finding delta exceeds a stated threshold, land the un-blinding behind #2739's review gate instead of ahead of it. The open-only dedup semantics are documented at `reflections/docs_auditor.py:1439-1441` and flow through `_open_issue_exists` (`:1169`) via `_file_issue_if_new` (`:1253`) on the rotation path too. |
 | NIT | Scope & Value | Test Impact enumerates "eleven cases at `:841,856,861,876,892,917,938,961,985`" — nine line numbers for eleven cases. The remaining `_apply_fixes_to_file` call sites in `TestExistenceInvariant` are at `:1002` and `:1016`. | **RESOLVED** — all eleven enumerated in Test Impact and in Task 3's Informed By. | n/a (NIT) |
+
+### Merged findings from the sibling war-room run
+
+A concurrent, unsupervised incarnation of this lane critiqued a duplicate plan document at the
+same time. That document has been deleted (`1f15d3756`); its findings table is recoverable at
+`b38f3d674:docs/plans/rename-detection-docs-auditor.md`. Its duplicate-plan blocker is the same
+finding as the third blocker above and is not repeated. The four distinct findings are merged
+here so this plan carries the union.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Scope & Value (sibling run) | Risk 1's mitigation rested on a false factual claim — that the lost README whole-line-delete is safe because `_detect_deleted_target_issues` still reports the broken reference. The two detectors match **disjoint path shapes**: the reporter matches backticked `.py` paths only (`:1056`), while the README detector matches markdown-link `.md` targets only (`:478`). A broken README `.md` entry therefore loses both the auto-delete *and* any reporting fallback. A reviewer would have been approving Risk 1 on a mitigation that does not apply to the path shape in question. | **RESOLVED.** Risk 1 now carries the disjoint-pattern table as evidence, states the entry "goes fully silent", claims no mitigation, and explicitly forbids asserting in the PR body that un-blinding the reporter compensates. The `.md` reporting gap is filed as **#2834** and is a tagged No-Go, a Risk 1 checklist item, and a Success Criterion. | Option (a) — widening the reporter to `.md` targets — is declined and is a Rabbit Hole / No-Go; option (b), plain disclosure, is what shipped. |
+| CONCERN | History & Consistency (sibling run) | `_detect_deleted_target_issues`' docstring reads "File issues for references to deleted **(non-renamed)** targets". The `(non-renamed)` qualifier encodes precisely the `:1076` suppression this plan removes, so the docstring would survive as a false statement. The Documentation section's inline-doc list omitted it, and the Verification greps scoped to `docs/features/` and `docs/sdlc/` never read in-source docstrings, so nothing would have caught the drift. | **RESOLVED.** Added to the Inline Documentation list with the rationale, and given a dedicated mechanical check — the "Reporter docstring un-blinded" Verification row greps `reflections/docs_auditor.py` for `(non-renamed)` and requires zero matches. Also a Success Criterion. | Docstring is at `:1041`; the narrow-pattern comment at `:1052` cross-references a deleted detector and is listed separately. |
+| CONCERN | History & Consistency (sibling run) | The `_apply_fixes_to_file` literal-fix re-triage was a judgment heuristic with no per-site disposition, and the Success Criterion "the existence invariant still has direct test coverage" was unverifiable — the relevant Verification rows grep production source only, so they cannot detect a *test*-coverage regression. | **RESOLVED.** Test Impact now enumerates every affected site with an explicit UPDATE / DELETE / REPLACE / ADD / VERIFY disposition, including all eleven `TestExistenceInvariant` call sites. Added a test-side Verification row: `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` must exceed 3. | The threshold is provisional and tunable (per `feedback_provisional_magic_numbers`). Current count on `main` is 5; `TestExistenceInvariant` cases are re-expressed rather than deleted, so a drop below 4 indicates the rewrite silently dropped the invariant's rejection path rather than porting it. |
+| CONCERN | Risk & Robustness (sibling run) | Removing the `:1076` suppression un-blinds, in one shot on the first post-merge audit, every broken `.py` reference across the doc tree that has rename history — the old suppression hid them uniformly regardless of age. The plan sized the volume impact for the README case only and gave no estimate or noise-management plan for the day-one findings spike. | **RESOLVED** — same remedy as the steady-state concern above. Risk 3 now separates rate-bounding from volume-bounding, and Task 2 measures the day-one delta directly via `_detect_deleted_target_issues` over the `NEIGHBORHOOD_CAP`-bounded list on both sides, with a >10 gate that sequences the un-blinding behind #2739 rather than shipping an unbounded spike. | Both runs independently reached the same measurement design, including the same prohibition on `apply_mode="apply"`. |
 
 ---
 
