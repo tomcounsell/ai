@@ -12,10 +12,30 @@ last_comment_id: 5311784123
 
 ## Problem
 
-`reflections/docs_auditor.py` carries a rename-detection channel that cannot produce a
-correct output for any input, in any repository. It has already contributed to one bad
+`reflections/docs_auditor.py` carries a rename-detection channel whose **query is
+unsound in one direction**: `git log --follow` answers "what was this path called
+before", while every consumer needs "what is this path called now". No rename *fix* the
+channel proposes can be correct, in any repository. It has already contributed to one bad
 commit class on `main`, and it currently degrades the one conservative, human-facing
 detector the repo intends to rely on.
+
+**Precision on the defect boundary** (the thing PR #2728 got wrong, and which this plan
+must not repeat in the opposite direction): the defect is the *query*, not the whole
+channel uniformly. Enumerated per call site:
+
+| Call site | How it consumes `renames` | Rename-dependent? |
+|---|---|---|
+| `:441` `_detect_renamed_link_fixes` | `renames[0][1]` as the replacement | **fully** — no correct output exists |
+| `:465` `_detect_renamed_symbol_fixes` | `renames[0][1]` behind the `!= path` guard | **fully** — guard never holds, detector is dead |
+| `:495` `_detect_readme_broken_entries` | `renames` as a *branch condition* only | **partially** — the `if` arm is dead; the `else` arm at `:501-502` emits `(line, "")` and is **correct working code** |
+| `:1076` `_detect_deleted_target_issues` | `renames` as a *suppression* condition | **inverted** — the suppression defers to a fix channel that can never fix anything |
+
+The `else` arm at `:501-502` is the one piece of this channel that works: when a README
+index entry points at a genuinely-deleted `.md` file and the rename query returns nothing,
+it deletes that index line. It applies cleanly (`_absent_new_path_refs("")` yields no
+refs, so the existence invariant never rejects it) and has live coverage in
+`TestLineDeleteSentinel`. **Deleting it is a deliberate, human-approved loss of working
+behavior, not a consequence of the query defect** — see Risk 1 and the No-Gos.
 
 **Current behavior:**
 
@@ -33,9 +53,11 @@ Concretely, per detector:
 
 - `_detect_renamed_symbol_fixes` — fully disabled. #2728 added `renames[0][1] != path`, which
   never holds.
-- `_detect_renamed_link_fixes` / `_detect_readme_broken_entries` — propose replacing a
-  doc-relative link with the repo-root-relative spelling of the *same nonexistent path*.
-  Withheld on every run, permanently.
+- `_detect_renamed_link_fixes` — proposes replacing a doc-relative link with the
+  repo-root-relative spelling of the *same nonexistent path*. Withheld on every run,
+  permanently.
+- `_detect_readme_broken_entries` — its rename arm has the same defect and is permanently
+  withheld. Its `else` arm works (above).
 - `_detect_deleted_target_issues:1076` — **not a fix detector.** It calls the same query and
   `continue`s when it returns anything, i.e. it silently drops a broken `.py` reference from
   the human-facing report precisely when that path has a rename in its history. The
@@ -48,10 +70,12 @@ generator makes that signal meaningless.
 
 **Desired outcome:**
 
-The rename channel is gone. `_detect_deleted_target_issues` reports every broken reference to
-a human, including those whose path has a rename in its history. `fixes_withheld` becomes a
-real signal. `_apply_fixes_to_file` carries exactly one fix channel — the regex channel — with
-no vestigial parameter, loop, or sentinel left behind.
+The rename channel is gone, **including `_detect_readme_broken_entries`' working `else`
+arm** — the human approved deleting the whole detector on 2026-08-17, accepting the loss of
+README index-line self-healing as a trade (Risk 1). `_detect_deleted_target_issues` reports
+every broken reference to a human, including those whose path has a rename in its history.
+`fixes_withheld` becomes a real signal. `_apply_fixes_to_file` carries exactly one fix
+channel — the regex channel — with no vestigial parameter, loop, or sentinel left behind.
 
 ## Freshness Check
 
@@ -68,7 +92,7 @@ no vestigial parameter, loop, or sentinel left behind.
 | `reflections/docs_auditor.py:373` | `_git_log_follow_renames` definition, `--follow` query unchanged | holds |
 | `reflections/docs_auditor.py:441` | `_detect_renamed_link_fixes` call site, `renames[0][1]` | holds |
 | `reflections/docs_auditor.py:465` | `_detect_renamed_symbol_fixes` call site with `renames[0][1] != path` guard | holds |
-| `reflections/docs_auditor.py:495` | `_detect_readme_broken_entries` call site, else-branch emits `(line, "")` | holds |
+| `reflections/docs_auditor.py:495` | `_detect_readme_broken_entries` rename call site. Re-verified 2026-08-17: `renames` here is a **branch condition**, not a replacement source. The `else` arm at `:501-502` emits `(line, "")` — a working README index-line delete that does **not** depend on the query. Deleting it is an approved scope decision (Risk 1), not a dead-code removal. | holds |
 | `reflections/docs_auditor.py:1076` | `_detect_deleted_target_issues` suppression `if renames: continue` | holds |
 | `reflections/docs_auditor.py:1359-1360` | per-run `_RENAME_QUERY_COUNT` reset inside `audit()` | holds |
 | `reflections/docs_auditor.py:1414/1416-1417` | detector registrations in the audit loop | holds (README arm at `:1414`, else-arm at `:1416-1417`) |
@@ -131,11 +155,22 @@ this; no plan-level premise changed.
 | PR #2728 (#2725) | Added `renames[0][1] != path` to `_detect_renamed_symbol_fixes`; added the existence invariant in `_apply_fixes_to_file` | Treated a **query defect** as a **target-selection defect**. Guarding index `[0]` cannot help when the query direction itself is wrong: `--follow` answers "what was this called before", the detectors need "what is this called now". The guard silently converted a broken detector into a dead one instead of removing it. |
 | PR #2782 (#2759) | Widened `_PATH_REF_RE`, ruled the detector patterns unchanged | Correct scoping call, but it left the dead channel in place and added another doc surface citing `GIT_LOG_FOLLOW_CAP` as a live budget constraint. |
 
-**Root cause pattern:** both fixes hardened the *write path* (`_apply_fixes_to_file`) around a
-detector channel whose *read path* (`git log --follow`) is unsound. Hardening downstream of a
-defective producer converts wrong output into withheld output, which reads as safety but is
-actually an accumulating maintenance and signal-noise cost. The correct move is to delete the
-producer, which is what this plan does.
+**Root cause, stated narrowly:** the defect is the `git log --follow` **query direction**,
+not the detector channel as a whole. Both prior fixes hardened the *write path*
+(`_apply_fixes_to_file`) around that unsound read, converting wrong output into withheld
+output — safety-shaped, but an accumulating maintenance and signal-noise cost. The correct
+move is to delete the *query* and every consumer that depends on its result value.
+
+**Where this plan goes beyond the root cause, and why that is a scope decision rather than a
+deduction.** Applying "delete the producer" wholesale would mirror PR #2728's own error in the
+opposite direction: #2728 generalized a query defect into a target-selection guard; a
+whole-channel deletion generalizes the same query defect into removing code that never touched
+the query. The per-arm table in Problem is the honest boundary. Two arms (`:441`, `:465`) are
+query-dependent and their deletion follows from the root cause. `:1076` is a suppression whose
+un-blinding also follows. `_detect_readme_broken_entries`' `else` arm does **not** follow — it
+is deleted because the human decided on 2026-08-17 that an auditor auto-deleting a line from a
+human's index file is a write class this repo no longer wants, which is a policy call recorded
+in Risk 1 and No-Gos, argued on its own merits.
 
 ## Data Flow
 
@@ -158,9 +193,16 @@ The channel being deleted, end to end:
    liveness record.
 
 After the deletion, step 2's `fixes` list has **no producer**, step 3 does not exist, step 4's
-literal loop is unreachable, and step 5 reports unconditionally. That is the whole reason
-`_apply_fixes_to_file` must collapse to regex-only rather than merely being passed an empty
-list — see Technical Approach.
+literal loop is unreachable, and step 5 reports unconditionally.
+
+The collapse of `_apply_fixes_to_file` rests on exactly this producer count, and on nothing
+else. All three literal-fix detectors are deleted (two because the query is unsound, one by
+the human's scope decision), and `:1429` is the only production call site. Once all three are
+gone the literal `fixes` channel has **zero producers in the repo** — the parameter, the loop,
+and the `new == ""` sentinel become code no execution path can reach. That is a plain NO
+LEGACY CODE TOLERANCE removal, and it holds regardless of *why* each detector was deleted.
+It would not hold if `_detect_readme_broken_entries` were retained in reduced form; the
+approved scope is that it is not.
 
 ## Architectural Impact
 
@@ -382,13 +424,38 @@ Record the red-state output in the PR description.
 ### Risk 2: Removing the `:1076` suppression floods the issue tracker
 **Impact:** `_detect_deleted_target_issues` files deduped GitHub issues. Un-blinding it could
 surface a backlog of genuinely-broken references all at once on the first rotation run.
-**Mitigation:** Three existing controls already bound this and none is being touched: filing is
-rotation-only (not per-PR), the neighborhood is capped at `NEIGHBORHOOD_CAP = 20` files per
-run, and `_open_issue_exists` dedupes against open issues cross-machine. Measure before
-shipping: run `audit(scope_mode="rotation", apply_mode="dry-run")` against a representative
-primary path pre- and post-change and record the finding-count delta in the PR. A large delta
-is a *correct* result (these are real broken references that were being hidden), but it should
-be a known number, not a surprise.
+**What the existing controls actually bound — and what they do not.** Filing is rotation-only
+(not per-PR), the neighborhood is capped at `NEIGHBORHOOD_CAP = 20` files per run, and the
+per-run cap at `:1455` allows at most 5 filings per rotation. Those bound the *rate*. They do
+**not** bound steady-state volume: rotation repeats, so a backlog drains at 5 issues per run
+indefinitely rather than as a single surge. And `_open_issue_exists` (`:1169`, reached via
+`_file_issue_if_new` `:1253`) dedupes against **open** issues only — documented at `:1439-1441`
+— so a finding closed without fixing the doc is re-filed on a later rotation. There is no
+control here that converges; only one that meters.
+
+**Mitigation — measure with something that can produce a number.** The previously-specified
+control could not: `audit()` gates filing behind `if apply_mode == "apply" and scope_mode ==
+"rotation":` (`:1456`), so under `apply_mode="dry-run"` the returned `issues_filed` is always
+`0` on both sides, and `_ok_result` (`:117,134`) exposes no findings list, so the
+`issue_findings` built at `:1444` are discarded before any caller sees them. A 0-vs-0 delta is a
+false green.
+
+Instead, call the detector directly. `_detect_deleted_target_issues(doc_path, content,
+repo_root) -> list[dict]` is a pure function over already-read content, with no filing side
+effect. Walk the same `NEIGHBORHOOD_CAP`-bounded file list `audit()` resolves via
+`_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` (`:1388`), read each file's
+content, call the detector, and sum `len(...)`. Run that on `main` and on the branch; the
+difference is the un-blinding delta. **Do not switch to `apply_mode="apply"` to make
+`issues_filed` nonzero** — that files real GitHub issues, which is the flood this risk exists
+to bound.
+
+**The delta is a gate, not a report line.** If the counted delta exceeds **10 additional
+findings** across the measured neighborhood, do not land the un-blinding ahead of #2739 —
+split the `:1076` suppression removal out of this PR, land the rest of the deletion, and
+sequence the un-blinding behind #2739's review gate. The threshold is provisional and tunable;
+it is set at roughly two rotations' worth of the per-run cap so that a backlog which drains in
+about two runs is treated as a surge and anything larger is treated as a standing source.
+Record the measured number and the gate decision in the PR description either way.
 
 ### Risk 3: A doc surface is missed and describes a deleted function
 **Impact:** `docs/features/docs-auditor.md` is 569 lines and references the rename channel in
