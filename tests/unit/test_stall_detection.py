@@ -733,7 +733,7 @@ class TestReactionPayloadSchemaParity:
     # Keys a mirror may add on top of the canonical schema.
     EXTRA_KEYS = {"custom_emoji_document_id", "heartbeat_tick", "ack_sent_id"}
 
-    def _assert_parity(self, payload, *, chat_id, reply_to, emoji, session_id):
+    def _assert_parity(self, payload, *, chat_id, reply_to, emoji, session_id, expect_ranked):
         from agent.output_handler import TelegramRelayOutputHandler
 
         expected = TelegramRelayOutputHandler._build_reaction_payload(
@@ -746,17 +746,18 @@ class TestReactionPayloadSchemaParity:
         )
         assert set(payload) - set(expected) <= self.EXTRA_KEYS
 
-        # `priority` and `priority_ranked` are per-writer by design, so only
-        # their PRESENCE is a parity claim, not their value. `priority` is
-        # already neutralized by passing it through above; doing the same for
-        # `priority_ranked` is not possible, because the builder derives it and
-        # any explicit `priority` forces it True -- which would make this helper
-        # unable to express a legitimately unranked writer
-        # (`tools/react_with_emoji.py`). Assert the key exists and is a bool on
-        # both sides, then compare everything else by value.
+        # `priority_ranked` cannot be compared against the builder's own output:
+        # `priority` is passed through above, and any explicit `priority` forces
+        # the derived value True -- which would make this helper structurally
+        # unable to express the one writer that must be False
+        # (`tools/react_with_emoji.py`). So the caller states the expected value
+        # instead. Asserting only presence/type would leave a real hole: a mirror
+        # could flip its literal and silently reinstate the #2716 review blocker
+        # where an unranked glyph claims the slot at terminal rank.
         assert "priority_ranked" in payload, "priority_ranked missing from mirror"
-        assert isinstance(payload["priority_ranked"], bool)
-        assert isinstance(expected["priority_ranked"], bool)
+        assert payload["priority_ranked"] is expect_ranked, (
+            f"priority_ranked drifted: expected {expect_ranked}"
+        )
 
         for field, value in expected.items():
             if field == "priority_ranked":
@@ -781,6 +782,7 @@ class TestReactionPayloadSchemaParity:
             reply_to=42,
             emoji=payload["emoji"],
             session_id="tg_user_-100_42",
+            expect_ranked=True,
         )
 
     def test_tool_budget_mirror(self, fake_redis):
@@ -795,6 +797,7 @@ class TestReactionPayloadSchemaParity:
             reply_to=42,
             emoji=BUDGET_REACTION_EMOJI,
             session_id="tg_user_-100_42",
+            expect_ranked=True,
         )
 
     def test_session_completion_suppress_mirror(self, fake_redis, monkeypatch):
@@ -818,6 +821,7 @@ class TestReactionPayloadSchemaParity:
             reply_to=42,
             emoji="👀",
             session_id="tg_user_-100_42",
+            expect_ranked=True,
         )
 
     def test_react_with_emoji_mirror(self, monkeypatch):
@@ -839,6 +843,7 @@ class TestReactionPayloadSchemaParity:
             reply_to=42,
             emoji="🔥",
             session_id="tg_user_-100_42",
+            expect_ranked=False,
         )
 
     def test_worker_down_reactions_uses_the_builder_directly(self):
