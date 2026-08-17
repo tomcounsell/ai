@@ -1167,7 +1167,12 @@ that fail the run. Any future annotation in this section must stay in prose or b
   with the row above so "delete the fixture" cannot be over-applied to `clear_basename_cache`
 - **Red-state transcripts captured** — pre-change `0` → demonstrated red, must become > 0 once Task 2
   writes `docs/plans/notes/docs-auditor-rename-detection-red-state.md`
-- **Existence-invariant coverage** — pre-change `5` → already green, non-regression guard, floor of 3
+- **Existence-invariant coverage** — pre-change `5` → already green, non-regression guard, floor of 3.
+  Post-review it is `4`, one above the floor: the round-1 review deleted the redundant
+  `test_regex_channel_is_also_guarded`. Only **3** of those 4 are live `_apply_fixes_to_file`
+  sites — the fourth is a hand-written dict in `test_pr_body_carries_marker_when_fixes_withheld`
+  that never calls it. If a future consolidation trips this row, re-derive the floor from the
+  live-site count; do not relax the threshold.
 - **Lint / format clean** — pre-change pass → already green; `ruff` honors `.gitignore` and so does
   not descend into `.worktrees/`
 
