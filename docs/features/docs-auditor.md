@@ -157,25 +157,41 @@ nothing else; the channel contract is unchanged. The suppression callable is
 built inside `_apply_fixes_to_file`'s regex loop by `_make_stale_term_replacer`,
 which wraps that plain string.
 
-That placement is forward-looking robustness, not stylistic.
-`_apply_fixes_to_file`'s regex loop applies its fixes in sequence over the same
-`new_text`, mutating it after each one, so any line index computed once against
-the pre-loop `content` would go stale the moment an earlier fix changed what
-precedes it — and it would fail **silently**: a plausible-looking wrong rewrite
-rather than an error. The callable instead re-derives context from `match.string`
-(the text currently being rewritten) and `match.start()` (the live offset into
-it), so there is no index to go stale.
+That placement is load-bearing, not stylistic. `_apply_fixes_to_file`'s regex
+loop applies its fixes in sequence over the same `new_text`, mutating it after
+each one, so any position computed once against the pre-loop `content` goes stale
+the moment an earlier fix changes what precedes it — and it fails **silently**: a
+plausible-looking wrong rewrite rather than an error. The callable instead
+re-derives context from `match.string` (the text currently being rewritten) and
+`match.start()` (the live offset into it), so there is no stored position to go
+stale.
 
-No shipped fix can trigger that failure today. `_detect_stale_term_fixes` is the
-sole fix producer, and since `line_idx` is derived as `text.count("\n", 0,
-match.start())`, only a substitution that changes the *newline* count can shift a
-later fix's line index. Every `STALE_TERMS` replacement is newline-free and
-strictly longer than its key (`SessionLog`->`AgentSession`,
-`RedisJob`->`AgentSession`, `session_log`->`agent_session`,
-`redis_job`->`agent_session`), so applying one shifts byte offsets but never line
-indices. The apply-time placement exists for `STALE_TERMS` entries an operator may
-add later, which may shorten text or span newlines; it is not guarding a
-currently-reachable corruption.
+The two gates differ in how urgently they need that placement, and the difference
+is worth stating precisely.
+
+**Gate 2 is not currently reachable.** `_is_documented_deletion` consumes a *line
+index*, derived as `text.count("\n", 0, match.start())`, so only a substitution
+that changes the *newline* count can stale it. `_detect_stale_term_fixes` is the
+sole fix producer and every `STALE_TERMS` replacement is newline-free
+(`SessionLog`->`AgentSession`, `RedisJob`->`AgentSession`,
+`session_log`->`agent_session`, `redis_job`->`agent_session`), so applying one
+shifts byte offsets but never line indices. Gate 2's apply-time placement is
+forward-looking robustness, for `STALE_TERMS` entries an operator may add later
+that shorten text or span newlines.
+
+**Gate 3 has no such reprieve — it is guarding a live corruption today.**
+`_match_inside_path_token` consumes raw byte offsets (`match.start()`,
+`match.end()`) rather than a line index, and the apply loop reassigns
+`new_text = candidate` after each fix. Every shipped replacement is strictly
+*longer* than its key, so each applied fix shifts the offsets of every later
+match — precisely *because* of the property that spares gate 2. Concretely: a doc
+containing the prose word `SessionLog` and the path token
+`models/session_log.py` queues fixes in `STALE_TERMS` order, so the `SessionLog`
+fix lengthens the text ahead of the `session_log` match; a detection-time offset
+map would mis-locate that match, gate 3 would fail to suppress, and
+`models/session_log.py` would be rewritten to `models/agent_session.py` — the
+corruption described below that the existence invariant provably cannot catch,
+because both files exist. Do not hoist the path-token decision to detection time.
 
 Keeping the callable local also keeps `_reject` receiving the replacement
 *string*, so a withheld record stays readable in the PR body, the findings

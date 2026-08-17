@@ -730,8 +730,13 @@ class TestStaleTermWordBoundary:
         The shortening regex here is a *synthetic* stand-in for a ``STALE_TERMS``
         shape that does not exist today: every current replacement is newline-free
         and strictly longer than its key, so no production fix can shift a later
-        fix's line index. This test guards the forward-looking case, for operator
+        fix's *line index*. This test guards the forward-looking case, for operator
         entries that shorten text or span newlines.
+
+        That reprieve is specific to the line-index gate. The path-token gate
+        consumes raw byte offsets, which every shipped replacement already shifts
+        precisely because it is longer than its key — so its apply-time placement
+        is guarding a live corruption, not a hypothetical one.
         """
         doc = repo / "docs" / "features" / "ctx.md"
         original = (
