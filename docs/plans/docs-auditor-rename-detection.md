@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
 revision_applied: true
-revision_applied_at: 2026-08-17T05:42:26Z
+revision_applied_at: 2026-08-17T05:47:21Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -514,23 +514,38 @@ follow-up if it is ever wanted, not a precondition for this deletion.
 at least eight places, several of them load-bearing rationale rather than passing mentions.
 The two `/do-docs` surfaces are user-facing skill text. A miss leaves the repo documenting
 functions that do not exist — the exact failure this auditor exists to catch.
-**Mitigation:** A `## Verification` anti-criterion greps the whole repo (excluding
-`docs/plans/`) for each deleted symbol name and requires zero matches. Note the
-`feedback_grep_anticriterion_counts_comments` lesson: the plan's own text quotes these symbol
-names, so the grep must exclude `docs/plans/` — including `docs/plans/completed/` — or it fails
-on this document. Three mechanical requirements, each of which broke the previous draft's rows:
+**Mitigation:** a `## Verification` anti-criterion per deleted symbol, each requiring zero
+matches. Four drafts of these rows have now been broken by four different mechanisms, so the
+requirements below are stated as rules rather than as commentary.
 
-1. **Quote the globs.** This shell is zsh; a bare `--include=*.py` is glob-expanded by the
-   shell and aborts with `no matches found` before `grep` ever runs. Write `--include="*.py"`.
-2. **Anchor the exclusion to grep's real output.** `grep -r` against `.` emits bare relative
-   paths (`docs/plans/foo.md`), never `./docs/plans/foo.md`, so an exclusion regex anchored at
-   `^./docs/plans/` matches nothing. Verified live on 2026-08-17: the previous draft's "Follow
-   cap gone" pipeline returned a nonzero count on an untouched tree, i.e. the safety net was
-   permanently inert. Anchor at `^docs/plans/`.
-3. **Do not read these rows by exit code alone.** `grep -c` and `grep -vc` exit **1** when the
-   count is zero, so an exit-code-driven harness reads every "expected 0" row as a failure.
-   Each row is therefore wrapped as `[ "$(... | grep -vc '^docs/plans/')" = 0 ]`, whose exit
-   code is 0 exactly when the count is 0.
+0. **Enumerate source roots; never grep `.`.** This is the rule that subsumes the two that used
+   to sit here (an exclusion regex for `docs/plans/`, and an anchor for it). Grepping `.`
+   pulls in two contaminants that no anchor can remove: this plan document, whose prose quotes
+   every deleted symbol (the `feedback_grep_anticriterion_counts_comments` lesson), and the
+   **29 sibling worktrees under `.worktrees/`**, each carrying its own full copy of
+   `reflections/docs_auditor.py` and the test file. Both survive the deletion, so a `.`-rooted
+   row can never reach zero — it is **permanently red**, which fails the build's validation just
+   as uselessly as a vacuous row passes it. The rows above therefore name real source roots
+   (`reflections/ tests/ docs/features/ docs/sdlc/ .claude/ tools/ agent/`) and carry no
+   exclusion at all. Verified under the harness on 2026-08-17: survivor sets are exactly the two
+   source files plus `docs/features/docs-auditor.md`, with empty stderr.
+1. **Quote the globs.** A bare `--include=*.py` is glob-expanded by the shell and can abort with
+   `no matches found` before `grep` ever runs. Write `--include="*.py"`.
+2. **Validate under the harness's shell, not your own — they are different programs.** This is
+   the trap that produced the previous draft's confidently-wrong claim that `grep -r .` emits
+   bare relative paths. An interactive agent shell here has `grep` shadowed by a **shell
+   function** wrapping `ugrep` with `--ignore-files`, which honors `.gitignore` and so silently
+   hides `.worktrees/`, and which emits bare paths. `run_checks` executes rows via
+   `subprocess.run(..., shell=True)` → `/bin/sh` → the **system** `grep`, which honors no
+   ignore file and emits `./`-prefixed paths. The same row that counts `12` when typed into the
+   agent's Bash tool counts **230** under the harness. Never validate a row by typing it; drive
+   it through `parse_verification_table()` + `run_checks()` (rule 5) and read *that* number.
+3. **Do not read these rows by exit code alone.** `grep -c` exits **1** when the count is zero,
+   so an exit-code-driven reading marks every "expected 0" row as failed. The rows above end in
+   `| wc -l` and use `match count == 0`, which reads stdout and is insensitive to grep's exit
+   code. If a root is ever mistyped or collapsed behind a variable, `grep` writes to stderr and
+   `wc -l` still prints `0` on stdout — a **false pass**. Keep the roots as literal arguments in
+   the row, and treat a previously-red row that turns `0` as a reason to inspect stderr.
 4. **One pattern per row — never pattern-internal alternation.** The table is executed through
    `agent/verification_parser.py`, whose `split_row_cells` unescapes `\|` to a bare `|` after
    splitting. A single-escaped `\|` written *inside* a grep pattern therefore reaches the shell
@@ -554,8 +569,9 @@ in the PR body that #2739's premise (nonzero `fixes_withheld` is a real signal) 
 only after this merges.
 
 **Known and expected:** `docs/plans/docs-auditor-review-gate.md` carries 24 lines referencing
-the six symbols this plan deletes, and the `## Verification` anti-criteria deliberately exclude
-`^docs/plans/`, so those references survive the deletion without failing a check. That is the
+the six symbols this plan deletes, and the `## Verification` anti-criteria scan enumerated source
+roots that deliberately omit `docs/plans/` entirely (Risk 4, rule 0), so those references survive
+the deletion without failing a check. That is the
 correct outcome given the #2741-before-#2739 ordering — #2739 is still `status: Planning` and its
 plan text is a draft against today's `main`, not a doc surface describing the shipped system.
 Refreshing it is #2739's own work when it replans onto the post-deletion tree; nothing in this
@@ -681,7 +697,9 @@ that read `fixes_withheld` need no code change.
 
 - [ ] `_git_log_follow_renames`, `_detect_renamed_link_fixes`, `_detect_renamed_symbol_fixes`,
       `_detect_readme_broken_entries`, `GIT_LOG_FOLLOW_CAP`, and `_RENAME_QUERY_COUNT` do not
-      appear anywhere in the repo outside `docs/plans/`.
+      appear in any live source root — `reflections/`, `tests/`, `docs/features/`, `docs/sdlc/`,
+      `.claude/`, `tools/`, `agent/`. Plan documents under `docs/plans/` are out of scope by
+      design (Risk 4, rule 0; Risk 5), as are sibling checkouts under `.worktrees/`.
 - [ ] `_apply_fixes_to_file` takes no literal `fixes` parameter and contains no `new == ""`
       branch.
 - [ ] `_detect_deleted_target_issues` makes no subprocess call and reports a broken reference
@@ -859,29 +877,41 @@ execution — the survivor set for every symbol is exactly `reflections/docs_aud
 `tests/unit/test_docs_auditor_substrate.py`, with zero lines from this plan document or any
 worktree.
 
-Red/green state on unmodified `main`, so a reviewer can tell which rows prove the work happened:
+Red/green state on unmodified `main`, so a reviewer can tell which rows prove the work happened.
+**This list is deliberately not a markdown table.** `parse_verification_table` collects *every*
+pipe-prefixed line in the `## Verification` section and treats rows past the first two as checks,
+so a second table here is executed as twelve nonsense commands (`/bin/sh: 12,: command not found`)
+that fail the run. Any future annotation in this section must stay in prose or bullets.
 
-| Row | Pre-change | Meaning |
-|---|---|---|
-| The six symbol-absence rows | 12, 4, 8, 7, 7, 9 | demonstrated red — must reach 0 |
-| Reporter docstring un-blinded | 1 | demonstrated red — must reach 0 |
-| Literal channel gone | 5 | demonstrated red — must reach 0 |
-| Reporter makes no rename query | 1 | demonstrated red — must reach 0 |
-| Rename regression exists | 0 | demonstrated red — must become > 0 |
-| Reporter stays subprocess-free | 0 | **already green** — a non-regression guard, not evidence of completion |
-| Basename cache reset survives | 1 | already green — non-regression guard |
-| Existence-invariant coverage | 5 | already green — non-regression guard, floor of 3 |
-| Lint / format clean | pass | `python -m ruff check .` verified clean and does not descend into worktrees |
+- **The six symbol-absence rows** — pre-change `12, 4, 8, 7, 7, 9` → demonstrated red, must reach 0
+- **Reporter docstring un-blinded** — pre-change `1` → demonstrated red, must reach 0
+- **Literal channel gone** — pre-change `5` → demonstrated red, must reach 0
+- **Reporter makes no rename query** — pre-change `1` → demonstrated red, must reach 0
+- **Rename regression exists** — pre-change `0` → demonstrated red, must become > 0
+- **Reporter stays subprocess-free** — pre-change `0` → **already green**; a non-regression guard,
+  not evidence of completion
+- **Basename cache reset survives** — pre-change `1` → already green, non-regression guard
+- **Existence-invariant coverage** — pre-change `5` → already green, non-regression guard, floor of 3
+- **Lint / format clean** — pre-change pass → already green; `ruff` honors `.gitignore` and so does
+  not descend into `.worktrees/`
 
 **Two execution hazards found while validating these rows, both recorded so the builder does not
-rediscover them.** First, `grep` on this machine is **ugrep 7.5.0**, not GNU grep — the rows above
-were executed under it and behave correctly, but do not assume GNU-only flags will work if a row
-is edited. Second, and more dangerous: if the root list is ever collapsed into a single shell
-word (for example by putting it in an unquoted variable), ugrep emits `No such file or directory`
-on **stderr** and `0` on **stdout**. A `match count == 0` row reads stdout, so a completely broken
-command **false-passes**. Keep the roots as literal arguments in the row, never behind a variable,
-and treat an unexpected `0` on a row that was previously red as a reason to inspect stderr rather
-than as success.
+rediscover them.**
+
+First, **the `grep` you type is not the `grep` that runs these rows.** An interactive agent shell
+here has `grep` shadowed by a shell function wrapping **ugrep 7.5.0** with `--ignore-files`; the
+harness runs each row through `subprocess.run(..., shell=True)`, i.e. `/bin/sh` and the **system**
+`grep`, which honors no ignore file. The two disagree on both things these rows depend on: path
+prefixes (`docs/plans/…` vs `./docs/plans/…`) and whether `.worktrees/` is descended. A row that
+counts `12` when typed counts `230` under the harness. Every number in the table above is the
+**harness** number. See Risk 4, rule 2.
+
+Second, and more dangerous: if the root list is ever collapsed into a single shell word (for
+example by putting it in an unquoted variable), `grep` emits `No such file or directory` on
+**stderr** and `wc -l` prints `0` on **stdout**. A `match count == 0` row reads stdout, so a
+completely broken command **false-passes**. Keep the roots as literal arguments in the row, never
+behind a variable, and treat an unexpected `0` on a row that was previously red as a reason to
+inspect stderr rather than as success.
 
 ## Critique Results
 
