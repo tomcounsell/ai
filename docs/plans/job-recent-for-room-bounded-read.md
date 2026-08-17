@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2636
 last_comment_id: 5215674953
+revision_applied: true
+revision_applied_at: 2026-08-17T02:57:38Z
 ---
 
 # Bound Job.recent_for_room via a direct bounded reverse-range read
@@ -24,7 +26,7 @@ A second, latent defect blocks any bounded fix: the sorted-set **scores are untr
 
 **Baseline commit:** `4e78975d4abef0a6cab15da264754f637aeb23e4`
 **Issue filed at:** 2026-08-07T05:51:23Z
-**Disposition:** Minor drift (line numbers + upstream state moved; premise intact). One upstream premise **revised**: the issue's "upstream, then consume" sequencing is superseded by the in-repo bounded read (see Recon Summary on the issue and Open Question 1).
+**Disposition:** Minor drift (line numbers + upstream state moved; premise intact). One upstream premise **revised**: the issue's "upstream, then consume" sequencing is superseded by the in-repo bounded read (see Recon Summary on the issue; ratified by supervisor, critique cycle 1).
 
 **File:line references re-verified (2026-08-17):**
 - `models/job.py:239` → drifted to `models/job.py:346-358` under PR #2814 (expectations); hydrate-all-then-slice logic byte-identical in shape — still holds.
@@ -49,7 +51,8 @@ A second, latent defect blocks any bounded fix: the sorted-set **scores are untr
 
 - **Issue #2634 / plan `completed/job-model-scaling-followups.md`**: parent scaling audit; item 3 split out into #2636 because it appeared to need an upstream release.
 - **PR #2671 (closes #2640)**: Job index hygiene — guarded `repair_indexes()` with daily `$SortF` partition reap via `rebuild_indexes()`. The bounded read's orphan tolerance rides on this.
-- **PR #2653 (`8d2d445ec`)**: scoped Job backfill write that re-reads immediately before saving to avoid clobbering concurrent writes — the pattern for the skew backfill.
+- **PR #2653 (`8d2d445ec`)**: scoped Job backfill write that re-reads immediately before saving to avoid clobbering concurrent writes.
+- **`Job.backfill_open_expectations_index` (`models/job.py:629`)**: the structural clobber-proof idiom in the very file this plan edits — `fresh.save(update_fields=[...])` makes concurrent-write clobber impossible by construction. The skew backfill uses this pattern (field-scoped to `last_active_at`), not the timing-based #2653 window-narrowing alone.
 - **`agent/memory_retrieval.py:110-122`**: production precedent for the exact idiom — derive the sorted-set key from popoto's own field API, bounded `zrevrange`, decode defensively, fail open.
 - **popoto#517/#519 (in 1.8.2), popoto#540/#547 (fixed, unreleased)**: the upstream path exists but has no shippable release; consuming it is deferred (see No-Gos).
 
@@ -130,7 +133,7 @@ Write-side flow (the prerequisite): any `Job.save()` → override re-attaches UT
 
 - **`Job.save()` tz-normalization override**: re-attach UTC to a naive `last_active_at` before delegating to popoto — one choke point that makes every score write pure UTC. Instant-preserving and idempotent; deliberately NOT a re-stamp (re-stamping `_now()` would resurrect idle Jobs and break rest-by-age).
 - **Bounded reverse-range read**: `recent_for_room` becomes derive-key → `zrevrange` top-`fetch_n` → `get_many(skip_none=True)` → truncate to `limit`. Over-fetch absorbs transient gone-hash orphans (permanent orphans don't exist post-#2640: the daily guarded repair reaps them).
-- **One-pass skew backfill migration**: for each Job, compare the stored score against `bridge.utc.to_unix_ts(job.last_active_at)`; where they disagree beyond tolerance, re-read fresh and `save()` (the override rewrites a correct score). Registered in `scripts/update/migrations.py::MIGRATIONS`, idempotent, never stamps a constant timestamp.
+- **One-pass skew backfill migration**: for each Job, compare the stored score against `bridge.utc.to_unix_ts(job.last_active_at)`; where they disagree beyond tolerance, re-read fresh and `save(update_fields=["last_active_at"])` (the override's guard fires — the field is named — and rewrites a correct score; the scoped write cannot clobber concurrent expectation writes by construction). Registered in `scripts/update/migrations.py::MIGRATIONS`, idempotent, never stamps a constant timestamp. Single unbounded pass, no resumable cursor — DECIDED on the measured population (92 Jobs / 0.03s full hydrate, shared production Redis, 2026-08-17).
 - **Empirical acceptance harness**: hash-read counting by wrapping the pipeline's hash-read method (exact integers, load-stable) — the "measures unchanged while looking fixed" failure mode is structurally detected.
 
 ### Flow
@@ -140,8 +143,8 @@ Inbound message → job_router bind-or-mint → `recent_for_room` → **one** re
 ### Technical Approach
 
 - **Read path** (`models/job.py::recent_for_room`): keep the classmethod signature and fail-open contract. Derive the partition key via `SortedField.get_sortedset_db_key(Job, "last_active_at", room_id).redis_key` — never f-string it (`DB_key.clean()` escaping; every real `room_id` contains a colon). `POPOTO_REDIS_DB.zrevrange(key, 0, fetch_n - 1)`, decode bytes members, `Job.query.get_many(keys, skip_none=True)`, truncate to `limit`. `fetch_n = limit + JOB_RECENT_OVERFETCH` with `JOB_RECENT_OVERFETCH` a named, env-overridable constant (provisional/tunable, default 5) per the magic-number convention. Do not re-fetch on under-fill: an under-filled result means the Room genuinely has fewer live Jobs, or a repair is mid-flight (fail-open posture, same exposure as today).
-- **Write path** (`models/job.py::Job.save` override): if `self.last_active_at` is a naive `datetime`, `replace(tzinfo=UTC)` before `super().save(...)`. No other field needs it — `last_active_at` is the only SortedField on Job. Preserve `save()`'s signature/kwargs pass-through.
-- **Backfill** (`scripts/update/migrations.py`): iterate Jobs through the ORM (bounded: per-machine Job counts are modest; this runs once on the update path). For each, read the stored score for its member in its Room partition; if `abs(score - to_unix_ts(job.last_active_at)) > 1.0`, re-read the row fresh and `save()` it immediately (minimal clobber window, mirroring #2653). Count and log repaired rows. Idempotent: second run repairs 0. Per the addendum's Popoto-migration rule: registered in `MIGRATIONS`, recorded once in `data/migrations_completed.json`, no raw Redis writes — the only write is `instance.save()`.
+- **Write path** (`models/job.py::Job.save` override): if `self.last_active_at` is a naive `datetime`, `replace(tzinfo=UTC)` before `super().save(...)`. No other field needs it — `last_active_at` is the only SortedField on Job. Preserve `save()`'s signature/kwargs pass-through. **Scoped-save guard (critique):** run the reattach only `if update_fields is None or "last_active_at" in update_fields:` — a scoped save excluding the field (production case: `backfill_open_expectations_index`'s `save(update_fields=["has_open_expectations"])`, `models/job.py:629`, whose docstring guarantees it never writes `last_active_at`) must never touch the SortedField score path; a scoped save *naming* the field MUST still reattach.
+- **Backfill** (`scripts/update/migrations.py`): iterate Jobs through the ORM in a **single unbounded pass — DECIDED**, no resumable cursor: the measured population is **92 Jobs total on the shared production Redis, full hydrate 0.03s** (2026-08-17, war-room measurement). Log the count each run. For each Job, read the stored score for its member in its Room partition; if `abs(score - to_unix_ts(job.last_active_at)) > 1.0`, re-read the row fresh and write with the **structural clobber-proof idiom**: `fresh.save(update_fields=["last_active_at"])` — a field-scoped write touching only `last_active_at` and its `$SortF` companion (never `goal`/`status`), which eliminates concurrent-expectation clobber by construction rather than by timing. Mirrors `backfill_open_expectations_index` (`models/job.py:629`); interlocks with the save()-override guard — the scoped save names `last_active_at`, so the tz-reattach runs. Idempotent: second run repairs 0. Per the addendum's Popoto-migration rule: registered in `MIGRATIONS`, recorded once in `data/migrations_completed.json`, no raw Redis writes — the only write is `instance.save()`.
 - **Ordering parity**: new path returns the same order as the old for distinct timestamps (verified by spike-1 at N=7 and N=30). Tie behavior legitimately differs (spike-4) — tests use distinct timestamps.
 - **Instrumentation for acceptance**: wrap/patch the redis client's hash-read method (as in the spike) in the test to count hash reads before/after; assert the bounded path's count is a function of `limit`, not of Room size. This defeats the named failure mode (a "fix" that measures unchanged).
 
@@ -163,7 +166,8 @@ Inbound message → job_router bind-or-mint → `recent_for_room` → **one** re
 
 - [ ] `tests/unit/test_job_model.py` — UPDATE: existing `recent_for_room` tests must pass unchanged against the bounded implementation (ordering/contract parity is the point); audit any test that stamps identical `last_active_at` values across Jobs and give them distinct timestamps (spike-4 tie hazard)
 - [ ] `tests/unit/test_job_model.py` — ADD: tz-purity regression (mint → reload → `add_expectation()` → stored score matches `time.time()` within tolerance; `last_active_at__gte=now-1h` finds the row), hash-read-count acceptance test, orphan-tolerance test, fail-open test
-- [ ] Migration tests (alongside existing `scripts/update/migrations.py` coverage, e.g. `tests/unit/test_migrations.py` if present, else create) — ADD: skewed-row repair + idempotency (second pass repairs 0)
+- [ ] `tests/unit/test_job_model.py` — ADD: scoped-save guard test — after mutating `last_active_at` to naive, a `save(update_fields=["has_open_expectations"])` leaves the stored `$SortF` score byte-unchanged (the override must not fire when the field is excluded)
+- [ ] `tests/unit/test_migrations.py` — UPDATE (file exists): add skewed-row repair + idempotency (second pass repairs 0) + poisoned-row continuation
 
 ## Rabbit Holes
 
@@ -177,7 +181,7 @@ Inbound message → job_router bind-or-mint → `recent_for_room` → **one** re
 
 ### Risk 1: Backfill clobbers a concurrent write (save() is full-row)
 **Impact:** a promise/expectation appended between the backfill's read and its save is lost.
-**Mitigation:** re-read the row immediately before saving (the #2653 idiom); only rows with skewed scores are touched at all, and skew only exists on rows written by pre-fix code paths. Run order in `/update` puts the migration after the code deploy, so the override is already active when the backfill runs.
+**Mitigation:** structural, not timing-based — the backfill writes `fresh.save(update_fields=["last_active_at"])`, a field-scoped write that cannot touch `goal`/`status` by construction (the `backfill_open_expectations_index` idiom, `models/job.py:629`); a fresh re-read before the save additionally keeps the written value current. Only rows with skewed scores are touched at all. Run order in `/update` puts the migration after the code deploy, so the override is already active when the backfill runs.
 
 ### Risk 2: Score-trust assumption is broken by a not-yet-backfilled peer machine
 **Impact:** fleet machines share Redis; a peer still running pre-fix code re-skews rows after this machine's backfill, and the bounded read (which trusts scores) demotes a recently-active Job below the top-N.
@@ -196,9 +200,9 @@ Inbound message → job_router bind-or-mint → `recent_for_room` → **one** re
 ### Race 1: backfill read → concurrent expectation write → backfill save
 **Location:** new migration in `scripts/update/migrations.py`
 **Trigger:** worker appends an expectation to a Job while the backfill iterates
-**Data prerequisite:** the backfill must save the row's *current* contents, not a stale snapshot
+**Data prerequisite:** the backfill must never write fields it did not repair
 **State prerequisite:** override active before backfill runs (deploy order)
-**Mitigation:** fresh re-read immediately before `save()` (#2653 idiom); tolerance gate means untouched rows are never written at all
+**Mitigation:** eliminated by construction — `fresh.save(update_fields=["last_active_at"])` writes only the repaired field and its `$SortF` companion, so a concurrent expectation write cannot be clobbered regardless of timing; fresh re-read keeps the written instant current; tolerance gate means untouched rows are never written at all
 
 ### Race 2: `zrevrange` vs `save()` on another process (score moves between range-read and hydration)
 **Location:** `models/job.py::recent_for_room`
@@ -209,7 +213,7 @@ Inbound message → job_router bind-or-mint → `recent_for_room` → **one** re
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] **popoto floor bump + upstream pushdown consumption** — blocked on a popoto release (>1.8.2) containing the popoto#540 fix; cutting and validating that release is a human-gated event in the popoto repo. When it ships, bumping the floor and optionally swapping this read for the upstream `.limit()` pushdown is follow-up work re-assessed at that time (issue #2636's comment thread holds the blocker ledger).
+- [ORDERED] **popoto floor bump + upstream pushdown consumption** — blocked on a popoto release (>1.8.2) containing the popoto#540 fix (PR #547); cutting and validating that release is a human-gated event in the popoto repo. Switch-back disposition is explicit: when that release ships, bump the floor and **RETIRE the in-repo read** in favor of the upstream `.limit()` pushdown (issue #2636's comment thread holds the blocker ledger).
 - [SEPARATE-SLUG #2639] **QueryBuilder double-hydration fix** — upstream popoto defect, filed and tracked separately; the bounded read sidesteps it for this call site.
 - [SEPARATE-SLUG #2494] **The phase-2 authoritative inbox cutover itself** — this plan only removes its named blocker; the cutover ships under #2494's own plan.
 
@@ -235,7 +239,8 @@ No agent integration required — this is a model-internal change. Existing surf
 - [ ] Mutation check on the bound: the test fails if the range read is issued unbounded (e.g., asserting the counted reads at N=30/limit=5 stay < 2·limit+overfetch, far below 60)
 - [ ] Ordering parity with the old implementation on distinct timestamps (N=7 and N=30 cases)
 - [ ] tz regression: reload → expectation write → score matches wall clock within tolerance; `last_active_at__gte` filter finds the row (the spike-2 live failure becomes a green test)
-- [ ] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs)
+- [ ] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs); its write is field-scoped (`update_fields=["last_active_at"]`)
+- [ ] Scoped-save guard: a save excluding `last_active_at` leaves the stored score byte-unchanged; a scoped save naming it still reattaches UTC
 - [ ] `recent_for_room` fail-open contract intact (warning logged, `[]` returned on read failure)
 - [ ] popoto floor unchanged at `>=1.8.0`
 - [ ] Tests pass (`/do-test`)
@@ -281,20 +286,20 @@ No agent integration required — this is a model-internal change. Existing surf
 - **Assigned To**: job-read-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add the `Job.save()` override (UTC re-attach on naive `last_active_at`, instant-preserving, signature-preserving)
+- Add the `Job.save()` override (UTC re-attach on naive `last_active_at`, instant-preserving, signature-preserving) with the scoped-save guard: reattach only `if update_fields is None or "last_active_at" in update_fields:`
 - Rewrite `recent_for_room` per Technical Approach (derived key, `zrevrange` top-`fetch_n`, `get_many(skip_none=True)`, truncate, fail open)
 - Name `JOB_RECENT_OVERFETCH` as an env-overridable module constant with a provisional/tunable comment
-- Add/adjust unit tests: ordering parity, tz regression, hash-read-count acceptance (instrumented), orphan tolerance, empty room, `limit=0`, fail-open
+- Add/adjust unit tests: ordering parity, tz regression, hash-read-count acceptance (instrumented), orphan tolerance, empty room, `limit=0`, fail-open, scoped-save guard (excluded field → score byte-unchanged; named field → reattach fires)
 
 ### 2. Skew backfill migration
 - **Task ID**: build-backfill
 - **Depends On**: build-bounded-read
 - **Validates**: migration tests (see Test Impact)
-- **Informed By**: spike-2 (skew signature), #2653 idiom (fresh-read-then-save)
+- **Informed By**: spike-2 (skew signature), `backfill_open_expectations_index` idiom (field-scoped `save(update_fields=["last_active_at"])`, structural clobber-proofing), critique concern 3 (92 Jobs / 0.03s → single unbounded pass, no cursor)
 - **Assigned To**: backfill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Migration function in `scripts/update/migrations.py`, registered in `MIGRATIONS`; ORM-only writes; tolerance-gated; per-row failure tolerant; never stamps constants
+- Migration function in `scripts/update/migrations.py`, registered in `MIGRATIONS`; ORM-only writes via `fresh.save(update_fields=["last_active_at"])`; tolerance-gated; per-row failure tolerant; never stamps constants; single unbounded pass logging the count
 - Tests: seeded skew repaired, idempotent second pass, poisoned-row continuation
 
 ### 3. Validation
@@ -331,14 +336,8 @@ No agent integration required — this is a model-internal change. Existing surf
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The unconditional `Job.save()` tz-normalization override never specifies its interaction with the scoped-save path already in production: `backfill_open_expectations_index` (`models/job.py:629`) calls `fresh.save(update_fields=["has_open_expectations"])` under a docstring invariant that it "never writes `last_active_at`". No spike verifies whether popoto rewrites the SortedField score on a scoped save that excludes the field. | pending | Guard shape: `if update_fields is None or "last_active_at" in update_fields:` around the `replace(tzinfo=UTC)` step in the `Job.save()` override, so a `has_open_expectations`-only scoped save never touches the SortedField score path; add a test that a scoped save after mutating `last_active_at` to naive leaves the stored score byte-unchanged. |
-| CONCERN | History & Consistency | Risk 1's mitigation (fresh re-read then full-row `save()`, the #2653 idiom) only narrows the clobber window; the same file already contains the structural fix — `backfill_open_expectations_index` uses `save(update_fields=[...])` to make concurrent-write clobber impossible. The skew backfill writes a single field (`last_active_at`) and can use the same idiom, but the plan neither uses nor cites it. | pending | Backfill writes `fresh.save(update_fields=["last_active_at"])` instead of bare `save()`, mirroring `backfill_open_expectations_index`; verify popoto's field-scoped write touches only `last_active_at` and its `$SortF` companion (never `goal`/`status`), eliminating Race 1 by construction instead of by timing. Cite `backfill_open_expectations_index` as Prior Art alongside PR #2653. Interlocks with the override guard above: a scoped save naming `last_active_at` MUST still run the tz-reattach. |
-| CONCERN | Scope & Value, Risk & Robustness | Open Question 2 (backfill resumable cursor) hedges on "modest" with no number. Measured 2026-08-17 by the war-room driver: `Job.query.all()` on the shared production Redis returned 92 Jobs in 0.03s — a single unbounded pass is trivially safe, and the supervisor ruling warrants a cursor only if the measured population makes a single pass risky. Leaving the question open invites unwarranted cursor machinery or a needless PM stall. | pending | Replace Open Question 2 with a closed decision: unbounded single pass, log the count, no resumable cursor, justified by the measured 92-Job/0.03s population (2026-08-17); remove the open-question framing so `/do-build` does not treat it as a live decision point. |
-| NIT | Scope & Value | The floor-bump trigger in the [ORDERED] No-Go is crisp (popoto release >1.8.2 containing the popoto#540/PR #547 fix), but the *switch-back* leg is not: "optionally swapping" leaves open whether the in-repo read is retired after the bump or kept indefinitely. | pending | State one of the two explicitly: the in-repo read is retired when the floor bump ships, or it is acceptable to keep indefinitely and the swap is pure optimization — delete "optionally". |
+| CONCERN | Risk & Robustness | The unconditional `Job.save()` tz-normalization override never specifies its interaction with the scoped-save path already in production: `backfill_open_expectations_index` (`models/job.py:629`) calls `fresh.save(update_fields=["has_open_expectations"])` under a docstring invariant that it "never writes `last_active_at`". No spike verifies whether popoto rewrites the SortedField score on a scoped save that excludes the field. | Revision pass 2026-08-17: scoped-save guard added to Technical Approach write path, Task 1, Test Impact, Success Criteria | Guard shape: `if update_fields is None or "last_active_at" in update_fields:` around the `replace(tzinfo=UTC)` step in the `Job.save()` override, so a `has_open_expectations`-only scoped save never touches the SortedField score path; add a test that a scoped save after mutating `last_active_at` to naive leaves the stored score byte-unchanged. |
+| CONCERN | History & Consistency | Risk 1's mitigation (fresh re-read then full-row `save()`, the #2653 idiom) only narrows the clobber window; the same file already contains the structural fix — `backfill_open_expectations_index` uses `save(update_fields=[...])` to make concurrent-write clobber impossible. The skew backfill writes a single field (`last_active_at`) and can use the same idiom, but the plan neither uses nor cites it. | Revision pass 2026-08-17: backfill switched to `save(update_fields=["last_active_at"])` throughout (Key Elements, Technical Approach, Risk 1, Race 1, Prior Art) | Backfill writes `fresh.save(update_fields=["last_active_at"])` instead of bare `save()`, mirroring `backfill_open_expectations_index`; verify popoto's field-scoped write touches only `last_active_at` and its `$SortF` companion (never `goal`/`status`), eliminating Race 1 by construction instead of by timing. Cite `backfill_open_expectations_index` as Prior Art alongside PR #2653. Interlocks with the override guard above: a scoped save naming `last_active_at` MUST still run the tz-reattach. |
+| CONCERN | Scope & Value, Risk & Robustness | Open Question 2 (backfill resumable cursor) hedges on "modest" with no number. Measured 2026-08-17 by the war-room driver: `Job.query.all()` on the shared production Redis returned 92 Jobs in 0.03s — a single unbounded pass is trivially safe, and the supervisor ruling warrants a cursor only if the measured population makes a single pass risky. Leaving the question open invites unwarranted cursor machinery or a needless PM stall. | Revision pass 2026-08-17: OQ2 closed as DECIDED (92 Jobs / 0.03s, single unbounded pass) in Key Elements + Technical Approach; Open Questions section removed | Replace Open Question 2 with a closed decision: unbounded single pass, log the count, no resumable cursor, justified by the measured 92-Job/0.03s population (2026-08-17); remove the open-question framing so `/do-build` does not treat it as a live decision point. |
+| NIT | Scope & Value | The floor-bump trigger in the [ORDERED] No-Go is crisp (popoto release >1.8.2 containing the popoto#540/PR #547 fix), but the *switch-back* leg is not: "optionally swapping" leaves open whether the in-repo read is retired after the bump or kept indefinitely. | Revision pass 2026-08-17: No-Go now states the in-repo read is RETIRED when the post-#547 release ships; "optionally" deleted | State one of the two explicitly: the in-repo read is retired when the floor bump ships, or it is acceptable to keep indefinitely and the swap is pure optimization — delete "optionally". |
 
----
-
-## Open Questions
-
-1. **Ratify the approach decision (Tom asked for it to be explicit, issue #2636 comment 1):** this plan chooses the in-repo bounded reverse-range read on popoto 1.8.0 NOW, and defers the upstream-pushdown consumption to whenever a post-#540 popoto release exists ([ORDERED] No-Go). Rationale: the upstream fix is merged but unreleased, 1.8.2 is unshippable here (40 red tests), and #2494 phase-2 is waiting. Confirm, or direct the lane to wait on a popoto 1.8.3 release instead.
-2. **Backfill scope:** the migration iterates all Jobs on each machine's `/update`. If lifetime Job counts on shared Redis are far larger than expected (post-#2207 cleanup should have this modest), should the backfill be bounded per-run (resumable cursor)? Default: unbounded single pass, log the count.
