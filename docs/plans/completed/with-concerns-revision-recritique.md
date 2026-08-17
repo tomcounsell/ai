@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: shipped
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-16
 tracking: https://github.com/yudame/ai/issues/2787
+merged: 839d70a5f (PR #2830, 2026-08-17)
 last_comment_id: none
 revision_applied: true
 revision_applied_at: 2026-08-17T03:12:00Z
