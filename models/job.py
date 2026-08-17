@@ -69,7 +69,7 @@ JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 *
 
 # Extra members the bounded recency read pulls beyond ``limit``, so a member
 # whose backing hash has already gone (a transient orphan between a delete and
-# the daily guarded index repair) is absorbed without an under-filled answer.
+# the guarded index repair) is absorbed without an under-filled answer.
 # GRAIN OF SALT: provisional/tunable via env — sized off the observed orphan
 # rate, which is near zero outside the repair window.
 JOB_RECENT_OVERFETCH = int(os.environ.get("JOB_RECENT_OVERFETCH", "5"))
@@ -642,7 +642,7 @@ class Job(Model):
             # naive-decoded instances — naive.timestamp() is local time, and
             # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
             # host the rebuild itself re-skews every recency score. Sweep the
-            # scores back so the daily maintenance path is score-preserving.
+            # scores back so the maintenance path is score-preserving.
             scanned, renormalized = cls.renormalize_last_active_scores()
             if renormalized:
                 logger.info(

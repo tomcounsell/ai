@@ -654,7 +654,7 @@ class TestRecencyLookup:
     def test_gone_hash_member_is_dropped_and_the_window_still_fills(
         self, scratch_room_id, monkeypatch
     ):
-        """A member whose hash is gone (transient orphan, reaped by the daily
+        """A member whose hash is gone (transient orphan, reaped by the
         guarded repair) is dropped by ``skip_none``; the over-fetch window keeps
         the answer full while live rows exist."""
         from popoto.redis_db import POPOTO_REDIS_DB
@@ -876,7 +876,7 @@ class TestGuardedRepair:
         """popoto's ``rebuild_indexes()`` re-scores every row via
         ``field.on_save`` on naive-decoded instances — ``naive.timestamp()`` is
         local time, bypassing the ``save()`` UTC-reattach — so on a non-UTC
-        host the daily rebuild re-skews every recency score the one-shot
+        host every rebuild re-skews every recency score the one-shot
         migration repaired. ``repair_indexes`` must sweep the scores back to
         each row's own UTC epoch afterwards.
 

@@ -94,7 +94,7 @@ costs reads only) and fleet-convergent (every machine shares the same Redis,
 so re-running it anywhere converges scores written by a peer still on
 pre-override code). The sweep's single implementation is
 `Job.renormalize_last_active_scores()`, which `Job.repair_indexes()` also
-runs after every daily index rebuild — popoto's `rebuild_indexes()` re-scores
+runs after every index rebuild — popoto's `rebuild_indexes()` re-scores
 naive-decoded instances in local time, bypassing the `save()` reattach, so
 the repair path re-normalizes what the rebuild would otherwise re-skew on a
 non-UTC host.
