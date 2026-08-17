@@ -189,7 +189,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 ### Technical Approach
 
 - **Anchor:** the counter measures time since the last *evidence of progress the watchdog can see itself* — not since session start, and never a self-report from the session. Candidate anchors in preference order: last observed turn transition, then `updated_at`, then session creation. The chosen anchor must be stated in the code comment, because [`bridge/liveness.py`](../../bridge/liveness.py) establishes the governing rule: *a handler that has stopped firing cannot testify to its own failure.*
-- **Constants already exist** on branch `wip/session-heartbeat-ticker` (`78443c3f6`) in `bridge/response.py`: `PREMIUM_DIGIT_REACTIONS`, `HEARTBEAT_FALLBACK_ARC`, `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and `heartbeat_reaction(tick)` which raises at the ceiling rather than clamping. Adopt, relocate, or discard on the merits — it is temp progress, not a design commitment.
+- **Constants must be written from scratch.** An earlier draft of this plan pointed at branch `wip/session-heartbeat-ticker` (`78443c3f6`) for `PREMIUM_DIGIT_REACTIONS`, `HEARTBEAT_FALLBACK_ARC`, `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and a ceiling-raising `heartbeat_reaction(tick)`. **That branch and commit no longer exist** — verified 2026-08-17: the object is unreachable and no commit in the repo contains `PREMIUM_DIGIT_REACTIONS`. It was temp progress, never a design commitment, so nothing is lost but the typing. Write these fresh in `bridge/response.py` against the behavior this plan specifies; do not spend time recovering the branch.
 - **Payload:** the outbox already supports `custom_emoji_document_id` (`bridge/telegram_relay.py`), so no transport change is needed. The payload literal must stay schema-compatible with `_build_reaction_payload`.
 - **Do not route ticks through `find_best_emoji`.** It uses cosine similarity plus `_softmax_sample` at a temperature — deliberately random among top-K. Correct for "pick a feeling", wrong for "this is tick 4".
 
@@ -217,7 +217,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 - [ ] `tests/unit/test_stall_detection.py` (stall-reaction cases: dedup, skip conditions, feature flag) — REPLACE: rewrite against counter behavior.
 - [ ] `tests/integration/test_watchdog_to_bridge.py` — UPDATE: end-to-end watchdog→outbox→relay path now carries a custom-emoji payload plus a priority field.
 - [ ] `tests/unit/test_custom_emoji_index.py` — DELETE: tests a function being removed. These tests pass only because they mock the client and feed it documents the real API never returns.
-- [ ] `tests/unit/test_heartbeat_reactions.py` — ADD: does not exist on `main` (it is on the unmerged `wip/session-heartbeat-ticker` branch). Extend to cover slot precedence and arc/registry disjointness.
+- [ ] `tests/unit/test_heartbeat_reactions.py` — ADD: does not exist anywhere; write it new alongside the constants. Cover slot precedence, arc/registry disjointness, and the ceiling raising rather than clamping.
 - [ ] `tests/unit/test_bridge_relay.py` (reaction payload cases at 412, 634, 1313-1411) — UPDATE: the drain-side precedence guard changes this path.
 - [ ] `tests/integration/test_worker_liveness_ingestion.py` — UPDATE: touches the ingestion-reaction sequence the precedence table now orders.
 - [ ] `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection` — UPDATE: shares `_assert_distinct()` with `bridge/response.py`; adding arc constants must not break the distinctness invariant.
@@ -316,7 +316,7 @@ No agent integration required — this is a bridge-internal change. The watchdog
 - Tests first: terminal-wins and no-flicker are the highest-value assertions in this plan.
 
 ### 2. Land the reaction constants
-- Adopt or rewrite the `wip/session-heartbeat-ticker` constants into their final home.
+- Write the reaction constants fresh in `bridge/response.py` (the `wip/session-heartbeat-ticker` draft is gone — see Technical Approach).
 - **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses 👀 or 🤔 stops the bridge from starting. The arc is a sequence, not a constant registry entry.
 - Add a test asserting the arc is disjoint from `_reaction_constants()` values, so a future edit cannot reintroduce the import-time crash.
 
