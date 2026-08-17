@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -766,6 +766,10 @@ prints no `./` prefix and such an anchor silently matches nothing.
 ---
 
 ## Open Questions
+
+Both questions carry a decided default in the plan body, so neither blocks
+build; they are raised for the critique war room to adjudicate rather than
+left unresolved.
 
 1. **Grace window default.** 180 s is derived from two constraints (three worker
    ticks below; the 210 s incident observation above). It is the largest value
