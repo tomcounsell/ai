@@ -163,17 +163,31 @@ no-op into an active false rebuild.
 
 **Cost: the lookup is doubled on the no-open-PR path (issue #2757).** The second
 `_lookup_pr` pass fires whenever the first returns `None` — i.e. for any issue
-with no open PR, which is most issues `_compute_meta` is asked about (the
-router tick, the dashboard, an operator naming a non-lane issue). Each pass can
-spend up to two `gh` subprocesses (issue-number search, then the branch-head
+with no open PR, which is most issues `_compute_meta` is asked about. Each pass
+can spend up to two `gh` subprocesses (issue-number search, then the branch-head
 fallback), so an issue with no PR at all costs 4 `gh` calls instead of 2, adding
 up to ~10s of latency when `gh` hangs against each call's 5s timeout, and the
-`gh pr list --search` leg draws on the tighter search-API rate limit. Bounded:
-only the router tick path and the `sdlc-tool` CLI reach `query_enriched`. A
-short-circuit (skipping the second pass when the caller only wants in-flight
+`gh pr list --search` leg draws on the tighter search-API rate limit.
+
+`query_enriched` has exactly three non-test callers: `tools/sdlc_next_skill.py`
+(the router tick and the `next-skill` CLI), `tools/sdlc_stage_query.py`'s own
+CLI entry point, and `agent/session_runner/runner.py::_load_ledger` — the
+ledger-aware completion guard (#2158). The third is where the added latency is
+user-visible: it runs in the long-lived worker on every SDLC session
+completion, so a doubled lookup stalls a completing session rather than a
+one-shot command. The dashboard is *not* a caller; `ui/data/sdlc.py` reaches
+pipeline state through `PipelineStateMachine.for_issue()` and only mentions
+this module in prose describing an analogous reader ladder.
+
+Because `_load_ledger` imports this module into the worker process,
+`sdlc_stage_query` is worker-resident — the general "`tools/` is a fresh
+subprocess per call, so no restart is needed" premise does not hold for it, and
+an executable change here needs `worker-restart`.
+
+A short-circuit (skipping the second pass when the caller only wants in-flight
 state) is deliberately not implemented — correctness first, and the cost is
-recorded here so a future slow-dashboard report finds the cause rather than
-re-deriving it.
+recorded here so a future report of a slow session completion or a `gh`
+rate-limit warning finds the cause rather than re-deriving it.
 
 **cwd threading (issue #2078).** All three live `git` checks
 (`_check_plan_committed_on_main`, `_check_branch_pushed`, and the
