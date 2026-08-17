@@ -101,7 +101,7 @@ silently halve review strength on one box.
 
 There is no env var for the roster or the judge count. The only env controls
 on this surface are the four cross-vendor toggles, documented in
-[Cross-vendor judge configuration](#configuration-1) below.
+[Env vars (all provisional/tunable)](#env-vars-all-provisionaltunable) below.
 
 ### Cost containment
 

@@ -1,4 +1,4 @@
-"""Every `SDLC_REVIEW_*` env control named in the review docs must have a reader (#2831).
+"""Every `SDLC_REVIEW_*` name in the review docs must resolve to a settings field (#2831).
 
 `SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K` were documented as operator kill
 switches in three files for 100 days while nothing anywhere read either one.
@@ -10,6 +10,13 @@ This encodes the property that actually broke, as a POSITIVE predicate: every
 `config/settings.py`. A blocklist of the two retired names would go green the
 moment they were deleted and catch nothing thereafter; this stays useful
 against the third variable someone documents tomorrow.
+
+A settings field is a *proxy* for a reader, deliberately a loose one. It does
+not prove some Python calls `settings.<name>` — `sdlc_review_cross_vendor` is
+itself consumed as prose by the review addendum rather than by code. What it
+does prove is that the variable was declared somewhere a human maintains, which
+is exactly the step the two retired names skipped: they existed only as a
+sentence describing a control nobody had built.
 
 Why this shape rather than an execution test: in this repo a review skill
 "reads" configuration by being told to in prose, so there is no function to
@@ -27,14 +34,23 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The three files that carried the false claim. `docs/features/README.md` is
-# green under this predicate today and contributes nothing to the original red
-# run; it is scanned so a future re-addition to the index is caught by the same
-# guard that cleaned it.
+# The three files that carried the false claim, plus the two other surfaces on
+# which an `SDLC_REVIEW_*` control could be declared. `docs/features/README.md`,
+# the skill body, and `.env.example` are all green under this predicate today
+# and contributed nothing to the original red run; they are scanned so a future
+# re-addition is caught by the same guard that cleaned this up.
+#
+# The skill body and `.env.example` matter because in this repo prose IS the
+# reader: a skill honors configuration by being told to in prose, and
+# `.env.example` is where a knob becomes discoverable at all. A control re-added
+# to either would be exactly as inert, and exactly as misleading, as the two
+# this file retired.
 SCANNED_DOCS: tuple[Path, ...] = (
     REPO_ROOT / "docs" / "features" / "multi-judge-consensus.md",
     REPO_ROOT / "docs" / "sdlc" / "do-pr-review.md",
     REPO_ROOT / "docs" / "features" / "README.md",
+    REPO_ROOT / ".claude" / "skills-global" / "do-pr-review" / "SKILL.md",
+    REPO_ROOT / ".env.example",
 )
 
 SETTINGS_PATH = REPO_ROOT / "config" / "settings.py"
