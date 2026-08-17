@@ -299,15 +299,21 @@ cycle.
 
 Run Marp CLI to generate outputs:
 
+`--html` enables raw HTML tags in the markdown. It is not an output-format flag — the format comes
+from `--pdf` / `--pptx` / `--images` or the `-o` extension. Every Cuttlefish archetype is built from
+`<div>` and `<span>` markup, so **every** export needs it. Raw HTML happens to be on by default in
+the current CLI, which means leaving the flag off works right up until that default changes and a
+deck silently exports with its layout stripped.
+
 ```bash
 # PDF (primary deliverable)
-npx --yes @marp-team/marp-cli "<source>.md" --pdf --allow-local-files -o "<source>.pdf"
+npx --yes @marp-team/marp-cli "<source>.md" --pdf --html --allow-local-files -o "<source>.pdf"
 
 # HTML (interactive, with slide navigation)
 npx --yes @marp-team/marp-cli "<source>.md" --html --allow-local-files -o "<source>.html"
 
 # PPTX (only if user requests editable format)
-npx --yes @marp-team/marp-cli "<source>.md" --pptx --allow-local-files -o "<source>.pptx"
+npx --yes @marp-team/marp-cli "<source>.md" --pptx --html --allow-local-files -o "<source>.pptx"
 ```
 
 Marp renders through headless Chrome, which fetches the Google Fonts `@import` over the network. An
