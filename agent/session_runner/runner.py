@@ -588,7 +588,11 @@ class SessionRunner:
         """Pop all pending steering messages for this session (Redis list).
 
         Dual-read (issue #2494): drains the legacy session key first, then
-        the session's Room key. Writers are unchanged in this release.
+        the session's Room key. A Room-leg entry may have been written for a
+        session that is already gone — that is the durability property, and
+        this drain is one of its two delivery points (the other is session
+        pickup). Each returned entry carries a transient ``_leg`` stamp so a
+        requeue can put it back where it came from.
         """
         from agent.steering import pop_all_steering_messages  # noqa: PLC0415
         from models.room import room_id_for_session  # noqa: PLC0415
@@ -601,17 +605,30 @@ class SessionRunner:
         )
 
     def _default_steering_push(self, msg: dict) -> None:
-        """Push one steering message back onto this session's Redis list."""
+        """Re-push one drained steering message onto the leg it came from.
+
+        This is a requeue, not an origination: ``msg`` was already drained by
+        ``_default_steering_pop`` off one specific leg, and the transient
+        ``_leg`` stamp says which. **Absent ``_leg`` → legacy**, the fail-safe
+        default — a hand-built dict can never be promoted onto the shared Room
+        key. The entry's original ``timestamp`` rides along so the Room leg's
+        age bound keeps measuring time since origination.
+        """
         from agent.steering import push_steering_message  # noqa: PLC0415
+        from models.room import room_id_for_session  # noqa: PLC0415
 
         session_id = str(getattr(self._agent_session, "session_id", "") or "")
         if not session_id:
             return
+        room_id = room_id_for_session(self._agent_session)
         push_steering_message(
             session_id,
             msg.get("text") or "",
             sender=msg.get("sender") or "runner-requeue",
             is_abort=bool(msg.get("is_abort")),
+            target_agent=msg.get("target_agent"),
+            room_id=room_id if msg.get("_leg") == "room" else None,
+            timestamp=msg.get("timestamp"),
         )
 
     def _requeue_pending_steers(self) -> None:

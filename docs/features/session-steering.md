@@ -26,6 +26,111 @@ The Redis list at key `steering:{session_id}` (`agent/steering.py`) is the sole 
 - **Storage**: Redis List (`RPUSH`/`LPUSH` to add, `LPOP` to consume), JSON-encoded entries
 - **Atomicity**: Write via `push_steering_message(session_id, text, sender, ...)`, drain via `pop_all_steering_messages(session_id)` (sequential atomic `LPOP`s), or peek non-destructively via `peek_steering_messages(session_id)`
 
+### Two legs: the session key and the Room key
+
+Steering rides two Redis lists, and which one a write lands on decides whether
+the instruction can outlive its target session.
+
+| Key | Lifetime | Drained by |
+|-----|----------|------------|
+| `steering:{session_id}` | Dies with the session | Every consumer, first |
+| `steering:room:{room_id}` | Immortal — a Room has no completion event | Every consumer, second |
+
+A **Room** is the `{project_key}\|{addressee}` pair standing for "the
+conversation" (`models/room.py`). It outlives any individual session, so an
+instruction parked on its key waits for whichever session next serves that Room
+rather than dying with the session it happened to be addressed to.
+
+Writers are **selective**. Delivering every message to a Room would be wrong,
+not merely imprecise: some payloads are destructive out of context and some are
+meaningless out of context.
+
+| Class | Sites | Rule |
+|-------|-------|------|
+| **Conversation-level originating writes** | `bridge/telegram_bridge.py` `_ack_steering_routed` (4 of its 5 callers) and both edit-steer paths, `tools/valor_session.py` resume, `agent/session_executor.py` `steer_session` | **Room**, when a Room resolves |
+| **Requeue writes** | `agent/health_check.py::_repush_messages`, `agent/session_runner/runner.py::_default_steering_push`, `agent/session_executor.py`'s remaining-message re-push | **The leg the message was drained from** |
+| **Abort signals** | any push with `is_abort` true, explicit or auto-detected from `ABORT_KEYWORDS`, including `scripts/steer_child.py --abort` | **Legacy, always** — "You MUST stop immediately" is destructive and non-idempotent; delivered to the wrong session it kills innocent work. Stranding an abort is the correct failure mode |
+| **Session-scoped diagnostics** | `agent/output_handler.py` drafter self-draft, `agent/session_health.py` tool-timeout advisory, `monitoring/session_watchdog.py` loop-break steer | **Legacy** — each describes the state of *this* session. Delivered to a successor it is noise. The drafter one also has a session-keyed attempt budget (`steering:attempts:{session_id}`) that a Room-durable copy would escape |
+| **No live row / ORM-free writers** | `bridge/telegram_bridge.py`'s in-memory coalescing guard, `scripts/migrate_steering_queue_drain.py` | **Legacy** — neither holds a session row it could derive a Room from, and fabricating one picks an arbitrary row |
+
+The caller derives `room_id` via `models.room.room_id_for_session` and hands it
+to `push_steering_message`. The writer never looks a session up: `session_id` is
+an unindexed Popoto `Field()`, so a resolution inside the writer costs seconds
+per push on the inbound-Telegram fast path. **No `room_id` → legacy key**, and
+**abort → legacy key regardless** — both are structural, one expression sitting
+below the `ABORT_KEYWORDS` auto-detect. A structural census
+(`tests/unit/test_steering_writer_census.py`) walks the repo and fails any
+non-test call site that omits the keyword.
+
+**A requeue writes to the leg it read from.** `pop_all_steering_messages` stamps
+each drained entry with a transient `_leg` (`"legacy"` or `"room"`); the three
+requeue writers read it and target accordingly, defaulting to legacy when it is
+absent. `_leg` is set by the reader, is never a `push_steering_message`
+parameter, and never reaches Redis — the persisted payload is exactly
+`{text, sender, timestamp, is_abort}` plus `target_agent` when set. Without this
+rule the readers would immediately undo the writers: a diagnostic written to the
+legacy key would be promoted onto the shared Room key on its first
+drain-and-requeue cycle, and a Room-written steer would be demoted onto a mortal
+key on its first.
+
+**Delivery points.** A Room-leg steer reaches whichever comes first of a session
+pickup (`agent/session_pickup.py::_drain_startup_steering`, which prepends the
+drained text into a brand-new session's `message_text`) and a turn boundary
+(`agent/session_runner/runner.py::_default_steering_pop`). In the durability
+scenario the pickup is usually first, because the successor session is created
+after the original target died.
+
+**One drain deliberately reads the legacy leg only.** The teardown drain in
+`agent/session_executor.py` feeds `_reenqueue_leftover_steering`, which *spawns a
+continuation session*. Scooping the shared Room leg there would convert an
+instruction possibly aimed at a still-live sibling into new work at every
+session teardown. A Room-leg message needs no rescuing — durability is precisely
+what the Room key provides.
+
+#### Same-Room delivery is by design
+
+`models/room.py` maps a `chat_id` of `None`, `"0"`, or any non-numeric non-email
+value onto a per-project `system` addressee. So every chatless session of a
+project — reflection sessions, watchdog targets, synthetics — shares one Room,
+`{project}|system`. A steer aimed at system-session A can therefore be drained
+by system-session B.
+
+This is the Room durability model working, not a defect: outliving the target
+session is the point, and a misrouted *instruction* is recoverable by
+re-steering. The two cases where that reasoning does not hold are carved out
+above — aborts never reach a Room key, and stale messages are bounded below. The
+`target_agent` field is the designed gate if same-Room cross-delivery ever proves
+harmful; no consumer filters on it today.
+
+Room-leg drains are also destructive and best-effort: a consumer that fails
+between draining and re-pushing loses what it took, and post-flip that loss can
+reach another session's steers. Every drop is logged with the message text, so a
+lost instruction is diagnosable and recoverable by re-steering.
+
+#### The Room leg is age-bounded
+
+Nothing else bounds it. There is no Redis TTL on either key, `clear_steering_queue`
+has no production callers, and "session completion" — the real bound on the legacy
+key — has no Room equivalent. An undrained Room-key steer would otherwise be
+immortal and would eventually be served to a session that did not exist when it
+was written.
+
+`_drain_list` **drops** and `_peek_list` **skips** Room-key entries older than
+`TimeoutSettings.steering_room_max_age_s` (env `TIMEOUTS__STEERING_ROOM_MAX_AGE_S`,
+default 21600 — 6 hours), logging each drop with the key and the age. The
+**legacy leg is never filtered**, so every message that exists today behaves
+exactly as it does today.
+
+The bound measures time since **origination**, not time since the last push: a
+requeue forwards the entry's own `timestamp` rather than restarting the clock.
+Without that, the PostToolUse hook's ordinary re-push path — which fires on every
+tool call — would reset the clock so often that the bound measured nothing.
+
+Both the drain and the status peek apply the same bound, so `valor-session status`
+never advertises a steer the next drain will silently discard. An entry with a
+missing or non-numeric `timestamp` is **kept**: failing open costs one extra
+delivery, failing closed deletes steers silently.
+
 ### Turn Boundary Check
 
 At the start of each agent turn in `_execute_agent_session()` (`agent/session_executor.py`), the worker drains the session's Redis steering list via `pop_all_steering_messages()`. If messages are pending, the first is used as the user input for that turn (replacing the original message text). Remaining messages are re-pushed onto the list for future turns.
@@ -311,12 +416,9 @@ steering via `valor-session steer` needs no special-casing for mid-turn vs.
 turn-boundary delivery — the runner's preempt watcher makes turn-boundary
 delivery the only shape steering ever needs to reason about.
 
-Transitional note (durability plan #2494, Milestone 2): consumers additionally
-drain a Room-scoped key (`steering:room:{room_id}`, `room_id` =
-`{project_key}|{addressee}`) after the legacy session key. This is a
-**drain-only dual-read leg — no writer targets it yet**; the writer flip to
-the Room key ships as a separate release once every machine runs the
-dual-read consumer.
+Consumers additionally drain a Room-scoped key (`steering:room:{room_id}`) after
+the legacy session key, and conversation-level writers target it. See
+[Two legs: the session key and the Room key](#two-legs-the-session-key-and-the-room-key).
 
 ## Parent-Child Steering (parent Eng session to child Eng session)
 

@@ -1130,6 +1130,7 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
     # This RPUSHes directly to Redis, independent of session.save(), so it
     # cannot be clobbered by a stale bound instance.
     from agent.steering import push_steering_message
+    from models.room import room_id_for_session
 
     # Fold the session's goal into the first turn input so a resumed session
     # can state its own objective without asking the human (issue #2136),
@@ -1144,7 +1145,11 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
         if goal:
             outbound = f"[Prior session context: {goal}]\n\n{message}"
 
-    push_steering_message(session_id, outbound, f"resume:{source}")
+    # Room-targeted: a resume steer is a conversation-level instruction, so it
+    # survives this session and is served by whichever session next drains the Room.
+    push_steering_message(
+        session_id, outbound, f"resume:{source}", room_id=room_id_for_session(session)
+    )
 
     # Transition to pending (atomic — fails if another process raced us).
     # Steering message is already persisted above, so no race window.

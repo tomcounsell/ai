@@ -407,7 +407,7 @@ class TestCallSitesWireUpBeforeDispatch:
 class TestAckSteeringRoutedAdvisory:
     """The interjection branch pushes a SEPARATE message, at the back."""
 
-    def _call(self, *, text, context_advisory, pushes):
+    def _call(self, *, text, context_advisory, pushes, room_id=None):
         from bridge import telegram_bridge
 
         message = MagicMock()
@@ -438,6 +438,7 @@ class TestAckSteeringRoutedAdvisory:
                     sender_name="human",
                     text=text,
                     log_context="test",
+                    room_id=room_id,
                     context_advisory=context_advisory,
                 )
 
@@ -458,6 +459,24 @@ class TestAckSteeringRoutedAdvisory:
         assert pushes[1][0][1] == ADVISORY
         assert pushes[1][1]["front"] is False
         assert pushes[1][0][2] == "intake-classifier"
+
+    def test_advisory_rides_the_same_leg_as_the_human_message(self):
+        """Regression guard for the PR #2685 review blocker: the advisory must
+        pass the SAME room_id as the human message it accompanies. A cross-leg
+        split (advisory legacy, human Room) inverts drain order — the legacy
+        leg drains first — so the advisory would displace the human's
+        interjection for a turn. Reverting the advisory push to room_id=None
+        while the human push carries a Room fails here."""
+        pushes = []
+        self._call(
+            text="yes",
+            context_advisory=ADVISORY,
+            pushes=pushes,
+            room_id="proj|123",
+        )
+        assert len(pushes) == 2
+        assert pushes[0][1]["room_id"] == "proj|123"
+        assert pushes[1][1]["room_id"] == "proj|123"
 
     def test_abort_survives_an_advisory(self):
         """Appending would have destroyed abort — the exact-match keyword check

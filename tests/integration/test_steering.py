@@ -4,6 +4,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
 import ast
+import json
 import pathlib
 import time
 from datetime import UTC, datetime, timedelta
@@ -13,8 +14,12 @@ import pytest
 
 from agent.steering import (
     ABORT_KEYWORDS,
+    _get_redis,
+    _queue_key,
+    _room_queue_key,
     clear_steering_queue,
     has_steering_messages,
+    peek_steering_messages,
     pop_all_steering_messages,
     pop_steering_message,
     push_steering_message,
@@ -1575,10 +1580,13 @@ class TestSteerChildDelivery:
     def test_steer_child_cli_harness_delivery(self):
         """_steer_child() (non-abort) routes to the Redis steering list via steer_session().
 
-        Post-A1 the Redis list is the sole steering inbox. steer_session() looks the
-        child up by its Popoto session_id and pushes there, so the message lands on the
-        Redis list keyed by child.session_id (not the deleted ListField).
+        The Redis list is the sole steering inbox. ``steer_session()`` is a
+        conversation-level originating writer, so the message lands on the
+        child's **Room** key — it survives the child session and is served to
+        whichever session next drains that Room. The child's own mortal key
+        stays empty.
         """
+        from models.room import room_id_for_session
         from scripts.steer_child import _steer_child
 
         parent = self._create_pm_session("tg_test_parent_p001")
@@ -1593,9 +1601,11 @@ class TestSteerChildDelivery:
 
         assert exit_code == 0
 
-        # Non-abort steering lands on the Redis list keyed by the child's session_id.
-        msg = pop_steering_message(child.session_id)
-        assert msg is not None, "Non-abort steer should land on the Redis steering list"
+        assert pop_steering_message(child.session_id) is None, (
+            "a conversation-level steer must not be parked on the mortal session key"
+        )
+        msg = pop_steering_message(child.session_id, room_id=room_id_for_session(child))
+        assert msg is not None, "Non-abort steer should land on the child's Room key"
         assert msg["text"] == "focus on error handling"
         assert msg.get("is_abort") in (False, None)
 
@@ -1676,18 +1686,18 @@ class TestSteerChildDelivery:
 
 
 class TestRoomDualRead:
-    """Room-scoped steering dual-read (Task 11 phase 1, issue #2494).
+    """Room-scoped steering dual-read (issue #2494).
 
     The drain consumer reads the LEGACY session key first, then the Room key.
-    Writers are UNCHANGED in this release — the Room leg exists so the writer
-    flip can ship later without any consumer change (Race 1 two-phase deploy:
-    dual-read consumer everywhere BEFORE any writer flips).
+    These tests exercise the read half in isolation, so they write the Room leg
+    directly rather than through ``push_steering_message``; the writer's own key
+    selection is covered by ``TestKeySelection`` below.
     """
 
     ROOM_ID = "test-proj|telegram:4242"
 
     def _push_room(self, room_id, text, sender="Tom", is_abort=False):
-        """Simulate a future room-key writer (the flip is a separate release)."""
+        """Write the Room leg directly, bypassing the writer's key selection."""
         import json
         import time as _time
 
@@ -1746,9 +1756,13 @@ class TestRoomDualRead:
 
     @pytest.mark.asyncio
     async def test_handle_steering_drains_room_leg(self):
-        """The watchdog-hook path participates in the dual-read: a message on
-        the Room key is seen and re-pushed to the legacy list for the worker's
-        turn-boundary drain (writers unchanged — the re-push targets legacy)."""
+        """The watchdog-hook path participates in the dual-read.
+
+        A message on the Room key is drained and re-pushed to the leg it came
+        from — the Room key, not the legacy one. A requeue is not an
+        origination: promoting or demoting a message here would launder it out
+        of the class it was written into.
+        """
         from agent.health_check import _handle_steering
 
         session_id = "test_dualread_hook"
@@ -1758,7 +1772,8 @@ class TestRoomDualRead:
         assert result is not None
         assert result["continue_"] is True
 
-        msgs = pop_all_steering_messages(session_id)
+        assert pop_all_steering_messages(session_id) == [], "must not demote onto the mortal key"
+        msgs = pop_all_steering_messages(session_id, room_id=self.ROOM_ID + "-e")
         assert [m["text"] for m in msgs] == ["room-steer"]
 
 
@@ -1786,6 +1801,40 @@ class TestAbortSiblingPreservation:
         )
 
     @pytest.mark.asyncio
+    async def test_room_sourced_siblings_return_to_the_room_key(self):
+        """Room-sourced siblings go back on the Room key; the abort does not.
+
+        This is the one place abort routing and the Room leg meet: the abort is
+        consumed rather than re-pushed, and it could not have been on the Room
+        leg to begin with.
+        """
+        from agent.health_check import _handle_steering
+        from agent.steering import _room_queue_key
+
+        session_id = "test_abort_siblings_room"
+        room = "test-proj|telegram:4343"
+        self_push = _get_redis().rpush
+        self_push(
+            _room_queue_key(room),
+            json.dumps(
+                {
+                    "text": "keep doing X",
+                    "sender": "Tom",
+                    "timestamp": time.time(),
+                    "is_abort": False,
+                }
+            ),
+        )
+        push_steering_message(session_id, "stop", "Tom")  # legacy leg, auto-detected abort
+
+        result = await _handle_steering(session_id, room_id=room)
+        assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
+
+        assert pop_all_steering_messages(session_id) == [], "the abort is consumed, not re-pushed"
+        survivors = pop_all_steering_messages(session_id, room_id=room)
+        assert [m["text"] for m in survivors] == ["keep doing X"]
+
+    @pytest.mark.asyncio
     async def test_abort_alone_leaves_queue_empty(self):
         from agent.health_check import _handle_steering
 
@@ -1796,3 +1845,643 @@ class TestAbortSiblingPreservation:
         assert result is not None
         assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
         assert pop_all_steering_messages(session_id) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Room-key steering WRITER (issue #2642)
+#
+# The read half of the Room inbox shipped in #2622; everything below covers the
+# write half. Its centre of gravity is the durability property itself — a steer
+# written for session A is delivered to a *different* session B serving the same
+# Room, after A is gone — plus the three boundaries that keep the flip correct:
+# aborts never leave the legacy key, a requeue writes to the leg it read from,
+# and the Room leg is age-bounded by time since origination.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TEST_PROJECT = "test-room-durability"
+ROOM = "test-proj|telegram:9001"
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _raw(key: str) -> list[dict]:
+    """Every entry on ``key``, decoded, without consuming anything."""
+    return [json.loads(x) for x in _get_redis().lrange(key, 0, -1)]
+
+
+def _texts(key: str) -> list[str]:
+    return [m.get("text") for m in _raw(key)]
+
+
+def _push_raw(key: str, text: str, *, sender="Tom", is_abort=False, timestamp=None, **extra):
+    """Write a payload directly, so a test can backdate the origination stamp."""
+    payload = {
+        "text": text,
+        "sender": sender,
+        "timestamp": time.time() if timestamp is None else timestamp,
+        "is_abort": is_abort,
+    }
+    payload.update(extra)
+    _get_redis().rpush(key, json.dumps(payload))
+
+
+class _Row:
+    """Minimal stand-in for an AgentSession, for room_id_for_session()."""
+
+    def __init__(self, project_key=TEST_PROJECT, chat_id=None, session_id="s"):
+        self.project_key = project_key
+        self.chat_id = chat_id
+        self.session_id = session_id
+
+
+def _bare_runner(agent_session):
+    """A SessionRunner bound only to ``_agent_session``.
+
+    ``_default_steering_pop``/``_default_steering_push`` touch the session via
+    ``getattr`` only, so no harness spawn is needed. Reading the durability
+    property back through the runner — rather than calling
+    ``pop_all_steering_messages`` with a test-computed room_id — is what makes
+    the test able to catch a writer/reader derivation mismatch.
+    """
+    from agent.session_runner.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner._agent_session = agent_session
+    runner._pending_steers = []
+    runner._push_steering = runner._default_steering_push
+    return runner
+
+
+@pytest.fixture
+def sibling_rows():
+    """Two persisted sessions sharing one Room, torn down through the ORM."""
+    from models.agent_session import AgentSession
+
+    created = []
+
+    def _make(session_id: str) -> AgentSession:
+        row = AgentSession()
+        row.session_id = session_id
+        row.project_key = TEST_PROJECT
+        row.chat_id = None  # chatless → SYSTEM_ADDRESSEE, so siblings share a Room
+        row.status = "running"
+        row.save()
+        created.append(row)
+        return row
+
+    yield _make
+
+    for row in created:
+        try:
+            row.delete()
+        except Exception:  # pragma: no cover — teardown must never fail a test
+            pass
+
+
+# ── the durability property (the reason this release exists) ──────────────────
+
+
+def test_steer_survives_target_session_and_reaches_room_sibling(sibling_rows):
+    """A steer written for A is delivered to sibling B after A is gone."""
+    from models.room import room_id_for_session
+
+    session_a = sibling_rows("test_durability_a")
+    session_b = sibling_rows("test_durability_b")
+    room_id = room_id_for_session(session_a)
+    assert room_id == room_id_for_session(session_b), "siblings must share one Room"
+
+    push_steering_message(session_a.session_id, "do X", "Tom", room_id=room_id)
+    session_a.delete()
+
+    delivered = _bare_runner(session_b)._default_steering_pop()
+    assert [m["text"] for m in delivered] == ["do X"]
+    assert [m["_leg"] for m in delivered] == ["room"]
+
+
+def test_steer_without_room_id_does_not_reach_room_sibling(sibling_rows):
+    """Negative twin: proves the test above measures the Room leg, not an artifact."""
+    session_a = sibling_rows("test_durability_neg_a")
+    session_b = sibling_rows("test_durability_neg_b")
+
+    push_steering_message(session_a.session_id, "do X", "Tom", room_id=None)
+    session_a.delete()
+
+    assert _bare_runner(session_b)._default_steering_pop() == []
+
+
+def test_stale_steer_does_not_reach_room_sibling(sibling_rows):
+    """Staleness twin: a Room entry past the age bound is dropped, not delivered."""
+    from models.room import room_id_for_session
+
+    session_a = sibling_rows("test_durability_stale_a")
+    session_b = sibling_rows("test_durability_stale_b")
+    room_id = room_id_for_session(session_a)
+
+    push_steering_message(session_a.session_id, "fresh", "Tom", room_id=room_id)
+    _push_raw(_room_queue_key(room_id), "ancient", timestamp=time.time() - 10_000_000)
+    session_a.delete()
+
+    delivered = _bare_runner(session_b)._default_steering_pop()
+    assert [m["text"] for m in delivered] == ["fresh"]
+
+
+def test_requeued_room_steer_still_reaches_room_sibling(sibling_rows):
+    """Requeue twin: B drains, wedges without injecting, C still receives it."""
+    from models.room import room_id_for_session
+
+    session_a = sibling_rows("test_durability_rq_a")
+    session_b = sibling_rows("test_durability_rq_b")
+    session_c = sibling_rows("test_durability_rq_c")
+    room_id = room_id_for_session(session_a)
+
+    push_steering_message(session_a.session_id, "do X", "Tom", room_id=room_id)
+    session_a.delete()
+
+    runner_b = _bare_runner(session_b)
+    runner_b._pending_steers = runner_b._default_steering_pop()
+    runner_b._requeue_pending_steers()
+
+    assert _texts(_queue_key(session_b.session_id)) == [], "must not demote to B's mortal key"
+    delivered = _bare_runner(session_c)._default_steering_pop()
+    assert [m["text"] for m in delivered] == ["do X"]
+
+
+def test_superseded_row_derives_the_live_session_room():
+    """A superseded row must not decide the Room the live session drains.
+
+    Driven through ``steer_session``, one of the selections with no status
+    filter — a ``superseded`` row cannot appear in a status-filtered result set,
+    so those sites cannot exercise this trigger at all.
+    """
+    from agent.session_executor import steer_session
+    from models.agent_session import AgentSession
+    from models.room import room_id_for_session
+
+    session_id = "test_superseded_room"
+    rows = []
+    try:
+        old = AgentSession()
+        old.session_id = session_id
+        old.project_key = TEST_PROJECT
+        old.chat_id = "555000111"  # a DIFFERENT Room from the live row's
+        old.status = "superseded"
+        old.save()
+        rows.append(old)
+
+        time.sleep(0.01)  # distinct created_at
+
+        live = AgentSession()
+        live.session_id = session_id
+        live.project_key = TEST_PROJECT
+        live.chat_id = "555999888"
+        live.status = "running"
+        live.save()
+        rows.append(live)
+
+        result = steer_session(session_id, "route me to the live room")
+        assert result["success"] is True, result
+
+        live_room = room_id_for_session(live)
+        stale_room = room_id_for_session(old)
+        assert live_room != stale_room
+        assert _texts(_room_queue_key(live_room)) == ["route me to the live room"]
+        assert _texts(_room_queue_key(stale_room)) == []
+    finally:
+        for row in rows:
+            try:
+                row.delete()
+            except Exception:  # pragma: no cover
+                pass
+
+
+def test_created_at_sort_key_is_total():
+    """``(created_at is not None, created_at)`` sorts a None row without raising.
+
+    The repo's older ``<field> or 0`` fallback idiom substitutes an int into a
+    list of datetimes and raises TypeError here. A single-row list would not
+    exercise the comparison at all.
+    """
+    from datetime import UTC, datetime
+
+    class _S:
+        def __init__(self, created_at):
+            self.created_at = created_at
+
+    populated = _S(datetime.now(UTC))
+    empty = _S(None)
+    for rows in ([empty, populated], [populated, empty]):
+        ordered = list(rows)
+        ordered.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
+        assert ordered[0] is populated
+
+
+# ── key selection ─────────────────────────────────────────────────────────────
+
+
+class TestKeySelection:
+    def test_room_id_targets_the_room_key(self):
+        session_id = "test_keysel_room"
+        push_steering_message(session_id, "hello", "Tom", room_id=ROOM)
+        assert _texts(_room_queue_key(ROOM)) == ["hello"]
+        assert _texts(_queue_key(session_id)) == []
+
+    @pytest.mark.parametrize("room_id", [None, ""])
+    def test_falsy_room_id_falls_back_to_legacy(self, room_id):
+        session_id = f"test_keysel_falsy_{room_id!r}"
+        push_steering_message(session_id, "hello", "Tom", room_id=room_id)
+        assert _texts(_queue_key(session_id)) == ["hello"]
+
+    def test_session_without_project_key_derives_no_room(self):
+        """The issue's explicit criterion: no project_key → legacy key."""
+        from models.room import room_id_for_session
+
+        row = _Row(project_key=None, session_id="test_keysel_noproject")
+        assert room_id_for_session(row) is None
+        push_steering_message(row.session_id, "hello", "Tom", room_id=room_id_for_session(row))
+        assert _texts(_queue_key(row.session_id)) == ["hello"]
+
+    def test_room_wins_over_an_empty_session_id(self):
+        """``steering:`` is a nonsensical target; the Room key is the right one."""
+        push_steering_message("", "hello", "Tom", room_id=ROOM + "-empty")
+        assert _texts(_room_queue_key(ROOM + "-empty")) == ["hello"]
+        assert _texts(_queue_key("")) == []
+
+    def test_payload_shape_is_unchanged(self):
+        session_id = "test_keysel_payload"
+        push_steering_message(session_id, "hi", "Tom", room_id=ROOM + "-shape")
+        (entry,) = _raw(_room_queue_key(ROOM + "-shape"))
+        assert set(entry) == {"text", "sender", "timestamp", "is_abort"}
+
+        push_steering_message(session_id, "hi", "Tom", target_agent="dev", room_id=ROOM + "-shape2")
+        (entry,) = _raw(_room_queue_key(ROOM + "-shape2"))
+        assert set(entry) == {"text", "sender", "timestamp", "is_abort", "target_agent"}
+
+    def test_originating_push_stamps_now(self):
+        session_id = "test_keysel_stamp"
+        before = time.time()
+        push_steering_message(session_id, "hi", "Tom")
+        (entry,) = _raw(_queue_key(session_id))
+        assert before <= entry["timestamp"] <= time.time()
+
+
+# ── abort routing (D4) ────────────────────────────────────────────────────────
+
+
+class TestAbortRouting:
+    def test_abort_routing_explicit_flag_stays_legacy(self):
+        session_id = "test_abort_routing_explicit"
+        push_steering_message(session_id, "wind it down", "Tom", is_abort=True, room_id=ROOM + "-x")
+        assert _texts(_queue_key(session_id)) == ["wind it down"]
+        assert _texts(_room_queue_key(ROOM + "-x")) == []
+
+    @pytest.mark.parametrize("keyword", sorted(ABORT_KEYWORDS))
+    def test_abort_keyword_detected_stays_legacy(self, keyword):
+        """Key selection must sit BELOW the ABORT_KEYWORDS auto-detect.
+
+        Above it, ``is_abort`` reads stale and every keyword-detected abort
+        lands on the shared Room key, where it can kill a session that was
+        never targeted.
+        """
+        session_id = f"test_abort_keyword_{keyword}"
+        room = f"{ROOM}-{keyword}"
+        push_steering_message(session_id, keyword, "Tom", room_id=room)
+        assert _texts(_queue_key(session_id)) == [keyword]
+        assert _texts(_room_queue_key(room)) == []
+
+    def test_abort_keyword_prefix_still_targets_the_room(self):
+        """Only a bare keyword is an abort — a sentence starting with one is not."""
+        session_id = "test_abort_keyword_prefix"
+        push_steering_message(session_id, "stop the deploy", "Tom", room_id=ROOM + "-prefix")
+        assert _texts(_room_queue_key(ROOM + "-prefix")) == ["stop the deploy"]
+        assert _texts(_queue_key(session_id)) == []
+
+
+# ── Room-leg age bound (D5) ───────────────────────────────────────────────────
+
+
+class TestRoomAgeBound:
+    def test_stale_room_entry_dropped_fresh_kept(self):
+        session_id = "test_age_drop"
+        room = ROOM + "-age"
+        _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
+        _push_raw(_room_queue_key(room), "fresh")
+
+        drained = pop_all_steering_messages(session_id, room_id=room)
+        assert [m["text"] for m in drained] == ["fresh"]
+        assert _raw(_room_queue_key(room)) == [], "the drain is destructive on both"
+
+    def test_stale_legacy_entry_is_not_dropped(self):
+        """The legacy leg is never filtered — today's behavior is preserved bit for bit."""
+        session_id = "test_age_legacy"
+        _push_raw(_queue_key(session_id), "ancient", timestamp=time.time() - 10_000_000)
+        drained = pop_all_steering_messages(session_id, room_id=ROOM + "-agelegacy")
+        assert [m["text"] for m in drained] == ["ancient"]
+
+    def test_peek_skips_stale_room_entry_without_deleting(self):
+        """``valor-session status`` must not advertise what the next drain discards."""
+        session_id = "test_age_peek"
+        room = ROOM + "-agepeek"
+        _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
+        _push_raw(_room_queue_key(room), "fresh")
+
+        assert [m["text"] for m in peek_steering_messages(session_id, room_id=room)] == ["fresh"]
+        # Non-destructive: the stale entry is still physically present, and a
+        # second peek still finds the fresh one.
+        assert _texts(_room_queue_key(room)) == ["ancient", "fresh"]
+        assert [m["text"] for m in peek_steering_messages(session_id, room_id=room)] == ["fresh"]
+
+    @pytest.mark.parametrize("stamp", [None, "not-a-number"])
+    def test_undatable_room_entry_is_kept(self, stamp):
+        """Fail open: dropping an entry we cannot date would delete steers silently."""
+        session_id = "test_age_malformed"
+        room = f"{ROOM}-malformed-{stamp}"
+        payload = {"text": "keep me", "sender": "Tom", "is_abort": False}
+        if stamp is not None:
+            payload["timestamp"] = stamp
+        _get_redis().rpush(_room_queue_key(room), json.dumps(payload))
+
+        assert [m["text"] for m in peek_steering_messages(session_id, room_id=room)] == ["keep me"]
+        assert [m["text"] for m in pop_all_steering_messages(session_id, room_id=room)] == [
+            "keep me"
+        ]
+
+    def test_bound_is_read_from_settings(self):
+        """A named setting, not a literal — so the knob is live and testable."""
+        from config.settings import settings
+
+        assert settings.timeouts.steering_room_max_age_s > 0
+
+
+# ── leg preservation on requeue (D6) ──────────────────────────────────────────
+
+
+class TestLegPreservation:
+    def test_pop_all_stamps_the_source_leg(self):
+        session_id = "test_leg_stamp"
+        room = ROOM + "-stamp"
+        push_steering_message(session_id, "from-legacy", "Tom")
+        _push_raw(_room_queue_key(room), "from-room")
+
+        drained = pop_all_steering_messages(session_id, room_id=room)
+        assert [(m["text"], m["_leg"]) for m in drained] == [
+            ("from-legacy", "legacy"),
+            ("from-room", "room"),
+        ]
+
+    def test_repush_keeps_a_legacy_sourced_message_on_legacy(self):
+        """Anti-laundering: a diagnostic written to legacy never reaches the Room."""
+        from agent.health_check import _repush_messages
+
+        session_id = "test_leg_repush_legacy"
+        room = ROOM + "-repushlegacy"
+        _repush_messages(
+            session_id,
+            [{"text": "watchdog says", "sender": "watchdog", "_leg": "legacy"}],
+            room_id=room,
+        )
+        assert _texts(_queue_key(session_id)) == ["watchdog says"]
+        assert _texts(_room_queue_key(room)) == []
+
+    def test_repush_returns_a_room_sourced_message_to_the_room(self):
+        from agent.health_check import _repush_messages
+
+        session_id = "test_leg_repush_room"
+        room = ROOM + "-repushroom"
+        _repush_messages(
+            session_id,
+            [{"text": "do X", "sender": "Tom", "_leg": "room"}],
+            room_id=room,
+        )
+        assert _texts(_room_queue_key(room)) == ["do X"]
+        assert _texts(_queue_key(session_id)) == []
+
+    def test_repush_without_a_leg_defaults_to_legacy(self):
+        """Absent ``_leg`` → legacy, the same fail-safe as absent ``room_id``."""
+        from agent.health_check import _repush_messages
+
+        session_id = "test_leg_repush_untagged"
+        room = ROOM + "-repushuntagged"
+        _repush_messages(session_id, [{"text": "hand built", "sender": "Tom"}], room_id=room)
+        assert _texts(_queue_key(session_id)) == ["hand built"]
+        assert _texts(_room_queue_key(room)) == []
+
+    @pytest.mark.parametrize(
+        "leg,expect_room",
+        [("room", True), ("legacy", False), (None, False)],
+    )
+    def test_runner_push_preserves_the_source_leg(self, leg, expect_room):
+        row = _Row(chat_id="777000111", session_id=f"test_leg_runner_{leg}")
+        from models.room import room_id_for_session
+
+        room = room_id_for_session(row)
+        msg = {"text": "carry me", "sender": "Tom"}
+        if leg is not None:
+            msg["_leg"] = leg
+
+        _bare_runner(row)._default_steering_push(msg)
+
+        if expect_room:
+            assert _texts(_room_queue_key(room)) == ["carry me"]
+            assert _texts(_queue_key(row.session_id)) == []
+        else:
+            assert _texts(_queue_key(row.session_id)) == ["carry me"]
+            assert _texts(_room_queue_key(room)) == []
+
+    def test_leg_not_persisted_to_redis(self):
+        """``_leg`` is a transient reader stamp — it must never reach Redis."""
+        from agent.health_check import _repush_messages
+
+        session_id = "test_leg_not_persisted"
+        room = ROOM + "-notpersisted"
+        _repush_messages(
+            session_id,
+            [{"text": "do X", "sender": "Tom", "_leg": "room", "timestamp": 1234.5}],
+            room_id=room,
+        )
+        (entry,) = _raw(_room_queue_key(room))
+        assert set(entry) == {"text", "sender", "timestamp", "is_abort"}
+
+    def test_runner_requeue_carries_target_agent(self):
+        """The runner used to strip ``target_agent`` on requeue — it must not."""
+        row = _Row(chat_id="777000222", session_id="test_leg_target_agent")
+        from models.room import room_id_for_session
+
+        room = room_id_for_session(row)
+        _bare_runner(row)._default_steering_push(
+            {"text": "do X", "sender": "Tom", "_leg": "room", "target_agent": "dev"}
+        )
+        (entry,) = _raw(_room_queue_key(room))
+        assert set(entry) == {"text", "sender", "timestamp", "is_abort", "target_agent"}
+        assert entry["target_agent"] == "dev"
+
+
+# ── origination age survives a requeue (D5 + D6) ──────────────────────────────
+
+
+class TestOriginationAge:
+    def test_timestamp_preserved_by_repush(self):
+        from agent.health_check import _repush_messages
+
+        session_id = "test_origination_age_repush"
+        stamp = time.time() - 500
+        _repush_messages(
+            session_id,
+            [{"text": "do X", "sender": "Tom", "timestamp": stamp}],
+        )
+        (entry,) = _raw(_queue_key(session_id))
+        assert entry["timestamp"] == pytest.approx(stamp)
+
+    def test_timestamp_preserved_by_runner_push(self):
+        row = _Row(chat_id="777000333", session_id="test_timestamp_preserved_runner")
+        stamp = time.time() - 900
+        _bare_runner(row)._default_steering_push(
+            {"text": "do X", "sender": "Tom", "timestamp": stamp}
+        )
+        (entry,) = _raw(_queue_key(row.session_id))
+        assert entry["timestamp"] == pytest.approx(stamp)
+
+    def test_origination_age_survives_a_drain_and_requeue_cycle(self):
+        """A backdated entry still expires on the drain AFTER a requeue.
+
+        Without the timestamp forward, every requeue restarts the clock and a
+        message that is repeatedly drained and re-pushed without ever being
+        injected stays exactly as immortal as it was before the bound existed.
+        """
+        from agent.health_check import _repush_messages
+
+        session_id = "test_origination_age_cycle"
+        room = ROOM + "-cycle"
+        _push_raw(_room_queue_key(room), "ancient", timestamp=time.time() - 10_000_000)
+
+        drained = pop_all_steering_messages(session_id, room_id=room)
+        assert drained == [], "the first drain already drops it"
+
+        # Same entry, re-pushed by a consumer that drained it just under the bound.
+        near_bound = time.time() - 10_000_000
+        _repush_messages(
+            session_id,
+            [{"text": "ancient", "sender": "Tom", "_leg": "room", "timestamp": near_bound}],
+            room_id=room,
+        )
+        (entry,) = _raw(_room_queue_key(room))
+        assert entry["timestamp"] == pytest.approx(near_bound), "requeue must not refresh the clock"
+        assert pop_all_steering_messages(session_id, room_id=room) == []
+
+    def test_requeue_of_an_undated_message_does_not_raise(self):
+        from agent.health_check import _repush_messages
+
+        session_id = "test_origination_age_undated"
+        _repush_messages(session_id, [{"text": "do X", "sender": "Tom"}])
+        (entry,) = _raw(_queue_key(session_id))
+        assert isinstance(entry["timestamp"], float)
+
+
+# ── the PostToolUse hook's four re-push paths ─────────────────────────────────
+
+
+class TestHandleSteeringRepushPaths:
+    @pytest.mark.asyncio
+    async def test_abort_siblings_return_to_their_source_legs(self):
+        """The abort itself dies with the session; siblings go back where they were."""
+        from agent.health_check import _handle_steering
+
+        session_id = "test_hook_abort_siblings"
+        room = ROOM + "-hookabort"
+        push_steering_message(session_id, "diagnostic", "watchdog")  # legacy-sourced
+        push_steering_message(session_id, "stop", "Tom")  # auto-detected abort
+        _push_raw(_room_queue_key(room), "room instruction")
+
+        result = await _handle_steering(session_id, room_id=room)
+        assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
+
+        assert _texts(_queue_key(session_id)) == ["diagnostic"]
+        assert _texts(_room_queue_key(room)) == ["room instruction"]
+
+    @pytest.mark.asyncio
+    async def test_non_abort_retry_path_still_forwards_the_room(self, monkeypatch):
+        """The retries live inside ``except`` blocks — a missed keyword there is silent."""
+        import agent.health_check as hc
+
+        session_id = "test_hook_retry"
+        room = ROOM + "-hookretry"
+        _push_raw(_room_queue_key(room), "room instruction")
+
+        real = hc._repush_messages
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("primary re-push failed")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(hc, "_repush_messages", flaky)
+        result = await hc._handle_steering(session_id, room_id=room)
+        assert result == {"continue_": True}
+        assert calls["n"] == 2, "the retry inside the except block must have fired"
+        assert _texts(_room_queue_key(room)) == ["room instruction"]
+
+    @pytest.mark.asyncio
+    async def test_abort_sibling_retry_path_still_forwards_the_room(self, monkeypatch):
+        import agent.health_check as hc
+
+        session_id = "test_hook_abort_retry"
+        room = ROOM + "-hookabortretry"
+        _push_raw(_room_queue_key(room), "room instruction")
+        push_steering_message(session_id, "stop", "Tom")
+
+        real = hc._repush_messages
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("primary re-push failed")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(hc, "_repush_messages", flaky)
+        result = await hc._handle_steering(session_id, room_id=room)
+        assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
+        assert calls["n"] == 2
+        assert _texts(_room_queue_key(room)) == ["room instruction"]
+
+
+# ── the deliberately-legacy writers (D1 / D4) ─────────────────────────────────
+
+
+class TestLegacyByRuleWriters:
+    def test_watchdog_loop_break_steer_stays_legacy(self):
+        from monitoring.session_watchdog import _inject_watchdog_steer
+
+        session_id = "test_legacy_watchdog"
+        assert _inject_watchdog_steer(session_id, "Read", "repeated tool") is True
+        assert len(_raw(_queue_key(session_id))) == 1
+
+    def test_terminal_leftover_drain_reads_legacy_only(self):
+        """``session_executor``'s teardown drain must not scoop the shared Room leg.
+
+        Its survivors are turned into a *new session*, so draining another
+        Room's instruction there converts it into spawned work.
+        """
+        import ast
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "session_executor.py"
+        tree = ast.parse(src.read_text())
+        drains = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "pop_all_steering_messages"
+        ]
+        assert drains, "the terminal leftover drain disappeared"
+        for call in drains:
+            room_kw = next((kw for kw in call.keywords if kw.arg == "room_id"), None)
+            assert room_kw is not None, f"line {call.lineno}: drain must name room_id"
+            assert isinstance(room_kw.value, ast.Constant) and room_kw.value.value is None, (
+                f"agent/session_executor.py:{call.lineno}: the terminal leftover drain "
+                "must pass room_id=None — it feeds _reenqueue_leftover_steering, which "
+                "spawns a continuation session."
+            )
