@@ -667,8 +667,10 @@ class Job(Model):
         - :meth:`repair_indexes`, because popoto's ``rebuild_indexes()``
           re-scores every row via ``field.on_save`` on naive-decoded
           instances — ``naive.timestamp()`` is local time, bypassing the
-          :meth:`save` override entirely — so on a non-UTC host the daily
-          rebuild would re-skew every score the migration repaired.
+          :meth:`save` override entirely — so on a non-UTC host every
+          rebuild (run at worker startup via
+          ``scripts/popoto_index_cleanup.run_cleanup``) would re-skew every
+          score the migration repaired.
 
         For each Job the stored score in its Room partition (key **derived**
         via ``SortedField.get_sortedset_db_key``, never hand-built) is
@@ -686,9 +688,10 @@ class Job(Model):
         tolerant (one bad row logs and the sweep continues).
 
         Scale note: because :meth:`repair_indexes` calls this after every
-        daily rebuild, the uncursored full-population pass here is a DAILY
-        commitment against an immortal, unboundedly growing model — not a
-        one-shot migration cost. At the measured population (92 Jobs) that
+        rebuild, the uncursored full-population pass here is a
+        per-worker-startup commitment against an immortal, unboundedly
+        growing model (via ``scripts/popoto_index_cleanup.run_cleanup``) —
+        not a one-shot migration cost. At the measured population (92 Jobs) that
         is negligible; past roughly 10,000 Jobs the full hydrate + one
         ``zscore`` round trip per row needs pipelining or a cursor.
 

@@ -1117,8 +1117,9 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     trusts scores, so existing skew must be swept out once per machine.
 
     The sweep itself is ``Job.renormalize_last_active_scores()`` — the ONE
-    shared implementation, also run by ``Job.repair_indexes()`` after every
-    daily ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
+    shared implementation, also run by ``Job.repair_indexes()`` (at worker
+    startup via ``scripts/popoto_index_cleanup.run_cleanup``) after every
+    ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
     naive-decoded instances bypasses the save() override and would otherwise
     re-skew every score on a non-UTC host). See that classmethod's docstring
     for the loop contract: derived partition key, 1-second tolerance,
