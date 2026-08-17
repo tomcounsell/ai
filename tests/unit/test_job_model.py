@@ -19,6 +19,7 @@ import pytest
 
 from models.job import (
     GOAL_PLACEHOLDER_PREFIX,
+    JOB_RECENT_OVERFETCH,
     Job,
     mint_placeholder_goal,
 )
@@ -556,17 +557,233 @@ class TestOpenExpectationIndex:
         assert Job.at_rest_with_open_expectations() == []
 
 
+def _partition_key(room_id: str) -> str:
+    """The ``last_active_at`` sorted-set key for a Room — derived, never built.
+
+    ``DB_key.clean()`` escapes ``:`` and ``/``, and every real room_id contains
+    a colon, so a hand-built key reads a set that does not exist (spike-3).
+    """
+    from popoto import SortedField
+
+    return SortedField.get_sortedset_db_key(Job, "last_active_at", room_id).redis_key
+
+
+def _scores(room_id: str) -> list[tuple[bytes, float]]:
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    return POPOTO_REDIS_DB.zrevrange(_partition_key(room_id), 0, -1, withscores=True)
+
+
+@pytest.fixture
+def count_hash_reads(monkeypatch):
+    """Count hash reads (the pipelined HGETALL/HMGET hydration path).
+
+    This is the acceptance instrument for the bound: an unbounded range read
+    hydrates every Job in the Room, a bounded one hydrates ``limit`` of them,
+    and only a read counter tells the two apart — a "fix" that measures
+    unchanged is the named failure mode.
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    counter = {"n": 0}
+
+    def wrap(obj, name):
+        real = getattr(obj, name)
+
+        def counting(*args, **kwargs):
+            counter["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(obj, name, counting)
+
+    real_pipeline = POPOTO_REDIS_DB.pipeline
+
+    def counting_pipeline(*args, **kwargs):
+        pipe = real_pipeline(*args, **kwargs)
+        for name in ("hgetall", "hmget"):
+            wrap(pipe, name)
+        return pipe
+
+    monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", counting_pipeline)
+    for name in ("hgetall", "hmget"):
+        wrap(POPOTO_REDIS_DB, name)
+    return counter
+
+
 class TestRecencyLookup:
-    def test_recent_for_room_returns_newest_first_capped(self, scratch_room_id):
-        jobs = [Job.mint(scratch_room_id, f"task {i}") for i in range(7)]
+    """The bind-or-mint candidate lookup: bounded, newest-first, fail-open."""
+
+    @pytest.mark.parametrize("population", [7, 30])
+    def test_recent_for_room_returns_newest_first_capped(self, scratch_room_id, population):
+        """Ordering parity with the old hydrate-all-then-sort implementation.
+
+        Timestamps are distinct (mint stamps microsecond ``_now()``): under
+        equal scores Python's stable sort and Redis' reverse-lex tiebreak pick
+        different subsets at the limit boundary (spike-4), so a constant-stamped
+        fixture would assert a coincidence rather than the contract.
+        """
+        jobs = [Job.mint(scratch_room_id, f"task {i}") for i in range(population)]
 
         recent = Job.recent_for_room(scratch_room_id, limit=5)
+
         assert len(recent) == 5
-        # Newest first: the last-minted job leads.
-        assert recent[0].job_id == jobs[-1].job_id
+        assert [j.job_id for j in recent] == [j.job_id for j in reversed(jobs[-5:])]
+
+    def test_hydration_scales_with_limit_not_room_size(self, scratch_room_id, count_hash_reads):
+        """The bound itself. At 30 Jobs the old path cost 2N=60 hash reads for a
+        top-5 answer (popoto's QueryBuilder hydrates twice, #2639); the bounded
+        path costs at most one per over-fetched member."""
+        for i in range(30):
+            Job.mint(scratch_room_id, f"task {i}")
+        limit = 5
+        count_hash_reads["n"] = 0
+
+        recent = Job.recent_for_room(scratch_room_id, limit=limit)
+
+        assert len(recent) == limit
+        ceiling = 2 * limit + JOB_RECENT_OVERFETCH
+        assert count_hash_reads["n"] <= limit + JOB_RECENT_OVERFETCH
+        assert count_hash_reads["n"] < ceiling, (
+            f"{count_hash_reads['n']} hash reads for a top-{limit} answer over 30 Jobs — "
+            "the range read is unbounded"
+        )
+
+    def test_gone_hash_member_is_dropped_and_the_window_still_fills(
+        self, scratch_room_id, monkeypatch
+    ):
+        """A member whose hash is gone (transient orphan, reaped by the daily
+        guarded repair) is dropped by ``skip_none``; the over-fetch window keeps
+        the answer full while live rows exist."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        jobs = [Job.mint(scratch_room_id, f"task {i}") for i in range(8)]
+        real_zrevrange = POPOTO_REDIS_DB.zrevrange
+        orphan = b"Job:test-orphan-no-such-hash:nowhere"
+
+        def with_orphan(key, start, end, **kwargs):
+            members = real_zrevrange(key, start, end, **kwargs)
+            return [orphan, *members][: end - start + 1]
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "zrevrange", with_orphan)
+
+        recent = Job.recent_for_room(scratch_room_id, limit=5)
+
+        assert len(recent) == 5
+        assert [j.job_id for j in recent] == [j.job_id for j in reversed(jobs[-5:])]
 
     def test_recent_for_room_empty_room_is_empty(self):
         assert Job.recent_for_room("test-jobroom-none|telegram:0") == []
+
+    def test_zero_limit_short_circuits_before_hydrating(self, scratch_room_id, count_hash_reads):
+        for i in range(3):
+            Job.mint(scratch_room_id, f"task {i}")
+        count_hash_reads["n"] = 0
+
+        assert Job.recent_for_room(scratch_room_id, limit=0) == []
+        assert count_hash_reads["n"] == 0
+
+    def test_read_failure_fails_open_with_a_warning(self, scratch_room_id, caplog):
+        """Fail-open contract: the candidate lookup never raises into the
+        router — it returns [] and the caller mints."""
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        Job.mint(scratch_room_id, "task")
+
+        def boom(*args, **kwargs):
+            raise ConnectionError("redis is unhappy")
+
+        original = POPOTO_REDIS_DB.zrevrange
+        POPOTO_REDIS_DB.zrevrange = boom
+        try:
+            with caplog.at_level(logging.WARNING, logger="models.job"):
+                assert Job.recent_for_room(scratch_room_id, limit=5) == []
+        finally:
+            POPOTO_REDIS_DB.zrevrange = original
+
+        assert "recent_for_room failed" in caplog.text
+
+
+class TestScorePurity:
+    """Sorted-set scores must be pure UTC epochs, on every write path.
+
+    popoto 1.8.0 decodes datetimes without tzinfo, so a reloaded Job's
+    ``last_active_at`` is naive and the next save would score it as
+    ``naive.timestamp()`` — local time. On a UTC+07 host that buries a Job
+    active seconds ago seven hours in the past, which is what made a live
+    ``last_active_at__gte=now-1h`` filter return zero rows.
+    """
+
+    def test_resave_after_reload_keeps_the_score_a_utc_epoch(self, scratch_room_id):
+        import time
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.last_active_at.tzinfo is None, "popoto still decodes naive (premise)"
+
+        reloaded.add_expectation("I'll report back")
+
+        [(_member, score)] = _scores(scratch_room_id)
+        assert abs(score - time.time()) < 60, (
+            f"score {score} is {time.time() - score:.0f}s off wall clock — local-time skew is back"
+        )
+
+    def test_recency_filter_finds_a_just_resaved_job(self, scratch_room_id):
+        """The user-visible half of the same defect (spike-2's live failure)."""
+        from datetime import UTC, datetime, timedelta
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        Job.query.get(id=job.id, room_id=scratch_room_id).add_expectation("I'll report back")
+
+        cutoff = datetime.now(tz=UTC) - timedelta(hours=1)
+        found = Job.query.filter(room_id=scratch_room_id, last_active_at__gte=cutoff)
+
+        assert [j.job_id for j in found] == [job.job_id]
+
+    def test_reattach_preserves_the_instant_and_is_idempotent(self, scratch_room_id):
+        """The override attaches the tzinfo the value already meant; it must
+        never re-stamp ``_now()`` — that would refresh recency on every
+        unrelated write and resurrect idle Jobs past rest-by-age."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        instant = job.last_active_at
+
+        job.last_active_at = instant.replace(tzinfo=None)
+        job.save()
+
+        assert job.last_active_at == instant
+        job.save()
+        assert job.last_active_at == instant
+
+    def test_scoped_save_excluding_the_field_leaves_the_score_untouched(self, scratch_room_id):
+        """``backfill_open_expectations_index`` saves
+        ``update_fields=["has_open_expectations"]`` under a docstring invariant
+        that it never writes recency. The override must honor that scope rather
+        than reaching into the SortedField path behind its back."""
+        job = Job.mint(scratch_room_id, "owes a reply")
+        [(_member, score_before)] = _scores(scratch_room_id)
+
+        job.last_active_at = job.last_active_at.replace(tzinfo=None)
+        job.has_open_expectations = True
+        job.save(update_fields=["has_open_expectations"])
+
+        assert job.last_active_at.tzinfo is None, "the guard let an out-of-scope write through"
+        assert _scores(scratch_room_id) == [(_member, score_before)]
+
+    def test_scoped_save_naming_the_field_still_reattaches(self, scratch_room_id):
+        """The skew backfill's write path: a scoped save that *names*
+        ``last_active_at`` must reattach UTC, or it would write the very skew it
+        exists to repair."""
+        from datetime import UTC
+
+        job = Job.mint(scratch_room_id, "owes a reply")
+        [(member, score_before)] = _scores(scratch_room_id)
+
+        job.last_active_at = job.last_active_at.replace(tzinfo=None)
+        job.save(update_fields=["last_active_at"])
+
+        assert job.last_active_at.tzinfo is UTC
+        assert _scores(scratch_room_id) == [(member, score_before)]
 
 
 class TestGuardedRepair:

@@ -60,14 +60,19 @@ GOAL_PLACEHOLDER_PREFIX = "handle user message '"
 # Fixed by the plan's mint contract: `handle user message '<first 20 chars>…'`.
 _PLACEHOLDER_CHARS = 20
 
-_EPOCH = datetime(1970, 1, 2, tzinfo=UTC)
-
 # Age threshold after which an idle active Job goes to rest (rest-by-age,
 # applied by ``Job.sweep_to_rest`` on the session-health cadence).
 # GRAIN OF SALT: provisional/tunable via env — sized to keep multi-day
 # conversations active across a weekend while letting abandoned threads
 # reach rest within the week.
 JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 * 3600)))
+
+# Extra members the bounded recency read pulls beyond ``limit``, so a member
+# whose backing hash has already gone (a transient orphan between a delete and
+# the daily guarded index repair) is absorbed without an under-filled answer.
+# GRAIN OF SALT: provisional/tunable via env — sized off the observed orphan
+# rate, which is near zero outside the repair window.
+JOB_RECENT_OVERFETCH = int(os.environ.get("JOB_RECENT_OVERFETCH", "5"))
 
 
 def _now() -> datetime:
@@ -109,6 +114,34 @@ class Job(Model):
     # `type=bool` is load-bearing: without it the value hydrates as the
     # string "False", which is truthy.
     has_open_expectations = IndexedField(type=bool, default=False)
+
+    # -- Persistence --------------------------------------------------------
+
+    def save(self, *args, update_fields: list | None = None, **kwargs):
+        """Re-attach UTC to a naive ``last_active_at`` before persisting.
+
+        popoto 1.8.0 decodes a stored datetime without tzinfo, so a reloaded
+        Job carries a naive ``last_active_at``; the next save would compute the
+        SortedField score as ``naive.timestamp()`` — local time, skewed from the
+        stored hash value by the host's UTC offset. Every write funnels through
+        here, so this one re-attach makes every score a pure UTC epoch.
+
+        **Instant-preserving, not a re-stamp.** It attaches the tzinfo the value
+        already meant and never assigns ``_now()``: re-stamping would refresh
+        recency on every unrelated write, resurrecting idle Jobs and defeating
+        rest-by-age.  Idempotent — an aware value is left untouched.
+
+        The reattach is gated on the field being in scope. A scoped save that
+        excludes ``last_active_at`` (``backfill_open_expectations_index``'s
+        ``save(update_fields=["has_open_expectations"])``, whose docstring
+        guarantees it never writes recency) must not touch the SortedField score
+        path at all; a scoped save that *names* the field still reattaches.
+        """
+        if update_fields is None or "last_active_at" in update_fields:
+            value = self.last_active_at
+            if isinstance(value, datetime) and value.tzinfo is None:
+                self.last_active_at = value.replace(tzinfo=UTC)
+        return super().save(*args, update_fields=update_fields, **kwargs)
 
     # -- Identity -----------------------------------------------------------
 
@@ -346,16 +379,44 @@ class Job(Model):
     def recent_for_room(cls, room_id: str, *, limit: int = 5) -> list[Job]:
         """Top-N most recent Jobs in a Room, newest first.
 
-        Served by the ``last_active_at`` SortedField partition — the range
-        scan is per-Room, never a global index walk.
+        A bounded reverse-range read over the ``last_active_at`` SortedField's
+        per-Room partition: one ``ZREVRANGE`` for the top members, then one
+        pipelined hydration of just those members. Cost is a function of
+        ``limit``, not of the Room's lifetime Job count — popoto 1.8.0's
+        ``QueryBuilder`` has no early-limit path for a SortedField, so a
+        ``filter()`` here would hydrate every Job in the Room (twice, per
+        popoto#2639) to answer a top-5 question. This runs on the bind-or-mint
+        hot path for every routed inbound message.
+
+        The partition key is **derived, never hand-built**: ``DB_key.clean()``
+        escapes ``:`` and ``/``, and every real ``room_id`` contains a colon,
+        so an f-string would silently read a key that does not exist.
+
+        The read over-fetches by ``JOB_RECENT_OVERFETCH`` so a member whose
+        backing hash is already gone (dropped by ``skip_none``) does not
+        under-fill the answer. An under-filled result is never re-fetched: it
+        means the Room genuinely has fewer live Jobs, or an index repair is
+        mid-flight — the same fail-open posture as every other step here.
+
+        Fail-open contract (unchanged): any failure logs a warning and returns
+        ``[]``; the caller treats that as "no candidates" and mints.
         """
+        if limit <= 0:
+            return []
         try:
-            jobs = list(cls.query.filter(room_id=room_id, last_active_at__gte=_EPOCH))
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            partition_key = SortedField.get_sortedset_db_key(
+                cls, "last_active_at", room_id
+            ).redis_key
+            fetch_n = limit + JOB_RECENT_OVERFETCH
+            members = POPOTO_REDIS_DB.zrevrange(partition_key, 0, fetch_n - 1)
+            redis_keys = [m.decode() if isinstance(m, bytes) else str(m) for m in members]
+            jobs = cls.query.get_many(redis_keys, skip_none=True)
         except Exception as e:  # noqa: BLE001 — candidate lookup must fail open
             logger.warning("[job] recent_for_room failed for %s: %s", room_id, e)
             return []
-        jobs.sort(key=lambda j: j.last_active_at or _EPOCH, reverse=True)
-        return jobs[:limit]
+        return list(jobs)[:limit]
 
     @classmethod
     def sweep_to_rest(cls, now: float | None = None) -> int:
