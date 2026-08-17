@@ -306,6 +306,26 @@ def _review_artifact_posted(
             if com.returncode == 0 and com.stdout.strip().isdigit():
                 if int(com.stdout.strip()) > 0:
                     return True
+
+        # 2b. GraphQL fallback for leg 2. The REST issue-comments endpoint is
+        # permission-gated separately from the PR object: a credential that can
+        # read ``repos/{slug}/pulls/{n}`` can still 404 on
+        # ``repos/{slug}/issues/{n}/comments`` and ``pulls/{n}/reviews``. Leg 1
+        # already reads comments' sibling field over GraphQL via ``gh pr view``,
+        # so ask the same way here rather than reporting a posted self-authored
+        # ``## Review:`` comment as missing and stalling the router in a
+        # re-review loop.
+        com_gql = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), *repo_args, "--json", "comments"],
+            capture_output=True,
+            text=True,
+            timeout=gh_timeout,
+        )
+        if com_gql.returncode == 0:
+            data = json.loads(com_gql.stdout or "{}")
+            for c in data.get("comments") or []:
+                if isinstance(c, dict) and str(c.get("body", "")).startswith("## Review:"):
+                    return True
         return False
     except Exception as e:
         logger.debug(
