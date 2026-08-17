@@ -488,6 +488,22 @@ def _extract_head_sha(record) -> str | None:
     return None
 
 
+def _coerce_count(value) -> int:
+    """Coerce a raw stage-states counter to a non-negative int, never raising.
+
+    Absent, ``None``, empty and non-numeric values all read as ``0`` -- the
+    correct starting state for a lane that has never had the counter written,
+    which is every lane predating the key. ``_compute_meta`` is invoked
+    unwrapped, so a corrupt value must degrade rather than raise: a counter
+    that reads ``0`` makes its bound stand down, whereas an exception here
+    would take the entire ``stage-query`` projection down and blind the router.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _compute_meta(
     raw_states: dict,
     session,
@@ -615,6 +631,17 @@ def _compute_meta(
         # on session resume. Surfaced here so the runner reads it without a
         # second ledger fetch.
         "completion_refusal_count": int(raw_states.get("_completion_refusal_count", 0) or 0),
+        # With-concerns critique rounds on this lane (#2787), written by
+        # tools/sdlc_verdict.py::record_verdict. It MUST ride `_meta`: the
+        # `stages` projection below threads only ("_verdicts", "_sdlc_dispatches")
+        # out of raw stage_states, so a bare `_concern_round_count` key would be
+        # dropped on the floor and every rule reading it would be structurally
+        # inert in the CLI path. Mirrors the `_critique_cycle_count` precedent.
+        # Key-parity with _default_meta is required (#2769).
+        # Coerced tolerantly: `_compute_meta` is called unwrapped, so a corrupt
+        # non-integer value must degrade to 0 (the bound stands down) rather than
+        # raise and take the whole stage-query down with it.
+        "concern_round_count": _coerce_count(raw_states.get("_concern_round_count")),
     }
 
 
@@ -645,6 +672,7 @@ def _default_meta() -> dict:
         "slug_source": "unresolved",
         "_resolved_target_repo": None,
         "completion_refusal_count": 0,
+        "concern_round_count": 0,
     }
 
 
