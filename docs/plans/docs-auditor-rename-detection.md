@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2741
 last_comment_id: 5311784123
 revision_applied: true
-revision_applied_at: 2026-08-17T06:23:07Z
+revision_applied_at: 2026-08-17T06:40:30Z
 ---
 
 # Delete the docs-auditor rename channel
@@ -371,8 +371,28 @@ tautology.
 
 All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
 
-- [ ] `:55,57` — fixture resetting `docs_auditor._RENAME_QUERY_COUNT` — UPDATE: remove both
-      lines (the symbol no longer exists; leaving them raises `AttributeError`).
+- [ ] `reset_global_state` (`:52-57`) — DELETE the whole fixture, decorator included, not just
+      its two body lines. `:55` and `:57` (`docs_auditor._RENAME_QUERY_COUNT = 0`, before and
+      after the `yield`) are its **entire body**; removing only them leaves
+      `@pytest.fixture(autouse=True) / def reset_global_state(): / """Reset module-level counters
+      between tests.""" / yield` — an autouse fixture that resets nothing, carrying a docstring
+      that is now false. That is the same residue class this plan refuses three sections earlier
+      when it deletes the `fixes` parameter outright rather than passing `[]`, and a false
+      docstring is exactly what the auditor exists to catch. Delete `:52-57` and the blank line
+      that follows.
+      - Nothing survives to reduce it to. Verified at `bc3051ee4`: the fixture's body references
+        only `_RENAME_QUERY_COUNT`, and `grep -n "reset_global_state"` returns exactly one hit —
+        `:53`, the `def` — so no test requests it by name and no other symbol is reset here.
+      - `_BASENAME_INDEX_CACHE` does **not** belong in it. Cache clearing already lives in a
+        separate, explicitly-requested fixture, `clear_basename_cache` (`:1025-1029`, clearing at
+        `:1027` and `:1029`), requested by name at `:1045`
+        (`test_ls_files_failure_warns_and_yields_empty_index`) and `:1077`
+        (`test_dir_prefixed_decisions_unaffected_by_degraded_index`). `clear_basename_cache`
+        **must survive** — do not confuse the two, and do not migrate anything into
+        `reset_global_state` to justify keeping it.
+      - The `_RENAME_QUERY_COUNT` anti-criterion reaches 0 either way, so no existing
+        `## Verification` row catches a hollowed-out fixture. The **Vestigial autouse fixture
+        gone** row was added for exactly this.
 - [ ] `TestGitLogFollowCap` (`:360-376`) — DELETE: both cases test the deleted function.
 - [ ] `TestRenamedSymbolFixesDegenerate` (`:378-410`) — DELETE: both cases test the deleted
       detector.
@@ -386,7 +406,9 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       (`_apply_fixes_to_file(Path("docs/features/snap.md"), repo, regex_fixes)`, and the
       identical edit for `fence.md` at `:771`). Their assertions (`applied == 0`,
       `withheld == []`, content unchanged) are unaffected. Both are #2744 path-token-suppression
-      regressions — the coverage class Risk 2 exists to protect.
+      regressions — the coverage class Risk 2 exists to protect. **A third site,
+      `TestWithheldRateNonRegression`'s `:1502`, has the identical shape** — see its own entry
+      below; the keyword-collision set is `:744`, `:771`, `:1502`.
 - [ ] `TestStaleTermWordBoundary::test_suppression_survives_an_earlier_line_deletion`
       (`:778-828`) — REPLACE: it constructs a README fixture, calls
       `_detect_readme_broken_entries` to get a `new == ""` literal fix, and asserts the regex
@@ -429,8 +451,14 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
       test — dir-prefixed targets never consult the degraded basename index — is
       channel-independent and must survive the migration intact.
 - [ ] `TestWithheldRateNonRegression` (`:1419-1567`, call at `:1502`) — UPDATE: it already runs
-      "under one regex arm" per its own docstring, but passes the literal arg positionally.
-      Re-point at the new signature. Its corpus baseline must not change.
+      "under one regex arm" per its own docstring, but its call is
+      `_apply_fixes_to_file(full.relative_to(worktree), worktree, [], regex_fixes=fixes)` — the
+      **third** site with the same keyword collision as `:744` and `:771`, not a bare positional
+      pass. Under the new three-positional signature the `[]` binds to `regex_fixes` and the
+      keyword collides: `TypeError: got multiple values for argument 'regex_fixes'`. Same
+      mechanical fix as the other two — drop the `[]` and pass `fixes` positionally. So the
+      keyword-collision count is **three** (`:744`, `:771`, `:1502`), not two. Its corpus
+      baseline must not change.
 - [ ] `TestLineDeleteSentinel` (`:1152-1185`) — DELETE: the entire class tests the `new == ""`
       sentinel. **Note what this deletion means:** these are passing tests covering working
       behavior, not tests of a defect. They go because the behavior goes, by the human's scope
@@ -539,7 +567,11 @@ outcome available from this change.
 **Mitigation:** Every rewritten case must be demonstrated-red before it is accepted: mutate
 `_absent_new_path_refs` to return `[]`, confirm the case fails, revert. Path-token suppression
 makes a vacuous pass the *default* failure mode here, so a green-only proof is not acceptable.
-Record the red-state output in the PR description.
+**Capture the red-state output the moment it is produced**, appending it to
+`docs/plans/notes/docs-auditor-rename-detection-red-state.md` (Task 2). It ends up in the PR
+description, but the PR does not exist until `/do-build` step 17 — long after Task 2 runs — so a
+transcript that is only ever "in the PR description" has no holding place and is lost. Task 3
+verifies the file; Task 6 pastes it.
 
 **The demonstrated-red proof is the only real guard here; the `target-absent > 3` Success
 Criterion is not a second one.** That criterion is implemented as
@@ -600,8 +632,10 @@ functions that do not exist — the exact failure this auditor exists to catch.
 symbol, each requiring zero matches. **These rows guard only the surfaces that spell a deleted
 identifier, which is a minority of the doc edits this plan requires.** Measured on `main`:
 `docs/features/docs-auditor.md` carries exactly three deleted-symbol mentions (`:164`, `:239`,
-`:246`) against nine planned edits to it, and `.claude/skill-context/do-docs.md` carries
-**zero**. So roughly two thirds of the feature-doc edits and the entire repo-specific skill
+`:246`) against **eight** planned edits to it, and `.claude/skill-context/do-docs.md` carries
+**zero**. (`### Feature Documentation` has nine bullets, but the ninth targets
+`docs/features/README.md`, not `docs-auditor.md` — earlier drafts miscounted it as nine.) So
+five of the eight feature-doc edits and the entire repo-specific skill
 surface have **no mechanical guard at all** — they are prose describing behavior, not
 identifiers. Those are covered only by the `## Documentation` checklist plus the Task 5
 human/validator pass. This plan deliberately does not add prose anti-criteria: a prose row is
@@ -816,18 +850,30 @@ that read `fixes_withheld` need no code change.
 - [ ] Every rewritten `TestExistenceInvariant` case — **all twelve**, including
       `test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at `:1087`) — was
       demonstrated red (with `_absent_new_path_refs` neutered) before being accepted green, with
-      the red output pasted into the PR description. In particular, every case that asserts
+      the red output captured to
+      `docs/plans/notes/docs-auditor-rename-detection-red-state.md` as it was produced (Task 2).
+      In particular, every case that asserts
       `target-absent` **and** calls `_apply_fixes_to_file` (`:850, 926, 1010, 1099` on `main`)
       has a transcript; `:1099` is the one that falls outside any "the eleven" phrasing and is
-      explicitly in scope.
-- [ ] The PR body carries Risk 3's disclosure: removing the `:1076` suppression un-blinds an
+      explicitly in scope. **(File existence and coverage verified in Task 3; pasting into the
+      PR description verified in Task 6.)**
+- [ ] **(verified in Task 6 — the PR does not exist during Tasks 1-5.)** The PR body carries
+      Risk 3's disclosure: removing the `:1076` suppression un-blinds an
       unknown number of previously-suppressed broken references and may raise
       `_detect_deleted_target_issues` finding volume; the per-run filing cap of 5 and the
       open-issue dedupe are the only bounds, and the mitigation is observing the next scheduled
       rotation runs. No pre-merge measurement and no threshold gate.
-- [ ] The PR body states plainly that broken README `.md` index entries lose both automated
+- [ ] **(verified in Task 6.)** The PR body states plainly that broken README `.md` index
+      entries lose both automated
       repair and automated reporting (Risk 1), and cites #2834, which records the `.md`
       reporting gap.
+- [ ] **(verified in Task 6.)** The PR body carries the red-state transcripts from
+      `docs/plans/notes/docs-auditor-rename-detection-red-state.md` and Risk 5's
+      #2739-ordering note.
+- [ ] The `reset_global_state` autouse fixture is gone from
+      `tests/unit/test_docs_auditor_substrate.py` — deleted outright, not hollowed out into a
+      no-op with a docstring that still claims it resets module-level counters. The
+      `clear_basename_cache` fixture is untouched.
 - [ ] `_detect_deleted_target_issues`' docstring no longer carries the `(non-renamed)`
       qualifier, which encoded the removed suppression.
 - [ ] The end-to-end withheld chain still has coverage: both
@@ -872,8 +918,11 @@ that read `fixes_withheld` need no code change.
 
 - **Validator**
   - Name: `auditor-validator`
-  - Role: Verify no deleted symbol survives, red-state proofs exist, and the PR body carries
-    the Risk 1 and Risk 3 disclosures
+  - Role: Verify no deleted symbol survives, no vestigial fixture is left behind, and the
+    red-state proofs exist in
+    `docs/plans/notes/docs-auditor-rename-detection-red-state.md`. The Risk 1 and Risk 3 PR-body
+    disclosures are **not** this role's job — the PR does not exist until `/do-build` step 17,
+    so they are verified in Task 6 by the build orchestrator.
   - Agent Type: validator
   - Resume: true
 
@@ -915,8 +964,14 @@ that read `fixes_withheld` need no code change.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Delete `TestGitLogFollowCap`, `TestRenamedSymbolFixesDegenerate`, `TestLineDeleteSentinel`.
-- Remove the `_RENAME_QUERY_COUNT` fixture lines, the `_git_log_follow_renames` patches
-  (`:804, 1683, 1703`), and the `_detect_renamed_link_fixes` silencer patches (`:1123, 1263`).
+- **Delete the `reset_global_state` autouse fixture outright** (`:52-57`, decorator included,
+  plus the trailing blank line). Its two body lines are its whole body; stripping only them
+  leaves an autouse fixture that resets nothing behind a docstring that says it does. Nothing
+  else references it (`grep -n "reset_global_state"` → only `:53`). **Leave
+  `clear_basename_cache` (`:1025-1029`) alone** — it is a different fixture, requested by name
+  at `:1045` and `:1077`, and it must survive. See its Test Impact entry.
+- Remove the `_git_log_follow_renames` patches
+  (`:804, 1683, 1703`) and the `_detect_renamed_link_fixes` silencer patches (`:1123, 1263`).
 - **Re-point, do not delete, the two `audit()`-driven withheld tests**
   (`TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` at `:1111-1144` and
   `TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`
@@ -932,6 +987,19 @@ that read `fixes_withheld` need no code change.
   it gets the same prose-anchored treatment as the other eleven, keeping its `subprocess.run`
   failure patch and both `failure` parametrisations. See its Test Impact entry for the exact
   pattern/replacement pair.
+- **Capture every red-state transcript as it is produced — do not rely on remembering it.**
+  The transcripts are load-bearing (Risk 2 calls them "the only real guard"; a Success Criterion
+  requires them pasted into the PR description), but the PR does not exist yet: `/do-build`
+  opens it at **step 17**, after every task here has finished. So each transcript needs a
+  durable holding place in between. Append each one — the neutering applied, the case name, and
+  the verbatim failure output — to
+  **`docs/plans/notes/docs-auditor-rename-detection-red-state.md`**, committed on `main` with an
+  explicit pathspec as you go (the `docs/plans/` prefix is exempt from the issue-disposition
+  hook, and `find_plan_path` only iterates `docs/plans/` non-recursively for `tracking:`
+  frontmatter, so a `notes/` subdirectory cannot be mistaken for a rival plan). Do **not** park
+  them inside the worktree: `/do-build` removes `.worktrees/{slug}` immediately after PR
+  creation, and a lane that pauses or resumes loses them entirely. Task 6 reads this file to
+  author the PR body; Task 3 checks only that it exists and covers all four required cases.
 - Rewrite `test_suppression_survives_an_earlier_line_deletion` with two regex fixes where the
   first shortens text ahead of the second's match.
 - Update the signature at **every** remaining `_apply_fixes_to_file` call site. Derive the list
@@ -963,21 +1031,25 @@ that read `fixes_withheld` need no code change.
   - `_detect_renamed_symbol_fixes` → **1**, `_detect_readme_broken_entries` → **1**, `GIT_LOG_FOLLOW_CAP` → **1** (doc-blocked until Task 4)
 
   All six must reach 0 at Task 5, which re-runs the full table after the documentation sweep.
-  Any deviation from the counts above is a real failure.
-- Confirm each rewritten existence-invariant case has a recorded red-state proof. This is
+  Any deviation from the counts above is a real failure. The three rows added in round 9 —
+  **Vestigial autouse fixture gone** (→ 0), **Basename cache fixture survives** (→ > 0) and
+  **Red-state transcripts captured** (→ > 0) — are all expected **green** here; none is
+  doc-blocked.
+- Confirm each rewritten existence-invariant case has a recorded red-state proof **in
+  `docs/plans/notes/docs-auditor-rename-detection-red-state.md`** (Task 2 writes it there; the
+  PR body does not exist yet and cannot be checked here). This is
   scoped by assertion, not by class membership: **every** case that both asserts `target-absent`
   and calls `_apply_fixes_to_file` needs a transcript — on `main` those are `:850, 926, 1010,
   1099`. `:1099` belongs to `test_dir_prefixed_decisions_unaffected_by_degraded_index` (call at
   `:1087`), so a validator that checks only "the eleven" misses it. A missing transcript for any
   of the four is a hard fail: the `target-absent` count row is a presence check and cannot
   substitute for it (Risk 2).
-- Confirm `_BASENAME_INDEX_CACHE.clear()` survives in `audit()`.
-- Confirm the PR body carries Risk 3's plain disclosure (the `:1076` removal un-blinds an
-  unknown number of previously-suppressed broken references; the per-run cap of 5 and the
-  open-issue dedupe are the only bounds, and observation of the next rotation runs is the
-  mitigation). No number and no gate decision are required.
-- Confirm the PR body carries Risk 1's disclosure (README `.md` entries lose repair *and*
-  reporting) and that it cites #2834 for the `.md` reporting gap.
+- Confirm `_BASENAME_INDEX_CACHE.clear()` survives in `audit()`, and that the
+  `clear_basename_cache` test fixture survives while `reset_global_state` is gone.
+- **No PR-body check belongs in this task.** `/do-build` opens the PR at its step 17, after
+  every task in this list has run, so the Risk 1 and Risk 3 disclosures cannot be present here.
+  They are verified in **Task 6**. A validator that looks for them at this point reports a
+  spurious failure or loops.
 - Confirm no reduced-form README line-delete survives: `_apply_fixes_to_file` must have no
   literal `fixes` parameter at all.
 - Confirm both `audit()`-driven withheld tests survive and still assert `fixes_withheld == 1`
@@ -1001,7 +1073,42 @@ that read `fixes_withheld` need no code change.
 - **Agent Type**: validator
 - **Parallel**: false
 - Re-run all `## Verification` rows including the repo-wide symbol-absence anti-criteria.
-- Verify every Success Criterion.
+- Verify every Success Criterion **except the three PR-body ones**, which are deferred to
+  Task 6 because the PR does not exist until `/do-build` step 17. The three deferred criteria
+  are explicitly marked "(verified in Task 6)" in `## Success Criteria`; every other criterion
+  is checkable against the worktree here and is in scope.
+
+### 6. Author and verify the PR body
+- **Task ID**: author-pr-body
+- **Depends On**: validate-all
+- **Assigned To**: whoever runs `/do-build` step 17 (the build orchestrator, not a subagent)
+- **Agent Type**: n/a — this is the PR-creation step itself, not a dispatched task
+- **Parallel**: false
+
+This task exists because three Success Criteria and Risk 2's "only real guard" are properties of
+the **PR description**, an artifact that does not exist while Tasks 1-5 run. `/do-build` creates
+the PR at step 17, after this plan's task list is exhausted. Assembling and checking those
+contents therefore has to happen at PR-open time, and this step is where it happens.
+
+Before creating the PR, compose a body carrying **all four** of the following, then re-read it
+and confirm each is present:
+
+- **Risk 1 disclosure.** State plainly that broken README `.md` index entries lose **both**
+  automated repair and automated reporting, with Risk 1's disjoint-pattern table as evidence,
+  and cite **#2834** as the record of the `.md` reporting gap. Do **not** claim that un-blinding
+  `_detect_deleted_target_issues` compensates — it does not, and asserting so puts a false
+  statement in front of the reviewer.
+- **Risk 3 disclosure.** State that removing the `:1076` suppression un-blinds an unknown number
+  of previously-suppressed broken references and may raise `_detect_deleted_target_issues`
+  finding volume; that the per-run filing cap of 5 and the open-issue dedupe are the only
+  bounds; and that the mitigation is observing the next scheduled rotation runs. No number, no
+  threshold, no gate decision.
+- **The red-state transcripts.** Paste the contents of
+  `docs/plans/notes/docs-auditor-rename-detection-red-state.md`, which Task 2 wrote and Task 3
+  confirmed covers all four in-scope cases (`:850, 926, 1010, 1099` on `main`). If that file is
+  missing or short a case, **stop** — Risk 2's guard has not been met and the PR is not ready.
+- **Risk 5's ordering note.** #2739's premise (a nonzero `fixes_withheld` is a real signal)
+  becomes true only after this merges, so this PR should land first.
 
 ## Verification
 
@@ -1021,11 +1128,16 @@ that read `fixes_withheld` need no code change.
 | Reporter makes no rename query | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "_git_log"` | match count == 0 |
 | Reporter stays subprocess-free (non-regression guard — already green pre-change) | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess"` | match count == 0 |
 | Basename cache reset survives | `grep -c "_BASENAME_INDEX_CACHE.clear()" reflections/docs_auditor.py` | output > 0 |
+| Vestigial autouse fixture gone | `grep -c "reset_global_state" tests/unit/test_docs_auditor_substrate.py` | match count == 0 |
+| Basename cache fixture survives | `grep -c "clear_basename_cache" tests/unit/test_docs_auditor_substrate.py` | output > 0 |
+| Red-state transcripts captured | `ls docs/plans/notes/docs-auditor-rename-detection-red-state.md 2>/dev/null \| wc -l` | output > 0 |
 | Rename regression exists | `grep -c "rename destination" tests/unit/test_docs_auditor_substrate.py` | output > 0 |
 | Existence-invariant coverage survives the channel collapse | `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` | output > 3 |
 
 **Every row above was executed against unmodified `main` on 2026-08-17** — validated by running,
-not by reasoning about grep's output format. Three rounds of critique broke these rows via three
+not by reasoning about grep's output format. Re-validated after the round-9 revision through
+`parse_verification_table()` + `subprocess.run(..., shell=True)`: **19 checks, 0 malformed**, every
+one with empty stderr. Three rounds of critique broke these rows via three
 different mechanisms (unquoted `--include` globs aborting under zsh; a `^./docs/plans/` anchor
 that matched nothing; then a `^docs/plans/` anchor that was equally inert because `grep -r .`
 emits `./`-prefixed paths, while that same `.` descended into 29 sibling worktrees). The durable
@@ -1049,6 +1161,12 @@ that fail the run. Any future annotation in this section must stay in prose or b
 - **Reporter stays subprocess-free** — pre-change `0` → **already green**; a non-regression guard,
   not evidence of completion
 - **Basename cache reset survives** — pre-change `1` → already green, non-regression guard
+- **Vestigial autouse fixture gone** — pre-change `1` → demonstrated red, must reach 0. Catches the
+  hollowed-out `reset_global_state` residue that the `_RENAME_QUERY_COUNT` row passes over.
+- **Basename cache fixture survives** — pre-change `3` → already green, non-regression guard; pairs
+  with the row above so "delete the fixture" cannot be over-applied to `clear_basename_cache`
+- **Red-state transcripts captured** — pre-change `0` → demonstrated red, must become > 0 once Task 2
+  writes `docs/plans/notes/docs-auditor-rename-detection-red-state.md`
 - **Existence-invariant coverage** — pre-change `5` → already green, non-regression guard, floor of 3
 - **Lint / format clean** — pre-change pass → already green; `ruff` honors `.gitignore` and so does
   not descend into `.worktrees/`
@@ -1090,10 +1208,10 @@ neither touches the deletion argument, the test-migration shape, or the `## Veri
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk \& Robustness; Scope \& Value | The plan makes four PR-description artifacts load-bearing — Risk 1's README-loses-repair-and-reporting disclosure, Risk 3's un-blinding disclosure, the #2834 citation, and the demonstrated-red transcripts that Risk 2 calls "the only real guard" — and three of them are Success Criteria. **No task authors any of them, and no task can verify them where they sit.** `/do-build` opens the PR at its own step 17, *after* every task in `## Step by Step Tasks` has run, so at Task 3 (`validate-deletion`) and at Task 5 (`validate-all`) the PR body does not exist yet. Task 3's two "Confirm the PR body carries…" bullets and Task 5's "Verify every Success Criterion" therefore check an artifact that cannot be present — structurally the same premature-validation defect round 8 caught in Task 3's `## Verification` rows, one layer up. Task 2 compounds it: it says "neuter `_absent_new_path_refs` to prove red, then revert" but never says to *capture* the transcript, while Task 3 says to confirm a "recorded red-state proof" and Success Criteria say it must be "pasted into the PR description" — so the transcripts have no durable holding place between the moment they are produced (Task 2) and the moment a PR exists to paste them into. A validator that takes Task 3 literally reports a spurious failure or loops. | pending | Do **not** weaken the Success Criteria — the disclosure content is correct and fully specified in Risks 1/2/3. Three edits: (1) Add to Task 2 an explicit bullet to write each red-state transcript into a durable artifact as it is produced (e.g. append to a `docs/plans/` scratch note or the lane's task-list notes) so it survives to PR-authoring time. (2) Move Task 3's two `Confirm the PR body carries…` bullets out of Task 3 — Task 3 keeps only the checks it can actually run against the worktree (verification rows, transcript existence, `_BASENAME_INDEX_CACHE.clear()`, no literal `fixes` param, both `audit()`-driven withheld tests surviving). (3) Add a final PR-body authoring step *after* Task 5, owned by whoever runs `/do-build` step 17, enumerating the four required contents (Risk 1 disclosure + #2834 citation, Risk 3 disclosure, red-state transcripts, Risk 5's #2739-ordering note), and re-point the three PR-body Success Criteria at that step so they are verified where the artifact exists. |
-| CONCERN | Risk \& Robustness | Test Impact dispositions `tests/unit/test_docs_auditor_substrate.py:55,57` as "remove both lines (the symbol no longer exists; leaving them raises `AttributeError`)". Those two lines are the *entire body* of the `reset_global_state` autouse fixture at `:52-57`; removing them leaves `def reset_global_state(): """Reset module-level counters between tests.""" yield` — an autouse fixture that resets nothing, carrying a docstring that is now false. `grep -n reset_global_state` returns exactly one hit (the definition), so no test requests it by name and nothing else depends on it. The `_RENAME_QUERY_COUNT` anti-criterion still reaches 0, so **no `## Verification` row catches this**: the plan's own guard passes over a vestigial autouse fixture with a lying docstring. That is precisely the residue class this plan refuses to tolerate three sections earlier, where it deletes the `fixes` parameter outright rather than passing `[]`, and the false docstring is the same defect the auditor exists to catch. | pending | Change the Test Impact entry from "remove both lines" to DELETE the whole `reset_global_state` fixture (`:52-57`, including the `@pytest.fixture(autouse=True)` decorator and the blank line after it). Verify nothing else references it first — `grep -n "reset_global_state" tests/unit/test_docs_auditor_substrate.py` must return only `:53`, the def, as it does at `bc3051ee4`. Do **not** confuse it with `clear_basename_cache`, a different fixture that is requested by name (`test_ls_files_failure_warns_and_yields_empty_index`, `test_dir_prefixed_decisions_unaffected_by_degraded_index`) and must survive. Add the deletion to Task 2's bullet list alongside the class deletions. |
-| NIT | History \& Consistency | Task 2 says ":744 and :771 (`TestStaleTermWordBoundary`) pass `[]` positionally *and* `regex_fixes=` by keyword and will raise `TypeError` under the new signature; drop the `[]` at **both**." A third site has the identical shape: `:1502` in `TestWithheldRateNonRegression` reads `_apply_fixes_to_file(full.relative_to(worktree), worktree, [], regex_fixes=fixes)`. Its Test Impact entry says only "passes the literal arg positionally. Re-point at the new signature" and does not name the keyword collision. Low impact — `:1502` is in Task 2's mechanically-derived call-site list, and the failure mode is a loud `TypeError`, never a vacuous green — but the count is wrong. | pending | n/a (NIT) |
-| NIT | History \& Consistency | Risk 4 states `docs/features/docs-auditor.md` carries "exactly three deleted-symbol mentions (`:164`, `:239`, `:246`) against **nine** planned edits to it". The `### Feature Documentation` checklist has nine bullets, but only **eight** target `docs-auditor.md`; the ninth targets `docs/features/README.md`. The round-8 verified-sound list has the same slip, calling its own enumeration of eight ranges "all nine". The three-mentions claim and the "roughly two thirds unguarded" conclusion both survive either reading (5/8 unguarded). | pending | n/a (NIT) |
+| CONCERN | Risk \& Robustness; Scope \& Value | The plan makes four PR-description artifacts load-bearing — Risk 1's README-loses-repair-and-reporting disclosure, Risk 3's un-blinding disclosure, the #2834 citation, and the demonstrated-red transcripts that Risk 2 calls "the only real guard" — and three of them are Success Criteria. **No task authors any of them, and no task can verify them where they sit.** `/do-build` opens the PR at its own step 17, *after* every task in `## Step by Step Tasks` has run, so at Task 3 (`validate-deletion`) and at Task 5 (`validate-all`) the PR body does not exist yet. Task 3's two "Confirm the PR body carries…" bullets and Task 5's "Verify every Success Criterion" therefore check an artifact that cannot be present — structurally the same premature-validation defect round 8 caught in Task 3's `## Verification` rows, one layer up. Task 2 compounds it: it says "neuter `_absent_new_path_refs` to prove red, then revert" but never says to *capture* the transcript, while Task 3 says to confirm a "recorded red-state proof" and Success Criteria say it must be "pasted into the PR description" — so the transcripts have no durable holding place between the moment they are produced (Task 2) and the moment a PR exists to paste them into. A validator that takes Task 3 literally reports a spurious failure or loops. | RESOLVED (round-9 revision) — Task 2 now writes each transcript to `docs/plans/notes/docs-auditor-rename-detection-red-state.md` as it is produced; Task 3's two PR-body bullets are gone, replaced by an explicit "no PR-body check belongs in this task" note plus a transcript-file check; new **Task 6 (author-pr-body)** owns PR assembly at `/do-build` step 17 and enumerates all four required contents; the three PR-body Success Criteria are marked "(verified in Task 6)"; a **Red-state transcripts captured** `## Verification` row was added. | Do **not** weaken the Success Criteria — the disclosure content is correct and fully specified in Risks 1/2/3. Three edits: (1) Add to Task 2 an explicit bullet to write each red-state transcript into a durable artifact as it is produced (e.g. append to a `docs/plans/` scratch note or the lane's task-list notes) so it survives to PR-authoring time. (2) Move Task 3's two `Confirm the PR body carries…` bullets out of Task 3 — Task 3 keeps only the checks it can actually run against the worktree (verification rows, transcript existence, `_BASENAME_INDEX_CACHE.clear()`, no literal `fixes` param, both `audit()`-driven withheld tests surviving). (3) Add a final PR-body authoring step *after* Task 5, owned by whoever runs `/do-build` step 17, enumerating the four required contents (Risk 1 disclosure + #2834 citation, Risk 3 disclosure, red-state transcripts, Risk 5's #2739-ordering note), and re-point the three PR-body Success Criteria at that step so they are verified where the artifact exists. |
+| CONCERN | Risk \& Robustness | Test Impact dispositions `tests/unit/test_docs_auditor_substrate.py:55,57` as "remove both lines (the symbol no longer exists; leaving them raises `AttributeError`)". Those two lines are the *entire body* of the `reset_global_state` autouse fixture at `:52-57`; removing them leaves `def reset_global_state(): """Reset module-level counters between tests.""" yield` — an autouse fixture that resets nothing, carrying a docstring that is now false. `grep -n reset_global_state` returns exactly one hit (the definition), so no test requests it by name and nothing else depends on it. The `_RENAME_QUERY_COUNT` anti-criterion still reaches 0, so **no `## Verification` row catches this**: the plan's own guard passes over a vestigial autouse fixture with a lying docstring. That is precisely the residue class this plan refuses to tolerate three sections earlier, where it deletes the `fixes` parameter outright rather than passing `[]`, and the false docstring is the same defect the auditor exists to catch. | RESOLVED (round-9 revision) — the Test Impact entry now DELETEs the whole `reset_global_state` fixture (`:52-57`, decorator and trailing blank line included), records that `grep -n "reset_global_state"` returns only `:53` at `bc3051ee4`, states that `_BASENAME_INDEX_CACHE` does **not** belong there because `clear_basename_cache` (`:1025-1029`) already owns it and is requested by name at `:1045`/`:1077`, and adds the deletion to Task 2's bullet list. Two new `## Verification` rows: **Vestigial autouse fixture gone** (pre-change 1 → 0) and **Basename cache fixture survives** (pre-change 3 → > 0). | Change the Test Impact entry from "remove both lines" to DELETE the whole `reset_global_state` fixture (`:52-57`, including the `@pytest.fixture(autouse=True)` decorator and the blank line after it). Verify nothing else references it first — `grep -n "reset_global_state" tests/unit/test_docs_auditor_substrate.py` must return only `:53`, the def, as it does at `bc3051ee4`. Do **not** confuse it with `clear_basename_cache`, a different fixture that is requested by name (`test_ls_files_failure_warns_and_yields_empty_index`, `test_dir_prefixed_decisions_unaffected_by_degraded_index`) and must survive. Add the deletion to Task 2's bullet list alongside the class deletions. |
+| NIT | History \& Consistency | Task 2 says ":744 and :771 (`TestStaleTermWordBoundary`) pass `[]` positionally *and* `regex_fixes=` by keyword and will raise `TypeError` under the new signature; drop the `[]` at **both**." A third site has the identical shape: `:1502` in `TestWithheldRateNonRegression` reads `_apply_fixes_to_file(full.relative_to(worktree), worktree, [], regex_fixes=fixes)`. Its Test Impact entry says only "passes the literal arg positionally. Re-point at the new signature" and does not name the keyword collision. Low impact — `:1502` is in Task 2's mechanically-derived call-site list, and the failure mode is a loud `TypeError`, never a vacuous green — but the count is wrong. | RESOLVED (round-9 revision) — `:1502`'s Test Impact entry now quotes its actual call and names the keyword collision; the `:744`/`:771` entry and the count both say **three** sites. | n/a (NIT) |
+| NIT | History \& Consistency | Risk 4 states `docs/features/docs-auditor.md` carries "exactly three deleted-symbol mentions (`:164`, `:239`, `:246`) against **nine** planned edits to it". The `### Feature Documentation` checklist has nine bullets, but only **eight** target `docs-auditor.md`; the ninth targets `docs/features/README.md`. The round-8 verified-sound list has the same slip, calling its own enumeration of eight ranges "all nine". The three-mentions claim and the "roughly two thirds unguarded" conclusion both survive either reading (5/8 unguarded). | RESOLVED (round-9 revision) — Risk 4 now says **eight** planned edits to `docs-auditor.md` and explains that the ninth `### Feature Documentation` bullet targets `docs/features/README.md`; the conclusion is restated as "five of the eight feature-doc edits" unguarded. | n/a (NIT) |
 
 **Verified this round and found sound (so round 10, if any, does not re-litigate):**
 
@@ -1143,6 +1261,21 @@ neither touches the deletion argument, the test-migration shape, or the `## Veri
   `## Documentation` carries `docs/features/` checkbox tasks and `## Test Impact` carries explicit
   UPDATE/DELETE/REPLACE/ADD/VERIFY dispositions on every entry. No Popoto model is touched, so the
   migration check does not apply.
+
+**Round-9 revision applied 2026-08-17.** Both CONCERNs and both NITs are closed above; this was
+the third and final concern-closing revision this run funds, so the plan builds from here. Every
+coordinate written in this revision was verified against live source at `bc3051ee4`, not carried
+over from the critique text: `reset_global_state` at `:52-57` with body lines `:55`/`:57` and a
+single `grep` hit at `:53`; `clear_basename_cache` at `:1025-1029` requested at `:1045`/`:1077`;
+`:1502`'s call reading `_apply_fixes_to_file(full.relative_to(worktree), worktree, [],
+regex_fixes=fixes)`; `:744`/`:771` carrying the identical shape; `### Feature Documentation`'s
+nine bullets, eight of which target `docs-auditor.md`; and `/do-build` opening the PR at step 17
+(`~/.claude/skills/do-build/SKILL.md:131`) with worktree removal following immediately after
+(`PR_AND_CLEANUP.md:116-124`), which is why the transcripts are parked on `main` under
+`docs/plans/notes/` rather than in the worktree. `## Verification` re-validated through
+`parse_verification_table()` + `subprocess.run(..., shell=True)`: **19 checks, 0 malformed**, all
+stderr empty, the six symbol rows unchanged at `12, 4, 8, 7, 7, 9`, and the three new rows at
+`1`, `3`, `0`.
 
 **Dispatch note.** The driving session had **no Agent tool available**, so the three FULL-roster
 lenses (Risk & Robustness, Scope & Value, History & Consistency) were applied directly by the
