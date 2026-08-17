@@ -693,7 +693,8 @@ class Job(Model):
         growing model (via ``scripts/popoto_index_cleanup.run_cleanup``) —
         not a one-shot migration cost. At the measured population (92 Jobs) that
         is negligible; past roughly 10,000 Jobs the full hydrate + one
-        ``zscore`` round trip per row needs pipelining or a cursor.
+        ``zscore`` round trip per row needs pipelining or a cursor. Tracked as
+        issue #2848 so the ceiling surfaces on its own rather than only here.
 
         Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
         the return when the enumeration itself fails (Redis down, popoto
