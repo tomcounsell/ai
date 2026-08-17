@@ -68,7 +68,6 @@ VAULT_SITE_MAPPING: dict[str, tuple[str, str | None]] = {
 # Hard caps and tunables.
 NEIGHBORHOOD_CAP = 20
 VAULT_DRIFT_ISSUE_CAP = 5
-GIT_LOG_FOLLOW_CAP = 10
 LOCK_TTL_SECONDS = 3600
 SWEEPER_LOCK_TTL_SECONDS = 1800
 STUB_DOC_LINE_THRESHOLD = 5
@@ -367,140 +366,6 @@ def _resolve_pr_changed_files(repo_root: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-_RENAME_QUERY_COUNT = 0
-
-
-def _git_log_follow_renames(old_path: str, repo_root: Path) -> list[tuple[str, str]]:
-    """Use ``git log --follow`` to find renames. Capped to GIT_LOG_FOLLOW_CAP per run.
-
-    Returns list of (old_name, new_name) tuples.
-    """
-    global _RENAME_QUERY_COUNT
-    if _RENAME_QUERY_COUNT >= GIT_LOG_FOLLOW_CAP:
-        logger.warning(
-            f"docs_auditor: git log --follow cap ({GIT_LOG_FOLLOW_CAP}) reached, "
-            f"skipping rename detection for {old_path}"
-        )
-        return []
-    _RENAME_QUERY_COUNT += 1
-
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "log",
-                "--follow",
-                "--diff-filter=R",
-                "--name-status",
-                "--format=",
-                "--",
-                old_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-        )
-        renames: list[tuple[str, str]] = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line.startswith("R"):
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 3:
-                renames.append((parts[1], parts[2]))
-        return renames
-    except Exception as e:
-        logger.warning(f"docs_auditor: git log --follow failed for {old_path}: {e}")
-        return []
-
-
-def _detect_renamed_link_fixes(
-    doc_path: Path, content: str, repo_root: Path
-) -> list[tuple[str, str]]:
-    """Detect markdown link targets whose path was renamed.
-
-    Returns list of (old_text, new_text) replacements.
-    """
-    fixes: list[tuple[str, str]] = []
-    for m in re.finditer(r"\[[^\]]+\]\(([^)]+\.md)\)", content):
-        target = m.group(1).strip()
-        # Resolve target absolute path; skip URLs
-        if target.startswith(("http://", "https://", "#")):
-            continue
-        target_path = (
-            (doc_path.parent / target).resolve() if not target.startswith("/") else Path(target)
-        )
-        try:
-            rel = target_path.relative_to(repo_root.resolve())
-        except ValueError:
-            continue
-        if (repo_root / rel).exists():
-            continue
-        # Try rename detection
-        renames = _git_log_follow_renames(str(rel), repo_root)
-        if renames:
-            new_name = renames[0][1]
-            fixes.append((target, new_name))
-    return fixes
-
-
-def _detect_renamed_symbol_fixes(content: str, repo_root: Path) -> list[tuple[str, str]]:
-    """Detect Python symbol/file references that were renamed.
-
-    Looks for backtick-wrapped paths like ``foo/bar.py``. If the path no
-    longer exists but git history shows a rename, queue a replacement.
-    """
-    fixes: list[tuple[str, str]] = []
-    # Deliberately narrower than `_PATH_REF_RE`, which was widened to `*` for #2759.
-    # This is a *detector* pattern governing what the auditor proposes, not the write
-    # path the existence invariant guards. Widening it to bare names enlarges the
-    # candidate set and spends the GIT_LOG_FOLLOW_CAP per-run `git log --follow`
-    # budget on names that resolve to no single path anyway — a scope and volume
-    # change with its own failure modes, not a safety fix. Ruled unchanged in #2759.
-    for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
-        path = m.group(1)
-        if (repo_root / path).exists():
-            continue
-        renames = _git_log_follow_renames(path, repo_root)
-        if renames and renames[0][1] != path:
-            fixes.append((path, renames[0][1]))
-    return fixes
-
-
-def _detect_readme_broken_entries(
-    readme_path: Path, content: str, repo_root: Path
-) -> list[tuple[str, str]]:
-    """Detect README index entries whose target file is gone.
-
-    Returns list of (old_line, replacement_or_empty) tuples. An empty
-    replacement signals deletion of the line.
-    """
-    fixes: list[tuple[str, str]] = []
-    for line in content.splitlines():
-        m = re.search(r"\(([^)]+\.md)\)", line)
-        if not m:
-            continue
-        target = m.group(1).strip()
-        if target.startswith(("http://", "https://", "#")):
-            continue
-        target_path = (readme_path.parent / target).resolve()
-        try:
-            rel = target_path.relative_to(repo_root.resolve())
-        except ValueError:
-            continue
-        if (repo_root / rel).exists():
-            continue
-        # Broken entry — try rename, otherwise delete the line
-        renames = _git_log_follow_renames(str(rel), repo_root)
-        if renames:
-            new_target = renames[0][1]
-            fixes.append((target, new_target))
-        else:
-            fixes.append((line, ""))
-    return fixes
-
-
 def _normalize_prose(text: str | None) -> str:
     """Lowercase, strip backticks, and collapse whitespace — for cue matching only.
 
@@ -627,18 +492,18 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
     context in real prose sits in a different sentence from the term it explains.
     Do not "improve" this into a per-occurrence rule.
 
-    Two further gates live at apply time rather than here, because the literal
-    ``fixes`` loop runs first and can delete lines out from under any index
-    computed against ``content``: fence/heading/deletion-prose suppression (via
-    ``_build_line_context`` / ``_is_documented_deletion``) and path-token
-    suppression. See ``_apply_fixes_to_file``.
+    Two further gates live at apply time rather than here, because the apply
+    loop rewrites the text across iterations and can shift or remove content out
+    from under any index computed against ``content``: fence/heading/
+    deletion-prose suppression (via ``_build_line_context`` /
+    ``_is_documented_deletion``) and path-token suppression. See
+    ``_apply_fixes_to_file``.
 
     Returns fixes on the regex channel — ``(compiled_pattern, replacement)`` —
-    so detection and application share one matching semantics. These are passed
-    to ``_apply_fixes_to_file`` as ``regex_fixes``, never mixed into the literal
-    ``fixes`` list (which carries the ``new == ""`` line-delete sentinel). The
-    replacement stays a plain ``str``; the suppression callable is built at the
-    apply site so the withheld record and this channel's contract stay intact.
+    so detection and application share one matching semantics. This is
+    ``_apply_fixes_to_file``'s only fix channel. The replacement stays a plain
+    ``str``; the suppression callable is built at the apply site so the withheld
+    record and this channel's contract stay intact.
     """
     normalized = _normalize_prose(content)
     fixes: list[tuple[re.Pattern[str], str]] = []
@@ -785,11 +650,11 @@ def _make_stale_term_replacer(replacement: str, suppressed: list[int]) -> Callab
 
     Context is re-derived from ``match.string`` — the text *currently being
     rewritten* — and ``match.start()``, the live offset into it. That is the whole
-    point: ``_apply_fixes_to_file`` applies the literal ``fixes`` list first,
-    including ``_detect_readme_broken_entries``' ``new == ""`` whole-line-delete
-    sentinel, so any line index computed at detection time is stale the moment a
-    line ahead of it disappears — and it fails *silently*, producing a plausible
-    wrong rewrite rather than an error. There is no index here to go stale.
+    point: ``_apply_fixes_to_file``'s regex loop mutates ``new_text`` across
+    iterations, so an index computed against the pre-loop ``content`` is already
+    stale for every fix after the first — and it fails *silently*, producing a
+    plausible wrong rewrite rather than an error. There is no index here to go
+    stale.
 
     A suppressed match returns ``match.group(0)`` unchanged, but ``subn`` still
     counts it, so each suppression is recorded in ``suppressed`` for the caller to
@@ -825,23 +690,21 @@ def _make_stale_term_replacer(replacement: str, suppressed: list[int]) -> Callab
 def _apply_fixes_to_file(
     path: Path,
     repo_root: Path,
-    fixes: list[tuple[str, str]],
-    regex_fixes: list[tuple[re.Pattern[str], str]] | None = None,
+    regex_fixes: list[tuple[re.Pattern[str], str]],
 ) -> tuple[int, list[dict]]:
     """Apply text replacements to a file, subject to the existence invariant.
 
-    ``fixes`` are literal ``(old, new)`` pairs; ``new == ""`` deletes the whole
-    line that exactly equals ``old``. ``regex_fixes`` are ``(pattern, replacement)``
-    pairs applied via ``pattern.subn()`` in their own loop.
+    ``regex_fixes`` — ``(pattern, replacement)`` pairs applied via
+    ``pattern.subn()`` — are the auditor's single fix channel.
 
-    **Apply-time suppression (regex fixes only, #2744):** each regex fix's plain
-    ``str`` replacement is wrapped in a locally-built callable
-    (``_make_stale_term_replacer``) that leaves a match untouched when it sits in
-    a fenced code block, under a deletion-recording heading, next to deletion
-    prose, or inside a file-path token. The literal ``fixes`` loop runs *first*
-    and its ``new == ""`` sentinel deletes whole lines, so this context must be —
-    and is — derived from the live, already-mutated text at match time rather
-    than from any index computed at detection time.
+    **Apply-time suppression (#2744):** each fix's plain ``str`` replacement is
+    wrapped in a locally-built callable (``_make_stale_term_replacer``) that
+    leaves a match untouched when it sits in a fenced code block, under a
+    deletion-recording heading, next to deletion prose, or inside a file-path
+    token. The loop rewrites ``new_text`` in place across iterations, so an index
+    computed against the pre-loop text is stale for every fix after the first;
+    this context must be — and is — derived from the live, already-mutated text
+    at match time rather than from any index computed at detection time.
 
     **Existence invariant:** a fix may not introduce a ``file.{py,md}``-shaped
     reference — bare or ``dir/``-prefixed (#2759) — that does not exist under
@@ -852,9 +715,8 @@ def _apply_fixes_to_file(
     Returns ``(applied_count, withheld)`` where ``withheld`` is a list of
     ``{"doc", "old", "new", "reason"}`` dicts.
     """
-    regex_fixes = regex_fixes or []
     full = repo_root / path
-    if not full.exists() or (not fixes and not regex_fixes):
+    if not full.exists() or not regex_fixes:
         return 0, []
     try:
         text = full.read_text(encoding="utf-8", errors="replace")
@@ -876,32 +738,6 @@ def _apply_fixes_to_file(
             ", ".join(absent),
         )
         withheld.append({"doc": str(path), "old": old, "new": new, "reason": "target-absent"})
-
-    for old, new in fixes:
-        if not old:
-            continue
-        if new == "":
-            # Delete the entire line that exactly equals `old` (after stripping trailing newline).
-            # Substring match would risk collateral deletion when `old` happens to appear
-            # inside an unrelated line.
-            lines = new_text.splitlines(keepends=True)
-            kept = [ln for ln in lines if ln.rstrip("\n\r") != old.rstrip("\n\r")]
-            count = len(lines) - len(kept)
-            if count == 0:
-                continue
-            candidate = "".join(kept)
-        else:
-            if old not in new_text:
-                continue
-            count = new_text.count(old)
-            candidate = new_text.replace(old, new)
-
-        absent = _absent_new_path_refs(original_refs, candidate, repo_root, path)
-        if absent:
-            _reject(old, new, absent)
-            continue
-        new_text = candidate
-        applied += count
 
     for pattern, new in regex_fixes:
         suppressed: list[int] = []
@@ -1038,7 +874,7 @@ def _is_documented_deletion(
 
 
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
-    """File issues for references to deleted (non-renamed) targets.
+    """File issues for references to deleted targets.
 
     Suppresses three classes of false positive before emitting a finding:
     placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
@@ -1048,11 +884,12 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
     findings: list[dict] = []
     lines = content.splitlines()
     in_fence, heading_for_line = _build_line_context(content)
-    # Deliberately narrower than `_PATH_REF_RE` (widened to `*` for #2759), for the
-    # same reason as `_detect_renamed_symbol_fixes`: this is a detector pattern
-    # governing what the auditor *proposes*, not the write path. Widening it would
-    # spend the per-run issue cap on bare names not resolvable to a single path.
-    # Ruled unchanged in #2759.
+    # Deliberately narrower than `_PATH_REF_RE`, which was widened to `*` for #2759.
+    # The asymmetry is intentional: `_PATH_REF_RE` guards the *write* path, where a
+    # bare name that resolves to nothing is a corruption the existence invariant must
+    # catch, while this is a *detector* pattern governing what the auditor proposes to
+    # a human. Widening it would spend the per-run issue cap on bare names not
+    # resolvable to a single path. Ruled unchanged in #2759.
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
         if _is_placeholder_path(path):
@@ -1072,9 +909,6 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             )
             continue
         if (repo_root / path).exists():
-            continue
-        renames = _git_log_follow_renames(path, repo_root)
-        if renames:
             continue
         findings.append(
             {
@@ -1356,8 +1190,6 @@ def audit(
         Dict with ``status``, ``files_touched``, ``fixes_applied``,
         ``issues_filed``, ``pr_url``.
     """
-    global _RENAME_QUERY_COUNT
-    _RENAME_QUERY_COUNT = 0  # reset per-run cap
     # The bare-name existence oracle is a per-*run* snapshot: a long-lived process
     # must not answer from an index built before the last commit (#2759).
     _BASENAME_INDEX_CACHE.clear()
@@ -1408,25 +1240,16 @@ def audit(
         except Exception:
             continue
 
-        # Auto-fix detectors
-        fixes: list[tuple[str, str]] = []
-        if path.name == "README.md":
-            fixes.extend(_detect_readme_broken_entries(path, content, root))
-        else:
-            fixes.extend(_detect_renamed_link_fixes(path, content, root))
-            fixes.extend(_detect_renamed_symbol_fixes(content, root))
-        # Anchored stale terms travel on their own homogeneous channel — a
-        # compiled pattern must never land in the literal `fixes` list.
+        # Auto-fix detectors — anchored stale terms are the only fix channel.
         regex_fixes = _detect_stale_term_fixes(content)
 
-        # Apply-mode writes are markdown-only (#2058). The detectors above are
-        # markdown-regex based (bare-term renames, backtick link/symbol fixes),
-        # so a committed non-.md file that lands in the same PR — e.g. a
-        # site/*.html doc page — must never be auto-rewritten inside tags,
-        # attributes, or inline <script>. Reporting still runs; only the
-        # write-back is guarded.
-        if (fixes or regex_fixes) and apply_mode == "apply" and str(path).endswith(".md"):
-            applied, rejected = _apply_fixes_to_file(path, root, fixes, regex_fixes=regex_fixes)
+        # Apply-mode writes are markdown-only (#2058). The detector above is
+        # markdown-regex based (bare-term renames), so a committed non-.md file
+        # that lands in the same PR — e.g. a site/*.html doc page — must never be
+        # auto-rewritten inside tags, attributes, or inline <script>. Reporting
+        # still runs; only the write-back is guarded.
+        if regex_fixes and apply_mode == "apply" and str(path).endswith(".md"):
+            applied, rejected = _apply_fixes_to_file(path, root, regex_fixes)
             withheld.extend(rejected)
             if applied > 0:
                 total_fixes += applied
