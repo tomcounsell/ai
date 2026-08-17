@@ -946,6 +946,7 @@ async def _ack_steering_routed(
     sender_name: str,
     text: str,
     log_context: str,
+    room_id: str | None = None,
     context_advisory: str | None = None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
@@ -957,6 +958,16 @@ async def _ack_steering_routed(
     Caller is responsible for ``return`` after this call. ``log_context``
     must NOT include the trailing ``(steer|abort)`` suffix — the helper
     appends it from the resolved abort detection.
+
+    ``room_id`` is the Room composite the caller derived from the session row
+    it selected, via ``models.room.room_id_for_session``. A caller holding no
+    session row passes ``None`` rather than fabricating a selection. With a
+    ``room_id`` the message outlives the session it was aimed at; with
+    ``None`` it lands on the legacy session key. An abort — explicit or
+    keyword-detected — lands on the legacy key regardless, so a "stop" typed
+    into a chat can never kill a session it was not aimed at. The writer
+    never resolves a Room itself: ``session_id`` is unindexed and a lookup on
+    this path costs seconds.
 
     Media branch (issue #1215): when ``message.media`` is present, the
     helper fires the user-facing reaction *before* downloading so the
@@ -1018,7 +1029,7 @@ async def _ack_steering_routed(
                 logger.warning(f"[steering-ingest] Failed to schedule task: {e}")
 
     is_abort = text.strip().lower() in ABORT_KEYWORDS
-    push_steering_message(session_id, text, sender_name, is_abort=is_abort)
+    push_steering_message(session_id, text, sender_name, is_abort=is_abort, room_id=room_id)
 
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's
@@ -1032,6 +1043,19 @@ async def _ack_steering_routed(
     # rest, so a front-pushed advisory would DISPLACE the human's own message
     # for that turn. At the back, the human's message is always consumed first
     # and the advisory is at worst one turn late.
+    #
+    # The advisory rides the SAME leg as the human message it accompanies
+    # (same room_id value). It is message-scoped, not session-scoped: whichever
+    # session drains the human's message — the original target on the legacy
+    # leg, or a Room successor on the Room leg — is exactly the session the
+    # advisory is for. Splitting the legs (advisory legacy, human Room) would
+    # invert drain order — pop_all_steering_messages drains legacy first — and
+    # the advisory would displace the human's message for a turn, falsifying
+    # the front=False invariant above. Carve-out: when the human's text is a
+    # bare abort keyword, push_steering_message demotes the human's message to
+    # the legacy leg while the advisory keeps the Room leg — the legs do split
+    # there, but legacy drains first, so the abort still precedes the advisory
+    # and ordering stays safe.
     if context_advisory:
         try:
             push_steering_message(
@@ -1039,6 +1063,7 @@ async def _ack_steering_routed(
                 context_advisory,
                 "intake-classifier",
                 is_abort=False,
+                room_id=room_id,  # same leg as the human message — see comment above
                 front=False,
             )
         except Exception as _adv_err:
@@ -1859,15 +1884,25 @@ async def main():
             _steering_session_enqueued = False
             try:
                 from models.agent_session import AgentSession
+                from models.room import room_id_for_session
 
                 # Check both "running" and "active" statuses -- "running" is the
                 # primary status during agent execution (set by _pop_agent_session), while
                 # "active" is set later by _execute_agent_session for auto-continue deferral.
                 # Both represent "agent is currently working" for steering purposes.
+                # `query.filter` returns a QueryBuilder, not a list — materialize it
+                # before sorting, or `.sort` raises AttributeError straight into the
+                # Telethon handler (there is no enclosing guard on this path). Sort
+                # newest-first so the Room is derived from the live row.
                 matching_session = None
                 for check_status in ("running", "active"):
-                    sessions = AgentSession.query.filter(session_id=session_id, status=check_status)
+                    sessions = list(
+                        AgentSession.query.filter(session_id=session_id, status=check_status)
+                    )
                     if sessions:
+                        sessions.sort(
+                            key=lambda s: (s.created_at is not None, s.created_at), reverse=True
+                        )
                         matching_session = sessions[0]
                         break
 
@@ -1886,6 +1921,7 @@ async def main():
                             f"{matching_session.status} session "
                             f"{session_id}"
                         ),
+                        room_id=room_id_for_session(matching_session),
                     )
                     return
                 else:
@@ -1894,10 +1930,13 @@ async def main():
                     # they want to add to that specific session regardless of how long
                     # it has been waiting. Skip the age window check here -- that guard
                     # only applies to non-reply coalescing (handled below).
-                    pending_sessions = AgentSession.query.filter(
-                        session_id=session_id, status="pending"
+                    pending_sessions = list(
+                        AgentSession.query.filter(session_id=session_id, status="pending")
                     )
                     if pending_sessions:
+                        pending_sessions.sort(
+                            key=lambda s: (s.created_at is not None, s.created_at), reverse=True
+                        )
                         pending_session = pending_sessions[0]
                         age = _pending_session_age_seconds(pending_session.created_at, time.time())
                         await _ack_steering_routed(
@@ -1911,6 +1950,7 @@ async def main():
                                 f"[{project_name}] Steered reply-to into "
                                 f"pending session {session_id} (age={age:.1f}s)"
                             ),
+                            room_id=room_id_for_session(pending_session),
                         )
                         return
 
@@ -1925,10 +1965,16 @@ async def main():
                         # created a pending/running record between the checks above.
                         live_guard = None
                         for _guard_status in ("pending", "running", "active"):
-                            _live = AgentSession.query.filter(
-                                session_id=session_id, status=_guard_status
+                            _live = list(
+                                AgentSession.query.filter(
+                                    session_id=session_id, status=_guard_status
+                                )
                             )
                             if _live:
+                                _live.sort(
+                                    key=lambda s: (s.created_at is not None, s.created_at),
+                                    reverse=True,
+                                )
                                 live_guard = _live[0]
                                 break
                         if live_guard:
@@ -1944,6 +1990,7 @@ async def main():
                                     f"[{project_name}] Steered reply-to-completed into "
                                     f"live {live_guard.status} session {session_id}"
                                 ),
+                                room_id=room_id_for_session(live_guard),
                             )
                             return
 
@@ -2147,6 +2194,11 @@ async def main():
                                     f"merged message into session {guard_session_id} "
                                     f"(age={guard_age:.3f}s)"
                                 ),
+                                # No session row in hand — `guard_sessions` is only
+                                # tested for truthiness, so any `[0]` here would be an
+                                # arbitrary pick that could derive the wrong Room.
+                                # Fall back to the legacy session key.
+                                room_id=None,
                             )
                             return
                         else:
@@ -2244,14 +2296,24 @@ async def main():
 
                     if intent == "interjection":
                         # Re-check session status (Race 1 mitigation: session may
-                        # have completed during classification)
+                        # have completed during classification). Materialize before
+                        # sorting — `query.filter` returns a QueryBuilder with no
+                        # `.sort`, and this path has no enclosing guard.
+                        from models.room import room_id_for_session
+
                         fresh_session = None
                         for check_status in ("running", "active", "pending"):
-                            sessions = AgentSession.query.filter(
-                                session_id=target_session.session_id,
-                                status=check_status,
+                            sessions = list(
+                                AgentSession.query.filter(
+                                    session_id=target_session.session_id,
+                                    status=check_status,
+                                )
                             )
                             if sessions:
+                                sessions.sort(
+                                    key=lambda s: (s.created_at is not None, s.created_at),
+                                    reverse=True,
+                                )
                                 fresh_session = sessions[0]
                                 break
 
@@ -2268,6 +2330,7 @@ async def main():
                                     f"interjection to session "
                                     f"{fresh_session.session_id}"
                                 ),
+                                room_id=room_id_for_session(fresh_session),
                                 # #2694: ONLY this call site passes an advisory.
                                 context_advisory=_ctx_recall_advisory,
                             )
@@ -2682,7 +2745,11 @@ async def main():
         try:
             from models.agent_session import AgentSession
 
+            # Newest-first: this query has no status filter, so a superseded row
+            # for the same session_id can appear beside the live one and would
+            # derive a Room the live session never drains.
             sessions = list(AgentSession.query.filter(session_id=session_id))
+            sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
             session = sessions[0] if sessions else None
         except Exception as e:
             logger.debug(f"[edit] Session lookup failed (non-fatal): {e}")
@@ -2705,11 +2772,13 @@ async def main():
         if session.status in ("running", "active", "pending"):
             # Agent is still working — steer with the updated text
             from agent.steering import push_steering_message
+            from models.room import room_id_for_session
 
             push_steering_message(
                 session_id,
                 f"[Edit] {edited_text}",
                 sender_name,
+                room_id=room_id_for_session(session),
             )
             logger.info(
                 f"[edit] Steered edit into {session.status} session {session_id} "
@@ -2729,8 +2798,14 @@ async def main():
             # when Telegram delivers duplicate edit events for the same message.
             try:
                 from agent.steering import push_steering_message
+                from models.room import room_id_for_session
 
+                # Newest-first before the Python-side status filter: unfiltered
+                # query, so a superseded row can sit beside the live one.
                 edit_sessions = list(AgentSession.query.filter(session_id=new_session_id))
+                edit_sessions.sort(
+                    key=lambda s: (s.created_at is not None, s.created_at), reverse=True
+                )
                 active_edit = next(
                     (s for s in edit_sessions if s.status in ("pending", "running", "active")),
                     None,
@@ -2739,7 +2814,12 @@ async def main():
                 active_edit = None
 
             if active_edit:
-                push_steering_message(new_session_id, f"[Edit] {edited_text}", sender_name)
+                push_steering_message(
+                    new_session_id,
+                    f"[Edit] {edited_text}",
+                    sender_name,
+                    room_id=room_id_for_session(active_edit),
+                )
                 logger.info(
                     f"[edit] Steered duplicate edit into existing session {new_session_id} "
                     f"(msg {message.id}, status={active_edit.status})"

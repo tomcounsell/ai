@@ -3553,6 +3553,11 @@ async def _apply_recovery_transition(
                         ),
                         "session-health",
                         front=True,
+                        # Legacy key on purpose: this advisory names the tool
+                        # that wedged THIS session, so it is misinformation to a
+                        # successor. It is also the repo's only front=True push,
+                        # and front orders within the legacy leg only.
+                        room_id=None,
                     )
                     try:
                         from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
