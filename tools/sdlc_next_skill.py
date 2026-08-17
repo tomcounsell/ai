@@ -278,8 +278,10 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     # (#2757). "Unverifiable" is not "falsified": manufacturing a mismatch from
     # a lookup that never ran is what re-dispatched `/do-build` on merged work.
     pr_identifiable = bool(pr_number)
-    build_claimed = stage_states.get("BUILD") == "completed" and pr_identifiable
-    if stage_states.get("BUILD") == "completed" and not pr_identifiable:
+    build_marked = stage_states.get("BUILD") == "completed"
+    patch_marked = stage_states.get("PATCH") == "completed"
+    build_claimed = build_marked and pr_identifiable
+    if build_marked and not pr_identifiable:
         logger.debug(
             "stage-artifact-verify: issue #%s BUILD claims completed but no PR number is "
             "recorded; skipping the live PR check rather than reporting a claim it cannot "
@@ -293,16 +295,14 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     # `pr_state` then stays None, the merged-skip below cannot engage, and the
     # whole verdict falls to `git ls-remote` -- where "branch gone" is
     # indistinguishable from "deleted on merge" with no PR state left to consult.
-    patch_claimed = (
-        stage_states.get("PATCH") == "completed" and bool(lane_branch) and pr_identifiable
-    )
-    if stage_states.get("PATCH") == "completed" and not lane_branch:
+    patch_claimed = patch_marked and bool(lane_branch) and pr_identifiable
+    if patch_marked and not lane_branch:
         logger.debug(
             "stage-artifact-verify: issue #%s PATCH claims completed but no lane slug is "
             "recorded; skipping the branch probe rather than guessing a branch name",
             issue_number,
         )
-    elif stage_states.get("PATCH") == "completed" and not pr_identifiable:
+    elif patch_marked and not pr_identifiable:
         logger.debug(
             "stage-artifact-verify: issue #%s PATCH claims completed but no PR number is "
             "recorded; skipping the branch probe because a missing branch is "
@@ -313,8 +313,10 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     # Resolve the live PR state at most once (used by both checks below) --
     # only when a claim that needs it is actually present, so an unclaimed
     # BUILD/PATCH stage still makes zero live calls (test_no_claimed_artifact_is_a_noop).
+    # Both claims already require `pr_identifiable`, so a claim being present is
+    # itself proof that `pr_number` is truthy -- no separate check needed.
     pr_state: str | None = None
-    if pr_number and (build_claimed or patch_claimed):
+    if build_claimed or patch_claimed:
         pr_state = _fetch_pr_state(pr_number, repo=repo)
 
     if build_claimed:

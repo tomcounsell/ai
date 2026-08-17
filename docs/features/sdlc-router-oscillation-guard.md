@@ -161,6 +161,20 @@ with no MERGED-over-CLOSED preference, so `all` can surface a closed-unmerged
 PR, which reads back as `CLOSED` and makes G8 fire — converting a silent
 no-op into an active false rebuild.
 
+**Cost: the lookup is doubled on the no-open-PR path (issue #2757).** The second
+`_lookup_pr` pass fires whenever the first returns `None` — i.e. for any issue
+with no open PR, which is most issues `_compute_meta` is asked about (the
+router tick, the dashboard, an operator naming a non-lane issue). Each pass can
+spend up to two `gh` subprocesses (issue-number search, then the branch-head
+fallback), so an issue with no PR at all costs 4 `gh` calls instead of 2, adding
+up to ~10s of latency when `gh` hangs against each call's 5s timeout, and the
+`gh pr list --search` leg draws on the tighter search-API rate limit. Bounded:
+only the router tick path and the `sdlc-tool` CLI reach `query_enriched`. A
+short-circuit (skipping the second pass when the caller only wants in-flight
+state) is deliberately not implemented — correctness first, and the cost is
+recorded here so a future slow-dashboard report finds the cause rather than
+re-deriving it.
+
 **cwd threading (issue #2078).** All three live `git` checks
 (`_check_plan_committed_on_main`, `_check_branch_pushed`, and the
 `branch_exists` probe in `_build_context`) run through a shared
