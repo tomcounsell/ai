@@ -661,8 +661,13 @@ class TestRecencyLookup:
         orphan = b"Job:test-orphan-no-such-hash:nowhere"
 
         def with_orphan(key, start, end, **kwargs):
+            """Splice a gone-hash member in at the head, honoring the caller's
+            window width so the orphan displaces a live member rather than
+            widening the read."""
             members = real_zrevrange(key, start, end, **kwargs)
-            return [orphan, *members][: end - start + 1]
+            spliced = [orphan, *members]
+            width = end - start + 1 if end >= 0 else len(spliced)
+            return spliced[:width]
 
         monkeypatch.setattr(POPOTO_REDIS_DB, "zrevrange", with_orphan)
 
