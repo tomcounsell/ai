@@ -416,7 +416,19 @@ Three builders with **disjoint file sets** so their commits never interleave in 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique round 1, 2026-08-17 — DUPLICATE-PLAN FINDING.** The war room for issue #2845 was routed at
+a *different* document, `docs/plans/update-warning-channel-repair.md` (commit `c60473fca`, written 10
+seconds after this one at `76fd31e52`). Both documents carry `tracking:
+https://github.com/tomcounsell/ai/issues/2845`, and `tools/lane_identity.py::find_plan_path` returns
+the first alphabetical match — **this file** — so every SDLC stage tool for #2845 resolves here while
+the critiqued design lives in the sibling. All three critics independently flagged the collision as a
+BLOCKER. The full 8-finding table for the critiqued design is in
+`docs/plans/update-warning-channel-repair.md` § Critique Results; only the finding that applies to
+*this* document is reproduced below.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (3/3) | Issue #2845 has two live plan documents with materially different designs (this one proposes `_scan_for_warnings`, an `optional:` prose-prefix marker, a `<<FILE:...>>` log-path marker, and an always-on `suppressed:` visibility line; the sibling proposes `extract_update_warnings`, an `@optional` sigil, and no suppressed-visibility line). Exactly one may survive. Until then the pipeline builds an uncritiqued document. | pending | `find_plan_path` (`tools/lane_identity.py:170-179`) iterates `sorted(plans_dir.iterdir())` and returns on first `tracking:` match, with no tie-break; `"...integrity.md" < "...repair.md"` lexically. Reconcile by folding this document's distinct ideas — the `<<FILE:...>>` log-path marker and the always-on `suppressed:` visibility line, neither of which appears in the sibling — into `update-warning-channel-repair.md`, then `git rm` this file. Verify with `python -c "from tools.lane_identity import find_plan_path; print(find_plan_path(2845))"`, which must print the `repair` path before `/do-build` runs. |
 
 ---
 
