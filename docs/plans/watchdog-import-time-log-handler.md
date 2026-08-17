@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -1554,7 +1554,7 @@ needs no wiring.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/watchdog-log-isolation.md` — the invariant (logging is configured at the
+- [x] Create `docs/features/watchdog-log-isolation.md` — the invariant (logging is configured at the
       entry point, never at import), applied across all **three** modules; the watchdogs' shared
       `propagate = False` topology and why the plists' both-streams redirect forces it; `log_rotate`'s
       opposite `propagate = True` decision and the two-different-files plist that justifies it,
@@ -1564,29 +1564,29 @@ needs no wiring.
       composition, so the >90% line-volume drop reads as intended rather than as a stopped
       watchdog**; and how the 14-file AST guard enforces the invariant along with what it
       deliberately does not cover.
-- [ ] Add a row for it to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
+- [x] Add a row for it to the `docs/features/README.md` index table.
+- [x] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
       watchdog itself writes to `logs/watchdog.log` now comes from a real entry-point invocation and
       appears once rather than twice, and submodule records that used to ride root's handler now
       arrive unformatted (WARNING+) or not at all (INFO).
 
 ### Inline Documentation
-- [ ] Docstring on `_configure_logging()` citing #2643, stating the three constraints a future editor
+- [x] Docstring on `_configure_logging()` citing #2643, stating the three constraints a future editor
       must not break: called from `__main__` only; `WATCHDOG_LOG_FILE` read from the module global at
       call time; no root configuration.
-- [ ] Update the `_configure_logger()` docstring in `monitoring/worker_watchdog.py` — keep the #1311
+- [x] Update the `_configure_logger()` docstring in `monitoring/worker_watchdog.py` — keep the #1311
       explanation, add the #2643 sentence about the call site moving out of module scope and the
       clearing becoming owned-only.
-- [ ] Update the `scripts/log_rotate.py` module docstring — one sentence recording that logging is
+- [x] Update the `scripts/log_rotate.py` module docstring — one sentence recording that logging is
       configured in the `__main__` guard because the module is imported as a library by
       `scripts/update/log_cleanup.py`. The existing self-rotation paragraph naming
       `logs/log_rotate_error.log` as the LaunchAgent's `StandardErrorPath` stays accurate and must
       stay verbatim; `basicConfig` keeps `stream=sys.stderr`.
-- [ ] Comment at the relocated `basicConfig` in `scripts/log_rotate.py` explaining why `logger` keeps
+- [x] Comment at the relocated `basicConfig` in `scripts/log_rotate.py` explaining why `logger` keeps
       `propagate = True` here while both watchdogs use `False` — this module configures **root**, so
       turning propagation off routes its records to `lastResort` at WARNING and silences every INFO
       line `main()` emits.
-- [ ] Comment in `tests/unit/test_watchdog_log_isolation.py` explaining why TC2 / TC4 assert on
+- [x] Comment in `tests/unit/test_watchdog_log_isolation.py` explaining why TC2 / TC4 assert on
       handler state rather than file size (concurrent-writer flake), why the root-state gates must run
       in a subprocess (`basicConfig` is a no-op when root already has pytest's handlers) — TC15
       included, for that same reason — and why TC15 `runpy`s a temp-dir copy rather than the real
@@ -1594,7 +1594,7 @@ needs no wiring.
       production logs).
 
 ### Test Suite Index
-- [ ] Add `tests/unit/test_watchdog_log_isolation.py` to the `tests/README.md` index with its feature
+- [x] Add `tests/unit/test_watchdog_log_isolation.py` to the `tests/README.md` index with its feature
       marker.
 
 ## Success Criteria
