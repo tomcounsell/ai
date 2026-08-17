@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from agent.sdlc_router import (
     DISPATCH_RULES,
+    MAX_CONCERN_RECRITIQUE_ROUNDS,
+    MAX_SAME_STAGE_DISPATCHES,
     SKILL_DO_BUILD,
     SKILL_DO_DOCS,
     SKILL_DO_MERGE,
@@ -1955,3 +1957,111 @@ class TestDispatchRuleOrderingIsLoadBearing:
         ids = [r.row_id for r in DISPATCH_RULES]
         assert ids.index("2b") < ids.index("4b")
         assert ids.index("2b") < ids.index("4c")
+
+
+class TestForeverWithConcernsTerminates:
+    """#2787 gate item 5: the loop terminates, and says so out loud.
+
+    ``compute_same_stage_count`` breaks its streak on every skill change and
+    this loop alternates ``/do-plan`` and ``/do-plan-critique``, so G4 can
+    never fire on it. ``MAX_CONCERN_RECRITIQUE_ROUNDS`` is the ONLY
+    terminator. This simulation is the proof that it actually terminates: it
+    drives the real router turn by turn against a plan whose critique returns
+    ``READY TO BUILD (with concerns)`` forever.
+    """
+
+    def _simulate(self, max_turns: int = 40) -> list:
+        """Drive decide_next_dispatch, applying each dispatch's real effect.
+
+        - ``/do-plan-critique`` records a fresh with-concerns verdict:
+          ``recorded_at`` advances and ``record_verdict`` bumps the counter.
+        - ``/do-plan`` settles a revision: ``revision_applied_at`` advances.
+        - ``/do-build`` is terminal.
+        """
+        clock = [0]
+
+        def tick() -> str:
+            clock[0] += 1
+            return _iso(f"2026-08-17T{clock[0]:02d}:00:00")
+
+        states = _wc_states(tick())
+        meta = _wc_meta(None, count=1)  # the first verdict already counted
+        trail = []
+        for _ in range(max_turns):
+            result = decide_next_dispatch(states, meta, {"current_plan_hash": _PLAN_HASH})
+            assert isinstance(result, Dispatch), f"loop escalated instead of terminating: {result}"
+            trail.append(result)
+            if result.skill == SKILL_DO_BUILD:
+                return trail
+            if result.skill == SKILL_DO_PLAN:
+                # /do-plan Phase 4 step 2a co-writes both fields.
+                meta["revision_applied"] = True
+                meta["revision_applied_at"] = tick()
+            elif result.skill == SKILL_DO_PLAN_CRITIQUE:
+                # A fresh with-concerns verdict: new recorded_at, counter +1.
+                states["_verdicts"]["CRITIQUE"]["recorded_at"] = tick()
+                meta["concern_round_count"] += 1
+            else:  # pragma: no cover - defensive
+                raise AssertionError(f"unexpected skill in the loop: {result.skill}")
+            # The router's own dispatch record, as record_dispatch would write it.
+            states.setdefault("_sdlc_dispatches", []).append(
+                {"skill": result.skill, "at": _iso(f"2026-08-17T{clock[0]:02d}:00:00")}
+            )
+            meta["last_dispatched_skill"] = result.skill
+        raise AssertionError(f"never terminated in {max_turns} turns: {[d.row_id for d in trail]}")
+
+    def test_terminates_at_the_bound_with_a_build(self):
+        trail = self._simulate()
+        assert trail[-1].skill == SKILL_DO_BUILD
+        assert trail[-1].row_id == "4c"
+        # It must re-critique at least once before giving up, or the bound is
+        # not doing the job the feature exists to do.
+        assert any(d.row_id == "2b" for d in trail), [d.row_id for d in trail]
+
+    def test_consumes_exactly_the_bounded_number_of_recritiques(self):
+        """Round 1's verdict is already counted, so the loop buys the rest."""
+        trail = self._simulate()
+        recritiques = [d for d in trail if d.skill == SKILL_DO_PLAN_CRITIQUE]
+        assert len(recritiques) == MAX_CONCERN_RECRITIQUE_ROUNDS - 1, [d.row_id for d in trail]
+
+    def test_row_4c_reason_records_the_accepted_residual_concerns(self):
+        """Gate item 5: a silent build at the cap is the failure mode one level up.
+
+        The reason string is the accountability record the supervisor sees, so
+        assert the string itself — the bound, the count, and the fact that
+        residual concerns were accepted WITHOUT review.
+        """
+        reason = self._simulate()[-1].reason
+        lowered = reason.lower()
+        assert "bound" in lowered, reason
+        assert str(MAX_CONCERN_RECRITIQUE_ROUNDS) in reason, reason
+        assert "with-concerns rounds" in lowered, reason
+        assert "residual concerns accepted unreviewed" in lowered, reason
+
+    def test_g4_cannot_see_this_loop(self):
+        """The bound is the only terminator — pinned so nobody deletes it.
+
+        A future reader will assume G4's oscillation cap backstops this. It
+        does not: ``compute_same_stage_count`` counts CONSECUTIVE same-skill
+        dispatches and breaks the streak on any skill change.
+        """
+        from agent.sdlc_router import compute_same_stage_count
+
+        # An UNCHANGED snapshot throughout: the only thing breaking the streak
+        # is the alternating skill, which is exactly the claim under test.
+        snapshot = {"PLAN": "completed", "CRITIQUE": "completed", "BUILD": "pending"}
+        history = [
+            {
+                "skill": SKILL_DO_PLAN if i % 2 == 0 else SKILL_DO_PLAN_CRITIQUE,
+                "at": _iso("2026-08-17T01:00:00"),
+                "stage_snapshot": snapshot,
+            }
+            for i in range(12)
+        ]
+        count, skill = compute_same_stage_count({"_sdlc_dispatches": history}, snapshot)
+        # +1 for the "about to dispatch" turn; the recorded streak itself is 1.
+        assert count <= 2, (count, skill)
+        assert count < MAX_SAME_STAGE_DISPATCHES, (
+            f"G4 would fire on the alternation at {count}; the bound is supposed "
+            "to be this loop's only terminator"
+        )
