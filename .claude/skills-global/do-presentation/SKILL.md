@@ -8,20 +8,20 @@ context: fork
 
 # Make a Presentation
 
-Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), themed to the repo's design system, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, slide count matches plan, every review flag addressed.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), set in the Cuttlefish house theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
 
 ## Repo Context Probe
 
 If `.claude/skill-context/do-presentation.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-The static-deck flow (research → structure → theme → diagrams → Marp export) is fully generic — it needs only `npx`/Marp and `curl`, no repo-specific tooling. The context file declares one optional capability: the **narrated `--video` mode** and the repo-provided CLI that powers it. When the file is absent (the common case in a foreign repo), the static deck (PDF/HTML/PPTX) is the deliverable and `--video` is unavailable.
+The static-deck flow (research → structure → theme → diagrams → editorial gate → Marp export) is fully generic — it needs only `npx`/Marp, `curl`, and network access for the Google Fonts import. No repo-specific tooling. The context file declares one optional capability: the **narrated `--video` mode** and the repo-provided CLI that powers it. When the file is absent (the common case in a foreign repo), the static deck (PDF/HTML/PPTX) is the deliverable and `--video` is unavailable.
 
 ## When to load sub-files
 
 | Sub-file | Load when... |
 |----------|-------------|
 | `CONTENT_GUIDE.md` | Structuring slide content — educational best practices, slide types, pacing |
-| `THEME_DETECTION.md` | Building the Marp CSS theme — how to find and adapt the repo's design system |
+| `THEME.md` | Writing the Marp front matter — the Cuttlefish theme, its style block, slide archetypes |
 
 ## Quick start
 
@@ -94,18 +94,26 @@ N.  Appendix
 
 Adjust count based on topic complexity. Aim for **one idea per slide**.
 
-### Step 4: Detect and build the theme
+Write the outline as **action titles** — each line a full sentence stating that slide's conclusion,
+not a topic label. Read the outline back top to bottom: it should read as the argument. If it reads
+as a table of contents, the deck will too. See "Action titles" in `CONTENT_GUIDE.md`.
 
-Read `THEME_DETECTION.md` for the full detection process. Quick version:
+### Step 4: Apply the theme
 
-1. Search for CSS/design tokens in the repo:
-   - `**/*.css`, `**/tailwind.config.*`, `**/theme.*`, `**/variables.*`, `**/tokens.*`
-   - `**/styles/**`, `**/design-system/**`, `**/ui/**`
-2. Extract: accent colors, fonts, border radius, spacing
-3. If no design system found, use the clean light fallback theme
-4. Build the Marp `style:` block from extracted tokens
+Every deck uses **Cuttlefish**, the house theme. Read `THEME.md`, copy its style block verbatim into
+the deck's front matter, and set the deck slug in the masthead rule. There is no theme detection and
+no per-deck restyling — the theme is the constant, and holding it constant is what makes a deck read
+as a Yudame artifact rather than a template.
 
-**IMPORTANT: All presentations use light backgrounds.** Even if the repo's design system is dark, adapt it to light mode. Keep the accent colors and fonts, invert backgrounds to white/light gray, use dark text. See the "Light Mode Mandate" section in `THEME_DETECTION.md` for the full dark→light token mapping.
+Two rules from `THEME.md` govern everything downstream and belong in working memory now:
+
+- **One accent per slide.** Annotation red marks *value* — the number that matters, the
+  recommendation, the one word carrying the slide. A slide with two reds has no accent at all.
+- **Light ground, square corners, hairlines over boxes.** Cream `#FAF9F6`, no shadows, no gradients,
+  no rounded cards.
+
+`THEME.md`'s closing section covers the single override case: a deck whose subject *is* another
+product, presented to that product's own audience. Swap the `:root` values, keep the structure.
 
 ### Step 5: Collect brand logos
 
@@ -129,17 +137,18 @@ When the presentation mentions companies, products, or branded technologies, pul
      -o diagrams/logo-{name}.png
    ```
 
-**Colorizing SVGs for dark backgrounds:**
+**Colorizing SVGs:**
 
-Simple Icons SVGs have no fill color (default black — invisible on dark slides). Inject a fill:
+Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Cuttlefish
+cream ground. Set the theme ink explicitly so the logos match the rest of the deck rather than
+sitting a shade darker:
 
 ```bash
-# White (safe default for dark themes)
-sed -i '' 's/<path/<path fill="#e6edf3"/' diagrams/logo-{slug}.svg
-
-# Or use the brand's official color (Simple Icons provides these)
-sed -i '' 's/<path/<path fill="#FF6600"/' diagrams/logo-{slug}.svg
+sed -i '' 's/<path/<path fill="#1A1A1A"/' diagrams/logo-{slug}.svg
 ```
+
+A brand's official color is the exception, not the default — it spends the slide's one accent on a
+logo. Use theme ink unless the brand color *is* the point of the slide.
 
 **Converting SVG to PNG (if needed for Marp compatibility):**
 
@@ -180,7 +189,13 @@ For any architectural or flow concepts, create diagrams:
 Diagram guidelines:
 - Max 7 nodes/boxes per diagram (cognitive load limit)
 - Label every arrow/connection
-- Use the repo's accent color for emphasis nodes
+- Annotation red marks one emphasis node. Everything else is ink and hairline
+- Put the diagram inside a `.figure` panel with a mono `.figure__meta` footer (`FIG. 01` left,
+  caption right) so it reads as a plate rather than a floating image
+
+For charts specifically, read the "Charts" section of `THEME.md` — flat bars, values labeled on the
+marks, no gridlines, no axis, no legend. Anything more involved than a bar comparison goes through
+the `dataviz` skill carrying those constraints.
 
 ### Step 7: Write the Marp markdown
 
@@ -195,95 +210,87 @@ Create the presentation file. Location priority:
 marp: true
 theme: default
 paginate: true
-backgroundColor: <from-design-system>
-color: <from-design-system>
+backgroundColor: '#FAF9F6'
+color: '#2D2D2D'
 style: |
-  /* Theme CSS generated from repo design system */
-  ...
+  <the Cuttlefish style block from THEME.md, verbatim, with the deck slug set>
 ---
 
-<!-- _class: lead -->
-# Title
-subtitle
+<!-- _class: cover -->
+<span class="eyebrow">Prepared for <Client></span>
+
+# The title
+
+<p class="lede">One serif line of framing.</p>
+
+<div class="stamp">
+  <div>Date<b>17 Aug 2026</b></div>
+  <div>Prepared by<b>Yudame</b></div>
+</div>
 
 ---
 
-## Slide Title
+<span class="eyebrow">Section · 02</span>
+
+## Retries cost more than the outage they prevent.
+
 content...
 ```
 
 **Writing rules:**
 - One idea per slide — if you need a scroll bar, split it
-- Use `<!-- _class: lead -->` for section dividers
+- **Action titles.** Every content slide's `##` is a full sentence stating that slide's conclusion,
+  under 15 words, and it is the largest text on the slide. `## Queue depth doubled after the retry
+  change` beats `## Queue metrics`. A reader who sees only the titles should get the argument.
+  Topic-label titles are for the appendix
+- **Word budget by archetype.** Statement slide ≤ 12 words. Concept slide ≤ 40 words of body.
+  Table ≤ 5 rows with short cells. Over budget means split the slide, not shrink the type
+- **Accent budget.** One red per slide, spent on the value that matters. Count it before moving on
+- Use `<!-- _class: section -->` for section breaks, `statement` for a single claim,
+  `figure` for a diagram plate, `data` for a table or a `.big` number
 - Use tables over bullet lists when comparing things
 - Use code blocks sparingly — only when the actual code IS the point
-- Every 3rd-4th slide should be visual (diagram, table, or formatted example)
-- Use `>` blockquotes for key takeaways or memorable quotes
+- Every 3rd-4th slide should be visual (figure plate, table, or `.big` number)
+- Use `.rose` for the one governing quote or line, once per deck
 - Bold key terms on first use
 - Use analogies liberally — connect technical concepts to everyday things
 
-**Include these utility CSS classes in every theme** — they get used on almost every deck:
+Layout components come from `THEME.md`: `.cols` / `.cols-3` break a slide that would otherwise be a
+dense list into scannable sections, `.plate` holds a governing metric or key fact, `.note` is the red
+margin annotation for a risk or caveat, `.card` inside `.cols-3` gives A/B/C decision options.
 
-```css
-/* Two-column grid */
-.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
-.cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 10px; }
+### Step 8: Editorial gate
 
-/* Callout — neutral/info. Full border, NOT a left accent bar (see THEME_DETECTION "Avoid AI-Slop Tells") */
-.stat {
-  background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 6px;
-  padding: 14px 20px; margin: 10px 0;
-  font-size: 0.96em; font-weight: 600; color: #1a3a6b; line-height: 1.5;
-}
+One gate, run once, on the finished draft. Invoke `Skill('de-slop')` as a **fresh-context review** —
+a subagent that receives only the deck file path, the medium (`presentation`), the audience, and the
+addendum below. It must not receive this drafting conversation; the author of a draft is the worst
+judge of its slop.
 
-/* Warning / risk callout. Full border, not a left accent bar. */
-.warn {
-  background: #fef3c7; border: 1px solid #fcd97a; border-radius: 6px;
-  padding: 10px 18px; margin: 10px 0;
-  font-size: 0.88em; color: #92400e; line-height: 1.5;
-}
-
-/* Option/path cards — for A/B/C decision slides */
-.path-card {
-  border: 1px solid #e5e7eb; border-radius: 6px;
-  padding: 14px 16px; font-size: 0.86em;
-}
-.path-card strong { display: block; margin-bottom: 4px; }
-```
-
-Use `.cols` / `.cols-3` to break a slide that would otherwise be a dense list into scannable side-by-side sections. Use `.stat` for governing metrics and key facts. Use `.warn` for risks and blockers. Use `.path-card` inside `.cols-3` for A/B/C decision options.
-
-**Callouts use a full border, never a single colored left-edge stripe** (`border-left: 4px solid …` with one rounded side). That stripe is the top "AI slop" tell — see the "Avoid AI-Slop Tells" section in `THEME_DETECTION.md`.
-
-### Step 8: Self-review pass (before export)
-
-Before running Marp, spawn a subagent to critique the draft. This catches structural and density issues before the user sees a bad first version.
-
-**Spawn a `plan-reviewer` agent** with this prompt template:
+Pass this addendum along with the standard inputs, since these checks are deck-shaped and de-slop's
+generic catalog does not cover them:
 
 ```
-Review this Marp presentation draft for two things only — structure and density.
-Do not evaluate content correctness.
+Additional checks for this deck, alongside the standard pass:
 
-STRUCTURE: Does it open with Why (the audience's problem / context), then How (the approach),
-then What (the specifics)? For client-facing decks especially, flag if the first 3 slides do not
-establish who the audience is and what problem they are experiencing before any solution content appears.
+STRUCTURE — does it open with Why (the audience's problem and context), then How (the approach),
+then What (the specifics)? For a client-facing deck, flag it if the first three slides do not
+establish who the audience is and what problem they are experiencing before any solution appears.
 
-DENSITY: List every slide that exceeds 6 lines of body text, or has more than 2 dense paragraphs,
-or has a table with more than 5 rows and verbose cell text. For each, suggest: split into 2 slides,
-convert prose to a .cols layout, or trim to a single key sentence.
+ACTION TITLES — every content slide's title should be a full sentence stating that slide's
+conclusion, under 15 words. Flag topic-label titles ("Market overview", "Architecture") outside
+the appendix, and rewrite them from the slide's own body.
 
-Return a short list — flagged slides with one-line diagnosis each. No other feedback.
+BUDGETS — flag any statement slide over 12 words, any concept slide over 40 words of body, any
+table over 5 rows with verbose cells, and any slide spending the accent color more than once.
+For each, say which: split the slide, move to a .cols layout, or cut to one sentence.
 ```
 
-Act on every flag before exporting. A split slide costs 2 minutes. Sending a dense deck to a client costs a revision cycle.
+- **PASS** → apply the change log and export.
+- **BLOCK** → revise per the diagnosis and re-run the gate. After 2 BLOCKs, stop and surface both
+  diagnoses to the user instead of exporting.
 
-### Step 8b: De-slop gate (before export)
-
-Run `Skill('de-slop')` on the deck markdown as a **fresh-context review** — a subagent that gets only the deck file path, the medium ("presentation"), and the audience; never this drafting conversation. It removes AI-writing tells (slop vocabulary, rule-of-three slides, inflated-significance titles, bullet walls) and blocks hollow decks.
-
-- **PASS** → proceed to export.
-- **BLOCK** → revise per the diagnosis and re-run the gate. After 2 BLOCKs, stop and surface both diagnoses to the user instead of exporting.
+Act on every flag. A split slide costs two minutes; a dense deck sent to a client costs a revision
+cycle.
 
 ### Step 9: Export
 
@@ -300,13 +307,20 @@ npx --yes @marp-team/marp-cli "<source>.md" --html --allow-local-files -o "<sour
 npx --yes @marp-team/marp-cli "<source>.md" --pptx --allow-local-files -o "<source>.pptx"
 ```
 
+Marp renders through headless Chrome, which fetches the Google Fonts `@import` over the network. An
+offline or proxied run silently falls back to a system face and the deck looks wrong in a way no
+error reports. Step 10 checks for it.
+
 ### Step 10: Verify
 
 After export, confirm:
 - [ ] PDF generated without errors
 - [ ] HTML generated without errors
 - [ ] Slide count matches plan
-- [ ] No slide flagged in the review pass was left unaddressed
+- [ ] **Fonts actually loaded** — open the PDF and check a heading is Lora (serif, tight) and a label
+      is IBM Plex Mono. A deck rendered in Times or Helvetica means the `@import` did not resolve;
+      re-run with network access rather than shipping it
+- [ ] No slide flagged by the editorial gate was left unaddressed
 - [ ] Report file locations to user
 
 ## Output
