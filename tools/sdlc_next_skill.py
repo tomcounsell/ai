@@ -212,6 +212,25 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     this, a terminal merged pipeline would re-dispatch ``/do-build`` via
     guard ``g8`` forever instead of routing to the terminal ``/do-merge``
     (row 10) -- a duplicate-PR risk.
+
+    #2757 reached that same misfire through the other door: not a PR whose
+    state read wrong, but a PR number that was not there to read. The old
+    BUILD branch reported a mismatch whenever the recorded identifier was
+    absent, so the gate answered a question it had never asked -- the live
+    read is itself gated on a recorded PR number, so ``gh`` was never
+    consulted at all. Three states, not two: an artifact is **verified**
+    when its identifier resolves and the world confirms it, **falsified**
+    when the identifier resolves and the world contradicts it, and
+    **unverifiable** when there is no identifier to resolve. Only the
+    middle one may set ``stage_artifacts_verified: False``; the third
+    no-ops with a debug log, matching ``_fetch_pr_state``'s stated contract
+    that ``None`` means "could not determine", never "the claim is false".
+
+    Both identifiability guards here are defense in depth. The real fix for
+    #2757 is upstream: ``tools/sdlc_stage_query.py::_compute_meta`` now
+    retries its PR lookup against merged PRs, so a shipped lane's
+    ``pr_number`` survives its own merge and this function verifies it on
+    the merits rather than skipping it.
     """
     from tools.lane_identity import find_plan_path, lane_branch_name, resolve_lane_slug
 
@@ -255,27 +274,53 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
 
     pr_number = meta.get("pr_number")
     repo = meta.get("_resolved_target_repo")
-    build_claimed = stage_states.get("BUILD") == "completed"
+    # No recorded PR number -> nothing to look up -> the BUILD check no-ops
+    # (#2757). "Unverifiable" is not "falsified": manufacturing a mismatch from
+    # a lookup that never ran is what re-dispatched `/do-build` on merged work.
+    pr_identifiable = bool(pr_number)
+    build_marked = stage_states.get("BUILD") == "completed"
+    patch_marked = stage_states.get("PATCH") == "completed"
+    build_claimed = build_marked and pr_identifiable
+    if build_marked and not pr_identifiable:
+        logger.debug(
+            "stage-artifact-verify: issue #%s BUILD claims completed but no PR number is "
+            "recorded; skipping the live PR check rather than reporting a claim it cannot "
+            "verify",
+            issue_number,
+        )
     # No recorded lane slug -> no branch to probe -> the PATCH check no-ops.
     # Probing a guessed name is what force-dispatches `/do-patch` against a
     # clean worktree until the G4 oscillation cap hard-blocks the lane (#2718).
-    patch_claimed = stage_states.get("PATCH") == "completed" and bool(lane_branch)
-    if stage_states.get("PATCH") == "completed" and not lane_branch:
+    # No recorded PR number is a second, independent reason to no-op (#2757):
+    # `pr_state` then stays None, the merged-skip below cannot engage, and the
+    # whole verdict falls to `git ls-remote` -- where "branch gone" is
+    # indistinguishable from "deleted on merge" with no PR state left to consult.
+    patch_claimed = patch_marked and bool(lane_branch) and pr_identifiable
+    if patch_marked and not lane_branch:
         logger.debug(
             "stage-artifact-verify: issue #%s PATCH claims completed but no lane slug is "
             "recorded; skipping the branch probe rather than guessing a branch name",
+            issue_number,
+        )
+    elif patch_marked and not pr_identifiable:
+        logger.debug(
+            "stage-artifact-verify: issue #%s PATCH claims completed but no PR number is "
+            "recorded; skipping the branch probe because a missing branch is "
+            "indistinguishable from deletion-on-merge with no PR state to consult",
             issue_number,
         )
 
     # Resolve the live PR state at most once (used by both checks below) --
     # only when a claim that needs it is actually present, so an unclaimed
     # BUILD/PATCH stage still makes zero live calls (test_no_claimed_artifact_is_a_noop).
+    # Both claims already require `pr_identifiable`, so a claim being present is
+    # itself proof that `pr_number` is truthy -- no separate check needed.
     pr_state: str | None = None
-    if pr_number and (build_claimed or patch_claimed):
+    if build_claimed or patch_claimed:
         pr_state = _fetch_pr_state(pr_number, repo=repo)
 
     if build_claimed:
-        if not pr_number or pr_state not in ("OPEN", "MERGED"):
+        if pr_state not in ("OPEN", "MERGED"):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} BUILD claims completed "
                 f"but PR {pr_number!r} is not open or merged (state={pr_state!r})"

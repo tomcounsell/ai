@@ -155,7 +155,13 @@ The OUTCOME contract this skill emits is parsed by `classify_outcome()` in
 
 ## Router-Test Fixtures: Seed a Recorded Verdict for Merge-Termination Asserts
 
-When a `tests/unit/test_sdlc_router*.py` fixture asserts the happy-path terminal
+This applies to **any** test that asserts a router `row_id` or dispatch skill —
+`tests/unit/test_sdlc_router*.py` **and integration fixtures** that drive
+`decide()` end to end (`tests/integration/test_sdlc_session_ensure_integration.py`).
+Scoping the rule to the unit router tests is exactly how an integration fixture
+sat red on `main` unnoticed until #2757.
+
+When such a fixture asserts the happy-path terminal
 dispatches `/do-merge`, it MUST seed a recorded `APPROVED` review verdict (via
 `meta["latest_review_verdict"]` or `_verdicts["REVIEW"]`) alongside the
 all-`completed` stage states. A `REVIEW == completed` marker is unwritable
@@ -164,3 +170,15 @@ no verdict is not the terminal state — Row 8e (no-verdict recovery) correctly
 re-dispatches `/do-pr-review`, and Row 10 (ready-to-merge) requires the recorded
 verdict (#2062 WS3a). A fixture that omits the verdict but asserts `/do-merge` is
 stale, not a router bug (see #2091).
+
+An integration fixture needs one thing more, because it drives the real
+`_build_context` rather than handing the router a context dict: the verdict's
+`head_sha` must **match the live PR head**, and the fixture's `subprocess.run`
+fake must answer the head-SHA read that produces it. That read is git-FIRST
+(`tools/pr_head_resolver.resolve_pr_head_sha`, #2404), so answering only
+`gh pr view --json headRefOid` is not enough — the fake must also answer
+`git remote get-url origin` (the resolver's cross-repo guard) and
+`git ls-remote origin refs/pull/{N}/head`. Miss any of them and
+`context["pr_head_sha"]` lands on the fail-closed empty sentinel, the verdict
+reads stale, and the tick routes to Row 8f (`/do-pr-review`) instead of Row 10 —
+a failure that looks like a router bug and is not one (#2757).

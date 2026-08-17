@@ -128,12 +128,66 @@ those flags and returns `Dispatch(skill=<same stage's skill>)`.
 
 | Stage | Claimed artifact | Live check |
 |-------|------------------|------------|
-| BUILD | PR opened | `gh pr view --json state`; verified when state is `OPEN` or `MERGED` |
-| PATCH | branch pushed | `git ls-remote --heads origin session/{slug}`; skipped (treated verified) when the PR state is already `MERGED`, since a delete-branch-on-merge policy removes the ref as an expected side effect of merging, not evidence of a fabricated claim |
-| PLAN | plan committed on `main` | `git show main:docs/plans/{slug}.md` |
+| BUILD | PR opened | `gh pr view --json state`; verified when state is `OPEN` or `MERGED`. **Skipped entirely when no `pr_number` is recorded** — there is no identifier to look up, so no check runs (#2757) |
+| PATCH | branch pushed | `git ls-remote --heads origin session/{slug}`; skipped (treated verified) when the PR state is already `MERGED`, since a delete-branch-on-merge policy removes the ref as an expected side effect of merging, not evidence of a fabricated claim. Also skipped when no `pr_number` is recorded: with no PR state to consult, the merged-skip cannot engage and "branch gone" is indistinguishable from "deleted on merge" (#2757) |
+| PLAN | plan committed on `main` | `git show main:{recorded plan path}` — the path comes from `find_plan_path`, which resolves the plan by its `tracking:` frontmatter, not by deriving a filename from the lane slug (#2792) |
 
 A stage with no claimed artifact (marker absent, or nothing this function
-knows how to check) is a no-op — verification never invents a check.
+knows how to check) is a no-op — verification never invents a check. **The
+same is true of a claimed artifact with no resolvable identifier** (#2757):
+there are three states here, not two. An artifact is **verified** when its
+identifier resolves and the world confirms it, **falsified** when the
+identifier resolves and the world contradicts it, and **unverifiable** when
+there is no identifier to resolve. Only *falsified* may set
+`stage_artifacts_verified: False`; *unverifiable* no-ops with a debug log,
+matching `_fetch_pr_state`'s stated contract that `None` means "could not
+determine", never "the claim is false". Before #2757 the BUILD row collapsed
+falsified and unverifiable, so a `pr_number`-less pipeline was re-dispatched
+to `/do-build` on the strength of a `gh` call that was never placed — against
+work that had, in the reported cases, already merged.
+
+**The identifiability skips are defense in depth, not a narrowing of the
+gate.** The primary fix for #2757 is upstream, in
+`tools/sdlc_stage_query.py::_compute_meta`: its PR lookup now retries against
+`state="merged"` when the default `state="open"` pass comes back empty, so a
+shipped lane's `pr_number` survives its own merge and BUILD is verified **on
+the merits** rather than skipped. The skips exist for the residual case where
+no PR exists in any state. A reader who sees only the skips will conclude the
+gate was weakened; it was not — a recorded `pr_number` whose live state is
+`CLOSED` still sets `stage_artifacts_verified: False` and still re-dispatches
+`/do-build`. The second pass is scoped to `merged` and deliberately **not**
+`all`: `_gh_pr_search_issue_ref` returns the first body-validating candidate
+with no MERGED-over-CLOSED preference, so `all` can surface a closed-unmerged
+PR, which reads back as `CLOSED` and makes G8 fire — converting a silent
+no-op into an active false rebuild.
+
+**Cost: the lookup is doubled on the no-open-PR path (issue #2757).** The second
+`_lookup_pr` pass fires whenever the first returns `None` — i.e. for any issue
+with no open PR, which is most issues `_compute_meta` is asked about. Each pass
+can spend up to two `gh` subprocesses (issue-number search, then the branch-head
+fallback), so an issue with no PR at all costs 4 `gh` calls instead of 2, adding
+up to ~10s of latency when `gh` hangs against each call's 5s timeout, and the
+`gh pr list --search` leg draws on the tighter search-API rate limit.
+
+`query_enriched` has exactly three non-test callers: `tools/sdlc_next_skill.py`
+(the router tick and the `next-skill` CLI), `tools/sdlc_stage_query.py`'s own
+CLI entry point, and `agent/session_runner/runner.py::_load_ledger` — the
+ledger-aware completion guard (#2158). The third is where the added latency is
+user-visible: it runs in the long-lived worker on every SDLC session
+completion, so a doubled lookup stalls a completing session rather than a
+one-shot command. The dashboard is *not* a caller; `ui/data/sdlc.py` reaches
+pipeline state through `PipelineStateMachine.for_issue()` and only mentions
+this module in prose describing an analogous reader ladder.
+
+Because `_load_ledger` imports this module into the worker process,
+`sdlc_stage_query` is worker-resident — the general "`tools/` is a fresh
+subprocess per call, so no restart is needed" premise does not hold for it, and
+an executable change here needs `worker-restart`.
+
+A short-circuit (skipping the second pass when the caller only wants in-flight
+state) is deliberately not implemented — correctness first, and the cost is
+recorded here so a future report of a slow session completion or a `gh`
+rate-limit warning finds the cause rather than re-deriving it.
 
 **cwd threading (issue #2078).** All three live `git` checks
 (`_check_plan_committed_on_main`, `_check_branch_pushed`, and the
