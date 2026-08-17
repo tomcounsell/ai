@@ -726,6 +726,12 @@ class TestStaleTermWordBoundary:
         of the fenced ``SessionLog`` line, conclude "not in a fence", and rewrite
         inside the illustrative block. It would do so silently, never raising —
         hence the assertion is on the resulting file content.
+
+        The shortening regex here is a *synthetic* stand-in for a ``STALE_TERMS``
+        shape that does not exist today: every current replacement is newline-free
+        and strictly longer than its key, so no production fix can shift a later
+        fix's line index. This test guards the forward-looking case, for operator
+        entries that shorten text or span newlines.
         """
         doc = repo / "docs" / "features" / "ctx.md"
         original = (
@@ -949,26 +955,11 @@ class TestExistenceInvariant:
         assert withheld == []
         assert "vanished_module.py" in p.read_text()
 
-    def test_regex_channel_is_also_guarded(self, repo):
-        # The fixture's match must sit in ordinary prose, NOT inside a path token:
-        # path-token suppression (#2744) refuses an in-token rewrite before the
-        # existence invariant ever sees it, so a fixture like ``\breal\b`` over
-        # ``agent/real.py`` would withhold nothing and prove nothing here. Do not
-        # "simplify" this back to rewriting a word inside a path.
-        p = repo / "docs" / "features" / "regex_inv.md"
-        p.write_text("The runtime lives in the real handler.\n")
-        applied, withheld = docs_auditor._apply_fixes_to_file(
-            Path("docs/features/regex_inv.md"),
-            repo,
-            [(re.compile(r"\breal\b"), "agent/ghost.py")],
-        )
-        assert applied == 0
-        assert len(withheld) == 1
-        assert withheld[0]["reason"] == "target-absent"
-
     @pytest.mark.parametrize("body", ["", "   \n\t\n"])
     def test_empty_or_whitespace_doc_with_no_fixes_writes_nothing(self, repo, body):
-        """An empty ``regex_fixes`` list is the sole early-out condition now."""
+        """With the literal channel gone, an empty ``regex_fixes`` list is the only
+        fix-emptiness early-out.
+        """
         p = repo / "docs" / "features" / "empty.md"
         p.write_text(body)
         applied, withheld = docs_auditor._apply_fixes_to_file(
