@@ -111,12 +111,17 @@ class TestG7PlanRevisingGuardDirect:
         revision the lock could never bind again — the mechanism #1302 built
         was permanently inert. With only the sticky boolean set and no verdict
         to scope against, the lock now survives and G7's own deadlock backstop
-        owns the escalation.
+        owns the escalation — with the documented manual recovery named in the
+        reason. That is the backstop working as designed, not a regression.
         """
         states = _base_states()
         meta = _base_meta(plan_revising=True, revision_applied=True)
         result = guard_g7_plan_revising(states, meta, {})
-        assert result is not None
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G7"
+        assert "plan_revising" in result.reason
+        # The escalation is only defensible because it names the way out.
+        assert "sdlc-tool meta-set" in result.reason
 
     def test_self_heal_fires_when_revision_landed_since_the_verdict(self):
         """A revision that postdates the CRITIQUE verdict does release the lock.

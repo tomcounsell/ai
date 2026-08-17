@@ -1809,7 +1809,6 @@ class TestG5AliveOnWithConcerns:
             _iso("2026-08-17T01:00:00"),
             plan_revising=True,
             last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
-            revision_applied=False,
         )
         result = decide_next_dispatch(states, meta, self._ctx())
         assert result.row_id != "G5"
