@@ -122,6 +122,7 @@ def clear_worker_down_reactions(session_id: str) -> int:
 
     try:
         from agent.output_handler import TelegramRelayOutputHandler  # noqa: PLC0415
+        from agent.reaction_priority import PRIORITY_PICKUP  # noqa: PLC0415
 
         emoji = _recovered_emoji()
         outbox_key = f"{_OUTBOX_KEY_PREFIX}{session_id}"
@@ -135,7 +136,7 @@ def clear_worker_down_reactions(session_id: str) -> int:
                 logger.debug("skipping malformed worker-down entry %r: %s", raw, parse_err)
                 continue
             payload = TelegramRelayOutputHandler._build_reaction_payload(
-                str(chat_id), message_id, emoji, session_id
+                str(chat_id), message_id, emoji, session_id, priority=PRIORITY_PICKUP
             )
             r.rpush(outbox_key, json.dumps(payload))
             queued += 1

@@ -1,12 +1,12 @@
-"""Integration test: stalled-session detection -> outbox handoff to bridge relay.
+"""Integration test: liveness tick publisher -> outbox -> bridge relay (#2716).
 
-Issue #1313. Drives one watchdog tick against a stale-pending fixture session
-and asserts the reaction payload lands in ``telegram:outbox:{session_id}`` with
-the right schema, then asserts ``bridge.telegram_relay._send_queued_reaction``
-recognizes the payload shape (called as a unit with a stub Telethon client).
+Drives one watchdog tick publish against a session past its first tick
+interval, asserts the reaction payload lands in ``telegram:outbox:{session_id}``
+with the counter's schema (including the ``priority`` field the drain guard
+reads), then drives the same payload through the relay's reaction path with a
+stub Telethon client.
 
-Uses an in-memory Redis stub so this test does not depend on a live Redis
-instance and never touches production keys.
+Uses an in-memory Redis stub so this test never touches a live instance.
 """
 
 import asyncio
@@ -15,15 +15,22 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from agent.reaction_priority import PRIORITY_HEARTBEAT, PRIORITY_TERMINAL
+from bridge.response import HEARTBEAT_TICK_INTERVAL_SECONDS, heartbeat_reaction
+
+OUTBOX_KEY = "telegram:outbox:tg_user_-100_42"
+
 
 class _FakeRedis:
-    """Minimal in-memory Redis stub matching the `set NX EX`, `rpush`,
-    `expire`, `delete` surface used by the watchdog."""
+    """In-memory stub for the get / set-NX-EX / rpush / expire / delete surface."""
 
     def __init__(self):
         self.store: dict[str, str] = {}
         self.lists: dict[str, list[str]] = {}
         self.expires: dict[str, int] = {}
+
+    def get(self, key):
+        return self.store.get(key)
 
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.store:
@@ -48,21 +55,19 @@ class _FakeRedis:
         return 1
 
 
-def _make_stale_pending_session(session_id="tg_user_-100_42"):
-    """Build a SimpleNamespace mimicking AgentSession for a stale-pending fixture."""
+def _make_running_session(age_seconds):
+    """A worker-executed Telegram session — status='running', which
+    ``check_all_sessions`` never queries and the tick publisher must."""
     now = time.time()
     return SimpleNamespace(
-        session_id=session_id,
+        session_id="tg_user_-100_42",
         agent_session_id="as-001",
-        status="pending",
-        # Stale: created well past the 300s pending threshold.
-        started_at=None,
-        created_at=now - 600,
-        updated_at=now - 600,
+        status="running",
+        started_at=now - age_seconds,
+        created_at=now - age_seconds,
+        updated_at=now - age_seconds,
         project_key="testproj",
         chat_id="-100",
-        # initial_telegram_message provides telegram_message_id via property,
-        # but SimpleNamespace can expose it directly.
         telegram_message_id=42,
     )
 
@@ -74,100 +79,86 @@ def _query_filter_for(sessions_by_status):
     return SimpleNamespace(filter=filter_fn)
 
 
-def test_watchdog_tick_writes_reaction_to_outbox(monkeypatch):
-    """A stalled pending session triggers a reaction payload in the outbox."""
+def _publish(session):
     from monitoring import session_watchdog
 
-    fake = _FakeRedis()
-    monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fake)
-    monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-
-    session = _make_stale_pending_session()
-
-    # The session needs `_get_history_list` (read by check_stalled_sessions).
-    session._get_history_list = lambda: []
-
-    sessions_by_status = {"pending": [session], "running": [], "active": []}
     with patch(
         "monitoring.session_watchdog.AgentSession.query",
-        _query_filter_for(sessions_by_status),
+        _query_filter_for({"running": [session], "active": []}),
     ):
-        stalled = session_watchdog.check_stalled_sessions()
+        return session_watchdog._publish_liveness_ticks()
 
-    # Watchdog must have detected the stall.
-    assert any(s["session_id"] == "tg_user_-100_42" for s in stalled)
 
-    # And queued exactly one reaction payload to the session's outbox.
-    queue_key = "telegram:outbox:tg_user_-100_42"
-    assert queue_key in fake.lists
-    assert len(fake.lists[queue_key]) == 1
+def test_watchdog_tick_writes_reaction_to_outbox(monkeypatch):
+    """A session past one tick interval queues exactly one counter payload."""
+    fake = _FakeRedis()
+    monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fake)
 
-    payload = json.loads(fake.lists[queue_key][0])
+    assert _publish(_make_running_session(HEARTBEAT_TICK_INTERVAL_SECONDS + 5)) == 1
+
+    assert len(fake.lists[OUTBOX_KEY]) == 1
+    payload = json.loads(fake.lists[OUTBOX_KEY][0])
     assert payload["type"] == "reaction"
     assert payload["chat_id"] == "-100"
     assert payload["reply_to"] == 42
-    assert payload["emoji"] == "⏳"
+    assert payload["emoji"] == heartbeat_reaction(1).emoji
     assert payload["session_id"] == "tg_user_-100_42"
+    assert payload["priority"] == PRIORITY_HEARTBEAT
+    assert payload["heartbeat_tick"] == 1
     assert "timestamp" in payload
 
-    # Outbox TTL applied so the relay-down case eventually clears.
-    assert fake.expires[queue_key] == 3600
-
-    # Dedup key claimed.
-    assert "watchdog:stall_reaction_applied:tg_user_-100_42" in fake.store
+    # Outbox TTL applied so a relay-down window eventually clears.
+    assert fake.expires[OUTBOX_KEY] == 3600
 
 
-def test_relay_send_queued_reaction_accepts_watchdog_payload(monkeypatch):
-    """The bridge's _send_queued_reaction must accept the watchdog's payload shape.
-
-    Patches `bridge.response.set_reaction` to avoid a real Telethon call; the
-    test only verifies the payload validation/parse path returns True.
-    """
+def test_relay_send_queued_reaction_accepts_tick_payload(monkeypatch):
+    """The relay's reaction path must accept the counter's payload shape."""
     from bridge.telegram_relay import _send_queued_reaction
-    from monitoring import session_watchdog
 
     fake = _FakeRedis()
     monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fake)
-    monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
-
-    session = _make_stale_pending_session()
-    assert session_watchdog._apply_stall_reaction(session) is True
-
-    queue_key = "telegram:outbox:tg_user_-100_42"
-    payload = json.loads(fake.lists[queue_key][0])
+    _publish(_make_running_session(HEARTBEAT_TICK_INTERVAL_SECONDS + 5))
+    payload = json.loads(fake.lists[OUTBOX_KEY][0])
 
     fake_set_reaction = AsyncMock(return_value=True)
     with patch("bridge.response.set_reaction", fake_set_reaction):
         result = asyncio.run(_send_queued_reaction(telegram_client=object(), message=payload))
 
     assert result is True
-    fake_set_reaction.assert_awaited_once()
-    # Verify the relay parsed chat_id, reply_to, emoji correctly.
-    args, kwargs = fake_set_reaction.call_args
-    # set_reaction(client, chat_id, msg_id, emoji)
+    args, _ = fake_set_reaction.call_args
     assert args[1] == -100
     assert args[2] == 42
-    assert args[3] == "⏳"
+    assert args[3] == heartbeat_reaction(1).emoji
 
 
-def test_second_tick_does_not_double_queue(monkeypatch):
-    """Two ticks observing the same stalled session queue the reaction once."""
-    from monitoring import session_watchdog
+def test_second_publish_in_the_same_interval_does_not_double_queue(monkeypatch):
+    """The tick is wall-clock derived, so a rescan recomputes the same value."""
+    fake = _FakeRedis()
+    monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fake)
+
+    session = _make_running_session(HEARTBEAT_TICK_INTERVAL_SECONDS + 5)
+    _publish(session)
+    _publish(session)
+
+    assert len(fake.lists[OUTBOX_KEY]) == 1
+
+
+def test_terminal_reaction_is_not_overwritten_by_a_tick(monkeypatch):
+    """End to end: a terminal reaction owns the slot, so the tick is dropped at
+    the drain and never reaches Telethon."""
+    from bridge.liveness_ticks import record_slot_owner
+    from bridge.telegram_relay import _reaction_yields_slot, _send_queued_reaction
 
     fake = _FakeRedis()
     monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", fake)
-    monkeypatch.delenv("WATCHDOG_STALL_REACTION_ENABLED", raising=False)
+    _publish(_make_running_session(HEARTBEAT_TICK_INTERVAL_SECONDS + 5))
+    payload = json.loads(fake.lists[OUTBOX_KEY][0])
 
-    session = _make_stale_pending_session()
-    session._get_history_list = lambda: []
+    record_slot_owner("-100", 42, PRIORITY_TERMINAL)
+    assert _reaction_yields_slot(payload) is True
 
-    sessions_by_status = {"pending": [session], "running": [], "active": []}
-    with patch(
-        "monitoring.session_watchdog.AgentSession.query",
-        _query_filter_for(sessions_by_status),
-    ):
-        session_watchdog.check_stalled_sessions()
-        session_watchdog.check_stalled_sessions()
-
-    queue_key = "telegram:outbox:tg_user_-100_42"
-    assert len(fake.lists[queue_key]) == 1
+    # Control: absent the guard the same payload would have hit the API.
+    fake_set_reaction = AsyncMock(return_value=True)
+    with patch("bridge.response.set_reaction", fake_set_reaction):
+        asyncio.run(_send_queued_reaction(telegram_client=object(), message=payload))
+    fake_set_reaction.assert_awaited_once()

@@ -1,11 +1,14 @@
 """Emoji embedding index for fast reaction selection.
 
 Maps the validated Telegram reaction emojis to descriptive feeling-word
-embeddings via cosine similarity. Also supports Premium custom emoji via
-a separate cached index of custom emoji sticker packs.
+embeddings via cosine similarity.
+
+This index covers STANDARD emoji only. Custom (Premium) emoji reactions are
+still supported by the transport — ``EmojiResult.document_id`` and
+``set_reaction``'s ``ReactionCustomEmoji`` branch are live — but their ids are
+pinned statically by the caller rather than searched semantically (#2716).
 
 Standard emoji cache: data/emoji_embeddings.json
-Custom emoji cache:   data/custom_emoji_embeddings.json
 
 Usage:
     from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message, EmojiResult
@@ -76,9 +79,6 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 # Cache location for pre-computed emoji embeddings
 CACHE_PATH = Path(__file__).parent.parent / "data" / "emoji_embeddings.json"
 
-# Cache location for custom emoji embeddings (Premium feature)
-CUSTOM_CACHE_PATH = Path(__file__).parent.parent / "data" / "custom_emoji_embeddings.json"
-
 # Default fallback emoji (thinking face)
 DEFAULT_EMOJI = "\U0001f914"  # 🤔
 
@@ -103,9 +103,6 @@ BLOCKED_REACTION_EMOJIS = frozenset(
 
 # Placeholder character used for custom emoji in message text
 CUSTOM_EMOJI_PLACEHOLDER = "\u2753"  # ❓ (replaced by entity rendering)
-
-# Minimum delta by which custom emoji score must exceed standard to win
-CUSTOM_EMOJI_DELTA = 0.05
 
 # Softmax temperature for emoji selection: higher = more random (flatter distribution).
 # At 1.0 the distribution tracks score differences closely; at 5.0+ it's nearly uniform.
@@ -246,12 +243,6 @@ EMOJI_LABELS: dict[str, str] = {
 # In-memory cache of embeddings (loaded lazily)
 _embedding_cache: dict[str, list[float]] | None = None
 
-# In-memory cache of custom emoji embeddings (loaded lazily)
-_custom_embedding_cache: dict[str, list[float]] | None = None
-
-# Flag indicating custom emoji indexing is disabled (non-Premium, API error)
-_custom_emoji_disabled: bool = False
-
 
 def _load_or_compute_embeddings() -> dict[str, list[float]]:
     """Load emoji embeddings from cache or compute via OpenRouter API.
@@ -334,11 +325,16 @@ def _softmax_sample(candidates: list[tuple[str, float]], temperature: float) -> 
 def find_best_emoji(feeling: str) -> EmojiResult:
     """Find the best reaction emoji for a given feeling word.
 
-    Embeds the feeling text and finds the nearest emoji by cosine similarity,
-    searching both standard and custom emoji embeddings.
+    Embeds the feeling text and finds the nearest emoji by cosine similarity
+    over the standard, Telegram-validated reaction set.
 
-    Custom emoji wins only when its similarity score exceeds the best standard
-    match by at least ``CUSTOM_EMOJI_DELTA`` (0.05).
+    This function never returns a custom emoji. The embedding index that once
+    fed that branch was deleted in #2716: it had no production caller, could
+    not work as written (it read ``result.documents`` from a request that
+    returns only set descriptors), and never produced a cache file. Custom
+    emoji reactions are still supported end to end — they now ride statically
+    pinned document ids, not a semantic search. See
+    ``bridge/response.py::heartbeat_reaction``.
 
     Args:
         feeling: A word or phrase describing the desired reaction
@@ -378,63 +374,16 @@ def find_best_emoji(feeling: str) -> EmojiResult:
     top_standard = scored[: max(1, REACTION_TOP_K)]
     best_standard_emoji, best_standard_score = _softmax_sample(top_standard, REACTION_TEMPERATURE)
 
-    # Search custom emoji embeddings (if available)
-    best_custom_id: int | None = None
-    best_custom_score = -1.0
-
-    custom_embeddings = _load_custom_embeddings()
-    if custom_embeddings:
-        custom_scored: list[tuple[int, float]] = []
-        for key, emb in custom_embeddings.items():
-            score = _cosine_similarity(query_embedding, emb)
-            try:
-                doc_id = int(key.split(":", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            custom_scored.append((doc_id, score))
-
-        if custom_scored:
-            custom_scored.sort(key=lambda x: x[1], reverse=True)
-            top_custom = custom_scored[: max(1, REACTION_TOP_K)]
-            # Reuse _softmax_sample with string keys for uniform interface
-            custom_str_candidates = [(str(doc_id), score) for doc_id, score in top_custom]
-            sampled_str, best_custom_score = _softmax_sample(
-                custom_str_candidates, REACTION_TEMPERATURE
-            )
-            try:
-                best_custom_id = int(sampled_str)
-            except ValueError:
-                best_custom_id = None
-
-    # Custom emoji wins only if it exceeds standard by CUSTOM_EMOJI_DELTA
-    use_custom = (
-        best_custom_id is not None and best_custom_score > best_standard_score + CUSTOM_EMOJI_DELTA
-    )
-
     elapsed_ms = (time.time() - start) * 1000
-
-    if use_custom:
-        result = EmojiResult(
-            emoji=best_standard_emoji,  # keep standard as fallback
-            document_id=best_custom_id,
-            is_custom=True,
-            score=best_custom_score,
-        )
-        logger.debug(
-            f"find_best_emoji({feeling!r}) -> custom:{best_custom_id} "
-            f"(score={best_custom_score:.3f} vs std={best_standard_score:.3f}, "
-            f"{elapsed_ms:.1f}ms)"
-        )
-    else:
-        result = EmojiResult(
-            emoji=best_standard_emoji,
-            is_custom=False,
-            score=best_standard_score,
-        )
-        logger.debug(
-            f"find_best_emoji({feeling!r}) -> {best_standard_emoji} "
-            f"(score={best_standard_score:.3f}, {elapsed_ms:.1f}ms)"
-        )
+    result = EmojiResult(
+        emoji=best_standard_emoji,
+        is_custom=False,
+        score=best_standard_score,
+    )
+    logger.debug(
+        f"find_best_emoji({feeling!r}) -> {best_standard_emoji} "
+        f"(score={best_standard_score:.3f}, {elapsed_ms:.1f}ms)"
+    )
 
     return result
 
@@ -490,161 +439,7 @@ def find_best_emoji_for_message(text: str, work_type: str | None = None) -> Emoj
     return EmojiResult(emoji=random.choice(candidates))
 
 
-def _load_custom_embeddings() -> dict[str, list[float]]:
-    """Load custom emoji embeddings from cache file.
-
-    Returns cached custom emoji embeddings, or empty dict if unavailable.
-    Custom emoji indexing is disabled when the account is non-Premium or
-    the cache file doesn't exist (lazy build on first bridge start).
-    """
-    global _custom_embedding_cache
-
-    if _custom_emoji_disabled:
-        return {}
-
-    if _custom_embedding_cache is not None:
-        return _custom_embedding_cache
-
-    if CUSTOM_CACHE_PATH.exists():
-        try:
-            data = json.loads(CUSTOM_CACHE_PATH.read_text())
-            if isinstance(data, dict) and len(data) > 0:
-                _custom_embedding_cache = data
-                logger.info(f"Loaded custom emoji embeddings from cache ({len(data)} entries)")
-                return _custom_embedding_cache
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Custom emoji cache corrupted: {e}")
-
-    _custom_embedding_cache = {}
-    return _custom_embedding_cache
-
-
-async def build_custom_emoji_index(client) -> dict[str, list[float]]:
-    """Query Telethon for custom emoji packs and build embedding index.
-
-    Queries the Telegram API for all custom emoji sticker sets available
-    to the account, extracts document IDs and descriptive labels, computes
-    embeddings, and caches to ``CUSTOM_CACHE_PATH``.
-
-    Args:
-        client: An authenticated Telethon TelegramClient instance.
-
-    Returns:
-        Dict mapping ``"custom:{document_id}"`` to embedding vectors.
-        Returns empty dict on failure (non-Premium, API error, etc.).
-    """
-    global _custom_embedding_cache, _custom_emoji_disabled
-
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.warning("OPENROUTER_API_KEY not set, skipping custom emoji index")
-        return {}
-
-    try:
-        from telethon.tl.functions.messages import GetEmojiStickersRequest
-
-        result = await client(GetEmojiStickersRequest(hash=0))
-    except Exception as e:
-        logger.warning(f"Custom emoji API call failed (non-Premium?): {e}")
-        _custom_emoji_disabled = True
-        return {}
-
-    # Extract sticker sets from the result
-    sticker_sets = getattr(result, "sets", [])
-    if not sticker_sets:
-        logger.info("No custom emoji sticker sets found")
-        _custom_embedding_cache = {}
-        return {}
-
-    # Build document_id -> label mapping from all sticker sets
-    labels: dict[int, str] = {}
-
-    # The result contains documents with their sticker set associations
-    documents = getattr(result, "documents", [])
-    # Build set_id -> set_title lookup
-    set_titles: dict[int, str] = {}
-    for s in sticker_sets:
-        set_titles[s.id] = getattr(s, "title", "")
-
-    for doc in documents:
-        doc_id = doc.id
-        # Extract associated emoji character from attributes
-        emoji_char = ""
-        set_id = None
-        for attr in getattr(doc, "attributes", []):
-            if hasattr(attr, "alt"):
-                emoji_char = attr.alt or ""
-            if hasattr(attr, "stickerset"):
-                stickerset_ref = attr.stickerset
-                if hasattr(stickerset_ref, "id"):
-                    set_id = stickerset_ref.id
-
-        # Compose descriptive label from emoji + set title
-        set_title = set_titles.get(set_id, "") if set_id else ""
-        label_parts = []
-        if emoji_char:
-            label_parts.append(emoji_char)
-        if set_title:
-            label_parts.append(set_title)
-        if label_parts:
-            labels[doc_id] = " ".join(label_parts)
-
-    if not labels:
-        logger.info("No custom emoji labels extracted from sticker sets")
-        _custom_embedding_cache = {}
-        return {}
-
-    # Compute embeddings
-    logger.info(f"Computing custom emoji embeddings for {len(labels)} emoji...")
-    embeddings: dict[str, list[float]] = {}
-
-    for doc_id, label in labels.items():
-        embedding = _compute_embedding(label, api_key)
-        if embedding:
-            embeddings[f"custom:{doc_id}"] = embedding
-        else:
-            logger.warning(f"Failed to compute embedding for custom emoji {doc_id}")
-
-    # Save to cache
-    if embeddings:
-        try:
-            CUSTOM_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CUSTOM_CACHE_PATH.write_text(json.dumps(embeddings))
-            logger.info(f"Saved custom emoji embeddings to cache ({len(embeddings)} entries)")
-        except OSError as e:
-            logger.warning(f"Failed to save custom emoji cache: {e}")
-
-    _custom_embedding_cache = embeddings
-    return embeddings
-
-
-async def rebuild_custom_emoji_index(client) -> dict[str, list[float]]:
-    """Force-rebuild the custom emoji index, clearing any existing cache.
-
-    Args:
-        client: An authenticated Telethon TelegramClient instance.
-
-    Returns:
-        The rebuilt embedding dict.
-    """
-    global _custom_embedding_cache, _custom_emoji_disabled
-
-    _custom_embedding_cache = None
-    _custom_emoji_disabled = False
-
-    # Remove existing cache file
-    try:
-        if CUSTOM_CACHE_PATH.exists():
-            CUSTOM_CACHE_PATH.unlink()
-    except OSError:
-        pass
-
-    return await build_custom_emoji_index(client)
-
-
 def clear_cache() -> None:
-    """Clear the in-memory embedding caches (for testing)."""
-    global _embedding_cache, _custom_embedding_cache, _custom_emoji_disabled
+    """Clear the in-memory embedding cache (for testing)."""
+    global _embedding_cache
     _embedding_cache = None
-    _custom_embedding_cache = None
-    _custom_emoji_disabled = False

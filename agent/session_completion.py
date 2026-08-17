@@ -588,10 +588,13 @@ def _queue_completion_suppress_reaction(
             )
             return False
 
+        from agent.reaction_priority import PRIORITY_SUPPRESS
+
         # Mirror of TelegramRelayOutputHandler._build_reaction_payload — keep in sync.
-        # (See agent/output_handler.py:789-820. We inline the schema here rather
-        # than importing the static method to avoid pulling the entire output-
-        # handler module into the completion-runner import graph for one dict.)
+        # (We inline the schema here rather than importing the static method to
+        # avoid pulling the entire output-handler module into the completion-
+        # runner import graph for one dict.) Schema parity across all five
+        # mirrors is enforced by tests/unit/test_stall_detection.py.
         payload = {
             "type": "reaction",
             "chat_id": chat_id,
@@ -599,6 +602,8 @@ def _queue_completion_suppress_reaction(
             "emoji": str(emoji) if emoji is not None else None,
             "session_id": session_id,
             "timestamp": _t.time(),
+            "priority": PRIORITY_SUPPRESS,
+            "priority_ranked": True,
         }
         queue_key = f"telegram:outbox:{session_id}"
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")

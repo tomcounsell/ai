@@ -192,10 +192,23 @@ class TestReactionEmojiSelection:
             "REACTION_RECEIVED",
             "REACTION_PROCESSING",
             "REACTION_ABORT",
+            "REACTION_WORKER_DOWN",
             "REACTION_SUCCESS",
             "REACTION_COMPLETE",
             "REACTION_ERROR",
         }
+
+    def test_liveness_arc_stays_out_of_the_registry(self):
+        """The tick counter's fallback arc must never be registered (#2716).
+
+        It reuses 👀 (REACTION_RECEIVED) at slot 0 by design, so registering it
+        would make the import-time _assert_distinct() raise ImportError and the
+        bridge would not start. The arc is a sequence, not a constant.
+        """
+        from bridge.response import HEARTBEAT_FALLBACK_ARC, _reaction_constants
+
+        assert "HEARTBEAT_FALLBACK_ARC" not in _reaction_constants()
+        assert HEARTBEAT_FALLBACK_ARC not in _reaction_constants().values()
 
     def test_no_validated_reaction_in_invalid_list(self):
         """No emoji should be in both VALIDATED_REACTIONS and INVALID_REACTIONS."""
