@@ -245,7 +245,7 @@ Not applicable. This repo publishes no external documentation site; `docs/` is t
 
 Mapped to the issue's acceptance criteria:
 
-- [ ] **`SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K` appear in no documentation as operator controls.** `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K" --include="*.md" --include="*.py" . | grep -v "^./docs/plans/" | grep -v test_review_judge_env_docs` returns no output. **The `test_review_judge_env_docs` exclusion is required, not optional** — the new guard names both variables in its own assertions and comments, by design (Risk 4). A criterion demanding literally zero hits would push a builder to strip those names out of the test and weaken the very guard this plan adds. Use the exclusion verbatim; it must match the Verification-table command exactly.
+- [ ] **`SDLC_REVIEW_JUDGES` and `SDLC_REVIEW_K` appear in no documentation as operator controls.** `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K" --include="*.md" --include="*.py" . | grep -v "docs/plans/" | grep -v test_review_judge_env_docs` returns no output. **The `test_review_judge_env_docs` exclusion is required, not optional** — the new guard names both variables in its own assertions and comments, by design (Risk 4). A criterion demanding literally zero hits would push a builder to strip those names out of the test and weaken the very guard this plan adds. Use the exclusion verbatim; it must match the Verification-table command exactly. The path exclusion is deliberately unanchored: GNU grep prints `./docs/plans/...` while this machine's `ugrep` prints `docs/plans/...`, so a `^.` anchor makes the row permanently red on one of the two.
 - [ ] **`docs/sdlc/do-pr-review.md` and `docs/features/multi-judge-consensus.md` agree with actual behavior, with no half-migration.** Both describe a fixed two-judge roster and the trivial-diff classifier as the only cost control. `docs/features/README.md` is brought along in the same commit so the index does not contradict them.
 - [ ] **"If Option A" criterion — NOT APPLICABLE.** Option A is not chosen. The plan states why per variable (K names a nonexistent algorithm; JUDGES is better served by a versioned roster declaration than by an unversioned per-machine env var), and why the execution test that criterion asks for is not writable against prose-driven behavior in this repo.
 - [ ] **"If Option B" criterion — APPLIES and is met.** No remaining prose describes an env-var control that nothing reads, across all three files plus the two module docstrings.
@@ -266,7 +266,7 @@ Mapped to the issue's acceptance criteria:
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| No env-var claim survives outside archived plans | `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K" --include="*.md" --include="*.py" . \| grep -v "^./docs/plans/" \| grep -v test_review_judge_env_docs` | no output |
+| No env-var claim survives outside archived plans | `grep -rn "SDLC_REVIEW_JUDGES\|SDLC_REVIEW_K" --include="*.md" --include="*.py" . \| grep -v "docs/plans/" \| grep -v test_review_judge_env_docs` | no output |
 | New guard passes | `scripts/pytest-clean.sh tests/unit/test_review_judge_env_docs.py -q` | exit code 0 |
 | Consensus behavior unchanged | `scripts/pytest-clean.sh tests/unit/test_review_multi_judge.py -q` | exit code 0, no test edited |
 | Skill consistency still green | `scripts/pytest-clean.sh tests/unit/test_skill_agent_tool_consistency.py -q` | exit code 0 |
