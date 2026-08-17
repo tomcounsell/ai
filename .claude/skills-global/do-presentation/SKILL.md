@@ -254,6 +254,9 @@ content...
 - Use `.rose` for the one governing quote or line, once per deck
 - Bold key terms on first use
 - Use analogies liberally — connect technical concepts to everyday things
+- **Write each paragraph on one source line.** Marp renders a newline inside a paragraph as a line
+  break, so markdown you wrapped for readability in the editor comes out broken mid-sentence on the
+  slide. Let the source line run long
 
 Layout components come from `THEME.md`: `.cols` / `.cols-3` break a slide that would otherwise be a
 dense list into scannable sections, `.plate` holds a governing metric or key fact, `.note` is the red
