@@ -603,6 +603,7 @@ def _queue_completion_suppress_reaction(
             "session_id": session_id,
             "timestamp": _t.time(),
             "priority": PRIORITY_SUPPRESS,
+            "priority_ranked": True,
         }
         queue_key = f"telegram:outbox:{session_id}"
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")

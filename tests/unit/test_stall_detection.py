@@ -638,6 +638,74 @@ class TestReactionSlotPrecedence:
         }
         assert _reaction_yields_slot(payload) is False
 
+    def test_killed_session_drops_the_tick(self, fake_redis):
+        """`killed` is a terminal status (models/session_lifecycle.py) and must
+        drop a queued tick.
+
+        Regression guard for a hand-rolled status set that omitted it: a session
+        killed while a tick was already queued would have had the tick land on
+        top of its terminal reaction, since the two outbox queues drain in
+        undefined order and the slot-owner layer only helps when the terminal
+        reaction happened to go first.
+        """
+        from models.session_lifecycle import TERMINAL_STATUSES
+
+        assert "killed" in TERMINAL_STATUSES
+
+        from bridge.telegram_relay import _session_reached_terminal_status
+
+        session = MagicMock()
+        session.status = "killed"
+        with patch("models.agent_session.AgentSession") as mock_model:
+            mock_model.query.filter.return_value = [session]
+            assert _session_reached_terminal_status("tg_user_-100_42") is True
+
+    def test_unranked_reaction_delivers_without_claiming_the_slot(self, fake_redis):
+        """An arbitrary agent glyph must not lock the slot at terminal rank.
+
+        `priority_for_glyph` answers DEFAULT_PRIORITY (terminal) for anything it
+        does not recognize, so react_with_emoji is never dropped. Recording that
+        fallback as the slot owner would suppress every lower-ranked writer --
+        including the counter -- for the owner key's whole TTL.
+        """
+        from agent.reaction_priority import PRIORITY_HEARTBEAT, priority_for_glyph
+        from bridge.liveness_ticks import read_slot_owner
+        from bridge.telegram_relay import _reaction_yields_slot, _record_reaction_slot_owner
+
+        unranked = {
+            "chat_id": "-100",
+            "reply_to": 42,
+            "emoji": "🦄",
+            "priority": priority_for_glyph("🦄"),
+            "priority_ranked": False,
+        }
+        # Delivered, not dropped.
+        assert _reaction_yields_slot(unranked) is False
+        _record_reaction_slot_owner(unranked)
+        # ...but it took no ownership, so the counter is not suppressed.
+        assert read_slot_owner("-100", 42) is None
+
+        tick = self._tick_payload()
+        tick["priority"] = PRIORITY_HEARTBEAT
+        assert _reaction_yields_slot(tick) is False
+
+    def test_ranked_reaction_still_claims_the_slot(self, fake_redis):
+        """Control for the test above: a known glyph must still take ownership."""
+        from agent.reaction_priority import PRIORITY_TERMINAL
+        from bridge.liveness_ticks import read_slot_owner
+        from bridge.telegram_relay import _record_reaction_slot_owner
+
+        _record_reaction_slot_owner(
+            {
+                "chat_id": "-100",
+                "reply_to": 42,
+                "emoji": "✅",
+                "priority": PRIORITY_TERMINAL,
+                "priority_ranked": True,
+            }
+        )
+        assert read_slot_owner("-100", 42) == PRIORITY_TERMINAL
+
     def test_terminal_reaction_always_wins(self, fake_redis):
         from agent.reaction_priority import PRIORITY_HEARTBEAT, PRIORITY_TERMINAL
         from bridge.liveness_ticks import record_slot_owner
@@ -677,7 +745,22 @@ class TestReactionPayloadSchemaParity:
             priority=payload["priority"],
         )
         assert set(payload) - set(expected) <= self.EXTRA_KEYS
+
+        # `priority` and `priority_ranked` are per-writer by design, so only
+        # their PRESENCE is a parity claim, not their value. `priority` is
+        # already neutralized by passing it through above; doing the same for
+        # `priority_ranked` is not possible, because the builder derives it and
+        # any explicit `priority` forces it True -- which would make this helper
+        # unable to express a legitimately unranked writer
+        # (`tools/react_with_emoji.py`). Assert the key exists and is a bool on
+        # both sides, then compare everything else by value.
+        assert "priority_ranked" in payload, "priority_ranked missing from mirror"
+        assert isinstance(payload["priority_ranked"], bool)
+        assert isinstance(expected["priority_ranked"], bool)
+
         for field, value in expected.items():
+            if field == "priority_ranked":
+                continue
             assert payload[field] == value, f"{field} drifted"
 
     def test_canonical_builder_emits_priority(self):

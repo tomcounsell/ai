@@ -211,11 +211,6 @@ async def _send_queued_reaction(
         return False
 
 
-_TERMINAL_SESSION_STATUSES = frozenset(
-    {"completed", "done", "error", "failed", "abandoned", "cancelled", "canceled"}
-)
-
-
 def _session_reached_terminal_status(session_id: str) -> bool:
     """True when the session owning this payload has finished.
 
@@ -226,9 +221,10 @@ def _session_reached_terminal_status(session_id: str) -> bool:
     """
     try:
         from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES
 
         for session in AgentSession.query.filter(session_id=session_id):
-            return str(getattr(session, "status", "") or "").lower() in (_TERMINAL_SESSION_STATUSES)
+            return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
         return False
     except Exception as e:  # noqa: BLE001
         logger.debug("Relay: terminal-status lookup failed for %s: %s", session_id, e)
@@ -257,8 +253,15 @@ def _reaction_yields_slot(message: dict) -> bool:
        whenever any higher-ranked writer owns the slot, and additionally
        whenever its session has already reached a terminal status.
 
-    Everything else is left alone — in particular the normal ⚠ → ✍ progression
-    at session pickup, where a later, lower-ranked reaction is supposed to win.
+    Everything else is left alone. The plan's broader phrasing ("drop a
+    lower-priority reaction whenever a higher one owns the slot") is
+    deliberately NOT implemented: several legitimate progressions are a later,
+    lower-ranked reaction overwriting a higher one — the rank-3 RTR suppress
+    after a rank-2 🤯, and the rank-4 child-completion suppress after a rank-3
+    ✍. Enforcing rank monotonically would silently drop both. (The ⚠ → ✍
+    pickup progression is often cited here but is not actually an example: ⚠ is
+    set in-process by ``react_if_worker_down`` and never reaches this drain, so
+    it records no slot owner at all.)
 
     Returns:
         True when the caller must drop this payload.
@@ -337,6 +340,14 @@ def _record_reaction_slot_owner(message: dict) -> None:
         chat_id = message.get("chat_id")
         reply_to = message.get("reply_to")
         if chat_id is None or reply_to is None:
+            return
+        # Only a writer whose rank we actually know may claim the slot. An
+        # unranked glyph (an arbitrary agent-issued `react_with_emoji` call)
+        # delivers, but recording it would pin the slot at the fallback's
+        # terminal rank and suppress the budget, pickup, and tick writers behind
+        # it for the key's full TTL -- the opposite of the documented intent
+        # that such a reaction simply wins until the next tick overwrites it.
+        if not message.get("priority_ranked", True):
             return
         record_slot_owner(chat_id, reply_to, int(message.get("priority") or DEFAULT_PRIORITY))
     except Exception as e:  # noqa: BLE001

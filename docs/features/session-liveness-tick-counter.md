@@ -190,8 +190,16 @@ Two writers sit outside this model, deliberately:
 - **`tools/react_with_emoji.py` is unranked.** It is an agent-callable
   arbitrary reaction — a human or agent acting on purpose — and the precedence
   model should not silently override a deliberate act. It takes the glyph
-  derivation, which lands on rank 1 for any emoji the model picks, so it simply
-  wins whenever it runs; the next tick overwrites it.
+  derivation, which lands on rank 1 for any emoji the model picks, so it is
+  never dropped; it simply wins whenever it runs and the next tick overwrites
+  it. That second half only holds because its payload carries
+  `priority_ranked: False`, so it delivers **without claiming the slot**.
+  Recording it would pin the message at the fallback's terminal rank for the
+  owner key's full TTL and silently suppress the budget, pickup, and tick
+  writers behind it — the exact opposite of "the next tick overwrites it".
+  `priority_ranked` exists to separate the two questions a single `priority`
+  value cannot answer at once: may this payload be dropped, and may it claim
+  the slot.
 - **`react_if_worker_down` bypasses the guard entirely.** It calls
   `set_reaction` in-process at ingestion rather than writing to the outbox, so
   the drain never sees it. The guard is not total, and this is the gap. It has
@@ -282,6 +290,13 @@ working default and no operational need to be set.
   read.
 - **`react_if_worker_down` bypasses the drain guard** (in-process
   `set_reaction`), so the guard is not total.
+- **The first sweep after deploy steers a burst.** A missing anchor is seeded
+  from `session.started_at`, so any session already running longer than the
+  full ceiling window computes a past-ceiling tick on the very first sweep,
+  claims the ceiling, and gets a forced-progress steer. That is a one-time
+  burst across the whole `running`+`active` population, it is self-correcting,
+  and each session's `SET NX` marker fires once — but the first post-deploy
+  hour will look unusually chatty and that is expected, not a bug.
 - **FLOOD_WAIT is a shared-relay exposure.** The watchdog makes zero Telegram
   calls and can never flood-wait; the relay's handler sleeps inline for up to
   300 s, blocking every chat and message type. Ticks add roughly one reaction

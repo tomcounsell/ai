@@ -343,6 +343,7 @@ def _queue_budget_reaction(session) -> None:
         "session_id": session_id,
         "timestamp": time.time(),
         "priority": PRIORITY_INGESTION,
+        "priority_ranked": True,
     }
     queue_key = f"telegram:outbox:{session_id}"
     POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))

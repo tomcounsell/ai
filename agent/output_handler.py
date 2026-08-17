@@ -1536,8 +1536,15 @@ class TelegramRelayOutputHandler:
                 with the parameter in hand must pass it explicitly — see
                 ``agent/reaction_priority.py``.
         """
-        from agent.reaction_priority import priority_for_glyph
+        from agent.reaction_priority import is_ranked_glyph, priority_for_glyph
 
+        # `priority_ranked` separates two questions the single `priority` value
+        # cannot answer on its own (#2716 review): whether to DROP this payload,
+        # and whether it may CLAIM the slot. An unmapped glyph derives to rank 1
+        # so it is never wrongly dropped -- but it must not then own the slot at
+        # terminal rank, or one agent-issued `react_with_emoji` call would lock
+        # the message for the owner key's full TTL and silently suppress the
+        # budget, pickup, and tick writers behind it.
         return {
             "type": "reaction",
             "chat_id": chat_id,
@@ -1546,6 +1553,7 @@ class TelegramRelayOutputHandler:
             "session_id": session_id,
             "timestamp": timestamp if timestamp is not None else time.time(),
             "priority": priority if priority is not None else priority_for_glyph(emoji),
+            "priority_ranked": priority is not None or is_ranked_glyph(emoji),
         }
 
     async def react(

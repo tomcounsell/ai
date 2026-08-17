@@ -71,3 +71,19 @@ def priority_for_glyph(glyph: str | None) -> int:
     if not glyph:
         return DEFAULT_PRIORITY
     return _GLYPH_PRIORITY.get(str(glyph), DEFAULT_PRIORITY)
+
+
+def is_ranked_glyph(glyph: str | None) -> bool:
+    """True when this glyph has a real rank rather than the fallback.
+
+    ``priority_for_glyph`` deliberately answers ``DEFAULT_PRIORITY`` (terminal)
+    for anything it does not recognize, so an unknown writer is never dropped.
+    That fail-safe is wrong for slot OWNERSHIP: an arbitrary agent-issued glyph
+    from ``tools/react_with_emoji.py`` would otherwise claim the slot at
+    terminal rank and suppress every lower-ranked writer, including the counter,
+    until the owner key expired. Callers recording ownership consult this
+    instead, so an unranked reaction delivers without taking the slot.
+    """
+    if not glyph:
+        return False
+    return str(glyph) in _GLYPH_PRIORITY

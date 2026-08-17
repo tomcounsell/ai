@@ -149,7 +149,12 @@ REACTION_WORKER_DOWN = "⚠"  # Worker not alive — enqueued but not being proc
 # 100 minutes. Grain of salt: 600s is a provisional, tunable choice — it is the
 # smallest interval that keeps reaction traffic negligible against the relay's
 # shared FLOOD_WAIT exposure.
-HEARTBEAT_TICK_INTERVAL_SECONDS = int(os.environ.get("HEARTBEAT_TICK_INTERVAL_SECONDS", "600"))
+# Floored at 1: the docstring above invites lowering this to exercise the
+# ceiling, and a 0 would make the watchdog's `elapsed // interval` raise
+# ZeroDivisionError once per running session on every scan.
+HEARTBEAT_TICK_INTERVAL_SECONDS = max(
+    1, int(os.environ.get("HEARTBEAT_TICK_INTERVAL_SECONDS", "600"))
+)
 
 # Highest tick the counter will render. Past it the counter refuses to advance
 # and the session is steered to publish a progress message instead. With the

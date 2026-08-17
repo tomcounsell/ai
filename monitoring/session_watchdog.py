@@ -699,6 +699,7 @@ def _publish_liveness_ticks() -> int:
                     # glyph is 👀, which that derivation maps to the rank-4
                     # child-completion suppress.
                     "priority": PRIORITY_HEARTBEAT,
+                    "priority_ranked": True,
                     "heartbeat_tick": tick,
                 }
                 if emoji_result.document_id is not None:
