@@ -229,9 +229,9 @@ No agent integration required — this is a model-internal change. Existing surf
 
 ## Documentation
 
-- [ ] Update `docs/features/durability-model.md` — replace the description of `recent_for_room`'s range-scan with the bounded reverse-range read, and document the `save()` tz-normalization invariant (scores are pure UTC epochs) and the backfill migration
-- [ ] Update `docs/plans/durability-room-job-agentrun.md:734` M3 note — the "#2636 bounded ZREVRANGE" gate is satisfied; point at this plan
-- [ ] Docstrings: `recent_for_room` (derivation-only key rule, over-fetch rationale, fail-open contract), `Job.save` override (instant-preserving, why not re-stamp), migration function (idempotency, fleet convergence)
+- [x] Update `docs/features/durability-model.md` — replace the description of `recent_for_room`'s range-scan with the bounded reverse-range read, and document the `save()` tz-normalization invariant (scores are pure UTC epochs) and the backfill migration
+- [x] Update `docs/plans/durability-room-job-agentrun.md` (M3 note, line 734) — the "#2636 bounded ZREVRANGE" gate is satisfied; point at this plan
+- [x] Docstrings: `recent_for_room` (derivation-only key rule, over-fetch rationale, fail-open contract), `Job.save` override (instant-preserving, why not re-stamp), migration function (idempotency, fleet convergence) — all three already adequate as shipped; no edits needed
 
 ## Success Criteria
 

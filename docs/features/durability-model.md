@@ -41,10 +41,10 @@ fresh session.
 - **Bind-or-mint** runs on the **local granite model via PydanticAI**
   (`agent.llm.run_typed_local`, strict `JobRouteDecision` JSON output), as
   does the intake intent classifier (`tools/classifier.py`). Structure:
-  zero-candidate short-circuit, top-5 recency cap
-  (`Job.recent_for_room`, a `SortedField(partition_by=room_id)`), post-hoc
-  `valid_ids` membership check, confidence threshold
-  (`JOB_ROUTER_CONFIDENCE_THRESHOLD`, provisional 0.70).
+  zero-candidate short-circuit, top-5 recency cap (`Job.recent_for_room`,
+  §Bounded recency read below), post-hoc `valid_ids` membership check,
+  confidence threshold (`JOB_ROUTER_CONFIDENCE_THRESHOLD`, provisional
+  0.70).
 - **Total fail-open to NEW**: any model/transport failure mints an extra Job
   — never a lost or wrong-bound message. The durable append precedes
   routing, so router latency/failure is a UX cost, not a durability cost.
@@ -52,6 +52,47 @@ fresh session.
   watch; the reduction lever is prompt tuning, not the threshold.
 - Binding is **idempotent** on the message identity (`SET NX`): a
   crash-after-bind re-route finds the existing binding and no-ops (Race 4).
+
+### Bounded recency read (`Job.recent_for_room`)
+
+`recent_for_room` answers the top-N bind-or-mint candidate lookup with a
+direct bounded reverse-range read over the `last_active_at` SortedField's
+per-Room partition, cost `O(limit)` regardless of the Room's lifetime Job
+count: the partition key is derived (never hand-built — `DB_key.clean()`
+escapes `:`, and every real `room_id` contains one), a single `ZREVRANGE`
+pulls the top `limit + JOB_RECENT_OVERFETCH` members (`JOB_RECENT_OVERFETCH`,
+env-overridable, default 5), and `Job.query.get_many(..., skip_none=True)`
+hydrates only those members in one pipelined round trip. The over-fetch
+absorbs a member whose backing hash is already gone; an under-filled result
+is never re-fetched — the Room genuinely has fewer live Jobs, or an index
+repair is mid-flight. Any failure logs a warning and fails open to `[]`,
+which the router treats as "no candidates" and mints.
+
+### `last_active_at` score purity (`Job.save()`)
+
+The sorted-set score behind `recent_for_room` must be a pure UTC epoch.
+popoto decodes a stored datetime without tzinfo, so a reloaded Job carries a
+naive `last_active_at`; `Job.save()` re-attaches UTC to a naive value before
+every write funnels into popoto's own scoring, making every score correct by
+construction. This is **instant-preserving, not a re-stamp** — it never
+assigns "now", only tzinfo, so an unrelated save (an expectation write, a
+goal version) cannot resurrect an idle Job's recency. The reattach is scoped
+to when `last_active_at` is actually being written: a save whose
+`update_fields` excludes it (`Job.backfill_open_expectations_index`'s
+`has_open_expectations`-only write) leaves the field, and the score, alone.
+
+Skew accumulated by any Job re-saved before this override shipped is swept
+by the `backfill_job_last_active_scores` migration
+(`scripts/update/migrations.py`), which runs on every machine's `/update`.
+For each Job it compares the stored sorted-set score against the UTC epoch
+the hash value implies; a row outside a 1-second tolerance is re-read fresh
+and repaired with a field-scoped `save(update_fields=["last_active_at"])` —
+the same clobber-proof idiom as `backfill_open_expectations_index`, so a
+concurrent expectation write is never overwritten. The migration is
+idempotent (a repaired row is in-tolerance on the next pass, so a re-run
+costs reads only) and fleet-convergent (every machine shares the same Redis,
+so re-running it anywhere converges scores written by a peer still on
+pre-override code).
 
 ## Goals and expectations (the single obligation primitive)
 
