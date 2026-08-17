@@ -345,6 +345,7 @@ tests/
 | unit | `test_telemetry.py` | 27 | Telemetry data collection |
 | unit | `test_health_check.py` | 12 | Health monitoring |
 | unit | `test_bridge_watchdog.py` | — | Bridge watchdog |
+| unit | `test_watchdog_log_isolation.py` | 17 | Import-time logging isolation for `monitoring/bridge_watchdog.py`, `monitoring/worker_watchdog.py`, `scripts/log_rotate.py` — no root handler, no file opened at import, config only from `__main__` (#2643) |
 | integration | `test_connectivity_gaps.py` | 12 | Connectivity failure handling |
 | integration | `test_silent_failures.py` | 7 | Silent failure detection |
 | performance | `test_benchmarks.py` | 16 | Latency, throughput, memory |

@@ -558,7 +558,18 @@ row. The skill-convention half of this fix (the `date -u` write in
 `/do-plan`'s Phase 4 Step 2a, and the `plan_revising` lock clear that depends
 on it) is documented in `docs/sdlc/do-plan.md`.
 
-**G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed. The `revision_applied_at` latch above covers the residual case where the plan hash *does* change (a body-only revision) but the revision was the settle-and-build pass, not a genuinely new concern.
+**Scope: the no-concerns path only (#2787).** The latch as described above now
+governs bare `READY TO BUILD`. On the `READY TO BUILD (with concerns)` path a
+bounded branch runs *ahead* of it: below `MAX_CONCERN_RECRITIQUE_ROUNDS` the
+verdict is stale whenever a revision landed after it, so row 2b re-critiques the
+concern-closing revision; at the bound the latch engages again and row 4c builds.
+The terminating bound there is the `_concern_round_count` counter, not G5. See
+[`with-concerns-recritique-gate.md`](with-concerns-recritique-gate.md).
+
+**G5 is the loop-breaker for the no-concerns path (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed. The `revision_applied_at` latch above covers the residual case where the plan hash *does* change (a body-only revision) but the revision was the settle-and-build pass, not a genuinely new concern.
+
+For a **with-concerns** verdict G5 steps aside unconditionally, so it is not the
+bound there; `MAX_CONCERN_RECRITIQUE_ROUNDS` is (#2787).
 
 **G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_body_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production. Using `compute_plan_body_hash` (not `compute_plan_hash`) ensures a `revision_applied: true` write does not bust the cache and send the router back to CRITIQUE (#1761).
 

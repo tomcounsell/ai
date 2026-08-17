@@ -74,7 +74,7 @@ The `revision_applied` flag is the mechanism for distinguishing "CRITIQUE comple
 
 The CRITIQUE -> PLAN -> CRITIQUE revision loop (for NEEDS REVISION verdicts) is capped at `MAX_CRITIQUE_CYCLES = 2`. After 2 revisions, the pipeline escalates to human review rather than looping indefinitely.
 
-The concern-triggered revision pass (READY TO BUILD with concerns) runs once and does not re-enter CRITIQUE — the `revision_applied` flag ensures it is never repeated.
+The concern-triggered revision pass (`READY TO BUILD (with concerns)`) re-enters CRITIQUE for up to `MAX_CONCERN_RECRITIQUE_ROUNDS` rounds, bounded by `_concern_round_count` rather than by `revision_applied`. See [With-Concerns Re-Critique Gate](with-concerns-recritique-gate.md).
 
 ## Propagation Check (do-plan integration)
 

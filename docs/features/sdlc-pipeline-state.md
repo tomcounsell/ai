@@ -86,6 +86,7 @@ Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in cano
 |-----|------|-------------|
 | `patch_cycle_count` | `int` | Number of PATCH cycles run so far |
 | `critique_cycle_count` | `int` | Number of CRITIQUE cycles run so far |
+| `concern_round_count` | `int` | Number of recorded `READY TO BUILD (with concerns)` CRITIQUE verdicts on this lane, incremented by `tools/sdlc_verdict.py::record_verdict` (sole writer); bounds the with-concerns re-critique loop against `MAX_CONCERN_RECRITIQUE_ROUNDS` (#2787, see [With-Concerns Re-Critique Gate](with-concerns-recritique-gate.md)) |
 | `latest_critique_verdict` | `str \| null` | Normalized critique verdict, e.g. `"NEEDS REVISION"` |
 | `latest_review_verdict` | `str \| null` | Normalized review verdict, e.g. `"APPROVED"` |
 | `revision_applied` | `bool` | Whether `revision_applied` frontmatter flag is set on the plan |

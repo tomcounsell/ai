@@ -1533,3 +1533,80 @@ class TestComputeMetaTwoPassPrLookup:
         assert meta["pr_number"] is None
         assert states_seen == ["open", "merged"], states_seen
         assert "all" not in states_seen
+
+
+class TestConcernRoundCountMetaProjection:
+    """#2787: `_concern_round_count` must reach the router via `_meta`.
+
+    It cannot ride `stages`: `query_enriched` threads only
+    ``("_verdicts", "_sdlc_dispatches")`` out of raw stage_states, so a bare
+    underscore key is dropped on the floor and every rule reading it would be
+    structurally inert in the CLI path — the ONLY path the pipeline uses.
+    """
+
+    def _enriched(self, raw_states: dict) -> dict:
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(raw_states)
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    return query_enriched(session_id="sid")
+
+    def test_raw_counter_is_surfaced_into_meta(self):
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": 2})
+        assert result["_meta"]["concern_round_count"] == 2
+
+    def test_raw_underscore_key_is_dropped_from_stages(self):
+        """Proof of why the `_meta` channel is required, not a stylistic choice."""
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": 2})
+        assert "_concern_round_count" not in result["stages"]
+
+    def test_defaults_to_zero_when_absent(self):
+        """Every lane predating the key starts here, and 0 is the correct start."""
+        result = self._enriched({"ISSUE": "completed"})
+        assert result["_meta"]["concern_round_count"] == 0
+
+    def test_default_meta_carries_the_key_parity_rule(self):
+        """#2769: `_default_meta` and `_compute_meta` must stay key-for-key.
+
+        A no-session ledger falls back to `_default_meta`; a key present in one
+        and absent in the other makes the router's read shape depend on whether
+        a session was found.
+        """
+        from tools.sdlc_stage_query import _compute_meta, _default_meta
+
+        defaults = _default_meta()
+        assert "concern_round_count" in defaults
+        assert defaults["concern_round_count"] == 0
+
+        mock_session = MagicMock()
+        mock_session.pr_number = None
+        with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+            with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                computed = _compute_meta({}, mock_session, None)
+        assert set(defaults) == set(computed), (
+            "key parity broken (#2769): "
+            f"only in _default_meta={set(defaults) - set(computed)}, "
+            f"only in _compute_meta={set(computed) - set(defaults)}"
+        )
+
+    def test_non_integer_values_coerce_to_zero_rather_than_raising(self):
+        """`_compute_meta` is called unwrapped: a corrupt value must degrade, not blind the router.
+
+        Coercing to 0 makes the bound stand down (routing to re-critique, the
+        fail-safe direction). Raising would take the whole `stage-query`
+        projection down and leave `_resolve_enriched` returning an empty ledger,
+        which sends a fully-worked issue back to `/do-plan`.
+        """
+        for bad in ("not-a-number", None, [], {}, "", "3.7.1"):
+            result = self._enriched({"ISSUE": "completed", "_concern_round_count": bad})
+            assert result["_meta"]["concern_round_count"] == 0, bad
+
+    def test_numeric_string_is_accepted(self):
+        """JSON round-trips through Redis can stringify; the counter must survive it."""
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": "5"})
+        assert result["_meta"]["concern_round_count"] == 5

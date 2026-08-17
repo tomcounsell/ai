@@ -111,6 +111,71 @@ This command is the single writer of `AgentSession.pr_number`; the read-only
 recovery rungs (validated gh search, `session/{slug}` branch-head fallback)
 live in `stage-query` and never write.
 
+**Accepted Residual Concerns note (Step 2).** Router row 4c dispatches `/do-build`
+when the with-concerns revision + re-critique loop hit its bound, and the residual
+concerns were accepted unreviewed. `row_id` is never plumbed into the dispatched
+skill's invocation, so `/do-build` re-derives row 4c's own condition from the same
+authoritative source the router used:
+
+```bash
+sdlc-tool stage-query --issue-number {issue_number}
+```
+
+**Mind the nesting.** `stage-query` emits `{"stages": {...}, "_meta": {...}}`.
+`_verdicts` — and therefore the verdict's `recorded_at` — lives under **`stages`**.
+`revision_applied_at` and `concern_round_count` live under **`_meta`**.
+`_meta["latest_critique_verdict"]` is a bare verdict string with **no** timestamp,
+so condition (b) below is *not* derivable from `_meta` alone.
+
+```bash
+sdlc-tool stage-query --issue-number {issue_number} | python -c "
+import json, sys
+from datetime import datetime
+from agent.pipeline_graph import MAX_CONCERN_RECRITIQUE_ROUNDS
+d = json.load(sys.stdin)
+v = d.get('stages', {}).get('_verdicts', {}).get('CRITIQUE', {}) or {}
+m = d.get('_meta', {}) or {}
+def ts(x):
+    try:
+        return datetime.fromisoformat(x) if x else None
+    except (TypeError, ValueError):
+        return None
+recorded_at, revised_at = ts(v.get('recorded_at')), ts(m.get('revision_applied_at'))
+a = 'WITH CONCERNS' in (v.get('verdict') or '').upper()
+b = bool(recorded_at and revised_at and revised_at > recorded_at)
+c = int(m.get('concern_round_count') or 0) >= MAX_CONCERN_RECRITIQUE_ROUNDS
+print('cap-reached' if (a and b and c) else 'normal')
+"
+```
+
+Write the note when **all three** hold: (a) the latest CRITIQUE verdict contains
+`WITH CONCERNS`; (b) `revision_applied_at` postdates that verdict's `recorded_at`;
+(c) `concern_round_count >= MAX_CONCERN_RECRITIQUE_ROUNDS`. An absent
+`concern_round_count` reads as `0`, and an absent or unparseable timestamp fails
+(b) — both degrade to `normal`, i.e. no note, which is the safe direction: a
+clean-verdict build can never grow a spurious note because (a) fails first.
+
+On `cap-reached`, append to the plan's `## Critique Results` section, before
+committing any build work:
+
+```markdown
+### Accepted Residual Concerns (round {concern_round_count}, bound {MAX_CONCERN_RECRITIQUE_ROUNDS})
+
+The with-concerns revision + re-critique loop reached its bound. The concerns
+below were carried into BUILD unresolved and are accepted on the record.
+
+- **{concern title}** — {the concern as the final critique round stated it}.
+  Accepted because: {why building with it standing is acceptable — non-blocking
+  by definition of CONCERN, plus anything round-specific}.
+```
+
+Name the round whose concerns were accepted and the bound it hit, so a reader can
+tell an accepted residual concern from one that was answered by a revision. Do not
+silently build without the note: if the derivation cannot be evaluated (the
+command errors rather than printing `normal`), stop and report rather than
+proceeding — an unrecorded accepted concern is the failure this note exists to
+prevent.
+
 **Build validators (Step 14) and verification parser (Step 5.1):**
 
 ```bash

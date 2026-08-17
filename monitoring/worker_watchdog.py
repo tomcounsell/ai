@@ -132,34 +132,41 @@ WORKER_RESPAWN_CIRCUIT_WINDOW_S = int(os.environ.get("WORKER_RESPAWN_CIRCUIT_WIN
 BREAKER_CRITICAL_KEY_TTL = 3600
 
 
-def _configure_logger() -> logging.Logger:
-    """Configure the named logger with a single rotating file handler.
+logger = logging.getLogger("monitoring.worker_watchdog")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+def _configure_logger() -> None:
+    """Attach the rotating file handler. Call from __main__ ONLY (issue #2643).
 
     Issue #1311: previously `logging.basicConfig` attached a StreamHandler to
     root, the named logger added another file handler, and the named logger
     propagated to root → every line written twice. The plist also redirects
     stdout/stderr to the same log file, compounding the duplication.
 
-    Fix: configure the named logger explicitly. No basicConfig. Set
-    `propagate = False` so root never sees these messages. Attach exactly one
-    rotating file handler. The plist's StandardOutPath/StandardErrorPath still
-    capture any uncaught Python exceptions (printed by the interpreter, not
-    via the logger) — those are operationally rare and not duplicated.
+    Fix: configure the named logger explicitly. No basicConfig. `propagate =
+    False` so root never sees these messages. Attach exactly one rotating
+    file handler. The plist's StandardOutPath/StandardErrorPath still capture
+    any uncaught Python exceptions (printed by the interpreter, not via the
+    logger) — those are operationally rare and not duplicated.
+
+    Issue #2643: this must be called from the `__main__` guard, never at
+    import — several tests call `main()` directly and must not reopen the
+    production log. `LOG_FILE` is read here, at call time, from the module
+    global: tests monkeypatch it, and capturing it into a default argument or
+    closure at import time would silently stop redirecting. Clearing is
+    owned-only (tag-and-close), not a blanket sweep, so a `caplog.handler`
+    attached by a test is never stripped.
     """
-    log = logging.getLogger("monitoring.worker_watchdog")
-    # Idempotent: clear any handlers attached by prior imports/test runs.
-    for h in list(log.handlers):
-        log.removeHandler(h)
-    log.setLevel(logging.INFO)
-    log.propagate = False
+    for h in [h for h in logger.handlers if getattr(h, "_watchdog_owned", False)]:
+        logger.removeHandler(h)
+        h.close()
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    log.addHandler(fh)
-    return log
-
-
-logger = _configure_logger()
+    fh._watchdog_owned = True
+    logger.addHandler(fh)
 
 
 def _get_worker_pid() -> int | None:
@@ -871,4 +878,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _configure_logger()
     main()
