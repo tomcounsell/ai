@@ -169,9 +169,12 @@ stale.
 The two gates differ in how urgently they need that placement, and the difference
 is worth stating precisely.
 
-**Gate 2 is not currently reachable.** `_is_documented_deletion` consumes a *line
-index*, derived as `text.count("\n", 0, match.start())`, so only a substitution
-that changes the *newline* count can stale it. `_detect_stale_term_fixes` is the
+**Gate 2's placement is not load-bearing today.** The gate itself fires on every
+run — it is what suppresses stale terms inside fenced code blocks — and only its
+apply-time *placement* is currently unexercised, because nothing today can stale
+the position it consumes. `_is_documented_deletion` takes a *line index*, derived
+as `text.count("\n", 0, match.start())`, so only a substitution that changes the
+*newline* count can stale it. `_detect_stale_term_fixes` is the
 sole fix producer and every `STALE_TERMS` replacement is newline-free
 (`SessionLog`->`AgentSession`, `RedisJob`->`AgentSession`,
 `session_log`->`agent_session`, `redis_job`->`agent_session`), so applying one
@@ -179,13 +182,15 @@ shifts byte offsets but never line indices. Gate 2's apply-time placement is
 forward-looking robustness, for `STALE_TERMS` entries an operator may add later
 that shorten text or span newlines.
 
-**Gate 3 has no such reprieve — it is guarding a live corruption today.**
+**Gate 3 has no such reprieve — hoisting it would corrupt docs today.**
 `_match_inside_path_token` consumes raw byte offsets (`match.start()`,
 `match.end()`) rather than a line index, and the apply loop reassigns
 `new_text = candidate` after each fix. Every shipped replacement is strictly
 *longer* than its key, so each applied fix shifts the offsets of every later
-match — precisely *because* of the property that spares gate 2. Concretely: a doc
-containing the prose word `SessionLog` and the path token
+match. Length and newline-freeness are orthogonal properties, not cause and
+effect: newline-freeness is what spares gate 2, strictly-longer is what dooms
+gate 3, and an equal-length newline-free replacement would spare both.
+Concretely: a doc containing the prose word `SessionLog` and the path token
 `models/session_log.py` queues fixes in `STALE_TERMS` order, so the `SessionLog`
 fix lengthens the text ahead of the `session_log` match; a detection-time offset
 map would mis-locate that match, gate 3 would fail to suppress, and
