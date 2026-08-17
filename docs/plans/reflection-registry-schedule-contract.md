@@ -576,6 +576,13 @@ Every block above was executed verbatim at `bc3051ee4`, before any of this plan'
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+**Round 7** (FULL depth: Risk & Robustness, Scope & Value, History & Consistency). Round 6's 3 concerns + 1 nit were all closed by revision commit `cd9660011`; all three critics independently verified the closures against the live source. Risk & Robustness and Scope & Value returned **No findings**. **0 blockers, 0 concerns, 2 nits** — verdict **READY TO BUILD (no concerns)**. The two nits below are wording-only and do not gate the build; a builder may fold them in opportunistically.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| NIT | History & Consistency | Pre-build measurements' preamble claims "Every block above was executed verbatim at `bc3051ee4`", but the `SC3` row two paragraphs later states it was measured at `97f17cb38` — the `SC3` block did not exist at `bc3051ee4`. The blanket claim is false for one of its own rows. | pending | One-sentence edit to the Pre-build measurements intro: "Each block below was executed verbatim at the commit noted in its row (`bc3051ee4` unless stated otherwise, e.g. `SC3` at `97f17cb38`)." No code or Verification-row change; the `SC3` row's own measurement is already self-consistent. |
+| NIT | History & Consistency | Task 4 lists `SC3` among the rows that go red if the Defect 2 resolver fix is reverted, but the parenthetical mechanism names only `SC1`/`SC4` and the whole-module row, leaving `SC3`'s inclusion unexplained. | pending | Extend task 4's parenthetical to "(SC1/SC3/SC4 exercise the fourth candidate directly via the shared `_registry_path()` delegation; the whole-module row via the new `_owning_checkout_root()` unit tests)". Wording-only; no measurement or Verification-table change. |
+
 **Round 6** (FULL depth: Risk & Robustness, Scope & Value, History & Consistency). Round 5's single concern (the `_owning_checkout_root()` relative-`gitdir:` guard) was closed by revision commit `5acb196b7` and is verified present in Technical Approach, spike-1, Failure Path Test Strategy, Test Impact, tasks 2-3 and Documentation. 0 blockers, 3 concerns, 1 nit.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
