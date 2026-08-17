@@ -915,38 +915,41 @@ inspect stderr rather than as success.
 
 ## Critique Results
 
-Round 6 (re-critique of the round-5 revision), FULL depth. Rounds 1-5 findings were all
-marked RESOLVED and their remedies are embedded in the plan body above; the round-5 table is
-recoverable at `61717ccb2:docs/plans/docs-auditor-rename-detection.md` and the rounds 1-4 table
-at `97e1ac80c:docs/plans/docs-auditor-rename-detection.md`.
-
-Zero BLOCKERs and zero CONCERNs survived independent verification this round. All three critics
-re-executed the `## Verification` rows through `parse_verification_table()` + `run_checks()`
-rather than by typing them into a shell, and every row reproduced the plan's own stated
-pre-change red/green numbers with empty stderr and no malformed rows.
+Round 7 (independent re-critique of the round-5 revision, run concurrently with round 6), FULL
+depth. Round 6 recorded `READY TO BUILD (no concerns)`; **this round supersedes it** — a rival
+incarnation of the same CRITIQUE dispatch, it did not exercise the two `audit()`-driven withheld
+tests and its verdict is unsound. Round 6's table is recoverable at
+`c08af526d:docs/plans/docs-auditor-rename-detection.md`, round 5's at `61717ccb2:`, rounds 1-4 at
+`97e1ac80c:`. Rounds 1-5 findings remain RESOLVED and their remedies are embedded in the plan body
+above.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| NIT | Risk & Robustness | The Verification prose claims "the survivor set for every symbol is exactly `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`". That is false for three of the six symbols: `docs/features/docs-auditor.md` also matches `_detect_renamed_symbol_fixes` (:239), `_detect_readme_broken_entries` (:164), and `GIT_LOG_FOLLOW_CAP` (:246). No operational consequence — all three lines fall inside ranges the `## Documentation` checklist already owns (:158-175 and :239-249), and the rows correctly stay red until the doc sweep lands. | pending | n/a (NIT) |
-| NIT | History & Consistency | The Problem table's `:495` row cites the `_detect_readme_broken_entries` `if` arm as `:496-498` while the round-5 Critique Results log restated it as `:497-499`. Against HEAD the true coordinates are: `:495` the query, `:496` `if renames:`, `:497-498` the `renames[0][1]` consumption, `:499` `else:`, `:500` `fixes.append((line, ""))`. Both spellings are defensible readings of "the `if` arm"; the `:499-500` else-arm coordinates used everywhere else in the plan are exactly right. | pending | n/a (NIT) |
+| BLOCKER | Risk \& Robustness | Test Impact mis-dispositions two `audit()`-driven tests as UPDATE ("remove the patches") and mis-attributes both to `TestAuditSubstrate`. `tests/unit/test_docs_auditor_substrate.py:1104-1150` is `TestExistenceInvariant::test_audit_surfaces_withheld_without_writing` and `:1243-1320` is `TestWithheldBlocksAutoMerge::test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness`. Each patches `_detect_renamed_symbol_fixes` to *return* a literal fix and then asserts `result["fixes_withheld"] == 1` and `withheld[0]["new"] == "agent/ghost.py"` (resp. `"ghost_module.py"`) from a real `audit()` run. Removing the patches leaves both tests with no producer of a withheld fix, so `fixes_withheld` is 0 and both fail — they are REPLACE, not UPDATE. The Failure Path Test Strategy section asserts the opposite as fact ("`TestWithheldBlocksAutoMerge` … must keep passing — they are driven by the regex channel and the `audit()` result contract, neither of which changes shape"), which is false: they are driven by the literal channel this plan deletes. A builder handed "remove the patches" and a red suite is most likely to delete them, losing the only end-to-end coverage of `fixes_withheld` → PR marker → auto-merge-ineligibility → Telegram → liveness — the exact signal chain this plan claims to make meaningful. | pending | Patch the surviving producer instead of the deleted one: `patch.object(docs_auditor, "_detect_stale_term_fixes", return_value=[(re.compile(r"\bSessionRunner\b"), "ghost_module.py")])`, with the fixture doc containing the prose word `SessionRunner` (not a path token) so `_make_stale_term_replacer`'s `_match_inside_path_token` suppression (#2744) does not eat the match — the shape `test_regex_channel_is_also_guarded` (`:994`) already uses. `_absent_new_path_refs` still rejects the bare `ghost_module.py` replacement (#2759 bare-name widening), so `audit()` yields `fixes_withheld == 1` and `withheld[0]["new"] == "ghost_module.py"`, and every downstream assertion (`WITHHELD_PR_MARKER` in the PR body, `_eligible(body) is False`, `"1 fix(es) withheld"` in the Telegram call, `liveness.call_args.kwargs["fixes_withheld"] == 1`) holds unchanged. The sibling `patch.object(docs_auditor, "_detect_renamed_link_fixes", return_value=[])` in each `with` block is a plain deletion — it only existed to silence the other detector. |
+| CONCERN | Risk \& Robustness | The six symbol-absence Verification rows enumerate `.claude/` as a source root, and `.claude/worktrees/` is Claude Code's `EnterWorktree` root where an agent worktree is a *full* repo checkout carrying `reflections/docs_auditor.py` and `tests/unit/test_docs_auditor_substrate.py`. The directory is empty today, which is why the harness numbers reproduce exactly (12, 4, 8, 7, 7, 9); if any agent worktree exists when Task 3 or Task 5 runs, all six rows go permanently red for precisely the reason Risk 4 rule 0 dropped `.` over `.worktrees/`. Rule 0 was written against `.worktrees/` only and does not see its `.claude/` sibling. | pending | Verified at `61717ccb2`: for all six symbols the entire survivor set is `reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`, and `docs/features/docs-auditor.md` — `.claude/`, `docs/sdlc/`, `tools/`, and `agent/` contribute **zero** matches, so they buy no coverage. Minimal-diff fix that keeps the future-proofing: add `--exclude-dir=worktrees` to each of the six rows (portable across BSD and GNU `grep`, and it also hardens them if a `.`-adjacent root is ever re-added). Re-validate through `parse_verification_table()` + the resolved `command`, never by typing it, per Risk 4 rule 2. |
+| CONCERN | History \& Consistency | Risk 4 names its mitigation as "a `## Verification` anti-criterion per deleted symbol, each requiring zero matches", but a per-*symbol* row only catches surfaces that spell a deleted identifier, and most surfaces this plan must edit do not. Measured at `61717ccb2`: `docs/features/docs-auditor.md` carries exactly three deleted-symbol mentions (`:164`, `:239`, `:246`) against nine planned edits; both `/do-docs` surfaces carry **zero**. So the two user-facing skill surfaces and two thirds of the feature-doc edits have no mechanical guard, and Risk 4's mitigation does not cover the failure Risk 4 describes. | pending | Either restate Risk 4's mitigation honestly (symbol rows guard the code-symbol surfaces; prose surfaces are guarded by the `## Documentation` checklist plus Task 5), or add prose anti-criteria — all currently red at count 1, one pattern per row per Risk 4 rule 4: `grep -c "renamed markdown links" .claude/skill-context/do-docs.md` → `match count == 0`; `grep -c "four classes of mechanical fix" .claude/skill-context/do-docs.md` → `match count == 0`. Do **not** add a prose row against `.claude/skills-global/do-docs/SKILL.md` — a global body legitimately describes capabilities this repo lacks. |
+| CONCERN | Scope \& Value | The `## Documentation` → Skill Surfaces checkbox edits a **global** skill body (`.claude/skills-global/do-docs/SKILL.md:216-219`), hardlinked by `/update` into `~/.claude/skills/` on every machine and read in foreign repos, because one repo deleted three detectors. That text is explicitly hypothetical ("Such a substrate **typically** handles mechanical fixes — …"); nothing in it asserts what this repo's substrate does. CLAUDE.md's rule is that global skill bodies stay generic and repo-specific behavior layers in via `.claude/skill-context/{skill}.md`, so narrowing the generic enumeration makes the global body less correct for every other repo while fixing nothing that is false. | pending | Drop the global-skill checkbox; keep only the repo-specific one. `.claude/skill-context/do-docs.md:122-126` ("It auto-handles four classes of mechanical fix — renamed markdown links, renamed paths/symbols, README index entries pointing at deleted files, and stale-term renames") becomes "one class of mechanical fix — stale-term renames", with the `python -c` invocation block below it and its result-key handling byte-identical, per the plan's own Agent Integration section. If the checkbox is kept anyway, it must specify a generic-preserving rewrite (e.g. "mechanical fixes such as stale-term renames or broken index entries") and must NOT be covered by any `## Verification` row. |
+| NIT | History \& Consistency | Two coordinate slips in Test Impact. (1) There is no class named `TestDegradedBasenameIndex`; `:1087` is `test_ls_files_failure_warns_and_yields_empty_index`, a case *inside* `TestExistenceInvariant`. (2) `TestExistenceInvariant` spans `:830-1151` (the next class, `TestLineDeleteSentinel`, begins at `:1152`), not `:830-1030` — the stated bound excludes four of its own `_apply_fixes_to_file` call sites. Practical risk is low because Task 2 derives the site list mechanically, but the wrong class name sends a reader to a region that does not exist. | pending | n/a (NIT) |
 
-**Verified during this round and found sound (recorded so round 7, if any, does not re-litigate):**
+**Verified this round and found sound (so round 8, if any, does not re-litigate):**
 
-- The round-5 BLOCKER about pattern-internal `\|` alternation reaching `/bin/sh` as a bare pipe is
-  genuinely closed: every anti-criterion now carries exactly one pattern, so no cell needs a second
-  escape level. `parse_verification_table()` yields 16 checks and **0 malformed rows**.
-- The red/green evidence was converted from a second markdown table to bullets. This was
-  load-bearing: `parse_verification_table` collects every pipe-prefixed line in the `## Verification`
-  section and executes rows past the first two, so a second table there is run as nonsense commands
-  that fail `/do-build`'s and `/do-pr-review`'s gate (`docs/sdlc/do-build.md:185`). The current form
-  parses to exactly the 16 intended checks.
-- The enumerated-source-root rows are non-vacuous and demonstrated red on unmodified `main` under the
-  harness: 12, 4, 8, 7, 7, 9 for the six symbols; 1 (docstring), 5 (sentinel), 1 (reporter query),
-  0 (rename regression); green non-regression guards at 0 (subprocess-free), 1 (basename cache),
-  5 (existence-invariant coverage). Every root in the list exists, so no row can false-pass through
-  the empty-stdout gate.
-- All file paths referenced by the plan exist except `docs/plans/rename-detection-docs-auditor.md`,
-  which the Freshness Check correctly records as deliberately deleted at `1f15d3756`.
+- `parse_verification_table()` yields exactly **16 checks and 0 malformed rows**; the round-5
+  pattern-internal-escape BLOCKER is genuinely closed (one pattern per row).
+- Every anti-criterion was re-executed under `/bin/sh` (the harness's shell, not the agent's
+  `ugrep`-shadowed one) and reproduced the plan's stated pre-change numbers exactly: 12, 4, 8, 7,
+  7, 9 for the six symbols; 1, 5, 1, 0, 1, 0, 5 for the remaining rows.
+- Every file:line reference in Problem, Freshness Check, Technical Approach, and Data Flow was
+  re-verified against `reflections/docs_auditor.py` at HEAD (`:71`, `:370`, `:373`, `:441`, `:465`,
+  `:495-500`, `:825`, `:1040`, `:1076-1077`, `:1359`, `:1363`, `:1428`, `:1429`) — all hold.
+- `_git_log_follow_renames` has exactly four call sites (`:441`, `:465`, `:495`, `:1076`) and
+  `_apply_fixes_to_file` exactly one production call site (`:1429`), so the Data Flow section's
+  zero-producer collapse argument is sound.
+- `tests/unit/test_public_api_contract.py` contains no `docs_auditor` reference, so the Test
+  Impact VERIFY item resolves clean.
+- `docs/features/README.md:67`'s docs-auditor summary does not mention rename detection.
+- `tests/README.md:272` does record a case count of 62.
+- All 18 `_apply_fixes_to_file` call sites in the test file are accounted for by a Test Impact
+  disposition — the enumeration in Task 2 is complete.
 
 ---
 
