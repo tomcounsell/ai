@@ -1317,7 +1317,7 @@ new one.
   diff. (`tools/sdlc_stage_query.py` is now **inside** the fence — see Appetite.)
 - [x] The unverifiable-BUILD skip logs at debug and the falsified-BUILD mismatch
   still logs at warning, asserted by level.
-- [ ] `sdlc-tool next-skill --issue-number 2755` still returns row 10 (the live
+- [x] `sdlc-tool next-skill --issue-number 2755` still returns row 10 (the live
   negative control from spike-7).
 - [x] Tests pass (`/do-test`)
 - [x] Documentation updated (`/do-docs`)
