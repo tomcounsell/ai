@@ -29,7 +29,7 @@ channel uniformly. Enumerated per call site:
 |---|---|---|
 | `:441` `_detect_renamed_link_fixes` | `renames[0][1]` as the replacement | **fully** — no correct output exists |
 | `:465` `_detect_renamed_symbol_fixes` | `renames[0][1]` behind the `!= path` guard | **fully** — guard never holds, detector is dead |
-| `:495` `_detect_readme_broken_entries` | `renames` as a *branch condition* only | **partially** — the `if` arm is dead; the `else` arm at `:501-502` emits `(line, "")` and is **correct working code** |
+| `:495` `_detect_readme_broken_entries` | both: `renames` is the `if`/`else` branch condition, and inside the `if` arm (`:497-499`) it consumes `renames[0][1]` as the replacement exactly as `:441` and `:465` do | **partially** — the `if` arm is dead for the same reason as the other two; the `else` arm at `:501-502` emits `(line, "")` and is **correct working code** that never reads the query result |
 | `:1076` `_detect_deleted_target_issues` | `renames` as a *suppression* condition | **inverted** — the suppression defers to a fix channel that can never fix anything |
 
 The `else` arm at `:501-502` is the one piece of this channel that works: when a README
@@ -300,7 +300,7 @@ reports **every** broken reference to a human via a deduped GitHub issue.
   whole-line-delete branch.
 - The early-out `if not full.exists() or (not fixes and not regex_fixes)` becomes
   `if not full.exists() or not regex_fixes`.
-- Update the call site at `:1429` and the guard at `:1425` (`if (fixes or regex_fixes) and ...`
+- Update the call site at `:1429` and the guard at `:1428` (`if (fixes or regex_fixes) and ...`
   → `if regex_fixes and ...`).
 - `_reject`, `_absent_new_path_refs`, `original_refs`, and the regex loop are **unchanged**.
 - Rewrite the docstring: the "literal `fixes` run first" framing is the current justification
@@ -363,6 +363,17 @@ All in `tests/unit/test_docs_auditor_substrate.py` unless noted.
 - [ ] `TestGitLogFollowCap` (`:360-376`) — DELETE: both cases test the deleted function.
 - [ ] `TestRenamedSymbolFixesDegenerate` (`:378-410`) — DELETE: both cases test the deleted
       detector.
+- [ ] `TestStaleTermWordBoundary::test_apply_leaves_session_logs_path_untouched` (`:744`) and
+      `::test_stale_term_inside_fenced_block_is_not_rewritten` (`:771`) — UPDATE: both call
+      `_apply_fixes_to_file(Path(...), repo, [], regex_fixes=regex_fixes)`. Under the new
+      three-positional signature the `[]` binds to `regex_fixes` and the keyword collides —
+      `TypeError: got multiple values for argument 'regex_fixes'`. Mechanical fix, and **not**
+      subject to the Rabbit Holes prose-match treatment, because both already drive the regex
+      channel exclusively: drop the `[]` and pass `regex_fixes` positionally
+      (`_apply_fixes_to_file(Path("docs/features/snap.md"), repo, regex_fixes)`, and the
+      identical edit for `fence.md` at `:771`). Their assertions (`applied == 0`,
+      `withheld == []`, content unchanged) are unaffected. Both are #2744 path-token-suppression
+      regressions — the coverage class Risk 2 exists to protect.
 - [ ] `TestStaleTermWordBoundary::test_suppression_survives_an_earlier_line_deletion`
       (`:778-828`) — REPLACE: it constructs a README fixture, calls
       `_detect_readme_broken_entries` to get a `new == ""` literal fix, and asserts the regex
@@ -469,41 +480,34 @@ outcome available from this change.
 makes a vacuous pass the *default* failure mode here, so a green-only proof is not acceptable.
 Record the red-state output in the PR description.
 
-### Risk 3: Removing the `:1076` suppression floods the issue tracker
-**Impact:** `_detect_deleted_target_issues` files deduped GitHub issues. Un-blinding it could
-surface a backlog of genuinely-broken references all at once on the first rotation run.
+### Risk 3: Removing the `:1076` suppression un-blinds an unknown number of findings
+**Impact:** `_detect_deleted_target_issues` currently drops any broken `.py` reference whose
+path has a rename anywhere in its git history. Removing that suppression makes those references
+visible for the first time. **How many there are is not known, and this plan does not attempt to
+find out** — it is a property of the whole doc corpus against the whole rename history, and every
+bounded proxy for it that has been proposed (a dry-run `issues_filed` delta, a rotation-window
+sum) has turned out to measure either structurally zero or one arbitrary slice. Stated plainly:
+the change may raise `_detect_deleted_target_issues` finding volume, by an amount discovered at
+run time rather than at build time. That is the honest disclosure, and it is deliberately not
+dressed up as a number.
+
 **What the existing controls actually bound — and what they do not.** Filing is rotation-only
 (not per-PR), the neighborhood is capped at `NEIGHBORHOOD_CAP = 20` files per run, and the
-per-run cap at `:1455` allows at most 5 filings per rotation. Those bound the *rate*. They do
-**not** bound steady-state volume: rotation repeats, so a backlog drains at 5 issues per run
-indefinitely rather than as a single surge. And `_open_issue_exists` (`:1169`, reached via
-`_file_issue_if_new` `:1253`) dedupes against **open** issues only — documented at `:1439-1441`
-— so a finding closed without fixing the doc is re-filed on a later rotation. There is no
-control here that converges; only one that meters.
+per-run cap at `:1455` allows at most 5 filings per rotation. Those bound the *rate*: no run can
+file more than five issues, so there is no single-surge failure mode. They do **not** bound
+steady-state volume — rotation repeats, so a backlog drains at 5 issues per run indefinitely.
+`_open_issue_exists` (`:1169`, reached via `_file_issue_if_new` `:1253`) dedupes against **open**
+issues only (documented at `:1439-1441`), so a finding closed without fixing the doc is re-filed
+on a later rotation.
 
-**Mitigation — measure with something that can produce a number.** The previously-specified
-control could not: `audit()` gates filing behind `if apply_mode == "apply" and scope_mode ==
-"rotation":` (`:1456`), so under `apply_mode="dry-run"` the returned `issues_filed` is always
-`0` on both sides, and `_ok_result` (`:117,134`) exposes no findings list, so the
-`issue_findings` built at `:1444` are discarded before any caller sees them. A 0-vs-0 delta is a
-false green.
-
-Instead, call the detector directly. `_detect_deleted_target_issues(doc_path, content,
-repo_root) -> list[dict]` is a pure function over already-read content, with no filing side
-effect. Walk the same `NEIGHBORHOOD_CAP`-bounded file list `audit()` resolves via
-`_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` (`:1388`), read each file's
-content, call the detector, and sum `len(...)`. Run that on `main` and on the branch; the
-difference is the un-blinding delta. **Do not switch to `apply_mode="apply"` to make
-`issues_filed` nonzero** — that files real GitHub issues, which is the flood this risk exists
-to bound.
-
-**The delta is a gate, not a report line.** If the counted delta exceeds **10 additional
-findings** across the measured neighborhood, do not land the un-blinding ahead of #2739 —
-split the `:1076` suppression removal out of this PR, land the rest of the deletion, and
-sequence the un-blinding behind #2739's review gate. The threshold is provisional and tunable;
-it is set at roughly two rotations' worth of the per-run cap so that a backlog which drains in
-about two runs is treated as a surge and anything larger is treated as a standing source.
-Record the measured number and the gate decision in the PR description either way.
+**Mitigation:** ordinary observation. The per-run cap of 5 means the worst case is a slow trickle,
+not a flood, and open-issue dedupe means the same finding is not re-filed while it is open. Watch
+the next few scheduled rotation runs after this merges; if the trickle turns out to be a standing
+source rather than a draining backlog, that is a real finding about the doc corpus and belongs on
+its own issue. **No gate, threshold, or pre-merge measurement is required by this plan** — two
+previous attempts to specify one produced controls that could not execute, and a fail-branch that
+contradicted this plan's own Success Criteria. Bounding the un-blinding quantitatively is a
+follow-up if it is ever wanted, not a precondition for this deletion.
 
 ### Risk 4: A doc surface is missed and describes a deleted function
 **Impact:** `docs/features/docs-auditor.md` is 569 lines and references the rename channel in
@@ -527,6 +531,19 @@ on this document. Three mechanical requirements, each of which broke the previou
    count is zero, so an exit-code-driven harness reads every "expected 0" row as a failure.
    Each row is therefore wrapped as `[ "$(... | grep -vc '^docs/plans/')" = 0 ]`, whose exit
    code is 0 exactly when the count is 0.
+4. **One pattern per row — never pattern-internal alternation.** The table is executed through
+   `agent/verification_parser.py`, whose `split_row_cells` unescapes `\|` to a bare `|` after
+   splitting. A single-escaped `\|` written *inside* a grep pattern therefore reaches the shell
+   as a literal pipe character, and a basic-regex `grep -c` searches for a string containing
+   that pipe — which matches nothing, so the row passes vacuously. Getting BRE alternation
+   through the table needs a *double* escape (`\\|`), while the shell-pipe separator before
+   `grep -vc` needs a *single* one; two escape levels in one cell is a trap this plan already
+   fell into once. The rows above avoid it entirely: every anti-criterion carries exactly one
+   pattern, so no cell needs a second escape level. Keep it that way — if a new symbol needs
+   guarding, add a row, do not extend a pattern.
+5. **Validate rewrites through the parser, never in a shell.** Run
+   `parse_verification_table()` on this document, print each resolved `command`, and execute
+   *that* string. A shell-typed approximation is what made the previous two drafts' rows inert.
 
 ### Risk 5: Coordination collision with `docs/plans/docs-auditor-review-gate.md` (#2739)
 **Impact:** Both plans edit `reflections/docs_auditor.py`. If #2739 builds first or
@@ -535,6 +552,14 @@ concurrently, the merge conflicts in `audit()` and `_apply_fixes_to_file`.
 diff is a pure deletion and rebasing #2739 onto it is strictly easier than the reverse. Flag
 in the PR body that #2739's premise (nonzero `fixes_withheld` is a real signal) becomes true
 only after this merges.
+
+**Known and expected:** `docs/plans/docs-auditor-review-gate.md` carries 24 lines referencing
+the six symbols this plan deletes, and the `## Verification` anti-criteria deliberately exclude
+`^docs/plans/`, so those references survive the deletion without failing a check. That is the
+correct outcome given the #2741-before-#2739 ordering — #2739 is still `status: Planning` and its
+plan text is a draft against today's `main`, not a doc surface describing the shipped system.
+Refreshing it is #2739's own work when it replans onto the post-deletion tree; nothing in this
+PR should edit it.
 
 ## Race Conditions
 
@@ -664,10 +689,11 @@ that read `fixes_withheld` need no code change.
 - [ ] Every rewritten `TestExistenceInvariant` case was demonstrated red (with
       `_absent_new_path_refs` neutered) before being accepted green, with the red output pasted
       into the PR description.
-- [ ] The un-blinding delta is measured by summing `len(_detect_deleted_target_issues(...))`
-      over the `NEIGHBORHOOD_CAP`-bounded file list on both `main` and the branch — **not** by
-      reading `audit()`'s `issues_filed`, which is structurally 0 in dry-run — and the number
-      plus the Risk 3 gate decision are recorded in the PR description.
+- [ ] The PR body carries Risk 3's disclosure: removing the `:1076` suppression un-blinds an
+      unknown number of previously-suppressed broken references and may raise
+      `_detect_deleted_target_issues` finding volume; the per-run filing cap of 5 and the
+      open-issue dedupe are the only bounds, and the mitigation is observing the next scheduled
+      rotation runs. No pre-merge measurement and no threshold gate.
 - [ ] The PR body states plainly that broken README `.md` index entries lose both automated
       repair and automated reporting (Risk 1), and cites #2834, which records the `.md`
       reporting gap.
@@ -706,8 +732,8 @@ that read `fixes_withheld` need no code change.
 
 - **Validator**
   - Name: `auditor-validator`
-  - Role: Verify no deleted symbol survives, red-state proofs exist, and the dry-run delta is
-    recorded
+  - Role: Verify no deleted symbol survives, red-state proofs exist, and the PR body carries
+    the Risk 1 and Risk 3 disclosures
   - Agent Type: validator
   - Resume: true
 
@@ -734,31 +760,11 @@ that read `fixes_withheld` need no code change.
 - Delete the README/else detector branches in the audit loop; remove the `fixes` local.
 - Collapse `_apply_fixes_to_file` to `(path, repo_root, regex_fixes)`: drop the literal loop,
   the `new == ""` branch, the `regex_fixes=None` default, and the `or []` normalization.
-  Update the early-out and the `:1425` guard.
+  Update the early-out and the `:1428` guard.
 - Rewrite the three affected docstrings so the match-time-context rationale rests on the regex
   loop's own cross-iteration mutation, not on a literal loop that no longer runs.
 
-### 2. Measure the un-blinding delta
-- **Task ID**: measure-delta
-- **Depends On**: build-delete-channel
-- **Assigned To**: `auditor-deletion-builder`
-- **Agent Type**: builder
-- **Parallel**: false
-- **Do not use `audit()`'s return value.** `issues_filed` is gated behind `apply_mode ==
-  "apply"` (`:1456`) and `_ok_result` exposes no findings list, so a dry-run delta is
-  structurally 0 vs 0. See Risk 3.
-- Write a throwaway measurement script (scratchpad, not committed) that: resolves the same
-  file list `audit()` walks via `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`,
-  reads each file's content, calls `_detect_deleted_target_issues(path, content, root)`
-  directly, and sums `len(...)`. It is a pure function with no filing side effect.
-- Run it against a checkout of `main` and against the branch. The difference is the delta.
-- **Never run with `apply_mode="apply"`** to force a nonzero `issues_filed` — that files real
-  GitHub issues, which is the flood being bounded.
-- Apply Risk 3's gate: if the delta exceeds **10 additional findings**, split the `:1076`
-  suppression removal out of this PR and sequence it behind #2739. Record the measured number
-  and the gate decision in the PR description either way.
-
-### 3. Migrate the tests
+### 2. Migrate the tests
 - **Task ID**: build-test-migration
 - **Depends On**: build-delete-channel
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py`
@@ -776,27 +782,34 @@ that read `fixes_withheld` need no code change.
   the path-shaped string. For each, neuter `_absent_new_path_refs` to prove red, then revert.
 - Rewrite `test_suppression_survives_an_earlier_line_deletion` with two regex fixes where the
   first shortens text ahead of the second's match.
-- Update the signature at every remaining `_apply_fixes_to_file` call site including
-  `TestWithheldRateNonRegression`; confirm its corpus baseline is unchanged.
+- Update the signature at **every** remaining `_apply_fixes_to_file` call site. Derive the list
+  mechanically — `grep -n "_apply_fixes_to_file" tests/unit/test_docs_auditor_substrate.py`
+  yields 744, 771, 812, 841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087, 1167,
+  1175, 1502 — rather than from the enumerated eleven `TestExistenceInvariant` sites. `:744` and
+  `:771` (`TestStaleTermWordBoundary`) pass `[]` positionally *and* `regex_fixes=` by keyword and
+  will raise `TypeError` under the new signature; drop the `[]` at both. Confirm
+  `TestWithheldRateNonRegression`'s corpus baseline is unchanged.
 - Add the rename-destination regression to `TestDeletedTargetFiltering` on a real `git_repo`.
 
-### 4. Validate the deletion
+### 3. Validate the deletion
 - **Task ID**: validate-deletion
-- **Depends On**: build-test-migration, measure-delta
+- **Depends On**: build-test-migration
 - **Assigned To**: `auditor-validator`
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every `## Verification` row.
 - Confirm each rewritten existence-invariant case has a recorded red-state proof.
 - Confirm `_BASENAME_INDEX_CACHE.clear()` survives in `audit()`.
-- Confirm the un-blinding delta was measured by direct `_detect_deleted_target_issues` summation
-  (not `audit()`'s `issues_filed`) and that Risk 3's threshold gate was evaluated and recorded.
+- Confirm the PR body carries Risk 3's plain disclosure (the `:1076` removal un-blinds an
+  unknown number of previously-suppressed broken references; the per-run cap of 5 and the
+  open-issue dedupe are the only bounds, and observation of the next rotation runs is the
+  mitigation). No number and no gate decision are required.
 - Confirm the PR body carries Risk 1's disclosure (README `.md` entries lose repair *and*
   reporting) and that it cites #2834 for the `.md` reporting gap.
 - Confirm no reduced-form README line-delete survives: `_apply_fixes_to_file` must have no
   literal `fixes` parameter at all.
 
-### 5. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-deletion
 - **Assigned To**: `auditor-documentarian`
@@ -805,7 +818,7 @@ that read `fixes_withheld` need no code change.
 - Work the `## Documentation` checklist surface by surface.
 - Preserve every rationale whose conclusion still holds; change only the stated cause.
 
-### 6. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: `auditor-validator`
@@ -825,10 +838,12 @@ that read `fixes_withheld` need no code change.
 | Link detector gone | `[ "$(grep -rn "_detect_renamed_link_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
 | Symbol detector gone | `[ "$(grep -rn "_detect_renamed_symbol_fixes" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
 | README detector gone | `[ "$(grep -rn "_detect_readme_broken_entries" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
-| Follow cap gone | `[ "$(grep -rn "GIT_LOG_FOLLOW_CAP\|_RENAME_QUERY_COUNT" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Follow cap constant gone | `[ "$(grep -rn "GIT_LOG_FOLLOW_CAP" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
+| Rename query counter gone | `[ "$(grep -rn "_RENAME_QUERY_COUNT" --include="*.py" --include="*.md" . \| grep -vc "^docs/plans/")" = 0 ]` | exit code 0 |
 | Reporter docstring un-blinded | `grep -c "(non-renamed)" reflections/docs_auditor.py` | match count == 0 |
 | Literal channel gone | `grep -c 'new == ""' reflections/docs_auditor.py` | match count == 0 |
-| Reporter is subprocess-free | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess\|_git_log"` | match count == 0 |
+| Reporter makes no rename query | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "_git_log"` | match count == 0 |
+| Reporter shells out to nothing | `sed -n '/def _detect_deleted_target_issues/,/^def /p' reflections/docs_auditor.py \| grep -c "subprocess"` | match count == 0 |
 | Basename cache reset survives | `grep -c "_BASENAME_INDEX_CACHE.clear()" reflections/docs_auditor.py` | output > 0 |
 | Rename regression exists | `grep -c "rename destination" tests/unit/test_docs_auditor_substrate.py` | output > 0 |
 | Existence-invariant coverage survives the channel collapse | `grep -c "target-absent" tests/unit/test_docs_auditor_substrate.py` | output > 3 |
@@ -841,12 +856,12 @@ table is recoverable at `97e1ac80c:docs/plans/docs-auditor-rename-detection.md`.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The "Follow cap gone" and "Reporter is subprocess-free" Verification rows are **vacuous as the repo actually executes them**. `agent/verification_parser.py::split_row_cells` unescapes a backslash-pipe to a bare pipe in the Command cell, so the pattern-internal backslash-pipe intended as BRE alternation reaches the shell as the literal patterns `GIT_LOG_FOLLOW_CAP\|_RENAME_QUERY_COUNT` and `subprocess\|_git_log` — strings containing a bare pipe, which basic-regex `grep` never matches. Demonstrated on the untouched tree (deletion NOT performed): the parsed "Follow cap gone" command exits 0 (PASS) and the parsed "Reporter is subprocess-free" command emits `0` (PASS under `match count == 0`), while `reflections/docs_auditor.py:1075` still calls `_git_log_follow_renames` and `:71`/`:370` still define both symbols. With the correct double escape the same commands return `14` and `1` — correctly red. Risk 4's "Verified live on 2026-08-17" was verified in a shell, not through the table parser, so the safety net it rebuilt is inert one escape level deeper. "Follow cap gone" is the sole mechanical guard for two of the six symbols in Success Criterion 1; "Reporter is subprocess-free" is the sole mechanical proof of the `:1076` un-blinding. | pending | `agent/verification_parser.py`'s module docstring tabulates the hazard: **one** backslash before the pipe reaches the shell as a bare pipe (a `grep -c` literal, matches nothing); **two** backslashes reach the shell as backslash-pipe (real BRE alternation). The shell-pipe separator before `grep -vc` must stay single-escaped — only pattern-internal alternation doubles. Preferred fix, which removes the escape-level trap entirely: split "Follow cap gone" into two single-pattern rows (one for `GIT_LOG_FOLLOW_CAP`, one for `_RENAME_QUERY_COUNT`), and reduce "Reporter is subprocess-free" to the single pattern `grep -c "_git_log"`. Validate any rewrite by running `parse_verification_table()` on the plan and printing the resolved `command` — never by typing it into a shell. |
-| BLOCKER | Risk & Robustness; Scope & Value (convergent) | Risk 3's delta measurement is still not a working control — the round-4 fix replaced a structurally-0 number with an **arbitrary** one. Task 2 says to walk "the same file list `audit()` walks via `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`" but never says what `primary` is. In production `primary` comes from `_select_primary_doc(PROJECT_ROOT, project_key)` (`reflections/docs_auditor.py:2049`), a Redis-backed rotation cursor picking the least-recently-audited doc, so the neighborhood is a different ≤20-file window every run and is unknowable at build time. The gate's ">10 additional findings" threshold is therefore applied to one arbitrary 20-file slice, which cannot distinguish Risk 3's own stated alternatives ("a backlog which drains in about two runs" vs "a standing source") and can read 0 on a tree carrying dozens of newly-unblinded findings elsewhere. | pending | `_detect_deleted_target_issues(doc_path, content, repo_root) -> list[dict]` is pure, per-file, and carries no rotation state, so a tree-wide sum costs the same as a neighborhood sum: iterate `sorted(root.rglob("*.md"))` excluding `docs/plans/` and `.venv/`, read each file, sum `len(...)` per side. That total is the true upper bound the un-blinding creates; the day-one spike is then bounded by `min(total_delta, per_run_cap=5)` (`reflections/docs_auditor.py:1455`). If the neighborhood form is kept, the plan MUST name the exact pinned `primary` and record it in the PR description, because `_select_primary_doc` will not reproduce it. The existing prohibitions (never `audit()`'s `issues_filed`, never `apply_mode="apply"`) remain correct. |
-| BLOCKER | Scope & Value | Risk 3's gate defines a fail-branch — "split the `:1076` suppression removal out of this PR … and sequence the un-blinding behind #2739's review gate" — that is mutually exclusive with the rest of the plan and has no task, no criteria variant, and no verification variant behind it. The `:1076` suppression **is** `renames = _git_log_follow_renames(path, repo_root)` / `if renames: continue` (`reflections/docs_auditor.py:1075-1077`); retaining it retains the only surviving caller of `_git_log_follow_renames`, contradicting Success Criterion 1, the "Rename query gone" Verification row, the Technical Approach row deleting `:373-416`, and the Documentation row dropping the `(non-renamed)` qualifier. Task 2 also `Depends On: build-delete-channel`, so by gate-evaluation time the suppression is already deleted and the split means partially reverting Task 1 — work no task owns. A builder measuring above threshold is handed an instruction it cannot execute without violating the plan's own acceptance criteria. | pending | The measurement needs no branch at all: the "with suppression" side is today's `main`, and the "without suppression" side is the same function with the two-line `if renames: continue` skipped — copy the `re.finditer(r"\`((?:[\w.-]+/)+[\w.-]+\.py)\`")` body from `reflections/docs_auditor.py:1056-1085` into the throwaway script and omit the `renames` check. Both numbers come from one `main` checkout, so re-sequence Task 2 to `Depends On: none` and run it BEFORE any deletion, letting its outcome pick the scope up front. If the split branch is kept instead, add a task that owns it and state the alternate Success Criteria / Verification rows that apply when `_git_log_follow_renames` survives. |
-| CONCERN | History & Consistency | Test Impact omits two live `_apply_fixes_to_file` call sites: `tests/unit/test_docs_auditor_substrate.py:744` (`TestStaleTermWordBoundary::test_apply_leaves_session_logs_path_untouched`) and `:771` (`test_stale_term_inside_fenced_block_is_not_rewritten`). Both call `_apply_fixes_to_file(Path(...), repo, [], regex_fixes=regex_fixes)`; under the new three-positional signature the `[]` binds to `regex_fixes` and the keyword then collides — `TypeError: got multiple values for argument 'regex_fixes'`. Test Impact is a mandated section whose contract is a per-test UPDATE/DELETE/REPLACE disposition, and these two sit inside a class the plan otherwise touches (`TestStaleTermWordBoundary`, whose third case is a REPLACE). Task 3's catch-all bullet names only `TestWithheldRateNonRegression`, so nothing points the test engineer at them. Both are #2744 path-token-suppression regressions — the coverage class Risk 2 exists to protect. | pending | Mechanical, and NOT subject to the Rabbit Holes prose-match treatment, because both cases already drive the regex channel exclusively: change `_apply_fixes_to_file(Path("docs/features/snap.md"), repo, [], regex_fixes=regex_fixes)` to `_apply_fixes_to_file(Path("docs/features/snap.md"), repo, regex_fixes)` at `:744`, and the identical edit for `Path("docs/features/fence.md")` at `:771`. Their assertions (`applied == 0`, `withheld == []`, content unchanged) are unaffected. Derive the site list mechanically — `grep -n "_apply_fixes_to_file" tests/unit/test_docs_auditor_substrate.py` yields 744, 771, 812, 841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087, 1167, 1175, 1502 — rather than from the enumerated eleven. |
-| NIT | History & Consistency | Two accuracy slips in text the plan designates as its precision layer. (1) The Problem table's `:495` row reads "`renames` as a *branch condition* only", but `_detect_readme_broken_entries`' `if` arm at `reflections/docs_auditor.py:497-499` does `new_target = renames[0][1]; fixes.append((target, new_target))` — it consumes `renames[0][1]` as a replacement exactly as `:441` and `:465` do. The "partially" verdict is right; the "how it consumes" cell is not. (2) Technical Approach step 2 cites the apply guard as `:1425`; it is at `:1428` (the call site `:1429` is correct). | pending | n/a (NIT) |
-| NIT | Scope & Value | Success Criterion 1 scopes symbol absence to "outside `docs/plans/`", and the anti-criteria anchor on `^docs/plans/`. `docs/plans/docs-auditor-review-gate.md` (status Planning, tracking #2739) carries 24 references to the six deleted symbols and will silently keep describing functions that no longer exist. Risk 5 asks #2739 to rebase its code onto this deletion but never asks it to refresh its plan text. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The "Follow cap gone" and "Reporter is subprocess-free" Verification rows are **vacuous as the repo actually executes them**. `agent/verification_parser.py::split_row_cells` unescapes a backslash-pipe to a bare pipe in the Command cell, so the pattern-internal backslash-pipe intended as BRE alternation reaches the shell as the literal patterns `GIT_LOG_FOLLOW_CAP\|_RENAME_QUERY_COUNT` and `subprocess\|_git_log` — strings containing a bare pipe, which basic-regex `grep` never matches. Demonstrated on the untouched tree (deletion NOT performed): the parsed "Follow cap gone" command exits 0 (PASS) and the parsed "Reporter is subprocess-free" command emits `0` (PASS under `match count == 0`), while `reflections/docs_auditor.py:1075` still calls `_git_log_follow_renames` and `:71`/`:370` still define both symbols. With the correct double escape the same commands return `14` and `1` — correctly red. Risk 4's "Verified live on 2026-08-17" was verified in a shell, not through the table parser, so the safety net it rebuilt is inert one escape level deeper. "Follow cap gone" is the sole mechanical guard for two of the six symbols in Success Criterion 1; "Reporter is subprocess-free" is the sole mechanical proof of the `:1076` un-blinding. | RESOLVED — Verification table | `agent/verification_parser.py`'s module docstring tabulates the hazard: **one** backslash before the pipe reaches the shell as a bare pipe (a `grep -c` literal, matches nothing); **two** backslashes reach the shell as backslash-pipe (real BRE alternation). The shell-pipe separator before `grep -vc` must stay single-escaped — only pattern-internal alternation doubles. Preferred fix, which removes the escape-level trap entirely: split "Follow cap gone" into two single-pattern rows (one for `GIT_LOG_FOLLOW_CAP`, one for `_RENAME_QUERY_COUNT`), and reduce "Reporter is subprocess-free" to the single pattern `grep -c "_git_log"`. Validate any rewrite by running `parse_verification_table()` on the plan and printing the resolved `command` — never by typing it into a shell. |
+| BLOCKER | Risk & Robustness; Scope & Value (convergent) | Risk 3's delta measurement is still not a working control — the round-4 fix replaced a structurally-0 number with an **arbitrary** one. Task 2 says to walk "the same file list `audit()` walks via `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`" but never says what `primary` is. In production `primary` comes from `_select_primary_doc(PROJECT_ROOT, project_key)` (`reflections/docs_auditor.py:2049`), a Redis-backed rotation cursor picking the least-recently-audited doc, so the neighborhood is a different ≤20-file window every run and is unknowable at build time. The gate's ">10 additional findings" threshold is therefore applied to one arbitrary 20-file slice, which cannot distinguish Risk 3's own stated alternatives ("a backlog which drains in about two runs" vs "a standing source") and can read 0 on a tree carrying dozens of newly-unblinded findings elsewhere. | RESOLVED — Risk 3 rewritten, Task 2 deleted | `_detect_deleted_target_issues(doc_path, content, repo_root) -> list[dict]` is pure, per-file, and carries no rotation state, so a tree-wide sum costs the same as a neighborhood sum: iterate `sorted(root.rglob("*.md"))` excluding `docs/plans/` and `.venv/`, read each file, sum `len(...)` per side. That total is the true upper bound the un-blinding creates; the day-one spike is then bounded by `min(total_delta, per_run_cap=5)` (`reflections/docs_auditor.py:1455`). If the neighborhood form is kept, the plan MUST name the exact pinned `primary` and record it in the PR description, because `_select_primary_doc` will not reproduce it. The existing prohibitions (never `audit()`'s `issues_filed`, never `apply_mode="apply"`) remain correct. |
+| BLOCKER | Scope & Value | Risk 3's gate defines a fail-branch — "split the `:1076` suppression removal out of this PR … and sequence the un-blinding behind #2739's review gate" — that is mutually exclusive with the rest of the plan and has no task, no criteria variant, and no verification variant behind it. The `:1076` suppression **is** `renames = _git_log_follow_renames(path, repo_root)` / `if renames: continue` (`reflections/docs_auditor.py:1075-1077`); retaining it retains the only surviving caller of `_git_log_follow_renames`, contradicting Success Criterion 1, the "Rename query gone" Verification row, the Technical Approach row deleting `:373-416`, and the Documentation row dropping the `(non-renamed)` qualifier. Task 2 also `Depends On: build-delete-channel`, so by gate-evaluation time the suppression is already deleted and the split means partially reverting Task 1 — work no task owns. A builder measuring above threshold is handed an instruction it cannot execute without violating the plan's own acceptance criteria. | RESOLVED — gate and fail-branch deleted | The measurement needs no branch at all: the "with suppression" side is today's `main`, and the "without suppression" side is the same function with the two-line `if renames: continue` skipped — copy the `re.finditer(r"\`((?:[\w.-]+/)+[\w.-]+\.py)\`")` body from `reflections/docs_auditor.py:1056-1085` into the throwaway script and omit the `renames` check. Both numbers come from one `main` checkout, so re-sequence Task 2 to `Depends On: none` and run it BEFORE any deletion, letting its outcome pick the scope up front. If the split branch is kept instead, add a task that owns it and state the alternate Success Criteria / Verification rows that apply when `_git_log_follow_renames` survives. |
+| CONCERN | History & Consistency | Test Impact omits two live `_apply_fixes_to_file` call sites: `tests/unit/test_docs_auditor_substrate.py:744` (`TestStaleTermWordBoundary::test_apply_leaves_session_logs_path_untouched`) and `:771` (`test_stale_term_inside_fenced_block_is_not_rewritten`). Both call `_apply_fixes_to_file(Path(...), repo, [], regex_fixes=regex_fixes)`; under the new three-positional signature the `[]` binds to `regex_fixes` and the keyword then collides — `TypeError: got multiple values for argument 'regex_fixes'`. Test Impact is a mandated section whose contract is a per-test UPDATE/DELETE/REPLACE disposition, and these two sit inside a class the plan otherwise touches (`TestStaleTermWordBoundary`, whose third case is a REPLACE). Task 3's catch-all bullet names only `TestWithheldRateNonRegression`, so nothing points the test engineer at them. Both are #2744 path-token-suppression regressions — the coverage class Risk 2 exists to protect. | RESOLVED — Test Impact + Task 2 | Mechanical, and NOT subject to the Rabbit Holes prose-match treatment, because both cases already drive the regex channel exclusively: change `_apply_fixes_to_file(Path("docs/features/snap.md"), repo, [], regex_fixes=regex_fixes)` to `_apply_fixes_to_file(Path("docs/features/snap.md"), repo, regex_fixes)` at `:744`, and the identical edit for `Path("docs/features/fence.md")` at `:771`. Their assertions (`applied == 0`, `withheld == []`, content unchanged) are unaffected. Derive the site list mechanically — `grep -n "_apply_fixes_to_file" tests/unit/test_docs_auditor_substrate.py` yields 744, 771, 812, 841, 856, 861, 876, 892, 917, 938, 961, 985, 1002, 1016, 1087, 1167, 1175, 1502 — rather than from the enumerated eleven. |
+| NIT | History & Consistency | Two accuracy slips in text the plan designates as its precision layer. (1) The Problem table's `:495` row reads "`renames` as a *branch condition* only", but `_detect_readme_broken_entries`' `if` arm at `reflections/docs_auditor.py:497-499` does `new_target = renames[0][1]; fixes.append((target, new_target))` — it consumes `renames[0][1]` as a replacement exactly as `:441` and `:465` do. The "partially" verdict is right; the "how it consumes" cell is not. (2) Technical Approach step 2 cites the apply guard as `:1425`; it is at `:1428` (the call site `:1429` is correct). | RESOLVED | n/a (NIT) |
+| NIT | Scope & Value | Success Criterion 1 scopes symbol absence to "outside `docs/plans/`", and the anti-criteria anchor on `^docs/plans/`. `docs/plans/docs-auditor-review-gate.md` (status Planning, tracking #2739) carries 24 references to the six deleted symbols and will silently keep describing functions that no longer exist. Risk 5 asks #2739 to rebase its code onto this deletion but never asks it to refresh its plan text. | RESOLVED | n/a (NIT) |
 
 ---
 
