@@ -117,7 +117,15 @@ class Job(Model):
 
     # -- Persistence --------------------------------------------------------
 
-    def save(self, *args, update_fields: list | None = None, **kwargs):
+    def save(
+        self,
+        pipeline=None,
+        ignore_errors: bool = False,
+        skip_auto_now: bool = False,
+        update_fields: list | None = None,
+        migrate_key: bool = False,
+        **kwargs,
+    ):
         """Re-attach UTC to a naive ``last_active_at`` before persisting.
 
         popoto 1.8.0 decodes a stored datetime without tzinfo, so a reloaded
@@ -136,12 +144,25 @@ class Job(Model):
         ``save(update_fields=["has_open_expectations"])``, whose docstring
         guarantees it never writes recency) must not touch the SortedField score
         path at all; a scoped save that *names* the field still reattaches.
+
+        The signature mirrors popoto 1.8.0's ``Model.save`` exactly (rather
+        than ``*args``) so a caller passing ``update_fields`` positionally is
+        still captured by the guard — a splat signature would let a positional
+        ``update_fields`` slip past the keyword check and only surface as a
+        ``TypeError`` at the ``super().save`` delegation.
         """
         if update_fields is None or "last_active_at" in update_fields:
             value = self.last_active_at
             if isinstance(value, datetime) and value.tzinfo is None:
                 self.last_active_at = value.replace(tzinfo=UTC)
-        return super().save(*args, update_fields=update_fields, **kwargs)
+        return super().save(
+            pipeline=pipeline,
+            ignore_errors=ignore_errors,
+            skip_auto_now=skip_auto_now,
+            update_fields=update_fields,
+            migrate_key=migrate_key,
+            **kwargs,
+        )
 
     # -- Identity -----------------------------------------------------------
 
@@ -617,10 +638,84 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
+            # rebuild_indexes() re-scores every row via field.on_save on
+            # naive-decoded instances — naive.timestamp() is local time, and
+            # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
+            # host the rebuild itself re-skews every recency score. Sweep the
+            # scores back so the daily maintenance path is score-preserving.
+            _scanned, renormalized = cls.renormalize_last_active_scores()
+            if renormalized:
+                logger.warning(
+                    "[job] re-normalized %d recency score(s) skewed by the index rebuild",
+                    renormalized,
+                )
             cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
             cls._repair_lock.release()
+
+    @classmethod
+    def renormalize_last_active_scores(cls) -> tuple[int, int]:
+        """Sweep every recency score back to the pure UTC epoch its hash implies.
+
+        The single shared implementation behind two callers:
+
+        - the one-shot ``backfill_job_last_active_scores`` migration
+          (``scripts/update/migrations.py``), which sweeps skew written
+          before the :meth:`save` UTC-reattach override shipped; and
+        - :meth:`repair_indexes`, because popoto's ``rebuild_indexes()``
+          re-scores every row via ``field.on_save`` on naive-decoded
+          instances — ``naive.timestamp()`` is local time, bypassing the
+          :meth:`save` override entirely — so on a non-UTC host the daily
+          rebuild would re-skew every score the migration repaired.
+
+        For each Job the stored score in its Room partition (key **derived**
+        via ``SortedField.get_sortedset_db_key``, never hand-built) is
+        compared against ``bridge.utc.to_unix_ts(job.last_active_at)``; a row
+        outside a 1-second tolerance is re-read fresh and repaired with the
+        structural clobber-proof idiom
+        ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
+        write that can never touch ``goal``/``status``, and one that names the
+        field so the :meth:`save` tz-reattach fires. **Instant-preserving**:
+        each row keeps its own stored instant; no constant timestamp is ever
+        stamped (spike-4 tie-break hazard). A Job whose partition member is
+        absent, or whose instant is unreadable, is skipped — partition
+        membership belongs to the rebuild, not this sweep. Idempotent (a
+        repaired score is inside tolerance next pass) and per-row failure
+        tolerant (one bad row logs and the sweep continues).
+
+        Returns ``(scanned, repaired)``.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from bridge.utc import to_unix_ts
+
+        jobs = list(cls.query.filter())
+        repaired = 0
+        for job in jobs:
+            try:
+                partition_key = SortedField.get_sortedset_db_key(
+                    cls, "last_active_at", job.room_id
+                ).redis_key
+                score = POPOTO_REDIS_DB.zscore(partition_key, job.db_key.redis_key)
+                expected = to_unix_ts(job.last_active_at)
+                if score is None or expected is None:
+                    continue
+                if abs(score - expected) <= 1.0:
+                    continue
+                fresh = cls.query.get(id=job.id, room_id=job.room_id)
+                if fresh is None:
+                    continue
+                fresh.save(update_fields=["last_active_at"])
+                repaired += 1
+            except Exception as e:  # noqa: BLE001 — one bad row never stops the sweep
+                logger.warning(
+                    "[job] score renormalization SKIP job=%s -- %s: %s",
+                    getattr(job, "job_id", "?"),
+                    type(e).__name__,
+                    e,
+                )
+        return (len(jobs), repaired)
 
     @classmethod
     def backfill_open_expectations_index(cls) -> int:

@@ -328,8 +328,8 @@ No agent integration required — this is a model-internal change. Existing surf
 | No hand-built sorted-set key (anti-criterion, spike-3) | `grep -c 'SortF' models/job.py` | match count == 0 |
 | Key derived via field API | `grep -c 'get_sortedset_db_key' models/job.py` | output > 0 |
 | Floor unchanged (anti-criterion, Rabbit Hole 1) | `grep -c 'popoto>=1.8.0' pyproject.toml` | output > 0 |
-| No raw Redis writes in migration (anti-criterion) | `grep -cE 'zadd|zrem|hset|delete\(' scripts/update/migrations.py` | match count == 0 |
-| Migration registered | `grep -c 'job.*skew\|skew.*job' scripts/update/migrations.py` | output > 0 |
+| No raw Redis writes in migration (anti-criterion) | `grep -cE 'zadd\|zrem\|hset\|delete\(' scripts/update/migrations.py` | match count == 0 |
+| Migration registered | `grep -c 'backfill_job_last_active_scores' scripts/update/migrations.py` | output > 0 |
 | Bounded read present | `grep -c 'zrevrange' models/job.py` | output > 0 |
 
 ## Critique Results

@@ -1116,34 +1116,25 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     correct; only the score drifted. The bounded ``recent_for_room`` read
     trusts scores, so existing skew must be swept out once per machine.
 
-    For each Job the stored score in its Room partition (key **derived** via
-    ``SortedField.get_sortedset_db_key`` — ``DB_key.clean()`` escapes colons,
-    and every real ``room_id`` contains one, so a hand-built key would read a
-    set that does not exist) is compared against
-    ``bridge.utc.to_unix_ts(job.last_active_at)``. Where they disagree beyond
-    a 1-second tolerance, the row is re-read fresh and repaired with the
-    structural clobber-proof idiom (``Job.backfill_open_expectations_index``,
-    PR #2653's successor): ``fresh.save(update_fields=["last_active_at"])`` —
-    a field-scoped write touching only ``last_active_at`` and its ``$SortF``
-    companion, never ``goal``/``status``, so a concurrent expectation write
-    cannot be clobbered by construction. The save() override's guard fires
-    because the field is named, so the tz-reattach runs and popoto writes a
-    correct pure-UTC score. **Instant-preserving**: each row keeps its own
-    stored instant — no constant timestamp is ever stamped (equal migrated
-    timestamps would create tie-break divergence in the bounded read, spike-4).
-
-    ORM-only: the only write is ``instance.save()``. A Job whose partition
-    member is absent entirely (transient ``$SortF`` orphan-inverse) is skipped
-    — the daily guarded ``rebuild_indexes()`` sweep converges it.
+    The sweep itself is ``Job.renormalize_last_active_scores()`` — the ONE
+    shared implementation, also run by ``Job.repair_indexes()`` after every
+    daily ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
+    naive-decoded instances bypasses the save() override and would otherwise
+    re-skew every score on a non-UTC host). See that classmethod's docstring
+    for the loop contract: derived partition key, 1-second tolerance,
+    fresh re-read, structural clobber-proof
+    ``fresh.save(update_fields=["last_active_at"])`` (ORM-only — the only
+    write is ``instance.save()``), instant-preserving (never a constant
+    stamp, spike-4), absent-member skip, per-row failure tolerance.
 
     Idempotent — a repaired score is inside tolerance on the next pass, so a
     second run repairs 0 and costs reads alone. Fleet-convergent: machines
     share this Redis, and re-running on every machine's ``/update`` is safe
     and expected; each pass only rewrites rows whose score still disagrees
     with their own hash (e.g. re-skewed by a peer still on pre-override code).
-    Per-row failure tolerant: one bad row logs and the pass continues. Single
-    unbounded pass, no cursor — DECIDED on the measured population (92 Jobs /
-    0.03s full hydrate, 2026-08-17); the total count is logged each run.
+    Single unbounded pass, no cursor — DECIDED on the measured population
+    (92 Jobs / 0.03s full hydrate, 2026-08-17); the total count is logged
+    each run.
 
     Returns None on success, an error string if the enumeration itself fails.
     """
@@ -1151,43 +1142,10 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
         import sys
 
         sys.path.insert(0, str(project_dir))
-        from popoto import SortedField
-        from popoto.redis_db import POPOTO_REDIS_DB
-
-        from bridge.utc import to_unix_ts
         from models.job import Job
 
-        jobs = list(Job.query.filter())
-        logger.info("[migration:backfill_job_last_active_scores] scanning %d Job(s)", len(jobs))
-
-        repaired = 0
-        for job in jobs:
-            try:
-                partition_key = SortedField.get_sortedset_db_key(
-                    Job, "last_active_at", job.room_id
-                ).redis_key
-                score = POPOTO_REDIS_DB.zscore(partition_key, job.db_key.redis_key)
-                expected = to_unix_ts(job.last_active_at)
-                if score is None or expected is None:
-                    # Absent member or unreadable instant: not skew. The daily
-                    # guarded rebuild_indexes() sweep owns partition-membership
-                    # convergence; this pass only corrects scores that exist.
-                    continue
-                if abs(score - expected) <= 1.0:
-                    continue
-                fresh = Job.query.get(id=job.id, room_id=job.room_id)
-                if fresh is None:
-                    continue
-                fresh.save(update_fields=["last_active_at"])
-                repaired += 1
-            except Exception as e:  # swallow-ok: one bad row never stops the sweep
-                logger.warning(
-                    "[migration:backfill_job_last_active_scores] SKIP job=%s -- %s: %s",
-                    getattr(job, "job_id", "?"),
-                    type(e).__name__,
-                    e,
-                )
-
+        scanned, repaired = Job.renormalize_last_active_scores()
+        logger.info("[migration:backfill_job_last_active_scores] scanning %d Job(s)", scanned)
         logger.info(
             "[migration:backfill_job_last_active_scores] repaired %d skewed score(s)",
             repaired,

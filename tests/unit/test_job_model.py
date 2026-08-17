@@ -641,9 +641,9 @@ class TestRecencyLookup:
         recent = Job.recent_for_room(scratch_room_id, limit=limit)
 
         assert len(recent) == limit
-        ceiling = 2 * limit + JOB_RECENT_OVERFETCH
-        assert count_hash_reads["n"] <= limit + JOB_RECENT_OVERFETCH
-        assert count_hash_reads["n"] < ceiling, (
+        # This bound subsumes the mutation ceiling (2·limit + overfetch, far
+        # below the old path's 2N=60): an unbounded range read fails it first.
+        assert count_hash_reads["n"] <= limit + JOB_RECENT_OVERFETCH, (
             f"{count_hash_reads['n']} hash reads for a top-{limit} answer over 30 Jobs — "
             "the range read is unbounded"
         )
@@ -687,7 +687,7 @@ class TestRecencyLookup:
         assert Job.recent_for_room(scratch_room_id, limit=0) == []
         assert count_hash_reads["n"] == 0
 
-    def test_read_failure_fails_open_with_a_warning(self, scratch_room_id, caplog):
+    def test_read_failure_fails_open_with_a_warning(self, scratch_room_id, caplog, monkeypatch):
         """Fail-open contract: the candidate lookup never raises into the
         router — it returns [] and the caller mints."""
         import logging
@@ -699,13 +699,9 @@ class TestRecencyLookup:
         def boom(*args, **kwargs):
             raise ConnectionError("redis is unhappy")
 
-        original = POPOTO_REDIS_DB.zrevrange
-        POPOTO_REDIS_DB.zrevrange = boom
-        try:
-            with caplog.at_level(logging.WARNING, logger="models.job"):
-                assert Job.recent_for_room(scratch_room_id, limit=5) == []
-        finally:
-            POPOTO_REDIS_DB.zrevrange = original
+        monkeypatch.setattr(POPOTO_REDIS_DB, "zrevrange", boom)
+        with caplog.at_level(logging.WARNING, logger="models.job"):
+            assert Job.recent_for_room(scratch_room_id, limit=5) == []
 
         assert "recent_for_room failed" in caplog.text
 
@@ -872,6 +868,43 @@ class TestGuardedRepair:
         finally:
             monkeypatch.setattr(POPOTO_REDIS_DB, "exists", real_exists)
             POPOTO_REDIS_DB.srem(status_index_key, *stale_members)
+
+    def test_repair_renormalizes_scores_the_rebuild_skewed(self, scratch_room_id, monkeypatch):
+        """popoto's ``rebuild_indexes()`` re-scores every row via
+        ``field.on_save`` on naive-decoded instances — ``naive.timestamp()`` is
+        local time, bypassing the ``save()`` UTC-reattach — so on a non-UTC
+        host the daily rebuild re-skews every recency score the one-shot
+        migration repaired. ``repair_indexes`` must sweep the scores back to
+        each row's own UTC epoch afterwards.
+
+        On a UTC host the rebuild's skew is invisible (local == UTC), so the
+        skewed rebuild is simulated: the wrapped ``rebuild_indexes`` runs the
+        real rebuild, then corrupts the score by spike-2's measured UTC+07
+        offset — exactly what a rebuild on that host writes.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from bridge.utc import to_unix_ts
+
+        job = Job.mint(scratch_room_id, "repair me")
+        partition = _partition_key(scratch_room_id)
+        member = job.db_key.redis_key
+        real_rebuild = Job.rebuild_indexes
+
+        def skewing_rebuild():
+            result = real_rebuild()
+            true_score = POPOTO_REDIS_DB.zscore(partition, member)
+            POPOTO_REDIS_DB.zadd(partition, {member: true_score - 25200.0})
+            return result
+
+        monkeypatch.setattr(Job, "rebuild_indexes", skewing_rebuild)
+
+        Job.repair_indexes()
+
+        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert POPOTO_REDIS_DB.zscore(partition, member) == pytest.approx(
+            to_unix_ts(fresh.last_active_at), abs=1.0
+        )
 
 
 class TestDriftCoverage:

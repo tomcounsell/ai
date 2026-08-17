@@ -133,11 +133,22 @@ class TestPromiseRewrite:
         assert "promises" not in json.loads(after_first)
 
         # The second pass has no promises key to act on, so it must not
-        # write at all — pinned with a save-spy, since a byte-identical
-        # rewrite would look the same from the outside.
+        # rewrite any goal — pinned with a save-spy, since a byte-identical
+        # rewrite would look the same from the outside. The one write the spy
+        # tolerates is the recency-score renormalization scoped exactly to
+        # ["last_active_at"]: the migration closes with Job.repair_indexes(),
+        # whose rebuild re-skews scores on a non-UTC host and whose
+        # renormalize sweep repairs them with that field-scoped save on every
+        # pass by design (#2636) — a goal rewrite can never take that shape.
         saves = []
         orig_save = Job.save
-        monkeypatch.setattr(Job, "save", lambda self, *a, **k: saves.append(self.job_id))
+        monkeypatch.setattr(
+            Job,
+            "save",
+            lambda self, *a, **k: (
+                None if k.get("update_fields") == ["last_active_at"] else saves.append(self.job_id)
+            ),
+        )
 
         assert _migrate_job_promises_to_expectations(tmp_path) is None
 
