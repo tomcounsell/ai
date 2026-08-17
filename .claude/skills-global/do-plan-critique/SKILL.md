@@ -407,18 +407,23 @@ Report a failed write; never silently continue as though the state landed.
 
 If the context file declares a plan-revising lock (a flag a downstream router
 reads to block build dispatch until a revision pass completes), set it after
-recording the verdict whenever the verdict requires a revision pass AND
-`revision_applied` is not already `true` in the plan frontmatter. Follow the
+recording the verdict whenever the verdict requires a revision pass. Follow the
 context file's exact invocation.
 
 Set the lock when the verdict is one of:
 - `NEEDS REVISION`
 - `MAJOR REWORK`
-- `READY TO BUILD (with concerns)` — and `revision_applied` is not already `true` in the plan frontmatter
+- `READY TO BUILD (with concerns)`
 
 **Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed.
 
-**Do NOT set the lock** when `revision_applied: true` is already in the plan frontmatter — the revision has already been applied.
+The rule is the verdict kind and nothing else. Do not add an exemption for plans
+that have already been revised once: a *prior* revision says nothing about
+whether *this* verdict has been answered, and such an exemption makes the lock
+permanently inert on every plan that has ever gone round the loop. Deciding
+whether a revision has landed *since this verdict* requires ledger state the
+skill cannot read; that event-scoping belongs to the downstream router, which
+reads the recorded verdict timestamp directly.
 
 In the generic case (no lock declared), skip this step — the printed verdict already tells the caller whether a revision pass is needed.
 
@@ -429,11 +434,13 @@ The skill returns a structured verdict that the SDLC pipeline can use:
 | Verdict | SDLC Action |
 |---------|-------------|
 | READY TO BUILD (no concerns) | Proceed directly to `/do-build` |
-| READY TO BUILD (with concerns) | Trigger revision pass via `/do-plan` before `/do-build` |
+| READY TO BUILD (with concerns) | Revision pass via `/do-plan`, then **re-critique** — never `/do-build` directly |
 | NEEDS REVISION | Return to `/do-plan` with blocker findings |
 | MAJOR REWORK | Return to issue discussion |
 
-**"READY TO BUILD (with concerns)"** triggers a revision pass. This pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step. The concern is still acknowledged (not blocking), but its Implementation Note is embedded in the plan so the builder has unambiguous implementation guidance without re-investigation.
+**"READY TO BUILD (with concerns)" does not reach `/do-build` directly.** It enters a bounded revision + re-critique loop: `/do-plan` applies the revision, then this skill runs again over the revised plan. The loop exits to `/do-build` either when a round returns `READY TO BUILD (no concerns)`, or when the pipeline's concern re-critique bound is exhausted — at which point the remaining concerns are accepted on the record and the build proceeds. The bound's name and value are pipeline configuration, not part of this skill; where the pipeline declares one, the context file names it.
+
+The revision pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step. The concern is still acknowledged (not blocking), but its Implementation Note is embedded in the plan so the builder has unambiguous implementation guidance without re-investigation.
 
 Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER findings (NITs do not block and do not trigger revision).
 

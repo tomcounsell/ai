@@ -66,16 +66,22 @@ Then write the frozen roster manifest (`_roster.json`): LITE →
 `{"roster": ["Consolidated Critic"], "count": 1}`; FULL →
 `{"roster": ["Risk & Robustness", "Scope & Value", "History & Consistency"], "count": 3}`.
 
-**Step 5.6 plan-revising lock.** When the verdict needs a revision pass and
-`revision_applied` is not already `true`:
+**Step 5.6 plan-revising lock.** Set the lock whenever the verdict is
+`NEEDS REVISION`, `MAJOR REWORK`, or `READY TO BUILD (with concerns)`:
 
 ```bash
 sdlc-tool meta-set --key plan_revising --value true --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 ```
 
 This activates the SDLC router guard G7 (blocks `/do-build` until `/do-plan`
-clears the lock). Do NOT set it for `READY TO BUILD (no concerns)` or when
-`revision_applied: true` already.
+clears the lock). Do NOT set it for `READY TO BUILD (no concerns)`.
+
+There is no once-revised exemption. A prior revision does not answer the verdict
+just recorded, and exempting on it leaves the lock inert forever on any plan that
+has been round the loop once. All event-scoping — "has a revision landed *since*
+this verdict?" — lives in `agent/sdlc_router.py` G7 gate 3, which compares
+`_meta["revision_applied_at"]` against the recorded CRITIQUE verdict's
+`recorded_at` and is unit-testable there.
 
 ## Triage Routing (LITE / FULL)
 
