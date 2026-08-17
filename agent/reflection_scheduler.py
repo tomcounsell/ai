@@ -177,7 +177,8 @@ def _resolve_registry_path() -> Path:
     # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced Desktop
     # path entirely. macOS TCC blocks stat()/open() on ~/Desktop files from launchd
     # agents — even exists() hangs indefinitely and blocks the asyncio event loop.
-    # install_worker.sh copies reflections.yaml → config/reflections.yaml at install time.
+    # install_reflection_worker.sh / install_email_bridge.sh / env_sync.py::sync_reflections_yaml
+    # copy reflections.yaml → config/reflections.yaml at install time.
     if not os.environ.get("VALOR_LAUNCHD"):
         vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
         candidates.append(str(vault_path))

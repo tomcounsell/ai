@@ -146,7 +146,7 @@ The fix extends [single-machine ownership](single-machine-ownership.md) to refle
 applies it at **update time, not run time**:
 
 1. A reflection declares `project_key: <key>` in the shared registry (e.g. `project_key: valor`).
-2. `install_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
+2. `install_reflection_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
    `config/reflections.yaml`, runs `python -m tools.reflection_machine_filter`. For each entry
    with a `project_key`, if `projects.<key>.machine` (from `projects.json`) is **not** this
    machine, it forces `enabled: false` in the local copy.

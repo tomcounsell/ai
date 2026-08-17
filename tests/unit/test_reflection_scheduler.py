@@ -44,7 +44,9 @@ def _registry_path() -> Path:
     """Resolve the live reflections registry the way the scheduler does.
 
     The in-repo ``config/reflections.yaml`` is only present after install
-    (install_worker.sh copies it from the iCloud-synced vault). Tests must use
+    (``install_reflection_worker.sh``, ``install_email_bridge.sh``, or
+    ``scripts/update/env_sync.py::sync_reflections_yaml`` copies it from the
+    iCloud-synced vault). Tests must use
     the same vault-first resolver the scheduler uses so they read the real file
     regardless of where it currently lives.
     """
