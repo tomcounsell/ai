@@ -1140,8 +1140,9 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     itself fails. An enumeration failure *inside* the sweep (e.g. Redis
     unreachable) is swallowed by ``renormalize_last_active_scores`` as
     ``(0, 0)``: this migration logs a 0-scanned pass, returns None, and is
-    recorded applied. That is accepted — the daily ``Job.repair_indexes``
-    sweep is the retry/backstop that eventually repairs the scores.
+    recorded applied. That is accepted — the ``Job.repair_indexes`` sweep,
+    run at worker startup via ``scripts/popoto_index_cleanup.run_cleanup``,
+    is the retry/backstop that eventually repairs the scores.
     """
     try:
         import sys

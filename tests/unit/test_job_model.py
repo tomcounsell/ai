@@ -910,18 +910,23 @@ class TestGuardedRepair:
         )
 
     def test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs(
-        self, scratch_room_id, monkeypatch
+        self, scratch_room_id, monkeypatch, caplog
     ):
         """Fail-open contract: a broken enumeration returns (0, 0) rather than
         raising into repair_indexes(), and repair_indexes still reaches
         backfill_open_expectations_index()."""
+        import logging
 
         def boom(*args, **kwargs):
             raise ConnectionError("redis is unhappy")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(Job.query, "filter", boom)
-            assert Job.renormalize_last_active_scores() == (0, 0)
+            with caplog.at_level(logging.WARNING, logger="models.job"):
+                assert Job.renormalize_last_active_scores() == (0, 0)
+        # The guard's WARNING proves (0, 0) came from the failure branch, not
+        # from an empty db satisfying the assertion vacuously.
+        assert "score renormalization SKIPPED -- enumeration failed" in caplog.text
 
         # repair_indexes half: only the score sweep's enumeration fails (the
         # raising patch is scoped inside the real renormalize call, so the
