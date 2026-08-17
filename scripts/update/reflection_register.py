@@ -208,10 +208,20 @@ def _resolve_target() -> Path:
     ``/update`` overwrites it from the vault and the registration is lost with
     no error. See Risk 3 in
     ``docs/plans/reflection-registry-schedule-contract.md`` for why this is a
-    contained CONCERN rather than a blocker: no such caller exists today --
-    ``_this_machine_owns_valor`` fails closed and this module runs only as an
-    ``/update`` step in the primary checkout -- and the containment must not be
-    relaxed without first splitting this shared resolver into distinct read
+    contained CONCERN rather than a blocker: no such caller exists today,
+    because this module runs only as an ``/update`` step in the primary
+    checkout. That is the whole of the containment, and it is sufficient under
+    every real invocation path.
+
+    ``_this_machine_owns_valor`` is **not** a second, independent leg. It fails
+    closed in a worktree only because ``config/projects.json`` is gitignored and
+    therefore absent there -- and ``scripts/update/run.py`` calls
+    ``env_sync.sync_projects_json(project_dir)`` at Step 1.65, which runs *before*
+    the registration steps, so a ``run.py --project-dir <worktree>`` invocation
+    would materialize that file and arm the ownership guard within the same run.
+    Treat the primary-checkout leg as the containment; do not relax it on the
+    assumption that ownership would catch a worktree caller. The containment must
+    not be relaxed without first splitting this shared resolver into distinct read
     and write functions (the ``[ORDERED]`` No-Go in that plan; a separate,
     sequenced change, not done here).
 

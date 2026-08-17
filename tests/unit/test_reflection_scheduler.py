@@ -61,8 +61,10 @@ def _entry_interval_seconds(entry: dict) -> int:
     return parse_every_duration(str(entry["every"]).strip())
 
 
-# The four schedule shapes the loader's normalizer accepts
-# (agent/reflection_scheduler.py:266-283), in its own precedence order.
+# The four schedule shapes the loader's normalizer accepts (the schedule
+# normalizer inside agent/reflection_scheduler.py::load_registry), in its own
+# precedence order. Referenced by symbol, not line range: line ranges in this
+# module have already drifted once.
 SCHEDULE_KEYS = ("schedule", "every", "cron", "at")
 
 
@@ -76,12 +78,23 @@ def required_field_violations(entry: dict) -> list[str]:
     The schedule rule is **exactly one of** ``schedule`` / ``every`` / ``cron`` /
     ``at``. Rejecting zero keys matches the loader, which cannot schedule such an
     entry at all. Rejecting two-or-more is **stricter than the loader by policy**:
-    the normalizer at ``agent/reflection_scheduler.py:266-283`` resolves a
-    multi-key entry deterministically by precedence (schedule > every > cron > at)
-    rather than refusing it, so a multi-key entry would load with one of its
-    declarations silently discarded. This lint exists to stop that from reaching
-    the registry. If a future loader change formalizes multi-key support, that is
-    an intended divergence to re-decide here, not a bug in this test.
+    the schedule normalizer in ``agent/reflection_scheduler.py::load_registry``
+    resolves a multi-key entry deterministically by precedence
+    (schedule > every > cron > at) rather than refusing it, so a multi-key entry
+    would load with one of its declarations silently discarded. This lint exists
+    to stop that from reaching the registry. If a future loader change formalizes
+    multi-key support, that is an intended divergence to re-decide here, not a bug
+    in this test.
+
+    Second, narrower divergence: this check counts a key as declared when it is
+    **present**, while the loader counts it when it is **truthy** (it reads
+    ``raw.get("schedule", "") or ""`` and then tests ``if raw.get("every")``). So
+    an entry carrying ``schedule: ""`` alongside ``every: 300s`` loads fine — the
+    loader ignores the empty ``schedule`` — but is flagged here as multi-key. That
+    is the stricter-by-policy posture applied consistently: a falsy schedule key is
+    still a declaration a reader would have to reason about. Zero registry entries
+    look like this today; the filter is left presence-based deliberately rather
+    than relaxed to truthiness.
     """
     violations: list[str] = []
     name = entry.get("name")
@@ -92,13 +105,14 @@ def required_field_violations(entry: dict) -> list[str]:
     if not declared:
         violations.append(
             f"Entry {name} declares no schedule; exactly one of {list(SCHEDULE_KEYS)!r} "
-            f"is required (agent/reflection_scheduler.py:266-283)."
+            f"is required (see the schedule normalizer in "
+            f"agent/reflection_scheduler.py::load_registry)."
         )
     elif len(declared) > 1:
         violations.append(
-            f"Entry {name} declares {declared!r}; the loader "
-            f"(agent/reflection_scheduler.py:266-283) would silently pick by precedence "
-            f"schedule>every>cron>at. Declare exactly one."
+            f"Entry {name} declares {declared!r}; the loader's schedule normalizer "
+            f"(agent/reflection_scheduler.py::load_registry) would silently pick by "
+            f"precedence schedule>every>cron>at. Declare exactly one."
         )
 
     if "cron_tz" in entry and "cron" not in entry:

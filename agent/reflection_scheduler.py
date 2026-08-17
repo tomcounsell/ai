@@ -332,9 +332,11 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
     """Load and validate the reflections registry from YAML.
 
     Args:
-        path: Path to the YAML file. Defaults to vault-first resolution:
-              REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
-              config/reflections.yaml.
+        path: Path to the YAML file. Defaults to ``_resolve_registry_path()``;
+              see that function's docstring for the authoritative ordering of
+              its resolution levels, including the owning-checkout level that
+              covers worktrees (issue #2734). Deliberately not re-enumerated
+              here — the duplicate went stale once already.
 
     Returns:
         List of validated ReflectionEntry objects. Invalid entries are

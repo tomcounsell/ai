@@ -167,7 +167,9 @@ The filter only **disables**; it never re-enables (so an owned-but-authored-`ena
 reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink — a
 defensive check against the pre-June-2026 layout, not a claim that `config/reflections.yaml`
 is one today — so a manual run against `config/reflections.yaml` can never corrupt the shared
-vault: it only ever rewrites the real per-machine copy that `install_worker.sh` produces.
+vault: it only ever rewrites the real per-machine copy produced by
+`install_reflection_worker.sh`, `install_email_bridge.sh`, and
+`scripts/update/env_sync.py::sync_reflections_yaml`.
 
 > **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
 > files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
