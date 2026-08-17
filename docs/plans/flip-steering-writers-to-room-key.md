@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -1368,7 +1368,7 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-steering.md` — replace the dual-read/writers-unchanged
+- [x] Update `docs/features/session-steering.md` — replace the dual-read/writers-unchanged
   description with the new status quo, which is *selective*: conversation-level writes target the
   Room key; aborts and session-scoped diagnostics stay on the legacy key; legacy is also the
   fallback for Room-less sessions and remains fully drained. Reproduce the Problem section's
@@ -1380,38 +1380,38 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   may be served to a different session in the same Room; the `system` addressee groups all chatless
   sessions of a project) and the Room-leg age bound from D5, naming
   `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` and its default.
-- [ ] Update `docs/plans/durability-room-job-agentrun.md` **line 673** (an earlier draft cited
+- [x] Update `docs/plans/durability-room-job-agentrun.md` **line 673** (an earlier draft cited
   "~655") — move "the steering writer flip" out of the "Remaining, each its own release" list and
   record it as shipped *with its selective boundary*, leaving phase 2 and phase 3 as the remainder.
   Plan-doc edits commit on main.
-- [ ] Add `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` to
+- [x] Add `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` to
   `docs/features/config-timeout-catalog.md`'s field catalog.
-- [ ] No `docs/features/README.md` index change — `session-steering.md` is already indexed.
+- [x] No `docs/features/README.md` index change — `session-steering.md` is already indexed.
 
 ### Inline Documentation
 
-- [ ] Rewrite `agent/steering.py` module docstring (lines 15-22) to the new status quo.
-- [ ] Rewrite `_room_queue_key` docstring (lines 48-55) — drop "No writer targets this key yet".
-- [ ] Rewrite the `agent/health_check.py:511-513` comment — drop "Writers are unchanged — the
+- [x] Rewrite `agent/steering.py` module docstring (lines 15-22) to the new status quo.
+- [x] Rewrite `_room_queue_key` docstring (lines 48-55) — drop "No writer targets this key yet".
+- [x] Rewrite the `agent/health_check.py:511-513` comment — drop "Writers are unchanged — the
   re-pushes below always target the legacy list".
-- [ ] Rewrite the `agent/session_runner/runner.py:589-591` `_default_steering_pop` docstring —
+- [x] Rewrite the `agent/session_runner/runner.py:589-591` `_default_steering_pop` docstring —
   drop "Writers are unchanged in this release."
-- [ ] Docstring the `room_id` parameter on the three changed signatures only —
+- [x] Docstring the `room_id` parameter on the three changed signatures only —
   `push_steering_message`, `agent/health_check.py::_repush_messages`, and
   `bridge/telegram_bridge.py::_ack_steering_routed` — including the "no `room_id` → legacy key"
   contract, the "abort → legacy key regardless" contract, and the note that the caller derives it
   via `room_id_for_session` because the writer deliberately does not look sessions up.
   (`peek_steering_sender` and `_inject_watchdog_steer` are not changed and get no such parameter.)
-- [ ] Amend the `front` docstring at `agent/steering.py:96-100` to state that `front` orders within
+- [x] Amend the `front` docstring at `agent/steering.py:96-100` to state that `front` orders within
   the legacy leg and that consumers drain legacy before Room, so a future `front=True` push must
   not target a Room without resolving cross-leg ordering (Risk 3).
-- [ ] Docstring the `max_age_seconds` parameter on **both** `_drain_list` (drops) and `_peek_list`
+- [x] Docstring the `max_age_seconds` parameter on **both** `_drain_list` (drops) and `_peek_list`
   (skips, never deletes), and state at both Room-leg call sites — `pop_all_steering_messages` and
   `peek_steering_messages` — why it is passed for the Room key and never for the legacy key (D5).
   Note in `pop_steering_message`'s **and** `has_steering_messages`'s docstrings that each is
   deliberately unbounded because it has no production callers, so a future caller knows to route
   through `pop_all_steering_messages` / `peek_steering_messages` instead.
-- [ ] Docstring the transient `_leg` key on `pop_all_steering_messages` (D6): reader-set, values
+- [x] Docstring the transient `_leg` key on `pop_all_steering_messages` (D6): reader-set, values
   `"legacy"` / `"room"`, never accepted by or forwarded to `push_steering_message`, never persisted.
   State the requeue contract in the three requeue writers' docstrings —
   `agent/health_check.py::_repush_messages`, `agent/session_runner/runner.py::_default_steering_push`,
