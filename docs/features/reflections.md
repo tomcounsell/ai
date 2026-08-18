@@ -42,7 +42,7 @@ reflections:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique identifier (used as Redis key) |
-| `every` / `cron` / `at` | string | Unified schedule grammar — exactly one is required. See [Schedule Grammar](#schedule-grammar) below. |
+| `schedule` / `every` / `cron` / `at` | string | Unified schedule grammar — exactly one is required. See [Schedule Grammar](#schedule-grammar) below. |
 | `priority` | string | `urgent`, `high`, `normal`, or `low` |
 | `execution_type` | string | `function` (direct callable) or `agent` (PM session) |
 | `callable` | string | Dotted Python path (for function type) |
@@ -75,15 +75,26 @@ A reflection that an operator is expected to add by hand on a per-machine basis 
 
 ### Schedule Grammar
 
-The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into one of three string-typed schedule keys. Exactly one must be present per reflection.
+The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into a string-typed schedule key. Exactly one must be present per reflection.
 
 | Key | Shape | Example | Semantics |
 |-----|-------|---------|-----------|
 | `every` | duration string | `every: 300s`, `every: 5m`, `every: 1h`, `every: 24h` | Recurring on a fixed interval. Tracked by `ran_at + interval`. |
 | `cron` | five-field cron expression, optional `; tz=<zone>` suffix | `cron: 0 9 * * 1-5; tz=America/New_York` | Recurring on a calendar schedule. Timezone defaults to UTC; explicit zones must be valid IANA names. |
 | `at` | ISO-8601 instant | `at: 2026-05-15T09:00:00+00:00` | One-shot — fires exactly once at the given instant. Pair with `auto_delete_after_run: true` so the record self-cleans on success. |
+| `schedule` | pre-composed grammar string | `schedule: "cron: 0 9 * * 1-5; tz=America/New_York"` | The already-normalized form the other three keys are folded into. Written by machinery that composes a schedule programmatically; prefer `every` / `cron` / `at` when hand-authoring. |
 
 The runtime parser lives in `agent/reflection_schedule.py::compute_next_due()` and depends on `croniter` (declared in `pyproject.toml`).
+
+**Exactly one, enforced by test (#2734).** `load_registry()` resolves a multi-key entry
+deterministically by precedence — `schedule` > `every` > `cron` > `at` — rather than refusing
+it, so an entry declaring two keys would load with one declaration silently discarded.
+`tests/unit/test_reflection_scheduler.py::required_field_violations` is therefore
+**deliberately stricter than the loader**: it rejects zero keys (matching the loader, which
+cannot schedule such an entry at all) *and* two-or-more (a lint the loader does not perform).
+It also counts a key as declared when **present**, while the loader counts it when **truthy**.
+Both divergences are intentional; a future loader change that formalizes multi-key support is
+a decision to re-make there, not a bug in the test.
 
 #### Migration from `interval:` (issue #1273)
 
