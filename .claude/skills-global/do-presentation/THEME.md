@@ -115,24 +115,33 @@ section::after {  /* page number */
   color: var(--ink-gray); right: 72px; bottom: 26px;
 }
 
-/* === HEADINGS === */
-h1, h2, h3, h4 {
+/* === HEADINGS ===
+   Every element selector below is prefixed with `section` on purpose. Marp's
+   default theme styles the same elements at `section h1` / `section a` / etc.
+   (0,0,2), so a bare `h1` (0,0,1) silently loses on any property they share —
+   Marp's heading border-bottom and link accent among them. Matching the
+   specificity and coming later in the cascade is what makes these win.
+   Do not "simplify" these back to bare element selectors. */
+section h1, section h2, section h3, section h4 {
   font-family: var(--serif); font-weight: 500; color: var(--ink);
-  text-wrap: balance; font-feature-settings: "kern","liga"; margin: 0 0 18px;
+  text-wrap: balance; font-feature-settings: "kern","liga";
+  margin: 0 0 18px; padding-bottom: 0; border-bottom: 0;
 }
-h1 { font-size: 40px; line-height: 1.1;  letter-spacing: -0.02em; }
-h2 { font-size: 30px; line-height: 1.2;  letter-spacing: -0.015em; }
-h3 { font-size: 22px; line-height: 1.3;  letter-spacing: -0.01em; }
+section h1 { font-size: 40px; line-height: 1.1;  letter-spacing: -0.02em; }
+section h2 { font-size: 30px; line-height: 1.2;  letter-spacing: -0.015em; }
+section h3 { font-size: 22px; line-height: 1.3;  letter-spacing: -0.01em; }
 
-strong { font-weight: 600; color: var(--ink); }
-em { font-style: italic; color: var(--ink-gray); }
-a { color: var(--cobalt); text-decoration: underline;
+section strong { font-weight: 600; color: var(--ink); }
+section em { font-style: italic; color: var(--ink-gray); }
+section a { color: var(--cobalt); text-decoration: underline;
     text-decoration-thickness: 1px; text-underline-offset: 0.2em; }
 
-ul, ol { margin: 0; padding-left: 22px; }
-li { margin-bottom: 10px; }
-ul li::marker { color: var(--rule-mid); content: "— "; }
-ol li::marker { font-family: var(--mono); font-size: 0.8em; color: var(--red); }
+section ul, section ol { margin: 0; padding-left: 22px; }
+section li { margin-bottom: 10px; }
+section ul li::marker { color: var(--rule-mid); content: "— "; }
+/* Ordered markers are gray, NOT red. Red is the one-per-slide accent; a
+   five-item numbered list in red puts five accents on a one-accent slide. */
+section ol li::marker { font-family: var(--mono); font-size: 0.8em; color: var(--ink-gray); }
 
 /* === MONO LABELS === */
 .eyebrow {
@@ -146,7 +155,9 @@ ol li::marker { font-family: var(--mono); font-size: 0.8em; color: var(--red); }
 
 /* === RULES === */
 .rule-red { height: 0; border-top: 2px solid var(--red); width: 96px; margin: 22px 0; }
-hr { border: 0; border-top: 1px solid var(--rule-mid); margin: 26px 0; }
+/* `---` is Marp's slide separator, so an <hr> only ever comes from `***`/`___`.
+   Styled anyway so the rare one is a hairline, not Marp's 0.25em bar. */
+section hr { border: 0; height: 1px; background: var(--rule-mid); margin: 26px 0; }
 
 /* === COVER === */
 section.cover {
@@ -209,13 +220,23 @@ section.statement .attrib {
   width: 6px; height: 6px; border-radius: 50%; background: var(--red);
 }
 
-/* Rose plate — the one quoted or governing line. Once per deck. */
-.rose, blockquote {
+/* Rose plate — the one quoted or governing line. Once per deck, opt-in via the
+   class. A bare markdown `>` is NOT aliased to it: aliasing made every casual
+   blockquote the loudest object on the slide, against its own once-per-deck rule. */
+.rose {
   background: var(--rose); padding: 22px 28px; margin: 20px 0;
   font-family: var(--serif); font-style: italic; font-size: 24px;
-  line-height: 1.45; color: var(--ink); border: 0;
+  line-height: 1.45; color: var(--ink); border: 0; border-radius: 0;
 }
 .rose .eyebrow { color: var(--red-deep); font-style: normal; }
+
+/* Bare blockquote — quiet by default. Full hairline, never a left accent bar. */
+section blockquote {
+  background: transparent; color: var(--ink-body);
+  border: 1px solid var(--rule-light); border-left: 1px solid var(--rule-light);
+  border-radius: 0; padding: 18px 24px; margin: 20px 0;
+  font-family: var(--serif); font-style: italic; font-size: 22px; line-height: 1.45;
+}
 
 /* === STAMP BAND === */
 .stamp {
@@ -290,16 +311,30 @@ section table td {
 section table tr:last-child td { border-bottom: 1px solid var(--rule-mid); }
 td strong { color: var(--red); font-weight: 500; }
 
-/* === CODE === */
-code {
+/* === CODE ===
+   Marp's default styles code at `section code` / `section pre` / and
+   `section :not(pre)>code` (up to 0,1,2) with a 6px radius. Bare `code`/`pre`
+   selectors lose to it and the deck exports with rounded code blocks, against
+   the square-corner rule. Match the specificity and zero the radius. */
+section code, section :not(pre) > code, section > code {
   font-family: var(--mono); font-size: 0.86em; background: var(--bg-warm);
-  color: var(--ink); padding: 2px 6px; border: 1px solid var(--rule-light);
+  color: var(--ink); padding: 2px 6px; margin: 0;
+  border: 1px solid var(--rule-light); border-radius: 0;
 }
-pre {
-  background: var(--bg-panel); border: 1px solid var(--rule-light);
-  padding: 18px 20px; font-size: 15px; line-height: 1.7;
+section pre {
+  background: var(--bg-panel); border: 1px solid var(--rule-light); border-radius: 0;
+  padding: 18px 20px; font-size: 15px; line-height: 1.7; filter: none;
 }
-pre code { background: none; border: 0; padding: 0; }
+section pre code, section pre > code {
+  background: none; border: 0; padding: 0; border-radius: 0; color: var(--ink);
+}
+
+/* Syntax highlighting is OFF by design. Marp ships highlight.js, which emits
+   reds, purples and blues — a multi-colour palette on a theme whose whole
+   discipline is one accent per slide. Code reads as ink; comments recede. */
+section pre code span { color: var(--ink) !important; }
+section pre code .hljs-comment,
+section pre code .hljs-quote { color: var(--ink-gray) !important; font-style: italic; }
 ```
 
 ## Per-deck slug

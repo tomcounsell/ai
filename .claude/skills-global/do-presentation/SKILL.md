@@ -251,7 +251,8 @@ content...
 - Use tables over bullet lists when comparing things
 - Use code blocks sparingly — only when the actual code IS the point
 - Every 3rd-4th slide should be visual (figure plate, table, or `.big` number)
-- Use `.rose` for the one governing quote or line, once per deck
+- Use `.rose` for the one governing quote or line, once per deck. A plain markdown `>` is the quiet
+  treatment (hairline box, serif italic) and carries no such limit
 - Bold key terms on first use
 - Use analogies liberally — connect technical concepts to everyday things
 - **Write each paragraph on one source line.** Marp renders a newline inside a paragraph as a line
