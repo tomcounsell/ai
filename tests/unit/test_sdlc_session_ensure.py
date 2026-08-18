@@ -1557,6 +1557,107 @@ class TestKillOrphans:
         assert result["count"] == 0
         assert result["orphans"] == []
 
+    def test_hollow_session_with_live_durable_renewer_is_exempt(self):
+        """SC7 (issue #2648): the reaper's #2703 exemption survives the
+        renewer-identity tightening.
+
+        The exposed shape is exactly this one -- an ``sdlc-local-{N}`` anchor
+        with ``last_heartbeat_at = None``, for which renewal freshness is the
+        only life signal. It is kept alive by the detached heartbeat, which
+        stamps its own ``renewer_pid`` on tick one. That pid resolves ALIVE,
+        so the predicate returns live and the session stays exempt no matter
+        how long it has been quiet.
+        """
+        from tools.sdlc_session_ensure import _kill_orphans
+
+        live = _make_orphan_session(
+            "sdlc-local-2648",
+            age_seconds=3600 * 24,
+            heartbeat=None,
+            last_activity_seconds=3600 * 24,
+            issue_number=2648,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [live]
+
+        # Quiet for 800s: well past ISSUE_LOCK_RENEWER_GRACE_SECONDS (180) and
+        # still inside the 1200s freshness window, so the renewer branch is the
+        # one that decides.
+        payload = {
+            "run_id": "live-run",
+            "session_id": "sdlc-local-2648",
+            "pid": 424242,  # the ephemeral session-ensure CLI, dead in seconds
+            "hostname": "this-host",
+            "create_time": 1000.0,
+            "renewed_at": time.time() - 800.0,
+            "renewer_pid": 999001,
+            "renewer_create_time": 2000.0,
+        }
+        live_renewer = MagicMock()
+        live_renewer.create_time.return_value = 2000.0
+
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._issue_lock_payload_for_session",
+                return_value=payload,
+            ),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=live_renewer),
+        ):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+        assert result["orphans"] == []
+
+    def test_hollow_session_with_dead_durable_renewer_past_grace_is_reapable(self):
+        """SC7 (issue #2648), the other direction: the same row whose durable
+        renewer is GONE and which has been quiet past the grace window IS
+        yielded.
+
+        This is the #2648 incident at the reaper layer -- before the
+        tightening, the fresh ``renewed_at`` short-circuited to live and the
+        anchor survived for the full freshness window. There is no idle-time
+        conjunct on the payload-present path, so a dead verdict reaps
+        immediately.
+        """
+        from tools.sdlc_session_ensure import _kill_orphans
+
+        dead = _make_orphan_session(
+            "sdlc-local-2649",
+            age_seconds=3600,
+            heartbeat=None,
+            last_activity_seconds=5,  # fresh updated_at: the lock payload decides
+            issue_number=2649,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [dead]
+
+        payload = {
+            "run_id": "dead-run",
+            "session_id": "sdlc-local-2649",
+            "pid": 424242,
+            "hostname": "this-host",
+            "create_time": 1000.0,
+            "renewed_at": time.time() - 800.0,
+            "renewer_pid": 999001,
+            "renewer_create_time": 2000.0,
+        }
+
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._issue_lock_payload_for_session",
+                return_value=payload,
+            ),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-2649"
+
     def test_cli_dry_run_exits_zero_with_valid_json(self):
         result = subprocess.run(
             [
