@@ -211,3 +211,17 @@ excludes IndexedFields from the plain HSET mapping and maintains them through
 an atomic Lua EVAL instead, so a save whose entire field list is IndexedFields
 sends no `goal` bytes at all — a maintenance pass on this path can never
 overwrite a concurrently-written `goal` (#2647).
+
+The same clobber-proof idiom governs the lifecycle transitions themselves:
+`Job.touch()`, `Job.mark_at_rest()`, and `Job.revive()` each save only the
+fields they mutate (`["last_active_at"]`, `["status"]`, and
+`["status", "last_active_at"]` respectively), so an in-flight expectation
+write on the same Job is never clobbered by a routing decision or a rest
+sweep (#2860). `mark_at_rest()` deliberately omits `last_active_at` from its
+`update_fields` — resting a Job by age never refreshes its recency. A side
+effect of scoping these three writes is that they no longer incidentally
+re-run `on_save` for `has_open_expectations` (or, for `touch`/`revive`,
+`last_active_at`) the way a full-hash save did. Index self-heal for those
+fields is owned exclusively by the two sanctioned sweeps —
+`backfill_open_expectations_index()` and `renormalize_last_active_scores()`
+— not by any lifecycle transition.
