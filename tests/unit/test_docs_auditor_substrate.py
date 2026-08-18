@@ -35,17 +35,34 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _git(cwd: Path, *args: str) -> str:
+    """Run a real git command in ``cwd`` and return stdout."""
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _porcelain(cwd: Path) -> str:
+    """``git status --porcelain`` output, stripped."""
+    return _git(cwd, "status", "--porcelain").strip()
+
+
 @pytest.fixture()
 def git_repo(repo: Path) -> Path:
-    """A ``repo`` that is also a real git checkout.
+    """A ``repo`` that is also a real git checkout, able to commit.
 
     The bare-name existence oracle (#2759) resolves a filename with no ``/``
     against a ``git ls-files --cached --others --exclude-standard`` basename
     index. That index only exists inside a git checkout, so ambiguity and
     index-backed resolution have to be exercised here rather than on the plain
     ``tmp_path`` ``repo`` fixture.
+
+    Identity is set locally so tests asserting on commit state can create a
+    baseline commit without depending on the machine's global git config.
     """
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Docs Auditor Test")
     return repo
 
 
@@ -388,12 +405,18 @@ class TestDoDocsContract:
         # Substrate must not push branches in any scope mode
         mock_push.assert_not_called()
 
-    def test_hook_invocation_under_pr_mode(self, repo: Path, auth_ok, patch_redis):
-        # In pr-changed-files mode the substrate fires the memory refresh hook
-        # itself, so the /do-docs skill is a true thin caller (no skill-level
-        # work needed per Task 4 acceptance criteria).
-        primary = repo / "docs" / "features" / "foo.md"
+    def test_hook_fires_and_nothing_is_committed_under_pr_mode(
+        self, git_repo: Path, auth_ok, patch_redis
+    ):
+        # In pr-changed-files mode the substrate fires the memory refresh hook on
+        # the *applied* set and commits nothing: the /do-docs skill owns the
+        # commit, because the diff has to pass a review gate before it becomes a
+        # permanent record. The applied fix must therefore still be dirty on exit.
+        primary = git_repo / "docs" / "features" / "foo.md"
         primary.write_text("# Foo\n\nThe SessionLog tracks state.\n" + "Padding line.\n" * 6)
+        _git(git_repo, "add", "-A")
+        _git(git_repo, "commit", "-q", "-m", "baseline")
+        assert _porcelain(git_repo) == ""
 
         with (
             patch(
@@ -401,7 +424,6 @@ class TestDoDocsContract:
                 return_value=[Path("docs/features/foo.md")],
             ),
             patch.object(docs_auditor, "_file_issue_if_new", return_value=False),
-            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
             patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
         ):
             result = docs_auditor.audit(
@@ -409,12 +431,15 @@ class TestDoDocsContract:
                 scope_mode="pr-changed-files",
                 apply_mode="apply",
                 project_key="test",
-                repo_root=repo,
+                repo_root=git_repo,
             )
 
         assert "docs/features/foo.md" in result["files_touched"]
-        mock_commit.assert_called_once()
         mock_hook.assert_called_once_with(["docs/features/foo.md"])
+        # The write landed and stayed uncommitted, for the skill to review.
+        assert "AgentSession" in primary.read_text()
+        assert "docs/features/foo.md" in _porcelain(git_repo)
+        assert _git(git_repo, "rev-list", "--count", "HEAD").strip() == "1"
 
     def test_rotation_mode_does_not_fire_hook_inside_audit(self, repo: Path, auth_ok, patch_redis):
         # In rotation mode, the hook is fired by run_docs_auditor (Caller A),
@@ -475,7 +500,6 @@ class TestNonMarkdownApplyGuard:
                 "reflections.docs_auditor._resolve_pr_changed_files",
                 return_value=[Path("site/runtime.html")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
             patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
         ):
             result = docs_auditor.audit(
@@ -491,8 +515,7 @@ class TestNonMarkdownApplyGuard:
         assert result["status"] == "ok"
         assert result["files_touched"] == []
         assert result["fixes_applied"] == 0
-        # No commit / memory refresh fires when nothing was touched.
-        mock_commit.assert_not_called()
+        # No memory refresh fires when nothing was touched.
         mock_hook.assert_not_called()
 
     def test_markdown_sibling_still_rewritten(self, repo: Path, auth_ok, patch_redis):
@@ -505,7 +528,6 @@ class TestNonMarkdownApplyGuard:
                 "reflections.docs_auditor._resolve_pr_changed_files",
                 return_value=[Path("docs/features/runtime.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch"),
             patch.object(docs_auditor, "refresh_docs_in_memory"),
         ):
             result = docs_auditor.audit(
@@ -1083,7 +1105,6 @@ class TestExistenceInvariant:
                 "_resolve_pr_changed_files",
                 return_value=[Path("docs/features/aud.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch") as commit,
         ):
             result = docs_auditor.audit(
                 primary_path=None,
@@ -1097,7 +1118,6 @@ class TestExistenceInvariant:
         assert result["fixes_withheld"] == 1
         assert result["withheld"][0]["new"] == "ghost_module.py"
         assert result["files_touched"] == []
-        commit.assert_not_called()
         assert "ghost_module.py" not in p.read_text()
 
 
@@ -1188,7 +1208,6 @@ class TestWithheldBlocksAutoMerge:
                 "_resolve_pr_changed_files",
                 return_value=[Path("docs/features/foo.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch"),
         ):
             audit_result = docs_auditor.audit(
                 primary_path=None,

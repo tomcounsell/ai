@@ -1177,6 +1177,14 @@ def audit(
 ) -> dict:
     """Unified docs-auditor entrypoint. Synchronous.
 
+    **This function never commits.** It writes fixes to the working tree, fires
+    the memory-refresh hook on what it wrote, and returns ``files_touched``. The
+    tree is left dirty and the **caller owns the commit**, because every write
+    the auditor makes has to pass a named review gate before it becomes a
+    permanent record: the ``/do-docs`` skill reads the diff for
+    ``pr-changed-files``, and the rotation reflection's gate is the pull request
+    ``run_docs_auditor`` opens.
+
     Args:
         primary_path: Repo-relative path to the primary doc to audit. When
             ``scope_mode == "pr-changed-files"`` this is ignored.
@@ -1290,11 +1298,11 @@ def audit(
             if _file_issue_if_new(finding, root):
                 issues_filed += 1
 
-    # Caller B (pr-changed-files): commit to current branch and fire memory
-    # refresh hook here so the /do-docs skill stays a thin caller. Caller A
-    # (rotation) handles its own commit/push/hook in run_docs_auditor.
+    # Caller B (pr-changed-files): fire the memory-refresh hook on the applied
+    # set. The hook operates on applied paths and needs no commit — the working
+    # tree stays dirty for the /do-docs skill's review gate. Caller A (rotation)
+    # handles its own branch/commit/push/hook in run_docs_auditor.
     if scope_mode == "pr-changed-files" and apply_mode == "apply" and touched:
-        _commit_current_branch(root, touched)
         try:
             refresh_docs_in_memory(touched)
         except Exception as e:
@@ -1308,32 +1316,6 @@ def audit(
         fixes_withheld=len(withheld),
         withheld=withheld,
     )
-
-
-def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
-    """Stage and commit substrate-applied changes on the current branch.
-
-    Best-effort: errors are logged not raised. Used by Caller B (/do-docs)
-    so the skill itself does not need to invoke git after the substrate.
-    """
-    try:
-        subprocess.run(
-            ["git", "add"] + touched,
-            capture_output=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-            check=False,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"Docs: cascade fixes ({len(touched)} files)"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-            check=False,
-        )
-    except Exception as e:
-        logger.warning(f"docs_auditor: current-branch commit failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -2289,6 +2271,10 @@ def run_docs_branch_sweeper() -> dict:
 if __name__ == "__main__":
     # Allow `python -m reflections.docs_auditor` to print a JSON result for the
     # ``/do-docs`` skill bash block. Args via env: SCOPE_MODE, APPLY_MODE.
+    #
+    # This runs no git of its own and **leaves a dirty working tree**: the fixes
+    # `audit()` applied are unstaged on exit, and reviewing and committing them
+    # is the caller's job.
     scope = os.environ.get("DOCS_AUDIT_SCOPE", "pr-changed-files")
     apply = os.environ.get("DOCS_AUDIT_APPLY", "apply")
     project = os.environ.get("VALOR_PROJECT_KEY", "valor")
