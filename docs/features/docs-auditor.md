@@ -179,8 +179,9 @@ sole fix producer and every `STALE_TERMS` replacement is newline-free
 (`SessionLog`->`AgentSession`, `RedisJob`->`AgentSession`,
 `session_log`->`agent_session`, `redis_job`->`agent_session`), so applying one
 shifts byte offsets but never line indices. Gate 2's apply-time placement is
-forward-looking robustness, for `STALE_TERMS` entries an operator may add later
-that shorten text or span newlines.
+forward-looking robustness, for a `STALE_TERMS` entry an operator may add later
+whose key or replacement spans a newline — the only shape that can change the
+newline count ahead of a later match.
 
 **Gate 3 has no such reprieve — hoisting it would corrupt docs today.**
 `_match_inside_path_token` consumes raw byte offsets (`match.start()`,
