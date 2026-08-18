@@ -502,50 +502,51 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 
 ## Critique Results
 
-**Critique round 3, 2026-08-18.** Run against plan commit `33c9b19de` (plan hash
-`sha256:fd4efc39`). War room depth: **FULL** — force-FULL, because the plan edits
+**Critique round 4, 2026-08-18.** Run against plan commit `f8e59ff8e` (plan hash
+`sha256:5072ee40`). War room depth: **FULL** — force-FULL, because the plan edits
 `.claude/skills/update/SKILL.md`, a doctrine path. Roster gate: **3/3 complete, 3/3 grounded**.
-Findings: **3 total (1 blocker, 2 concerns, 0 nits)**.
+Findings: **0 total (0 blockers, 0 concerns, 0 nits)**.
 
-**Round 2's 7 findings were independently re-verified at this commit, not taken on the table's
-word.** All seven hold: the `suppressed:` trailer is specified outside `run.py:2482-2494`'s
-mutually-exclusive `if/elif/else` in both the Technical Approach and Task 4, with the pinning
-test correctly restated as empty `result.warnings` + non-empty `active()`; the append-site count
-matches the driver's live measurement (`grep -c 'result.warnings.append' scripts/update/run.py`
-= 82, `...append(f` = 48) and the plan no longer claims a single emission boundary exists;
-`calendar-config` is confirmed as a bespoke third `warn_state` consumer at `run.py:2354`
-(clear-on-resolve) and `run.py:2365` (signature emit), outside `human_gated_tools`, and Task 4
-requires membership rather than exact-set assertions. The Appetite/roster reconciliation and the
-`PM check-ins: 3` correction are both real.
+No findings from the war room.
 
-**The loop has not fully converged.** Two of the three round-3 findings are consequences of the
-round-2 adoption itself: correcting "~20"/"~35" to 82 landed in the Technical Approach but not in
-the two other prose sites that quote the same figure, and scoping `_append_warning` to three site
-groups leaves a gap the plan's own count cross-check is structurally unable to detect. **Revision round 3 applied, 2026-08-18** — all 3 addressed, no `pending` cells remain, and each was fixed at the cause rather than at the symptom: the newline scope widened to all 82 sites (with the reason the narrow scope was undetectable recorded in the text), every `run.py` edit consolidated under one builder so the disjoint-files premise is true as written, and the measured figure propagated to both stale prose sites. The blocker
-is new: Task 1 directs `update-channel-builder` to edit `scripts/update/run.py`, which Team
-Orchestration assigns to a *different, concurrently-running* builder.
+**Round 3's blocker and two concerns were independently re-verified as fixed, against the
+document and the code rather than the table's word:**
 
-*Column semantics:* **Implementation Note** is the critic's guidance at the time the finding was
-raised; **Addressed By** records what the revision pass actually adopted and supersedes the note
-where the two differ.
+- The `run.py` bullet is gone from Task 1; all `run.py` work, including every `_append_warning`
+  conversion, sits in Task 4 under `warn-state-builder`, and Team Orchestration states outright
+  that `update-channel-builder` never opens the file. The disjoint-files premise that justifies
+  `Parallel: true` on Tasks 1 and 4 is now true as written.
+- `_append_warning` is scoped to **all 82** call sites, with the reason the narrower round-2 scope
+  was wrong recorded in the Technical Approach: `run.py:2486-2492` sets `w_count =
+  len(result.warnings)` and emits exactly one bullet per entry, so the `(N warnings)`-vs-bullet
+  cross-check agrees even when an entry embeds a newline — the gap was invisible by construction.
+  The render-time guard test asserting no entry contains a newline is specified in both the
+  Technical Approach and Task 4.
+- The measured **82** figure now appears at the root-cause paragraph and at the Rabbit Holes
+  No-Go justification. The Technical Approach sentence that previously quoted the stale
+  approximations verbatim was reworded, so a zero-match grep gate on those tokens is achievable;
+  the only surviving occurrences are inside this section, which is the critics' own finding text.
 
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | Scope & Value | Team Orchestration asserts the three builders touch disjoint files (`bridge/update.py`; `scripts/update/verify.py` + `.env.example`; `scripts/update/run.py`) and runs Tasks 1 and 4 with `Parallel: true` on that premise. But Task 1, assigned to `update-channel-builder` whose stated file is `bridge/update.py` only, carries the bullet "Collapse embedded newlines in warning text at the emission boundary in `run.py`", and the Technical Approach pins `_append_warning`'s call sites to the gws auth path (`run.py:1029`), the Redis ACL path (`run.py:1480-1497`), and the `valor_tools` loop (`run.py:2266-2290`). Task 4, assigned to `warn-state-builder` and also `Parallel: true`, wires `warn_state.should_emit` through the first two of those exact sites. Two builders running concurrently in one worktree are directed to edit the same lines of `run.py`, contradicting the "without interleaving commits" claim that is the sole justification for the parallelism. | **ADOPTED.** The `run.py` bullet is deleted from Task 1 and all `run.py` work — including every `_append_warning` conversion — moved to Task 4 under `warn-state-builder`. The disjoint-files sentence in Team Orchestration now states explicitly that `update-channel-builder` never opens `run.py`, and records that an earlier revision had made the claim false. `Parallel: true` stands on both tasks because the premise is now true rather than asserted. | Move the newline-collapse work for the gws-auth and Redis-ACL sites into Task 4, which already owns those exact lines, and delete the `run.py` bullet from Task 1. Add to Task 4: "wrap both `should_emit`-gated appends in `_append_warning` to collapse embedded newlines." If the `valor_tools` loop also needs `_append_warning`, assign it to `warn-state-builder` as well — `update-channel-builder` per Team Orchestration never touches `run.py` at all. Then re-state the disjoint-files claim so it is true as written, or drop `Parallel: true` from one of the two tasks. |
-| CONCERN | Risk & Robustness | The `(N warnings)` vs. extracted-bullet-count cross-check — the plan's only stated safety net against a truncated multi-line warning — is structurally blind to the failure it is supposed to catch. `scripts/update/run.py:2486-2492` sets `w_count = len(result.warnings)` and then emits exactly one `⚠️` bullet per entry regardless of that entry's content, so the count and the bullet total always agree even when an entry embeds a newline. A multi-line exception string appended raw at any of the 79 sites the scoped `_append_warning` helper does not convert (the plan's own Problem section quotes exactly this shape, a multi-line pydantic `ValidationError`) renders as one bullet whose tail `extract_update_warnings` silently drops, with the cross-check reporting a clean match — reproducing the original truncation defect through a path the plan's safety net cannot see. | **ADOPTED, wider option.** Scope widened from three call-site groups to **all 82**, and Technical Approach records why the narrower round-2 scope was wrong rather than just changing it: the count cross-check compares `len(result.warnings)` against a one-bullet-per-entry render, so the two always agree and the gap is invisible by construction — a bounded gap only counts as bounded if something can see it. Also states that text normalisation is not the typed-record redesign the No-Go excludes. The newline guard test at render time is added as the recurrence guard. | Newline-collapsing is pure text normalization, not the typed-record redesign the No-Go excludes, so the mechanical option is open: replace all 82 `result.warnings.append(X)` call sites with `_append_warning(result, X)` (a regex-safe rename — every site already has `result` in scope). If scope must stay at the three named groups, add a guard test asserting no entry in `result.warnings` contains `"\n"` at the point `run.py:2486-2492` renders, so an unconverted site fails loudly instead of leaving the gap undetectable by the count check the plan relies on. |
-| CONCERN | History & Consistency | The round-2 correction of the call-site count from "~20"/"~35" to the measured 82 landed in the Technical Approach (lines 171, 173) but missed two other prose instances of the same claim: the "Why Previous Fixes Failed" root-cause paragraph still reads "warnings are appended to `result.warnings` from ~20 places" (line 100), and the Rabbit Holes seam-building bullet still reads "~20 call sites append to `result.warnings`" (line 237). Both understate the excluded work by more than 4x, at exactly the two places — the root-cause diagnosis and the No-Go justification — a builder reads to judge how much containment is enough. | **ADOPTED.** Both prose sites now carry the measured figure. The Technical Approach sentence that previously *quoted* the two stale approximations was reworded to describe them instead, so a zero-match grep gate on those tokens is achievable — a gate that trips on the document's own account of what it deleted is the recurring anti-criterion trap in this repo. | Substitute the measured figure at both sites: line 100's "from ~20 places" and line 237's "~20 call sites". Verify with `grep -n '~20' docs/plans/update-warning-channel-repair.md` returning zero matches; cross-check against the anchor phrase "82 `result.warnings.append(...)` sites" already present at line 171. |
+Driver re-verification against live code: `grep -c 'result.warnings.append' scripts/update/run.py`
+= 82, `...append(f` = 48; the summary render at `run.py:2482-2494` is a mutually-exclusive
+`if/elif/else`; `find_plan_path(2845)` resolves to this document.
 
-**Structural check results (driver, run at `33c9b19de`):**
+**Convergence:** 8 findings / 3 blockers → 7 / 0 → 3 / 1 → **0 / 0**. Each round's findings were
+consequences of the prior round's adoption, and that chain has now terminated. Nothing cosmetic
+was raised to keep the loop open.
+
+**Structural check results (driver, run at `f8e59ff8e`):**
 
 | Check | Status | Detail |
 |-------|--------|--------|
 | Required sections | PASS | Documentation (8 checkboxes, 5 `docs/features/` paths), Update System, Agent Integration, Test Impact all present and substantive. |
 | Task numbering | PASS | Tasks 1-7 contiguous, no gaps. Every task carries `Validates`. |
 | Dependencies valid | PASS | Every `Depends On` resolves to a real Task ID; no cycles. |
-| File paths exist | PASS | All cited source, test, and doc paths exist except the 3 this plan creates (`tests/unit/test_update_warning_extraction.py`, `tests/unit/test_env_declaration_readers.py`, `docs/features/update-warning-channel.md`). The deleted sibling `docs/plans/update-warning-channel-integrity.md` is confirmed gone and `find_plan_path(2845)` resolves to this document. |
+| File paths exist | PASS | All cited source, test, and doc paths exist except the 3 this plan creates. |
 | Prerequisites met | PASS | Vault `.env` readable; `redis-cli` at `/opt/homebrew/bin/redis-cli`; venv on the `3.14` pin. |
-| Cross-references | FAIL | One contradiction: Team Orchestration's disjoint-files invariant versus Task 1's `run.py` bullet (blocker above). No No-Go contradicts the Solution; every Success Criterion maps to a task. |
-| Cited claims re-verified | PASS | 82/48 append counts, `run.py:2482-2494` mutually-exclusive render, `run.py:2354`/`:2365` bespoke `calendar-config` consumer, `run.py:2266-2290` `human_gated_tools` precedent, `check_env_completeness` reporting exactly 27 missing keys, `find_plan_path(2845)` — all confirmed live by the driver. |
+| Cross-references | PASS | Round 3's Team-Orchestration-vs-Task-1 contradiction is resolved. No No-Go contradicts the Solution; every Success Criterion maps to a task. |
+| Cited claims re-verified | PASS | 82/48 append counts, the mutually-exclusive render block, `find_plan_path(2845)` — all confirmed live. |
+
 ---
 
 ## Open Questions
