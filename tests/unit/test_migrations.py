@@ -12,13 +12,25 @@ Every test cleans up the AgentSession/PipelineLedger records it creates.
 
 from __future__ import annotations
 
+import logging
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from popoto import SortedField
+from popoto.redis_db import POPOTO_REDIS_DB
+
 from agent.pipeline_ledger import PipelineLedger
+from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
+from models.job import Job
 from models.session_lifecycle import touch_issue_lock
-from scripts.update.migrations import MIGRATIONS, _migrate_backfill_pipeline_ledger
+from scripts.update.migrations import (
+    MIGRATIONS,
+    _migrate_backfill_job_last_active_scores,
+    _migrate_backfill_pipeline_ledger,
+)
 
 _TEST_REPO = "test-owner/test-repo"
 
@@ -310,3 +322,111 @@ class TestStripPidFieldsV2Registration:
     def test_every_migration_name_is_unique(self):
         """A duplicate key would silently shadow one registration."""
         assert len(MIGRATIONS) == len(set(MIGRATIONS))
+
+
+class TestBackfillJobLastActiveScores:
+    """Skew backfill migration (#2636): tz-skewed ``$SortF`` scores repaired.
+
+    Real Popoto/Redis against the test db (autouse ``redis_test_db``). Skew is
+    seeded by corrupting the sorted-set score directly — that IS the defect
+    (a pre-override host wrote ``naive.timestamp()`` = local time), and no ORM
+    path can produce it deterministically on a UTC host. Same test-side
+    corruption-seeding precedent as ``test_job_model.py``'s stale-member tests.
+    """
+
+    _SKEW = 25200.0  # spike-2's measured UTC+07 offset, in seconds
+
+    @pytest.fixture
+    def scratch_room_id(self):
+        """Unique test- prefixed room id (with a real colon); ORM cleanup."""
+        rid = f"test-migskew-{uuid.uuid4().hex[:8]}|telegram:1"
+        yield rid
+        for job in Job.query.filter(room_id=rid):
+            job.delete()
+
+    @staticmethod
+    def _partition_key(room_id: str) -> str:
+        """Derived, never hand-built — ``DB_key.clean()`` escapes the colon."""
+        return SortedField.get_sortedset_db_key(Job, "last_active_at", room_id).redis_key
+
+    def _seed_skewed_job(self, room_id: str) -> tuple[Job, str]:
+        """Mint a Job, then corrupt its stored score by the spike-2 offset."""
+        job = Job.mint(room_id, "repair me")
+        member = job.db_key.redis_key
+        partition = self._partition_key(room_id)
+        true_score = POPOTO_REDIS_DB.zscore(partition, member)
+        POPOTO_REDIS_DB.zadd(partition, {member: true_score - self._SKEW})
+        return job, member
+
+    def test_seeded_skew_is_repaired_to_the_raw_utc_epoch(self, scratch_room_id, tmp_path, caplog):
+        """The raw ``$SortF`` score — not just hash-side state — must land on
+        the row's own UTC epoch (round-5 critique NIT): asserting the sorted
+        set directly catches any future popoto scoped-save path that silently
+        skips the SortedField companion write."""
+        job, member = self._seed_skewed_job(scratch_room_id)
+        partition = self._partition_key(scratch_room_id)
+        instant_before = job.last_active_at
+
+        with caplog.at_level(logging.INFO, logger="scripts.update.migrations"):
+            assert _migrate_backfill_job_last_active_scores(tmp_path) is None
+
+        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+        # Instant-preserving: the row keeps its OWN instant, never a re-stamp
+        # (a constant migration timestamp is the spike-4 tie-break hazard).
+        assert to_unix_ts(fresh.last_active_at) == pytest.approx(
+            to_unix_ts(instant_before), abs=1.0
+        )
+        assert POPOTO_REDIS_DB.zscore(partition, member) == pytest.approx(
+            to_unix_ts(fresh.last_active_at), abs=1.0
+        )
+        assert "scanned 1 Job(s)" in caplog.text, "the pass must log the population count"
+        assert "repaired 1 skewed score(s)" in caplog.text
+
+    def test_second_pass_repairs_zero(self, scratch_room_id, tmp_path, caplog):
+        """Idempotency: a repaired score is inside tolerance next time, so the
+        fleet-wide re-run on every machine's /update costs reads alone."""
+        job, member = self._seed_skewed_job(scratch_room_id)
+        partition = self._partition_key(scratch_room_id)
+
+        assert _migrate_backfill_job_last_active_scores(tmp_path) is None
+        score_after_first = POPOTO_REDIS_DB.zscore(partition, member)
+
+        with caplog.at_level(logging.INFO, logger="scripts.update.migrations"):
+            assert _migrate_backfill_job_last_active_scores(tmp_path) is None
+
+        assert "repaired 0 skewed score(s)" in caplog.text
+        assert POPOTO_REDIS_DB.zscore(partition, member) == score_after_first
+
+    def test_poisoned_row_logs_and_the_pass_continues(
+        self, scratch_room_id, tmp_path, caplog, monkeypatch
+    ):
+        """One bad row must cost only itself: the sweep logs the failure and
+        still repairs every other skewed row in the same pass."""
+        poisoned, _poisoned_member = self._seed_skewed_job(scratch_room_id)
+        healthy, healthy_member = self._seed_skewed_job(scratch_room_id)
+        partition = self._partition_key(scratch_room_id)
+
+        real_get = Job.query.get
+
+        def poisoned_get(*args, **kwargs):
+            if kwargs.get("id") == poisoned.id:
+                raise RuntimeError("row is poisoned")
+            return real_get(*args, **kwargs)
+
+        monkeypatch.setattr(Job.query, "get", poisoned_get)
+
+        with caplog.at_level(logging.WARNING, logger="scripts.update.migrations"):
+            assert _migrate_backfill_job_last_active_scores(tmp_path) is None
+
+        assert f"SKIP job={poisoned.job_id}" in caplog.text
+        assert "RuntimeError" in caplog.text
+        fresh_healthy = Job.query.get(id=healthy.id, room_id=scratch_room_id)
+        assert POPOTO_REDIS_DB.zscore(partition, healthy_member) == pytest.approx(
+            to_unix_ts(fresh_healthy.last_active_at), abs=1.0
+        )
+
+    def test_registered_in_migrations_dict(self):
+        assert "backfill_job_last_active_scores" in MIGRATIONS
+        fn, description = MIGRATIONS["backfill_job_last_active_scores"]
+        assert fn is _migrate_backfill_job_last_active_scores
+        assert description

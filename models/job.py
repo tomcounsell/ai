@@ -60,14 +60,19 @@ GOAL_PLACEHOLDER_PREFIX = "handle user message '"
 # Fixed by the plan's mint contract: `handle user message '<first 20 chars>…'`.
 _PLACEHOLDER_CHARS = 20
 
-_EPOCH = datetime(1970, 1, 2, tzinfo=UTC)
-
 # Age threshold after which an idle active Job goes to rest (rest-by-age,
 # applied by ``Job.sweep_to_rest`` on the session-health cadence).
 # GRAIN OF SALT: provisional/tunable via env — sized to keep multi-day
 # conversations active across a weekend while letting abandoned threads
 # reach rest within the week.
 JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 * 3600)))
+
+# Extra members the bounded recency read pulls beyond ``limit``, so a member
+# whose backing hash has already gone (a transient orphan between a delete and
+# the guarded index repair) is absorbed without an under-filled answer.
+# GRAIN OF SALT: provisional/tunable via env — sized off the observed orphan
+# rate, which is near zero outside the repair window.
+JOB_RECENT_OVERFETCH = int(os.environ.get("JOB_RECENT_OVERFETCH", "5"))
 
 
 def _now() -> datetime:
@@ -109,6 +114,55 @@ class Job(Model):
     # `type=bool` is load-bearing: without it the value hydrates as the
     # string "False", which is truthy.
     has_open_expectations = IndexedField(type=bool, default=False)
+
+    # -- Persistence --------------------------------------------------------
+
+    def save(
+        self,
+        pipeline=None,
+        ignore_errors: bool = False,
+        skip_auto_now: bool = False,
+        update_fields: list | None = None,
+        migrate_key: bool = False,
+        **kwargs,
+    ):
+        """Re-attach UTC to a naive ``last_active_at`` before persisting.
+
+        popoto 1.8.0 decodes a stored datetime without tzinfo, so a reloaded
+        Job carries a naive ``last_active_at``; the next save would compute the
+        SortedField score as ``naive.timestamp()`` — local time, skewed from the
+        stored hash value by the host's UTC offset. Every write funnels through
+        here, so this one re-attach makes every score a pure UTC epoch.
+
+        **Instant-preserving, not a re-stamp.** It attaches the tzinfo the value
+        already meant and never assigns ``_now()``: re-stamping would refresh
+        recency on every unrelated write, resurrecting idle Jobs and defeating
+        rest-by-age.  Idempotent — an aware value is left untouched.
+
+        The reattach is gated on the field being in scope. A scoped save that
+        excludes ``last_active_at`` (``backfill_open_expectations_index``'s
+        ``save(update_fields=["has_open_expectations"])``, whose docstring
+        guarantees it never writes recency) must not touch the SortedField score
+        path at all; a scoped save that *names* the field still reattaches.
+
+        The signature mirrors popoto 1.8.0's ``Model.save`` exactly (rather
+        than ``*args``) so a caller passing ``update_fields`` positionally is
+        still captured by the guard — a splat signature would let a positional
+        ``update_fields`` slip past the keyword check and only surface as a
+        ``TypeError`` at the ``super().save`` delegation.
+        """
+        if update_fields is None or "last_active_at" in update_fields:
+            value = self.last_active_at
+            if isinstance(value, datetime) and value.tzinfo is None:
+                self.last_active_at = value.replace(tzinfo=UTC)
+        return super().save(
+            pipeline=pipeline,
+            ignore_errors=ignore_errors,
+            skip_auto_now=skip_auto_now,
+            update_fields=update_fields,
+            migrate_key=migrate_key,
+            **kwargs,
+        )
 
     # -- Identity -----------------------------------------------------------
 
@@ -346,16 +400,44 @@ class Job(Model):
     def recent_for_room(cls, room_id: str, *, limit: int = 5) -> list[Job]:
         """Top-N most recent Jobs in a Room, newest first.
 
-        Served by the ``last_active_at`` SortedField partition — the range
-        scan is per-Room, never a global index walk.
+        A bounded reverse-range read over the ``last_active_at`` SortedField's
+        per-Room partition: one ``ZREVRANGE`` for the top members, then one
+        pipelined hydration of just those members. Cost is a function of
+        ``limit``, not of the Room's lifetime Job count — popoto 1.8.0's
+        ``QueryBuilder`` has no early-limit path for a SortedField, so a
+        ``filter()`` here would hydrate every Job in the Room (twice, per
+        popoto#2639) to answer a top-5 question. This runs on the bind-or-mint
+        hot path for every routed inbound message.
+
+        The partition key is **derived, never hand-built**: ``DB_key.clean()``
+        escapes ``:`` and ``/``, and every real ``room_id`` contains a colon,
+        so an f-string would silently read a key that does not exist.
+
+        The read over-fetches by ``JOB_RECENT_OVERFETCH`` so a member whose
+        backing hash is already gone (dropped by ``skip_none``) does not
+        under-fill the answer. An under-filled result is never re-fetched: it
+        means the Room genuinely has fewer live Jobs, or an index repair is
+        mid-flight — the same fail-open posture as every other step here.
+
+        Fail-open contract (unchanged): any failure logs a warning and returns
+        ``[]``; the caller treats that as "no candidates" and mints.
         """
+        if limit <= 0:
+            return []
         try:
-            jobs = list(cls.query.filter(room_id=room_id, last_active_at__gte=_EPOCH))
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            partition_key = SortedField.get_sortedset_db_key(
+                cls, "last_active_at", room_id
+            ).redis_key
+            fetch_n = limit + JOB_RECENT_OVERFETCH
+            members = POPOTO_REDIS_DB.zrevrange(partition_key, 0, fetch_n - 1)
+            redis_keys = [m.decode() if isinstance(m, bytes) else str(m) for m in members]
+            jobs = cls.query.get_many(redis_keys, skip_none=True)
         except Exception as e:  # noqa: BLE001 — candidate lookup must fail open
             logger.warning("[job] recent_for_room failed for %s: %s", room_id, e)
             return []
-        jobs.sort(key=lambda j: j.last_active_at or _EPOCH, reverse=True)
-        return jobs[:limit]
+        return list(jobs)[:limit]
 
     @classmethod
     def sweep_to_rest(cls, now: float | None = None) -> int:
@@ -556,10 +638,112 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
+            # rebuild_indexes() re-scores every row via field.on_save on
+            # naive-decoded instances — naive.timestamp() is local time, and
+            # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
+            # host the rebuild itself re-skews every recency score. Sweep the
+            # scores back so the maintenance path is score-preserving.
+            scanned, renormalized = cls.renormalize_last_active_scores()
+            if renormalized:
+                logger.info(
+                    "[job] re-normalized %d of %d recency score(s) after the index rebuild",
+                    renormalized,
+                    scanned,
+                )
             cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
             cls._repair_lock.release()
+
+    @classmethod
+    def renormalize_last_active_scores(cls) -> tuple[int, int]:
+        """Sweep every recency score back to the pure UTC epoch its hash implies.
+
+        The single shared implementation behind two callers:
+
+        - the one-shot ``backfill_job_last_active_scores`` migration
+          (``scripts/update/migrations.py``), which sweeps skew written
+          before the :meth:`save` UTC-reattach override shipped; and
+        - :meth:`repair_indexes`, because popoto's ``rebuild_indexes()``
+          re-scores every row via ``field.on_save`` on naive-decoded
+          instances — ``naive.timestamp()`` is local time, bypassing the
+          :meth:`save` override entirely — so on a non-UTC host every
+          rebuild (run at worker startup via
+          ``scripts/popoto_index_cleanup.run_cleanup``) would re-skew every
+          score the migration repaired.
+
+        For each Job the stored score in its Room partition (key **derived**
+        via ``SortedField.get_sortedset_db_key``, never hand-built) is
+        compared against ``bridge.utc.to_unix_ts(job.last_active_at)``; a row
+        outside a 1-second tolerance is re-read fresh and repaired with the
+        structural clobber-proof idiom
+        ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
+        write that can never touch ``goal``/``status``, and one that names the
+        field so the :meth:`save` tz-reattach fires. **Instant-preserving**:
+        each row keeps its own stored instant; no constant timestamp is ever
+        stamped (spike-4 tie-break hazard). A Job whose partition member is
+        absent, or whose instant is unreadable, is skipped — partition
+        membership belongs to the rebuild, not this sweep. Idempotent (a
+        repaired score is inside tolerance next pass) and per-row failure
+        tolerant (one bad row logs and the sweep continues).
+
+        Scale note: because :meth:`repair_indexes` calls this after every
+        rebuild, the uncursored full-population pass here is a
+        per-worker-startup commitment against an immortal, unboundedly
+        growing model (via ``scripts/popoto_index_cleanup.run_cleanup``) —
+        not a one-shot migration cost. At the measured population (92 Jobs) that
+        is negligible; past roughly 10,000 Jobs the full hydrate + one
+        ``zscore`` round trip per row needs pipelining or a cursor. Tracked as
+        issue #2848 so the ceiling surfaces on its own rather than only here.
+
+        Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
+        the return when the enumeration itself fails (Redis down, popoto
+        decode blow-up) — the guard logs a WARNING and swallows the error so
+        :meth:`repair_indexes` still reaches
+        :meth:`backfill_open_expectations_index`.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from bridge.utc import to_unix_ts
+
+        # Maintenance path never raises: an enumeration failure (Redis down,
+        # popoto decode blow-up) logs and returns (0, 0) so repair_indexes
+        # still reaches backfill_open_expectations_index().
+        try:
+            jobs = list(cls.query.filter())
+        except Exception as e:  # noqa: BLE001 — maintenance path never raises
+            logger.warning(
+                "[job] score renormalization SKIPPED -- enumeration failed %s: %s",
+                type(e).__name__,
+                e,
+            )
+            return (0, 0)
+        logger.info("[job] renormalizing recency scores across %d Job(s)", len(jobs))
+        repaired = 0
+        for job in jobs:
+            try:
+                partition_key = SortedField.get_sortedset_db_key(
+                    cls, "last_active_at", job.room_id
+                ).redis_key
+                score = POPOTO_REDIS_DB.zscore(partition_key, job.db_key.redis_key)
+                expected = to_unix_ts(job.last_active_at)
+                if score is None or expected is None:
+                    continue
+                if abs(score - expected) <= 1.0:
+                    continue
+                fresh = cls.query.get(id=job.id, room_id=job.room_id)
+                if fresh is None:
+                    continue
+                fresh.save(update_fields=["last_active_at"])
+                repaired += 1
+            except Exception as e:  # noqa: BLE001 — one bad row never stops the sweep
+                logger.warning(
+                    "[job] score renormalization SKIP job=%s -- %s: %s",
+                    getattr(job, "job_id", "?"),
+                    type(e).__name__,
+                    e,
+                )
+        return (len(jobs), repaired)
 
     @classmethod
     def backfill_open_expectations_index(cls) -> int:

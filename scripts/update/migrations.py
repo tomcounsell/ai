@@ -1105,6 +1105,64 @@ def _migrate_job_promises_to_expectations(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
+    """Repair tz-skewed ``Job.last_active_at`` sorted-set scores (issue #2636).
+
+    popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
+    ``Job.save()`` UTC-reattach override shipped, any re-save of a reloaded Job
+    (``mark_at_rest()``, ``_write_goal_data()``) recomputed its ``$SortF``
+    partition score as ``naive.timestamp()`` — local time, skewed from the
+    correct UTC epoch by the writing host's UTC offset. The hash field stayed
+    correct; only the score drifted. The bounded ``recent_for_room`` read
+    trusts scores, so existing skew must be swept out once per machine.
+
+    The sweep itself is ``Job.renormalize_last_active_scores()`` — the ONE
+    shared implementation, also run by ``Job.repair_indexes()`` (at worker
+    startup via ``scripts/popoto_index_cleanup.run_cleanup``) after every
+    ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
+    naive-decoded instances bypasses the save() override and would otherwise
+    re-skew every score on a non-UTC host). See that classmethod's docstring
+    for the loop contract: derived partition key, 1-second tolerance,
+    fresh re-read, structural clobber-proof
+    ``fresh.save(update_fields=["last_active_at"])`` (ORM-only — the only
+    write is ``instance.save()``), instant-preserving (never a constant
+    stamp, spike-4), absent-member skip, per-row failure tolerance.
+
+    Idempotent — a repaired score is inside tolerance on the next pass, so a
+    second run repairs 0 and costs reads alone. Fleet-convergent: machines
+    share this Redis, and re-running on every machine's ``/update`` is safe
+    and expected; each pass only rewrites rows whose score still disagrees
+    with their own hash (e.g. re-skewed by a peer still on pre-override code).
+    Single unbounded pass, no cursor — DECIDED on the measured population
+    (92 Jobs / 0.03s full hydrate, 2026-08-17); the total count is logged
+    each run.
+
+    Returns None on success; an error string only if the import/call path
+    itself fails. An enumeration failure *inside* the sweep (e.g. Redis
+    unreachable) is swallowed by ``renormalize_last_active_scores`` as
+    ``(0, 0)``: this migration logs a 0-scanned pass, returns None, and is
+    recorded applied. That is accepted — the ``Job.repair_indexes`` sweep,
+    run at worker startup via ``scripts/popoto_index_cleanup.run_cleanup``,
+    is the retry/backstop that eventually repairs the scores.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.job import Job
+
+        scanned, repaired = Job.renormalize_last_active_scores()
+        logger.info(
+            "[migration:backfill_job_last_active_scores] "
+            "scanned %d Job(s), repaired %d skewed score(s)",
+            scanned,
+            repaired,
+        )
+        return None
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -1219,6 +1277,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_job_promises_to_expectations,
         "Rewrite Job goal promises as inbound expectations and clear the retired "
         "has_open_promises index sets (issue #2708)",
+    ),
+    "backfill_job_last_active_scores": (
+        _migrate_backfill_job_last_active_scores,
+        "Repair tz-skewed Job.last_active_at sorted-set scores via field-scoped "
+        "ORM re-saves (issue #2636)",
     ),
 }
 

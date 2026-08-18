@@ -43,6 +43,8 @@ Note the scope of that statement: since issue #2536, `Model.rebuild_indexes()` *
 5. Logs per-model orphan counts found/cleaned and the keyspace delta
 6. Finally runs `_run_guarded_repairs()`, which invokes the guarded `repair_indexes()` of each `_GUARDED_ELSEWHERE` model that has no other caller -- `Room` and `Job`. Results land under the summary's `guarded_repairs` key.
 
+`Job.repair_indexes()` carries one extra step the other guarded paths do not: it runs `Job.renormalize_last_active_scores()` immediately after the rebuild. `rebuild_indexes()` re-scores each Job from a naive-decoded `last_active_at`, bypassing the UTC reattach in `Job.save()`, so on a non-UTC host the rebuild itself re-skews the `last_active_at` sorted-set scores that `Job.recent_for_room`'s bounded read depends on. The renormalization pass is fail-open (a failed enumeration logs and returns `(0, 0)`) and does not change `repair_indexes()`'s `(quarantined, rebuilt)` return arity. See [Durability Model](durability-model.md#last_active_at-score-purity-jobsave).
+
 Each model is processed independently -- one model failure does not abort the sweep. The SCAN-based `rebuild_indexes()` is safe to run concurrently with normal operations for every model still in scope.
 
 ### The two-part `_GUARDED_ELSEWHERE` contract

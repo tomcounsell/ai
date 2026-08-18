@@ -229,22 +229,22 @@ No agent integration required — this is a model-internal change. Existing surf
 
 ## Documentation
 
-- [ ] Update `docs/features/durability-model.md` — replace the description of `recent_for_room`'s range-scan with the bounded reverse-range read, and document the `save()` tz-normalization invariant (scores are pure UTC epochs) and the backfill migration
-- [ ] Update `docs/plans/durability-room-job-agentrun.md:734` M3 note — the "#2636 bounded ZREVRANGE" gate is satisfied; point at this plan
-- [ ] Docstrings: `recent_for_room` (derivation-only key rule, over-fetch rationale, fail-open contract), `Job.save` override (instant-preserving, why not re-stamp), migration function (idempotency, fleet convergence)
+- [x] Update `docs/features/durability-model.md` — replace the description of `recent_for_room`'s range-scan with the bounded reverse-range read, and document the `save()` tz-normalization invariant (scores are pure UTC epochs) and the backfill migration
+- [x] Update `docs/plans/durability-room-job-agentrun.md` (M3 note, line 734) — the "#2636 bounded ZREVRANGE" gate is satisfied; point at this plan
+- [x] Docstrings: `recent_for_room` (derivation-only key rule, over-fetch rationale, fail-open contract), `Job.save` override (instant-preserving, why not re-stamp), migration function (idempotency, fleet convergence) — all three already adequate as shipped; no edits needed
 
 ## Success Criteria
 
-- [ ] Hash-read count for `recent_for_room` is a function of `limit` (≤ `limit + JOB_RECENT_OVERFETCH`), not Room size — asserted by the instrumented test at N≥30 (the "before" is `2N`)
-- [ ] Mutation check on the bound: the test fails if the range read is issued unbounded (e.g., asserting the counted reads at N=30/limit=5 stay < 2·limit+overfetch, far below 60)
-- [ ] Ordering parity with the old implementation on distinct timestamps (N=7 and N=30 cases)
-- [ ] tz regression: reload → expectation write → score matches wall clock within tolerance; `last_active_at__gte` filter finds the row (the spike-2 live failure becomes a green test)
-- [ ] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs); its write is field-scoped (`update_fields=["last_active_at"]`)
-- [ ] Scoped-save guard: a save excluding `last_active_at` leaves the stored score byte-unchanged; a scoped save naming it still reattaches UTC
-- [ ] `recent_for_room` fail-open contract intact (warning logged, `[]` returned on read failure)
-- [ ] popoto floor unchanged at `>=1.8.0`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Hash-read count for `recent_for_room` is a function of `limit` (≤ `limit + JOB_RECENT_OVERFETCH`), not Room size — asserted by the instrumented test at N≥30 (the "before" is `2N`)
+- [x] Mutation check on the bound: the test fails if the range read is issued unbounded (e.g., asserting the counted reads at N=30/limit=5 stay < 2·limit+overfetch, far below 60)
+- [x] Ordering parity with the old implementation on distinct timestamps (N=7 and N=30 cases)
+- [x] tz regression: reload → expectation write → score matches wall clock within tolerance; `last_active_at__gte` filter finds the row (the spike-2 live failure becomes a green test)
+- [x] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs); its write is field-scoped (`update_fields=["last_active_at"]`)
+- [x] Scoped-save guard: a save excluding `last_active_at` leaves the stored score byte-unchanged; a scoped save naming it still reattaches UTC
+- [x] `recent_for_room` fail-open contract intact (warning logged, `[]` returned on read failure)
+- [x] popoto floor unchanged at `>=1.8.0`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -328,16 +328,15 @@ No agent integration required — this is a model-internal change. Existing surf
 | No hand-built sorted-set key (anti-criterion, spike-3) | `grep -c 'SortF' models/job.py` | match count == 0 |
 | Key derived via field API | `grep -c 'get_sortedset_db_key' models/job.py` | output > 0 |
 | Floor unchanged (anti-criterion, Rabbit Hole 1) | `grep -c 'popoto>=1.8.0' pyproject.toml` | output > 0 |
-| No raw Redis writes in migration (anti-criterion) | `grep -cE 'zadd|zrem|hset|delete\(' scripts/update/migrations.py` | match count == 0 |
-| Migration registered | `grep -c 'job.*skew\|skew.*job' scripts/update/migrations.py` | output > 0 |
+| No raw Redis writes in migration (anti-criterion) | `grep -cE 'zadd\|zrem\|hset\|delete\(' scripts/update/migrations.py` | match count == 0 |
+| Migration registered | `grep -c 'backfill_job_last_active_scores' scripts/update/migrations.py` | output > 0 |
 | Bounded read present | `grep -c 'zrevrange' models/job.py` | output > 0 |
 
 ## Critique Results
 
+Round 5 (re-critique of revision 114bf2db8, 2026-08-17). All 3 prior CONCERNs + 1 NIT verified genuinely closed by all three critics against both the revised plan text and the landed Task-1 code. Two new CONCERNs were raised and adjudicated by the war-room driver with direct evidence: one refuted (the pre-fix `recent_for_room` body — `git show 3081c2fa2~1:models/job.py` — filtered `last_active_at__gte=_EPOCH` through the same `$SortF` SortedField partition, so Risk 3's "identical exposure exists today" claim is factually correct), one downgraded to NIT (popoto's partial-save path runs `field.on_save` for every named field — `popoto/models/base.py:1176-1185`, `:1238-1247` — and `SortedFieldMixin.on_save` performs the `zadd` at `sorted_field_mixin.py:528`, so `save(update_fields=["last_active_at"])` does rewrite the `$SortF` score; the planned seeded-skew-repair + idempotency tests empirically detect any silent skip).
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The unconditional `Job.save()` tz-normalization override never specifies its interaction with the scoped-save path already in production: `backfill_open_expectations_index` (`models/job.py:629`) calls `fresh.save(update_fields=["has_open_expectations"])` under a docstring invariant that it "never writes `last_active_at`". No spike verifies whether popoto rewrites the SortedField score on a scoped save that excludes the field. | Revision pass 2026-08-17: scoped-save guard added to Technical Approach write path, Task 1, Test Impact, Success Criteria | Guard shape: `if update_fields is None or "last_active_at" in update_fields:` around the `replace(tzinfo=UTC)` step in the `Job.save()` override, so a `has_open_expectations`-only scoped save never touches the SortedField score path; add a test that a scoped save after mutating `last_active_at` to naive leaves the stored score byte-unchanged. |
-| CONCERN | History & Consistency | Risk 1's mitigation (fresh re-read then full-row `save()`, the #2653 idiom) only narrows the clobber window; the same file already contains the structural fix — `backfill_open_expectations_index` uses `save(update_fields=[...])` to make concurrent-write clobber impossible. The skew backfill writes a single field (`last_active_at`) and can use the same idiom, but the plan neither uses nor cites it. | Revision pass 2026-08-17: backfill switched to `save(update_fields=["last_active_at"])` throughout (Key Elements, Technical Approach, Risk 1, Race 1, Prior Art) | Backfill writes `fresh.save(update_fields=["last_active_at"])` instead of bare `save()`, mirroring `backfill_open_expectations_index`; verify popoto's field-scoped write touches only `last_active_at` and its `$SortF` companion (never `goal`/`status`), eliminating Race 1 by construction instead of by timing. Cite `backfill_open_expectations_index` as Prior Art alongside PR #2653. Interlocks with the override guard above: a scoped save naming `last_active_at` MUST still run the tz-reattach. |
-| CONCERN | Scope & Value, Risk & Robustness | Open Question 2 (backfill resumable cursor) hedges on "modest" with no number. Measured 2026-08-17 by the war-room driver: `Job.query.all()` on the shared production Redis returned 92 Jobs in 0.03s — a single unbounded pass is trivially safe, and the supervisor ruling warrants a cursor only if the measured population makes a single pass risky. Leaving the question open invites unwarranted cursor machinery or a needless PM stall. | Revision pass 2026-08-17: OQ2 closed as DECIDED (92 Jobs / 0.03s, single unbounded pass) in Key Elements + Technical Approach; Open Questions section removed | Replace Open Question 2 with a closed decision: unbounded single pass, log the count, no resumable cursor, justified by the measured 92-Job/0.03s population (2026-08-17); remove the open-question framing so `/do-build` does not treat it as a live decision point. |
-| NIT | Scope & Value | The floor-bump trigger in the [ORDERED] No-Go is crisp (popoto release >1.8.2 containing the popoto#540/PR #547 fix), but the *switch-back* leg is not: "optionally swapping" leaves open whether the in-repo read is retired after the bump or kept indefinitely. | Revision pass 2026-08-17: No-Go now states the in-repo read is RETIRED when the post-#547 release ships; "optionally" deleted | State one of the two explicitly: the in-repo read is retired when the floor bump ships, or it is acceptable to keep indefinitely and the swap is pure optimization — delete "optionally". |
+| NIT | Risk & Robustness | No spike explicitly exercises a scoped save that *names* the SortedField; the migration test should assert the raw sorted-set score, not just hash-side repair. (Downgraded from CONCERN: driver verified against pinned popoto source that the scoped-save path zadds the `$SortF` companion — see round-5 note above.) | not required (NIT) — recommended for Task 2 tests | In the migration test, after the scoped save, assert `POPOTO_REDIS_DB.zscore(partition_key, member_key) == pytest.approx(bridge.utc.to_unix_ts(job.last_active_at), abs=1.0)` — checking the raw sorted-set score catches any future popoto scoped-save path that silently skips the SortedField companion write. |
 
