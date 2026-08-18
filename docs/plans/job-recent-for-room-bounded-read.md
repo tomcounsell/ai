@@ -235,16 +235,16 @@ No agent integration required — this is a model-internal change. Existing surf
 
 ## Success Criteria
 
-- [ ] Hash-read count for `recent_for_room` is a function of `limit` (≤ `limit + JOB_RECENT_OVERFETCH`), not Room size — asserted by the instrumented test at N≥30 (the "before" is `2N`)
-- [ ] Mutation check on the bound: the test fails if the range read is issued unbounded (e.g., asserting the counted reads at N=30/limit=5 stay < 2·limit+overfetch, far below 60)
-- [ ] Ordering parity with the old implementation on distinct timestamps (N=7 and N=30 cases)
-- [ ] tz regression: reload → expectation write → score matches wall clock within tolerance; `last_active_at__gte` filter finds the row (the spike-2 live failure becomes a green test)
-- [ ] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs); its write is field-scoped (`update_fields=["last_active_at"]`)
-- [ ] Scoped-save guard: a save excluding `last_active_at` leaves the stored score byte-unchanged; a scoped save naming it still reattaches UTC
-- [ ] `recent_for_room` fail-open contract intact (warning logged, `[]` returned on read failure)
-- [ ] popoto floor unchanged at `>=1.8.0`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Hash-read count for `recent_for_room` is a function of `limit` (≤ `limit + JOB_RECENT_OVERFETCH`), not Room size — asserted by the instrumented test at N≥30 (the "before" is `2N`)
+- [x] Mutation check on the bound: the test fails if the range read is issued unbounded (e.g., asserting the counted reads at N=30/limit=5 stay < 2·limit+overfetch, far below 60)
+- [x] Ordering parity with the old implementation on distinct timestamps (N=7 and N=30 cases)
+- [x] tz regression: reload → expectation write → score matches wall clock within tolerance; `last_active_at__gte` filter finds the row (the spike-2 live failure becomes a green test)
+- [x] Backfill migration repairs seeded skewed rows and is idempotent (second run: 0 repairs); its write is field-scoped (`update_fields=["last_active_at"]`)
+- [x] Scoped-save guard: a save excluding `last_active_at` leaves the stored score byte-unchanged; a scoped save naming it still reattaches UTC
+- [x] `recent_for_room` fail-open contract intact (warning logged, `[]` returned on read failure)
+- [x] popoto floor unchanged at `>=1.8.0`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
