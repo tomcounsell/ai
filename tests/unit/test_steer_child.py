@@ -91,6 +91,9 @@ class TestSteerChild:
             text="stop everything",
             sender="pm",
             is_abort=True,
+            # Load-bearing literal: an abort is destructive and non-idempotent,
+            # so it must die with the session it was aimed at (legacy key).
+            room_id=None,
         )
 
     @patch(_AGENT_SESSION)
