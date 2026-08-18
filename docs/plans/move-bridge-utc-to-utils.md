@@ -598,29 +598,30 @@ after the PR merges, because they act on live services.
 
 The lead agent orchestrates and does not build directly.
 
+**Two agents, not four.** The first draft assigned four named agents across six
+tasks that were each `Parallel: false` and each depended on the one before it.
+There was no concurrency to buy, so the roster purchased three context handoffs on
+a change whose entire difficulty is *completeness across 57 files* — the one thing
+a handoff loses. It also contradicted this plan's own Appetite line ("Solo dev,
+code reviewer") on a `Small` change.
+
+Tasks 1–6 share one ledger: the residual-reference count. They go to one builder,
+who carries that number from checkpoint to checkpoint and re-emits it in every
+commit message. Task 7 goes to a separate validator, because independent
+verification is the one place a fresh context is worth its cost.
+
 ### Team Members
 
-- **Builder (move)**
+- **Builder**
   - Name: `utc-mover`
-  - Role: performs the rename, the bulk import rewrite, and the three string-literal edits
+  - Role: tasks 1–6 — the rename, the bulk import rewrite, the four executable non-import sites, the 15 prose sites, the boundary guard test, and the docs/graph updates
   - Agent Type: builder
   - Resume: true
-
-- **Builder (guard)**
-  - Name: `boundary-guard-builder`
-  - Role: writes and mutation-verifies the architectural boundary test
-  - Agent Type: test-engineer
-  - Resume: true
-
-- **Documentarian**
-  - Name: `utc-documentarian`
-  - Role: docs, docstrings, comments, and the generated graph artifact
-  - Agent Type: documentarian
-  - Resume: true
+  - Handoff artifact: every checkpoint commit message ends with the gate reading `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l`, so progress is a measured number in git history rather than a claim
 
 - **Validator**
   - Name: `utc-validator`
-  - Role: runs the Verification table, confirms zero residual references, confirms the mutation checks were actually performed
+  - Role: task 7 — runs every Verification row, runs the full `scripts/pytest-clean.sh` suite, confirms zero residual references, and confirms the mutation checks in tasks 3 and 5 were performed and reported rather than asserted
   - Agent Type: validator
   - Resume: true
 
@@ -635,98 +636,164 @@ The lead agent orchestrates and does not build directly.
 - **Assigned To**: utc-mover
 - **Agent Type**: builder
 - **Parallel**: false
-- Record the pre-move baseline: `git grep -clE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` (expect 57) and the collected test count of `tests/unit/test_utc.py`.
+- Record the pre-move baseline: `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` (expect **57 files**) and the collected test count of `tests/unit/test_utc.py`.
 - `git mv bridge/utc.py utils/utc.py`.
 - Edit only the module docstring: drop the bridge-local framing, state that the module is dependency-free by contract because standalone `tools/` packages import it.
-- Commit checkpoint: "Move the UTC helper from bridge/ to utils/ (#2867)".
+- Commit checkpoint: "Move the UTC helper from bridge/ to utils/ (#2867)", ending with the gate reading.
 
-### 2. Rewrite the 54 import statements
+### 2. Rewrite the 59 import statements across 51 files
 
 - **Task ID**: build-rewrite-imports
 - **Depends On**: build-move-module
 - **Validates**: tests/unit/test_utc.py, tests/unit/test_public_api_contract.py
-- **Informed By**: spike-3 (confirmed: exactly 3 references are string literals, not import statements)
+- **Informed By**: the Freshness Check census (59 import statements in 51 files; 19 non-import lines in 15 files are explicitly NOT this task's job)
 - **Assigned To**: utc-mover
 - **Agent Type**: builder
 - **Parallel**: false
-- Rewrite `from bridge.utc import` → `from utils.utc import` across all remaining `*.py` files. Include the function-local imports in `tools/telegram_history/__init__.py:333` and `agent/session_stall_classifier.py:233`, which a top-level-only pass would miss.
-- Update the `tests/unit/test_public_api_contract.py` dict key to `("utils.utc", "utc_now")`, leaving the signature string untouched.
-- Update the `tests/unit/test_utc.py` import line and docstring.
+- Rewrite `from bridge.utc import` → `from utils.utc import` across all `*.py` files. The census counts **59 real import statements in 51 files**. A raw `git grep -nE 'from bridge\.utc import|from bridge import utc' -- '*.py'` returns **60 lines**; the extra one is `tests/unit/test_session_stall_classifier.py:297`, a comment that quotes an import verbatim. Leave it to task 4 — it is prose, not code.
+- Include the function-local imports (`tools/telegram_history/__init__.py:333`, `agent/session_stall_classifier.py:233`, and the many indented `from bridge.utc import` lines inside function bodies across `reflections/`, `models/`, and `bridge/`), which a top-level-only pass would miss.
+- Update the `tests/unit/test_public_api_contract.py:57` dict key to `("utils.utc", "utc_now")`, leaving the signature string untouched.
+- Update the `tests/unit/test_utc.py:7` import line. Its module docstring at `:1` belongs to task 4.
 - Run `python -m ruff check --fix` to re-sort the import blocks (`utils` sorts after `tools` where `bridge` sorted first), then `python -m ruff format`. No other linting.
 - Confirm the tree still imports: `python -c "import utils.utc, bridge.telegram_bridge"`.
-- Commit checkpoint.
+- Commit checkpoint with the gate reading in the message. **Expected: 14 files remain.** The 15 prose-bearing files, minus `tests/unit/test_public_api_contract.py` whose only non-import reference is the dict key this task fixes. A reading of 57 means the rewrite did not run; a reading below 14 means it rewrote prose it should have left to task 4; a reading of 0 here is a red flag, not a success.
 
-### 3. Fix the three string-literal references
+### 3. Fix the four executable non-import references
 
-- **Task ID**: build-string-sites
+- **Task ID**: build-executable-sites
 - **Depends On**: build-rewrite-imports
 - **Validates**: tests/unit/test_session_stall_classifier.py, tests/integration/test_reflections_redis.py
-- **Informed By**: spike-3
+- **Informed By**: spike-3 (4 executable non-import sites: 3 string literals + 1 dict key)
 - **Assigned To**: utc-mover
 - **Agent Type**: builder
 - **Parallel**: false
-- `tests/integration/test_reflections_redis.py:107` and `:129` — `__import__("bridge.utc", ...)` → `__import__("utils.utc", ...)`.
-- `tests/unit/test_session_stall_classifier.py:300` — `patch("bridge.utc.to_unix_ts", ...)` → `patch("utils.utc.to_unix_ts", ...)`, and correct the explanatory comment above it that names `bridge.utc` twice.
+- `tests/integration/test_reflections_redis.py:107` and `:129` — `__import__("bridge.utc", fromlist=["utc_now"])` → `__import__("utils.utc", ...)`. Both sites.
+- `tests/unit/test_session_stall_classifier.py:300` — `patch("bridge.utc.to_unix_ts", ...)` → `patch("utils.utc.to_unix_ts", ...)`.
+- (`tests/unit/test_public_api_contract.py:57` is the fourth executable site; it was handled in task 2 alongside the import rewrite because it lives in the same file's contract dict.)
 - **Prove the patch still bites**: temporarily change its `return_value` from `None` to a float and confirm `test_unparseable_timestamp_returns_healthy_not_stalled` fails, then revert. A patch aimed at a module the code under test never reads passes green, and only this check distinguishes the two.
-- Verify completeness: `grep -rn "bridge[./]utc" --include=*.py .` returns nothing.
+- Do **not** claim completeness here — 15 prose lines remain and task 4 owns them. Record the gate reading and move on.
 - Commit checkpoint.
 
-### 4. Add the boundary guard test
+### 4. Sweep the 15 comment and docstring references
+
+- **Task ID**: build-prose-sites
+- **Depends On**: build-executable-sites
+- **Validates**: the completeness gate (no test covers these lines)
+- **Informed By**: spike-3 re-run (19 non-import lines total, 4 executable, 15 prose)
+- **Assigned To**: utc-mover
+- **Agent Type**: builder
+- **Parallel**: false
+
+These are prose inside source files. No import rewriter reaches them and no test
+fails because of them — the completeness gate is their only detector, which is
+why the first draft lost eleven of them. **Two spellings appear and a rule
+matching only the dotted form leaves three sites behind.**
+
+Dotted spelling — `bridge.utc.…` → `utils.utc.…`:
+
+- [ ] `agent/session_runner/liveness.py:68` — docstring, ``bridge.utc.to_unix_ts``
+- [ ] `agent/session_stall_classifier.py:11` — module docstring, "Uses bridge.utc.to_unix_ts for all datetime → float conversions."
+- [ ] `bridge/telegram_bridge.py:155` — docstring, ``bridge.utc.to_unix_ts``
+- [ ] `models/job.py:695` — docstring, ``bridge.utc.to_unix_ts(job.last_active_at)``
+- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py:347` — comment, "per bridge.utc.to_unix_ts's"
+- [ ] `tests/unit/session_runner/test_liveness.py:181` — docstring, "(mirrors bridge.utc.to_unix_ts)"
+- [ ] `tests/unit/test_reconciler.py:1132` — docstring, "pinned via bridge.utc.to_unix_ts"
+- [ ] `tests/unit/test_session_stall_classifier.py:297` and `:298` — the two-line comment explaining the patch target, naming `bridge.utc` once each
+- [ ] `tests/unit/test_utc.py:1` — module docstring, "Tests for bridge.utc utility module."
+- [ ] `tools/agent_session_scheduler.py:45` — docstring, ``bridge.utc.to_unix_ts``
+- [ ] `tools/telegram_history/__init__.py:330` — docstring, ``bridge.utc.to_unix_ts``
+
+Path spelling — `bridge/utc.py::` → `utils/utc.py::`. **These three are the ones a
+dotted-only rule misses:**
+
+- [ ] `models/agent_session.py:1022` — "(see bridge/utc.py::utc_now)"
+- [ ] `models/agent_session.py:1135` — "(consistent with bridge/utc.py::to_unix_ts)"
+- [ ] `tests/integration/test_updated_at_heal.py:51` — "the same logic used by bridge/utc.py::to_unix_ts"
+
+- After the sweep, the gate must print `0`: `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l`. This is the first checkpoint at which a completeness claim is legitimate.
+- Commit checkpoint with the gate reading `0` in the message.
+
+### 5. Add the boundary guard test
 
 - **Task ID**: build-boundary-guard
-- **Depends On**: build-string-sites
+- **Depends On**: build-prose-sites
 - **Validates**: tests/unit/test_architectural_constraints.py
 - **Informed By**: spike-2 (confirmed: the property holds today but nothing enforces it)
-- **Assigned To**: boundary-guard-builder
-- **Agent Type**: test-engineer
+- **Assigned To**: utc-mover
+- **Agent Type**: builder
 - **Parallel**: false
+- **Scope note**: this test is added scope, justified by Risk 2, not by an issue acceptance criterion (see No-Gos).
 - Add `TestStandaloneToolPackageBoundaries` to `tests/unit/test_architectural_constraints.py`, reusing the file's existing `_get_imports` AST helper — it uses `ast.walk`, so it catches function-local imports, which a top-level-only check would miss on exactly the files that matter.
 - `test_standalone_tool_packages_have_no_harness_imports`: walk every `*.py` under `tools/selfie`, `tools/sms_reader`, and `tools/test_scheduler` including their `tests/` directories; assert no import's first path segment is in `{bridge, agent, worker, models, monitoring, reflections, analytics, ui}`. Failure message must name the offending file, line, and module. Do not add `config` to the forbidden set (see Rabbit Holes).
 - `test_utils_package_init_imports_nothing`: assert `utils/__init__.py` parses to zero `Import`/`ImportFrom` nodes, with a failure message explaining that a harness import here silently re-couples all three packages above.
 - **Mutation-check each assertion separately**: inject a harness import into a scratch copy of `tools/selfie/__init__.py`, then of a file under `tools/sms_reader/tests/`, then into `utils/__init__.py`, and confirm the corresponding test goes red each time. A test that reaches no code passes for the wrong reason; per-guard measurement is the only thing that rules it out.
 - Commit checkpoint.
 
-### 5. Documentation and generated graph
+### 6. Documentation and generated graph
 
 - **Task ID**: document-feature
 - **Depends On**: build-boundary-guard
-- **Assigned To**: utc-documentarian
-- **Agent Type**: documentarian
+- **Assigned To**: utc-mover
+- **Agent Type**: builder
 - **Parallel**: false
-- Update `docs/features/utc-timestamps.md` (heading, three code samples, the `to_unix_ts` read-path guidance) and add the one-sentence rationale for the `utils/` location.
-- Update `docs/features/session-lifecycle.md:398`.
-- Update the `agent/session_stall_classifier.py:11` docstring line.
-- Replace `bridge/utc.py` path strings in `site/assets/graph.js` node ids, `filePath` fields, and edge endpoints.
-- Leave `docs/plans/completed/*.md` untouched — they record shipped history.
+- Update `docs/features/utc-timestamps.md` — the `## The bridge/utc Module` heading, the three code samples at `:16`, `:60`, and `:85`, and the `bridge.utc.to_unix_ts(val)` read-path guidance. Add the one-sentence rationale for the `utils/` location.
+- Update `docs/features/session-lifecycle.md:398` — `bridge.utc.utc_now()` → `utils.utc.utc_now()`.
+- Replace the **31** `bridge/utc.py` path strings in `site/assets/graph.js` (node ids, `filePath` fields, and edge endpoints) with `utils/utc.py`.
+- (`agent/session_stall_classifier.py:11` moved to task 4 — it is a source-file docstring and belongs with the other 14 prose sites, under the completeness gate rather than in the docs pass.)
+- Leave `docs/plans/completed/*.md` untouched — they record shipped history and are deliberately excluded from every gate in this plan.
+- Verify: `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' | wc -l` prints `0`.
 - Commit checkpoint.
 
-### 6. Final validation
+### 7. Final validation
 
 - **Task ID**: validate-all
-- **Depends On**: build-move-module, build-rewrite-imports, build-string-sites, build-boundary-guard, document-feature
+- **Depends On**: build-move-module, build-rewrite-imports, build-executable-sites, build-prose-sites, build-boundary-guard, document-feature
 - **Assigned To**: utc-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every row of the Verification table.
-- Re-run the residual-reference grep after any rebase, since a concurrently-merged importer would only surface then.
-- Confirm the mutation checks in tasks 3 and 4 were actually performed and reported, not asserted.
-- Report pass/fail per criterion.
+- Run **every row** of the Verification table and report the literal command output for each, not a pass/fail summary. Several rows print a number; the number is the evidence.
+- Run the full suite: `scripts/pytest-clean.sh` with no path argument. This is the issue's seventh acceptance criterion and the only thing that executes `tests/integration/test_reflections_redis.py`, `tests/integration/test_updated_at_heal.py`, and `tests/performance/test_benchmarks.py` — three files this change edits. Never bare `pytest`; never a pattern kill to clean up. Roughly 20 minutes for the unit portion is normal.
+- Re-run the completeness gate after any rebase, since a concurrently-merged importer surfaces only then (Risk 3).
+- Confirm the mutation checks in tasks 3 and 5 were **performed and reported with their red output**, not asserted. A "mutation check passed" with no failing-test output is an unverified claim.
+- Report pass/fail per criterion with evidence attached.
+- The **Post-Merge Checklist** (service restart) is deliberately NOT this task's job. It runs on `main` after merge.
 
 ## Verification
+
+Every row below prints either an exit code or a **bare number**. No row asks a
+reader to scan a multi-line listing for the absence of something — that was the
+defect that made the first draft's completeness proof unrunnable. `grep -c`
+appears nowhere: it emits `path:count` lines rather than a total whenever it is
+given more than one file argument, and it exits 0 regardless of matches. `git grep
+-l … | wc -l` is used throughout because it yields one number under every
+argument count and exits 0 whether or not it matched.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Module exists at new path | `test -f utils/utc.py` | exit code 0 |
 | Old module is gone (anti-criterion: no shim) | `test -e bridge/utc.py` | exit code != 0 |
-| No residual `bridge.utc` references in Python | `grep -rc "bridge[./]utc" --include='*.py' agent bridge models monitoring reflections scripts tools ui utils tests` | match count == 0 |
-| Standalone tools carry no harness imports | `grep -rc -E "(from\|import)[[:space:]]+(bridge\|agent\|worker\|models\|monitoring\|reflections)[. ]" --include='*.py' tools/selfie tools/sms_reader tools/test_scheduler` | match count == 0 |
-| Moved module imports no first-party package | `grep -c -E "^(from\|import) (bridge\|agent\|worker\|models\|config\|monitoring\|reflections\|tools\|ui\|utils)" utils/utc.py` | match count == 0 |
+| **No residual references in Python (the completeness gate)** | `git grep -lE 'bridge[./]utc\|from bridge import utc' -- '*.py' \| wc -l` | prints `0` |
+| Same gate, fail-closed form for scripts | `! git grep -qE 'bridge[./]utc\|from bridge import utc' -- '*.py'` | exit code 0 |
+| Standalone tools carry no harness imports | `git grep -lE '^[[:space:]]*(from\|import)[[:space:]]+(bridge\|agent\|worker\|models\|monitoring\|reflections\|analytics\|ui)[.[:space:]]' -- 'tools/selfie/*.py' 'tools/sms_reader/*.py' 'tools/test_scheduler/*.py' \| wc -l` | prints `0` |
+| Moved module imports no first-party package | `git grep -lE '^(from\|import) (bridge\|agent\|worker\|models\|config\|monitoring\|reflections\|tools\|ui\|utils)\b' -- utils/utc.py \| wc -l` | prints `0` |
 | Targeted tests pass | `scripts/pytest-clean.sh tests/unit/test_utc.py tests/unit/test_public_api_contract.py tests/unit/test_architectural_constraints.py tests/unit/test_session_stall_classifier.py -q` | exit code 0 |
-| Full unit suite passes | `scripts/pytest-clean.sh tests/unit -q` | exit code 0 |
+| **Modified non-unit tests actually execute** | `scripts/pytest-clean.sh tests/integration/test_reflections_redis.py tests/integration/test_updated_at_heal.py tests/performance/test_benchmarks.py -q` | exit code 0 |
+| **Full suite passes** (issue acceptance criterion 7) | `scripts/pytest-clean.sh` | exit code 0 |
+| `tests/unit/test_utc.py` collects the same number of tests as before the move | `scripts/pytest-clean.sh tests/unit/test_utc.py --collect-only -q \| tail -1` | same count as the task-1 baseline |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Docs no longer cite the old path | `grep -c "bridge[./]utc" docs/features/utc-timestamps.md docs/features/session-lifecycle.md` | match count == 0 |
-| Generated graph no longer cites the old path | `grep -c "bridge/utc.py" site/assets/graph.js` | match count == 0 |
+| Docs and generated graph no longer cite the old path | `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' \| wc -l` | prints `0` |
+
+**Why the non-unit row cannot be replaced by `--collect-only`.** The two
+`__import__("utils.utc", fromlist=["utc_now"])` calls in
+`tests/integration/test_reflections_redis.py` sit inside test *bodies*. Collection
+imports the module and succeeds with a wrong path still in place; only execution
+raises. `tests/integration/` needs Redis, which is why this row belongs to the
+task-7 validator rather than the builder's checkpoint loop.
+
+**Excluded from every gate on purpose:** `docs/plans/completed/*.md` (shipped
+history) and this plan document itself, which quotes the old path throughout. All
+gates are scoped by pathspec so neither can turn a row red.
 
 ## Critique Results
 
