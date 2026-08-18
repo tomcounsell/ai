@@ -57,6 +57,11 @@ def _make_session(
     s.retain_for_resume = retain
     s.pr_url = pr_url
     s.slug = slug
+    # A real project_key string so the resume path's derived room id
+    # (room_id_for_session → "test|system") is assertable rather than a
+    # MagicMock repr. Shared by ~30 call sites; no test asserts on
+    # project_key being absent.
+    s.project_key = "test"
     # Default to a non-null UUID so existing happy-path tests continue to
     # exercise the status-guard path without tripping the null-UUID guard
     # added in issue #1061. Tests that want to exercise the null-UUID path
@@ -179,7 +184,9 @@ class TestCmdResumeHappyPath:
 
         assert result == 0
         # Steering message must be pushed to Redis before transition_status is called
-        mock_push.assert_called_once_with("sess-ok", "Do the patch.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-ok", "Do the patch.", "resume:valor-session resume", room_id="test|system"
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -290,7 +297,10 @@ class TestCmdResumeKilledFailedSupport:
         )
         assert result == 0
         mock_push.assert_called_once_with(
-            "sess-k", "Pick up where we left off.", "resume:valor-session resume"
+            "sess-k",
+            "Pick up where we left off.",
+            "resume:valor-session resume",
+            room_id="test|system",
         )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
@@ -300,7 +310,9 @@ class TestCmdResumeKilledFailedSupport:
         session = _make_session("sess-f", status="failed", claude_session_uuid="uuid-failed")
         result, mock_transition, mock_push = self._run_resume(session, message="Recover.")
         assert result == 0
-        mock_push.assert_called_once_with("sess-f", "Recover.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-f", "Recover.", "resume:valor-session resume", room_id="test|system"
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -456,7 +468,10 @@ class TestCmdResumeAbandonedSupport:
         )
         assert result == 0
         mock_push.assert_called_once_with(
-            "sess-a", "Pick up where we left off.", "resume:valor-session resume"
+            "sess-a",
+            "Pick up where we left off.",
+            "resume:valor-session resume",
+            room_id="test|system",
         )
         mock_transition.assert_called_once()
         _, kwargs = mock_transition.call_args
@@ -508,6 +523,8 @@ class TestResumeSessionCore:
         s.status = status
         s.claude_session_uuid = uuid
         s.model = "claude-opus-4-5"
+        # Real project_key so the derived room id is assertable ("test|system").
+        s.project_key = "test"
         return s
 
     def _patch_lifecycle(self, mock_transition=None, resumable=None):
@@ -619,7 +636,9 @@ class TestResumeSessionCore:
 
         assert result.success is True
         assert call_order.index("push") < call_order.index("transition")
-        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli")
+        mock_push.assert_called_once_with(
+            "core-sess", "continue", "resume:cli", room_id="test|system"
+        )
 
     def test_transition_error_returns_failure(self):
         session = self._make_mock_session(status="failed")
