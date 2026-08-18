@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: dev
 created: 2026-08-18
 tracking: https://github.com/tomcounsell/ai/issues/2846
 last_comment_id: 5324621012
+revision_applied: true
+revision_applied_at: 2026-08-18T07:07:43Z
 ---
 
 # Fix stale tests on main: steering-call assertions (#2846) and MessageDraft expectations kwarg (#2822)
@@ -205,11 +207,16 @@ Room-leg pass-through uncovered). Instead:
 - Pass an explicit `room_id` (e.g. `"test|system"`) into `_ack_steering_routed`
   in the 8 failing tests and assert it arrives unchanged at
   `push_steering_message` (i.e. `assert_called_once_with(..., room_id="test|system")`).
-- Keep at most one case calling the helper without `room_id` and asserting
-  `room_id=None` to cover the legacy fallback.
+- Keep **exactly one** case calling the helper without `room_id` and asserting
+  `room_id=None` to cover the legacy fallback (a floor, not a ceiling — the
+  fallback must stay covered).
 - The `context_advisory` push (line 1066) is documented as riding the *same leg*
-  as the human message. Add/assert this invariant where the advisory path is
-  exercised (it is currently silently satisfied when everything is `None`).
+  as the human message. No current test passes `context_advisory`, so the
+  advisory push never fires. Add `context_advisory="advisory text"` to **one**
+  helper call (e.g. the same case that asserts the explicit `room_id`
+  pass-through) and assert `push.call_args_list` has **two** calls, both with
+  `room_id="test|system"` (human message + advisory), pinning the same-leg
+  invariant.
 
 **Cluster A2 — steer_child abort test (`test_steer_child.py::test_abort_flag`, 1 test).**
 `scripts/steer_child.py:119-129` passes a literal `room_id=None` with an inline
@@ -221,19 +228,27 @@ sender="pm", is_abort=True, room_id=None)`.
 **Cluster A3 — resume tests (`test_valor_session_resume_release.py`, 5 tests).**
 `tools/valor_session.py:1150` passes `room_id=room_id_for_session(session)`.
 `room_id_for_session` derives `room_id(str(project_key), addressee)` where
-`addressee` is `"system"` for a chatless session. The mocked sessions (from
-`_make_session`) have no `project_key`, so the derived id is a `MagicMock` repr
-(`"<MagicMock name='mock.project_key'>|system"`). Fix:
+`addressee` is `"system"` for a chatless session. The mocked sessions have no
+`project_key`, so the derived id is a `MagicMock` repr
+(`"<MagicMock name='mock.project_key'>|system"`). Fix — **both** session
+helpers must set a real `project_key`, because the 5 tests use two different
+helpers:
 
-- In `_make_session`, set `s.project_key = "test"` (a real string). This makes
-  the derived room id `"test|system"` and is safe — no test in the file asserts
-  on `project_key` being absent.
-- Update the 5 resume assertions to include `room_id="test|system"`:
-  `test_transitions_to_pending_and_appends_steering` (line ~182),
-  `test_killed_with_uuid_resumes` (line ~292),
-  `test_failed_with_uuid_resumes` (line ~303),
-  `test_abandoned_with_uuid_resumes` (line ~292),
-  `test_steering_push_before_transition` (line ~622, `resume:cli` source).
+- **`_make_session` (line 45)** — used by 4 of the 5 resume tests
+  (`test_transitions_to_pending_and_appends_steering` line ~182,
+  `test_killed_with_uuid_resumes` line ~292,
+  `test_failed_with_uuid_resumes` line ~303,
+  `test_abandoned_with_uuid_resumes` line ~458). Set `s.project_key = "test"`
+  (a real string). This makes the derived room id `"test|system"` and is safe —
+  no test in the file asserts on `project_key` being absent.
+- **`TestResumeSessionCore._make_mock_session` (line 500)** — used by the 5th
+  test, `test_steering_push_before_transition` (line ~622, `resume:cli` source).
+  This helper sets no `project_key`, so without a fix here the derived room id
+  stays a `MagicMock` repr and the test stays red. Set `s.project_key = "test"`
+  in this helper too (lines 506-511), and update line 622 to
+  `mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id="test|system")`.
+
+- Update all 5 resume assertions to include `room_id="test|system"`.
 
 **Cluster B — reaction test (`test_reaction_never_hostile.py`, 1 test).**
 Delete line 146:
@@ -273,8 +288,10 @@ Not applicable — no user-visible output is involved.
 - [ ] `tests/unit/test_steer_child.py::TestSteerChild::test_abort_flag` — UPDATE:
       add `room_id=None` to the assertion (load-bearing literal).
 - [ ] `tests/unit/test_valor_session_resume_release.py` — UPDATE: set
-      `s.project_key = "test"` in `_make_session`; add `room_id="test|system"`
-      to the 5 resume assertions.
+      `s.project_key = "test"` in **both** `_make_session` (line 45) and
+      `TestResumeSessionCore._make_mock_session` (line 500); add
+      `room_id="test|system"` to the 5 resume assertions (incl. line 622
+      `test_steering_push_before_transition`).
 - [ ] `tests/unit/test_reaction_never_hostile.py` — UPDATE: delete the
       `_custom_embedding_cache` patch line (line 146).
 - [ ] `tests/unit/test_context_recall_wiring.py` — UPDATE: remove the
@@ -301,9 +318,9 @@ repeating the "loosened until they stop failing" failure mode.
 helper and assert it arrives unchanged. This pins the pass-through, not the
 default.
 
-### Risk 2: `_make_session` project_key change breaks other tests
-**Impact:** Adding `s.project_key = "test"` to `_make_session` could affect tests
-that rely on `project_key` being absent.
+### Risk 2: `project_key` change breaks other tests
+**Impact:** Adding `s.project_key = "test"` to `_make_session` (and
+`_make_mock_session`) could affect tests that rely on `project_key` being absent.
 **Mitigation:** Verified no test in `test_valor_session_resume_release.py`
 references `project_key`. Run the full file after the change to confirm.
 
@@ -349,13 +366,17 @@ to green. No new feature, no behavior change, no user-facing surface. The
 steering-leg and emoji-embedding behavior is already documented in the
 production docstrings and `docs/features/session-steering.md`.
 
+- [ ] No `docs/features/` change required — steering-leg behavior already
+      documented in `docs/features/session-steering.md` (test-only fix).
+
 ### Inline Documentation
 - [ ] No inline doc changes needed — production code is untouched; the test
       assertions are self-documenting once they encode the intended leg.
 
 ## Success Criteria
 
-- [ ] All 15 #2846 node ids pass via the reproduction command:
+- [ ] All 15 #2846 node ids pass via the reproduction command (a superset of
+      the 15 named nodes — the named nodes are the gate):
       `./scripts/pytest-clean.sh tests/unit/test_bridge_ack_steering_routed.py
       tests/unit/test_reaction_never_hostile.py::TestFindBestEmojiNeverHostile::test_hostile_top_candidate_is_skipped
       tests/unit/test_steer_child.py::TestSteerChild::test_abort_flag
@@ -363,9 +384,13 @@ production docstrings and `docs/features/session-steering.md`.
 - [ ] All 11 #2822 node ids pass:
       `./scripts/pytest-clean.sh tests/unit/test_context_recall_wiring.py -q`
 - [ ] Cluster A assertions pin the intended steering leg: bridge tests assert an
-      explicit `room_id` pass-through; steer_child asserts `room_id=None`
-      (load-bearing); resume tests assert a concrete room-id string
-      (`"test|system"`), not a `MagicMock`.
+      explicit `room_id` pass-through (incl. the `context_advisory` same-leg
+      invariant); steer_child asserts `room_id=None` (load-bearing); resume tests
+      assert a concrete room-id string (`"test|system"`), not a `MagicMock` —
+      including `test_steering_push_before_transition` (line 622).
+- [ ] Caller-sweep grep clean: no `push_steering_message` assertion lacks the
+      intended `room_id`; no `expectations=` remains in
+      `test_context_recall_wiring.py`.
 - [ ] No production-source change.
 - [ ] No `Co-Authored-By` trailers on the commits.
 - [ ] Tests pass (`/do-test`).
@@ -423,8 +448,10 @@ The lead NEVER builds directly — they deploy team members and coordinate.
 - **Task ID**: build-resume
 - **Depends On**: none
 - **Description**: In `tests/unit/test_valor_session_resume_release.py`, set
-  `s.project_key = "test"` in `_make_session`, then add `room_id="test|system"`
-  to the 5 resume assertions.
+  `s.project_key = "test"` in **both** `_make_session` (line 45) and
+  `TestResumeSessionCore._make_mock_session` (line 500), then add
+  `room_id="test|system"` to the 5 resume assertions — including line 622
+  `test_steering_push_before_transition`, which uses `_make_mock_session`.
 
 ### 4. Fix Cluster B — reaction test
 - **Task ID**: build-reaction
@@ -446,16 +473,20 @@ The lead NEVER builds directly — they deploy team members and coordinate.
   build-reaction, build-context-recall
 - **Description**: Run both reproduction commands (the #2846 15-node command and
   the #2822 11-node command). Confirm all 26 pass, no production source changed,
-  and no `Co-Authored-By` trailers on the commits.
+  and no `Co-Authored-By` trailers on the commits. Then run a caller-sweep grep
+  to prove no stale seam remains (the manual 5-file fix must not repeat the
+  seam-miss failure mode):
+  - `grep -rn "assert_called_once_with" tests/unit/test_bridge_ack_steering_routed.py tests/unit/test_valor_session_resume_release.py tests/unit/test_steer_child.py` — every `push_steering_message` assertion must carry the intended `room_id`.
+  - `grep -rn "expectations=" tests/unit/test_context_recall_wiring.py` — must return no matches.
 
 ## Critique Results
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Cluster A3 fix misses `test_steering_push_before_transition` — it uses `_make_mock_session` (line 501), not `_make_session`, so setting `project_key` in `_make_session` leaves the derived room id a MagicMock repr and the test still red | pending | Add `s.project_key = "test"` in `TestResumeSessionCore._make_mock_session` (lines 501-512) and update line 623 to `mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id="test\|system")` |
-| CONCERN | Risk & Robustness | Cluster A1 `context_advisory` same-leg assertion is underspecified — no current test passes `context_advisory`, so the advisory push never fires; plan does not name which test to modify | pending | Add `context_advisory="advisory text"` to one helper call and assert `push.call_args_list` has two calls both with `room_id="test\|system"` (human + advisory) |
-| CONCERN | Scope & Value | Documentation section lacks the repo-mandated checkbox task with a `docs/features/` path | pending | Add `- [ ] No `docs/features/` change required — steering-leg behavior already documented in `docs/features/session-steering.md` (test-only fix).` |
-| CONCERN | History & Consistency | Manual 5-file fix repeats the seam-miss failure mode; caller-sweep guard deferred to No-Go (#2846) | pending | Add a grep sweep to the verify task: `grep -rn "assert_called_once_with" tests/unit/test_bridge_ack_steering_routed.py tests/unit/test_valor_session_resume_release.py tests/unit/test_steer_child.py` and `grep -rn "expectations=" tests/unit/test_context_recall_wiring.py` |
-| NIT | Risk & Robustness | Reproduction command runs whole files (superset of 15 nodes), so green does not isolate the named nodes | pending | Optionally note the command is a superset; the 15 named nodes are the gate |
-| NIT | Scope & Value | "At most one case" is a ceiling (0 or 1), so legacy-fallback coverage is not guaranteed | pending | Make it a floor ("keep exactly one case") if fallback coverage is intended |
-| NIT | History & Consistency | No internal contradiction found; triage corrections correctly incorporated | pending | None |
+| BLOCKER | Risk & Robustness | Cluster A3 fix misses `test_steering_push_before_transition` — it uses `_make_mock_session` (line 501), not `_make_session`, so setting `project_key` in `_make_session` leaves the derived room id a MagicMock repr and the test still red | RESOLVED — Technical Approach A3, Test Impact, Task 3, Success Criteria | Add `s.project_key = "test"` in `TestResumeSessionCore._make_mock_session` (lines 500-511) and update line 622 to `mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id="test\|system")` |
+| CONCERN | Risk & Robustness | Cluster A1 `context_advisory` same-leg assertion is underspecified — no current test passes `context_advisory`, so the advisory push never fires; plan does not name which test to modify | RESOLVED — Technical Approach A1 | Add `context_advisory="advisory text"` to one helper call and assert `push.call_args_list` has two calls both with `room_id="test\|system"` (human + advisory) |
+| CONCERN | Scope & Value | Documentation section lacks the repo-mandated checkbox task with a `docs/features/` path | RESOLVED — Documentation section | Add `- [ ] No `docs/features/` change required — steering-leg behavior already documented in `docs/features/session-steering.md` (test-only fix).` |
+| CONCERN | History & Consistency | Manual 5-file fix repeats the seam-miss failure mode; caller-sweep guard deferred to No-Go (#2846) | RESOLVED — Task 6, Success Criteria | Add a grep sweep to the verify task: `grep -rn "assert_called_once_with" tests/unit/test_bridge_ack_steering_routed.py tests/unit/test_valor_session_resume_release.py tests/unit/test_steer_child.py` and `grep -rn "expectations=" tests/unit/test_context_recall_wiring.py` |
+| NIT | Risk & Robustness | Reproduction command runs whole files (superset of 15 nodes), so green does not isolate the named nodes | RESOLVED — Success Criteria | Note the command is a superset; the 15 named nodes are the gate |
+| NIT | Scope & Value | "At most one case" is a ceiling (0 or 1), so legacy-fallback coverage is not guaranteed | RESOLVED — Technical Approach A1 | Make it a floor ("keep exactly one case") if fallback coverage is intended |
+| NIT | History & Consistency | No internal contradiction found; triage corrections correctly incorporated | RESOLVED — no change needed | None |
