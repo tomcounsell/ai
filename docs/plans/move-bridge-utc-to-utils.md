@@ -232,7 +232,7 @@ The issue left the destination open and named three candidates. The choice is `u
 | Candidate | Import cost to a freed tool | Packaging change | Verdict |
 |---|---|---|---|
 | `utils/utc.py` | 2 modules / 1 ms | none — `utils` already ships in the wheel | **Chosen** |
-| `kernel/utc.py` | 2 modules / 1 ms | must add `kernel` to `[tool.hatch.build.targets.wheel] packages` | Rejected |
+| `kernel/utc.py` | 2 modules / 1 ms | one-token edit to `pyproject.toml:115` | Rejected, narrowly |
 | `config/utc.py` | 214 modules / 94 ms | none | Rejected |
 
 **`config/` is disqualified on measured evidence.** The issue's argument for it
@@ -245,13 +245,30 @@ nothing from `config` today; routing them through it would replace a 4-module
 dependency on `bridge` with a 214-module dependency on the settings layer. The
 issue asks to detach these tools, and this option attaches them harder.
 
-**`kernel/` is rejected on cost, not on taste.** It matches `utils/` exactly on
-the only functional axis that matters (an empty `__init__.py`, 2 modules, 1 ms),
-so it buys nothing measurable. What it costs is concrete:
+**`kernel/` is rejected narrowly, and the packaging argument against it is
+weaker than the first draft claimed.** A correction, because leaving a bad
+argument in a plan is worse than leaving the decision open:
 
-- `utils` is one of six packages listed in `[tool.hatch.build.targets.wheel]` (`bridge`, `tools`, `scripts`, `agent`, `utils`, `ui`). `kernel` would not be, and a new top-level package that ships `tools/selfie` while omitting the module `tools/selfie` imports produces a wheel that fails at import time. That registration is one line and easy to omit, and the failure surfaces only in an installed environment, not in the source checkout where every test runs.
-- It creates an eighth top-level package to hold one 60-line module, against the repo's preference for minimal surface. A package named `kernel` also invites the immediate question of which of `utils/`'s six existing modules belong in it — a much larger reorganization the issue does not sanction and this plan will not start.
-- The name has no precedent anywhere in this repo.
+> The first draft argued that `kernel` "would not be packaged" and implied a
+> latent wheel-import failure. That overstates the cost. `pyproject.toml:115`
+> reads `packages = ["bridge", "tools", "scripts", "agent", "utils", "ui"]` —
+> adding `"kernel"` is a one-token edit on a line this plan can see. It is a
+> thing to remember, not a hazard.
+
+With that corrected, `kernel/` matches `utils/` exactly on the only functional
+axis that matters (an empty `__init__.py`, 2 modules, 1 ms) and costs one extra
+token of packaging metadata. The remaining case against it is modest and honest:
+
+- It creates a seventh top-level package to hold one 60-line module, against the repo's preference for minimal surface. A package named `kernel` also invites the immediate question of which of `utils/`'s six existing modules belong in it — a much larger reorganization the issue does not sanction and this plan will not start.
+- The name has no precedent anywhere in this repo; `utils/` is where every other small stdlib-shaped helper already lives.
+
+**The decision rests on the measured import cost, which is where the real
+evidence is.** `config/` is disqualified by 214 modules against 2 — that is a
+hundredfold difference and it decides the question. Between `utils/` and
+`kernel/` there is no measurable difference at all, and `utils/` wins on
+"changes nothing that does not need changing". A reviewer who prefers `kernel/`
+is not wrong on evidence; they are making a naming judgment, and the cost of
+honoring it is one token in `pyproject.toml` plus a new directory.
 
 The honest cost of `utils/` is that the name is vague and the package is a
 grab-bag. That is an aesthetic objection, and `utc.py` sits comfortably beside
@@ -293,8 +310,11 @@ services. It runs entirely against the source checkout.
 
 - **`utils/utc.py`**: the relocated module, byte-identical in body to today's `bridge/utc.py` apart from its docstring, which stops implying a bridge-local scope.
 - **`bridge/utc.py`**: deleted. No shim, no re-export, no alias, no deprecation window.
-- **57 rewritten references**: 54 import statements plus 3 string-literal module paths, all in one change.
-- **A boundary guard in `tests/unit/test_architectural_constraints.py`**: asserts the three freed `tools/` packages carry no harness imports, and that `utils/__init__.py` imports nothing. Without it the detachment is a fact of today with nothing defending it tomorrow.
+- **57 rewritten files**, decomposing (per the Freshness Check census) into:
+  - **59 import statements** across **51 files** — the bulk mechanical rewrite.
+  - **19 non-import reference lines** across **15 files** — of which 4 are executable (3 string literals, 1 dict key) and 15 are comments or docstrings. An import rewriter reaches none of these.
+  - 9 files carry both kinds; 51 + 15 − 9 = 57.
+- **A boundary guard in `tests/unit/test_architectural_constraints.py`**: asserts the three freed `tools/` packages carry no harness imports, and that `utils/__init__.py` imports nothing. This is **added scope, not an issue acceptance criterion** — issue #2867 asserts a *state* ("zero remaining imports from…"), not a test enforcing it. The guard is justified by Risk 2 alone: without it the detachment is a fact of today with nothing defending it tomorrow. A reviewer approving this plan is approving that addition knowingly.
 - **Docs and the generated graph**: `docs/features/utc-timestamps.md`, `docs/features/session-lifecycle.md`, and the path strings in `site/assets/graph.js`.
 
 ### Flow
@@ -306,12 +326,35 @@ Developer needs the current time → `from utils.utc import utc_now` → gets a 
 ### Technical Approach
 
 - **`git mv bridge/utc.py utils/utc.py`**, so the move is recorded as a rename and review reads as a rename rather than a delete-plus-add.
-- **Rewrite in two passes.** A bulk pass over the 54 import-statement sites (`from bridge.utc import` → `from utils.utc import`), then three hand edits for the string-literal sites named in spike-3. Neither pass is trusted on its own; the completeness check is a repo-wide grep for `bridge[./]utc` over `*.py` returning zero.
+- **Rewrite in three passes, not two.** (1) A bulk pass over the **59 import statements** in **51 files** (`from bridge.utc import` → `from utils.utc import`). (2) Four hand edits for the executable non-import sites — three string literals and one dict key. (3) A prose sweep over the **15 comment and docstring lines** that neither of the first two passes touches. No pass is trusted on its own; the completeness gate below is what closes the accounting.
+
+- **The completeness gate, stated so it can actually fail.** The gate is:
+
+  ```bash
+  git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l   # must print 0
+  ```
+
+  or, for use inside a script, the fail-closed twin `! git grep -qE 'bridge[./]utc|from bridge import utc' -- '*.py'` (exit 0 means clean).
+
+  **Do not use `grep -rc … --include='*.py' <many paths>`.** With more than one
+  path argument `grep -c` prints a `path:count` line per file — 1294 lines in
+  this repo, nearly all ending `:0` — and exits 0 whether or not there are
+  matches. "Expected: match count == 0" is not an observable outcome of that
+  command; it is a 1294-line wall a human skims past. `grep -c` yields a bare
+  number only when given exactly one file argument. Every multi-path row in the
+  Verification table has been converted to the `git grep -l … | wc -l` form.
+  Where plain `grep` is still used, `--include='*.py'` is quoted, because zsh
+  glob-expands it unquoted before grep ever sees it.
+
+  Note the gate is deliberately wider than any rewrite rule: `bridge[./]utc`
+  matches both the dotted `bridge.utc` and the path `bridge/utc.py` spellings.
+  A rewrite rule written against the dotted form alone leaves three sites behind
+  and this gate is what reports it.
 - **Let ruff re-sort.** `python -m ruff check --fix` handles the isort reordering that follows from `utils` sorting after `tools` where `bridge` sorted first. Then `python -m ruff format`. No other linting.
 - **Keep `tests/unit/test_utc.py` where it is.** The suite is flat under `tests/unit/` and does not mirror source paths, so the file name is already correct. Only its import line and its docstring change. Moving it would add churn for no signal.
 - **Update the public API contract key, not its value.** `("bridge.utc", "utc_now")` becomes `("utils.utc", "utc_now")`; the signature string `"() -> datetime.datetime"` is unchanged because the function is unchanged.
 - **Treat `site/assets/graph.js` as a path-keyed artifact, not as prose.** Its node ids are derived from file paths (`"id": "file:bridge/utc.py"`, `"filePath": "bridge/utc.py"`, and edge endpoints). A literal `bridge/utc.py` → `utils/utc.py` replacement in that file is exactly what a regeneration would produce for these nodes, and it keeps the committed graph honest without running the whole `/understand` pipeline. Commit `961d20eee` treated staleness in this file as a real defect (#2531), so leaving it stale is not the neutral option.
-- **Commit in checkpoints**, not one lump: (1) the `git mv` plus the module docstring, (2) the bulk import rewrite plus ruff, (3) the three string-literal sites, (4) the guard test, (5) docs and graph. Each is independently reviewable and each keeps the tree importable.
+- **Commit in checkpoints**, not one lump: (1) the `git mv` plus the module docstring, (2) the bulk import rewrite plus ruff, (3) the four executable non-import sites, (4) the 15 prose sites, (5) the guard test, (6) docs and graph. Each is independently reviewable and each keeps the tree importable. **Each checkpoint commit message ends with the current gate reading** — `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` — so the ledger of remaining work is a measured number carried in git history rather than a claim in a handoff message. The number must fall monotonically: 57 → ~6 → ~2 → 0.
 
 ## Failure Path Test Strategy
 
@@ -333,9 +376,66 @@ Developer needs the current time → `from utils.utc import utc_now` → gets a 
 - [ ] `tests/unit/test_utc.py` — UPDATE: change `from bridge.utc import ...` to `from utils.utc import ...` and the module docstring "Tests for bridge.utc utility module." to name the new path. File stays at its current location.
 - [ ] `tests/unit/test_public_api_contract.py::test_public_api_signatures_are_stable` — UPDATE: change the dict key `("bridge.utc", "utc_now")` to `("utils.utc", "utc_now")`. The signature value is unchanged. This test is designed to fail first and loudest on exactly this kind of rename, so it is the canary, not a nuisance.
 - [ ] `tests/unit/test_session_stall_classifier.py::test_unparseable_timestamp_returns_healthy_not_stalled` — UPDATE: change the `patch("bridge.utc.to_unix_ts", ...)` target to `patch("utils.utc.to_unix_ts", ...)` and correct the three-line explanatory comment above it that names `bridge.utc`. Verify the patch still bites by confirming the assertion fails when `return_value` is changed.
-- [ ] `tests/integration/test_reflections_redis.py` lines 107 and 129 — UPDATE: change `__import__("bridge.utc", fromlist=["utc_now"])` to `__import__("utils.utc", fromlist=["utc_now"])` at both sites.
-- [ ] `tests/integration/test_updated_at_heal.py`, `tests/performance/test_benchmarks.py`, `tests/unit/reflections/test_sdlc_upvote_lanes.py`, `tests/unit/session_runner/test_liveness.py`, `tests/unit/test_hooks_audit.py`, `tests/unit/test_job_model.py`, `tests/unit/test_messenger.py`, `tests/unit/test_migrations.py`, `tests/unit/test_reconciler.py`, `tests/unit/test_session_archive.py`, `tests/unit/test_valor_telegram.py` — UPDATE: plain import-path rewrite, no assertion changes.
+- [ ] `tests/integration/test_reflections_redis.py` lines 107 and 129 — UPDATE: change `__import__("bridge.utc", fromlist=["utc_now"])` to `__import__("utils.utc", fromlist=["utc_now"])` at both sites. **Must be executed, not merely collected** — see the execution note below.
+
+**Test files whose only reference is an import statement** — UPDATE: plain
+import-path rewrite, no assertion changes:
+
+- [ ] `tests/performance/test_benchmarks.py:22`
+- [ ] `tests/unit/test_hooks_audit.py:372`
+- [ ] `tests/unit/test_job_model.py` — five sites (`:266`, `:280`, `:307`, `:322`, `:987`)
+- [ ] `tests/unit/test_messenger.py:9`
+- [ ] `tests/unit/test_migrations.py:25`
+- [ ] `tests/unit/test_reconciler.py:1133`
+- [ ] `tests/unit/test_session_archive.py:29`
+- [ ] `tests/unit/test_valor_telegram.py:13`
+
+**Test files whose only reference is prose, with NO import at all** — UPDATE:
+comment or docstring edit only. The first draft listed these three as "plain
+import-path rewrite", which is false: an import rewriter finds nothing to rewrite
+in any of them and their references survive untouched:
+
+- [ ] `tests/integration/test_updated_at_heal.py:51` — docstring, **path spelling** `bridge/utc.py::to_unix_ts`
+- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py:347` — comment, dotted spelling
+- [ ] `tests/unit/session_runner/test_liveness.py:181` — docstring, dotted spelling
+
+**Test files carrying both an import and a prose reference** — UPDATE: both must
+be edited; fixing the import alone leaves the gate red:
+
+- [ ] `tests/unit/test_reconciler.py` — import at `:1133`, docstring at `:1132`
+- [ ] `tests/unit/test_utc.py` — import at `:7`, module docstring at `:1`
+- [ ] `tests/unit/test_session_stall_classifier.py` — comment at `:297` and `:298`, `patch()` target at `:300`
+
+**New test:**
+
 - [ ] `tests/unit/test_architectural_constraints.py` — UPDATE: add a new `TestStandaloneToolPackageBoundaries` class. The file already has the AST helper this needs (`_get_imports`, which uses `ast.walk` and therefore catches function-local imports as well as top-level ones), so the guard extends an existing pattern instead of introducing one.
+
+### Execution coverage for the modified non-unit tests
+
+Three of the files this plan edits live outside `tests/unit/`:
+`tests/integration/test_reflections_redis.py`,
+`tests/integration/test_updated_at_heal.py`, and
+`tests/performance/test_benchmarks.py`. The first draft's verification rows and
+success criteria all stopped at `tests/unit`, so the plan edited three files it
+never ran.
+
+That gap is sharpest on the two `__import__("bridge.utc", …)` sites, which are
+precisely the references the plan calls invisible to an import rewriter. They sit
+inside test *bodies*, so **`--collect-only` is not a substitute**: collection
+succeeds with a wrong module path and the failure only appears when the line
+executes.
+
+`tests/integration/` needs Redis, so this runs in the task-7 validator pass, not
+in the builder's per-checkpoint loop:
+
+```bash
+scripts/pytest-clean.sh tests/integration/test_reflections_redis.py \
+  tests/integration/test_updated_at_heal.py \
+  tests/performance/test_benchmarks.py -q
+```
+
+The issue's own acceptance criteria require the **full** `scripts/pytest-clean.sh`
+suite, not `tests/unit` alone. Success Criteria now says so.
 
 ## Rabbit Holes
 
