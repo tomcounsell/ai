@@ -443,7 +443,7 @@ suite, not `tests/unit` alone. Success Criteria now says so.
 - **Broadening the boundary guard to ban `config` imports.** The guard's forbidden set is exactly the issue's acceptance criterion — `bridge`, `agent`, `worker`, `models`, `monitoring`, `reflections` (plus `analytics` and `ui` for symmetry). Adding `config` would make the test stricter than anything agreed and would forbid `tools/image_gen`'s legitimate `config.models` dependency if the guard's package list ever widens.
 - **Collapsing the three inline `to_unix_ts` duplicates.** `monitoring/session_watchdog._to_timestamp`, `agent/session_health._to_ts`, and `ui/data/sdlc._safe_float` each reimplement the same naive-datetime guard. `docs/features/utc-timestamps.md` records that #777 left them untouched on purpose. Touching them here would triple the review surface of a rename.
 - **Regenerating the whole `site/assets/graph.js` knowledge graph.** The targeted path-string replacement is correct and cheap. Running the full `/understand` pipeline would rewrite thousands of unrelated lines and bury the actual change.
-- **Hand-verifying 57 files.** The completeness proof is a repo-wide grep returning zero, plus the test suite. Reading each file individually is slower and less reliable.
+- **Hand-verifying 57 files.** The completeness proof is `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` printing `0`, plus the full test suite. Reading each file individually is slower and less reliable. This holds only because the gate is a single number that can be wrong out loud — the first draft's `grep -rc` form printed 1294 lines and exited 0 regardless, which is hand-verification wearing a command's clothes.
 
 ## Risks
 
@@ -451,7 +451,9 @@ suite, not `tests/unit` alone. Success Criteria now says so.
 
 **Impact:** `tests/unit/test_session_stall_classifier.py`'s patch target is the sharp case. In general, a `patch()` aimed at the wrong module either raises or quietly patches something the code under test never reads, and the second failure mode reports green.
 
-**Mitigation:** The hard move deletes `bridge/utc.py`, so a missed `patch("bridge.utc...")` raises `ModuleNotFoundError` rather than passing. This is the strongest single argument for the no-shim constraint and it should be stated in the PR body. Backed by a repo-wide `grep` for `bridge[./]utc` over `*.py` expected to return zero matches, which catches string literals that no import-aware tool sees. Additionally, mutate the patch's `return_value` and confirm the test flips to failing, proving the patch still reaches the code.
+**Mitigation:** The hard move deletes `bridge/utc.py`, so a missed `patch("bridge.utc...")` raises `ModuleNotFoundError` rather than passing. This is the strongest single argument for the no-shim constraint and it should be stated in the PR body. Backed by the completeness gate `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` printing `0`, which catches string literals that no import-aware tool sees. That gate is only load-bearing in the `git grep -l … | wc -l` form; the `grep -rc` form this plan originally specified could not fail. Additionally, mutate the patch's `return_value` and confirm the test flips to failing, proving the patch still reaches the code.
+
+Note the `__import__("bridge.utc", …)` sites in `tests/integration/test_reflections_redis.py` fail the *opposite* way: they are inside test bodies, so they raise only when executed. They are covered by the task-7 integration run, not by collection.
 
 ### Risk 2: The detachment silently regresses after this ships
 
@@ -463,7 +465,7 @@ suite, not `tests/unit` alone. Success Criteria now says so.
 
 **Impact:** A file added by a concurrently-merging PR imports `bridge.utc`, the branch merges, and main breaks at import time.
 
-**Mitigation:** Zero overlap between the 57 files and all four open PRs is confirmed at plan time, and no commits have landed since the issue was filed. Re-run the `git grep` count immediately before opening the PR and again after any rebase; the number must be zero on the branch. The `ModuleNotFoundError` from the deleted module means this fails loudly at collection rather than degrading quietly.
+**Mitigation:** Zero overlap between the 57 files and all four open PRs is confirmed at plan time, and no commits have landed since the issue was filed. Re-run `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` immediately before opening the PR and again after any rebase; it must print `0` on the branch. The `ModuleNotFoundError` from the deleted module means a newly-landed top-level importer fails loudly at collection rather than degrading quietly.
 
 ### Risk 4: The rename reads as a delete-plus-add and review misses that the body is unchanged
 
@@ -484,9 +486,17 @@ each checkpoint.
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every item in the issue's acceptance criteria is in scope for
-this plan, including the guard test, the string-literal sites, the docs, and the
-generated graph artifact.
+Nothing deferred. Every one of the issue's seven acceptance criteria is in scope,
+**including the last one — the full `scripts/pytest-clean.sh` suite, not a
+`tests/unit` subset.** The first draft claimed full coverage while its Success
+Criteria narrowed to `tests/unit`; that contradiction is resolved in favor of the
+issue.
+
+Two items in this plan are **additions beyond the issue**, and a reviewer should
+approve them as such rather than as inherited requirements:
+
+- **The boundary guard test** (`TestStandaloneToolPackageBoundaries`). Issue #2867 asserts a *state* — "`tools/selfie`, `tools/sms_reader`, and `tools/test_scheduler` have zero remaining imports from `bridge/`, `agent/`, `worker/`, `models/`, `monitoring/`, or `reflections/`" — and contains no criterion requiring a test to enforce it. The guard is justified by **Risk 2** alone: the property is incidental today and one import added to `utils/__init__.py` later would silently undo the whole change. That is a good reason, and it is this plan's reason, not the issue's.
+- **The `site/assets/graph.js` path-string update.** The issue does not mention the generated graph. It is included because commit `961d20eee` (#2531) treated staleness in that file as a real defect.
 
 Three things are **non-goals** of this change rather than postponed work. They
 were never part of issue #2867 and this plan makes no promise about them:
@@ -521,9 +531,24 @@ changes, no `.mcp.json` changes, and the bridge imports nothing new.
 The bridge does import the moved module — `bridge/dedup.py`,
 `bridge/escape_hatch.py`, `bridge/session_transcript.py`,
 `bridge/telegram_bridge.py`, and `bridge/telegram_relay.py` are five of the 57
-and get the plain import rewrite. Because bridge and worker code changes, the
-repo's restart rule applies after merge: `./scripts/valor-service.sh restart`,
-verified by `tail -5 logs/bridge.log` showing "Connected to Telegram".
+files and get the plain import rewrite. `bridge/telegram_bridge.py` additionally
+carries a docstring reference at `:155` that the prose sweep handles.
+
+**Restart obligation.** Because bridge code changes, the repo's restart rule
+applies. The first draft left this as prose here and in no task, verification row,
+or success criterion — and task 6 was scoped to "every row of the Verification
+table", where it did not appear. It is now a **Post-Merge Checklist** item
+(below Success Criteria) with an explicit command and verification:
+
+```bash
+./scripts/valor-service.sh restart
+tail -5 logs/bridge.log        # must show "Connected to Telegram"
+```
+
+**Sequence this after the merge to `main`, never during the build.** Restarting
+while the feature branch is checked out puts a half-migrated tree in front of live
+Telegram traffic. It is deliberately not a build-stage verification row for that
+reason.
 
 ## Documentation
 
@@ -549,14 +574,25 @@ verified by `tail -5 logs/bridge.log` showing "Connected to Telegram".
 
 - [ ] `utils/utc.py` exists and exports `utc_now`, `to_local`, `utc_iso`, `to_unix_ts` with unchanged signatures and bodies.
 - [ ] `bridge/utc.py` does not exist. No shim, no re-export, no alias anywhere in the repo.
-- [ ] A repo-wide grep for `bridge[./]utc` over `*.py` returns zero matches.
+- [ ] **`git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` prints `0`.** This single number covers all 59 import statements and all 19 non-import reference lines, in both the dotted and path spellings. It is the completeness proof for the whole change.
+- [ ] `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' | wc -l` prints `0`. (`docs/plans/completed/*.md` is deliberately excluded — those are shipped history.)
 - [ ] `tools/selfie`, `tools/sms_reader`, and `tools/test_scheduler` have zero imports from `bridge`, `agent`, `worker`, `models`, `monitoring`, or `reflections` — including inside their `tests/` directories and including function-local imports.
 - [ ] `tests/unit/test_public_api_contract.py` passes with the `("utils.utc", "utc_now")` key.
 - [ ] `tests/unit/test_utc.py` passes with the same collected test count as before the move.
 - [ ] The new boundary guard test fails when a harness import is injected into any guarded file (mutation-verified per guard, not once for the class).
-- [ ] Tests pass (`/do-test`), full `tests/unit` run.
+- [ ] **The three modified non-unit test files actually execute and pass** — `scripts/pytest-clean.sh tests/integration/test_reflections_redis.py tests/integration/test_updated_at_heal.py tests/performance/test_benchmarks.py -q`. Collection alone does not count: the `__import__` sites are inside test bodies.
+- [ ] **The full suite passes** — `scripts/pytest-clean.sh` with no path argument, per the issue's seventh acceptance criterion. A `tests/unit`-only run does not satisfy the issue and does not execute three of the files this change edits. Expect roughly 20 minutes for the unit portion; a long run is not a stuck run.
 - [ ] Documentation updated (`/do-docs`).
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean.
+
+## Post-Merge Checklist
+
+Not part of the build and not a Verification-table row. These run against `main`
+after the PR merges, because they act on live services.
+
+- [ ] `./scripts/valor-service.sh restart` — five `bridge/` modules changed import paths, so the running bridge, watchdog, and worker are on stale code until cycled.
+- [ ] `tail -5 logs/bridge.log` shows "Connected to Telegram".
+- [ ] Re-run the completeness gate on `main` after the merge commit: `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` prints `0`. This is the only check that catches an importer merged from a concurrent PR between the branch's last rebase and the merge (Risk 3).
 
 ## Team Orchestration
 
