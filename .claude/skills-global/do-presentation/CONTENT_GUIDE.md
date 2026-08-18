@@ -95,8 +95,8 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 - End with a connection to the next slide
 
 ### Figure Slide
-- `<!-- _class: figure -->`, visual inside a `.figure` panel
-- Minimal text — the action title and a mono `.figure__meta` caption
+- No slide class. The visual goes inside a `.figure` div
+- Minimal text — the action title and a mono `.figure__meta` title block
 - Label everything on the diagram itself, not in surrounding text
 
 ### Example Slide
@@ -105,7 +105,7 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 - Before/after comparisons work well
 
 ### Comparison / Table Slide
-- `<!-- _class: data -->`, tables instead of side-by-side bullets
+- No slide class. Use a markdown table instead of side-by-side bullets
 - 2-4 columns max, clear headers
 - Mark the recommended option with the slide's one accent
 

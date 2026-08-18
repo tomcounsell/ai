@@ -47,8 +47,10 @@ palettes, gridlines, axis lines or legends; stock photography; font sizes outsid
 Fonts: `Lora` 500 (serif, all headings) · `Inter` 300/400/500 (body) · `IBM Plex Mono` 400/500
 (labels, figures, data).
 
-Sizes for a 1280×720 slide: cover 68px · statement 46px · h1 40px · h2 30px · h3 22px · body 22px ·
-small 18px · mono label 13px · mono micro 11px · big number 132px. Nothing else.
+Sizes for a 1280×720 slide. Content type: cover 68 · section title 52 · statement 46 · h1 40 ·
+h2 30 · h3 22 · body 22 · card 18. Display: big number 132 · section numeral 96. Utility: rose
+plate 24 · plate 20 · table cell 17 · code block 15 · mono label 13 · table header 12 · mono
+micro 11. Every size the theme uses is in that list; reach for an existing one before adding.
 
 ## Accent discipline
 
@@ -59,16 +61,19 @@ provisional. A deck can run ten slides with no red and lose nothing.
 
 ## Slide archetypes
 
-Marp classes. Use `<!-- _class: name -->` at the top of a slide.
+Three archetypes are Marp slide classes, set with `<!-- _class: name -->`. The other three need no
+class: they are compositions of the inline components, and the default slide styling already carries
+them. Do not invent a `_class` for those — an undefined class is a silent no-op that reads in the
+source as though it were doing something.
 
 | Class | Slide | Anatomy |
 |---|---|---|
 | `cover` | Title | Mono eyebrow (audience/client) top · Lora title center · red rule · `.stamp` metadata band bottom |
 | `section` | Section break | Large muted mono numeral · Lora title · one red rule |
 | `statement` | Single claim | One Lora sentence, 12 words maximum, 60% of the slide left empty |
-| *(none)* | Concept | Mono eyebrow · Lora action title · Inter body or `.cols` |
-| `figure` | Diagram | Full-width `.figure` panel with graph-paper grid, corner marks, mono footer |
-| `data` | Table or number | `.data` ruled table, or one `.big` figure over a mono caption |
+| none | Concept | Mono eyebrow · Lora action title · Inter body or `.cols` |
+| none | Diagram | Mono eyebrow · action title · a `.figure` div: graph-paper grid, corner marks, `.figure__meta` title block |
+| none | Table or number | Mono eyebrow · action title · a markdown table, or one `.big` figure over a mono caption |
 
 Inline components: `.eyebrow` `.cols` `.cols-3` `.plate` `.card` `.note` `.rose` `.stamp` `.big`
 `.figure` `.figure__meta` `.rule-red`.

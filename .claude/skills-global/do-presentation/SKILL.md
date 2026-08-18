@@ -246,8 +246,9 @@ content...
 - **Word budget by archetype.** Statement slide ≤ 12 words. Concept slide ≤ 40 words of body.
   Table ≤ 5 rows with short cells. Over budget means split the slide, not shrink the type
 - **Accent budget.** One red per slide, spent on the value that matters. Count it before moving on
-- Use `<!-- _class: section -->` for section breaks, `statement` for a single claim,
-  `figure` for a diagram plate, `data` for a table or a `.big` number
+- The only slide classes are `cover`, `section` and `statement`. Diagram, table and number slides
+  need no class; they are compositions of `.figure`, a markdown table, or `.big`. An undefined
+  `_class` is a silent no-op
 - Use tables over bullet lists when comparing things
 - Use code blocks sparingly — only when the actual code IS the point
 - Every 3rd-4th slide should be visual (figure plate, table, or `.big` number)
