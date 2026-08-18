@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
@@ -7,7 +7,7 @@ created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2739
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-18T04:03:52Z
+revision_applied_at: 2026-08-18T04:18:16Z
 ---
 
 # Docs Auditor Review Gate
@@ -97,7 +97,7 @@ the claim.
 | `_pr_is_auto_merge_eligible` def | `:2005` | Holds; any review/reviewRequest/comment still disqualifies (`:2056-2057`) |
 | `run_docs_branch_sweeper` def | `:2089` | Holds; auto-merge branch `:2236-2240`, stale-close `gh pr close --delete-branch` `:2263` |
 | `__main__` CLI caller | `:2289-2295` | Holds; no `repo_root`, no git of its own |
-| Scheduler discards `summary` | `agent/reflection_scheduler.py:514-515` | **Confirmed** — only `result.get("projects")` is read; `findings` and `summary` are dropped |
+| Scheduler discards `summary` | `agent/reflection_scheduler.py:639-640` | **Confirmed** — only `result.get("projects")` is read; `findings` and `summary` are dropped |
 | Old contract text (descriptive) | `.claude/skill-context/do-docs.md:166` | Holds; moved from `:152` |
 | Old contract text (imperative) | `.claude/skills-global/do-docs/SKILL.md:220-221` | Holds; same lines |
 | Rename channel | absent | **Deleted upstream.** `_git_log_follow_renames`, `_detect_renamed_link_fixes`, `_detect_renamed_symbol_fixes`, `_detect_readme_broken_entries`, `GIT_LOG_FOLLOW_CAP`, `_RENAME_QUERY_COUNT` all grep to 0 |
@@ -320,8 +320,11 @@ results below.
 - **Method:** code-read of `agent/reflection_scheduler.py`, `models/reflection.py`,
   `ui/data/reflections.py`, and every `reflections/*.py` escalation site.
 - **Finding: confirmed, plus a cheap repair nobody noticed.**
-  - `agent/reflection_scheduler.py:514-515` reads only `result.get("projects")`;
+  - `agent/reflection_scheduler.py:639-640` reads only `result.get("projects")`;
     `findings` and `summary` are discarded. Still true on the baseline commit.
+    (Anchor corrected in the round-3 settle pass, R3-4 — this was cited as `:514-515`
+    through rounds 1-3, which is an unrelated `every:`-schedule burst-fire guard inside
+    `is_reflection_due`. The claim was always right; only the line numbers were rotten.)
   - **But `mark_completed` already accepts `output_summary`**
     (`models/reflection.py:186`, stored `:221`, passed through at `:254`), and the
     dashboard already renders it (`ui/data/reflections.py:286` and `:139` as
@@ -509,8 +512,8 @@ the prefix explicitly in Python and depends on no undocumented search semantics.
 | PR #2842 merged to main — **satisfied 2026-08-18** | `test "$(gh pr view 2842 --json state -q .state)" = MERGED` | Q5's escalation is only trustworthy once the permanent withheld generator is gone (spike-2). Merged as `a9205b065`. Same fail-closed argument |
 | Rename channel actually absent | `! grep -q _git_log_follow_renames reflections/docs_auditor.py` | Guards against building Q5 on a tree where #2842 was reverted. Shape is deliberate: both `grep -c` (exits 1 on a zero count) and `grep -L` (BSD grep still exits 1 when no line was selected) report *absence* as failure, so the negation is the only form that reads correctly. Exits 1 exactly when the symbol is back |
 | No rotation in flight | `.venv/bin/python -c "import sys; from reflections.docs_auditor import _get_redis, REDIS_RUNNING_KEY; sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)"` | Changing commit behavior mid-rotation could interleave with a live `checkout -b` in the shared checkout. `sys.exit` carries the answer, so a live rotation is a FAIL rather than a printed `True` nobody reads. Must be the venv interpreter — a bare `python` has no `popoto`, and that too now fails closed, since `ModuleNotFoundError` exits 1 |
-| Shared main checkout clean **on the auditor's own write surface** | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs/features)"` | Scoped to `docs/features/` in critique round 2 (NEW-3). The whole-tree form was practically unsatisfiable and contradicted this plan's own model: other lanes routinely hold uncommitted work in the shared checkout, and No-Gos forbids the builder from clearing it, so a whole-tree row handed the builder a FAIL they were not permitted to fix — it failed for exactly that reason during the round-1 revision. `docs/features/` is the auditor's only write surface (spike-5: the module's one write is `_apply_fixes_to_file`, and rotation only ever selects `docs/features/*.md`), so dirt there is the wedged state item 4 describes and must be understood before landing. Foreign dirt outside `docs/features/` does **not** block and is preserved by design (Race 1) |
-| No open docs-audit PR mid-flight | `.venv/bin/python -c "import json,subprocess,sys; o=subprocess.run(['gh','pr','list','--state','open','--json','headRefName'],capture_output=True,text=True); sys.exit(0 if o.returncode==0 and not [x for x in json.loads(o.stdout or '[]') if x['headRefName'].startswith('docs-audit/')] else 1)"` | An in-flight PR opened by the old code carries old-format staging. Rewritten in critique round 2 (NEW-7) to an explicit `startswith("docs-audit/")` test rather than `--search "head:docs-audit"`. The critic's own suggested `gh … -q` replacement cannot be used: `check_prerequisites.py:62` runs a naive `row.strip("|").split("|")`, which is blind to quoting, so the pipes inside the jq program truncate the cell. This form is pipe-free, and matches the `.venv/bin/python -c` shape the rotation-probe row above already uses. Fails closed twice over: a non-zero `gh` exit and an unparseable payload both exit 1. Both branches executed at revision time — exit 0 with no `docs-audit/` PR open, exit 1 against a `session/` control |
+| Shared main checkout clean **on the auditor's own write surface** | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs .claude)"` | Scoped rather than whole-tree in critique round 2 (NEW-3), and **widened from `docs/features` to `docs .claude` in the round-3 settle pass (R3-1)**. The whole-tree form was practically unsatisfiable and contradicted this plan's own model: other lanes routinely hold uncommitted work in the shared checkout, and No-Gos forbids the builder from clearing it, so a whole-tree row handed the builder a FAIL they were not permitted to fix — it failed for exactly that reason during the round-1 revision. The narrower `docs/features` form was satisfiable but rested on a **false** justification: `docs/features/` is where rotation picks its *primary*, not where the module writes. The write surface is the primary doc's neighborhood, `_resolve_neighborhood:259` (called at `:1220`), spanning `docs/` and outbound-linked `.md` paths — `_apply_fixes_to_file` gates only on `.endswith(".md")` (`:1251`), never on a directory, so real targets today include `docs/plans/*.md`, `docs/sdlc/*.md`, `docs/tools-reference.md`, and `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. `docs .claude` covers that surface, so leftover dirt from a wedged pre-change rotation is actually detected. Foreign dirt outside those two trees does **not** block and is preserved by design (Race 1). **Known cost of the widening:** the scope now also catches other lanes' uncommitted work under `docs/` — most commonly in-flight `docs/plans/*.md` edits. If this row FAILs on foreign non-auditor dirt, the builder must inspect it and report rather than clear it (No-Gos, [EXTERNAL]); it is a stop-and-ask, not a licence to `checkout` another lane's file |
+| No open docs-audit PR mid-flight | `.venv/bin/python -c "import json,subprocess,sys; o=subprocess.run(['gh','pr','list','--state','open','--limit','200','--json','headRefName'],capture_output=True,text=True); sys.exit(0 if o.returncode==0 and not [x for x in json.loads(o.stdout or '[]') if x['headRefName'].startswith('docs-audit/')] else 1)"` | An in-flight PR opened by the old code carries old-format staging. Rewritten in critique round 2 (NEW-7) to an explicit `startswith("docs-audit/")` test rather than `--search "head:docs-audit"`. **`--limit 200` added in the round-3 settle pass:** `gh pr list` defaults to `--limit 30`, newest-first, so with more than 30 open PRs an older `docs-audit/*` PR falls off the page and the row silently passes — a narrow fail-open, and exactly the PR this row exists to catch, since a stuck docs-audit PR is by definition an old one. The critic's own suggested `gh … -q` replacement cannot be used: `check_prerequisites.py:62` runs a naive `row.strip("|").split("|")`, which is blind to quoting, so the pipes inside the jq program truncate the cell. This form is pipe-free, and matches the `.venv/bin/python -c` shape the rotation-probe row above already uses. Fails closed twice over: a non-zero `gh` exit and an unparseable payload both exit 1. Both branches executed at revision time — exit 0 with no `docs-audit/` PR open, exit 1 against a `session/` control |
 | `gh` authenticated | `gh auth status` | Sweeper and PR tests reason about real `gh` JSON shapes. Already exit-code correct — `gh auth status` exits non-zero when no account is logged in |
 
 ## Solution
@@ -725,10 +728,19 @@ verification fixes the rest.
    produced no PR and must not thereby freeze the rotation. Follow that precedent
    literally, including the `[str(primary)]` single-element list form.
 
-   **The bound, stated accurately.** The deferral a fired guard costs is: **≤1 day for
-   the daily cap**; and for the open-PR guard, **this doc** is deferred for the PR's
-   lifetime, while **rotation continues on other docs because the hash is stamped**. The
-   guard therefore skips one document, not the rotation.
+   **The bound, stated accurately (corrected in the round-3 settle pass).** The deferral a
+   fired guard costs is: **≤1 day for the daily cap**; and for the open-PR guard, **this
+   doc is deferred until its next turn in the rotation**, while **rotation continues on
+   other docs because the hash is stamped**. The guard skips one document, not the
+   rotation.
+
+   Read the open-PR bound that way rather than as "the PR's lifetime" — the earlier
+   phrasing was optimistic in the builder's favour and understated the deferral. Stamping
+   a doc the run never actually audited gives it a maximal timestamp, which pushes it to
+   the **back** of the queue of every `docs/features/*.md`; it therefore waits a full
+   rotation cycle, not merely until the blocking PR closes. That is still the correct
+   design choice — a bounded, self-clearing deferral of one document beats a permanent
+   silent shutdown of the whole rotation — but the cost is one cycle, not one PR.
 
    **Ruling on the substrate's advisory issue channel (B2, second half).** Skipping
    `audit()` also skips the advisory `_file_issue_if_new` loop at `:1290`
@@ -818,12 +830,50 @@ verification fixes the rest.
    (guard fired; nothing written to the working tree, no git operation, **rotation hash
    stamped**), `error` (write happened, PR did not).
 
-   **What fires on which outcome, exhaustively (NEW-1).** The success Telegram (`:1947`)
-   and `_write_liveness(..., "ok", ...)` (`:1955`) fire **only** on `ok`.
-   `_update_rotation_hash` (`:1950`) fires on `ok` **and** on `skipped` — on `ok` with
-   `files_touched`, on `skipped` with `[str(primary)]`. It does **not** fire on `error`:
-   a run that wrote and failed to produce a PR has not audited the doc, and re-picking it
-   on the next run is the correct behavior there.
+   **What fires on which outcome, exhaustively (NEW-1).**
+
+   | Side effect | `ok` (PR created) | `skipped` (guard fired) | `error` |
+   |---|---|---|---|
+   | Working-tree write / any git operation | yes | **no** | yes (the write already happened) |
+   | `_update_rotation_hash` (`:1950`) | yes, with `files_touched` | **yes**, with `[str(primary)]` | **no** |
+   | `_write_liveness` (`:1955`) | yes, `status="ok"` | **yes**, `status="skipped"` — see the ruling below | no |
+   | Success Telegram (`:1947`) | yes | no | no |
+   | Q5 withheld issue filing | when `fixes_withheld > 0` | no (`audit()` never ran) | no |
+
+   `_update_rotation_hash` does **not** fire on `error`: a run that wrote and failed to
+   produce a PR has not audited the doc, and re-picking it on the next run is correct
+   there.
+
+   **Ruling: the guard-fired `skipped` path DOES call `_write_liveness` (round-3 settle
+   pass).** The terminal critique left this explicitly unspecified — either choice
+   satisfies the plan's invariants — so it is decided here rather than left to the
+   builder. Call
+   `_write_liveness(slug, "skipped", None, 0, fixes_withheld=0)`, copying the zero-diff
+   path at `:1913` verbatim in shape, with `fixes_withheld=0` because `audit()` never ran
+   and there is nothing to report. Three reasons:
+
+   - **Precedent, and the same precedent.** The guard path is already mandated to copy the
+     zero-diff path's `_update_rotation_hash` call. The zero-diff path stamps liveness on
+     the very next line for a run that also legitimately produced no PR. Splitting the two
+     halves of that precedent would leave the module with two near-identical no-PR exits
+     that behave differently for no stated reason — the kind of drift this plan spends
+     its Q4 fixing.
+   - **A frozen liveness timestamp is a false alarm, not a signal.** The keys are the
+     operator's documented manual surface (`docs/features/docs-auditor.md:546-547`). If a
+     guard fires daily, omitting the stamp makes `last_completed_run_ts` age
+     indefinitely and reads exactly like a crashed or wedged auditor — indistinguishable
+     from the failure mode this plan exists to make visible. Writing `"skipped"` says the
+     true thing: the auditor ran, decided not to act, and is healthy.
+   - **It costs nothing this plan has to defend.** The invariant Q4 protects is "no
+     working-tree write and no git operation" on the guard path; a Redis write is
+     explicitly outside it (see the NEW-1 note in Data Flow step 7). And it does not
+     conflict with the `_write_liveness` deprecation in No-Gos: this adds one more call
+     site to a channel #2743 will delete wholesale, which is one more line in that
+     deletion, not a new reader or a competing surface.
+
+   The only thing that stays forbidden is `_write_liveness(..., "ok", ...)` on any path
+   that did not create a PR — the Failure Path Test Strategy row asserts exactly that, and
+   `"skipped"` satisfies it.
 
 On the failure mode this replaces: today's plain `git checkout main` in the `finally`
 block (`:1557-1563`, no `check=`, return code discarded) fails when local
@@ -879,8 +929,26 @@ not build Q5 without it, which the Prerequisites table now checks.
    issues per run, and on hitting the cap emit one `logger.warning` naming how many were
    suppressed, exactly as `:1281-1288` does. Nothing is lost — rotation runs daily and
    the per-defect titles are stable, so a suppressed entry is filed on the next run under
-   the title it would have had. Do **not** invent a separate constant: read `per_run_cap`
-   from the same expression so the two channels cannot drift apart.
+   the title it would have had.
+
+   **How the cap is shared, stated executably (R3-2).** "Reuse the existing
+   `per_run_cap`" is not literally executable: `per_run_cap` is a **function-local** in
+   `audit()` (`:1278`, `per_run_cap = 5 if scope_mode == "rotation" else 3`), and the
+   withheld filing loop lives in `run_docs_auditor` — a different function that cannot see
+   it. **Hoist it to a single module-level constant** and have both loops read that one
+   name:
+
+   ```python
+   ISSUE_FILING_PER_RUN_CAP = 5          # rotation; advisory loop uses 3 for other scopes
+   ```
+
+   Concretely: define the constant beside the module's other tunables (near
+   `STALE_PR_AGE_DAYS`, `:75`), rewrite `audit()`'s local to derive from it
+   (`per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3`), and have
+   the new withheld loop in `run_docs_auditor` break on `ISSUE_FILING_PER_RUN_CAP`
+   directly. That is the reuse this plan intends — one source of truth, so the two
+   channels cannot drift — and it is still not the "separate new constant" forbidden
+   above, which meant a second, independently-valued literal.
    Note also that `_file_issue_if_new` hardcodes `--label documentation`
    (`:1115-1116`), so every issue this channel files carries that label and no other;
    nothing here needs a new label.
@@ -924,7 +992,8 @@ not build Q5 without it, which the Prerequisites table now checks.
    Correction of the phrasing this plan used before: `_file_issue_if_new` does not
    "refresh, via dedup". On a dedup hit it **is suppressed** and returns `False`. Any
    design that needs a second signal for the same subject needs a second title.
-3. **Wire `summary` → `output_summary`** in `agent/reflection_scheduler.py:514-515`:
+3. **Wire `summary` → `output_summary`** in `agent/reflection_scheduler.py:639-640`
+   (anchor corrected from `:514-515` in the round-3 settle pass, R3-4):
    `state.mark_completed(duration, projects=projects_list, output_summary=summary)`
    where `summary = result.get("summary") if isinstance(result, dict) else None`.
    The field already exists on the model (`models/reflection.py:186`, stored into
@@ -1187,9 +1256,11 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       assert the built code requests `body` at `:2147`. Without this, the
       "withheld PR is not closed" test passes vacuously against a payload that never
       carried a body.
-- [ ] **Withheld filing respects the per-run cap (NEW-4).** Feed more than 5 withheld
-      entries and assert at most 5 issues are filed and that the suppression warning
-      names the remainder.
+- [ ] **Withheld filing respects the per-run cap (NEW-4 / R3-3).** Feed more than 5
+      withheld entries and assert **exactly 5** issues are filed and that the suppression
+      warning names the remainder. This is the Verification row for NEW-4 — it is
+      behavioral on purpose, because a `grep -c` on the cap symbol cannot tell a shared
+      constant from a second one the withheld loop declared for itself.
 - [ ] `files_touched == []` creates no branch and no commit.
 - [ ] Sweeper close path: real repo + `gh` dispatcher. Assert a PR whose body
       contains `WITHHELD_PR_MARKER` is **not** closed and **no** `--delete-branch`
@@ -1645,7 +1716,10 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `clean`. Make a failed restore a reported failure, judged on both porcelain columns for
   `files_touched` only.
 - Q4: route outcomes as `ok` / `skipped` / `error`. `_write_liveness(..., "ok", ...)`
-  (`:1955`) and the success Telegram (`:1947`) fire **only** on `ok`.
+  (`:1955`) and the success Telegram (`:1947`) fire **only** on `ok`. On the guard-fired
+  `skipped` path call `_write_liveness(slug, "skipped", None, 0, fixes_withheld=0)`,
+  copying the zero-diff path at `:1913` — ruled on in Q4 item 4's outcome table, so do not
+  re-decide it. Consult that table for the exhaustive per-outcome side-effect list.
 - Q4 (NEW-1): `_update_rotation_hash` (`:1950`) is the **exception** — it must fire on
   `ok` *and* on the guard-fired `skipped` path, never on `error`. On the `skipped` path
   call `_update_rotation_hash(project_key, [str(primary)])` for the picked doc, copying
@@ -1689,9 +1763,15 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `docs-auditor: withheld fix in {doc} ({old} -> {new})`. The title is the dedup key
   (`:1075-1076`), so it must be per-defect and must contain **no** volatile component —
   no age, date, count, or run id.
-- Q5 (NEW-4): bound the withheld filing at the module's existing per-run cap of 5
-  (`:1277-1289`), reusing that `per_run_cap` expression rather than a new constant, and
-  log a suppression warning naming the remainder exactly as `:1281-1288` does.
+- Q5 (NEW-4 / R3-2): bound the withheld filing at the module's existing per-run cap of 5
+  (`:1277-1289`), and log a suppression warning naming the remainder exactly as
+  `:1281-1288` does. **The cap must be hoisted, not read in place.** `per_run_cap` is a
+  function-local in `audit()` (`:1278`) and the withheld loop lives in `run_docs_auditor`,
+  so "reuse the existing local" is not executable across the two functions. Introduce a
+  single module-level `ISSUE_FILING_PER_RUN_CAP = 5` beside `STALE_PR_AGE_DAYS` (`:75`),
+  derive `audit()`'s local from it
+  (`per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3`), and break
+  the withheld loop on the constant. One source of truth; no second literal.
 - Q5 (NEW-2): add `body` to the sweeper's `gh pr list --json` field set at `:2147`
   (`number,state,createdAt` → `number,state,createdAt,body`). Deleting
   `_pr_is_auto_merge_eligible` removes the only place the sweeper ever fetched a PR body
@@ -1703,7 +1783,10 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   title `docs-auditor: withheld PR #{n} still unreviewed`. A same-title filing is a
   guaranteed no-op — `_file_issue_if_new` returns `False` on a dedup hit and never
   comments or refreshes. Keep the age out of the title and put it in the body.
-- Q5 (C3): wire `output_summary` in `agent/reflection_scheduler.py:514-515`, guarded by
+- Q5 (C3): wire `output_summary` in `agent/reflection_scheduler.py:639-640` — the
+  `projects_list = result.get("projects") …` / `state.mark_completed(duration,
+  projects=projects_list)` pair, **not** `:514-515`, which this plan cited in error
+  through round 3 (R3-4) and which is an unrelated schedule guard — guarded by
   the existing `isinstance(result, dict)` check, coerced to `str` and truncated; **and**
   add the one-line render to `ui/templates/reflections/_partials/modal_content.html`
   beside the `{% if r.last_error %}` block at `:54-56`. Without the render the value
@@ -1787,7 +1870,7 @@ post-build expectation that legitimately fails now.
 | Guard-fired run still advances the rotation (NEW-1) | Real-git/Redis test: force `_has_open_pr_for_slug` true for the picked slug, run `run_docs_auditor`, assert the run returns `status="skipped"`, that `REDIS_LAST_RUN_HASH` now holds a fresh timestamp for that slug, and that a second immediately-following run picks a **different** doc. Grep-level guard that the call was not dropped: `grep -c '_update_rotation_hash' reflections/docs_auditor.py` | `status="skipped"`, the slug is stamped, the next pick differs; grep `> 2` (zero-diff path, guard path, success path) | post-build (today the guards are not in `run_docs_auditor` at all and the grep reads `3` for unrelated reasons — assert the behavior, not the count alone) |
 | Guard-fired run touches no working tree (NEW-1) | Real-git test: with the daily cap set, assert `git status --porcelain` in the temp repo is byte-identical before and after the run, and that `audit()` was never called. Redis writes are expected and are **not** covered by this row | porcelain unchanged; `audit()` not called | post-build |
 | Sweeper can still read a PR body (NEW-2) | `grep -c 'number,state,createdAt,body' reflections/docs_auditor.py` | > 0 | post-build (currently `0` — the sweeper's `pr list` at `:2147` omits `body`, and the only `body` fetch is inside the predicate Q2 deletes) |
-| Withheld filing is flood-capped (NEW-4) | Read the withheld filing loop and confirm it breaks at the same `per_run_cap` expression the advisory loop uses (`:1278`), rather than declaring its own constant. Structural check: `grep -c 'per_run_cap' reflections/docs_auditor.py` | > 2 (assignment, advisory loop, withheld loop) | post-build (currently `2`) |
+| Withheld filing is flood-capped (NEW-4 / R3-3) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: drive a rotation run whose result carries **more than 5** withheld entries and assert (a) `_file_issue_if_new` is invoked exactly 5 times, (b) a `logger.warning` fires naming the number suppressed, and (c) the run's status is unaffected by the suppression | exactly 5 issues filed, one suppression warning naming the remainder | post-build. The grep-count form this row used before is retired: it claimed `grep -c 'per_run_cap'` was "currently 2" and expected `> 2`, but the real current count is **3** (`:1278`, `:1281`, `:1285`), so the row was already green today and proved nothing. Counting a symbol also cannot distinguish "both loops share one cap" from "the withheld loop declared its own"; only behavior can. Companion structural check, if a grep is still wanted: `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` → `> 2` (definition, `audit()` derivation, withheld loop), currently `0` |
 | Dashboard renders the summary (C3) | `grep -c 'output_summary' ui/templates/reflections/_partials/modal_content.html` | > 0 | post-build (currently `0` — the value reaches `dashboard.json` and no template) |
 | Issue titles carry no volatile field (B4) | Read the two title templates in the built code and confirm neither interpolates an age, date, count, or run id — only `{doc}`/`{old}`/`{new}` for the per-defect title and `#{n}` for the sweeper title | no volatile interpolation | post-build |
 | New commit ownership declared | `grep -c 'files_touched' .claude/skill-context/do-docs.md` | > 0 | post-build (currently `0`) |
@@ -1797,7 +1880,7 @@ post-build expectation that legitimately fails now.
 | Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_docs_auditor_git_surface.py` | > 0 | post-build |
 | No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_docs_auditor_git_surface.py` | exit code 1 | post-build |
 | Test count row is recomputed | `POPOTO_TEST_DB=13 .venv/bin/python -m pytest tests/unit/test_docs_auditor_substrate.py --collect-only -q \| tail -1` and compare against `grep -n 'test_docs_auditor_substrate' tests/README.md` | the number in `tests/README.md:272` equals the collected count | post-build (both read `130` today, and the count will move) |
-| Shared checkout clean after run | `git -C /Users/valorengels/src/ai status --porcelain` | output does not contain `docs/features` | holds now — must still hold at the end |
+| Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
 
 ## Critique Results
 
