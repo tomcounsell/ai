@@ -294,9 +294,14 @@ def _gh_pr_search_issue_ref(
 
     Args:
         state: ``gh pr list --state`` value. Defaults to ``open`` so routing callers
-            ("is there a PR in flight?") are unchanged. Pass ``all`` when the question
-            is historical rather than in-flight -- e.g. the REVIEW artifact probe, which
-            must still find its artifact after the PR merges (issue #2539).
+            ("is there a PR in flight?") are unchanged. Pass a wider state when the
+            question is historical rather than in-flight -- e.g. the REVIEW artifact
+            probe, which must still find its artifact after the PR merges (issue #2539).
+            For that historical question the correct scope is ``merged``, NOT ``all``:
+            this function returns the FIRST body-validating candidate with no
+            MERGED-over-CLOSED preference, so ``all`` can surface a closed-unmerged PR
+            that never produced an artifact (issue #2757; measured on #2793, which
+            resolves to closed PR 2794 under ``all`` and to None under ``merged``).
 
     Returns the validated PR number, or None on any failure or when no candidate validates.
     Never raises.
@@ -360,10 +365,13 @@ def _lookup_pr(
     Args:
         state: ``gh pr list --state`` value, threaded into both resolution legs.
             Defaults to ``open``, so callers asking "is there a PR in flight?"
-            keep their existing semantics. Pass ``all`` when the question is
+            keep their existing semantics. Pass a wider state when the question is
             historical -- a merged PR is invisible to both legs under ``open``,
             which made the REVIEW artifact probe unreachable after any merge
-            (issue #2539).
+            (issue #2539). ``merged`` is the correct historical scope for the
+            issue-search leg; ``all`` can surface a closed-unmerged PR, because
+            that leg takes the first body-validating candidate with no
+            MERGED-over-CLOSED preference (issue #2757).
 
     Returns the PR number or None. Never raises.
     """
@@ -488,6 +496,22 @@ def _extract_head_sha(record) -> str | None:
     return None
 
 
+def _coerce_count(value) -> int:
+    """Coerce a raw stage-states counter to a non-negative int, never raising.
+
+    Absent, ``None``, empty and non-numeric values all read as ``0`` -- the
+    correct starting state for a lane that has never had the counter written,
+    which is every lane predating the key. ``_compute_meta`` is invoked
+    unwrapped, so a corrupt value must degrade rather than raise: a counter
+    that reads ``0`` makes its bound stand down, whereas an exception here
+    would take the entire ``stage-query`` projection down and blind the router.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _compute_meta(
     raw_states: dict,
     session,
@@ -545,7 +569,33 @@ def _compute_meta(
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr
     else:
+        # Two-pass lookup (#2757). `_lookup_pr` defaults to `state="open"`, so a
+        # merged PR is invisible to BOTH its resolution legs -- which is exactly
+        # why a lane's `pr_number` evaporates the minute its PR merges, and why
+        # a terminal pipeline was being told to rebuild the work it had just
+        # shipped. #2539 already corrected the identical defect at a sibling
+        # call site (`tools/sdlc_stage_marker.py`), and
+        # `agent/pipeline_state.py::_durable_gh_pr_for_branch` independently walks
+        # a two-pass state ladder for the same reason; this is that in-repo idiom,
+        # not a new one. That one widens to `all` on its second pass, which is safe
+        # there only because it matches on an exact `--head <branch>` with no fuzzy
+        # candidate selection -- a property the issue-search leg below lacks.
+        #
+        # The second pass runs ONLY when the first returns None. Ordering is the
+        # whole safety property: an OPEN PR is the lane's live artifact and must
+        # always win over a historical one, so no lookup that succeeds today can
+        # change its answer. The pass is strictly additive.
+        #
+        # It is scoped to `merged`, deliberately NOT `all`. `_gh_pr_search_issue_ref`
+        # returns the FIRST body-validating candidate with no MERGED-over-CLOSED
+        # preference, so `all` can surface a closed-unmerged PR -- measured on
+        # #2793, which resolves to closed PR 2794 under `all` and to None under
+        # `merged`. A closed-unmerged PR is not evidence BUILD produced an
+        # artifact; admitting one would read back as CLOSED and make G8 fire,
+        # converting a silent no-op into an active false rebuild.
         pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo)
+        if pr_number is None:
+            pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo, state="merged")
 
     # Fetch live PR merge state and CI status for G6 guard
     pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
@@ -615,6 +665,17 @@ def _compute_meta(
         # on session resume. Surfaced here so the runner reads it without a
         # second ledger fetch.
         "completion_refusal_count": int(raw_states.get("_completion_refusal_count", 0) or 0),
+        # With-concerns critique rounds on this lane (#2787), written by
+        # tools/sdlc_verdict.py::record_verdict. It MUST ride `_meta`: the
+        # `stages` projection below threads only ("_verdicts", "_sdlc_dispatches")
+        # out of raw stage_states, so a bare `_concern_round_count` key would be
+        # dropped on the floor and every rule reading it would be structurally
+        # inert in the CLI path. Mirrors the `_critique_cycle_count` precedent.
+        # Key-parity with _default_meta is required (#2769).
+        # Coerced tolerantly: `_compute_meta` is called unwrapped, so a corrupt
+        # non-integer value must degrade to 0 (the bound stands down) rather than
+        # raise and take the whole stage-query down with it.
+        "concern_round_count": _coerce_count(raw_states.get("_concern_round_count")),
     }
 
 
@@ -645,6 +706,7 @@ def _default_meta() -> dict:
         "slug_source": "unresolved",
         "_resolved_target_repo": None,
         "completion_refusal_count": 0,
+        "concern_round_count": 0,
     }
 
 

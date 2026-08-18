@@ -103,10 +103,46 @@ class TestG7PlanRevisingGuardDirect:
         result = guard_g7_plan_revising(states, meta, {})
         assert result is None
 
-    def test_self_heal_revision_applied_returns_none(self):
-        """G7 self-heals when plan_revising=True but revision_applied=True."""
+    def test_self_heal_requires_a_revision_since_the_verdict(self):
+        """G7 gate 3 is event-scoped, not keyed on the sticky boolean (#2787).
+
+        `revision_applied` is set by /do-plan on every revision pass and never
+        resets, so keying the self-heal on it meant that after the very first
+        revision the lock could never bind again — the mechanism #1302 built
+        was permanently inert. With only the sticky boolean set and no verdict
+        to scope against, the lock now survives and G7's own deadlock backstop
+        owns the escalation — with the documented manual recovery named in the
+        reason. That is the backstop working as designed, not a regression.
+        """
         states = _base_states()
         meta = _base_meta(plan_revising=True, revision_applied=True)
+        result = guard_g7_plan_revising(states, meta, {})
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G7"
+        assert "plan_revising" in result.reason
+        # The escalation is only defensible because it names the way out.
+        assert "sdlc-tool meta-set" in result.reason
+
+    def test_self_heal_fires_when_revision_landed_since_the_verdict(self):
+        """A revision that postdates the CRITIQUE verdict does release the lock.
+
+        Verdict-kind-agnostic on purpose: this is a NEEDS REVISION lock, and
+        gate 3 must keep self-healing it or G7 escalates to Blocked on a lane
+        that already did the work.
+        """
+        states = _base_states(
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "NEEDS REVISION",
+                    "recorded_at": "2026-08-17T10:00:00",
+                }
+            }
+        )
+        meta = _base_meta(
+            plan_revising=True,
+            revision_applied=True,
+            revision_applied_at="2026-08-17T11:00:00",
+        )
         result = guard_g7_plan_revising(states, meta, {})
         assert result is None
 
@@ -228,12 +264,24 @@ class TestG7ThroughDecideNextDispatch:
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_BUILD
 
-    def test_lock_with_revision_applied_routes_to_build(self):
-        """G7 self-heals when revision_applied=True; router routes to /do-build."""
-        states = _base_states()
+    def test_lock_with_event_scoped_revision_routes_to_build(self):
+        """G7 releases on an event-scoped revision; router then routes to /do-build.
+
+        #2787: the release is keyed on a revision that landed AFTER the latest
+        CRITIQUE verdict, not on the sticky `revision_applied` boolean.
+        """
+        states = _base_states(
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "2026-08-17T10:00:00",
+                }
+            }
+        )
         meta = _base_meta(
             plan_revising=True,
             revision_applied=True,
+            revision_applied_at="2026-08-17T11:00:00",
             latest_critique_verdict="READY TO BUILD",
         )
         result = decide_next_dispatch(states, meta, {})
@@ -388,11 +436,11 @@ class TestG5DefersAfterBuild:
     run.
     """
 
-    def _g5_inputs(self, **state_overrides):
+    def _g5_inputs(self, verdict="READY TO BUILD", **state_overrides):
         states = _base_states(
             _verdicts={
                 "CRITIQUE": {
-                    "verdict": "READY TO BUILD (WITH CONCERNS)",
+                    "verdict": verdict,
                     "artifact_hash": "sha256:abc",
                 }
             },
@@ -402,12 +450,30 @@ class TestG5DefersAfterBuild:
         return guard_g5_artifact_hash_cache, states, context
 
     def test_dispatches_build_before_pr(self):
-        """With no PR and BUILD pending, G5 routes straight to /do-build."""
+        """With no PR and BUILD pending, G5 routes straight to /do-build.
+
+        Fixture uses a NO-CONCERNS verdict: since #2787 the cached-verdict
+        branch steps aside unconditionally on with-concerns, so a with-concerns
+        fixture would no longer exercise the #1710 deferral this class covers.
+        """
         g5, states, context = self._g5_inputs(BUILD="pending")
         meta = _base_meta(pr_number=None)
         result = g5(states, meta, context)
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_BUILD
+
+    def test_steps_aside_on_with_concerns_so_rows_own_the_state(self):
+        """#2787: G5 never serves a with-concerns verdict.
+
+        Guards run before the dispatch table, so without this step-aside rows
+        2b/4b/4c are unreachable in production and the whole re-critique gate
+        is dead while still passing its own unit tests.
+        """
+        g5, states, context = self._g5_inputs(
+            verdict="READY TO BUILD (WITH CONCERNS)", BUILD="pending"
+        )
+        meta = _base_meta(pr_number=None)
+        assert g5(states, meta, context) is None
 
     def test_defers_when_pr_open(self):
         """With a PR open, G5 returns None so PR-stage rows take over."""

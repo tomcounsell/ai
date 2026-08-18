@@ -1,14 +1,14 @@
 ---
-status: Ready
+status: completed
 type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-08-10
 tracking: https://github.com/tomcounsell/ai/issues/2716
-last_comment_id: none
-revised: 2026-08-10
+last_comment_id: 5312083426
+revised: 2026-08-17
 revision_applied: true
-revision_applied_at: 2026-08-11T03:27:10Z
+revision_applied_at: 2026-08-17T05:24:00Z
 ---
 
 # Session liveness tick counter (rewrite of the dead stall reaction)
@@ -28,7 +28,7 @@ Relay: failed to set reaction ⏳ on msg 1308 in chat -1003449100931
 
 Even repaired, a single static reaction is a one-shot signal: it cannot show time passing, and it never escalates — a session can sit behind it forever.
 
-**Desired outcome:** a long-running session displays a visibly advancing counter, emitted by the watchdog, that guarantees a progress message from the PM at least every 100 minutes.
+**Desired outcome:** a long-running session displays a visibly advancing counter, emitted by the watchdog, that guarantees a progress message from the PM at least every 100 minutes for any session still executing tool calls (see the conditionality note below).
 
 ### What the counter means (decided 2026-08-10)
 
@@ -38,13 +38,16 @@ This is the load-bearing semantic decision, and it is narrower than "liveness" i
 - **The number is duration.** Nothing more. Tick 4 means "roughly 40 minutes since this counter started," not "4 units of progress" and not "4 checks passed."
 - **It does NOT guarantee the session is unstalled.** A wedged session and a busy session tick identically. Any wording that implies stall detection is wrong and must not appear in this document or in the code comments.
 - **The PM may take as long as it wants** working with eng sessions. Duration is not a failure condition.
-- **The forcing function is the guarantee.** At the ceiling the PM must publish a progress message — success, failure, or still-working — and a fresh counter anchors to that message. So the human is promised a substantive human-readable update at least every 100 minutes, and the counter is the visible countdown toward that promise.
+- **The forcing function is the guarantee, for a session still executing tool calls.** At the ceiling the PM must publish a progress message — success, failure, or still-working — and a fresh counter anchors to that message. So the human is promised a substantive human-readable update at least every 100 minutes, and the counter is the visible countdown toward that promise.
+- **The guarantee is conditional, and the condition is worth stating plainly.** Delivery is via steering, which `agent/steering.py:5` serves on a PostToolUse hook and drains at turn boundaries. A genuinely wedged session — no tool calls, no turn boundary — never receives the steer, and Race 3's `SET NX` marker then stays latched, so the human sees a frozen digit and no message. That is acceptable and arguably correct (a frozen counter is itself the wedge signal), but it is the one case the 100-minute promise does not cover. Task 4 must give it an explicit disposition rather than leaving the prose absolute.
 
 This is why no evidence-freshness gating is required: the counter is not trying to infer the session's internal state. It measures wall-clock time and forces a periodic answer. The answer, not the digit, is where stall information actually surfaces.
 
 ## Freshness Check
 
-**Disposition: Unchanged.** Baseline `origin/main` = `1e3fdd6f5`.
+**Disposition: Unchanged.** Re-verified 2026-08-17 against `origin/main` = `c23fb0e00`, seven days and ~10 SDLC-substrate merges after the original 2026-08-10 pass at `1e3fdd6f5`. Full evidence table in [issue comment 5312083426](https://github.com/tomcounsell/ai/issues/2716#issuecomment-5312083426). Every load-bearing claim still holds: `STALL_REACTION_EMOJI = "⏳"` (`session_watchdog.py:112`) still contradicts `INVALID_REACTIONS` (`response.py:86`); `_apply_stall_reaction` (`:578`), `_clear_stall_reaction_dedup` (`:674`), the `watchdog:stall_reaction_applied:` key (`:636`) and the `WATCHDOG_STALL_REACTION_ENABLED` gate (`:622`) are all intact; `build_custom_emoji_index`'s only non-test caller is `rebuild_custom_emoji_index`, itself test-only; `data/custom_emoji_embeddings.json` still does not exist. The single watchdog change since filing (`ac190fb26`, the #2642 steering flip) is 5 lines and touches no stall-reaction symbol. One detail went stale — branch `wip/session-heartbeat-ticker` (`78443c3f6`) is gone, unreachable, with no commit anywhere containing `PREMIUM_DIGIT_REACTIONS`; corrected in `10ebf7bbd` and reflected in Technical Approach / Task 2.
+
+Original 2026-08-10 pass, still valid:
 
 - Issue #2716 was filed 2026-08-10T08:55:49Z; `git log origin/main --since=<that>` returns no commits. All issue claims were verified against this exact tree during `/do-issue` recon, minutes before planning.
 - [#2710](https://github.com/tomcounsell/ai/pull/2710) (`sdlc-stall-auto-resume`) merged shortly before filing and sounded adjacent. Verified with `git show --stat 6a9e2b66c`: it touches no watchdog, reaction, `response.py`, or emoji file. It handles stalled *SDLC runs*; this plan handles the *user-visible* signal. No collision.
@@ -127,11 +130,11 @@ Telegram permits one reaction per sender per message. **Seven writers** currentl
 
 | # | Writer | Glyph | Trigger | Proposed rank |
 |---|---|---|---|---|
-| 1 | `agent/session_executor.py:2499-2532` | `REACTION_COMPLETE` / `REACTION_SUCCESS` / `REACTION_ERROR`, or `None` to clear | session reaches terminal state | **1 — terminal, always wins, final** |
+| 1 | `agent/session_executor.py:2545-2580` | `REACTION_COMPLETE` / `REACTION_SUCCESS` / `REACTION_ERROR`, or `None` to clear | session reaches terminal state | **1 — terminal, always wins, final** |
 | 2 | `bridge/response.py::react_if_worker_down:386` | ⚠ `REACTION_WORKER_DOWN` | no live worker at ingestion (direct in-process `set_reaction`, not the outbox) | 2 |
 | 3 | `agent/tool_budget.py::_queue_budget_reaction:308` | 🤯 `BUDGET_REACTION_EMOJI` | tool budget exhausted → `paused_budget` | 2 |
 | 4 | `agent/worker_down_reactions.py:126` | ✍ `REACTION_PROCESSING` | worker picks the session up (overwrites the ⚠) | 3 |
-| 5 | `agent/output_handler.py:1486` + `tools/valor_telegram.py:977,1022` | RTR suppress reaction | read-the-room suppression | 3 |
+| 5 | `agent/output_handler.py:1574,1578` + `tools/valor_telegram.py:977,1022` | RTR suppress reaction | read-the-room suppression | 3 |
 | 6 | `agent/session_completion.py:564` | 👀 (suppress, default arg) | child-session completion suppress | 4 |
 | 7 | `monitoring/session_watchdog.py:112,444` | ⏳ (dead — being deleted) | stall observed | — |
 | → | **`_publish_liveness_ticks()` (new)** | digit 1-9 / fallback arc | every `HEARTBEAT_TICK_INTERVAL_SECONDS` | **5 — lowest; yields to everything** |
@@ -188,8 +191,8 @@ What replaces it as the structural defense against #1313's defect class: a test 
 
 ### Technical Approach
 
-- **Anchor:** the counter measures time since the last *evidence of progress the watchdog can see itself* — not since session start, and never a self-report from the session. Candidate anchors in preference order: last observed turn transition, then `updated_at`, then session creation. The chosen anchor must be stated in the code comment, because [`bridge/liveness.py`](../../bridge/liveness.py) establishes the governing rule: *a handler that has stopped firing cannot testify to its own failure.*
-- **Constants already exist** on branch `wip/session-heartbeat-ticker` (`78443c3f6`) in `bridge/response.py`: `PREMIUM_DIGIT_REACTIONS`, `HEARTBEAT_FALLBACK_ARC`, `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and `heartbeat_reaction(tick)` which raises at the ceiling rather than clamping. Adopt, relocate, or discard on the merits — it is temp progress, not a design commitment.
+- **Anchor:** counter start — session start, re-anchored to each forced progress message. Pure duration, per the semantics decided in the Problem section and restated under Data Flow. There is deliberately **no** evidence-freshness probe (no transcript mtime, no `tool_use.jsonl` mtime, no `updated_at` staleness gate): the counter makes no claim about the session's internal state, so there is no liveness inference to defend. State the anchor in the code comment, and state alongside it *why* no self-report is consulted — [`bridge/liveness.py`](../../bridge/liveness.py) establishes the governing rule that *a handler that has stopped firing cannot testify to its own failure*, which is why the tick is emitted by the watchdog rather than by the session.
+- **Constants must be written from scratch.** An earlier draft of this plan pointed at branch `wip/session-heartbeat-ticker` (`78443c3f6`) for `PREMIUM_DIGIT_REACTIONS`, `HEARTBEAT_FALLBACK_ARC`, `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and a ceiling-raising `heartbeat_reaction(tick)`. **That branch and commit no longer exist** — verified 2026-08-17: the object is unreachable and no commit in the repo contains `PREMIUM_DIGIT_REACTIONS`. It was temp progress, never a design commitment, so nothing is lost but the typing. Write these fresh in `bridge/response.py` against the behavior this plan specifies; do not spend time recovering the branch.
 - **Payload:** the outbox already supports `custom_emoji_document_id` (`bridge/telegram_relay.py`), so no transport change is needed. The payload literal must stay schema-compatible with `_build_reaction_payload`.
 - **Do not route ticks through `find_best_emoji`.** It uses cosine similarity plus `_softmax_sample` at a temperature — deliberately random among top-K. Correct for "pick a feeling", wrong for "this is tick 4".
 
@@ -209,7 +212,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 ### Error State Rendering
 
 - Terminal error must win the slot and stay. A tick must never overwrite a completed or errored session's reaction.
-- `REACTION_ERROR` is pinned to 🤔 — see Open Questions, this collides with the proposed arc.
+- `REACTION_ERROR` is pinned to 🤔, which is why the fallback arc avoids that glyph (Resolved Question 4) — a healthy session must never wear the error face.
 
 ## Test Impact
 
@@ -217,7 +220,7 @@ What replaces it as the structural defense against #1313's defect class: a test 
 - [ ] `tests/unit/test_stall_detection.py` (stall-reaction cases: dedup, skip conditions, feature flag) — REPLACE: rewrite against counter behavior.
 - [ ] `tests/integration/test_watchdog_to_bridge.py` — UPDATE: end-to-end watchdog→outbox→relay path now carries a custom-emoji payload plus a priority field.
 - [ ] `tests/unit/test_custom_emoji_index.py` — DELETE: tests a function being removed. These tests pass only because they mock the client and feed it documents the real API never returns.
-- [ ] `tests/unit/test_heartbeat_reactions.py` — ADD: does not exist on `main` (it is on the unmerged `wip/session-heartbeat-ticker` branch). Extend to cover slot precedence and arc/registry disjointness.
+- [ ] `tests/unit/test_heartbeat_reactions.py` — ADD: does not exist anywhere; write it new alongside the constants. Cover slot precedence, arc **non-registration** in `_reaction_constants()` (not glyph disjointness — see Task 2), and the ceiling raising rather than clamping.
 - [ ] `tests/unit/test_bridge_relay.py` (reaction payload cases at 412, 634, 1313-1411) — UPDATE: the drain-side precedence guard changes this path.
 - [ ] `tests/integration/test_worker_liveness_ingestion.py` — UPDATE: touches the ingestion-reaction sequence the precedence table now orders.
 - [ ] `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection` — UPDATE: shares `_assert_distinct()` with `bridge/response.py`; adding arc constants must not break the distinctness invariant.
@@ -249,7 +252,7 @@ If precedence is wrong, the human sees the reaction change back and forth betwee
 ### Race 1: Tick vs. session completion
 A session completes while a tick payload is already queued. The tick could land *after* the terminal reaction and overwrite it with a duration glyph.
 
-**There is no shared queue** — this is the part the first draft got wrong. `output_handler.react()` sets `session_id = chat_id` and writes `telegram:outbox:{chat_id}` (`output_handler.py:1486`), while ticks, stall, and budget reactions write `telegram:outbox:{session_id}`. `process_outbox` iterates `r.keys("telegram:outbox:*")` in **unspecified order** (`telegram_relay.py:891`), draining up to `RELAY_BATCH_SIZE=10` per key per cycle. So ordering is undefined *across two independent queues*, not merely unguaranteed within one. A builder assuming FIFO gets them partway there would be wrong.
+**There is no shared queue** — this is the part the first draft got wrong. `output_handler.react()` sets `session_id = chat_id` and writes `telegram:outbox:{chat_id}` (`output_handler.py:1574,1578`), while ticks, stall, and budget reactions write `telegram:outbox:{session_id}`. `process_outbox` iterates `r.keys("telegram:outbox:*")` in **unspecified order** (`telegram_relay.py:891`), draining up to `RELAY_BATCH_SIZE=10` per key per cycle. So ordering is undefined *across two independent queues*, not merely unguaranteed within one. A builder assuming FIFO gets them partway there would be wrong.
 
 **Prevention:** drop the stale tick at the drain (`telegram_relay.py:922`), gated on a tick marker in the payload so the guard costs nothing for other reaction types. Constraints: no per-reaction Popoto status query on a 100 ms poll loop, and any status read goes through `asyncio.to_thread` like every other Redis call in that loop. Note that reactions exhausting `MAX_RELAY_RETRIES=3` are **discarded, not dead-lettered** (`telegram_relay.py:827-831`).
 
@@ -285,16 +288,16 @@ No agent integration required — this is a bridge-internal change. The watchdog
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/session-liveness-tick-counter.md` covering the tick derivation, the reaction-slot precedence table, the ceiling and forced-progress behavior, and the Premium/fallback split.
-- [ ] Add the entry to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/bridge-self-healing.md` if it references the ⏳ stall reaction.
+- [x] Create `docs/features/session-liveness-tick-counter.md` covering the tick derivation, the reaction-slot precedence table, the ceiling and forced-progress behavior, and the Premium/fallback split.
+- [x] Add the entry to the `docs/features/README.md` index table.
+- [x] Update `docs/features/bridge-self-healing.md` if it references the ⏳ stall reaction.
 
 ### External Documentation Site
-- [ ] No changes — internal mechanism, not user-facing product surface.
+- [x] No changes — internal mechanism, not user-facing product surface.
 
 ### Inline Documentation
-- [ ] Update the `monitoring/session_watchdog.py` module docstring: it currently documents the ⏳ behavior being removed.
-- [ ] Record in `bridge/response.py` why digits require the custom-emoji schema, so nobody re-adds a keycap to `VALIDATED_REACTIONS`.
+- [x] Update the `monitoring/session_watchdog.py` module docstring: it currently documents the ⏳ behavior being removed.
+- [x] Record in `bridge/response.py` why digits require the custom-emoji schema, so nobody re-adds a keycap to `VALIDATED_REACTIONS`.
 
 ## Success Criteria
 
@@ -311,14 +314,17 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 ### 1. Establish reaction-slot precedence
 - Document the seven-writer precedence order in `docs/features/session-liveness-tick-counter.md`, including the unranked `react_with_emoji.py` path and the in-process `react_if_worker_down` gap.
-- Add the `priority` field to the reaction payload and emit it from every outbox writer (minimal call-site change; trigger logic untouched).
+- Add the `priority` field to the reaction payload. **Do it inside `_build_reaction_payload` (`agent/output_handler.py:1501`), as a keyword-only `priority: int | None = None` that falls back to a glyph→rank derivation when the caller passes nothing.** This is the decision the plan owes the builder, because "emit it from every outbox writer" is not a payload-literal edit for the writer that matters most: the terminal reaction (rank 1) never builds its own payload — `agent/session_executor.py:2576` calls `react_cb(...)`, which resolves to `TelegramRelayOutputHandler.react` (`:1535`) and builds at `:1576` through this one shared static. The alternative — threading `priority` through all four `react()` signatures (`output_handler.py:91,150,1535`, `bridge/email_bridge.py:1012`) — is rejected as a wider blast radius for no gain.
+- **The tick publisher must pass `priority` explicitly; it must not lean on the glyph→rank fallback.** 👀 is genuinely ambiguous under that derivation — it is both the child-completion suppress (rank 4, `agent/session_completion.py:564`) and the tick's slot-0 arc entry (rank 5). The fallback exists for writers that predate the field, not for new code that has the parameter in hand.
+- **Preserve schema parity after the replacement.** The payload schema is hand-mirrored in five more places (`agent/session_completion.py:591-602`, `agent/tool_budget.py:332-339`, `tools/react_with_emoji.py:98-105`, `monitoring/session_watchdog.py:605-608`, and imported directly at `agent/worker_down_reactions.py:137`). Task 8 REPLACEs `test_payload_matches_build_reaction_payload`, which is currently the test keeping one of those mirrors honest — so the replacement test must assert the *new* schema against `_build_reaction_payload` for every mirror, or the mirrors drift silently the first time the schema moves again.
 - Implement the drain guard at `telegram_relay.py:922`: drop a tick whose session reached terminal status, and drop a lower-priority reaction when a higher one owns the slot. Status read via `asyncio.to_thread`.
+- **Give the slot-ownership clause a state store**, or it is unimplementable. Terminal status is queryable, but "who owns this slot right now" is not derivable from anything that exists: record it per `(chat_id, message_id)` under `heartbeat:slot_owner:{chat_id}:{message_id}` holding the winning rank, written at the drain's `if success:` branch, TTL-bounded, and reset when a rank-1 terminal reaction lands. Without this the guard silently degrades to the terminal check alone — which is the only clause the drain can otherwise enforce.
 - Tests first: terminal-wins and no-flicker are the highest-value assertions in this plan.
 
 ### 2. Land the reaction constants
-- Adopt or rewrite the `wip/session-heartbeat-ticker` constants into their final home.
-- **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses 👀 or 🤔 stops the bridge from starting. The arc is a sequence, not a constant registry entry.
-- Add a test asserting the arc is disjoint from `_reaction_constants()` values, so a future edit cannot reintroduce the import-time crash.
+- Write the reaction constants fresh in `bridge/response.py` (the `wip/session-heartbeat-ticker` draft is gone — see Technical Approach): the pinned digit table, the fallback arc (👀 then alternating 🥱/👨‍💻 — see Resolved Question 4), `HEARTBEAT_MAX_TICKS`, `HEARTBEAT_TICK_INTERVAL_SECONDS`, and a `heartbeat_reaction(tick)` that raises past the ceiling.
+- **Keep the fallback arc OUT of `_reaction_constants()`.** `_assert_distinct()` raises `ImportError` at module import (`response.py:147,178`), so registering an arc that reuses an already-registered glyph (👀, 🤔, ✍, ⚠) stops the bridge from starting. The arc is a sequence, not a constant registry entry.
+- Add a test asserting **the arc registers no entry in `_reaction_constants()`**, so a future edit cannot reintroduce the import-time crash. Word it that way, not as glyph-disjointness: the arc deliberately leads with 👀, which *is* `REACTION_RECEIVED` (`bridge/response.py:111,137`), so a literal disjointness assertion would fail against the arc this task specifies. The invariant that actually prevents the crash is non-registration — `_assert_distinct()` (`response.py:147`, run at import at `:178`) only ever inspects the registry dict, so a glyph merely *reused* by an unregistered sequence cannot trip it.
 
 ### 3. Rewrite the watchdog path
 - Delete `_apply_stall_reaction`, `_clear_stall_reaction_dedup`, `STALL_REACTION_EMOJI`, the `watchdog:stall_reaction_applied:` key, and the `WATCHDOG_STALL_REACTION_ENABLED` gate.
@@ -328,7 +334,10 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 ### 4. Implement the ceiling
 - Refuse to tick past `HEARTBEAT_MAX_TICKS`; steer the session to publish progress, guarded by an atomic `SET NX` (Race 3).
-- Re-anchor the counter to the new message.
+- **Use the legacy session-scoped steering leg (`room_id=None`), not the Room leg.** `agent/steering.py:18-33` makes key selection selective (#2642): conversation-level writes go to the Room key and are served to whichever session next drains that Room, while session-scoped diagnostics — explicitly including the watchdog loop-break steer — target the legacy key. "Publish your progress" is a diagnostic about *this* session; sent to the Room leg a sibling session can consume it and the wedged session stays silent.
+- **Re-anchor on a named signal, not on inference.** The counter's anchor is cleared and re-established when the forced progress message actually exists. Use the relay's own record of sent message ids (`bridge/telegram_relay.py:984`, `_record_sent_message` on the `AgentSession`) as the truth source: the new anchor is that message id. **Mind the `DELIVERED_NO_ID` hole:** `telegram_relay.py:937-939` sets `success=True` with `msg_id=None`, and `_record_sent_message` only fires when an id exists — so a delivered-but-idless progress message would leave the Race 3 marker latched and the counter frozen despite the human having been answered. Treat a `DELIVERED_NO_ID` outcome as clearing the marker without re-anchoring (the counter stops; the next inbound message starts a fresh one). Re-anchoring on *any* subsequent PM message, rather than only a ceiling-forced one, is intended. This is the signal Race 3 depends on — its `SET NX` marker is cleared only when the new anchor message exists, so without naming it the marker has no specified clearer and latches forever.
+- **Disposition for "steer never honored"** (see the conditionality note in *What the counter means*): a wedged session never drains the steer, so no progress message appears and no re-anchor occurs. Do **not** add a retry or a timeout escalation in this issue. The counter stays frozen at the ceiling digit, which is the intended terminal display for this case. Assert it in a test so a later reader does not "fix" the freeze.
+- **Redis keys, named with TTLs so they cannot leak.** The counter anchor (`heartbeat:anchor:{session_id}`) and the last-published tick (`heartbeat:tick:{session_id}`) both carry a TTL comfortably exceeding the full ceiling window; the Race 3 forced-progress marker keeps its own `SET NX` TTL. An anchor key outliving its session is a leak, and the keys being *deleted* by Task 3 are named precisely, so these should be too.
 
 ### 5. Delete the dead custom-emoji index
 - Remove `build_custom_emoji_index`, `rebuild_custom_emoji_index`, `_load_custom_embeddings`, `CUSTOM_CACHE_PATH`, and `tests/unit/test_custom_emoji_index.py`.
@@ -377,12 +386,14 @@ No agent integration required — this is a bridge-internal change. The watchdog
 
 ## Resolved Questions
 
-All three questions from the first draft are decided. Kept here rather than deleted, because each rules out an approach a future reader would otherwise re-propose.
+All four questions are decided. Kept here rather than deleted, because each rules out an approach a future reader would otherwise re-propose.
 
 1. **Counter semantics — DECIDED (owner, 2026-08-10).** The counter asserts watchdog attention; the number is duration; it makes no stall claim; the ceiling forces a PM progress message at minimum every 100 minutes. Full statement in the Problem section. This supersedes both the "advancing liveness signal" framing of the first draft and the critique's "gated duration" counter-proposal — no evidence-freshness gating is needed, because the counter never infers session state.
 2. **Scope — DECIDED (owner, 2026-08-10).** Kept whole, appetite raised to Large. Not split into a separate reaction-slot-ownership issue: precedence is a prerequisite for the counter, and shipping the counter without it produces exactly the flicker the plan exists to avoid.
 3. **Anchor — DECIDED, follows from (1).** Anchor is counter start (session start, re-anchored at each forced progress message). Pure duration. The transcript-mtime / `updated_at` / turn-transition debate is moot: with no liveness inference there is no mirage to defend against.
 
+4. **Fallback arc glyph — DECIDED 2026-08-17.** The arc is **👀 then alternating 🥱/👨‍💻**. The original 🤔 is dropped: it is `REACTION_ERROR`'s pinned glyph (`bridge/response.py:143`), so in fallback mode every odd tick would show the system's "error" face on a healthy session. 🥱 is in `VALIDATED_REACTIONS` (`response.py:68`), unclaimed by any constant, and reads as honest elapsed time. There is no crash risk on either choice — the arc stays out of `_reaction_constants()` per Task 2, and Task 2's non-registration test enforces that. Note the arc still *leads with* 👀, which is `REACTION_RECEIVED`; that is deliberate and safe, because `_assert_distinct()` inspects only the registry, never a reused glyph.
+
 ## Open Questions
 
-1. **Fallback arc glyph — one open call, low stakes.** The specified arc is 👀 then alternating 🤔/👨‍💻. Two facts, now verified: registering any arc glyph in `_reaction_constants()` raises `ImportError` at import, which Task 2 avoids by keeping the arc out of the registry entirely — so **there is no crash risk either way**. What remains is cosmetic: 🤔 is `REACTION_ERROR`'s pinned glyph, so in fallback mode (digits unavailable) every odd tick shows the system's "error" face. The specified arc is retained as-is pending a call, since the collision is visible only in a degraded mode that a Premium account rarely enters. Swapping 🤔 → 🥱 or 😴 removes the ambiguity and reads as honest elapsed time; both are in `VALIDATED_REACTIONS` and unclaimed. Builder may proceed with the specified arc; this is reversible in one line.
+None — all four questions above are decided. The plan is ready for critique.

@@ -14,6 +14,7 @@ missing-binary message.
 
 from __future__ import annotations
 
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -283,6 +284,35 @@ def test_composite_receives_total_runtime(monkeypatch, tmp_path):
     build_deck_video(deck, output_path=tmp_path / "out.mp4")
 
     assert harness.composite_total_runtime == pytest.approx(1.5 + DECK_VIDEO_DEFAULT_HOLD_SECS)
+
+
+# --- Marp invocation ---------------------------------------------------------
+
+
+def test_export_pngs_passes_html_flag(monkeypatch, tmp_path):
+    """The Marp export must pass --html, which enables raw HTML tags.
+
+    Every slide archetype in the Cuttlefish theme is built from <div>/<span>
+    markup. Raw HTML is on by default in the current Marp CLI, so dropping the
+    flag looks harmless until that default flips and every exported frame comes
+    out with its layout silently stripped. Assert the flag rather than trusting
+    an upstream default.
+    """
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        (tmp_path / "deck.001.png").write_bytes(b"x")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dv.subprocess, "run", fake_run)
+    deck = tmp_path / "deck.md"
+    deck.write_text("# slide\n")
+
+    dv._export_pngs(deck, tmp_path)
+
+    assert "--html" in captured["cmd"]
+    assert "--allow-local-files" in captured["cmd"]
 
 
 # --- Ordering past index 9 ---------------------------------------------------

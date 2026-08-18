@@ -83,8 +83,11 @@ class TestReact:
         # Reactions land on the session-scoped outbox queue.
         assert mock_redis.rpush.call_args[0][0] == "telegram:outbox:test-session"
 
-    def test_react_queues_custom_emoji_reaction(self, _telegram_env):
-        """A custom emoji reaction carries custom_emoji_document_id."""
+    def test_react_payload_carries_a_precedence_rank(self, _telegram_env):
+        """This path is deliberately UNRANKED (#2716): an agent reacting on
+        purpose derives to rank 1 and wins its slot, rather than being silently
+        overridden by the precedence model."""
+        from agent.reaction_priority import PRIORITY_TERMINAL
         from tools.emoji_embedding import EmojiResult
         from tools.react_with_emoji import react
 
@@ -93,14 +96,17 @@ class TestReact:
             patch("tools.react_with_emoji._get_redis", return_value=mock_redis),
             patch(
                 "tools.emoji_embedding.find_best_emoji",
-                return_value=EmojiResult(emoji="\U0001f525", document_id=99999, is_custom=True),
+                return_value=EmojiResult(emoji="\U0001f525"),
             ),
         ):
             react("excited")
 
         payload = _queued_payload(mock_redis)
         assert payload["type"] == "reaction"
-        assert payload["custom_emoji_document_id"] == 99999
+        assert payload["priority"] == PRIORITY_TERMINAL
+        # find_best_emoji can no longer return a custom emoji: the embedding
+        # index that fed that branch was deleted in #2716.
+        assert "custom_emoji_document_id" not in payload
 
     def test_react_requires_reply_to(self, monkeypatch):
         """Missing TELEGRAM_REPLY_TO → exit 1 (a reaction needs an anchor)."""

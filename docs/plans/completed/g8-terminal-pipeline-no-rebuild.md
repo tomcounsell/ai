@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: completed
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -568,10 +568,12 @@ The change is confined to step 5, and it only ever moves an outcome from
   mitigated with a cache — that would add persistent state and break this plan's
   "no new dependencies, no new architectural surface" property for a sub-second cost.
   Lanes with an open PR remain entirely unaffected. **At batch granularity** the
-  figure multiplies: a dashboard refresh, an operator sweep, or a reflection scan that
-  walks N issues in one pass adds roughly N × 0.89s, serially, each call bounded by the
-  existing 5s timeout. Recorded so whoever next reports a slow dashboard refresh finds
-  the cause here rather than re-deriving it.
+  figure multiplies: any caller that walks N issues in one pass adds roughly N × 0.89s,
+  serially, each call bounded by the existing 5s timeout. The dashboard is **not** such
+  a caller — `ui/data/sdlc.py` reads pipeline state via `PipelineStateMachine.for_issue()`
+  and never enters `query_enriched`. Risk 3c names the three real callers and the tail
+  latency; recorded so whoever next reports a slow session completion or a `gh`
+  rate-limit warning finds the cause there rather than re-deriving it.
 - **Data ownership**: unchanged. The verifier remains read-only.
 - **Reversibility**: very high. Three small edits across two functions; reverting
   restores the present behavior exactly.
@@ -1100,6 +1102,31 @@ through to `Blocked(NO_RULE)`, which this plan classifies as a human-escalation 
 No router change is in this fence; the deliverable here is an honest statement of the
 residual, and Risk 2's mitigation is qualified accordingly.
 
+### Risk 3c: The two-pass lookup doubles the `gh` cost on the common path
+**Impact:** the second `_lookup_pr` pass fires whenever the first returns `None`,
+which is any issue with no open PR — most of what `_compute_meta` is asked about, as
+its own comment notes. Each pass can spend two `gh` subprocesses (issue-number search,
+then the branch-head fallback), so an issue with no PR at all costs **4** `gh` calls
+instead of 2, adding up to ~10s of latency when `gh` hangs against each call's
+existing 5s timeout, and the `gh pr list --search` leg draws on the tighter search-API
+rate limit rather than the general one. Architectural Impact records the measured
+~0.89s typical case; this entry names the tail and the call-count, which it did not.
+**Mitigation:** accepted, bounded, and documented rather than engineered around.
+`query_enriched` has three non-test callers: `tools/sdlc_next_skill.py` (router tick
+and `next-skill` CLI), `tools/sdlc_stage_query.py`'s own CLI entry point, and
+`agent/session_runner/runner.py::_load_ledger`, the completion guard from #2158. The
+first two are per-tick and per-invocation costs. The third is the one that matters:
+it runs in the long-lived worker on every SDLC session completion, so the doubled
+lookup stalls a completing session rather than a one-shot command. The dashboard is
+**not** a caller — `ui/data/sdlc.py` reads pipeline state via
+`PipelineStateMachine.for_issue()`. A short-circuit (skipping the second pass for
+callers that only want in-flight state) is deliberately **not** implemented: it would
+add a caller-intent parameter to a function this plan otherwise leaves
+signature-stable, and the plan's cache rejection applies for the same reason. The cost
+is recorded in `docs/features/sdlc-router-oscillation-guard.md` beside the
+cwd-threading note so whoever next reports a slow session completion or a `gh`
+rate-limit warning finds the cause here instead of re-deriving it.
+
 ### Risk 4: The repaired integration test is repaired to the wrong expectation
 **Impact:** the test currently asserts `row_id == "10"` on a fixture that cannot
 reach row 10. If the repair guesses at the missing pieces, it will either stay red
@@ -1209,7 +1236,7 @@ new one.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sdlc-router-oscillation-guard.md` — the G8 doc of
+- [x] Update `docs/features/sdlc-router-oscillation-guard.md` — the G8 doc of
   record. Its **"Verified artifact set (top 3, deterministic)"** table (`:127-134`)
   says BUILD is "verified when state is `OPEN` or `MERGED`", which omits the case
   that matters: no recorded PR number means no check at all. Add the unverifiable
@@ -1220,42 +1247,42 @@ new one.
   The existing note at `:135-136` ("A stage with no claimed artifact ... is a no-op —
   verification never invents a check") is the sentence this fix finally makes true
   for BUILD; extend it rather than writing a parallel one.
-- [ ] Update `docs/features/sdlc-pipeline.md` — the **"Stage-Advance Verification
+- [x] Update `docs/features/sdlc-pipeline.md` — the **"Stage-Advance Verification
   Gate (G8, issue #1267)"** section (`:50-80`). Its bullet list describes where
   verification runs, positioning, firing condition, and contract; note in the
   firing-condition bullet that an unresolvable artifact identifier is a no-op, not a
   mismatch, and that `pr_number` now resolves for merged PRs.
-- [ ] Update `.claude/skills/sdlc/SKILL.md:188` — "**G8 makes no live calls**"
+- [x] Update `.claude/skills/sdlc/SKILL.md:188` — "**G8 makes no live calls**"
   paragraph. It describes the verifier's live checks; add one clause that a stage
   whose artifact identifier is absent is skipped rather than reported as a mismatch.
   Keep it to one clause — this file is read into every SDLC session's context.
-- [ ] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
+- [x] Update `docs/sdlc/do-test.md:156-166` — the stale-fixture guardrail produced by
   **#2091** (`docs/plans/completed/fix-sdlc-router-merge-termination.md`), which
   already adjudicated this exact class of defect: a test fixture that encodes a
   routing expectation invalidated by a later router change. Its scope is currently
   `tests/unit/test_sdlc_router*.py`, which is precisely why the **integration**
   fixture repaired by this plan escaped it. Widen the note to cover integration
   fixtures that assert `row_id`.
-- [ ] Also fix `docs/features/sdlc-router-oscillation-guard.md:133` while in that
+- [x] Also fix `docs/features/sdlc-router-oscillation-guard.md:133` while in that
   table — it still describes the PLAN check by slug, which #2792 made false. It is
   one line inside a table the builder is already editing.
-- [ ] No new feature doc, and therefore no `docs/features/README.md` index entry.
+- [x] No new feature doc, and therefore no `docs/features/README.md` index entry.
   Creating `docs/features/g8-terminal-*.md` would be a parallel artifact for a
   behavior already documented in two places.
 
 ### Inline Documentation
-- [ ] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
+- [x] `_compute_meta`'s two-pass lookup: a comment naming #2539 as the precedent,
   `agent/pipeline_state.py:1564` as the in-repo idiom, why the second pass runs only
   on `None` (an open PR must always win over a historical one), and why it is scoped
   to `merged` rather than `all` (a closed-unmerged PR is not a build artifact, and
   admitting one would make G8 fire — demonstrated on #2793).
-- [ ] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
+- [x] No new helper docstring — the earlier draft's `_pipeline_is_terminal_from_states`
   is cut, so there is no third spelling of the terminal predicate to document.
-- [ ] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
+- [x] `_verify_stage_artifacts_live` docstring (`:189-210`): extend the
   merged-pipeline-misfire paragraph with the #2757 case and the three-state
   distinction. **Paraphrase the removed condition** — naming it verbatim trips the
   plan's own anti-criterion grep.
-- [ ] The two new debug logs carry their reasons inline (unverifiable BUILD;
+- [x] The two new debug logs carry their reasons inline (unverifiable BUILD;
   unverifiable PATCH), in the register of the existing PATCH skip at `:258-263`.
 
 ## Success Criteria
@@ -1317,7 +1344,7 @@ new one.
   diff. (`tools/sdlc_stage_query.py` is now **inside** the fence — see Appetite.)
 - [x] The unverifiable-BUILD skip logs at debug and the falsified-BUILD mismatch
   still logs at warning, asserted by level.
-- [ ] `sdlc-tool next-skill --issue-number 2755` still returns row 10 (the live
+- [x] `sdlc-tool next-skill --issue-number 2755` still returns row 10 (the live
   negative control from spike-7).
 - [x] Tests pass (`/do-test`)
 - [x] Documentation updated (`/do-docs`)
@@ -1726,3 +1753,36 @@ This repo has `deleteBranchOnMerge: false` and `session/sdlc-2755` is still on o
 | CONCERN | Scope | Six tasks and three agents for roughly ten lines plus tests; tasks 3 and 5 are the same work run twice. | **ADDRESSED** — exactly that: builder + validator, with validation collapsed to a single pass (build-red / build-fix / build-tests-docs / validate-all). The documentarian folds into the builder. | Collapse to two agents and three tasks. |
 | NIT | Risk, Scope, History | Log-level assertions need `caplog.set_level(logging.DEBUG)` or they pass vacuously. Re-asserting the existing warning's level pins a log level as an interface. `_pipeline_is_terminal_from_states` contains `_pipeline_is_terminal` as a substring, making cross-reference greps ambiguous. `docs/features/sdlc-router-oscillation-guard.md:133` still describes the PLAN check by slug, false post-#2792, in the same table the documentarian edits. spike-3 over-reads a now-empty ledger as testimony about its state a day earlier. | **ADDRESSED** — `caplog.set_level(logging.DEBUG)` mandated and the existing-warning re-assertion dropped (Error State Rendering); the near-homonym is gone with the helper; `sdlc-router-oscillation-guard.md:133`'s stale slug wording added to Documentation; spike-3's over-read of the empty ledger flagged in its correction note. | Address inline during revision. |
 
+
+### Round 4 — staleness re-critique 2026-08-17
+
+**Verdict: READY TO BUILD (no concerns)** — LITE roster (Consolidated Critic).
+0 BLOCKERs, 0 CONCERNs, 0 NITs.
+
+Scoped re-critique triggered by router row 2b only: the plan doc's commit time moved
+past the round-3 verdict time. The plan was already BUILT, TESTED (252 passing),
+PATCHED twice, and REVIEWED to APPROVED at head `f40611a42`.
+
+Diff `4dec5d5d5..HEAD` on the plan carries exactly one substantive change — the
+additive **Risk 3c** section. Every other changed line is a checkbox tick; each
+changed checkbox line was verified to pair exactly with its counterpart modulo
+`[ ]` vs `[x]`, so no criterion text, task step, acceptance criterion, or scope moved.
+
+Risk 3c's factual claims were re-verified live against the repo:
+
+| Claim | Status |
+|---|---|
+| `query_enriched` has exactly three non-test callers | **CONFIRMED** — `tools/sdlc_next_skill.py:96`, `tools/sdlc_stage_query.py:860` (its own CLI `main`), `agent/session_runner/runner.py:1397` (`_load_ledger`) |
+| The dashboard is **not** a caller | **CONFIRMED** — `ui/data/sdlc.py:944` reads through `PipelineStateMachine.for_issue()` |
+| 4 `gh` calls worst case instead of 2 | **CONFIRMED** — `_lookup_pr` has two legs (`_gh_pr_search_issue_ref`, `_gh_pr_list`); two passes double them |
+| 5s per-call timeout | **CONFIRMED** — `tools/sdlc_stage_query.py:319` and `:247` both `timeout=5` |
+| ~10s added tail reconciles with Architectural Impact's ~0.89s typical | **CONFIRMED** — Risk 3c states the distinction explicitly; the two figures measure the hang tail and the fast path, not the same quantity |
+| Short-circuit rejection consistent with Rabbit Holes / No-Gos | **CONFIRMED** — no entry proposes it; the rationale matches the existing cache rejection |
+
+Risk 3c documents an already-shipped, already-reviewed cost at the explicit direction
+of the PR review. It proposes no new work. No revision pass is required; the lane
+proceeds to DOCS and MERGE.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| — | Consolidated Critic | No findings from the war room. Risk 3c is accurate and internally consistent; nothing else of substance moved. | n/a | n/a |

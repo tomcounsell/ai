@@ -14,7 +14,7 @@ screen for the length of its spoken narration, voiceover muxed in, exported as a
 **Pipeline:**
 
 1. **Author the deck with per-slide narration blocks** (schema below) — the Marp markdown is written exactly as in the static flow, plus one narration comment per slide carrying the speaker text.
-2. **Marp exports one PNG per slide**: `npx --yes @marp-team/marp-cli "<source>.md" --images png --allow-local-files` (the same Marp invocation as static export, with `--images png`). Filenames are zero-padded sequence suffixes (`deck.001.png`, ...) so document order is preserved.
+2. **Marp exports one PNG per slide**: `npx --yes @marp-team/marp-cli "<source>.md" --images png --html --allow-local-files` (the same Marp invocation as static export, with `--images png`). `--html` enables raw HTML tags, which every Cuttlefish slide archetype is built from. Filenames are zero-padded sequence suffixes (`deck.001.png`, ...) so document order is preserved.
 3. **`valor-tts` synthesizes one clip per narrated slide**: each slide's narration text becomes one OGG/Opus clip. Each clip's measured `duration` is that slide's on-screen hold time.
 4. **ffmpeg muxes** the PNGs and audio clips into `deck.mp4` (concat demuxer, per-image duration list, `-c:v libx264 -pix_fmt yuv420p`, audio re-encoded to AAC).
 

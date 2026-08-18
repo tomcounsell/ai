@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -1554,7 +1554,7 @@ needs no wiring.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/watchdog-log-isolation.md` — the invariant (logging is configured at the
+- [x] Create `docs/features/watchdog-log-isolation.md` — the invariant (logging is configured at the
       entry point, never at import), applied across all **three** modules; the watchdogs' shared
       `propagate = False` topology and why the plists' both-streams redirect forces it; `log_rotate`'s
       opposite `propagate = True` decision and the two-different-files plist that justifies it,
@@ -1564,29 +1564,29 @@ needs no wiring.
       composition, so the >90% line-volume drop reads as intended rather than as a stopped
       watchdog**; and how the 14-file AST guard enforces the invariant along with what it
       deliberately does not cover.
-- [ ] Add a row for it to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
+- [x] Add a row for it to the `docs/features/README.md` index table.
+- [x] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
       watchdog itself writes to `logs/watchdog.log` now comes from a real entry-point invocation and
       appears once rather than twice, and submodule records that used to ride root's handler now
       arrive unformatted (WARNING+) or not at all (INFO).
 
 ### Inline Documentation
-- [ ] Docstring on `_configure_logging()` citing #2643, stating the three constraints a future editor
+- [x] Docstring on `_configure_logging()` citing #2643, stating the three constraints a future editor
       must not break: called from `__main__` only; `WATCHDOG_LOG_FILE` read from the module global at
       call time; no root configuration.
-- [ ] Update the `_configure_logger()` docstring in `monitoring/worker_watchdog.py` — keep the #1311
+- [x] Update the `_configure_logger()` docstring in `monitoring/worker_watchdog.py` — keep the #1311
       explanation, add the #2643 sentence about the call site moving out of module scope and the
       clearing becoming owned-only.
-- [ ] Update the `scripts/log_rotate.py` module docstring — one sentence recording that logging is
+- [x] Update the `scripts/log_rotate.py` module docstring — one sentence recording that logging is
       configured in the `__main__` guard because the module is imported as a library by
       `scripts/update/log_cleanup.py`. The existing self-rotation paragraph naming
       `logs/log_rotate_error.log` as the LaunchAgent's `StandardErrorPath` stays accurate and must
       stay verbatim; `basicConfig` keeps `stream=sys.stderr`.
-- [ ] Comment at the relocated `basicConfig` in `scripts/log_rotate.py` explaining why `logger` keeps
+- [x] Comment at the relocated `basicConfig` in `scripts/log_rotate.py` explaining why `logger` keeps
       `propagate = True` here while both watchdogs use `False` — this module configures **root**, so
       turning propagation off routes its records to `lastResort` at WARNING and silences every INFO
       line `main()` emits.
-- [ ] Comment in `tests/unit/test_watchdog_log_isolation.py` explaining why TC2 / TC4 assert on
+- [x] Comment in `tests/unit/test_watchdog_log_isolation.py` explaining why TC2 / TC4 assert on
       handler state rather than file size (concurrent-writer flake), why the root-state gates must run
       in a subprocess (`basicConfig` is a no-op when root already has pytest's handlers) — TC15
       included, for that same reason — and why TC15 `runpy`s a temp-dir copy rather than the real
@@ -1594,65 +1594,65 @@ needs no wiring.
       production logs).
 
 ### Test Suite Index
-- [ ] Add `tests/unit/test_watchdog_log_isolation.py` to the `tests/README.md` index with its feature
+- [x] Add `tests/unit/test_watchdog_log_isolation.py` to the `tests/README.md` index with its feature
       marker.
 
 ## Success Criteria
 
-- [ ] Running `tests/unit/test_bridge_watchdog.py` in the worktree produces zero new lines in that
+- [x] Running `tests/unit/test_bridge_watchdog.py` in the worktree produces zero new lines in that
       worktree's `logs/watchdog.log` (identical sha256 before and after).
-- [ ] `import monitoring.bridge_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
+- [x] `import monitoring.bridge_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
       **empty** and root at **WARNING**, and opens no file (TC1). The plain absolute form, restored in
       revision 3 and measured to hold under the three-module fix (`[] / 30`). No `basicConfig` call
       originates from `monitoring/` or from `scripts/log_rotate.py` during the import (TC1a), and no
       logger anywhere holds a handler on `watchdog.log` (TC2).
-- [ ] `import monitoring.worker_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
+- [x] `import monitoring.worker_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
       empty, leaves root at WARNING, and opens no file (TC3, TC4).
-- [ ] `import scripts.log_rotate` in a fresh interpreter leaves `logging.getLogger().handlers` empty
+- [x] `import scripts.log_rotate` in a fresh interpreter leaves `logging.getLogger().handlers` empty
       and root at WARNING (TC13), and `log_rotate.logger` reports `level == logging.INFO` and
       `propagate is True` (TC14).
-- [ ] After a bare import, both **watchdog** loggers report `propagate is False`,
+- [x] After a bare import, both **watchdog** loggers report `propagate is False`,
       `level == logging.INFO`, and `isEnabledFor(logging.INFO) is True`. `log_rotate`'s logger reports
       `propagate is True` and `level == logging.INFO` — the opposite propagation decision, justified
       in Solution and pinned by TC14.
-- [ ] A real entry-point invocation still writes to `logs/watchdog.log` with formatter
+- [x] A real entry-point invocation still writes to `logs/watchdog.log` with formatter
       `%(asctime)s [%(levelname)s] %(message)s`, level INFO, 10 MB × 5 rotation — proved by running
       the module's actual `__main__` guard in the worktree and asserting on the handler it attached
       plus one emitted record (Task 5). Not proved via `--check-only`: that branch emits nothing
       above DEBUG on a machine without a bridge, and it writes a synthetic crash event to
       `data/crash_history.jsonl` and to production Redis on the way.
-- [ ] `monitoring/worker_watchdog.py` keeps 5 MB × 3 rotation and `propagate = False` after its
+- [x] `monitoring/worker_watchdog.py` keeps 5 MB × 3 rotation and `propagate = False` after its
       entry-point configuration runs.
-- [ ] `scripts/log_rotate.py` run as a script still configures root with `level=INFO`,
+- [x] `scripts/log_rotate.py` run as a script still configures root with `level=INFO`,
       `format="%(asctime)s %(levelname)s %(message)s"`, `stream=sys.stderr`, and still emits its
       diagnostics formatted — proved by TC15's subprocess probe against a temp-dir copy of the real
       source, so the
       LaunchAgent's `logs/log_rotate_error.log` output is byte-shaped identically to today.
-- [ ] `tests/unit/test_log_rotate.py` and `tests/unit/test_update_log_cleanup.py` pass unmodified.
-- [ ] `tests/unit/test_bridge_watchdog.py` passes. Exactly two `caplog` sites in it are edited to the
+- [x] `tests/unit/test_log_rotate.py` and `tests/unit/test_update_log_cleanup.py` pass unmodified.
+- [x] `tests/unit/test_bridge_watchdog.py` passes. Exactly two `caplog` sites in it are edited to the
       explicit-handler pattern; nothing else in the file changes.
-- [ ] The three `TestLoggerConfiguration` tests are rewritten per Test Impact — handler-count,
+- [x] The three `TestLoggerConfiguration` tests are rewritten per Test Impact — handler-count,
       propagate, and idempotence assertions **retained** against explicit `_configure_logger()` calls
       under a monkeypatched `LOG_FILE` — and the mis-aimed `test_no_basicconfig_on_root` now asserts
       something about root that a mutation can break.
-- [ ] `tests/integration/test_update_loop_wedge_recovery.py` and
+- [x] `tests/integration/test_update_loop_wedge_recovery.py` and
       `tests/integration/test_watchdog_recovery.py` pass.
 - [ ] The full `tests/unit/` suite passes once before the PR opens (Risk 3).
-- [ ] Demonstrated-red evidence is in the PR body: red command + **verbatim** failing output for the
+- [x] Demonstrated-red evidence is in the PR body: red command + **verbatim** failing output for the
       new gates against unfixed source, green command + **verbatim** passing output after, and the
       full per-guard mutation → test mapping from Task 5.
-- [ ] The PR body states all three operator-visible effects explicitly under a top-level "Behavior
+- [x] The PR body states all three operator-visible effects explicitly under a top-level "Behavior
       change" heading, carrying the Data Flow table verbatim and the reading of acceptance
       criterion 3: own-record de-duplication, submodule WARNING+ losing its format prefix, and
       submodule INFO being dropped.
-- [ ] Issue **#2678** carries a comment linking this PR, and its title and body name only
+- [x] Issue **#2678** carries a comment linking this PR, and its title and body name only
       `scripts/update/run.py` (Task 6). **Stated as an end state at revision 4**, not as an edit to
       perform: the retitle and rescope already happened before this revision, so a criterion phrased
       as "it is retitled" would be ticked without work. Only the PR-link comment is new.
-- [ ] The No-Go prefix gate prints `LOGS_PREFIX_INTACT`: neither main-checkout log shrank and
+- [x] The No-Go prefix gate prints `LOGS_PREFIX_INTACT`: neither main-checkout log shrank and
       neither one's recorded prefix changed.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

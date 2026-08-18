@@ -1428,3 +1428,185 @@ class TestLatestReviewHeadShaMeta:
             # router still reads the record directly.
             direct = _latest_review_head_sha({"_verdicts": verdicts}, {})
             assert direct.lower() == (expected or ""), label
+
+
+# ---------------------------------------------------------------------------
+# Issue #2757: `_compute_meta`'s two-pass PR lookup.
+#
+# `_lookup_pr` defaults to `state="open"`, which excludes merged PRs from BOTH
+# of its resolution legs. A lane's `pr_number` therefore evaporated the moment
+# its PR merged -- and a `pr_number`-less terminal pipeline is what got told to
+# rebuild the work it had just shipped. Measured live before the fix: #2638 ->
+# None under `open` / 2686 under `merged`; #2566 -> None / 2665; #2640 -> None
+# / 2671.
+#
+# All three cases below drive the REAL `_lookup_pr` / `_gh_pr_search_issue_ref`
+# through a stubbed `gh`, so the assertions are about the `--state` values
+# actually placed on the wire rather than about a mock's return value.
+# ---------------------------------------------------------------------------
+
+
+class TestComputeMetaTwoPassPrLookup:
+    @staticmethod
+    def _gh_stub(by_state: dict[str, list[dict]], states_seen: list[str]):
+        """Stub `gh pr list`, recording every `--state` value it is asked for.
+
+        ``by_state`` maps a `--state` value to the JSON candidate list `gh`
+        returns for it; an unlisted state answers empty.
+        """
+
+        def _run(cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.stdout = "[]"
+            if cmd[:3] == ["gh", "pr", "list"]:
+                state = cmd[cmd.index("--state") + 1] if "--state" in cmd else "open"
+                states_seen.append(state)
+                proc.stdout = json.dumps(by_state.get(state, []))
+            return proc
+
+        return _run
+
+    def _compute(self, by_state):
+        from tools.sdlc_stage_query import _compute_meta
+
+        states_seen: list[str] = []
+        with (
+            patch("tools.sdlc_stage_query._resolve_target_repo_fallback", return_value=None),
+            patch("tools.sdlc_stage_query.resolve_lane_slug", return_value=None),
+            patch("tools.sdlc_stage_query._find_plan_path", return_value=None),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("subprocess.run", self._gh_stub(by_state, states_seen)),
+        ):
+            meta = _compute_meta({}, MagicMock(pr_number=None, slug=None), 2757)
+        return meta, states_seen
+
+    def test_merged_pr_resolves_when_the_open_pass_finds_nothing(self):
+        """The headline fix: a shipped lane's pr_number survives its own merge."""
+        meta, states_seen = self._compute(
+            {"merged": [{"number": 2686, "body": "Closes #2757"}]},
+        )
+
+        assert meta["pr_number"] == 2686
+        assert states_seen == ["open", "merged"], states_seen
+
+    def test_open_pass_hit_does_not_run_the_merged_pass_at_all(self):
+        """Strictly-additive ordering, pinned by CALL COUNT, not by result.
+
+        An OPEN PR is the lane's live artifact and must always win over a
+        historical one. Asserting only that the answer is 2900 would be
+        satisfied by a second pass that runs anyway and happens to agree --
+        which is a real behavior change (an extra `gh` call per tick, and a
+        different answer the day the two passes disagree). The zero-merged-
+        calls assertion is the one that cannot be faked.
+        """
+        meta, states_seen = self._compute(
+            {
+                "open": [{"number": 2900, "body": "Closes #2757"}],
+                "merged": [{"number": 2686, "body": "Closes #2757"}],
+            },
+        )
+
+        assert meta["pr_number"] == 2900
+        assert states_seen == ["open"], states_seen
+        assert "merged" not in states_seen
+
+    def test_closed_unmerged_pr_resolves_to_none_not_to_that_pr(self):
+        """The second pass is scoped to `merged`, deliberately NOT `all`.
+
+        `_gh_pr_search_issue_ref` returns the FIRST body-validating candidate
+        with no MERGED-over-CLOSED preference, so an `all` pass surfaces a
+        closed-unmerged PR -- measured on #2793, whose only body-validating PR
+        is closed 2794. That is not evidence BUILD produced an artifact: it
+        reads back as CLOSED, which makes guard g8 fire and converts a silent
+        no-op into an ACTIVE false rebuild. Without this case a builder could
+        revert the second pass to `state="all"` and still satisfy every other
+        criterion in the plan.
+
+        Simulated exactly as `gh` behaves: the PR is visible under `all`, and
+        under neither `open` nor `merged`.
+        """
+        meta, states_seen = self._compute(
+            {"all": [{"number": 2794, "body": "Closes #2757"}]},
+        )
+
+        assert meta["pr_number"] is None
+        assert states_seen == ["open", "merged"], states_seen
+        assert "all" not in states_seen
+
+
+class TestConcernRoundCountMetaProjection:
+    """#2787: `_concern_round_count` must reach the router via `_meta`.
+
+    It cannot ride `stages`: `query_enriched` threads only
+    ``("_verdicts", "_sdlc_dispatches")`` out of raw stage_states, so a bare
+    underscore key is dropped on the floor and every rule reading it would be
+    structurally inert in the CLI path — the ONLY path the pipeline uses.
+    """
+
+    def _enriched(self, raw_states: dict) -> dict:
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(raw_states)
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    return query_enriched(session_id="sid")
+
+    def test_raw_counter_is_surfaced_into_meta(self):
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": 2})
+        assert result["_meta"]["concern_round_count"] == 2
+
+    def test_raw_underscore_key_is_dropped_from_stages(self):
+        """Proof of why the `_meta` channel is required, not a stylistic choice."""
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": 2})
+        assert "_concern_round_count" not in result["stages"]
+
+    def test_defaults_to_zero_when_absent(self):
+        """Every lane predating the key starts here, and 0 is the correct start."""
+        result = self._enriched({"ISSUE": "completed"})
+        assert result["_meta"]["concern_round_count"] == 0
+
+    def test_default_meta_carries_the_key_parity_rule(self):
+        """#2769: `_default_meta` and `_compute_meta` must stay key-for-key.
+
+        A no-session ledger falls back to `_default_meta`; a key present in one
+        and absent in the other makes the router's read shape depend on whether
+        a session was found.
+        """
+        from tools.sdlc_stage_query import _compute_meta, _default_meta
+
+        defaults = _default_meta()
+        assert "concern_round_count" in defaults
+        assert defaults["concern_round_count"] == 0
+
+        mock_session = MagicMock()
+        mock_session.pr_number = None
+        with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+            with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                computed = _compute_meta({}, mock_session, None)
+        assert set(defaults) == set(computed), (
+            "key parity broken (#2769): "
+            f"only in _default_meta={set(defaults) - set(computed)}, "
+            f"only in _compute_meta={set(computed) - set(defaults)}"
+        )
+
+    def test_non_integer_values_coerce_to_zero_rather_than_raising(self):
+        """`_compute_meta` is called unwrapped: a corrupt value must degrade, not blind the router.
+
+        Coercing to 0 makes the bound stand down (routing to re-critique, the
+        fail-safe direction). Raising would take the whole `stage-query`
+        projection down and leave `_resolve_enriched` returning an empty ledger,
+        which sends a fully-worked issue back to `/do-plan`.
+        """
+        for bad in ("not-a-number", None, [], {}, "", "3.7.1"):
+            result = self._enriched({"ISSUE": "completed", "_concern_round_count": bad})
+            assert result["_meta"]["concern_round_count"] == 0, bad
+
+    def test_numeric_string_is_accepted(self):
+        """JSON round-trips through Redis can stringify; the counter must survive it."""
+        result = self._enriched({"ISSUE": "completed", "_concern_round_count": "5"})
+        assert result["_meta"]["concern_round_count"] == 5

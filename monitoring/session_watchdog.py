@@ -16,11 +16,13 @@ When issues are detected, the watchdog FIXES them automatically:
   AUTOMATICALLY enqueues a steering message via `_inject_watchdog_steer`.
   Per-reason atomic Redis cooldowns (SET NX EX) prevent floods. No longer
   "detected but logged only" — detections now drive actuation.
-- For stalled sessions with an originating Telegram message (issue #1313):
-  AUTOMATICALLY queues a ⏳ reaction emoji on the user's original message
-  via `_apply_stall_reaction`. Atomic `SET NX EX` dedup key per session
-  prevents repeats within a stall period. Reset on healthy-state observation
-  so re-stalls trigger a fresh reaction.
+- For sessions with an originating Telegram message (issue #2716):
+  publishes an advancing liveness tick counter on that message via
+  `_publish_liveness_ticks`, and forces a progress message at the ceiling.
+  The counter is pure wall-clock DURATION: it asserts that this watchdog —
+  a process independent of the session — has eyes on the session, and makes
+  no claim about whether the session is stalled. See
+  `docs/features/session-liveness-tick-counter.md`.
 
 NO ALERTS ARE SENT for recoverable stalls. Either retry, fix, or create an issue.
 
@@ -105,20 +107,16 @@ TOKEN_ALERT_COOLDOWN = int(os.environ.get("WATCHDOG_TOKEN_ALERT_COOLDOWN", "3600
 # steer before the next one fires.
 STEER_COOLDOWN = int(os.environ.get("WATCHDOG_STEER_COOLDOWN", "900"))
 
-# === User-visible stall alert (issue #1313) ===
-# Reaction emoji queued on the originating Telegram message when a session
-# is observed stalled. ⏳ chosen for "stalled / waiting too long"; visually
-# distinct from existing bridge reactions (👀 received, 🔥 drafting, 👍 done).
-STALL_REACTION_EMOJI = "⏳"
-# Dedup TTL: the reaction is queued at most once per session per stall
-# period. 1 day is well over any realistic stall lifetime; the key is also
-# explicitly DELETEd when the session is observed in a healthy state, so
-# this TTL is just a safety bound for orphaned keys.
-STALL_REACTION_DEDUP_TTL = 86400
+# === Session liveness tick counter (issue #2716) ===
 # OUTBOX TTL: matches `agent/output_handler.py::OutputHandler.OUTBOX_TTL`
 # (3600s) — the bridge's reaction relay drains the same key with this TTL
 # applied via EXPIRE on each rpush.
-STALL_REACTION_OUTBOX_TTL = 3600
+HEARTBEAT_OUTBOX_TTL = 3600
+# Statuses the tick publisher sweeps. `running` is the load-bearing entry:
+# worker-executed Telegram sessions — the exact population this feature exists
+# for — live at `running`, and `check_all_sessions` never sees them because it
+# queries `status="active"` only.
+HEARTBEAT_STATUSES = ("running", "active")
 
 
 # === Fix #5 (#1821): out-of-domain worker liveness + slot recovery ===
@@ -238,6 +236,12 @@ async def watchdog_loop(telegram_client=None) -> None:
             check_worker_liveness_and_slots()
         except Exception as e:
             logger.error("[watchdog] Error in worker liveness/slot check: %s", e, exc_info=True)
+
+        # Own guarded try: a counter failure must never take down the loop.
+        try:
+            _publish_liveness_ticks()
+        except Exception as e:
+            logger.error("[watchdog] Error in liveness tick publish: %s", e, exc_info=True)
 
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
@@ -438,15 +442,6 @@ def check_stalled_sessions() -> list[dict]:
                         last_history,
                     )
 
-                    # Issue #1313: queue a user-visible ⏳ reaction on the
-                    # originating Telegram message. Idempotent within the
-                    # stall period; cleared below when the session recovers.
-                    _apply_stall_reaction(session)
-                else:
-                    # Session observed in a healthy (non-stall) state. Clear
-                    # the dedup key so a future re-stall triggers a fresh
-                    # reaction. Cheap no-op when the key doesn't exist.
-                    _clear_stall_reaction_dedup(session_id)
             except Exception as e:
                 logger.error("[watchdog] Error checking session for stall: %s", e)
 
@@ -575,122 +570,156 @@ def _inject_watchdog_steer(
         return False
 
 
-def _apply_stall_reaction(session: AgentSession) -> bool:
-    """Queue a user-visible ⏳ reaction on the originating Telegram message.
+def _forced_progress_steer_text() -> str:
+    """Compose the ceiling steer that forces a substantive progress message."""
+    from bridge.response import HEARTBEAT_MAX_TICKS, HEARTBEAT_TICK_INTERVAL_SECONDS
 
-    Issue #1313: when `check_stalled_sessions` observes a session past its
-    stall threshold, this helper writes a reaction payload to
-    ``telegram:outbox:{session_id}`` so the bridge relay's existing
-    `_send_queued_reaction` drain delivers the emoji on the user's
-    original message. The existing ``LIFECYCLE_STALL`` warning log is
-    preserved unchanged — this is an *additional* user-visible channel,
-    not a replacement.
+    minutes = (HEARTBEAT_MAX_TICKS + 1) * HEARTBEAT_TICK_INTERVAL_SECONDS // 60
+    return (
+        f"[watchdog] This session has been running about {minutes} minutes since its "
+        f"last message to the human, and the liveness counter has reached its ceiling. "
+        f"Publish a short progress message now — success, failure, or still-working with "
+        f"what you are waiting on. The counter re-anchors to that message and starts over."
+    )
 
-    Idempotency: a single atomic ``SET NX EX`` on
-    ``watchdog:stall_reaction_applied:{session_id}`` (TTL =
-    ``STALL_REACTION_DEDUP_TTL``) ensures exactly one reaction per
-    session per stall period. The key is DELETEd elsewhere when the
-    session is observed in a healthy state so re-stalls trigger a fresh
-    reaction.
 
-    Skip conditions (return ``False``, no Redis writes, no warning):
-      * Feature flag ``WATCHDOG_STALL_REACTION_ENABLED`` is set falsy.
-      * Session has no ``chat_id`` (e.g. local sessions, no Telegram origin).
-      * Session has no ``telegram_message_id`` (originating message not
-        captured — typical for non-Telegram session creators).
-      * Session has no resolvable ``session_id`` / ``agent_session_id``.
-      * Dedup key already exists for this stall period.
+def _publish_liveness_ticks() -> int:
+    """Advance the liveness tick counter on each session's originating message.
 
-    Schema parity: the inlined payload literal MUST stay byte-for-byte
-    identical to ``agent/output_handler.OutputHandler._build_reaction_payload``
-    so the bridge relay accepts both writers' messages from the same outbox.
-    The unit test ``test_payload_matches_build_reaction_payload`` enforces
-    this. We do NOT import `_build_reaction_payload` directly because that
-    module is async-handler code and the import path risks cycles; the test
-    is the only mechanical defense against schema drift.
+    Issue #2716. Synchronous, called from `watchdog_loop` alongside
+    `check_stalled_sessions`. It must NOT live inside `check_all_sessions`:
+    that function is async and queries `status="active"` only, while
+    worker-executed Telegram sessions run at `status="running"` — the exact
+    population this feature exists for.
 
-    Args:
-        session: The AgentSession observed as stalled. Must expose
-            ``session_id`` (or ``agent_session_id``), ``chat_id``, and
-            ``telegram_message_id``.
+    **What the counter means.** It asserts that the watchdog has eyes on this
+    session, and nothing else. The number is pure wall-clock duration since the
+    counter's anchor: tick 4 means "roughly four intervals have passed", not
+    "four units of progress". A wedged session and a busy session tick
+    identically. No self-report is consulted and no evidence-freshness probe is
+    performed, because there is no liveness inference to defend —
+    `bridge/liveness.py` establishes why a session cannot testify to its own
+    failure, which is why an independent observer emits this signal at all.
+
+    The tick is DERIVED from elapsed wall clock (`elapsed // interval`), never
+    incremented per scan. WATCHDOG_INTERVAL is 300s against a 600s tick, so an
+    increment-per-scan implementation would advance at double rate and would
+    double-count across a loop restart. A rescan recomputes the same value.
+
+    At the ceiling the counter refuses to advance and the session is steered to
+    publish a progress message instead, guarded by an atomic SET NX so two
+    scans cannot both steer. A genuinely wedged session never drains the steer
+    — no tool calls, no turn boundary — so the marker stays claimed and the
+    counter freezes at the ceiling digit. That is the intended terminal display
+    for that case and must not be "fixed" with a retry or timeout escalation.
 
     Returns:
-        True when a reaction payload was queued. False on any skip
-        condition or any caught exception (fail-quiet so the watchdog
-        loop never crashes on reaction errors).
+        The number of tick reactions queued this sweep. Fail-quiet per session:
+        one bad session never aborts the sweep.
     """
-    if not _env_flag_enabled("WATCHDOG_STALL_REACTION_ENABLED"):
-        return False
+    import bridge.liveness_ticks as ticks
+    from agent.reaction_priority import PRIORITY_HEARTBEAT
+    from bridge.response import (
+        HEARTBEAT_MAX_TICKS,
+        HEARTBEAT_TICK_INTERVAL_SECONDS,
+        heartbeat_reaction,
+    )
 
-    try:
-        chat_id = getattr(session, "chat_id", None)
-        msg_id = getattr(session, "telegram_message_id", None)
-        session_id = getattr(session, "session_id", None) or getattr(
-            session, "agent_session_id", None
-        )
-        if not (chat_id and msg_id and session_id):
-            return False
+    queued = 0
+    now = time.time()
 
-        from popoto.redis_db import POPOTO_REDIS_DB
+    for status_val in HEARTBEAT_STATUSES:
+        try:
+            sessions = list(AgentSession.query.filter(status=status_val))
+        except Exception as e:
+            logger.error(
+                "[watchdog] Failed to query %s sessions for liveness ticks: %s",
+                status_val,
+                e,
+            )
+            continue
 
-        dedup_key = f"watchdog:stall_reaction_applied:{session_id}"
-        slot_open = POPOTO_REDIS_DB.set(
-            dedup_key,
-            "1",
-            nx=True,
-            ex=STALL_REACTION_DEDUP_TTL,
-        )
-        if not slot_open:
-            return False
+        for session in sessions:
+            try:
+                chat_id = getattr(session, "chat_id", None)
+                msg_id = getattr(session, "telegram_message_id", None)
+                session_id = getattr(session, "session_id", None) or getattr(
+                    session, "agent_session_id", None
+                )
+                # Local sessions and non-Telegram origins have no slot to write.
+                if not (chat_id and msg_id and session_id):
+                    continue
 
-        payload = {
-            "type": "reaction",
-            "chat_id": str(chat_id),
-            "reply_to": int(msg_id),
-            "emoji": STALL_REACTION_EMOJI,
-            "session_id": session_id,
-            "timestamp": time.time(),
-        }
-        queue_key = f"telegram:outbox:{session_id}"
-        POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))
-        POPOTO_REDIS_DB.expire(queue_key, STALL_REACTION_OUTBOX_TTL)
-        logger.warning(
-            "[watchdog] Stall reaction queued for %s (chat=%s msg=%s emoji=%s)",
-            session_id,
-            chat_id,
-            msg_id,
-            STALL_REACTION_EMOJI,
-        )
-        return True
-    except Exception as e:
-        logger.warning(
-            "[watchdog] Failed to queue stall reaction for %s: %s",
-            getattr(session, "session_id", "?"),
-            e,
-        )
-        return False
+                anchor = ticks.read_anchor(session_id)
+                if anchor is None:
+                    started = (
+                        _to_timestamp(session.started_at)
+                        or _to_timestamp(session.created_at)
+                        or now
+                    )
+                    ticks.start_anchor(session_id, started, int(msg_id))
+                    anchor = ticks.read_anchor(session_id) or (started, int(msg_id))
 
+                anchor_ts, anchor_msg_id = anchor
+                tick = int((now - anchor_ts) // HEARTBEAT_TICK_INTERVAL_SECONDS)
+                if tick <= ticks.read_last_tick(session_id):
+                    continue
 
-def _clear_stall_reaction_dedup(session_id: str) -> None:
-    """Delete the stall-reaction dedup key so re-stalls trigger a fresh reaction.
+                if tick > HEARTBEAT_MAX_TICKS:
+                    if ticks.claim_ceiling(session_id):
+                        from agent.steering import push_steering_message
 
-    Called from the iteration loop in `check_stalled_sessions` whenever a
-    session is observed in a healthy (non-stall) state. Fail-quiet: any
-    Redis exception is swallowed; orphaned keys age out via
-    ``STALL_REACTION_DEDUP_TTL``.
-    """
-    if not session_id:
-        return
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB
+                        # Legacy session-scoped leg on purpose (#2642): "publish
+                        # your progress" is a diagnostic about THIS session. On
+                        # the Room leg a sibling session could consume it and the
+                        # session the human is waiting on would stay silent.
+                        push_steering_message(
+                            session_id,
+                            _forced_progress_steer_text(),
+                            sender="watchdog",
+                            room_id=None,
+                        )
+                        logger.info(
+                            "[watchdog] Liveness ceiling reached for %s — forced-progress "
+                            "steer sent (tick=%d)",
+                            session_id,
+                            tick,
+                        )
+                    continue
 
-        POPOTO_REDIS_DB.delete(f"watchdog:stall_reaction_applied:{session_id}")
-    except Exception as e:  # pragma: no cover - defensive
-        logger.debug(
-            "[watchdog] Failed to clear stall reaction dedup for %s: %s",
-            session_id,
-            e,
-        )
+                emoji_result = heartbeat_reaction(tick)
+                payload = {
+                    "type": "reaction",
+                    "chat_id": str(chat_id),
+                    "reply_to": int(anchor_msg_id),
+                    "emoji": str(emoji_result.emoji),
+                    "session_id": session_id,
+                    "timestamp": time.time(),
+                    # Explicit, never the glyph→rank fallback: the arc's slot-0
+                    # glyph is 👀, which that derivation maps to the rank-4
+                    # child-completion suppress.
+                    "priority": PRIORITY_HEARTBEAT,
+                    "priority_ranked": True,
+                    "heartbeat_tick": tick,
+                }
+                if emoji_result.document_id is not None:
+                    payload["custom_emoji_document_id"] = emoji_result.document_id
+
+                from popoto.redis_db import POPOTO_REDIS_DB
+
+                queue_key = f"telegram:outbox:{session_id}"
+                POPOTO_REDIS_DB.rpush(queue_key, json.dumps(payload))
+                POPOTO_REDIS_DB.expire(queue_key, HEARTBEAT_OUTBOX_TTL)
+                ticks.record_tick(session_id, tick)
+                queued += 1
+            except Exception as e:
+                logger.warning(
+                    "[watchdog] Liveness tick failed for %s: %s",
+                    getattr(session, "session_id", "?"),
+                    e,
+                )
+
+    return queued
 
 
 def check_worker_liveness_and_slots() -> None:

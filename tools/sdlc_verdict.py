@@ -480,6 +480,35 @@ def record_verdict(
             verdicts = {}
             states["_verdicts"] = verdicts
         verdicts[stage] = record
+
+        # #2787: count with-concerns CRITIQUE rounds. This is the SDLC router's
+        # only terminator for the PLAN <-> CRITIQUE loop a with-concerns verdict
+        # opens, so its properties are load-bearing:
+        #
+        # - Durable: `_concern_round_count` is absent from `_OWNED_METADATA_KEYS`
+        #   (agent/pipeline_state.py), so `PipelineStateMachine._save()` merges it
+        #   back from the live store on every write. Nothing truncates it. A count
+        #   over `_sdlc_dispatches` could NOT provide this -- that list FIFO-evicts
+        #   at MAX_DISPATCH_HISTORY, so its count shrinks as entries age out.
+        # - Monotonic: increment-only, no reset path.
+        # - Loop-scoped: only a WITH CONCERNS verdict counts, so a lane's NEEDS
+        #   REVISION history cannot consume the bound.
+        #
+        # There is deliberately NO dedupe. A replayed `verdict record` on unchanged
+        # plan bytes and a genuine next round are byte-identical inputs, so any
+        # dedupe key that suppresses the first also risks suppressing the second --
+        # and a bound that can silently fail to advance is unacceptable here,
+        # because G4 cannot see this loop (`compute_same_stage_count` breaks its
+        # streak on every skill change, and this loop alternates two skills).
+        # Over-counting costs a build with a RECORDED acceptance one round early;
+        # under-counting costs an unbounded loop with no backstop. Do not
+        # "optimize" the dedupe back in.
+        if stage == "CRITIQUE" and "WITH CONCERNS" in verdict:
+            try:
+                current = int(states.get("_concern_round_count", 0) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            states["_concern_round_count"] = current + 1
         return states
 
     try:

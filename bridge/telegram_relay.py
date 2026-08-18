@@ -211,6 +211,149 @@ async def _send_queued_reaction(
         return False
 
 
+def _session_reached_terminal_status(session_id: str) -> bool:
+    """True when the session owning this payload has finished.
+
+    Only consulted for liveness-tick payloads, so the Popoto query never runs
+    on the relay's 100 ms poll loop for ordinary reaction traffic. Fail-open
+    (returns False) on any error: dropping a tick is cosmetic, but wrongly
+    dropping one on a transient Redis blip would freeze the counter.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES
+
+        for session in AgentSession.query.filter(session_id=session_id):
+            return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Relay: terminal-status lookup failed for %s: %s", session_id, e)
+        return False
+
+
+def _reaction_yields_slot(message: dict) -> bool:
+    """Decide whether this reaction must be dropped rather than delivered (#2716).
+
+    Telegram permits one reaction per sender per message, and seven writers
+    across two processes target a session's originating message. Ordering is
+    undefined: `output_handler.react()` writes ``telegram:outbox:{chat_id}``
+    while ticks, budget, and completion reactions write
+    ``telegram:outbox:{session_id}``, and `process_outbox` iterates those keys
+    in unspecified order. There is no single queue whose FIFO order could be
+    relied on, so precedence is enforced here, at the one point all outbox
+    traffic converges.
+
+    Two rules, both anchored on ``heartbeat:slot_owner:{chat_id}:{message_id}``:
+
+    1. **Terminal is final.** Once a rank-1 reaction lands, nothing lower may
+       overwrite it. This also closes a latent bug that predates the counter:
+       nothing stopped `tool_budget`'s 🤯 landing after a session's terminal
+       reaction.
+    2. **The tick yields to everything.** A rank-5 liveness tick is dropped
+       whenever any higher-ranked writer owns the slot, and additionally
+       whenever its session has already reached a terminal status.
+
+    Everything else is left alone. The plan's broader phrasing ("drop a
+    lower-priority reaction whenever a higher one owns the slot") is
+    deliberately NOT implemented: several legitimate progressions are a later,
+    lower-ranked reaction overwriting a higher one — the rank-3 RTR suppress
+    after a rank-2 🤯, and the rank-4 child-completion suppress after a rank-3
+    ✍. Enforcing rank monotonically would silently drop both. (The ⚠ → ✍
+    pickup progression is often cited here but is not actually an example: ⚠ is
+    set in-process by ``react_if_worker_down`` and never reaches this drain, so
+    it records no slot owner at all.)
+
+    Returns:
+        True when the caller must drop this payload.
+    """
+    try:
+        from agent.reaction_priority import DEFAULT_PRIORITY, PRIORITY_HEARTBEAT, PRIORITY_TERMINAL
+        from bridge.liveness_ticks import read_slot_owner
+
+        priority = int(message.get("priority") or DEFAULT_PRIORITY)
+        is_tick = message.get("heartbeat_tick") is not None
+        chat_id = message.get("chat_id")
+        reply_to = message.get("reply_to")
+        if chat_id is None or reply_to is None:
+            return False
+
+        if is_tick:
+            session_id = message.get("session_id")
+            if session_id and _session_reached_terminal_status(session_id):
+                logger.debug("Relay: dropping liveness tick for terminal session %s", session_id)
+                return True
+
+        owner = read_slot_owner(chat_id, reply_to)
+        if owner is None or priority <= owner:
+            return False
+
+        if owner == PRIORITY_TERMINAL or priority == PRIORITY_HEARTBEAT:
+            logger.debug(
+                "Relay: dropping reaction (priority=%d) — slot %s/%s owned by rank %d",
+                priority,
+                chat_id,
+                reply_to,
+                owner,
+            )
+            return True
+        return False
+    except Exception as e:  # noqa: BLE001 — never crash the drain on precedence
+        logger.debug("Relay: reaction precedence check failed (delivering): %s", e)
+        return False
+
+
+def _reanchor_liveness_counter(message: dict, msg_id) -> None:
+    """Re-anchor a session's liveness counter to a message it just published (#2716).
+
+    This is the named signal the ceiling depends on: the forced-progress
+    marker is released only when the new anchor message actually exists, and
+    the relay's own record of sent message ids is the truth source for that.
+    Re-anchoring on ANY message the session publishes, not just a
+    ceiling-forced one, is intended — the human has been answered either way.
+
+    ``DELIVERED_NO_ID`` (a send that reached Telegram but returned no message
+    id) is the hole this closes: there is no message to anchor to, so the
+    counter stops instead. Left unhandled, the ceiling marker would stay
+    latched and the counter would freeze at the ceiling digit despite the
+    human having been answered.
+    """
+    try:
+        from bridge.liveness_ticks import reanchor, stop_counter
+
+        session_id = message.get("session_id")
+        if not session_id:
+            return
+        if msg_id is None:
+            stop_counter(session_id)
+        else:
+            reanchor(session_id, int(msg_id))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Relay: liveness re-anchor failed (non-fatal): %s", e)
+
+
+def _record_reaction_slot_owner(message: dict) -> None:
+    """Record the rank that now owns this message's reaction slot."""
+    try:
+        from agent.reaction_priority import DEFAULT_PRIORITY
+        from bridge.liveness_ticks import record_slot_owner
+
+        chat_id = message.get("chat_id")
+        reply_to = message.get("reply_to")
+        if chat_id is None or reply_to is None:
+            return
+        # Only a writer whose rank we actually know may claim the slot. An
+        # unranked glyph (an arbitrary agent-issued `react_with_emoji` call)
+        # delivers, but recording it would pin the slot at the fallback's
+        # terminal rank and suppress the budget, pickup, and tick writers behind
+        # it for the key's full TTL -- the opposite of the documented intent
+        # that such a reaction simply wins until the next tick overwrites it.
+        if not message.get("priority_ranked", True):
+            return
+        record_slot_owner(chat_id, reply_to, int(message.get("priority") or DEFAULT_PRIORITY))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Relay: slot-owner record failed (non-fatal): %s", e)
+
+
 def _record_sent_reaction(message: dict) -> None:
     """Durably record a sent reaction in the existing message log (#2494).
 
@@ -920,11 +1063,14 @@ async def process_outbox(telegram_client) -> int:
                 session_id = message.get("session_id")
                 try:
                     if msg_type == "reaction":
+                        if await asyncio.to_thread(_reaction_yields_slot, message):
+                            continue
                         success = await _send_queued_reaction(telegram_client, message)
                         if success:
                             # Durable reaction record (#2494): reply-to entry
                             # in the existing message log, at send success.
                             await asyncio.to_thread(_record_sent_reaction, message)
+                            await asyncio.to_thread(_record_reaction_slot_owner, message)
                     elif msg_type == "custom_emoji_message":
                         msg_id = await _send_custom_emoji_message(telegram_client, message)
                         success = msg_id is not None
@@ -977,6 +1123,8 @@ async def process_outbox(telegram_client) -> int:
 
                 if success:
                     sent_count += 1
+                    if msg_type != "reaction":
+                        await asyncio.to_thread(_reanchor_liveness_counter, message, msg_id)
                     # Record sent message ID on AgentSession
                     if msg_id is not None:
                         session_id = message.get("session_id")

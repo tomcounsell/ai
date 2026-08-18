@@ -57,6 +57,18 @@ should_revert, commit_sha = detect_crash_pattern()
 
 A separate process that monitors bridge health and executes recovery. Runs via launchd every 60 seconds.
 
+**Log isolation (issue #2643).** Logging configuration (`_configure_logging()`: mkdir + the rotating
+file handler + formatter) runs only from the `if __name__ == "__main__":` guard, never at import.
+Importing this module — including transitively, via `scripts.update.service` → `scripts.log_rotate`,
+which had the same defect — has zero logging side effects. Every line the watchdog writes to
+`logs/watchdog.log` now comes from a real entry-point invocation and appears **once** rather than
+twice (the plist previously doubled every record: once via the module's `RotatingFileHandler`, once
+via a `propagate = True` leak to root's `StreamHandler` → stderr → the plist's redirect of both
+streams into the same file). Submodule records that used to ride root's handler now arrive unformatted
+via `logging.lastResort` (WARNING+) or not at all (INFO — dropped at the call site). See
+[Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data Flow table and the
+`scripts/log_rotate.py` counterpart.
+
 **Health Checks**:
 - Process running (`pgrep -f telegram_bridge.py`)
 - Logs fresh (written within 5 minutes)
@@ -175,35 +187,15 @@ python monitoring/bridge_watchdog.py --check-only
 
 This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
 
-### 4a. User-Visible Stall Alerts (`monitoring/session_watchdog.py`, issue #1313)
+### 4a. Session Liveness Tick Counter (`monitoring/session_watchdog.py`, issue #2716)
 
-**Problem**: When `check_stalled_sessions()` detected a stalled session, it logged a `LIFECYCLE_STALL` warning to `worker.log` and did nothing else. The user (CEO) saw silence on Telegram and assumed "agent is thinking." Silent failure compounded short outages into long ones because no human-visible signal triggered an investigation.
+**Problem**: a human watching a long-running session cannot tell "still working" from "wedged" without asking. The one mechanism built to close that gap — the ⏳ stall reaction from #1313 — never worked: ⏳ is not a legal Telegram reaction, so all eleven of its production enqueues failed at the API.
 
-**Solution**: After the existing `LIFECYCLE_STALL` warning fires, the watchdog also calls `_apply_stall_reaction(session)`, which queues a ⏳ reaction emoji on the user's originating Telegram message. The bridge's existing `bridge/telegram_relay.py::_send_queued_reaction` drain delivers it on the next poll. The warning log is preserved unchanged — the reaction is an *additional* user-visible channel.
+**Solution**: `_publish_liveness_ticks()` advances a counter on the session's originating Telegram message every `HEARTBEAT_TICK_INTERVAL_SECONDS`, and at a hard ceiling refuses to advance and steers the session to publish a progress message instead. The counter is pure wall-clock duration: it asserts that the watchdog has eyes on the session and makes no stall claim.
 
-**How the queueing works**:
-- The watchdog stays Telethon-free. It writes a reaction payload (`type: "reaction"`, `chat_id`, `reply_to`, `emoji: "⏳"`, `session_id`, `timestamp`) directly to `telegram:outbox:{session_id}` via `RPUSH` + `EXPIRE` (3600s TTL, matches `OutputHandler.OUTBOX_TTL`).
-- The payload schema is byte-for-byte identical to `agent/output_handler.py::_build_reaction_payload`. A unit test (`test_payload_matches_build_reaction_payload`) enforces this so any drift fails CI.
-- The bridge relay drains the same outbox key on its normal poll loop and calls `set_reaction` over Telethon.
+The ⏳ path and its machinery (`STALL_REACTION_EMOJI`, `_apply_stall_reaction`, `_clear_stall_reaction_dedup`, the `watchdog:stall_reaction_applied:` key, the `WATCHDOG_STALL_REACTION_ENABLED` gate) were deleted in the same change — one reaction slot means one writer.
 
-**Idempotency**:
-- A single atomic `SET NX EX` on `watchdog:stall_reaction_applied:{session_id}` (TTL = 1 day, `STALL_REACTION_DEDUP_TTL`) ensures exactly one reaction per stall period. Same shape as the per-reason cooldowns from issue #1128.
-- When the next watchdog tick observes the session in a healthy (non-stall) state, the dedup key is `DELETE`d so a re-stall queues a fresh reaction. There is a ≤5-minute window where ⏳ can briefly persist after recovery before the next tick clears the dedup; the user will see the bot's recovery message land before the reaction is reset, so this is acceptable.
-
-**Skip conditions** (return False, no Redis writes, no log spam):
-- `WATCHDOG_STALL_REACTION_ENABLED` env var is set falsy (`0`, `false`, `no`). Default is on.
-- Session has no `chat_id` (e.g. local Claude Code sessions, no Telegram origin).
-- Session has no `telegram_message_id` (originating message not captured).
-- Session has no resolvable `session_id`/`agent_session_id`.
-
-**Failure modes**:
-- Redis exception → fail-quiet `logger.warning`, watchdog loop continues.
-- Bridge relay down longer than `OUTBOX_TTL` → outbox key expires, reaction lost. The warning log still fires, and the next tick re-queues once the bridge returns and the dedup key TTL expires. A bridge-down >TTL is a bigger-than-watchdog incident.
-- ⏳ not in Telegram's allowed reactions for a chat → the relay's `set_reaction` already handles unknown-emoji failure (logs and moves on). Swap `STALL_REACTION_EMOJI = "⚠️"` is a one-line change.
-
-**Configuration**:
-- `WATCHDOG_STALL_REACTION_ENABLED`: default on. Set to `0`/`false`/`no` to disable, mirror of `WATCHDOG_AUTO_STEER_ENABLED`.
-- Constants live at the top of `monitoring/session_watchdog.py` near `STEER_COOLDOWN`: `STALL_REACTION_EMOJI`, `STALL_REACTION_DEDUP_TTL`, `STALL_REACTION_OUTBOX_TTL`.
+Full design, precedence table, Redis keys, and degradation path: [Session Liveness Tick Counter](session-liveness-tick-counter.md).
 
 ### 5. Log Rotation
 
@@ -580,7 +572,7 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 
 **Operator-disable short-circuit**: the watchdog detects sticky-disable via `launchctl print-disabled gui/<uid>` at the very top of `main()`. If `"com.valor.worker" => disabled` appears in the output, it logs `Worker disabled by operator (launchctl print-disabled) — skipping check`, clears the down-tick counter (so a future re-enable starts fresh), and returns without touching launchctl. This is the only authoritative source — `worker-disable` in `valor-service.sh` calls `launchctl disable` directly; no sidecar flag file exists. Operator check precedes the down-counter increment so a disabled worker never accumulates ticks.
 
-**Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Regression test: `len(monitoring.worker_watchdog.logger.handlers) == 1`.
+**Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Since #2643 that configuration happens in `_configure_logger()`, called from the `__main__` guard only, so a bare import attaches no handler at all — the invariant is "exactly one *owned* handler after `_configure_logger()` runs", not "one handler always". Regression test: `tests/unit/test_worker_watchdog.py::TestLoggerConfiguration::test_logger_no_duplicate_handlers`, which calls `_configure_logger()` and asserts exactly one handler tagged `_watchdog_owned`.
 
 **Check status**:
 ```bash

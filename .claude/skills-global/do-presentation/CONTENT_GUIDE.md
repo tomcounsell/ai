@@ -33,24 +33,70 @@ Use this framework to structure any technical explanation. Each level builds on 
 - "Without this, the whole system would..."
 - Leave them with a mental model they can build on
 
+## Action titles
+
+A slide title is not a label for what the slide covers. It is the slide's conclusion, written as a
+full sentence, and it is the largest text on the slide. This is the discipline the top strategy
+decks are built on, and it is the cheapest quality gain available.
+
+| Topic label | Action title |
+|---|---|
+| Market overview | Three competitors left the mid-market last year |
+| Architecture | Every message crosses exactly one queue |
+| Retry behavior | Retries cost more than the outage they prevent |
+| Next steps | You decide the launch date; we handle everything before it |
+
+**Rules:** under 15 words. Never more than two lines. A conclusion, not a question. Read every title
+in the deck end to end with nothing else — that sequence should be the argument. If it reads as a
+table of contents, the deck has topic labels, not action titles.
+
+Topic labels are correct in exactly two places: the appendix, and a section-break slide whose whole
+job is to name the section.
+
+## Budgets
+
+Numbers, so the call is not a matter of taste:
+
+| Budget | Limit |
+|---|---|
+| Statement slide | 12 words |
+| Concept slide body | 40 words |
+| Table | 5 rows, short cells |
+| New terms per slide | 2 |
+| Code block | 8 lines |
+| Accent color uses per slide | 1 |
+| Talk time per slide | 60 seconds |
+
+Over budget means split the slide. It does not mean shrink the type — the theme's size scale is
+fixed, and a slide that only fits at a smaller size is two slides.
+
+The accent budget is the one people skip. Annotation red marks *value*: the number that matters, the
+recommendation, the one word carrying the slide. Spend it once. A slide with two reds has no accent
+at all, and a deck where every slide is red is a deck with no argument.
+
 ## Slide Types
 
 Mix these to maintain engagement. Never use more than 3 of the same type in a row.
 
-### Title / Section Break
-- `<!-- _class: lead -->` in Marp
-- Large heading, optional subtitle
-- Use to signal topic transitions
-- Include a hook: question, surprising fact, or bold claim
+### Cover / Section Break
+- `<!-- _class: cover -->` and `<!-- _class: section -->` in Marp
+- Large Lora heading, mono eyebrow above
+- Section breaks signal topic transitions and carry a numeral
+- The cover includes a hook: question, surprising fact, or bold claim
+
+### Statement Slide
+- `<!-- _class: statement -->`
+- One sentence, 12 words maximum, most of the slide left empty
+- The load-bearing claim of a section, or the answer the deck exists to deliver
 
 ### Concept Slide
-- One heading, 3-5 bullet points max
+- Action title, then 3-5 bullets or a `.cols` split
 - Bold the key term on first use
 - End with a connection to the next slide
 
-### Diagram Slide
-- Visual fills most of the slide
-- Minimal text — just a title and optional caption
+### Figure Slide
+- `<!-- _class: figure -->`, visual inside a `.figure` panel
+- Minimal text — the action title and a mono `.figure__meta` caption
 - Label everything on the diagram itself, not in surrounding text
 
 ### Example Slide
@@ -59,12 +105,12 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 - Before/after comparisons work well
 
 ### Comparison / Table Slide
-- Use tables instead of side-by-side bullets
+- `<!-- _class: data -->`, tables instead of side-by-side bullets
 - 2-4 columns max, clear headers
-- Highlight the "winner" or recommended option if applicable
+- Mark the recommended option with the slide's one accent
 
 ### Quote / Takeaway Slide
-- Use `>` blockquote for emphasis
+- `.rose` plate for the governing line, once per deck
 - One key insight, large text
 - Good for punctuation between dense sections
 
@@ -138,12 +184,14 @@ For a client-facing deck, the title slide is not about the deck — it is about 
 
 ## Anti-Patterns (What NOT to Do)
 
-- **Wall of text**: If a slide has more than 6 lines of body text, split it
+- **Wall of text**: any slide over the body budget above. Split it
+- **Topic-label titles**: "Market overview" tells the audience nothing they can act on. See "Action titles"
 - **Orphan bullets**: A single bullet point is not a list — make it a sentence
 - **Jargon avalanche**: Never introduce more than 2 new terms per slide
-- **Code dumps**: Code blocks over 10 lines lose the audience — excerpt the key part
-- **No visuals**: If you go 4+ slides without a diagram, table, or visual break, add one
+- **Code dumps**: Code blocks over the budget lose the audience — excerpt the key part
+- **No visuals**: If you go 4+ slides without a figure, table, or visual break, add one
 - **Burying the lead**: Put the conclusion FIRST, then explain why — don't build to a reveal
+- **Accent inflation**: More than one red on a slide. The second one cancels the first
 - **Slide numbers as content**: "Step 1, Step 2..." is a document, not a presentation
 
 ## Engagement Hooks
@@ -174,7 +222,17 @@ Use at least 2-3 of these across the deck:
 - **Label every arrow** — unlabeled connections are ambiguous
 - **Left-to-right or top-to-bottom** — never mix flow directions
 - **Color sparingly** — accent color for the focus element only
-- **Include a legend** if using symbols, shapes, or colors for meaning
+- **Label the marks, not a legend.** A legend makes the reader hold a color-to-name mapping in their
+  head while reading the chart. Put the name on the bar, the line, or the node. Reach for a legend
+  only when direct labels genuinely collide
+
+### Charts
+
+Flat bars in theme ink, the one key bar in the accent, values labeled directly on the marks in mono,
+category names below in gray, a hairline baseline. No gridlines, no y-axis, no legend, no second
+accent. Anything past a bar comparison goes through the `dataviz` skill, carrying these constraints
+in as the palette — it owns form choice, color ramps, and accessibility, and duplicating its rules
+here would only let the two drift.
 
 ### Diagrams That Should NOT Be Mermaid Flowcharts
 

@@ -38,7 +38,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from agent.pipeline_graph import MAX_CRITIQUE_CYCLES, STAGE_TO_SKILL
+from agent.pipeline_graph import (
+    MAX_CONCERN_RECRITIQUE_ROUNDS,
+    MAX_CRITIQUE_CYCLES,
+    STAGE_TO_SKILL,
+)
 from agent.pipeline_state import SETTLED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -602,6 +606,28 @@ def guard_g5_artifact_hash_cache(
         # forever on a finished build. Mirrors the D3 guard in rows 4a/4b/4c.
         if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
             return None
+        # #2787: G5 never serves a with-concerns verdict. `CRITIQUE_READY_TO_BUILD
+        # in verdict_text` matches "READY TO BUILD (WITH CONCERNS)" too, and guards
+        # run to completion BEFORE the dispatch table, so without this step-aside
+        # rows 2b/4b/4c are unreachable in production and the whole feature is dead
+        # while still passing its own unit tests.
+        #
+        # Unconditional on purpose. An earlier design gated this on
+        # `_concern_revision_is_unjudged`, which is False in state S1 -- exactly the
+        # state right after a with-concerns verdict is recorded -- so G5 still
+        # shipped /do-build in the state the guard was written to prevent. Rows
+        # 2b/4b/4c cover every with-concerns state, including the bound-exhausted
+        # one, so there is nothing left for G5 to serve here.
+        #
+        # Returns None (not a Dispatch) so the dispatch table owns the state.
+        #
+        # Consequence, stated honestly: G5 is no longer row 2b's loop bound on this
+        # path -- MAX_CONCERN_RECRITIQUE_ROUNDS is. That substitution is sound
+        # because the counter advances on every recorded round regardless of whether
+        # the plan bytes changed, so an unchanged-plan re-critique still consumes a
+        # slot and still terminates.
+        if "WITH CONCERNS" in verdict_text:
+            return None
         # #1871 present-gap short-circuit: G7 (guard_g7_plan_revising) now
         # precedes G5 in GUARDS list order, but G7's Gate 6 returns None
         # (falls through to G5) whenever the plan_revising lock is set, the
@@ -639,9 +665,13 @@ def guard_g7_plan_revising(
     1. If ``pr_number`` is set → return None (G3/G6 own PR-stage routing; an
        already-shipped PR is never blocked by plan revisions).
     2. If ``plan_revising`` is falsy → return None (lock not set, fall through).
-    3. Self-heal: if ``plan_revising`` is truthy AND ``revision_applied`` is also
-       truthy → return None (plan was revised but the lock-clear step never ran,
-       e.g. skill crashed mid-step; revision_applied is the source of truth).
+    3. Self-heal: if ``plan_revising`` is truthy AND a ``/do-plan`` revision has
+       landed since the latest CRITIQUE verdict → return None (plan was revised
+       but the lock-clear step never ran, e.g. skill crashed mid-step). Keyed on
+       the event-scoped ``_concern_revision_is_unjudged``, NOT on the sticky
+       ``revision_applied`` boolean: that boolean is set on every revision pass
+       and never resets, so keying the release on it made the lock permanently
+       unarmable after a plan's first revision (#2787).
     4. If lock is set AND ``last_dispatched_skill`` is ``/do-plan-critique``
        (critique just finished) → return Dispatch(/do-plan): the obvious next
        step is to apply the revision.
@@ -677,8 +707,25 @@ def guard_g7_plan_revising(
     if not meta.get("plan_revising"):
         return None
 
-    # Gate 3: Self-heal — revision_applied supersedes the lock.
-    if meta.get("revision_applied"):
+    # Gate 3: Self-heal — a revision that landed SINCE the latest CRITIQUE verdict
+    # supersedes the lock (#2787). Previously keyed on the sticky `revision_applied`
+    # boolean, which /do-plan sets on every revision pass and never resets: once a
+    # plan had been revised once, this gate released the lock unconditionally and
+    # `plan_revising` could never bind again. Event-scoping makes the lock armable
+    # per round.
+    #
+    # Called WITHOUT a verdict-kind test, deliberately: this gate must keep
+    # self-healing a lock left behind by a NEEDS REVISION or MAJOR REWORK round
+    # too. Pushing a `WITH CONCERNS` test into the predicate would make this return
+    # False on those locks, so G7 would fall through to Gate 5 and escalate to
+    # Blocked after MAX_PLAN_REVISING_DISPATCHES — a new stall introduced by the fix.
+    #
+    # With no `_verdicts["CRITIQUE"]` record at all the predicate returns False, so
+    # a lock the sticky boolean would have released now survives. G7's own deadlock
+    # backstop then escalates to Blocked with the documented manual recovery
+    # (`sdlc-tool meta-set --key plan_revising --value false`). That is the backstop
+    # working as designed, not a regression.
+    if _concern_revision_is_unjudged(stage_states, meta):
         return None
 
     # The lock is set and the plan has not been marked as revised.
@@ -872,7 +919,18 @@ def _rule_critique_ready_no_concerns(stage_states: dict, meta: dict, context: di
 def _rule_critique_ready_with_concerns_no_revision(
     stage_states: dict, meta: dict, context: dict
 ) -> bool:
-    """Plan critiqued (READY TO BUILD, concerns), revision_applied not set.
+    """Plan critiqued (READY TO BUILD, concerns), no revision landed since (state S1).
+
+    Row 4b revises; row 4c builds once the bound is spent; row 2b -- registered
+    EARLIER in DISPATCH_RULES and therefore evaluated first -- owns the state
+    between them (S2 below the bound). 4b and 4c are mutually exclusive by
+    construction: ``not P`` vs ``P and Q`` (#2787).
+
+    Keyed on the event-scoped ``_concern_revision_is_unjudged`` rather than the
+    sticky ``revision_applied`` boolean. The boolean is set by /do-plan on EVERY
+    revision pass and never resets, so from round 2 onward it made this row
+    unreachable and sent every subsequent round straight to /do-build unreviewed --
+    the defect #2787 exists to fix.
 
     D3: defer to downstream PR-stage rows once a PR exists or BUILD has
     completed — a finished PR must never route back to plan/build.
@@ -882,7 +940,7 @@ def _rule_critique_ready_with_concerns_no_revision(
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
-    if bool(meta.get("revision_applied")):
+    if _concern_revision_is_unjudged(stage_states, meta):
         return False
     # Once build has produced a PR (or BUILD is already done), this row must
     # release so routing can advance to review/merge. Without these guards the
@@ -897,7 +955,18 @@ def _rule_critique_ready_with_concerns_no_revision(
 def _rule_critique_ready_with_concerns_revision_applied(
     stage_states: dict, meta: dict, context: dict
 ) -> bool:
-    """Plan critiqued (READY TO BUILD, concerns), revision_applied true.
+    """Plan critiqued (READY TO BUILD, concerns), revision landed, bound SPENT (#2787).
+
+    The bound-exhausted build edge. Below the bound this row does not fire at all --
+    row 2b, evaluated earlier, re-critiques the concern-closing revision instead.
+    Row 4c only takes over once ``MAX_CONCERN_RECRITIQUE_ROUNDS`` with-concerns
+    rounds have been recorded, at which point the residual concerns are accepted and
+    the build proceeds with that acceptance recorded in the plan.
+
+    Deliberately dispatches /do-build rather than returning Blocked: CONCERNs are
+    non-blocking by definition, and a Blocked strands the lane on a human who is
+    usually not watching. The accountability comes from the recorded acceptance,
+    not from the halt.
 
     D3: defer to downstream PR-stage rows once a PR exists or BUILD has
     completed so row-4c stops re-proposing /do-build on a finished PR.
@@ -907,7 +976,9 @@ def _rule_critique_ready_with_concerns_revision_applied(
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
-    if not bool(meta.get("revision_applied")):
+    if not _concern_revision_is_unjudged(stage_states, meta):
+        return False
+    if concern_round_count(meta) < MAX_CONCERN_RECRITIQUE_ROUNDS:
         return False
     # Once build has produced a PR (or BUILD is already done), this row must
     # release so routing can advance to review. Without these guards the row
@@ -917,6 +988,64 @@ def _rule_critique_ready_with_concerns_revision_applied(
         return False
     build_status = stage_states.get("BUILD")
     return build_status in (None, "pending", "ready")
+
+
+def concern_round_count(meta: dict | None) -> int:
+    """Return the number of with-concerns CRITIQUE rounds recorded on this lane (#2787).
+
+    Reads ``meta``, NOT ``stage_states``. ``sdlc-tool next-skill`` consumes
+    ``stage-query``'s projection, which threads only ``_verdicts`` and
+    ``_sdlc_dispatches`` out of raw stage_states -- a bare ``_concern_round_count``
+    key would never reach the router in the CLI path. The counter therefore rides
+    the ``_meta`` channel, like ``critique_cycle_count`` before it.
+
+    A missing, ``None`` or non-integer value reads as ``0``: the correct starting
+    state for every lane that predates the change.
+    """
+    try:
+        return int((meta or {}).get("concern_round_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _concern_revision_is_unjudged(stage_states: dict, meta: dict | None = None) -> bool:
+    """Return True when a /do-plan revision landed AFTER the latest CRITIQUE verdict.
+
+    This is state **S2** in the #2787 design: the concern-closing revision exists
+    and has not itself been judged. ``False`` is state S1 -- the verdict is the
+    most recent event and no revision has landed since.
+
+    **Verdict-kind-agnostic, deliberately and permanently.** It asks exactly one
+    question -- "did a ``/do-plan`` revision land after the latest CRITIQUE verdict
+    was recorded?" -- and nothing about what that verdict SAID. The ``WITH CONCERNS``
+    requirement lives at the call sites, never in this body.
+
+    Do NOT "tidy" this by moving a verdict-kind test inside. G7 gate 3 calls it
+    WITHOUT one, because the lock it self-heals may have been left by a NEEDS
+    REVISION or MAJOR REWORK round too. A ``WITH CONCERNS`` test in this body would
+    make gate 3 return False on those locks, so G7 would fall through to its
+    deadlock backstop and escalate to Blocked after MAX_PLAN_REVISING_DISPATCHES --
+    a new stall introduced by the fix. Rows 4b/4c test ``WITH CONCERNS`` themselves,
+    before calling this.
+
+    **Fail-safe direction is deliberate.** Anything unreadable -- verdict absent,
+    ``recorded_at`` missing, ``revision_applied_at`` absent or unparseable, equal
+    timestamps -- returns ``False``, which routes to row 4b (``/do-plan``), i.e. to
+    a revision pass. It never degrades to a free pass to BUILD.
+
+    Compares timestamps only; reads no dispatch history.
+    """
+    try:
+        verdict_dict = (stage_states or {}).get("_verdicts", {}).get("CRITIQUE", {})
+        if not isinstance(verdict_dict, dict):
+            return False
+        recorded_at = verdict_dict.get("recorded_at")
+        revision_applied_at = (meta or {}).get("revision_applied_at")
+        if not recorded_at or not revision_applied_at:
+            return False
+        return datetime.fromisoformat(revision_applied_at) > datetime.fromisoformat(recorded_at)
+    except Exception:
+        return False
 
 
 def _rule_branch_exists_no_pr(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1092,6 +1221,44 @@ def _critique_verdict_is_stale(stage_states: dict, meta: dict | None = None) -> 
         recorded_at = verdict_dict.get("recorded_at")
         if not recorded_at:
             return False
+
+        # #2787: the with-concerns branch. Row 2b IS the re-critique edge for the
+        # concern-closing revision; #1760 suppressed it here because the loop had
+        # no terminating bound, and #2049 then narrowed the latch AWAY from NEEDS
+        # REVISION, leaving READY TO BUILD (with concerns) as its live domain. The
+        # bound now exists, so this deliberately re-opens what #1760 suppressed --
+        # on the with-concerns path ONLY. The no-concerns and NEEDS REVISION /
+        # MAJOR REWORK paths below are untouched.
+        #
+        # This block sits AHEAD of the `latest_plan_at` lookup on purpose: the whole
+        # with-concerns decision must be independent of `_sdlc_dispatches`, which
+        # FIFO-evicts at MAX_DISPATCH_HISTORY.
+        #
+        # G4 cannot substitute for the bound. `compute_same_stage_count` counts
+        # CONSECUTIVE same-skill dispatches and breaks its streak on any skill
+        # change; this loop alternates /do-plan and /do-plan-critique, so the streak
+        # resets every turn. The bound is this loop's only terminator.
+        _verdict_text_early = normalize_verdict(_verdict_text(verdict_dict))
+        _requires_revision_early = (
+            CRITIQUE_NEEDS_REVISION in _verdict_text_early
+            or CRITIQUE_MAJOR_REWORK in _verdict_text_early
+        )
+        if (not _requires_revision_early) and "WITH CONCERNS" in _verdict_text_early:
+            if concern_round_count(meta) >= MAX_CONCERN_RECRITIQUE_ROUNDS:
+                # Bound spent: never stale again on this path, so row 2b steps
+                # aside and row 4c owns the terminal /do-build. Unconditional --
+                # it reads no timestamp and no dispatch history, so there is no
+                # state in which the bound's own precondition goes missing.
+                return False
+            # Below the bound: stale IFF a revision actually LANDED since this
+            # verdict (state S2). Deliberately NOT a fallthrough to
+            # `verdict_dt < plan_dt`: `plan_dt` comes from `_latest_dispatch_at`,
+            # stamped when /do-plan is DISPATCHED rather than when it finishes, so
+            # a fallthrough would call the verdict stale the instant row 4b fires
+            # and let row 2b (registered earlier) re-critique a plan nobody has
+            # revised yet -- burning a bound slot when /do-plan crashes or no-ops.
+            return _concern_revision_is_unjudged(stage_states, meta)
+
         latest_plan_at = _latest_dispatch_at(stage_states, SKILL_DO_PLAN)
         if not latest_plan_at:
             return False
@@ -1137,9 +1304,19 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     Marker-agnostic by design: the #1639 dead-end leaves CRITIQUE at
     ``in_progress``, so this rule must NOT require any particular marker value.
 
-    Loop-bound: G5 (``guard_g5_artifact_hash_cache``) runs before this row and
-    short-circuits re-critique when the plan hash is unchanged, so this rule can
-    only progress on a genuinely revised plan. See the docstring on row 2b.
+    Loop-bound, by verdict kind:
+
+    - **No-concerns / NEEDS REVISION / MAJOR REWORK:** G5
+      (``guard_g5_artifact_hash_cache``) runs before this row and short-circuits
+      re-critique when the plan hash is unchanged, so the rule can only progress
+      on a genuinely revised plan.
+    - **READY TO BUILD (with concerns):** G5 steps aside unconditionally (#2787),
+      so this row CAN progress on an unchanged plan hash — deliberately. The
+      terminating bound there is ``MAX_CONCERN_RECRITIQUE_ROUNDS`` via
+      ``_concern_round_count``, enforced inside ``_critique_verdict_is_stale``.
+      Do not delete that bound believing G5 or G4 backstops it: G5 no longer runs
+      here, and G4 counts consecutive same-skill dispatches while this loop
+      alternates two skills.
     """
     if not _critique_verdict_is_stale(stage_states, meta):
         return False
@@ -1558,7 +1735,9 @@ DISPATCH_RULES: list[DispatchRule] = [
     # stale → re-critique wins over row 3's stale-text → /do-plan match. Mirrors
     # REVIEW row 8b. Disjoint from G1 (which fires only when the last dispatch
     # was /do-plan-critique; the #1639 dead-end has last dispatch = /do-plan),
-    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash).
+    # and bounded by G5 (re-critique short-circuits on an unchanged plan hash) --
+    # except on the with-concerns path, where G5 steps aside and the bound is
+    # MAX_CONCERN_RECRITIQUE_ROUNDS instead (#2787).
     DispatchRule(
         row_id="2b",
         state_predicate=_rule_critique_verdict_stale,
@@ -1601,7 +1780,10 @@ DISPATCH_RULES: list[DispatchRule] = [
         row_id="4c",
         state_predicate=_rule_critique_ready_with_concerns_revision_applied,
         skill=SKILL_DO_BUILD,
-        reason="Revision pass already complete — proceed to build",
+        reason=(
+            f"Concern re-critique bound spent ({MAX_CONCERN_RECRITIQUE_ROUNDS} "
+            f"with-concerns rounds) — residual concerns accepted unreviewed, proceed to build"
+        ),
     ),
     DispatchRule(
         row_id="5",

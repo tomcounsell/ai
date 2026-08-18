@@ -746,15 +746,22 @@ class TestHibernationSuppression:
         """Watchdog logs a clear message when suppressing recovery due to hibernation."""
         import logging
 
+        from monitoring.bridge_watchdog import logger as bw_logger
         from monitoring.bridge_watchdog import run_health_check
 
-        with (
-            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
-            caplog.at_level(logging.INFO, logger="monitoring.bridge_watchdog"),
-        ):
-            flag = tmp_path / "bridge-auth-required"
-            flag.write_text("auth-required")
-            run_health_check()
+        # bw_logger.propagate is False (issue #2643), so caplog's root-attached
+        # handler never sees its records; attach explicitly and detach after.
+        bw_logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
+                caplog.at_level(logging.INFO, logger="monitoring.bridge_watchdog"),
+            ):
+                flag = tmp_path / "bridge-auth-required"
+                flag.write_text("auth-required")
+                run_health_check()
+        finally:
+            bw_logger.removeHandler(caplog.handler)
 
         assert any("hibernating" in r.message.lower() for r in caplog.records)
 
@@ -948,16 +955,22 @@ class TestUpdateReleaseSignals:
 
         mock_health.return_value = HealthStatus(**self.HEALTHY)
         p1, p2, p3, p4, p5 = self._patches(bw, tmp_path)
-        with (
-            p1,
-            p2,
-            p3,
-            p4,
-            p5,
-            caplog.at_level(_logging.CRITICAL, logger="monitoring.bridge_watchdog"),
-        ):
-            (tmp_path / "update-release-failed").write_text('{"process": "bridge"}\n')
-            bw.run_health_check()
+        # bw.logger.propagate is False (issue #2643), so caplog's root-attached
+        # handler never sees its records; attach explicitly and detach after.
+        bw.logger.addHandler(caplog.handler)
+        try:
+            with (
+                p1,
+                p2,
+                p3,
+                p4,
+                p5,
+                caplog.at_level(_logging.CRITICAL, logger="monitoring.bridge_watchdog"),
+            ):
+                (tmp_path / "update-release-failed").write_text('{"process": "bridge"}\n')
+                bw.run_health_check()
+        finally:
+            bw.logger.removeHandler(caplog.handler)
 
         assert any("[update-release]" in r.message for r in caplog.records)
 

@@ -128,12 +128,66 @@ those flags and returns `Dispatch(skill=<same stage's skill>)`.
 
 | Stage | Claimed artifact | Live check |
 |-------|------------------|------------|
-| BUILD | PR opened | `gh pr view --json state`; verified when state is `OPEN` or `MERGED` |
-| PATCH | branch pushed | `git ls-remote --heads origin session/{slug}`; skipped (treated verified) when the PR state is already `MERGED`, since a delete-branch-on-merge policy removes the ref as an expected side effect of merging, not evidence of a fabricated claim |
-| PLAN | plan committed on `main` | `git show main:docs/plans/{slug}.md` |
+| BUILD | PR opened | `gh pr view --json state`; verified when state is `OPEN` or `MERGED`. **Skipped entirely when no `pr_number` is recorded** — there is no identifier to look up, so no check runs (#2757) |
+| PATCH | branch pushed | `git ls-remote --heads origin session/{slug}`; skipped (treated verified) when the PR state is already `MERGED`, since a delete-branch-on-merge policy removes the ref as an expected side effect of merging, not evidence of a fabricated claim. Also skipped when no `pr_number` is recorded: with no PR state to consult, the merged-skip cannot engage and "branch gone" is indistinguishable from "deleted on merge" (#2757) |
+| PLAN | plan committed on `main` | `git show main:{recorded plan path}` — the path comes from `find_plan_path`, which resolves the plan by its `tracking:` frontmatter, not by deriving a filename from the lane slug (#2792) |
 
 A stage with no claimed artifact (marker absent, or nothing this function
-knows how to check) is a no-op — verification never invents a check.
+knows how to check) is a no-op — verification never invents a check. **The
+same is true of a claimed artifact with no resolvable identifier** (#2757):
+there are three states here, not two. An artifact is **verified** when its
+identifier resolves and the world confirms it, **falsified** when the
+identifier resolves and the world contradicts it, and **unverifiable** when
+there is no identifier to resolve. Only *falsified* may set
+`stage_artifacts_verified: False`; *unverifiable* no-ops with a debug log,
+matching `_fetch_pr_state`'s stated contract that `None` means "could not
+determine", never "the claim is false". Before #2757 the BUILD row collapsed
+falsified and unverifiable, so a `pr_number`-less pipeline was re-dispatched
+to `/do-build` on the strength of a `gh` call that was never placed — against
+work that had, in the reported cases, already merged.
+
+**The identifiability skips are defense in depth, not a narrowing of the
+gate.** The primary fix for #2757 is upstream, in
+`tools/sdlc_stage_query.py::_compute_meta`: its PR lookup now retries against
+`state="merged"` when the default `state="open"` pass comes back empty, so a
+shipped lane's `pr_number` survives its own merge and BUILD is verified **on
+the merits** rather than skipped. The skips exist for the residual case where
+no PR exists in any state. A reader who sees only the skips will conclude the
+gate was weakened; it was not — a recorded `pr_number` whose live state is
+`CLOSED` still sets `stage_artifacts_verified: False` and still re-dispatches
+`/do-build`. The second pass is scoped to `merged` and deliberately **not**
+`all`: `_gh_pr_search_issue_ref` returns the first body-validating candidate
+with no MERGED-over-CLOSED preference, so `all` can surface a closed-unmerged
+PR, which reads back as `CLOSED` and makes G8 fire — converting a silent
+no-op into an active false rebuild.
+
+**Cost: the lookup is doubled on the no-open-PR path (issue #2757).** The second
+`_lookup_pr` pass fires whenever the first returns `None` — i.e. for any issue
+with no open PR, which is most issues `_compute_meta` is asked about. Each pass
+can spend up to two `gh` subprocesses (issue-number search, then the branch-head
+fallback), so an issue with no PR at all costs 4 `gh` calls instead of 2, adding
+up to ~10s of latency when `gh` hangs against each call's 5s timeout, and the
+`gh pr list --search` leg draws on the tighter search-API rate limit.
+
+`query_enriched` has exactly three non-test callers: `tools/sdlc_next_skill.py`
+(the router tick and the `next-skill` CLI), `tools/sdlc_stage_query.py`'s own
+CLI entry point, and `agent/session_runner/runner.py::_load_ledger` — the
+ledger-aware completion guard (#2158). The third is where the added latency is
+user-visible: it runs in the long-lived worker on every SDLC session
+completion, so a doubled lookup stalls a completing session rather than a
+one-shot command. The dashboard is *not* a caller; `ui/data/sdlc.py` reaches
+pipeline state through `PipelineStateMachine.for_issue()` and only mentions
+this module in prose describing an analogous reader ladder.
+
+Because `_load_ledger` imports this module into the worker process,
+`sdlc_stage_query` is worker-resident — the general "`tools/` is a fresh
+subprocess per call, so no restart is needed" premise does not hold for it, and
+an executable change here needs `worker-restart`.
+
+A short-circuit (skipping the second pass when the caller only wants in-flight
+state) is deliberately not implemented — correctness first, and the cost is
+recorded here so a future report of a slow session completion or a `gh`
+rate-limit warning finds the cause rather than re-deriving it.
 
 **cwd threading (issue #2078).** All three live `git` checks
 (`_check_plan_committed_on_main`, `_check_branch_pushed`, and the
@@ -504,7 +558,18 @@ row. The skill-convention half of this fix (the `date -u` write in
 `/do-plan`'s Phase 4 Step 2a, and the `plan_revising` lock clear that depends
 on it) is documented in `docs/sdlc/do-plan.md`.
 
-**G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed. The `revision_applied_at` latch above covers the residual case where the plan hash *does* change (a body-only revision) but the revision was the settle-and-build pass, not a genuinely new concern.
+**Scope: the no-concerns path only (#2787).** The latch as described above now
+governs bare `READY TO BUILD`. On the `READY TO BUILD (with concerns)` path a
+bounded branch runs *ahead* of it: below `MAX_CONCERN_RECRITIQUE_ROUNDS` the
+verdict is stale whenever a revision landed after it, so row 2b re-critiques the
+concern-closing revision; at the bound the latch engages again and row 4c builds.
+The terminating bound there is the `_concern_round_count` counter, not G5. See
+[`with-concerns-recritique-gate.md`](with-concerns-recritique-gate.md).
+
+**G5 is the loop-breaker for the no-concerns path (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed. The `revision_applied_at` latch above covers the residual case where the plan hash *does* change (a body-only revision) but the revision was the settle-and-build pass, not a genuinely new concern.
+
+For a **with-concerns** verdict G5 steps aside unconditionally, so it is not the
+bound there; `MAX_CONCERN_RECRITIQUE_ROUNDS` is (#2787).
 
 **G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_body_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production. Using `compute_plan_body_hash` (not `compute_plan_hash`) ensures a `revision_applied: true` write does not bust the cache and send the router back to CRITIQUE (#1761).
 

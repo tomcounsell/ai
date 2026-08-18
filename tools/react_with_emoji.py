@@ -95,6 +95,19 @@ def react(feeling: str) -> None:
 
     result = find_best_emoji(feeling.strip())
 
+    from agent.reaction_priority import is_ranked_glyph, priority_for_glyph
+
+    # Mirror of TelegramRelayOutputHandler._build_reaction_payload; parity is
+    # enforced by tests/unit/test_stall_detection.py.
+    #
+    # This path is deliberately UNRANKED in the precedence model (#2716): an
+    # agent reacting on purpose should not be silently overridden, so the glyph
+    # derivation lands it on rank 1 and it is never dropped. `priority_ranked`
+    # is what stops that fallback from also CLAIMING the slot: the model can
+    # pick any emoji, and recording an unrecognized one as terminal-rank would
+    # pin the message for the owner key's whole TTL and suppress the budget,
+    # pickup, and tick writers behind it. Unranked means it wins when it runs
+    # and the next liveness tick overwrites it -- which is the intent.
     payload = {
         "type": "reaction",
         "chat_id": chat_id,
@@ -102,9 +115,9 @@ def react(feeling: str) -> None:
         "emoji": str(result),
         "session_id": session_id,
         "timestamp": time.time(),
+        "priority": priority_for_glyph(str(result)),
+        "priority_ranked": is_ranked_glyph(str(result)),
     }
-    if result.is_custom and result.document_id is not None:
-        payload["custom_emoji_document_id"] = result.document_id
 
     queue_key = f"telegram:outbox:{session_id}"
     try:

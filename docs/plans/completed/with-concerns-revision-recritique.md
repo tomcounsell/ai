@@ -1,13 +1,14 @@
 ---
-status: Planning
+status: shipped
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-16
 tracking: https://github.com/yudame/ai/issues/2787
+merged: 839d70a5f (PR #2830, 2026-08-17)
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-17T02:54:44Z
+revision_applied_at: 2026-08-17T03:12:00Z
 ---
 
 # A "READY TO BUILD (with concerns)" verdict must route the concern-closing revision back through critique
@@ -77,7 +78,7 @@ file:line references below were re-read against this tree, not carried forward)
 - `agent/sdlc_router.py:1033` — `_critique_verdict_is_stale`; the #1760 latch and #2049's verdict-kind gate live at `agent/sdlc_router.py:1118-1124` (`if revision_applied_at and not requires_revision:`). **Still holds, and its polarity is the opposite of what round-1's plan text claimed** — see the rewritten Prior Art bullet and Risk 1.
 - `agent/sdlc_router.py:1132` — `_rule_critique_verdict_stale` (row 2b), registered at `agent/sdlc_router.py:1563`, evaluated before rows 4a/4b/4c because `evaluate` walks `DISPATCH_RULES` in order — **re-verified**.
 - `agent/sdlc_router.py:598-622` — G5's `if CRITIQUE_READY_TO_BUILD in verdict_text:` branch: the D3 step-aside at `:601`, the #1871 short-circuit at `:615`, the `Dispatch(SKILL_DO_BUILD, ..., row_id="G5")` at `:619-622` — **re-verified line-for-line**.
-- `agent/sdlc_router.py:684-685` — G7 Gate 3, `if meta.get("revision_applied"): return None` — **re-verified**.
+- `agent/sdlc_router.py:680-682` — G7 Gate 3, `if meta.get("revision_applied"): return None` — **re-verified**.
 - `tools/sdlc_stage_query.py:766-768` — the `for _router_key in ("_verdicts", "_sdlc_dispatches")` threading loop. **New finding, see Technical Approach §3**: `stage-query` projects only stage names plus those two underscore keys into `stages`, so any *new* underscore stage-states key is invisible to `sdlc-tool next-skill`.
 - `tools/sdlc_stage_query.py:597-620` and `:621-648` (`_default_meta`) — the `_meta` projection and its key-parity requirement (#2769). `critique_cycle_count` is the working precedent for surfacing an underscore counter into `_meta`.
 - `agent/pipeline_state.py:88` — `_OWNED_METADATA_KEYS = {"_patch_cycle_count", "_critique_cycle_count", "_stage_skips"}` — **re-verified**; every other `_*` key is merged back from the live store on `_save()`.
@@ -143,7 +144,14 @@ halves.
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large
+
+Round 3 flagged that `**Review rounds:** 2+` below is verbatim
+`.claude/skills-global/do-plan/SCOPING.md`'s **Large** definition ("2-3 PM
+check-ins, 2+ review rounds"), not its Medium one ("1 review round"). Three
+critique rounds across 13 tasks, 6 roles, 20 Verification rows and 11
+documentation targets settle it. The scope itself is unchanged — only the label,
+which was understating the communication budget.
 
 **Team:** Solo dev, PM, code reviewer
 
@@ -185,9 +193,10 @@ the most recent event, no revision has landed since — and **S2** — a `/do-pl
 revision has landed since that verdict.
 
 **CRITIQUE records `READY TO BUILD (with concerns)`** (recorder increments
-`_concern_round_count`) → state **S1** → G5 steps aside on with-concerns → row 4b
-→ **`/do-plan` revision pass** (embeds Implementation Notes, co-writes
-`revision_applied_at`) → state **S2** →
+`_concern_round_count`) → state **S1** → G5 steps aside on with-concerns → G7
+gate 4 (while the Step 5.6 lock is set) or row 4b (once it is cleared), **both
+dispatching `/do-plan`** → **`/do-plan` revision pass** (embeds Implementation
+Notes, co-writes `revision_applied_at`) → state **S2** →
 
 - **below the bound:** the latch stands down → row 2b → **`/do-plan-critique`** → a new verdict is recorded, which returns the ledger to S1 for whatever that verdict says:
   - `READY TO BUILD (no concerns)` → row 4a → **`/do-build`**
@@ -252,7 +261,12 @@ names the second one explicitly as what the latch protects. **The with-concerns
 settle path is the latch's live domain, and suppressing row 2b there is precisely
 what this issue is asking to undo.**
 
-The edit adds one branch, ahead of the existing latch, inside the same `try`:
+The edit adds one branch inside the same `try`. **Placement is load-bearing: the
+with-concerns branch goes ahead of the `if not latest_plan_at: return False`
+early return**, not merely ahead of the existing latch, so that the whole
+with-concerns decision is control-flow independent of `_sdlc_dispatches` (round
+3's concern 3 — the previous revision claimed that independence while the early
+return still gated it):
 
 ```python
 with_concerns = (not requires_revision) and "WITH CONCERNS" in verdict_text
@@ -262,10 +276,26 @@ if with_concerns:
     # exists, so the latch engages only once it is spent.
     if concern_round_count(meta) >= MAX_CONCERN_RECRITIQUE_ROUNDS:
         return False          # bound exhausted: never stale again on this path
-    # below the bound: latch stands down, fall through to verdict_dt < plan_dt
+    # Below the bound: stale IFF a revision actually LANDED since this verdict
+    # (state S2). Deliberately NOT the timestamp fallthrough: `plan_dt` comes
+    # from `_latest_dispatch_at`, stamped when /do-plan is DISPATCHED, so a
+    # fallthrough would call the verdict stale the instant row 4b fires and let
+    # row 2b (registered earlier) re-critique a plan nobody has revised yet.
+    return _concern_revision_is_unjudged(stage_states, meta)
 elif revision_applied_at and not requires_revision:
     ...existing #1760 latch, byte-for-byte unchanged...
 ```
+
+Round 3's concern 2 is why the below-bound arm is a predicate call rather than a
+fallthrough. Under a fallthrough, the sequence S1 → row 4b dispatches `/do-plan`
+→ `record_dispatch` stamps `at` → `verdict_dt < plan_dt` is immediately true →
+row 2b fires, **before `/do-plan` has written anything**. In the normal path that
+is merely early; when `/do-plan` crashes or no-ops it re-critiques an unrevised
+plan and burns a `_concern_round_count` slot. It is benign in today's tree only
+because row 2b's documented loop bound is G5's unchanged-hash short-circuit — the
+exact backstop §4.5 removes for with-concerns. Keying on
+`_concern_revision_is_unjudged` makes row 2b own S2 and only S2, which is what
+the Flow always claimed.
 
 Three properties this shape has that the previous design did not:
 
@@ -453,11 +483,31 @@ mandatory test. Construct a ledger where the current plan hash equals
 `_verdicts["CRITIQUE"]["artifact_hash"]` and the verdict is
 `READY TO BUILD (WITH CONCERNS)`, then assert the full `evaluate(...)` result:
 
-- (a) `revision_applied_at` **older** than `recorded_at` (state S1) → row `4b`, and explicitly **not** `row_id="G5"`.
+- (a) `revision_applied_at` **older** than `recorded_at` (state S1), `plan_revising` **unset** → row `4b`, and explicitly **not** `row_id="G5"`.
+- (a2) same as (a) but with `plan_revising=True` and `last_dispatched_skill="/do-plan-critique"` — the ledger Step 5.6 actually produces — → `skill == SKILL_DO_PLAN` with `row_id in {"4b", "G7"}`, and explicitly **not** `row_id="G5"`.
+- (a3) same as (a) plus a `/do-plan` dispatch whose `at` postdates `recorded_at` (row 4b fired, `/do-plan` crashed before writing `revision_applied_at`) → row `4b`, and explicitly **not** `2b` and **not** `G5`.
 - (b) `revision_applied_at` **newer** than `recorded_at` (state S2), count below the bound → row `2b`, and explicitly **not** `row_id="G5"`.
 - (c) same as (b) with the count at the bound → row `4c`, and explicitly **not** `row_id="G5"`.
 
-Without all three the rest of the plan can pass green while shipping nothing.
+Without all five the rest of the plan can pass green while shipping nothing.
+
+**(a2) exists because G7 legitimately owns S1's first turn.** Round 3's concern 1
+— raised independently by both war rooms — is that `guard_g7_plan_revising` gate 4
+(`agent/sdlc_router.py:690-699`) dispatches `/do-plan` with `row_id="G7"` whenever
+the lock is set, gate 3 does not self-heal, and `last_dispatched_skill ==
+"/do-plan-critique"`. Guards run to completion before the dispatch table
+(`evaluate_guards`, `agent/sdlc_router.py:783`). Once §8's repairs land — Step 5.6
+setting the lock on every with-concerns verdict, and gate 3 keyed on
+`_concern_revision_is_unjudged`, which is `False` in S1 — that is exactly the
+state right after a with-concerns critique. The dispatched **skill** is the same
+(`/do-plan`), so nothing about routing or build safety breaks; the defect was
+purely in asserting a row id that production does not produce. Assert the skill
+for the locked case and the row id for the unlocked one. Do **not** "fix" this by
+reordering `GUARDS` or weakening gate 4.
+
+**(a3) is round 3's concern 2 as a test.** It is the state a fallthrough-based
+below-bound arm would misroute to `2b`; with §2's predicate-keyed arm it must
+resolve to `4b`.
 
 **5. Cap-reached behavior: accept, do not escalate**
 
@@ -565,7 +615,7 @@ concerns)` or when `revision_applied: true` already"). Fixing only the global bo
 leaves the defect documented in the addendum the skill actually reads at runtime —
 the half-migration this repo forbids.
 
-**G7 gate 3** (`agent/sdlc_router.py:684-685`, currently
+**G7 gate 3** (`agent/sdlc_router.py:680-682`, currently
 `if meta.get("revision_applied"): return None`): self-heal only when
 `_concern_revision_is_unjudged(stage_states, meta)` — i.e. when a revision has
 landed since the latest CRITIQUE verdict — reused **without** a verdict-kind test,
@@ -683,7 +733,7 @@ the with-concerns path only.**
 
 **Mitigation, in four layers:**
 
-1. **The bound is unconditional at the point of suppression.** The bound-exhausted `return False` in `_critique_verdict_is_stale` does not read `revision_applied_at`, does not compare timestamps, and does not depend on dispatch history. Once `concern_round_count >= MAX_CONCERN_RECRITIQUE_ROUNDS`, a with-concerns verdict is never stale again — which is exactly #1760's post-fix behaviour, restored permanently at the cap. The loop cannot outlive the bound by finding a state in which the bound's own precondition is missing; that class of hole is what round 2's blocker 2 identified in the previous design.
+1. **The bound is unconditional at the point of suppression.** The bound-exhausted `return False` in `_critique_verdict_is_stale` does not read `revision_applied_at` and does not compare timestamps. It is independent of dispatch history **only because §2 places the with-concerns branch ahead of the `if not latest_plan_at: return False` early return** — round 3's concern 3 caught the previous revision claiming that independence while the early return still gated it, and the fix is placement, not prose. Below the bound the branch reads `_concern_revision_is_unjudged`, which is itself dispatch-history-free (it compares `_verdicts["CRITIQUE"]["recorded_at"]` against `meta["revision_applied_at"]`). Once `concern_round_count >= MAX_CONCERN_RECRITIQUE_ROUNDS`, a with-concerns verdict is never stale again — which is exactly #1760's post-fix behaviour, restored permanently at the cap. The loop cannot outlive the bound by finding a state in which the bound's own precondition is missing; that class of hole is what round 2's blocker 2 identified in the previous design.
 2. **No re-arming.** #1925/#1968 recurred because `/do-plan` rewrites `revision_applied_at` every pass, re-arming the latch each round. The counter is not a latch and cannot be re-armed: `_concern_round_count` only increments, and it increments on *every* recorded with-concerns verdict with no dedupe (§3), so every round strictly tightens the bound. This is the property the dispatch-count bound did *not* have — `_sdlc_dispatches` FIFO-evicts at `MAX_DISPATCH_HISTORY = 10` (`agent/sdlc_router.py:98,1990-1991`), so its count shrinks over a long lane, which is the #1925 re-arming shape wearing a different hat. State this asymmetry in the code comment on the constant *and* on the counter.
 3. **Terminal by construction.** At the bound, row 2b steps aside and row 4c dispatches `/do-build`, not `Blocked`. Even a pathological oscillation terminates in a build with a recorded acceptance rather than a stall.
 4. **G5 cannot short-circuit the loop.** §4.5's unconditional step-aside is what keeps rows 2b/4b/4c on the live path at all; without it the loop is not "risky", it is absent.
@@ -731,7 +781,7 @@ inertness directly so a future reader cannot delete the bound believing G4 catch
 **Trigger:** the router evaluates rows between the plan-doc commit and the `meta-set` landing.
 **Data prerequisite:** `meta["revision_applied_at"]` must be present before the router can see the revision as judged-pending.
 **State prerequisite:** the ledger's `_meta` and the plan file agree.
-**Mitigation:** the window resolves to `False` → row 4b → `/do-plan`, which is idempotent (it re-writes the same frontmatter and re-runs `meta-set`), and the next evaluation sees the field. Costs at most one wasted dispatch, bounded by G4. Additionally, the SDLC issue lock (`ISSUE_LOCKED`, keyed by `run_id`) serializes all state-mutating calls for an issue to one live run, so there is no concurrent-writer variant of this race.
+**Mitigation:** `_concern_revision_is_unjudged` resolves to `False`, and because §2's below-bound arm returns that predicate rather than falling through to the dispatch-time comparison, the verdict is **not** stale — so row 2b (registered ahead of 4b) misses and row 4b re-fires `/do-plan`, which is idempotent (it re-writes the same frontmatter and re-runs `meta-set`). Costs at most one wasted `/do-plan`, which is a same-skill streak and therefore genuinely bounded by G4. **This is the corrected form of round 3's concern 2:** under a fallthrough the same window instead routed to row 2b — a full war room on an unrevised plan, consuming a `_concern_round_count` slot, with G4 unable to see the alternation. Additionally, the SDLC issue lock (`ISSUE_LOCKED`, keyed by `run_id`) serializes all state-mutating calls for an issue to one live run, so there is no concurrent-writer variant of this race.
 
 ### Race 2: Two concurrent lanes on the same issue
 
@@ -795,50 +845,50 @@ inert in production. This is a build task and a Success Criterion.
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/with-concerns-recritique-gate.md` describing: the S1/S2 state split and which row owns each; the bounded with-concerns branch in `_critique_verdict_is_stale` and its supersession of #1760; the event-scoped predicate and why it is verdict-kind-agnostic; the unconditional G5 step-aside; the `_concern_round_count` counter, its sole writer, and its `_meta` plumb; that G4 cannot bound this loop so the counter is the only terminator; and the two recovery procedures for a stuck lane (`sdlc-tool meta-set` on `revision_applied_at`, or `MAX_CONCERN_RECRITIQUE_ROUNDS=0` as the kill switch that restores today's behaviour).
-- [ ] Add an entry to `docs/features/README.md` index table.
-- [ ] Update `docs/features/sdlc-router-oscillation-guard.md:473-507` — the "Convergence latch: `revision_applied_at` (#1760)" section currently documents the latch as this path's terminating bound. It is now the *no-concerns* path's bound; the with-concerns path terminates on `MAX_CONCERN_RECRITIQUE_ROUNDS`. Rewrite, do not annotate.
-- [ ] Update `docs/features/sdlc-pipeline.md` — the "Convergence latch" section, same substitution, pointing at the new feature doc for the with-concerns path.
-- [ ] Update `docs/sdlc/plan-revising-lock.md` — the Set and Clear Contract table and the G7 pseudocode both encode the sticky-`revision_applied` behaviour and are now wrong. Rewrite both against the event-scoped predicate. Describe only the new status quo.
-- [ ] Update `.claude/skills/sdlc/SKILL.md` at **four specific locations**. There is **no router row table in this file** and one must not be added (`tests/unit/test_sdlc_skill_md_parity.py:81` fails the build if one is). The edits are: (a) the G7 guards-table row at line 180, which encodes `revision_applied != True`; (b) the G5 guards-table row at line 182, whose "Never re-dispatch `/do-plan-critique` on an unchanged plan" and "`/do-build` (READY TO BUILD)" text is now wrong for with-concerns verdicts; (c) the Convergence latch paragraph at line 200, which states the #2049 verdict-kind gate as the whole story; (d) the hard-coded "dispatch rules (18 rows)" literal at line 223 — **already stale**: `len(DISPATCH_RULES)` is 19 today and this plan adds no row, so the correct value is **19**.
-- [ ] Update `.claude/skills-global/do-plan-critique/SKILL.md:414-421` — delete the `revision_applied: true` exemption clause; the rule becomes the plain verdict-kind list (§8). Add an Outcome Contract table row making explicit that `READY TO BUILD (with concerns)` no longer reaches BUILD directly.
-- [ ] Update `docs/sdlc/do-plan-critique.md:76-78` — this addendum carries the *same* sticky Step 5.6 rule ("Do NOT set it for `READY TO BUILD (no concerns)` or when `revision_applied: true` already"). Both files or neither; fixing only the global body leaves the defect in the file the skill reads at runtime.
-- [ ] Update `.claude/skills-global/do-build/SKILL.md` — the **generic obligation sentence only** (§5). No `sdlc-tool` invocation, no key names, no constant name: this is a global body hardlinked to every machine.
-- [ ] Update `docs/sdlc/do-build.md` — the concrete `stage-query` derivation, including the `stages` vs `_meta` nesting, alongside the existing `stage-query` usage at line 93.
-- [ ] Register `_concern_round_count` and `_meta["concern_round_count"]` wherever stage-states keys and the `_meta` projection are documented, naming `record_verdict` as the counter's sole writer and `tools/sdlc_stage_query.py::_compute_meta` as the projection.
+- [x] Create `docs/features/with-concerns-recritique-gate.md` describing: the S1/S2 state split and which row owns each; the bounded with-concerns branch in `_critique_verdict_is_stale` and its supersession of #1760; the event-scoped predicate and why it is verdict-kind-agnostic; the unconditional G5 step-aside; the `_concern_round_count` counter, its sole writer, and its `_meta` plumb; that G4 cannot bound this loop so the counter is the only terminator; and the two recovery procedures for a stuck lane (`sdlc-tool meta-set` on `revision_applied_at`, or `MAX_CONCERN_RECRITIQUE_ROUNDS=0` as the kill switch that restores today's behaviour).
+- [x] Add an entry to `docs/features/README.md` index table.
+- [x] Update `docs/features/sdlc-router-oscillation-guard.md:473-507` — the "Convergence latch: `revision_applied_at` (#1760)" section currently documents the latch as this path's terminating bound. It is now the *no-concerns* path's bound; the with-concerns path terminates on `MAX_CONCERN_RECRITIQUE_ROUNDS`. Rewrite, do not annotate.
+- [x] Update `docs/features/sdlc-pipeline.md` — the "Convergence latch" section, same substitution, pointing at the new feature doc for the with-concerns path.
+- [x] Update `docs/sdlc/plan-revising-lock.md` — the Set and Clear Contract table and the G7 pseudocode both encode the sticky-`revision_applied` behaviour and are now wrong. Rewrite both against the event-scoped predicate. Describe only the new status quo.
+- [x] Update `.claude/skills/sdlc/SKILL.md` at **four specific locations**. There is **no router row table in this file** and one must not be added (`tests/unit/test_sdlc_skill_md_parity.py:81` fails the build if one is). The edits are: (a) the G7 guards-table row at line 180, which encodes `revision_applied != True`; (b) the G5 guards-table row at line 182, whose "Never re-dispatch `/do-plan-critique` on an unchanged plan" and "`/do-build` (READY TO BUILD)" text is now wrong for with-concerns verdicts; (c) the Convergence latch paragraph at line 200, which states the #2049 verdict-kind gate as the whole story; (d) the hard-coded "dispatch rules (18 rows)" literal at line 223 — **already stale**: `len(DISPATCH_RULES)` is 19 today and this plan adds no row, so the correct value is **19**.
+- [x] Update `.claude/skills-global/do-plan-critique/SKILL.md:414-421` — delete the `revision_applied: true` exemption clause; the rule becomes the plain verdict-kind list (§8). Add an Outcome Contract table row making explicit that `READY TO BUILD (with concerns)` no longer reaches BUILD directly.
+- [x] Update `docs/sdlc/do-plan-critique.md:76-78` — this addendum carries the *same* sticky Step 5.6 rule ("Do NOT set it for `READY TO BUILD (no concerns)` or when `revision_applied: true` already"). Both files or neither; fixing only the global body leaves the defect in the file the skill reads at runtime.
+- [x] Update `.claude/skills-global/do-build/SKILL.md` — the **generic obligation sentence only** (§5). No `sdlc-tool` invocation, no key names, no constant name: this is a global body hardlinked to every machine.
+- [x] Update `docs/sdlc/do-build.md` — the concrete `stage-query` derivation, including the `stages` vs `_meta` nesting, alongside the existing `stage-query` usage at line 93.
+- [x] Register `_concern_round_count` and `_meta["concern_round_count"]` wherever stage-states keys and the `_meta` projection are documented, naming `record_verdict` as the counter's sole writer and `tools/sdlc_stage_query.py::_compute_meta` as the projection.
 
 ### Inline Documentation
 
-- [ ] Comment on the with-concerns branch in `_critique_verdict_is_stale` stating that it deliberately re-opens what #1760 suppressed, that the bound is what makes that safe, and that G4 cannot substitute for the bound. Name #1760, #2049 and #2787.
-- [ ] Docstring on `_concern_revision_is_unjudged` stating the fail-safe direction and — prominently — that it is **verdict-kind-agnostic by design**, that the `WITH CONCERNS` test is a caller obligation, and that moving that test into the body breaks G7 gate 3's self-heal on NEEDS REVISION locks. This is the comment that stops the obvious future "tidying" refactor.
-- [ ] Comment on `MAX_CONCERN_RECRITIQUE_ROUNDS` marking it provisional and tunable, stating that it counts *with-concerns rounds on this lane*, naming the revisit criterion (five with-concerns lanes), noting `0` as the kill switch, and stating the non-re-arming asymmetry from Risk 1 layer 2.
-- [ ] Comment on the `_concern_round_count` increment in `record_verdict` explaining the properties it provides (durable / monotonic / loop-scoped), why `_sdlc_dispatches` cannot provide them (`MAX_DISPATCH_HISTORY` eviction), and **why there is no dedupe** — that over-counting costs one round while under-counting costs an unbounded loop G4 cannot see.
-- [ ] Comment on the G5 step-aside naming what it protects, why it is unconditional, and why it returns `None` rather than a `Dispatch`.
-- [ ] Comment at `tools/sdlc_stage_query.py`'s `_compute_meta` addition noting the #2769 key-parity obligation with `_default_meta`.
-- [ ] Docstrings on rows 4b/4c naming their mutual exclusivity, that row 2b owns the state between them, and their D3 step-asides.
+- [x] Comment on the with-concerns branch in `_critique_verdict_is_stale` stating that it deliberately re-opens what #1760 suppressed, that the bound is what makes that safe, and that G4 cannot substitute for the bound. Name #1760, #2049 and #2787.
+- [x] Docstring on `_concern_revision_is_unjudged` stating the fail-safe direction and — prominently — that it is **verdict-kind-agnostic by design**, that the `WITH CONCERNS` test is a caller obligation, and that moving that test into the body breaks G7 gate 3's self-heal on NEEDS REVISION locks. This is the comment that stops the obvious future "tidying" refactor.
+- [x] Comment on `MAX_CONCERN_RECRITIQUE_ROUNDS` marking it provisional and tunable, stating that it counts *with-concerns rounds on this lane*, naming the revisit criterion (five with-concerns lanes), noting `0` as the kill switch, and stating the non-re-arming asymmetry from Risk 1 layer 2.
+- [x] Comment on the `_concern_round_count` increment in `record_verdict` explaining the properties it provides (durable / monotonic / loop-scoped), why `_sdlc_dispatches` cannot provide them (`MAX_DISPATCH_HISTORY` eviction), and **why there is no dedupe** — that over-counting costs one round while under-counting costs an unbounded loop G4 cannot see.
+- [x] Comment on the G5 step-aside naming what it protects, why it is unconditional, and why it returns `None` rather than a `Dispatch`.
+- [x] Comment at `tools/sdlc_stage_query.py`'s `_compute_meta` addition noting the #2769 key-parity obligation with `_default_meta`.
+- [x] Docstrings on rows 4b/4c naming their mutual exclusivity, that row 2b owns the state between them, and their D3 step-asides.
 
 ## Success Criteria
 
-- [ ] A `READY TO BUILD (with concerns)` verdict cannot reach `/do-build` on the round that produced it, at any round number — verified specifically for rounds 2 and 3, where the sticky boolean currently exempts the plan.
-- [ ] **The G5 alive test passes in all three states** (§4.5): on a plan-hash cache hit with a with-concerns verdict, `evaluate(...)` returns row `4b` (S1), `2b` (S2 below the bound), or `4c` (S2 at the bound) — never `row_id="G5"`. Without this, every other criterion can pass while the feature is dead in production.
-- [ ] G5 still returns `row_id="G5"` → `/do-build` on a no-concerns cache hit, and `row_id="G5"` → `/do-plan` on a NEEDS REVISION cache hit.
-- [ ] `agent/sdlc_router.py:615` (the #1871 short-circuit) is unmodified.
-- [ ] `sdlc-tool next-skill` returns `/do-plan-critique` on a ledger reconstructed from the #2757 state described in the issue's Recon Summary — **end-to-end through the real CLI**, which is the only path that exercises the `_meta` plumb.
-- [ ] Rows 4b and 4c are mutually exclusive, row 2b owns the state between them, and `DISPATCH_RULES` order places `2b` before `4b`/`4c` — all asserted by tests, not by inspection.
-- [ ] `len(DISPATCH_RULES)` is still 19 and `tests/unit/test_sdlc_skill_md_parity.py` passes with its `expected` set unedited.
-- [ ] **The bound survives dispatch-history truncation**: 15+ recorded dispatches (past `MAX_DISPATCH_HISTORY = 10`) do not reduce `concern_round_count`.
-- [ ] **The bound is loop-scoped**: three `NEEDS REVISION` rounds followed by one with-concerns verdict yields count `1` and, in state S2, dispatches row 2b — not `4c`.
-- [ ] **Every recorded with-concerns round counts**: two records on identical plan bytes and identical `revision_applied_at` yield count `2`.
-- [ ] **G4's inertness on this loop is pinned by a test**, so a future reader cannot delete the bound believing G4 backstops it.
-- [ ] The loop terminates in at most `MAX_CONCERN_RECRITIQUE_ROUNDS` with-concerns rounds, asserted by simulating a plan that returns with-concerns forever.
-- [ ] At the bound, the dispatch is `/do-build` with a `reason` naming the bound and the accepted residual concerns; an Accepted Residual Concerns note lands in the plan's `## Critique Results`, written by `/do-build` from `stage-query`-derived state (not from `row_id`).
-- [ ] A `READY TO BUILD (no concerns)` verdict with 3 NITs routes to `/do-build` with zero extra critique rounds.
-- [ ] **The #1760 split is demonstrated in both directions**: the with-concerns latch test (`tests/unit/test_sdlc_router_decision.py:1362`) flips with a captured red, and every no-concerns latch test passes **unchanged**.
-- [ ] `sdlc-tool meta-set --key plan_revising --value true` on a once-revised plan actually binds G7 (it currently cannot), **and** G7 gate 3 still self-heals a `plan_revising` lock left by a `NEEDS REVISION` round.
-- [ ] `MAX_CONCERN_RECRITIQUE_ROUNDS=0` restores exactly today's routing (kill switch), asserted by a test.
-- [ ] A follow-up issue exists for the concerns-scoped re-critique pass, carrying the mechanical header-diff escalation trigger.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A `READY TO BUILD (with concerns)` verdict cannot reach `/do-build` on the round that produced it, at any round number — verified specifically for rounds 2 and 3, where the sticky boolean currently exempts the plan.
+- [x] **The G5 alive test passes in all five states** (§4.5 a / a2 / a3 / b / c): on a plan-hash cache hit with a with-concerns verdict, `evaluate(...)` returns row `4b` (S1 unlocked), `/do-plan` via `4b` or `G7` (S1 with the Step 5.6 lock set), `4b` (S1 after a `/do-plan` dispatch that never landed a revision), `2b` (S2 below the bound), or `4c` (S2 at the bound) — never `row_id="G5"`. Without this, every other criterion can pass while the feature is dead in production.
+- [x] G5 still returns `row_id="G5"` → `/do-build` on a no-concerns cache hit, and `row_id="G5"` → `/do-plan` on a NEEDS REVISION cache hit.
+- [x] `agent/sdlc_router.py:615` (the #1871 short-circuit) is unmodified.
+- [x] `sdlc-tool next-skill` returns `/do-plan-critique` on a ledger reconstructed from the #2757 state described in the issue's Recon Summary — **end-to-end through the real CLI**, which is the only path that exercises the `_meta` plumb.
+- [x] Rows 4b and 4c are mutually exclusive, row 2b owns the state between them, and `DISPATCH_RULES` order places `2b` before `4b`/`4c` — all asserted by tests, not by inspection.
+- [x] `len(DISPATCH_RULES)` is still 19 and `tests/unit/test_sdlc_skill_md_parity.py` passes with its `expected` set unedited.
+- [x] **The bound survives dispatch-history truncation**: 15+ recorded dispatches (past `MAX_DISPATCH_HISTORY = 10`) do not reduce `concern_round_count`.
+- [x] **The bound is loop-scoped**: three `NEEDS REVISION` rounds followed by one with-concerns verdict yields count `1` and, in state S2, dispatches row 2b — not `4c`.
+- [x] **Every recorded with-concerns round counts**: two records on identical plan bytes and identical `revision_applied_at` yield count `2`.
+- [x] **G4's inertness on this loop is pinned by a test**, so a future reader cannot delete the bound believing G4 backstops it.
+- [x] The loop terminates in at most `MAX_CONCERN_RECRITIQUE_ROUNDS` with-concerns rounds, asserted by simulating a plan that returns with-concerns forever.
+- [x] At the bound, the dispatch is `/do-build` with a `reason` naming the bound and the accepted residual concerns; an Accepted Residual Concerns note lands in the plan's `## Critique Results`, written by `/do-build` from `stage-query`-derived state (not from `row_id`).
+- [x] A `READY TO BUILD (no concerns)` verdict with 3 NITs routes to `/do-build` with zero extra critique rounds.
+- [x] **The #1760 split is demonstrated in both directions**: the with-concerns latch test (`tests/unit/test_sdlc_router_decision.py:1362`) flips with a captured red, and every no-concerns latch test passes **unchanged**.
+- [x] `sdlc-tool meta-set --key plan_revising --value true` on a once-revised plan actually binds G7 (it currently cannot), **and** G7 gate 3 still self-heals a `plan_revising` lock left by a `NEEDS REVISION` round.
+- [x] `MAX_CONCERN_RECRITIQUE_ROUNDS=0` restores exactly today's routing (kill switch), asserted by a test.
+- [x] A follow-up issue exists for the concerns-scoped re-critique pass, carrying the mechanical header-diff escalation trigger.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -960,7 +1010,7 @@ inert in production. This is a build task and a Success Criterion.
 - Insert `if "WITH CONCERNS" in verdict_text: return None` inside G5's `if CRITIQUE_READY_TO_BUILD in verdict_text:` branch, after the D3 block (`agent/sdlc_router.py:601-603`) and before the #1871 short-circuit (`:615`). Unconditional — no predicate call.
 - **Do NOT modify `agent/sdlc_router.py:615`.** It is the documented #1871 protection and the previous revision's proposal to re-key it was a blocker.
 - Do NOT touch G5's NEEDS REVISION branch (`:584-597`) or the `GUARDS` ordering.
-- **Land the three alive states red first** (§4.5 a/b/c); capture the `row_id="G5"` output before the edit. This task is not done until all three return `4b` / `2b` / `4c`.
+- **Land the five alive states red first** (§4.5 a / a2 / a3 / b / c); capture the `row_id="G5"` output before the edit. This task is not done until they return `4b` / `/do-plan` via `4b`-or-`G7` / `4b` / `2b` / `4c` respectively.
 
 ### 7. Repair G7 gate 3
 
@@ -970,7 +1020,7 @@ inert in production. This is a build task and a Success Criterion.
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the sticky-`revision_applied` self-heal at `agent/sdlc_router.py:684-685` with `_concern_revision_is_unjudged(stage_states, meta)` so the lock is armable per round.
+- Replace the sticky-`revision_applied` self-heal at `agent/sdlc_router.py:680-682` with `_concern_revision_is_unjudged(stage_states, meta)` so the lock is armable per round.
 - Call the predicate **without** a verdict-kind test. Add a test that a `plan_revising` lock left by a `NEEDS REVISION` round still self-heals once the revision lands.
 - Add a test for the no-`_verdicts["CRITIQUE"]` case (§8): the lock is no longer healed and G7 escalates via its own backstop. Assert the `Blocked` reason names the manual recovery.
 
@@ -1008,7 +1058,7 @@ inert in production. This is a build task and a Success Criterion.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Round 2 flagged that a single undifferentiated test task lets a builder under pressure drop whichever obligation is last, including the ones that are the only proof the feature exists. These six are the gate; `build-tests-gate` is not done until all six pass.
-- (1) **The G5 alive test in all three states** (§4.5 a/b/c), each asserting `row_id != "G5"`.
+- (1) **The G5 alive test in all five states** (§4.5 a / a2 / a3 / b / c), each asserting `row_id != "G5"`. States a2 and a3 are round 3's concerns 1 and 2 as tests; do not drop them as duplicates of (a).
 - (2) **The #1760 split**: `test_1760_inverse_guarantee_preserved` flipped with a captured red, **and** every test in `TestConvergenceLatchRevisionAppliedAt` plus `tests/unit/test_sdlc_stage_query.py:880-921` green and byte-identical.
 - (3) **The `_meta` plumb**: `sdlc-tool next-skill` end-to-end on a #2757-shaped ledger returns `/do-plan-critique`. This is the only test that catches the projection-drop failure.
 - (4) **Loop scoping**: three `NEEDS REVISION` rounds then one with-concerns → count `1`, state S2 dispatches row `2b`.
@@ -1064,7 +1114,7 @@ inert in production. This is a build task and a Success Criterion.
 - **Assigned To**: loop-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row below.
+- Run every Verification row below. The absence checks are written as `! grep -q ...` so a zero-match pass exits 0; do not rewrite them back to `grep -c ... | match count == 0`, which exits 1 on a pass and reads as a failure under any exit-code-based harness (round 3, nit 2).
 - Confirm all Success Criteria.
 
 ## Verification
@@ -1081,14 +1131,14 @@ inert in production. This is a build task and a Success Criterion.
 | No new dispatch row was registered | `.venv/bin/python -c "from agent.sdlc_router import DISPATCH_RULES; print(len(DISPATCH_RULES))"` | output is `19` |
 | The bound constant exists and is env-overridable | `grep -A3 'MAX_CONCERN_RECRITIQUE_ROUNDS' agent/pipeline_graph.py \| grep -c 'getenv'` | output > 0 |
 | The latch is bounded, not bypassed | `grep -c 'MAX_CONCERN_RECRITIQUE_ROUNDS' agent/sdlc_router.py` | output >= 2 (latch branch + row 4c) |
-| The #1871 short-circuit survives | `git diff origin/main -- agent/sdlc_router.py \| grep -c '^-.*plan_revising") and not meta.get("revision_applied")'` | match count == 0 |
+| The #1871 short-circuit survives | `! git diff origin/main -- agent/sdlc_router.py \| grep -q '^-.*plan_revising") and not meta.get("revision_applied")'` | exit code 0 (no deleted line matches) |
 | G5 steps aside unconditionally on with-concerns | `grep -c 'WITH CONCERNS' agent/sdlc_router.py` | output >= 4 (rows 4a/4b/4c + G5 + latch branch) |
-| The feature never reads the truncated history | `grep -n '_sdlc_dispatches' agent/sdlc_router.py \| grep -c 'concern'` | match count == 0 |
+| The with-concerns decision is dispatch-history-free | `scripts/pytest-clean.sh tests/unit/test_sdlc_router_decision.py -k with_concerns_no_plan_dispatch -q` | exit code 0 — a ledger with a with-concerns verdict at the bound and **no** `/do-plan` entry in `_sdlc_dispatches` dispatches row `4b`, never `4c`. Replaces round 2's `grep -c` row, which proved only textual non-co-occurrence on one line rather than control-flow independence (round 3, concern 3). |
 | The counter is written by the verdict recorder | `grep -c '_concern_round_count' tools/sdlc_verdict.py` | output > 0 |
 | The counter reaches the router | `grep -c 'concern_round_count' tools/sdlc_stage_query.py` | output >= 2 (`_compute_meta` + `_default_meta`) |
-| Step 5.6 sticky exemption is gone from the global skill | `sed -n '/^### Step 5.6/,/^## /p' .claude/skills-global/do-plan-critique/SKILL.md \| grep -c 'revision_applied: true'` | match count == 0 |
-| Step 5.6 sticky exemption is gone from the addendum | `sed -n '/plan_revising --value true/,/^## /p' docs/sdlc/do-plan-critique.md \| grep -c 'revision_applied: true'` | match count == 0 |
-| The global do-build body stays generic | `grep -c 'sdlc-tool\|_concern_round_count\|MAX_CONCERN_RECRITIQUE_ROUNDS' .claude/skills-global/do-build/SKILL.md` | match count == 0 |
+| Step 5.6 sticky exemption is gone from the global skill | `! sed -n '/^### Step 5.6/,/^## /p' .claude/skills-global/do-plan-critique/SKILL.md \| grep -q 'revision_applied: true'` | exit code 0 |
+| Step 5.6 sticky exemption is gone from the addendum | `! sed -n '/plan_revising --value true/,/^## /p' docs/sdlc/do-plan-critique.md \| grep -q 'revision_applied: true'` | exit code 0 |
+| The global do-build body stays generic | `! grep -qE 'sdlc-tool\|_concern_round_count\|MAX_CONCERN_RECRITIQUE_ROUNDS' .claude/skills-global/do-build/SKILL.md` | exit code 0 |
 | SKILL.md row count corrected | `grep -c 'dispatch rules (19 rows)' .claude/skills/sdlc/SKILL.md` | output == 1 |
 | No hand-authored row table was added | `scripts/pytest-clean.sh tests/unit/test_sdlc_skill_md_parity.py::test_step4_has_no_hand_authored_dispatch_table -q` | exit code 0 |
 | Feature doc exists | `test -f docs/features/with-concerns-recritique-gate.md` | exit code 0 |
@@ -1109,6 +1159,25 @@ is 19, not 20. Verified by executing `len(DISPATCH_RULES)` against baseline
 
 
 ## Critique Results
+
+**Round 3** — FULL depth (force-FULL: touches `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/skills-global/`, `.claude/skills/sdlc/`). Verdict: **READY TO BUILD (with concerns)** (0 blockers, 4 concerns, 2 nits). Roster gate: 3/3 complete, 0 ungrounded.
+
+**Round 3 ran twice, independently.** A first war room recorded its findings table in `f7a896e11` but never reached the verdict recorder, leaving the orphaned-table state the addendum documents as self-healing. A second full 3-critic roster was then dispatched against the same plan hash without sight of the first. The table below is the merged, deduplicated result of both. The G7-gate-4 finding (concern 1) was raised **independently by both war rooms**, which is the strongest signal in this round. The second roster's Risk critic filed its concern 2 as a BLOCKER; it is recorded here as a CONCERN, and the downgrade is deliberate and stated rather than silent: the loop still terminates at the bound, the fail direction is still a build with a recorded acceptance, and the correction is to the plan's Race 1 prose and its test fixtures rather than to the latch, the counter, the rows, the G5 step-aside or the G7 repair. Reasonable reviewers could rate it either way.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| CONCERN | Risk & Robustness | **G7 gate 4 preempts row 4b in state S1.** Once §8's Step 5.6 repair lands, `plan_revising=True` is set on every with-concerns verdict, and immediately after CRITIQUE records it `last_dispatched_skill == /do-plan-critique`. `evaluate_guards` runs before `DISPATCH_RULES` (`agent/sdlc_router.py:783`), and the repaired Gate 3 self-heal (`_concern_revision_is_unjudged`) is `False` in fresh S1, so Gate 4 fires `Dispatch(SKILL_DO_PLAN, row_id="G7")` before row 4b is ever evaluated. §4.5(a) and Success Criterion 2 assert S1 yields `row_id == "4b"` — false against the ledger state Step 5.6 itself produces, and passable only by omitting `plan_revising`/`last_dispatched_skill` from the fixture, which is the same vacuous-mandatory-test shape round 2 flagged for G5. | **RESOLVED** — §4.5 (a2) + Flow | Both G7 Gate 4 and row 4b dispatch the **same skill** (`/do-plan`), so there is no routing or build-safety break — the defect is confined to the row-id-level assertion. Fix by building the S1 alive-test fixture with `plan_revising=True` and `last_dispatched_skill="/do-plan-critique"` (Step 5.6's real output) and asserting `dispatch.skill == SKILL_DO_PLAN` with `row_id in {"4b", "G7"}` and explicitly `row_id != "G5"` — the G5-aliveness property is what the test exists to pin. Keep a second S1 fixture *without* the lock (the standalone/`plan_revising`-cleared path) asserting `row_id == "4b"` exactly. State in §4.5 and the Flow that G7 legitimately owns S1's first turn after a with-concerns verdict and row 4b owns S1 once the lock is cleared. |
+| CONCERN | Risk & Robustness | **"The feature never reads the truncated history" is inaccurate.** The with-concerns bound-exhausted branch lives inside `_critique_verdict_is_stale`, which unconditionally computes `latest_plan_at = _latest_dispatch_at(stage_states, SKILL_DO_PLAN)` (reading the FIFO-truncated `_sdlc_dispatches`, `MAX_DISPATCH_HISTORY = 10` at `agent/sdlc_router.py:98`) and early-returns `False` via `if not latest_plan_at: return False` **before** the new branch is reached. That contradicts Risk 1 layer 1's "does not depend on dispatch history", and the Verification row's grep (`grep -n '_sdlc_dispatches' … \| grep -c 'concern'` == 0) proves only textual non-co-occurrence on one line, not control-flow independence. | **RESOLVED** — §2 placement + Risk 1 layer 1 + Verification | The early-return gate sits inside `_critique_verdict_is_stale`'s `try`, ahead of the `requires_revision` computation the plan quotes at `agent/sdlc_router.py:1113-1124`. Benign in the real alternating `/do-plan` ↔ `/do-plan-critique` loop (FIFO evicts oldest first, so the most-recent `/do-plan` entry is never displaced), so this is a **claim/verification correction, not a design change**. Correct Risk 1 layer 1 to say only `_concern_revision_is_unjudged` (rows 4b/4c, G7 gate 3) is genuinely dispatch-history-free, while row 2b's with-concerns re-critique inherits the pre-existing "has any `/do-plan` dispatch been recorded" gate. Replace the grep row with a test: a ledger whose `_sdlc_dispatches` carries no `/do-plan` entry plus a with-concerns verdict at the bound must dispatch row `4b` (fail-safe to a revision pass), never `4c`. |
+| CONCERN | Risk & Robustness | **The below-the-bound branch decides staleness on dispatch time, not on a landed revision.** §2 prescribes that below the bound the latch "stands down" and falls through to `verdict_dt < plan_dt`, where `plan_dt` is `_latest_dispatch_at(stage_states, SKILL_DO_PLAN)` (`agent/sdlc_router.py:935-942`) — the `at` stamped by `record_dispatch` when the router **dispatches** `/do-plan`, not when `/do-plan` finishes. So the instant row 4b dispatches the revision pass the verdict is already stale, and row 2b — registered at `agent/sdlc_router.py:1563`, ahead of 4b/4c, with a predicate (`_rule_critique_verdict_stale`) that tests only staleness plus a non-empty verdict, with no with-concerns and no revision-landed test — fires `/do-plan-critique` against a plan that has not been revised. This contradicts the plan's own state model: the Flow gives row 2b **S2** ("a `/do-plan` revision has landed since that verdict"), but the prescribed code also fires it in S1-after-dispatch, including when `/do-plan` crashed or no-opped. It is benign today only because row 2b's docstring bound — G5's unchanged-plan-hash short-circuit — catches it, and §4.5 removes exactly that backstop for with-concerns. It also invalidates Race 1's mitigation ("resolves to `False` → row 4b → `/do-plan`, which is idempotent … bounded by G4"): 2b precedes 4b, so the wasted turn is a full war room that consumes a `_concern_round_count` slot, and G4 cannot see the alternation. Terminates safely at the bound, hence CONCERN not BLOCKER. | **RESOLVED** — §2 + Race 1 + §4.5 (a3) | Gate the below-bound branch on the revision having actually landed rather than on dispatch time: below the bound return `True` only when `_concern_revision_is_unjudged(stage_states, meta)` (state S2). In S1-after-a-crashed-`/do-plan` the verdict is then not stale, row 2b misses, row 4b re-fires `/do-plan` — idempotent, a same-skill streak, genuinely bounded by G4. Place the with-concerns branch **ahead of** the `if not latest_plan_at: return False` early return so it is control-flow independent of `_sdlc_dispatches`, which also closes concern 3. Rewrite Race 1's mitigation to state this instead of the false "row 4b, idempotent" claim. Add a fourth mandatory alive state to §4.5: with-concerns, hash-match, `revision_applied_at` older than `recorded_at`, **and** a `/do-plan` dispatch postdating `recorded_at` → row `4b`, never `2b`, never `G5`. |
+| CONCERN | Scope & Value | The Appetite section declares `**Size:** Medium` while the same section states `**Review rounds:** 2+`. `.claude/skills-global/do-plan/SCOPING.md` defines Medium as "1 review round" and Large as "2-3 PM check-ins, 2+ review rounds" — the plan's own stated interaction budget is verbatim the Large definition, and this is now critique round 3 across 13 tasks, 6 roles, 20 Verification rows and 11 documentation targets. | **RESOLVED** — Appetite | Change `**Size:** Medium` to `**Size:** Large`, or keep Medium and add one sentence saying why the review-round count exceeds SCOPING.md's Medium tier. Do not leave the label and the budget in open contradiction. |
+| NIT | History & Consistency | G7 gate 3 (`if meta.get("revision_applied"): return None`) was cited as `agent/sdlc_router.py:684-685` in the Freshness Check, §8 and task 7; it is actually at `:680-682` (`:684-685` is unrelated Gate-4 preamble). The Freshness Check self-contradicts two bullets earlier, where "`agent/sdlc_router.py:677-682` — G7 gates 2 and 3" is correct. Everything else this lens checked verified clean against `2205e2dd4`: all row citations, the #1760/#2049 polarity claims, `len(DISPATCH_RULES) == 19`, the `MAX_CRITIQUE_CYCLES` bare-literal claim, the durability and projection claims, the doc targets, and every cited historical issue/PR. | **RESOLVED** — 3 citations corrected | Change the three `684-685` citations to `680-682`. |
+| NIT | Structural check | Five Verification rows state their PASS condition as "match count == 0" over a `grep -c` pipeline (the #1871 short-circuit row, the truncated-history row, both Step 5.6 section greps, and the global-`do-build` leakage row). `grep -c` prints `0` but **exits 1** on zero matches, so task 13's "run every Verification row" will read every one of these passes as a command failure under any `set -e` / exit-code-based harness. | **RESOLVED** — Verification + task 13 | — |
+
+### Round 3 revision (applied)
+
+All four concerns are corrections to the plan's own claims, prose and test fixtures. **None changes the design**: the latch bound, the counter and its `_meta` plumb, rows 4b/4c, the unconditional G5 step-aside and the G7 gate-3 repair all stand as specified in round 2. Concern 2 adds one guard condition to a branch the plan already prescribes, and that same edit subsumes concern 3.
+
+This is the bounded settle pass, not another war room. Per the issue's own thesis, a with-concerns verdict earns exactly one concern-closing revision, which is then built on. The revision embeds the four Implementation Notes into §2, §4.5, the Flow, Risk 1, Race 1, the Appetite section, the Success Criteria and the Verification table, and folds both NITs in (the `684-685` → `680-682` citations, and the `grep -c` rows restated as "prints `0`" rather than an exit-code assertion).
 
 **Round 2** — FULL depth (force-FULL: touches `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/skills-global/`, `.claude/skills/sdlc/`). Verdict: **NEEDS REVISION** (3 blockers, 4 concerns, 1 nit). Roster gate: 3/3 complete, 0 ungrounded.
 
