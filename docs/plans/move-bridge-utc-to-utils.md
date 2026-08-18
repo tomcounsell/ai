@@ -29,14 +29,18 @@ CLI utilities are chained to the Telegram package by a call to `datetime.now()`.
 **Desired outcome:**
 
 The time helper lives in a package whose name matches what it is, `bridge/utc.py`
-stops existing, and all 57 referencing files point at the new path in the same
+stops existing, and all **57 referencing files** point at the new path in the same
 change. `tools/selfie`, `tools/sms_reader`, and `tools/test_scheduler` end with
 zero harness imports, and a test in `tests/unit/test_architectural_constraints.py`
 keeps them that way.
 
 ## Freshness Check
 
-**Baseline commit:** `a2d13de73` (`git rev-parse HEAD` == `origin/main`, working tree clean)
+**Baseline commit:** `79b539535` (`git rev-parse HEAD` == `origin/main`, working tree clean)
+**Original baseline:** `a2d13de73`. The only commits between the two are this plan
+document's own three revisions (`git diff --name-only a2d13de73..79b539535` returns
+`docs/plans/move-bridge-utc-to-utils.md` and nothing else), so every code
+measurement below holds at both commits.
 **Issue filed at:** 2026-08-18T13:10:14Z
 **Disposition:** Unchanged
 
@@ -51,7 +55,45 @@ keeps them that way.
 - `tests/unit/test_public_api_contract.py:57` — `("bridge.utc", "utc_now"): "() -> datetime.datetime"`. Still holds, exact line.
 - `tests/unit/test_utc.py` — exists, imports all four symbols from `bridge.utc`, docstring names the old path.
 
-**Importer count re-derived, not inherited:** `git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py'` returns **57** files at `a2d13de73`. Breakdown: tests 15, `reflections/` 13, `tools/` 9, `agent/` 6, `bridge/` 5, `monitoring/` 4, `scripts/` 2, `models/` 2, `ui/` 1. The issue's 57 is correct; its note about an independent pass finding 56 is resolved — the earlier probe used `\s` in a POSIX-ERE `git grep -E`, where `\s` is not a character class, so anchored patterns silently under-matched. This plan's scans use `-P`.
+### Reference census — re-derived at `79b539535`, with units attached
+
+The first draft of this plan collapsed three different quantities into one number
+and called them all "57". They are not the same quantity and a builder measuring
+against the wrong one will stop short of the completeness gate. The census below
+is the authoritative decomposition; every later section quotes it rather than
+restating a figure from memory.
+
+| Quantity | Command | Value |
+|---|---|---|
+| **Files** with at least one reference of any kind | `git grep -lE 'bridge[./]utc\|from bridge import utc' -- '*.py' \| wc -l` | **57 files** |
+| **Files** with at least one real import statement | `git grep -lE 'from bridge\.utc import\|from bridge import utc' -- '*.py' \| wc -l` | **51 files** |
+| **Import statements** (grep lines) | `git grep -nE 'from bridge\.utc import\|from bridge import utc' -- '*.py' \| wc -l` | 60 raw lines |
+| **Import statements**, real | 60 raw minus the one comment line that quotes an import verbatim (`tests/unit/test_session_stall_classifier.py:297`) | **59 import statements** |
+| **Non-import reference lines** | `git grep -nE 'bridge[./]utc' -- '*.py' \| grep -vE ':[0-9]+: *from bridge\.utc import' \| grep -vE ':[0-9]+: *from bridge import utc'` | **19 lines across 15 files** |
+| Files carrying **both** kinds | `comm -12` of the two file lists | 9 files |
+
+The three file counts reconcile: 51 import-bearing + 15 prose-bearing − 9 overlap
+= **57 files**. The earlier "54 import statements plus 3 string-literal paths =
+57" was wrong on every term — 54 was invented, 3 undercounted the non-import
+lines by a factor of six, and the 57 they summed to was a *file* count that never
+decomposed that way in the first place.
+
+**Two spellings exist and both must be rewritten.** A rule matching only the
+dotted `bridge.utc` form leaves three sites behind and the completeness gate stays
+red:
+
+- dotted — `bridge.utc.to_unix_ts`, `from bridge.utc import …`, `"bridge.utc"` (16 of the 19 non-import lines)
+- path — `bridge/utc.py::utc_now`, `bridge/utc.py::to_unix_ts` (3 sites: `models/agent_session.py:1022`, `models/agent_session.py:1135`, `tests/integration/test_updated_at_heal.py:51`)
+
+The `bridge[./]utc` character class in the gate pattern covers both. Any narrower
+per-site rewrite rule must be checked against both spellings explicitly.
+
+**Directory breakdown of the 57 files:** tests 15, `reflections/` 13, `tools/` 9,
+`agent/` 6, `bridge/` 5, `monitoring/` 4, `scripts/` 2, `models/` 2, `ui/` 1.
+
+The issue's 57 is correct as a *file* count; its note about an independent pass
+finding 56 is resolved — the earlier probe used `\s` in a POSIX-ERE `git grep -E`,
+where `\s` is not a character class, so anchored patterns silently under-matched.
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -120,11 +162,35 @@ checks.
 
 ### spike-3: Are there references a mechanical import rewrite would miss?
 
-- **Assumption**: "All 57 references are import statements."
-- **Method**: code-read — scan for string-literal module paths and dynamic import forms.
-- **Finding**: three string-literal sites, none of which any import-rewriting tool would catch:
-  - `tests/integration/test_reflections_redis.py:107` and `:129` — `__import__("bridge.utc", fromlist=["utc_now"])`
-  - `tests/unit/test_session_stall_classifier.py:300` — `patch("bridge.utc.to_unix_ts", return_value=None)`
+- **Assumption**: "Every reference outside an import statement is an executable string literal."
+- **Method (first pass, too narrow)**: code-read — scan for string-literal module
+  paths and dynamic import forms only. This found three sites and the plan then
+  drew a *completeness* conclusion from it. The method never scanned comments or
+  docstrings, so it could not support that conclusion. Two coverage gaps in the
+  first draft trace directly to this mismatch.
+- **Method (re-run, matching the claim)**: the scan is now as wide as the
+  statement it supports — every non-import line, whatever its syntactic kind:
+
+  ```bash
+  git grep -nE 'bridge[./]utc' -- '*.py' \
+    | grep -vE ':[0-9]+: *from bridge\.utc import' \
+    | grep -vE ':[0-9]+: *from bridge import utc'
+  ```
+
+  This is the same command the task-6 validator runs, so builder and validator
+  share one definition of done rather than two descriptions of it.
+- **Finding**: **19 non-import reference lines across 15 files**, not three. By kind:
+
+  | Kind | Count | Sites |
+  |---|---|---|
+  | Executable string literal | 3 | `tests/integration/test_reflections_redis.py:107`, `:129`; `tests/unit/test_session_stall_classifier.py:300` |
+  | Executable dict key | 1 | `tests/unit/test_public_api_contract.py:57` |
+  | Comment or docstring | 15 | the remainder — see the full list in task 4 |
+
+  Only the first four change program behavior. The other 15 are prose inside
+  source files, and they are exactly what the first draft's task list forgot:
+  they are invisible to an import rewriter *and* invisible to the test suite, so
+  nothing but the completeness gate catches them, and eleven of them had no task.
 
   The `patch` site is load-bearing. `agent/session_stall_classifier.py:233` does a
   function-local `from bridge.utc import to_unix_ts`, so the patch resolves
@@ -135,9 +201,11 @@ checks.
   turns a real assertion into a no-op that still reports green. Because the hard
   move deletes `bridge/utc.py` entirely, this particular site fails loudly rather
   than silently, which is the argument for the hard move over a shim.
-- **Confidence**: high.
-- **Impact on plan**: these three sites are named explicitly as tasks rather than
-  left to a bulk rewrite.
+- **Confidence**: high — the scan is now co-extensive with the completeness gate,
+  so the two cannot disagree.
+- **Impact on plan**: the four executable sites are named as explicit build tasks
+  (task 3). The 15 prose sites get their own task (task 4) with a full file:line
+  list, because a bulk import rewrite reaches none of them.
 
 ## Data Flow
 
