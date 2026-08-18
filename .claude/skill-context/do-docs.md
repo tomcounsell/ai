@@ -120,10 +120,9 @@ rg "<retired-term>" --glob 'site/*.html'
 
 ## Auto-fix substrate (Step 2d — run BEFORE manual edits)
 
-Run the unified docs-auditor substrate against the PR-changed files. It auto-handles four
-classes of mechanical fix — renamed markdown links, renamed paths/symbols, README index
-entries pointing at deleted files, and stale-term renames — so manual editing in Step 3 only
-handles cases the substrate can't auto-detect.
+Run the unified docs-auditor substrate against the PR-changed files. It auto-handles one
+class of mechanical fix — stale-term renames — so manual editing in Step 3 only handles
+cases the substrate can't auto-detect.
 
 ```bash
 python -c "
