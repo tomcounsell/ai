@@ -44,7 +44,7 @@ Evaluated in order; the first matching condition returns `"send"` immediately:
 
 1. **Empty draft** — `draft_text` is empty or whitespace-only.
 2. **No baseline** — `recent_sent_drafts` is `None` or empty (cannot be redundant).
-3. **Has expectations** — `MessageDraft.expectations` is non-empty (drafter detected
+3. **Has open questions** — `MessageDraft.open_questions` is non-empty (drafter detected
    a question for the human; this send is intentional).
 4. **Terminal status** — `session.status` is `"completed"`, `"failed"`, or `"blocked"`.
 5. **New artifact** — The new draft contains an artifact (PR URL, commit hash, error
@@ -122,7 +122,7 @@ contract:
 - `session_status=None` — intentionally bypasses the `_TERMINAL_STATUSES`
   exemption (which is correct for the in-session drafter but wrong for the
   completion runner, where dedupe IS desired even on terminal sessions).
-- `expectations=None` — Pass 2 of the runner returns plain text, not a
+- `open_questions=None` — Pass 2 of the runner returns plain text, not a
   `MessageDraft`.
 
 Baseline source is `chat_message_log` outbound entries (Path A + Path B

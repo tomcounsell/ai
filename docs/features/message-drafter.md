@@ -61,7 +61,7 @@ class MessageDraft:
     needs_self_draft: bool = False            # True when a blocking flag fired (violation or empty promise)
     artifacts: dict[str, list[str]] = {}      # commit hashes, URLs, PRs
     context_summary: str | None = None        # deterministic one-sentence routing hint
-    expectations: str | None = None           # open questions (None when absent, never "")
+    open_questions: str | None = None         # open questions (None when absent, never "")
     violations: list[Violation] = []          # wire-format violations for agent review
     context_recall_advisory: str | None = None  # history-read command when the PM asked the human
                                                 # to re-identify a referent (#2694)
@@ -79,8 +79,8 @@ Note: `was_drafted` has been removed. The drafter no longer calls any LLM — th
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
 5. If `_evaluate_drafter_promise` fires (agent made a promise without substance — "will do", "I'll follow up" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. **Both** promotions happen on **both** return points — the short-output early return (see below) and this main-path return — so neither a wire-format violation (issue #1955) nor an empty promise (issue #2421) ever ships silently regardless of message length. Every gate decision writes a `source="promise_gate_drafter"` audit entry to `logs/classification_audit.jsonl`. All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
-7. Populate `expectations` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
-8. Return `MessageDraft(text=<composed>, context_summary=..., expectations=..., violations=[...])`.
+7. Populate `open_questions` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
+8. Return `MessageDraft(text=<composed>, context_summary=..., open_questions=..., violations=[...])`.
 
 ### Short-output early return (D5a)
 
@@ -181,9 +181,9 @@ Derives a coarse one-sentence routing hint from the narration-stripped text. Thi
 
 ### `_extract_open_questions(text) -> list[str]`
 
-The sole source of the `expectations` field. Scans the text for a `## Open Questions` heading and extracts substantive list items below it. Returns empty list if no section is found, the section is empty, or it contains only placeholders.
+The sole source of the `open_questions` field. Scans the text for a `## Open Questions` heading and extracts substantive list items below it. Returns empty list if no section is found, the section is empty, or it contains only placeholders.
 
-**None-vs-empty contract**: `expectations` on `MessageDraft` is `None` when no questions are found, never `""`. `_persist_routing_fields` in `output_handler.py` only writes `expectations` when it is not `None`, preserving any prior persisted value when no new questions are present.
+**None-vs-empty contract**: `open_questions` on `MessageDraft` is `None` when no questions are found, never `""`. `_persist_routing_fields` in `output_handler.py` persists only `context_summary`; the drafter's `open_questions` is a transient concept and is never written to the session row (Job expectations, #2708, are the durable obligation record).
 
 ## Drafter-at-the-handler (the critical fix)
 

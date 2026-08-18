@@ -335,7 +335,7 @@ existing `send_cb` call:
      `_TERMINAL_STATUSES` exemption — that exemption is correct for the
      in-session drafter path but the completion runner is a different
      surface where dedupe IS desired)
-   - `expectations=None` (Pass 2 returns plain text, not a `MessageDraft`)
+   - `open_questions=None` (Pass 2 returns plain text, not a `MessageDraft`)
 
    The caller then enforces the high-confidence cutoff
    (`DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD`, default `0.75`):
