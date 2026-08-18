@@ -1338,6 +1338,12 @@ Verification commands enumerate roots explicitly (`models/ tools/ agent/
 tests/ docs/ .claude/`) rather than anchoring on `^./` — `ugrep` on this machine
 prints no `./` prefix and such an anchor silently matches nothing.
 
+**Every expect-no-output row exits 1, and that is the PASS.** `grep` returns 1
+when it matches nothing, so the anti-criterion rows and the xfail row all exit
+non-zero on a correct build. Do not run them under `set -e`, and do not
+"fix" a passing row by inverting it. All four expect-no-output forms were run
+against `main` while writing this plan and behave as documented.
+
 **Anti-criterion scoping — the row must never count its own prose.** The
 "no ephemeral CLI renewer stamps" row greps an explicit four-file list, not a
 recursive root. That is deliberate and must stay that way:
