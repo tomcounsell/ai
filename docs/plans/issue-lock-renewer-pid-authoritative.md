@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2648
 last_comment_id: 5311761287
 revision_applied: true
-revision_applied_at: 2026-08-18T03:44:49Z
+revision_applied_at: 2026-08-18T03:58:32Z
 ---
 
 # Re-stamp the renewer's pid on same-owner lease renewal so pid liveness becomes authoritative
@@ -215,11 +215,15 @@ proceeding with codebase context.
 - **Method**: code-read (`grep` over every `touch_issue_lock(` call site).
 - **Result**: **Confirmed.** Durable: `tools/sdlc_lease_heartbeat.py:429`
   (detached, `start_new_session=True`), `agent/session_executor.py:246` (worker
-  tier-1 60 s tick). Ephemeral: `tools/_sdlc_utils.py:609`,
-  `tools/_sdlc_utils.py:834`, `tools/sdlc_stage_marker.py:884`,
-  `tools/sdlc_next_skill.py:638`, `tools/sdlc_session_ensure.py:539` (the mint).
-  Read-only peeks (`tools/merge_predicate.py:656`,
-  `tools/sdlc_review_finalize.py:351`) never write.
+  tier-1 60 s tick). Ephemeral **writers — four call sites across three
+  files**: `tools/_sdlc_utils.py:609`, `tools/_sdlc_utils.py:834`,
+  `tools/sdlc_stage_marker.py:884`, `tools/sdlc_session_ensure.py:539` (the
+  mint). Read-only peeks never write and cannot re-poison the field:
+  `tools/sdlc_next_skill.py:638` (`peek=True`, corrected at round 5 — an
+  earlier draft miscounted it as a fifth renewer), `tools/merge_predicate.py:656`,
+  `tools/sdlc_review_finalize.py:351`. `tools/sdlc_next_skill.py` stays in the
+  anti-criterion file list as a deliberate defensive inclusion, not as evidence
+  of a renewer.
 - **Confidence**: high
 - **Impact if false**: an opt-in flag would be the wrong shape.
 
@@ -428,7 +432,7 @@ None. Every file exists on `main` at `335fde5b3`.
    invariant, and a deliberate exception to that helper's "spread the EXISTING
    payload, never reconstruct a subset" rule (`:1084-1096`). Without it the
    group is sticky in the wrong direction: the default renewal branch at
-   `:1378` is a bare non-CAS `_R.set` of a spread payload, so any of the five
+   `:1378` is a bare non-CAS `_R.set` of a spread payload, so any of the four
    ephemeral CLI renewers would re-carry a stale `renewer_pid` it read before a
    clear, and silently undo it (round-3 CONCERN). The exception is narrow and
    must be commented as such at the spread site, naming this invariant.
@@ -495,8 +499,8 @@ state the payload does not carry and would change every spike row.
 Two consequences worth stating outright, because they cut in opposite
 directions and both are real:
 
-- `renewed_at` is re-stamped by **every** same-owner renewal, including all five
-  ephemeral CLI renewers. So any `sdlc-tool` write resets the grace clock — the
+- `renewed_at` is re-stamped by **every** same-owner renewal, including all four
+  ephemeral CLI renewal call sites. So any `sdlc-tool` write resets the grace clock — the
   tightened branch only ever fires during a stretch of ≥ `GRACE` seconds with
   *zero* lock writes (spike-5 row I'').
 - That same property means the tightening cannot fire on a chatty run at all.
@@ -599,10 +603,14 @@ overwhelmingly machine-scoped (reboot, sleep, power loss, an operator's kill
 sweep), and every one of those kills the run too, which makes the DEAD verdict
 **correct** and is precisely the #2648 incident. The residual is the strict
 subset where something kills the detached heartbeat *alone*: an OOM-kill of a
-small sleeping loop, or an operator killing one pid by hand. In worker mode the
-residual does not exist at all — `_maybe_launch_lease_heartbeat` is skipped
-under `VALOR_WORKER_MODE`, the durable renewer is the worker itself, and if the
-worker dies the run (its subprocess) dies with it.
+small sleeping loop, or an operator killing one pid by hand. **Worker mode has
+the same residual, in symmetric form** — `_maybe_launch_lease_heartbeat` is
+skipped under `VALOR_WORKER_MODE` and the durable renewer is the worker itself,
+but the worker's `claude -p` subprocesses are spawned `start_new_session=True`
+(`agent/session_runner/role_driver.py:462`) and can outlive a worker crash, so a
+SIGKILLed worker leaves a dead `renewer_pid` behind a possibly-live run with no
+clear mechanism. Risk 5 records it; a crash cannot run cleanup code, which is
+row Ib's own reasoning.
 
 So the systematic false-dead generator (a deadline exit, which happens on
 *every* lane that outlives 90 min) is removed; what remains is an
@@ -864,6 +872,7 @@ beyond one debug line naming the dead renewer pid.
 - [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD: the two non-releasing deadline exits perform the `renewer_*` clear (shape (a)); a clear that raises does not block the exit; and a clear that loses its CAS is retried once (Race 6 mode 1). Locate the existing exit-path tests (around `:185-226`) and extend them rather than adding a parallel class.
 - [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD the `-m` invocation regression test (SC5b): drive the heartbeat via `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or a subprocess and assert the renewal still stamps `renewer_pid`. A plain `import` cannot detect the round-3 BLOCKER.
 - [ ] `tests/unit/test_session_lifecycle.py` — ADD `test_ephemeral_renewal_strips_renewer_identity` (SC5c): stamp via a durable renewal, then renew WITHOUT the flag, and assert the payload carries no `renewer_*` keys.
+- [ ] `tests/unit/test_session_lifecycle.py` — ADD `test_disallowed_module_stamp_is_dropped` (SC5, Risk 6): call the renewal path with `stamp_renewer_identity=True` and a `renewer_module` token absent from `_DURABLE_RENEWER_MODULES`; assert no `renewer_*` keys are written and no exception is raised. The Verification row greps this exact name.
 
 No xfail markers (decorator or runtime `pytest.xfail()`) exist in `tests/`
 relating to the issue lock, so there are none to convert.
@@ -930,7 +939,7 @@ mitigation is argued against each:
 
 ### Risk 2: An ephemeral CLI renewer acquires the stamp later and re-poisons the field
 
-If a future edit adds `stamp_renewer_identity=True` to one of the five
+If a future edit adds `stamp_renewer_identity=True` to one of the four
 short-lived CLI renewers, the payload would carry a pid that is dead within
 seconds and the predicate would report every lease orphaned after the grace —
 strictly worse than today.
@@ -947,7 +956,7 @@ heartbeat's `TTL//3` cadence) does not need a larger grace: **while the renewer
 pid resolves alive**, the branch returns `True` without ever consulting the
 clock, so cadence is irrelevant. The narrower true statement is the one that
 binds — **once the renewer pid resolves dead, `renewed_at` recency is the
-signal**, and `renewed_at` is refreshed by every renewer including the five
+signal**, and `renewed_at` is refreshed by every renewer including the four
 ephemeral ones. What could still exceed 180 s is an unusually slow worker
 restart.
 
@@ -984,10 +993,30 @@ kill of the supervisor's process tree, and the deaths that do take it out are
 overwhelmingly machine-scoped (reboot, sleep, power loss, an operator kill
 sweep) — every one of which kills the run too, making the DEAD verdict
 **correct** and identical to the #2648 incident this plan fixes. The residual is
-the strict subset where something kills the detached heartbeat *alone*. In
-worker mode it does not exist at all: `_maybe_launch_lease_heartbeat` is skipped
-under `VALOR_WORKER_MODE`, the durable renewer is the worker itself, and if the
-worker dies the run dies with it.
+the strict subset where something kills the detached heartbeat *alone*.
+
+**Worker mode has the SAME residual, not none (round-5 CONCERN).** An earlier
+draft claimed it "does not exist at all" in worker mode on the grounds that the
+run dies with the worker. That is false, and it was the one residual with no
+covering task. `agent/session_runner/role_driver.py:462` spawns every role
+turn's `claude -p` with `start_new_session=True` — its own comment says "the
+worker orphan sweep reaps survivors after a crash", language that only makes
+sense because survivors routinely exist. `agent/session_executor.py:246` stamps
+the **worker's** pid (`os.getpid()`), not the subprocess's, and the worker's
+60 s tick loop dies with the worker. So a worker SIGKILL or OOM leaves a dead
+`renewer_pid` with no tick to refresh it and — unlike the heartbeat's two
+non-releasing exits — **no clear mechanism at all**, because Task 5 edits only
+`tools/sdlc_lease_heartbeat.py`. After the grace, the tightened branch reads
+DEAD against a possibly-still-working orphaned subprocess.
+
+This is spike-5 row Ib on the worker side: **symmetric to the heartbeat case,
+not absent.** It carries the same three-part conjunction (renewer dies without a
+clear; the death spares the run; then ≥ grace of quiet), the same
+anomaly-conditioning, and the same backstops (1800 s TTL, and any `sdlc-tool`
+write resetting the grace clock). It is recorded here rather than closed:
+extending the clear to the worker would mean a crash-path write from a process
+that has just been SIGKILLed, which is not implementable, and the honest
+disposition is the TTL.
 
 **Backstops are unchanged — but only because Task 5 makes the clear a pure
 key-removal** (round-4 CONCERN). They are the 1800 s lease TTL, #2784's release
@@ -1229,8 +1258,8 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
    allowlist passes every import-based test while never stamping in production,
    so a suite that only imports cannot discharge criterion 5.
 5c. **The `renewer_*` group survives no ephemeral renewal.** After a durable
-   stamp, a renewal without `stamp_renewer_identity` (any of the five CLI
-   renewers) leaves a payload carrying **no** `renewer_*` keys — Key Element 2's
+   stamp, a renewal without `stamp_renewer_identity` (any of the four CLI
+   renewal call sites) leaves a payload carrying **no** `renewer_*` keys — Key Element 2's
    invariant, and what makes the Task 5 clear durable rather than defeasible
    (Race 6 mode 2).
 6. `ISSUE_LOCK_RENEWER_GRACE_SECONDS` is a named, env-overridable, GRAIN OF
@@ -1263,7 +1292,7 @@ and a critique round, not a same-day PR").
 
 | Role | Agent Type | Responsibility |
 |------|-----------|----------------|
-| Builder | `builder` | All five task steps, sequentially |
+| Builder | `builder` | All eight task steps, sequentially |
 | Critic | `plan-reviewer` (via `/do-plan-critique`) | Pre-build war room on this document |
 
 ## Step by Step Tasks
@@ -1496,6 +1525,11 @@ most one TTL window".
   `EXIT_UNSUPERVISED_MAX_LIFETIME` (`:360`) and `EXIT_MAX_LIFETIME` (`:365`).
   Do NOT add it to `EXIT_SUPERVISOR_DEAD` (`:392`), which already releases the
   lease outright (#2784) and has nothing to clear.
+- **Factoring the shared retry-plus-swallow logic into one helper is expected
+  and correct** — the two exits sit four lines apart and this file already
+  factors exit logic that way (`_log_exit`, `:244`, called from five sites). The
+  Verification row is `> 0`, not an exact count, precisely so a well-factored
+  build is not turned red. Coverage of both exits is proved by the SC8 tests.
 - It MUST be best-effort and exception-swallowed, matching the release at
   `:377-390`: a failure to clear can never block the exit. The lease TTL is the
   backstop.
@@ -1602,7 +1636,7 @@ belongs in this plan and the PR body, neither of which the row greps.
 | **Clear preserves the decay clock** (round-4 CONCERN) | `grep -c 'def test_drop_renewer_identity_preserves_renewed_at' tests/unit/test_session_lifecycle.py` | output contains 1 |
 | Clear does not reset the TTL | `grep -c 'pttl' models/session_lifecycle.py` | output > 0 |
 | **Shape (a):** the clear exists and is CAS | `grep -c 'drop_renewer_identity' models/session_lifecycle.py` | output > 1 |
-| **Shape (a):** both non-releasing exits clear | `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 2 |
+| **Shape (a):** the heartbeat clears | `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output > 0 — **not** an exact count of 2. Task 5 explicitly permits factoring the retry-plus-swallow logic into one helper called from both exits (the house style at `_log_exit`, `:244`, called from five sites), which yields a single literal occurrence. That both exits are covered is proved by the SC8 behavioural tests, not by a grep. |
 | **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -l 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | **no output** (`-l` prints only filenames that match, so a clean build prints nothing; `-c` prints a `file:0` line per file and invites a builder to read the exit code as failure) |
 | **Anti-criterion:** the #2620 short-circuit still exists for identity-less payloads | `grep -c 'test_peek_dead_pid_with_fresh_renewal_is_not_orphaned' tests/unit/test_session_lifecycle.py` | output contains 1 |
 | Demonstrated-red test exists | `grep -c 'class TestRenewerIdentityLiveness' tests/unit/test_session_lifecycle.py` | output contains 1 |
@@ -1632,10 +1666,10 @@ belongs in this plan and the PR body, neither of which the row greps.
 | CONCERN | Risk & Robustness (round 4) | Shape (a)'s exit clear buys the retiring run a FRESH liveness window, so Risk 5's "backstops are unchanged" is inaccurate. Task 5 specifies `drop_renewer_identity` as "a same-owner CAS renewal", which routes through `_healed_renewal_payload` (`models/session_lifecycle.py:1084-1120`), whose docstring states `renewed_at` is "deliberately OVERWRITTEN on every renewal" and whose `:1118` is an unconditional `new_payload["renewed_at"] = time.time()`; and through the `renew_only` CAS at `:1296-1301`, which passes `ttl` (default `ISSUE_LOCK_TTL_SECONDS` = 1800) into `_RENEW_IF_VALUE_MATCHES_LUA`. So at `EXIT_UNSUPERVISED_MAX_LIFETIME` — the exit whose own comment says failing to resolve a supervisor "is not positive proof the run is dead" — the heartbeat's last act re-stamps `renewed_at` to now AND extends the lease a full 1800 s. Today that exit performs no Redis write at all, so the payload's `renewed_at` is already up to one 600 s tick stale and the TTL is decaying on its own clock. For a run that IS dead at its deadline exit, shape (a) therefore adds up to ~600 s of extra false-live plus up to ~600 s of extra lease lifetime versus `main`. spike-5 row Ia measured the verdict at an instant ("live", byte-identical to today) but not the decay clock, which is exactly where the two diverge. **Suggestion:** either make the drop write preserve the payload's existing `renewed_at` and remaining TTL, or accept the widening explicitly and correct Risk 5 plus the "Net effect" paragraph, which currently claims the blind window collapses to <=180 s without noting that post-deadline-exit runs revert to a *refreshed* 1200 s window. | **Task 5** (clear is a pure key-removal: inline CAS payload, `renewed_at` untouched, remaining TTL via `pttl` with sentinel guards); **Risk 5** ("backstops are unchanged" now stated as load-bearing on that detail); **Net effect** paragraph scoped to stamped leases; Task 1 case + Verification rows `Clear preserves the decay clock` / `Clear does not reset the TTL` | The unconditional re-stamp is `models/session_lifecycle.py:1118` (`new_payload["renewed_at"] = time.time()`) — verify the line yourself, an earlier draft of this note cited a wrong offset. Two viable shapes: (1) thread a `bump_renewed_at: bool = True` kwarg from `drop_renewer_identity` into `_healed_renewal_payload` and skip the re-stamp when `False`; or (2) have `touch_issue_lock`'s `drop_renewer_identity` branch build its CAS payload inline (`{**payload}` minus the two `renewer_*` keys, `renewed_at` untouched) instead of delegating to the helper — note this is a second, narrower exception to that helper's "spread the EXISTING payload" rule and must be commented alongside Key Element 2's. For the TTL, pass the key's remaining lifetime (`_R.pttl(key) // 1000`, guarding the `-1`/`-2` sentinels) into the CAS eval rather than the 1800 s default. If the TTL half is judged not worth the mechanism, say so in Risk 5 rather than leaving "backstops are unchanged" standing. Add a Task 1 case asserting that after a `drop_renewer_identity=True` write the stored `renewed_at` equals its pre-clear value. |
 | CONCERN | History & Consistency (round 4) | The Documentation checkbox and the `Grace constant marked provisional` Verification row cannot both be satisfied. The last Documentation bullet requires that "docstrings on `_healed_renewal_payload`, `_lock_owner_is_live`, and the new constant must carry the #2648 rationale and the GRAIN OF SALT note" — three locations. `models/session_lifecycle.py` carries exactly 3 `GRAIN OF SALT` lines on `main` (verified by `grep -c`: lines 750, 842, 855, all on module-level constants), and neither function docstring carries the phrase today. A builder following the checkbox literally lands on 6, while the Verification row hard-codes "output contains 4 (exactly one more than the 3 on `main`)". A faithful build therefore goes red against its own Verification table — the same self-counting-prose trap the plan already documents for the two anti-criterion rows and for the `renewer_machine_id` row. **Suggestion:** narrow the Documentation bullet so only the new constant carries the literal marker, with the two function docstrings carrying the #2648 rationale in prose only. | **Documentation** inline bullet rewritten: literal `GRAIN OF SALT` marker on the new constant's single comment line ONLY; the two function docstrings carry the #2648 rationale in prose without the marker, keeping the `grep -c` target at exactly 4 | Reword the bullet to: "the new constant's comment carries both the #2648 rationale and the literal GRAIN OF SALT marker; docstrings on `_healed_renewal_payload` and `_lock_owner_is_live` carry the #2648 rationale in prose, WITHOUT the literal marker." `grep -c` counts matching LINES, not occurrences, so the target of 4 holds only if exactly ONE new line contains the token — keep the marker on a single comment line above the constant, matching the existing shape at `models/session_lifecycle.py:842` and `:855`. Do not "fix" this by relaxing the Verification row back to `> 1`; that is the ineffective form round 3 already replaced (NIT 2). |
 | NIT | Risk & Robustness (round 4) | Task 3 specifies the new branch "Log at debug naming the dead renewer pid" — the same level as today's routine paths — even though Risk 1 names this branch's false-dead as the worst-case failure across all three consumers ("no operator in the loop" on the `_lock_says_live` to `create_session` path). An operator investigating an unexplained rival lane or a reaped `sdlc-local-{N}` anchor gets no elevated signal distinguishing "the new grace-tightening fired" from any other liveness path, unless debug logging happened to be enabled beforehand. **Suggestion:** emit the DEAD-verdict path only at `logger.info` or `logger.warning`, naming the renewer pid, the `renewed_at` age, and the grace value; keep the LIVE paths and the `except Exception -> True` fallback at debug. | **Task 3**: DEAD verdict logs at `logger.warning` naming the renewer pid, `renewed_at` age, and grace value; LIVE paths and the `except -> True` fallback stay at debug | n/a (NIT) |
-| CONCERN | Risk & Robustness (round 5) | Risk 5's claim that the shape-(a) residual "does not exist at all" in worker mode is false, and it is the one residual with no covering task. The justification is "if the worker dies the run (its subprocess) dies with it", but `agent/session_runner/role_driver.py:462` spawns every role turn's `claude -p` with `start_new_session=True`, and its own inline comment reads "the worker orphan sweep reaps survivors after a crash" — language that only makes sense because survivors routinely exist. `agent/session_executor.py:246` stamps the *worker's* pid as `renewer_pid` (via `os.getpid()`), not the subprocess's, and the worker's 60 s tick loop dies with the worker. So a worker SIGKILL/OOM leaves a dead `renewer_pid` with no tick to refresh it and — unlike the heartbeat's two non-releasing exits, which Task 5 covers — **no clear mechanism at all**, because Task 5 only edits `tools/sdlc_lease_heartbeat.py`. After 180 s of quiet the tightened branch reads DEAD against an orphaned subprocess that may still be doing real work. This is spike-5 row Ib on the worker side, and the plan currently asserts it away rather than recording it. **Suggestion:** correct Risk 5 and the parallel sentence in Technical Approach to state the worker-mode residual is symmetric to row Ib (anomaly-conditioned, same three-part conjunction, same backstops) rather than absent. | pending | No code change is required — a crash cannot run cleanup code, which is row Ib's own reasoning. This is a prose fix in two places: Technical Approach's "In worker mode the residual does not exist at all" sentence and Risk 5's paragraph repeating it. Replace with: the worker-mode residual exists and is bounded by the same conjunction (worker dies without graceful shutdown; the orphaned `claude -p` survives and does real work; the run then goes >= GRACE with zero `sdlc-tool` lock writes), with the same backstops (1800 s TTL, any ephemeral write resetting the grace clock). If the team wants to narrow it rather than document it, the analog to Task 5 is a `drop_renewer_identity=True` call from the worker's startup orphan sweep before it reaps a surviving subprocess — but that is a scope decision, not mandated by this finding. Do NOT close it by widening `ISSUE_LOCK_RENEWER_GRACE_SECONDS`; the 210 s incident ceiling (n=1) is the binding constraint. |
-| CONCERN | History & Consistency (round 5) | The Verification row `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py \| output contains 2` (`:1605`) fails on a faithful, well-factored build. Task 5 mandates non-trivial shared logic at each call site — a bounded 2-attempt re-GET/re-CAS retry checking `result.acquired` plus best-effort exception-swallowing — at BOTH non-releasing exits, which sit four lines apart (`tools/sdlc_lease_heartbeat.py:359` and `:365`, verified). That file already factors exactly this kind of shared exit logic into a helper: `_log_exit` is defined at `:244` and called from five exit sites. A builder who writes one `_clear_renewer_identity_at_exit()` helper containing a single `touch_issue_lock(..., drop_renewer_identity=True, ...)` call and invokes it from both exits produces ONE literal occurrence, not two, and turns a correct build red against its own table. Nothing in Task 5 forbids the factoring. **Suggestion:** either relax the row to `output > 0` (the plan's own precedent for shape-dependent counts, e.g. the `acquired` row at `:1601` uses `> 1`), or add an explicit instruction to Task 5 to inline the call at both sites. | pending | Pick one and make the two locations agree. If keeping the exact count, add to Task 5: "Write the `touch_issue_lock(..., drop_renewer_identity=True)` call inline at BOTH `EXIT_UNSUPERVISED_MAX_LIFETIME` (`:359`) and `EXIT_MAX_LIFETIME` (`:365`); do not factor the retry/CAS/swallow logic into a shared helper — the Verification row's exact count of 2 depends on it." If relaxing instead, change the row at `:1605` to `output > 0` and keep the "both exits clear" obligation on SC8 and the Task 5 test ("both exits perform the clear"), which check behavior rather than token count and cannot be defeated by factoring. The second option is the more robust pairing; the first preserves the exact-count discipline rounds 3-4 established. |
-| NIT | History & Consistency (round 5) | The Verification row `Allowlist is enforced, not just declared` (`:1596`) greps for a test named exactly `test_disallowed_module_stamp_is_dropped`, and the round-3 Critique Results entry names it as part of the accepted remedy, but `## Test Impact` never lists adding it — unlike every other named-test Verification row (`TestRenewerIdentityLiveness`, `test_ephemeral_renewal_strips_renewer_identity`, `test_drop_renewer_identity_preserves_renewed_at`), all of which appear in Test Impact with matching names. **Suggestion:** add the missing Test Impact bullet. | pending | n/a (NIT) |
-| NIT | Scope & Value (round 5) | spike-4's ephemeral-renewer inventory over-counts. `tools/sdlc_next_skill.py:638` is the file's only `touch_issue_lock` call and it is `peek=True` (verified) — a read-only peek that never reaches a renewal branch, so it cannot "re-poison the field" (Risk 2) and needs no protection from the strip invariant. The true production renewal/mint call sites outside the two durable renewers are four across three files (`tools/_sdlc_utils.py:609`, `:834`, `tools/sdlc_stage_marker.py:884`, `tools/sdlc_session_ensure.py:539`), not "five ephemeral CLI renewers" across four files as repeated in spike-4, Key Element 2, Race 6 mode 2, Task 4 and SC5c. **Suggestion:** correct the count in every location, and either drop `tools/sdlc_next_skill.py` from the anti-criterion file list or keep it explicitly as a defensive inclusion rather than as evidence of a fifth renewer. | pending | n/a (NIT) |
+| CONCERN | Risk & Robustness (round 5) | Risk 5's claim that the shape-(a) residual "does not exist at all" in worker mode is false, and it is the one residual with no covering task. The justification is "if the worker dies the run (its subprocess) dies with it", but `agent/session_runner/role_driver.py:462` spawns every role turn's `claude -p` with `start_new_session=True`, and its own inline comment reads "the worker orphan sweep reaps survivors after a crash" — language that only makes sense because survivors routinely exist. `agent/session_executor.py:246` stamps the *worker's* pid as `renewer_pid` (via `os.getpid()`), not the subprocess's, and the worker's 60 s tick loop dies with the worker. So a worker SIGKILL/OOM leaves a dead `renewer_pid` with no tick to refresh it and — unlike the heartbeat's two non-releasing exits, which Task 5 covers — **no clear mechanism at all**, because Task 5 only edits `tools/sdlc_lease_heartbeat.py`. After 180 s of quiet the tightened branch reads DEAD against an orphaned subprocess that may still be doing real work. This is spike-5 row Ib on the worker side, and the plan currently asserts it away rather than recording it. **Suggestion:** correct Risk 5 and the parallel sentence in Technical Approach to state the worker-mode residual is symmetric to row Ib (anomaly-conditioned, same three-part conjunction, same backstops) rather than absent. | **Risk 5** rewritten: worker-mode residual stated as symmetric to row Ib (same three-part conjunction, same backstops), not absent; parallel sentence in **Technical Approach** corrected. No code change — a crash cannot run cleanup code. | No code change is required — a crash cannot run cleanup code, which is row Ib's own reasoning. This is a prose fix in two places: Technical Approach's "In worker mode the residual does not exist at all" sentence and Risk 5's paragraph repeating it. Replace with: the worker-mode residual exists and is bounded by the same conjunction (worker dies without graceful shutdown; the orphaned `claude -p` survives and does real work; the run then goes >= GRACE with zero `sdlc-tool` lock writes), with the same backstops (1800 s TTL, any ephemeral write resetting the grace clock). If the team wants to narrow it rather than document it, the analog to Task 5 is a `drop_renewer_identity=True` call from the worker's startup orphan sweep before it reaps a surviving subprocess — but that is a scope decision, not mandated by this finding. Do NOT close it by widening `ISSUE_LOCK_RENEWER_GRACE_SECONDS`; the 210 s incident ceiling (n=1) is the binding constraint. |
+| CONCERN | History & Consistency (round 5) | The Verification row `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py \| output contains 2` (`:1605`) fails on a faithful, well-factored build. Task 5 mandates non-trivial shared logic at each call site — a bounded 2-attempt re-GET/re-CAS retry checking `result.acquired` plus best-effort exception-swallowing — at BOTH non-releasing exits, which sit four lines apart (`tools/sdlc_lease_heartbeat.py:359` and `:365`, verified). That file already factors exactly this kind of shared exit logic into a helper: `_log_exit` is defined at `:244` and called from five exit sites. A builder who writes one `_clear_renewer_identity_at_exit()` helper containing a single `touch_issue_lock(..., drop_renewer_identity=True, ...)` call and invokes it from both exits produces ONE literal occurrence, not two, and turns a correct build red against its own table. Nothing in Task 5 forbids the factoring. **Suggestion:** either relax the row to `output > 0` (the plan's own precedent for shape-dependent counts, e.g. the `acquired` row at `:1601` uses `> 1`), or add an explicit instruction to Task 5 to inline the call at both sites. | **Verification** row relaxed to `> 0` with the reason inline; **Task 5** states that factoring the retry-plus-swallow into one helper is expected and correct (house style `_log_exit`), and that SC8's behavioural tests prove both exits are covered | Pick one and make the two locations agree. If keeping the exact count, add to Task 5: "Write the `touch_issue_lock(..., drop_renewer_identity=True)` call inline at BOTH `EXIT_UNSUPERVISED_MAX_LIFETIME` (`:359`) and `EXIT_MAX_LIFETIME` (`:365`); do not factor the retry/CAS/swallow logic into a shared helper — the Verification row's exact count of 2 depends on it." If relaxing instead, change the row at `:1605` to `output > 0` and keep the "both exits clear" obligation on SC8 and the Task 5 test ("both exits perform the clear"), which check behavior rather than token count and cannot be defeated by factoring. The second option is the more robust pairing; the first preserves the exact-count discipline rounds 3-4 established. |
+| NIT | History & Consistency (round 5) | The Verification row `Allowlist is enforced, not just declared` (`:1596`) greps for a test named exactly `test_disallowed_module_stamp_is_dropped`, and the round-3 Critique Results entry names it as part of the accepted remedy, but `## Test Impact` never lists adding it — unlike every other named-test Verification row (`TestRenewerIdentityLiveness`, `test_ephemeral_renewal_strips_renewer_identity`, `test_drop_renewer_identity_preserves_renewed_at`), all of which appear in Test Impact with matching names. **Suggestion:** add the missing Test Impact bullet. | **Test Impact**: added the `test_disallowed_module_stamp_is_dropped` bullet naming the exact test the Verification row greps | n/a (NIT) |
+| NIT | Scope & Value (round 5) | spike-4's ephemeral-renewer inventory over-counts. `tools/sdlc_next_skill.py:638` is the file's only `touch_issue_lock` call and it is `peek=True` (verified) — a read-only peek that never reaches a renewal branch, so it cannot "re-poison the field" (Risk 2) and needs no protection from the strip invariant. The true production renewal/mint call sites outside the two durable renewers are four across three files (`tools/_sdlc_utils.py:609`, `:834`, `tools/sdlc_stage_marker.py:884`, `tools/sdlc_session_ensure.py:539`), not "five ephemeral CLI renewers" across four files as repeated in spike-4, Key Element 2, Race 6 mode 2, Task 4 and SC5c. **Suggestion:** correct the count in every location, and either drop `tools/sdlc_next_skill.py` from the anti-criterion file list or keep it explicitly as a defensive inclusion rather than as evidence of a fifth renewer. | **spike-4** corrected: four ephemeral renewal call sites across three files; `tools/sdlc_next_skill.py:638` reclassified as a read-only peek and kept in the anti-criterion list as a defensive inclusion. Count fixed in spike-4, Key Element 2, Race 6, Risk 2, Risk 3, Solution -> Flow and SC5c | n/a (NIT) |
 
 ---
 
