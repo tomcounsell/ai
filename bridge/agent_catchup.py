@@ -58,6 +58,7 @@ from pydantic import BaseModel
 
 from agent.llm import run_typed
 from bridge.dedup import get_or_init_dm_coverage_epoch
+from bridge.room_inbox import shadow_append_inbox
 from bridge.routing import (
     find_project_for_dm_dialog,
     persona_to_session_type,
@@ -679,6 +680,21 @@ async def _enqueue_recovery(
         inbound.message_id,
         inbound.sender_name,
         inbound.text[:80],
+    )
+
+    # Durable Room-inbox shadow append (durability plan Task 11 phase 1,
+    # issue #2494): written alongside the untouched recovery enqueue below,
+    # mirroring live intake's append-precedes-dispatch order. NOT
+    # authoritative — dispatch still routes from the enqueue;
+    # shadow_append_inbox never raises into the recovery path.
+    shadow_append_inbox(
+        project,
+        chat_id=chat.chat_id,
+        message_id=inbound.message_id,
+        sender_id=inbound.sender_id,
+        sender_name=inbound.sender_name,
+        text=inbound.text,
+        date=inbound.date,
     )
 
     await enqueue_fn(
