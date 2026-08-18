@@ -1,4 +1,4 @@
-# Theme: Cuttlefish
+# Theme: Yudame House
 
 One theme. Every deck uses it. It is the house design system from `yudame.ai` — black on cream,
 Lora serif headings, Inter body, IBM Plex Mono labels, and a single red used the way an architect
@@ -16,7 +16,7 @@ most once per slide as a rule, a dot, a marked figure, or one word. Cross-refere
 and an 8px technical grid, never from boxes and shadows: every slide opens with a 1px rule carrying a
 mono eyebrow left and the deck slug right, corners are square, and drawings sit inside a
 graph-paper `.figure` panel with registration marks in all four corners and a mono `FIG. 01` footer.
-Data appears as ruled `.data` tables with a warm-gray uppercase mono header and hairline rows, or as
+Data appears as ruled tables with a warm-gray uppercase mono header and hairline rows, or as
 one large `IBM Plex Mono` tabular figure over a mono caption. Charts are flat black bars on a hairline
 baseline with the one key bar in red, values labeled directly on the bars, no gridlines, no axis, no
 legend. Section breaks are cream, not black: a large muted mono numeral, a Lora title, one red rule.
@@ -369,7 +369,7 @@ carry these palette constraints into it.
 
 ## When the deck is about someone else's product
 
-Cuttlefish is the house theme and the default for every deck. The one override: a deck whose subject
+Yudame House is the house theme and the default for every deck. The one override: a deck whose subject
 *is* a specific product with its own strong brand, presented to that product's own audience. Then
 swap the `:root` values (ground, ink, accent, three font families) for theirs and leave the
 structure alone. Keep the light ground, the single-accent discipline, and the square corners

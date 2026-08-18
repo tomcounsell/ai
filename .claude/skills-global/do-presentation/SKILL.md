@@ -8,7 +8,7 @@ context: fork
 
 # Make a Presentation
 
-Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), set in the Cuttlefish house theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
 
 ## Repo Context Probe
 
@@ -21,7 +21,7 @@ The static-deck flow (research → structure → theme → diagrams → editoria
 | Sub-file | Load when... |
 |----------|-------------|
 | `CONTENT_GUIDE.md` | Structuring slide content — educational best practices, slide types, pacing |
-| `THEME.md` | Writing the Marp front matter — the Cuttlefish theme, its style block, slide archetypes |
+| `THEME.md` | Writing the Marp front matter — the Yudame House theme, its style block, slide archetypes |
 
 ## Quick start
 
@@ -100,7 +100,7 @@ as a table of contents, the deck will too. See "Action titles" in `CONTENT_GUIDE
 
 ### Step 4: Apply the theme
 
-Every deck uses **Cuttlefish**, the house theme. Read `THEME.md`, copy its style block verbatim into
+Every deck uses **Yudame House**, the house theme. Read `THEME.md`, copy its style block verbatim into
 the deck's front matter, and set the deck slug in the masthead rule. There is no theme detection and
 no per-deck restyling — the theme is the constant, and holding it constant is what makes a deck read
 as a Yudame artifact rather than a template.
@@ -139,7 +139,7 @@ When the presentation mentions companies, products, or branded technologies, pul
 
 **Colorizing SVGs:**
 
-Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Cuttlefish
+Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Yudame House
 cream ground. Set the theme ink explicitly so the logos match the rest of the deck rather than
 sitting a shade darker:
 
@@ -213,7 +213,7 @@ paginate: true
 backgroundColor: '#FAF9F6'
 color: '#2D2D2D'
 style: |
-  <the Cuttlefish style block from THEME.md, verbatim, with the deck slug set>
+  <the Yudame House style block from THEME.md, verbatim, with the deck slug set>
 ---
 
 <!-- _class: cover -->
@@ -302,7 +302,7 @@ cycle.
 Run Marp CLI to generate outputs:
 
 `--html` enables raw HTML tags in the markdown. It is not an output-format flag — the format comes
-from `--pdf` / `--pptx` / `--images` or the `-o` extension. Every Cuttlefish archetype is built from
+from `--pdf` / `--pptx` / `--images` or the `-o` extension. Every Yudame House archetype is built from
 `<div>` and `<span>` markup, so **every** export needs it. Raw HTML happens to be on by default in
 the current CLI, which means leaving the flag off works right up until that default changes and a
 deck silently exports with its layout stripped.

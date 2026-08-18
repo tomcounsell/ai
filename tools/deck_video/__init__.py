@@ -225,7 +225,7 @@ def _export_pngs(deck_path: Path, work_dir: Path) -> list[Path]:
     ``.claude/skills-global/do-presentation/SKILL.md`` (``npx --yes
     @marp-team/marp-cli <deck> --html --allow-local-files``), adding
     ``--images png``. ``--html`` enables raw HTML tags, which every slide
-    archetype in the Cuttlefish theme is built from; it is on by default in the
+    archetype in the Yudame House theme is built from; it is on by default in the
     current CLI, so passing it explicitly keeps a default flip from silently
     exporting layout-stripped frames.
     Marp emits zero-padded sequence filenames (``deck.001.png`` ...). The PNGs

@@ -75,7 +75,7 @@ deck.md
   |     Empty string for un-narrated slides.
   |
   |-- Marp PNG export (npx @marp-team/marp-cli --images png --html)
-  |     --html enables raw HTML tags; every Cuttlefish slide archetype is
+  |     --html enables raw HTML tags; every Yudame House slide archetype is
   |     built from <div>/<span> markup, so this is passed explicitly rather
   |     than relied on as a CLI default.
   |     One PNG per slide; zero-padded sequence filenames (deck.001.png ...).
