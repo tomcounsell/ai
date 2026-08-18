@@ -245,6 +245,103 @@ def _age_out(job: Job) -> Job:
     return job
 
 
+def _status_index_key(status: str) -> str:
+    """The ``status`` IndexedField's Set key for a value — derived via the
+    field API (``IndexedFieldMixin.filter_query``'s own key-build pattern),
+    never hand-built with an f-string."""
+    from popoto.models.db_key import DB_key
+
+    field = Job._meta.fields["status"]
+    prefix = field.get_special_use_field_db_key(Job, "status")
+    return DB_key(prefix, status).redis_key
+
+
+class TestFieldScopedLifecycleSaves:
+    """#2860: ``touch``/``mark_at_rest``/``revive`` must scope their save to
+    only the field(s) they mutate, so a concurrent ``goal`` write (an
+    expectation add/discharge on a second in-memory instance) is never
+    clobbered by the whole-hash rewrite a bare ``save()`` would perform."""
+
+    def test_touch_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        from bridge.utc import to_unix_ts
+
+        a = Job.mint(scratch_room_id, "check the deploy")
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+        before = to_unix_ts(a.last_active_at)
+
+        a.touch()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+        assert to_unix_ts(reloaded.last_active_at) > before
+
+    def test_revive_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        from bridge.utc import to_unix_ts
+
+        a = Job.mint(scratch_room_id, "check the deploy")
+        a.mark_at_rest()
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+        before = to_unix_ts(a.last_active_at)
+
+        a.revive()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert reloaded.status == "active"
+        assert to_unix_ts(reloaded.last_active_at) > before
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+
+    def test_mark_at_rest_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        a = Job.mint(scratch_room_id, "check the deploy")
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+
+        a.mark_at_rest()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert reloaded.status == "at-rest"
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+
+    def test_mark_at_rest_does_not_refresh_recency(self, scratch_room_id):
+        from bridge.utc import to_unix_ts
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        before_ts = to_unix_ts(job.last_active_at)
+        [(member, score_before)] = _scores(scratch_room_id)
+
+        job.mark_at_rest()
+
+        assert to_unix_ts(job.last_active_at) == before_ts
+        assert _scores(scratch_room_id) == [(member, score_before)]
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert to_unix_ts(reloaded.last_active_at) == before_ts
+
+    @pytest.mark.parametrize("method", ["touch", "revive"])
+    def test_touch_and_revive_still_score_correctly(self, scratch_room_id, method):
+        from bridge.utc import to_unix_ts
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        getattr(job, method)()
+
+        [(_member, score)] = _scores(scratch_room_id)
+        assert score == pytest.approx(to_unix_ts(job.last_active_at), abs=1.0)
+
+    def test_mark_at_rest_updates_the_raw_status_index_set(self, scratch_room_id):
+        """Index maintenance under a scoped save, asserted at the Redis layer
+        (not merely inferred from an ORM round trip)."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        member_key = job.db_key.redis_key
+        assert POPOTO_REDIS_DB.sismember(_status_index_key("active"), member_key)
+
+        job.mark_at_rest()
+
+        assert not POPOTO_REDIS_DB.sismember(_status_index_key("active"), member_key)
+        assert POPOTO_REDIS_DB.sismember(_status_index_key("at-rest"), member_key)
+
+
 class TestGoalSelfHeal:
     """``_goal_data()`` is total: no goal shape can make it raise."""
 
