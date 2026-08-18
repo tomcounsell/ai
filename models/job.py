@@ -380,19 +380,37 @@ class Job(Model):
     # -- Lifecycle (rest by age, revived by any steer; never hard-closed) ---
 
     def touch(self) -> None:
-        """Record activity (message bound, PM turn) — refreshes recency."""
+        """Record activity (message bound, PM turn) — refreshes recency.
+
+        Field-scoped save (the structural clobber-proof idiom): a bare
+        ``save()`` would serialize the whole hash, including a concurrent
+        writer's in-flight ``goal`` mutation loaded earlier by this
+        instance. ``update_fields=["last_active_at"]`` writes only what this
+        method actually mutates.
+        """
         self.last_active_at = _now()
-        self.save()
+        self.save(update_fields=["last_active_at"])
 
     def mark_at_rest(self) -> None:
+        """Field-scoped save (the structural clobber-proof idiom): mutates
+        only ``status``, so an in-flight ``goal`` write from a concurrent
+        expectation mutation is never clobbered. Also deliberately excludes
+        ``last_active_at`` — resting a Job by age must never refresh its
+        recency.
+        """
         self.status = "at-rest"
-        self.save()
+        self.save(update_fields=["status"])
 
     def revive(self) -> None:
-        """Any steering message revives a Job regardless of age."""
+        """Any steering message revives a Job regardless of age.
+
+        Field-scoped save (the structural clobber-proof idiom): mutates only
+        ``status`` and ``last_active_at``, so an in-flight ``goal`` write
+        from a concurrent expectation mutation is never clobbered.
+        """
         self.status = "active"
         self.last_active_at = _now()
-        self.save()
+        self.save(update_fields=["status", "last_active_at"])
 
     # -- Queries ------------------------------------------------------------
 
