@@ -74,6 +74,10 @@ def fake_redis():
     fake.delete.return_value = 1
     fake.hgetall.return_value = {}
     fake.hset.return_value = 1
+    # A blank fake holds no keys. Without this, MagicMock's truthy default makes
+    # _daily_pr_cap_reached() report a cap on every run, which now short-circuits
+    # run_docs_auditor at the hoisted preflight guard.
+    fake.exists.return_value = 0
     return fake
 
 
@@ -1171,11 +1175,11 @@ class TestWithheldBlocksAutoMerge:
         ]
         with (
             patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
-            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
-            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, withheld=withheld)
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/x.md"], withheld=withheld
+            )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
         body = create[create.index("--body") + 1]
@@ -1230,11 +1234,14 @@ class TestWithheldBlocksAutoMerge:
 
         with (
             patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
-            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
-            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, withheld=audit_result["withheld"])
+            docs_auditor._push_branch_and_pr(
+                "slug",
+                repo,
+                ["docs/features/foo.md"],
+                withheld=audit_result["withheld"],
+            )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
         body = create[create.index("--body") + 1]
@@ -1278,7 +1285,10 @@ class TestWithheldBlocksAutoMerge:
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
-            patch("reflections.docs_auditor._push_branch_and_pr", return_value=None) as push,
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ) as push,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
             patch("reflections.docs_auditor._write_liveness"),
@@ -1288,6 +1298,8 @@ class TestWithheldBlocksAutoMerge:
         assert result["status"] == "ok"
         assert any("2 fix(es) withheld" in f for f in result["findings"])
         assert "withheld" in result["summary"]
+        # The staging set is passed explicitly — never a whole-tree `git add -A`.
+        assert push.call_args.args[2] == audit_result["files_touched"]
         assert push.call_args.kwargs["withheld"] == audit_result["withheld"]
         assert "withheld" in notify.call_args.args[0]
 
@@ -1541,8 +1553,157 @@ class TestPRCreationFailure:
         ):
             result = docs_auditor.run_docs_auditor()
 
-        # Failure to create PR should not raise
-        assert result["status"] in ("ok", "error")
+        # Failure to create PR must not raise. The guards are hoisted to the
+        # preflight, so a None from _push_branch_and_pr after a write can only
+        # mean failure — it routes to "error", never a silent "ok".
+        assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# TestHoistedPRGuards — the guards fire before the substrate writes
+# ---------------------------------------------------------------------------
+
+
+class TestHoistedPRGuards:
+    """The daily-cap and open-PR guards run pre-write, in run_docs_auditor.
+
+    Before this, both lived inside ``_push_branch_and_pr`` and fired *after*
+    ``audit()`` had already rewritten docs in the shared main checkout, which
+    left the edits uncommitted there while the run reported success.
+    """
+
+    @staticmethod
+    def _run(repo, **guards):
+        """Drive a rotation with the two guards forced, returning (result, mocks)."""
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch(
+                "reflections.docs_auditor._daily_pr_cap_reached",
+                return_value=guards.get("cap", False),
+            ),
+            patch(
+                "reflections.docs_auditor._has_open_pr_for_slug",
+                return_value=guards.get("open_pr", False),
+            ),
+            patch("reflections.docs_auditor.audit") as audit_mock,
+            patch("reflections.docs_auditor._push_branch_and_pr") as push,
+            patch("reflections.docs_auditor._update_rotation_hash") as rotation,
+            patch("reflections.docs_auditor._write_liveness") as liveness,
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+        ):
+            result = docs_auditor.run_docs_auditor()
+        return result, {
+            "audit": audit_mock,
+            "push": push,
+            "rotation": rotation,
+            "liveness": liveness,
+            "notify": notify,
+        }
+
+    @pytest.mark.parametrize("guard", ["cap", "open_pr"])
+    def test_guard_returns_skipped_without_running_the_substrate(
+        self, repo, auth_ok, patch_redis, guard
+    ):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        result, mocks = self._run(repo, **{guard: True})
+
+        assert result["status"] == "skipped"
+        mocks["audit"].assert_not_called()
+        mocks["push"].assert_not_called()
+        mocks["notify"].assert_not_called()
+
+    @pytest.mark.parametrize("guard", ["cap", "open_pr"])
+    def test_guard_still_stamps_the_rotation_hash_for_the_picked_doc(
+        self, repo, auth_ok, patch_redis, guard
+    ):
+        """Without this stamp the same doc is re-picked forever.
+
+        ``_select_primary_doc`` always picks the least-recently-audited doc, so an
+        unstamped slug is re-picked on every run for as long as the guard fires —
+        and an open withheld PR is never closed, which would turn one blocked doc
+        into a permanent silent shutdown of the whole rotation.
+        """
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        _result, mocks = self._run(repo, **{guard: True})
+
+        mocks["rotation"].assert_called_once()
+        assert mocks["rotation"].call_args.args[1] == ["docs/features/foo.md"]
+        assert mocks["liveness"].call_args.args[1] == "skipped"
+
+    def test_no_guard_lets_the_substrate_run(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        _result, mocks = self._run(repo)
+
+        mocks["audit"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestExplicitStagingSet — the branch stages files_touched and nothing else
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitStagingSet:
+    def test_empty_files_touched_creates_no_branch_and_no_commit(self, repo):
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("reflections.docs_auditor.subprocess.run", side_effect=record):
+            assert docs_auditor._push_branch_and_pr("slug", repo, []) is None
+
+        assert calls == []
+
+    def test_staging_command_names_the_touched_paths_only(self, repo):
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="main\n", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=record),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+
+        add = next(c for c in calls if c[:2] == ["git", "add"])
+        assert add == ["git", "add", "--", "docs/features/foo.md"]
+        assert not any(c[:3] == ["git", "add", "-A"] for c in calls)
+
+    def test_restore_uses_head_so_staged_content_cannot_survive(self, repo):
+        """``git checkout -- <paths>`` restores from the INDEX, not from HEAD.
+
+        On the staged-then-commit-failed path the index still holds the auditor's
+        own content, so the bare form re-applies it to the working tree. The
+        ``HEAD`` in ``git checkout HEAD -- <paths>`` is what resets both.
+        """
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="main\n", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=record),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+
+        assert ["git", "checkout", "HEAD", "--", "docs/features/foo.md"] in calls
+        # Never a whole-tree operation — other lanes hold uncommitted work here.
+        assert not any(
+            c[:2] == ["git", "reset"] or c[:2] == ["git", "clean"] or "-f" in c for c in calls
+        )
 
 
 # ---------------------------------------------------------------------------
