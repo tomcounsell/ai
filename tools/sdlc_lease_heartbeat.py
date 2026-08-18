@@ -34,12 +34,24 @@ whatever run_id it carries) and:
 This is deliberately an OWNERSHIP check, never a pid-liveness one (issue
 #2537 review): the payload's ``pid`` is stamped by the short-lived
 ``sdlc-tool session-ensure`` CLI at acquire time and is dead before this
-detached heartbeat's first tick, so the peek's pid-keyed ``orphaned_lock``
-signal reads every locally-minted lease as orphaned and must not gate the
+detached heartbeat's first tick, so a pid-keyed ``orphaned_lock`` signal
+would read every locally-minted lease as orphaned and must not gate the
 renew. The shape mirrors ``touch_issue_lock``'s own "no run_id supplied:
 never mutates" special case at the caller layer: the heartbeat can only ever
 EXTEND a lease it already owns, never mint on a free key nor steal one from a
 successor.
+
+**``renewer_pid`` is the exception, and it is the whole point of issue
+#2648.** That claim about the payload's ``pid`` holds for ``pid`` alone. This
+heartbeat is one of exactly two DURABLE renewers -- processes that live as
+long as the run does -- so its renewals also stamp ``renewer_pid`` +
+``renewer_create_time``, which name a process that is ALIVE for as long as the
+lease deserves to be. That is what makes the lease's pid evidence checkable at
+all, and it is why ``_lock_owner_is_live`` can treat a fresh renewal stamp as
+corroborating rather than conclusive: a run that renewed once and then died no
+longer reads live for the full freshness window. The distinction is load-
+bearing in both directions -- gating the renew on ``pid`` would be the #2620
+regression, while never stamping ``renewer_pid`` would leave #2648 unfixed.
 
 **Run liveness is the SUPERVISOR's liveness (issue #2714).** The heartbeat's
 own existence proves nothing about the run: a supervisor killed mid-stage
