@@ -1676,6 +1676,36 @@ belongs in this plan and the PR body, neither of which the row greps.
 | — | Risk & Robustness (round 6) | No findings. Verified against real source: the short-circuit at `models/session_lifecycle.py:1033`, the lazy `_psutil_process_for_pid` import below the renewer-only guards (supporting the "own try/except" requirement), `_healed_renewal_payload`'s unconditional `renewed_at` re-stamp at `:1118`, the `renew_only` CAS branch's `run_id` ownership guard before `_RENEW_IF_VALUE_MATCHES_LUA`, the non-CAS default `_R.set` at `:1379`, both non-releasing heartbeat exits at `tools/sdlc_lease_heartbeat.py:360`/`:365`, `_log_exit` at `:244`, the `__main__` guard at `:531`, `_iter_orphan_sessions`'s bare `if not owner_live: yield s` at `tools/sdlc_session_ensure.py:1128`, and the worker tick at `agent/session_executor.py:246`. The `pttl` sentinel handling, the 2-attempt CAS retry's ownership re-check, and the strip invariant's non-interaction with the `SET NX` mint path were each pressure-tested and hold. | n/a | n/a |
 | NIT | Scope & Value (round 5) | spike-4's ephemeral-renewer inventory over-counts. `tools/sdlc_next_skill.py:638` is the file's only `touch_issue_lock` call and it is `peek=True` (verified) — a read-only peek that never reaches a renewal branch, so it cannot "re-poison the field" (Risk 2) and needs no protection from the strip invariant. The true production renewal/mint call sites outside the two durable renewers are four across three files (`tools/_sdlc_utils.py:609`, `:834`, `tools/sdlc_stage_marker.py:884`, `tools/sdlc_session_ensure.py:539`), not "five ephemeral CLI renewers" across four files as repeated in spike-4, Key Element 2, Race 6 mode 2, Task 4 and SC5c. **Suggestion:** correct the count in every location, and either drop `tools/sdlc_next_skill.py` from the anti-criterion file list or keep it explicitly as a defensive inclusion rather than as evidence of a fifth renewer. | **spike-4** corrected: four ephemeral renewal call sites across three files; `tools/sdlc_next_skill.py:638` reclassified as a read-only peek and kept in the anti-criterion list as a defensive inclusion. Count fixed in spike-4, Key Element 2, Race 6, Risk 2, Risk 3, Solution -> Flow and SC5c | n/a (NIT) |
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound. The final
+verdict was `READY TO BUILD (WITH CONCERNS)`, and the revision applied after it
+was never re-critiqued. The concerns below were carried into BUILD on that
+basis and are accepted on the record.
+
+- **Test Impact was not self-consistent with Verification** (CONCERN, History &
+  Consistency, round 6) — `## Test Impact` omitted bullets for
+  `TestRenewerIdentityLiveness` and `test_drop_renewer_identity_preserves_renewed_at`
+  even though `## Verification` carries exact-name grep rows for both, and the
+  round-5 NIT entry asserted otherwise. Bullets were added in the post-verdict
+  revision but not re-critiqued. Accepted because: non-blocking by definition of
+  CONCERN, and the critic's own note records that it "does NOT block a faithful
+  build" — Task 1's prose already directs the builder to write both tests, so
+  the code exists regardless of the disposition list's bookkeeping.
+
+- **`## Decided Defaults` read as open rather than decided** (NIT, Scope &
+  Value, round 6) — both items ended in interrogatives aimed at a human reader
+  while the section claimed both were decided. Reworded in the post-verdict
+  revision, not re-critiqued. Accepted because: wording-only, confined to one
+  section, and it changes no Success Criterion, task, or Verification row —
+  Task 2 already hard-codes the 180 s default and Risk 5 already treats the TTL
+  as the accepted backstop.
+
+Risk & Robustness reported **no findings** in round 6, having pressure-tested
+the `pttl` sentinel handling, the 2-attempt CAS retry's ownership re-check, and
+the strip invariant's non-interaction with the `SET NX` mint path. The residual
+above is therefore bookkeeping and prose, not unresolved mechanism.
+
 ---
 
 ## Decided Defaults
