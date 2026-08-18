@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2648
 last_comment_id: 5311761287
+revision_applied: true
+revision_applied_at: 2026-08-18T03:44:49Z
 ---
 
 # Re-stamp the renewer's pid on same-owner lease renewal so pid liveness becomes authoritative
@@ -1633,12 +1635,12 @@ belongs in this plan and the PR body, neither of which the row greps.
 
 ---
 
-## Open Questions
+## Decided Defaults
 
-Both questions carry a decided default in the plan body, so neither blocks
-build. Both survived two critique rounds without being challenged on their
-substance, so the defaults stand as decided; they are recorded here because the
-evidence behind them is thin (see the n=1 caveat), not because they are open.
+Nothing here blocks build. Both items survived four critique rounds without
+being challenged on their substance, so both are **decided**. They are recorded
+because the evidence behind them is thin (see the n=1 caveat), not because they
+are open — a future incident observation is the trigger to revisit them.
 
 1. **Grace window default.** 180 s is derived from two constraints (three worker
    ticks below; the 210 s incident observation above). It is the largest value
