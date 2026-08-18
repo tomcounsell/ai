@@ -42,7 +42,7 @@ reflections:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique identifier (used as Redis key) |
-| `every` / `cron` / `at` | string | Unified schedule grammar — exactly one is required. See [Schedule Grammar](#schedule-grammar) below. |
+| `schedule` / `every` / `cron` / `at` | string | Unified schedule grammar — exactly one is required. See [Schedule Grammar](#schedule-grammar) below. |
 | `priority` | string | `urgent`, `high`, `normal`, or `low` |
 | `execution_type` | string | `function` (direct callable) or `agent` (PM session) |
 | `callable` | string | Dotted Python path (for function type) |
@@ -59,7 +59,7 @@ reflections:
 
 ### Code-Registered Reflections
 
-`config/reflections.yaml` is a **gitignored symlink** (`~/Desktop/Valor/reflections.yaml`, vault-synced) — a hand-edit to it, or even to a checked-out machine's local copy, never ships via git history and gets clobbered by the next vault→config sync. A reflection that must ship with a feature's code (rather than be registered by hand on each machine after the fact) instead registers itself through a small idempotent helper in `scripts/update/reflection_register.py`, invoked as a step inside `scripts/update/run.py`.
+`config/reflections.yaml` is a **gitignored real-file copy** of `~/Desktop/Valor/reflections.yaml` (vault-synced) — a hand-edit to it, or even to a checked-out machine's local copy, never ships via git history and gets clobbered by the next vault→config sync. A reflection that must ship with a feature's code (rather than be registered by hand on each machine after the fact) instead registers itself through a small idempotent helper in `scripts/update/reflection_register.py`, invoked as a step inside `scripts/update/run.py`.
 
 Each registration function (`register_crash_recovery`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next config reload.
 
@@ -75,15 +75,26 @@ A reflection that an operator is expected to add by hand on a per-machine basis 
 
 ### Schedule Grammar
 
-The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into one of three string-typed schedule keys. Exactly one must be present per reflection.
+The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into a string-typed schedule key. Exactly one must be present per reflection.
 
 | Key | Shape | Example | Semantics |
 |-----|-------|---------|-----------|
 | `every` | duration string | `every: 300s`, `every: 5m`, `every: 1h`, `every: 24h` | Recurring on a fixed interval. Tracked by `ran_at + interval`. |
 | `cron` | five-field cron expression, optional `; tz=<zone>` suffix | `cron: 0 9 * * 1-5; tz=America/New_York` | Recurring on a calendar schedule. Timezone defaults to UTC; explicit zones must be valid IANA names. |
 | `at` | ISO-8601 instant | `at: 2026-05-15T09:00:00+00:00` | One-shot — fires exactly once at the given instant. Pair with `auto_delete_after_run: true` so the record self-cleans on success. |
+| `schedule` | pre-composed grammar string | `schedule: "cron: 0 9 * * 1-5; tz=America/New_York"` | The already-normalized form the other three keys are folded into. Written by machinery that composes a schedule programmatically; prefer `every` / `cron` / `at` when hand-authoring. |
 
 The runtime parser lives in `agent/reflection_schedule.py::compute_next_due()` and depends on `croniter` (declared in `pyproject.toml`).
+
+**Exactly one, enforced by test (#2734).** `load_registry()` resolves a multi-key entry
+deterministically by precedence — `schedule` > `every` > `cron` > `at` — rather than refusing
+it, so an entry declaring two keys would load with one declaration silently discarded.
+`tests/unit/test_reflection_scheduler.py::required_field_violations` is therefore
+**deliberately stricter than the loader**: it rejects zero keys (matching the loader, which
+cannot schedule such an entry at all) *and* two-or-more (a lint the loader does not perform).
+It also counts a key as declared when **present**, while the loader counts it when **truthy**.
+Both divergences are intentional; a future loader change that formalizes multi-key support is
+a decision to re-make there, not a bug in the test.
 
 #### Migration from `interval:` (issue #1273)
 
@@ -91,24 +102,48 @@ The `interval: <int>` field is now `every: <int>s`. The migration is one-shot an
 
 - `scripts/migrate_reflections_yaml.py` rewrites `interval: N` → `every: Ns` in place. Running it on an already-migrated YAML is a no-op.
 - The `/update` skill invokes the migration on every pull (`scripts/update/run.py` Step 3.65) so machines that haven't migrated yet pick up the change automatically. The wrapper lives in `scripts/update/reflections_yaml.py`.
-- The vault copy (`~/Desktop/Valor/reflections.yaml`) is the canonical target; the in-repo `config/reflections.yaml` symlinks to it on live machines.
+- The vault copy (`~/Desktop/Valor/reflections.yaml`) is the canonical target; the in-repo `config/reflections.yaml` is a real-file copy of it, written on every update, on live machines.
 
 ### Registry Location (Vault-First)
 
-The scheduler resolves `config/reflections.yaml` via a three-level fallback:
+The scheduler resolves `config/reflections.yaml` via a four-level fallback
+(`agent/reflection_scheduler.py::_resolve_registry_path()`):
 
 1. `REFLECTIONS_YAML` env var (explicit override, e.g., for testing)
-2. `~/Desktop/Valor/reflections.yaml` (vault copy — iCloud-synced, takes precedence)
-3. `config/reflections.yaml` in-repo (symlink to vault on live machines)
+2. `~/Desktop/Valor/reflections.yaml` (vault copy — iCloud-synced, takes precedence) —
+   skipped entirely under `VALOR_LAUNCHD` (macOS TCC hazard, see below)
+3. `config/reflections.yaml` in *this* checkout
+4. `config/reflections.yaml` in the **owning checkout** — the primary checkout that a
+   linked git worktree belongs to, located via `_owning_checkout_root()` from git's
+   on-disk worktree metadata (the worktree's `.git` file → `gitdir:` → `commondir`),
+   never by invoking the git CLI
 
-On live machines, `config/reflections.yaml` is a symlink to `~/Desktop/Valor/reflections.yaml`.
-The symlink is created by `sync_reflections_yaml()` in `scripts/update/env_sync.py` during
-each update run. This ensures the scheduler always reads the vault version.
+Levels 3 and 4 exist because `config/reflections.yaml` is **gitignored** and is
+materialized only at install time — by `install_reflection_worker.sh`,
+`install_email_bridge.sh`, and `scripts/update/env_sync.py::sync_reflections_yaml` —
+and only in the **primary checkout**. A linked git worktree (`.worktrees/{slug}/`, see
+[Worktree Manager](worktree-manager.md)) never receives its own copy: install-time
+artifacts are not duplicated per worktree, both because per-worktree copies would go
+stale independently and because linking each worktree straight into the vault would
+reintroduce the June 2026 worker wedge (the incident that motivated the real-file form
+noted just below). Level 3 is therefore always
+absent in a worktree, and level 4 — reading the *owning* checkout's real-file copy
+instead — is what makes the registry resolvable from `.worktrees/{slug}/` under
+`VALOR_LAUNCHD=1`. When every level is exhausted, the resolver logs one deduplicated
+error naming all four candidates and still returns the local (level-3) in-repo path,
+unchanged from its legacy behavior, so no new exception type escapes into production.
 
-Under launchd (`VALOR_LAUNCHD=1`), the worker instead reads a **real copy** at
-`config/reflections.yaml` that `install_worker.sh` writes from the vault (macOS TCC blocks
-launchd agents from reading `~/Desktop`). That copy step is where repo-specific ownership is
-applied — see below.
+On live machines, `config/reflections.yaml` in the primary checkout is a **real file** —
+a plain copy of `~/Desktop/Valor/reflections.yaml`, not a symlink into it. The copy is
+written by `sync_reflections_yaml()` in `scripts/update/env_sync.py` during each update
+run. This ensures the scheduler always reads a current snapshot of the vault version.
+The real-file form matters: reading that path directly from `~/Desktop` under launchd
+was the June 2026 worker wedge, and the resolver's worktree-fallback level 4 depends on
+the primary copy staying a real file so it never re-trips that hazard one layer removed.
+
+Under launchd (`VALOR_LAUNCHD=1`), the worker reads that same real copy at
+`config/reflections.yaml` (macOS TCC blocks launchd agents from reading `~/Desktop`
+directly). That copy step is where repo-specific ownership is applied — see below.
 
 ### Repo-Specific Reflections (Single-Machine Ownership)
 
@@ -122,7 +157,7 @@ The fix extends [single-machine ownership](single-machine-ownership.md) to refle
 applies it at **update time, not run time**:
 
 1. A reflection declares `project_key: <key>` in the shared registry (e.g. `project_key: valor`).
-2. `install_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
+2. `install_reflection_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
    `config/reflections.yaml`, runs `python -m tools.reflection_machine_filter`. For each entry
    with a `project_key`, if `projects.<key>.machine` (from `projects.json`) is **not** this
    machine, it forces `enabled: false` in the local copy.
@@ -140,9 +175,12 @@ Ownership semantics (`tools/reflection_machine_filter.py`):
 | `project_key` not in `projects.json` | Fail-open (left as-is) with a warning — a typo never silently disables an audit everywhere |
 
 The filter only **disables**; it never re-enables (so an owned-but-authored-`enabled: false`
-reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink, so a
-manual run against the symlinked `config/reflections.yaml` can never corrupt the shared vault —
-it only ever rewrites the real per-machine copy that `install_worker.sh` produces.
+reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink — a
+defensive check against the pre-June-2026 layout, not a claim that `config/reflections.yaml`
+is one today — so a manual run against `config/reflections.yaml` can never corrupt the shared
+vault: it only ever rewrites the real per-machine copy produced by
+`install_reflection_worker.sh`, `install_email_bridge.sh`, and
+`scripts/update/env_sync.py::sync_reflections_yaml`.
 
 > **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
 > files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
@@ -792,7 +830,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | Component | Detail |
 |-----------|--------|
 | Scheduler | `agent/reflection_scheduler.py` (run out-of-process by `python -m reflections`) |
-| Registry | `config/reflections.yaml` (symlink → `~/Desktop/Valor/reflections.yaml`) |
+| Registry | `config/reflections.yaml` (real-file copy of `~/Desktop/Valor/reflections.yaml`) |
 | State | Redis via `models/reflection.py` |
 | Tick interval | 60 seconds |
 
@@ -810,7 +848,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | File | Purpose |
 |------|---------|
 | `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
-| `config/reflections.yaml` | Declarative registry symlink → `~/Desktop/Valor/reflections.yaml` |
+| `config/reflections.yaml` | Declarative registry, real-file copy of `~/Desktop/Valor/reflections.yaml` |
 | `reflections/__init__.py` | Package: all callables return `{"status", "findings", "summary"}` |
 | `reflections/utilities.py` | Shared helpers: `load_local_projects()`, `is_ignored()`, `run_llm_reflection()`, `extract_structured_errors()`, `CORRECTION_PATTERNS` |
 | `reflections/agents/` | 5 agent/session health reflections (one file each): `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` |
@@ -828,7 +866,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
 | `models/reflections.py` | Re-export shim: `ReflectionIgnore`, `PRReviewAudit` |
 | `scripts/reflections_report.py` | GitHub issue creation module (was used by retired `daily_report`) |
-| `scripts/update/env_sync.py` | `sync_reflections_yaml()`: creates vault symlink on update |
+| `scripts/update/env_sync.py` | `sync_reflections_yaml()`: writes the real-file vault copy on update |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
 

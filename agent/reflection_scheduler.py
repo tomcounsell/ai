@@ -64,17 +64,107 @@ _reflection_pool = ThreadPoolExecutor(
 )
 
 
+# Candidate sets for which the exhausted-candidates diagnostic has already been
+# emitted. Keyed on the joined candidate tuple, so a *different* exhausted set
+# still logs its own line, while the eight-plus call sites that re-resolve within
+# one process share a single message. Deliberately not an lru_cache on the
+# resolver: load_registry() re-resolves per call and tests mutate REFLECTIONS_YAML,
+# so the resolver itself must stay uncached.
+_exhausted_warned: set[str] = set()
+
+
+def _owning_checkout_root() -> Path | None:
+    """Locate the root of the checkout that owns this one, or None.
+
+    In a linked git worktree, ``<repo_root>/.git`` is a *file* holding a single
+    ``gitdir: <path>`` line pointing at ``<primary>/.git/worktrees/<name>``. That
+    directory usually holds a ``commondir`` file (typically ``../..``) which
+    resolves to the primary ``.git``. In the primary checkout, ``.git`` is a
+    directory and there is no owning checkout, so this returns None.
+
+    The two branches are **asymmetric** and must not be given a uniform
+    ``.parent``: with ``commondir`` present the resolved path is the primary
+    ``.git`` so we take its ``.parent``; with ``commondir`` missing,
+    ``parents[2]`` of the gitdir already *is* the checkout root for git's fixed
+    ``<primary>/.git/worktrees/<name>`` layout, so no ``.parent`` is applied.
+
+    The ``gitdir:`` link is assumed **absolute**. Git writes it that way by
+    default, but ``git worktree add --relative-paths`` and the
+    ``worktree.useRelativePaths`` config write a relative link. Resolving a
+    relative link would silently anchor it to the *process CWD* rather than to
+    the worktree root and yield a wrong root, so a relative link returns None and
+    takes the same unfamiliar-layout path as a malformed one.
+
+    This is resolved from git's on-disk worktree metadata rather than by invoking
+    the git CLI: ``REGISTRY_PATH`` is computed at import time inside a launchd
+    worker, and a blocking child process on that path is precisely the class of
+    hazard the surrounding launchd guards exist to prevent.
+
+    Performs **no** registry ``exists()`` check — it does not know what a
+    registry is. The caller owns that, so the candidate path stays nameable in
+    the exhausted-candidates diagnostic even when it turns out to be absent.
+    """
+    try:
+        repo_root = Path(__file__).parent.parent
+        dot_git = repo_root / ".git"
+        if dot_git.is_dir():
+            return None
+        if not dot_git.is_file():
+            return None
+
+        gitdir_text = ""
+        for line in dot_git.read_text().splitlines():
+            if line.startswith("gitdir:"):
+                gitdir_text = line.split(":", 1)[1].strip()
+                break
+        if not gitdir_text:
+            return None
+        # Guard before any commondir read or parents[] indexing (see docstring).
+        if not Path(gitdir_text).is_absolute():
+            return None
+
+        gitdir = Path(gitdir_text)
+        commondir_file = gitdir / "commondir"
+        if commondir_file.is_file():
+            commondir_text = commondir_file.read_text().strip()
+            if commondir_text:
+                common = (gitdir / Path(commondir_text)).resolve()
+                return common.parent
+
+        # No commondir: rely on git's fixed <primary>/.git/worktrees/<name> layout.
+        # Guard the index explicitly — a short gitdir: would raise IndexError, which
+        # the broad except below would swallow into the silent fallback this guard
+        # exists to keep legible.
+        if len(gitdir.parents) > 2:
+            return gitdir.parents[2]
+        return None
+    except Exception:
+        return None
+
+
 # Path to the reflections registry.
-# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml → config/
+# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
+# this checkout's config/ → the owning checkout's config/
 def _resolve_registry_path() -> Path:
     """Resolve the reflections YAML path using vault-first fallback logic.
 
     Priority:
     1. REFLECTIONS_YAML env var (explicit override, e.g., for testing)
     2. ~/Desktop/Valor/reflections.yaml (iCloud-synced vault, private config)
-    3. config/reflections.yaml (in-repo fallback, always present)
+       — skipped entirely under VALOR_LAUNCHD (macOS TCC hazard, see below)
+    3. config/reflections.yaml in *this* checkout. Gitignored and materialized
+       only at install time, so it is **absent in worktrees**.
+    4. config/reflections.yaml in the checkout that owns this worktree, located
+       via ``_owning_checkout_root()``. This is the level that makes the registry
+       readable from ``.worktrees/{slug}/`` under VALOR_LAUNCHD.
+
+    When every candidate is exhausted, one error naming all four slots is logged
+    (de-duplicated per candidate set) and the level-3 path is returned unchanged,
+    so no new exception escapes at import time.
     """
     import os
+
+    candidates: list[str] = []
 
     env_path = os.environ.get("REFLECTIONS_YAML")
     if env_path:
@@ -82,17 +172,50 @@ def _resolve_registry_path() -> Path:
         if p.exists():
             return p
         logger.warning("REFLECTIONS_YAML env var points to non-existent path: %s", env_path)
+    candidates.append(f"REFLECTIONS_YAML={env_path or '<unset>'}")
 
     # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced Desktop
     # path entirely. macOS TCC blocks stat()/open() on ~/Desktop files from launchd
     # agents — even exists() hangs indefinitely and blocks the asyncio event loop.
-    # install_worker.sh copies reflections.yaml → config/reflections.yaml at install time.
+    # install_reflection_worker.sh / install_email_bridge.sh / env_sync.py::sync_reflections_yaml
+    # copy reflections.yaml → config/reflections.yaml at install time.
     if not os.environ.get("VALOR_LAUNCHD"):
         vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+        candidates.append(str(vault_path))
         if vault_path.exists():
             return vault_path
+    else:
+        candidates.append("<vault skipped: VALOR_LAUNCHD>")
 
-    return Path(__file__).parent.parent / "config" / "reflections.yaml"
+    local_path = Path(__file__).parent.parent / "config" / "reflections.yaml"
+    candidates.append(str(local_path))
+    if local_path.exists():
+        return local_path
+
+    # Fourth level: the owning checkout's install-time copy. The locator answers
+    # only "which checkout owns this one?"; the existence check is owned here so
+    # the candidate stays nameable in the diagnostic below even when absent.
+    owning_root = _owning_checkout_root()
+    if owning_root is not None:
+        primary_candidate = owning_root / "config" / "reflections.yaml"
+        candidates.append(str(primary_candidate))
+        if primary_candidate.exists():
+            return primary_candidate
+    else:
+        candidates.append("<owning checkout not resolvable>")
+
+    key = "|".join(candidates)
+    if key not in _exhausted_warned:
+        _exhausted_warned.add(key)
+        logger.error(
+            "Reflections registry not found; every candidate exhausted: %s. "
+            "Returning %s, which does not exist. Run /update on this machine to "
+            "materialize the install-time copy.",
+            ", ".join(candidates),
+            local_path,
+        )
+
+    return local_path
 
 
 REGISTRY_PATH = _resolve_registry_path()
@@ -210,9 +333,11 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
     """Load and validate the reflections registry from YAML.
 
     Args:
-        path: Path to the YAML file. Defaults to vault-first resolution:
-              REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
-              config/reflections.yaml.
+        path: Path to the YAML file. Defaults to ``_resolve_registry_path()``;
+              see that function's docstring for the authoritative ordering of
+              its resolution levels, including the owning-checkout level that
+              covers worktrees (issue #2734). Deliberately not re-enumerated
+              here — the duplicate went stale once already.
 
     Returns:
         List of validated ReflectionEntry objects. Invalid entries are
