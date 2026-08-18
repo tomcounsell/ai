@@ -880,11 +880,11 @@ ISSUE_LOCK_RENEWER_GRACE_SECONDS = int(os.environ.get("ISSUE_LOCK_RENEWER_GRACE_
 
 # Modules whose renewals may record a DURABLE renewer identity on the payload
 # (issue #2648). Membership is checked against an explicit `renewer_module`
-# token the caller passes -- NEVER derived by introspection: the detached
-# heartbeat runs as `python -m tools.sdlc_lease_heartbeat`, so `__name__`,
-# `sys._getframe` and `inspect` all resolve to "__main__" there and an
-# introspective check would silently never stamp in production while passing
-# every import-based unit test. Everything else that renews this lease is a
+# token the caller passes -- NEVER derived by walking the call stack or
+# reading a module name off a frame: the detached heartbeat runs as
+# `python -m tools.sdlc_lease_heartbeat`, so every such route resolves to
+# "__main__" there. A check built that way would silently never stamp in
+# production while passing every import-based unit test. Everything else that renews this lease is a
 # short-lived `sdlc-tool` CLI whose pid is dead within seconds; recording one of
 # those as the renewer would report every lease orphaned after the grace.
 _DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat", "agent.session_executor"}

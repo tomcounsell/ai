@@ -243,8 +243,18 @@ def _tick_issue_lock_renewal(
         from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
         session_id = getattr(session, "session_id", None) or ""
+        # `stamp_renewer_identity` (issue #2648): in worker mode this 60s tick
+        # IS the durable renewer -- the detached heartbeat is deliberately not
+        # spawned here -- so the worker's own pid is the one on the payload
+        # that tracks the run's life. The payload's acquire-time `pid` belongs
+        # to the ephemeral `session-ensure` CLI and is long dead.
         result = touch_issue_lock(
-            issue_number, run_id, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
+            issue_number,
+            run_id,
+            session_id=session_id,
+            ttl=ISSUE_LOCK_TTL_SECONDS,
+            stamp_renewer_identity=True,
+            renewer_module="agent.session_executor",
         )
         if not result.acquired:
             logger.warning(
