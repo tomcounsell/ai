@@ -180,7 +180,7 @@ OK -> /path/to/deck.mp4
 
 - `tools/deck_video/__init__.py` — compositor: narration parser, Marp export, synthesis loop, ffmpeg compositing, `build_deck_video()` entrypoint
 - `tools/deck_video/cli.py` — `valor-deck-video` entry point
-- `.claude/skills-global/do-presentation/SKILL.md` — skill definition, `--video` mode, narration schema, version history
+- `.claude/skills-global/do-presentation/SKILL.md` — skill definition, `--video` mode, narration schema
 - `tests/unit/test_deck_video.py` — unit tests (narration parser, per-slide synthesis, error handling)
 - `tests/integration/test_deck_video_e2e.py` — E2E test (2-slide fixture deck, real ffmpeg + valor-tts, playable MP4 assertion)
 - `docs/features/tts.md` — `valor-tts` reference (dual backend, voice catalog, duration field)
