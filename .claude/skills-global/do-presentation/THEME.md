@@ -35,6 +35,7 @@ palettes, gridlines, axis lines or legends; stock photography; font sizes outsid
 | `--ink` | `#1A1A1A` | Headings |
 | `--ink-body` | `#2D2D2D` | Body text |
 | `--ink-gray` | `#5A5A5A` | Labels, captions |
+| `--ink-muted` | `#8A8A8A` | Section numeral. The lightest ink that clears 3:1 |
 | `--rule-dark` | `#3A3A3A` | Structural rules, panel borders |
 | `--rule-mid` | `#C4C4C4` | Masthead and band hairlines |
 | `--rule-light` | `#E5E5E5` | Table rows, grid lines |
@@ -89,6 +90,7 @@ Paste this verbatim into the deck's front matter under `style: |`. Change values
   --bg: #FAF9F6;      --bg-panel: #FFFFFF;  --bg-warm: #F5F4F1;
   --ink: #1A1A1A;     --ink-body: #2D2D2D;  --ink-gray: #5A5A5A;
   --rule-dark: #3A3A3A; --rule-mid: #C4C4C4; --rule-light: #E5E5E5;
+  --ink-muted: #8A8A8A;   /* lightest ink that clears 3:1 on the cream ground */
   --red: #B91C1C;     --red-deep: #7F1D1D;  --rose: #FECACA;
   --cobalt: #1E3A8A;  --ochre: #92400E;
   --serif: 'Lora', Georgia, serif;
@@ -182,9 +184,12 @@ section.cover .lede {
 section.section {
   display: flex; flex-direction: column; justify-content: center;
 }
+/* Numeral is --ink-muted, not --rule-mid. A rule colour behind 96px type gives
+   1.66:1 against the cream, under even the 3:1 large-text floor, and the
+   section number tells the reader where they are. --ink-muted clears it. */
 section.section .num {
   font-family: var(--mono); font-size: 96px; font-weight: 400;
-  color: var(--rule-mid); line-height: 1; margin-bottom: 18px;
+  color: var(--ink-muted); line-height: 1; margin-bottom: 18px;
 }
 section.section h1 { font-size: 52px; margin: 0; }
 
