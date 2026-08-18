@@ -447,3 +447,15 @@ The lead NEVER builds directly — they deploy team members and coordinate.
 - **Description**: Run both reproduction commands (the #2846 15-node command and
   the #2822 11-node command). Confirm all 26 pass, no production source changed,
   and no `Co-Authored-By` trailers on the commits.
+
+## Critique Results
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | Cluster A3 fix misses `test_steering_push_before_transition` — it uses `_make_mock_session` (line 501), not `_make_session`, so setting `project_key` in `_make_session` leaves the derived room id a MagicMock repr and the test still red | pending | Add `s.project_key = "test"` in `TestResumeSessionCore._make_mock_session` (lines 501-512) and update line 623 to `mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id="test\|system")` |
+| CONCERN | Risk & Robustness | Cluster A1 `context_advisory` same-leg assertion is underspecified — no current test passes `context_advisory`, so the advisory push never fires; plan does not name which test to modify | pending | Add `context_advisory="advisory text"` to one helper call and assert `push.call_args_list` has two calls both with `room_id="test\|system"` (human + advisory) |
+| CONCERN | Scope & Value | Documentation section lacks the repo-mandated checkbox task with a `docs/features/` path | pending | Add `- [ ] No `docs/features/` change required — steering-leg behavior already documented in `docs/features/session-steering.md` (test-only fix).` |
+| CONCERN | History & Consistency | Manual 5-file fix repeats the seam-miss failure mode; caller-sweep guard deferred to No-Go (#2846) | pending | Add a grep sweep to the verify task: `grep -rn "assert_called_once_with" tests/unit/test_bridge_ack_steering_routed.py tests/unit/test_valor_session_resume_release.py tests/unit/test_steer_child.py` and `grep -rn "expectations=" tests/unit/test_context_recall_wiring.py` |
+| NIT | Risk & Robustness | Reproduction command runs whole files (superset of 15 nodes), so green does not isolate the named nodes | pending | Optionally note the command is a superset; the 15 named nodes are the gate |
+| NIT | Scope & Value | "At most one case" is a ceiling (0 or 1), so legacy-fallback coverage is not guaranteed | pending | Make it a floor ("keep exactly one case") if fallback coverage is intended |
+| NIT | History & Consistency | No internal contradiction found; triage corrections correctly incorporated | pending | None |
