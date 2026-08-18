@@ -1,7 +1,7 @@
 ---
 status: Ready
 type: bug
-appetite: Small
+appetite: Medium
 owner: Valor Engels
 created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2648
@@ -385,11 +385,21 @@ tightened branch against that site specifically.
 
 ## Appetite
 
-**Small.** Three source files, one new constant, one new payload-writing branch,
-one payload-clearing branch, one new predicate branch, and tests across four
-modules. The reasoning (the #2620/#2703 tension, and the composition hole
-spike-5 measured) is the expensive part and is done in this document. No new
-services, no schema, no migration.
+**Medium** — relabelled at round 3, honestly rather than defensively.
+
+The original idea was one mechanism: stamp the durable renewer's pid and gate on
+it. Two critique rounds each added a second: round 2 added the CAS
+`drop_renewer_identity` clear at both heartbeat deadline exits (Task 5, forced
+by the spike-5 composition hole), and round 3 added the stamp/strip invariant
+plus an explicit-token allowlist. Three mechanisms across three source files,
+with tests in four modules, is not Small, and the earlier defence — "the
+reasoning is the expensive part" — stopped being true once the reasoning started
+producing mechanisms.
+
+It is still bounded: no new services, no schema, no migration, no new module,
+and every mechanism is forced by a measured failure rather than anticipated. But
+a builder should size this as Medium and a reviewer should expect three
+interacting parts, not one.
 
 ## Prerequisites
 
@@ -399,29 +409,48 @@ None. Every file exists on `main` at `335fde5b3`.
 
 ### Key Elements
 
+0. **The invariant everything else serves (round-3).** *The `renewer_*` group is
+   present on the payload if and only if the MOST RECENT renewal was performed
+   by a durable renewer.* Every element below exists to keep that biconditional
+   true; if a change breaks it, the change is wrong. Stating it as an invariant
+   rather than as a sequence of writes is what closes the round-3 re-poisoning
+   concern, which arose precisely because the first design treated the clear as
+   a one-shot event instead of a maintained property.
 1. **`_healed_renewal_payload` gains an opt-in `stamp_renewer_identity` flag.**
    When set, the renewal payload additionally carries **exactly two** new keys:
    `renewer_pid` and `renewer_create_time` — the identity of the process
    performing *this* renewal. **There is no `renewer_machine_id`** (BLOCKER 2,
    argued below).
-2. **`touch_issue_lock` gains a keyword-only `stamp_renewer_identity: bool =
+2. **`_healed_renewal_payload` STRIPS the `renewer_*` group whenever
+   `stamp_renewer_identity` is not set for that call** — the other half of the
+   invariant, and a deliberate exception to that helper's "spread the EXISTING
+   payload, never reconstruct a subset" rule (`:1084-1096`). Without it the
+   group is sticky in the wrong direction: the default renewal branch at
+   `:1378` is a bare non-CAS `_R.set` of a spread payload, so any of the five
+   ephemeral CLI renewers would re-carry a stale `renewer_pid` it read before a
+   clear, and silently undo it (round-3 CONCERN). The exception is narrow and
+   must be commented as such at the spread site, naming this invariant.
+3. **`touch_issue_lock` gains a keyword-only `stamp_renewer_identity: bool =
    False`,** plumbed into both renewal branches (`renew_only` CAS at `:1296` and
    the default same-owner branch at `:1378`).
-3. **Exactly two callers pass it:** `tools/sdlc_lease_heartbeat.py:429` and
-   `agent/session_executor.py:246`. The restriction is enforced **structurally
-   at runtime** by a caller-module allowlist inside the renewal path itself, not
-   only by the grep anti-criterion (see *Why the four-file grep is not
-   sufficient*).
-4. **`touch_issue_lock` also gains a keyword-only `drop_renewer_identity: bool
+4. **Exactly two callers pass it,** each also passing an explicit
+   `renewer_module` token checked against `_DURABLE_RENEWER_MODULES`:
+   `tools/sdlc_lease_heartbeat.py:429` and `agent/session_executor.py:246`. The
+   token is passed explicitly and **never derived by introspection** — see the
+   round-3 BLOCKER below, where `__name__` is shown to be `"__main__"` for the
+   detached heartbeat.
+5. **`touch_issue_lock` also gains a keyword-only `drop_renewer_identity: bool
    = False`,** which performs a same-owner CAS renewal writing a payload with
    the `renewer_*` group **removed**. The heartbeat calls it at both of its
-   non-releasing deadline exits (spike-5 shape (a)).
-5. **`_lock_owner_is_live` makes freshness *corroborating rather than
+   non-releasing deadline exits (spike-5 shape (a)). Element 2 keeps the clear
+   durable; this element is what performs it when the heartbeat is the last
+   writer, which is exactly the deadline-exit case.
+6. **`_lock_owner_is_live` makes freshness *corroborating rather than
    conclusive*, but only when a durable renewer identity is present, complete,
    and the payload is same-machine per the existing
    `_payload_from_same_machine`.** Otherwise the existing short-circuit is
    byte-for-byte unchanged.
-6. **New named constant `ISSUE_LOCK_RENEWER_GRACE_SECONDS`** (default 180,
+7. **New named constant `ISSUE_LOCK_RENEWER_GRACE_SECONDS`** (default 180,
    env-overridable, marked provisional) bounds how long a dead renewer pid is
    tolerated while `renewed_at` is still fresh.
 
@@ -593,21 +622,45 @@ never reaps, re-opening #2703 defect 1 from the other side. Taking (c) = (a)+(b)
 would buy the reaper a partial guard against row Ib while paying that revert in
 full and still leaving the reflection gate exposed. (a) alone is the decision.
 
-**Why the four-file grep is necessary but NOT sufficient — the restriction is
-made structural.** The anti-criterion greps four ephemeral-renewer files, but
-renewal-adjacent call sites already exist outside that set:
-`tools/sdlc_session_release.py:92`, `tools/merge_predicate.py:656`, and
-`agent/supervised_run.py:256`. A future caller can therefore reach the renewal
-path without touching any watched file, and the grep would stay green while the
-field is re-poisoned by an ephemeral process (Risk 2). The plan therefore adds
-a runtime allowlist **inside the renewal path itself**: a module-level
+**The runtime allowlist: what it is, and the introspection trap that would have
+made it inert (round-3 BLOCKER).**
+
+The renewal path carries a module-level
 `_DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat",
-"agent.session_executor"}` checked against the calling module's `__name__`. A
-disallowed caller passing the flag gets the stamp **silently dropped** plus one
-`logger.warning` — never an exception, because nothing in this path may be
-allowed to break lock acquisition. The grep row stays as the cheap
-build-time signal; the allowlist is the one that holds at runtime, and it is
-directly testable (call from a disallowed module, assert no `renewer_*` keys).
+"agent.session_executor"}`. A caller passing `stamp_renewer_identity=True` must
+also pass a `renewer_module` token; if the token is not in the set, the stamp is
+**silently dropped** plus one `logger.warning` — never an exception, because
+nothing on this path may be allowed to break lock acquisition.
+
+**The token is passed explicitly by the caller. It must NEVER be derived by
+introspection.** The first draft specified "checked against the calling module's
+`__name__`", and that design is not merely fragile — it fails closed on the
+exact path the whole fix exists for. `tools/sdlc_session_ensure.py:235-238`
+launches the heartbeat as
+`[sys.executable, "-m", "tools.sdlc_lease_heartbeat", ...]`. Under `-m` the
+module executes as `__main__`, so every frame defined in that file resolves
+`f_globals["__name__"]` to `"__main__"`, never the dotted path — the file's own
+`if __name__ == "__main__":` guard at `tools/sdlc_lease_heartbeat.py:531` is
+proof it runs under that name. The detached heartbeat would therefore fail the
+allowlist on **every** call and never stamp anything in production, while
+`agent/session_executor.py` (imported normally by the worker) would be
+unaffected. The failure is silent by construction, and — the part that makes it
+genuinely dangerous — **the mandated test would still pass**, because unit tests
+reach the heartbeat via a plain `import tools.sdlc_lease_heartbeat`, where
+`__name__` resolves correctly. A green suite over an inert fix on every real
+deployment. Do not use `sys._getframe`, `inspect.stack()[n].frame.f_globals`, or
+`inspect.getmodule(frame).__name__`; all three return `"__main__"` here.
+
+**What the allowlist does and does not buy, stated plainly.** With an explicit
+token it is a *declaration* checked against a list, not a structural barrier: a
+caller that can pass `stamp_renewer_identity=True` can also pass a token that is
+on the list. Its honest value is that opting in is two-part and self-naming, so
+the opt-in cannot be added absent-mindedly and both halves are greppable. It is
+kept for that reason and because a mis-stamp is the expensive direction (Risk 2),
+not because it is unforgeable. The four-file grep anti-criterion remains the
+cheap build-time signal, and the mandatory REVIEW stage is the backstop that
+actually catches a new renewal-writing caller. Risk 6 states the residual
+without overclaiming.
 
 **Why `renewer_machine_id` is dropped (round-2 BLOCKER).**
 The first draft stamped a third key, `renewer_machine_id`, and gated the
@@ -796,7 +849,9 @@ beyond one debug line naming the dead renewer pid.
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — ADD two rows to `TestKillOrphans`: an `sdlc-local-{N}` row with `last_heartbeat_at = None` whose payload carries a fresh stamp and a LIVE `renewer_pid` must NOT be yielded; the same row with a dead `renewer_pid` past the grace MUST be yielded. This is SC7 at the consumer layer, not the predicate layer.
 - [ ] `tests/unit/reflections/test_utilities_lock_says_live.py` — NEW module (BLOCKER 1). Patch `reflections.utilities._get_redis` to return each payload shape and assert `_lock_says_live(N)`: dead-renewer-past-grace → `False`; live-renewer → `True`; inside-grace → `True`; no-renewer-identity → `True`; cross-machine → `True`. The existing `tests/unit/reflections/test_sdlc_upvote_lanes.py` stubs `_lock_says_live` wholesale, so it exercises the gate but never the payload→verdict path; this module covers the half that matters here.
 - [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` (`:697`, `:704`) — KEEP UNCHANGED: the "imported not forked" guards must stay green, since this plan's whole posture is one predicate for all three consumers.
-- [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD: the two non-releasing deadline exits perform the `renewer_*` clear (shape (a)), and a clear that raises does not block the exit. Locate the existing exit-path tests and extend them rather than adding a parallel class.
+- [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD: the two non-releasing deadline exits perform the `renewer_*` clear (shape (a)); a clear that raises does not block the exit; and a clear that loses its CAS is retried once (Race 6 mode 1). Locate the existing exit-path tests (around `:185-226`) and extend them rather than adding a parallel class.
+- [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD the `-m` invocation regression test (SC5b): drive the heartbeat via `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or a subprocess and assert the renewal still stamps `renewer_pid`. A plain `import` cannot detect the round-3 BLOCKER.
+- [ ] `tests/unit/test_session_lifecycle.py` — ADD `test_ephemeral_renewal_strips_renewer_identity` (SC5c): stamp via a durable renewal, then renew WITHOUT the flag, and assert the payload carries no `renewer_*` keys.
 
 No xfail markers (decorator or runtime `pytest.xfail()`) exist in `tests/`
 relating to the issue lock, so there are none to convert.
@@ -930,16 +985,26 @@ outliving 90 minutes) is exchanged for an *anomaly-conditioned* one.
 
 ### Risk 6: A future caller reaches the renewal path without touching a watched file
 
-The grep anti-criterion watches four ephemeral-renewer files, but
-renewal-adjacent call sites already exist outside that set
-(`tools/sdlc_session_release.py:92`, `tools/merge_predicate.py:656`,
-`agent/supervised_run.py:256`). A new caller could therefore stamp a durable
-identity from an ephemeral process while the anti-criterion stays green — which
-is Risk 2 arriving through a door the grep does not watch.
+**This risk is precautionary, and the correction matters (round-3 CONCERN).**
+An earlier draft cited `tools/sdlc_session_release.py:92`,
+`tools/merge_predicate.py:656`, and `agent/supervised_run.py:256` as proof that
+renewal-writing callers already exist outside the four watched files. That was
+wrong. All three were re-read and **all three are read-only peeks**
+(`touch_issue_lock(..., peek=True)`); none reaches a renewal branch, and each
+would have to be rewritten from a peek into a renewal call before the stamp flag
+could matter at all — a visible edit this repo's mandatory REVIEW stage catches.
+The citations are removed rather than left standing as if they were near-misses.
 
-**Mitigation.** The `_DURABLE_RENEWER_MODULES` allowlist inside the renewal path
-(Task 2) is the runtime enforcement; the grep row is the cheap build-time
-signal. Directly tested by calling the renewal path from a disallowed module and
+So: **no current caller performs a renewal write outside the four watched
+files.** The risk is that a *future* one does, and the grep anti-criterion is
+scoped to a fixed file list that would not see it.
+
+**Mitigation, sized to a hypothetical rather than an observed gap.** The
+`renewer_module` token plus `_DURABLE_RENEWER_MODULES` (Task 2) makes opting in
+a two-part, self-naming act that cannot be added absent-mindedly; it is a
+declaration checked against a list, not an unforgeable barrier (argued in
+**Technical Approach**). The grep row is the build-time signal and REVIEW is the
+real backstop. Tested by calling the renewal path with a disallowed token and
 asserting no `renewer_*` keys are written.
 
 ## Race Conditions
@@ -983,6 +1048,43 @@ only if the stored value is byte-identical to the one read. A successor's
 payload never matches, so the clear no-ops. This is the same reason #2714 made
 the renew path a CAS, and the same reason the supervisor-death release at
 `tools/sdlc_lease_heartbeat.py:379-381` is a compare-and-delete.
+
+### Race 6: A same-run_id ephemeral renewal lands around the deadline-exit clear
+
+Distinct from Race 5 and more likely: not a *successor* takeover but a benign
+`sdlc-tool` CLI renewal on the **same** run_id, racing the heartbeat's exit
+clear. Two failure modes, both real, both closed:
+
+1. **The clear loses its CAS** because an ephemeral renewal landed between the
+   heartbeat's read and its write. The exit clear is a single best-effort
+   exception-swallowed write with no retry, so it would simply be lost — and
+   unlike the tick loop, which stops on a lost CAS via `EXIT_LEASE_LOST`, there
+   is nothing downstream to notice. **Closed by** a bounded 2-attempt
+   re-GET/re-CAS loop checking `result.acquired`, falling through to the
+   existing swallow only after the budget is exhausted. A genuine successor
+   (different `run_id`) still fails both attempts, so Race 5's guarantee is
+   preserved.
+2. **An ephemeral renewal lands *after* a successful clear** and re-carries the
+   stale `renewer_pid` it read beforehand, because the default renewal branch
+   (`:1373-1380`) is a bare non-CAS `_R.set` of a payload spread from the
+   existing one. This would silently undo the clear and drop the run back into
+   spike-5 row I — false-dead, reapable on the next quiet stretch, with no
+   backstop until the 1800 s TTL. A retry does **not** close this; the write can
+   land at any later time. **Closed by Key Element 2**: a renewal that does not
+   set `stamp_renewer_identity` strips the group rather than spreading it, so
+   an ephemeral renewal cannot re-assert a durable identity no matter when it
+   lands. This is why the invariant is stated as a maintained property rather
+   than as a one-shot clear.
+
+**The cost of Key Element 2, stated honestly.** Because an ephemeral renewal now
+strips the group, a lease whose last write before death happened to be an
+ephemeral CLI renewal carries no durable identity and keeps the full 1200 s
+blind window. That is a *partial-coverage* loss, not a correctness loss: it
+fails toward live, the safe direction, and it costs nothing in the quiet-stretch
+case the tightening actually targets — any ephemeral write also resets
+`renewed_at`, so the grace clock had restarted anyway and the branch could not
+have fired. The #2648 incident shape (run dies, heartbeat's stamp is the last
+write, then silence) is unaffected.
 
 ## No-Gos (Out of Scope)
 
@@ -1085,10 +1187,20 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
    evidence, not two independent checks; a build that produces only one of them
    has not demonstrated red.
 5. `tools/sdlc_lease_heartbeat.py` and `agent/session_executor.py` are the ONLY
-   call sites passing `stamp_renewer_identity=True` (anti-criterion), **and**
-   the runtime `_DURABLE_RENEWER_MODULES` allowlist drops the stamp for any
-   other calling module — proved by calling the renewal path from a disallowed
-   module and asserting no `renewer_*` keys appear (Risk 6).
+   call sites passing `stamp_renewer_identity=True` (anti-criterion), each with
+   its explicit `renewer_module` token, **and** a disallowed token drops the
+   stamp — proved by calling the renewal path with one and asserting no
+   `renewer_*` keys appear (Risk 6).
+5b. **The heartbeat stamps under its REAL invocation shape.** Exercised via
+   `runpy.run_module(..., run_name="__main__")` or a subprocess, not a plain
+   `import`. This is the round-3 BLOCKER criterion: an introspection-based
+   allowlist passes every import-based test while never stamping in production,
+   so a suite that only imports cannot discharge criterion 5.
+5c. **The `renewer_*` group survives no ephemeral renewal.** After a durable
+   stamp, a renewal without `stamp_renewer_identity` (any of the five CLI
+   renewers) leaves a payload carrying **no** `renewer_*` keys — Key Element 2's
+   invariant, and what makes the Task 5 clear durable rather than defeasible
+   (Race 6 mode 2).
 6. `ISSUE_LOCK_RENEWER_GRACE_SECONDS` is a named, env-overridable, GRAIN OF
    SALT-annotated module constant beside its two siblings, and is catalogued in
    `docs/features/config-timeout-catalog.md`.
@@ -1197,18 +1309,29 @@ Now the work:
   The write rule is therefore **both or neither**: stamp only when
   `_current_process_create_time()` is not `None`, mirroring
   `_resolved_supervisor`'s "a pid without a create_time is no identity" rule.
-- **Add the runtime durable-renewer allowlist (Risk 6).** A module-level
-  `_DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat",
-  "agent.session_executor"}`, checked inside the renewal path against the
-  calling module's `__name__`. A disallowed caller passing the flag gets the
-  stamp **silently dropped plus one `logger.warning`** — never an exception,
-  because nothing on this path may be allowed to break lock acquisition. The
-  four-file grep anti-criterion is necessary but not sufficient: renewal-adjacent
-  call sites already exist outside the watched set
-  (`tools/sdlc_session_release.py:92`, `tools/merge_predicate.py:656`,
-  `agent/supervised_run.py:256`), so a future caller could stamp from an
-  ephemeral process while the grep stays green. The grep is the build-time
-  signal; this allowlist is what holds at runtime.
+- **Make the strip the other half of the write rule (Key Element 2, round-3
+  CONCERN).** When `stamp_renewer_identity` is NOT set, `_healed_renewal_payload`
+  must **remove** `renewer_pid` / `renewer_create_time` from the payload it
+  returns rather than spreading them through. This is a deliberate, narrow
+  exception to that helper's documented "spread the EXISTING payload, never
+  reconstruct a subset" rule (`:1084-1096`) — comment it as such at the spread
+  site and name the invariant (Key Element 0). Without it the default branch at
+  `:1378`, a bare non-CAS `_R.set`, lets any ephemeral CLI renewal re-carry a
+  stale `renewer_pid` and silently undo a clear (Race 6).
+- **Add the durable-renewer allowlist with an EXPLICIT token (Risk 6).** A
+  module-level `_DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat",
+  "agent.session_executor"}`, checked against a `renewer_module` argument the
+  caller passes. A disallowed token gets the stamp **silently dropped plus one
+  `logger.warning`** — never an exception, because nothing on this path may be
+  allowed to break lock acquisition.
+
+  **Do NOT derive the caller's identity by introspection.** `__name__`,
+  `sys._getframe`, and `inspect` all resolve to `"__main__"` for the detached
+  heartbeat, which `tools/sdlc_session_ensure.py:235-238` launches as
+  `python -m tools.sdlc_lease_heartbeat`. An introspection-based check would
+  fail on every heartbeat call in production, never stamp anything, and do it
+  silently — while a unit test using a plain `import` would still pass. See the
+  round-3 BLOCKER in **Technical Approach**.
 - Add keyword-only `stamp_renewer_identity: bool = False` to `touch_issue_lock`
   and plumb it to BOTH renewal branches (`:1296` renew_only CAS, `:1378`
   default). Put the "why only two callers" rationale in the `touch_issue_lock`
@@ -1256,9 +1379,19 @@ Now the work:
 
 ### 4. Wire the two durable renewers
 
-- `tools/sdlc_lease_heartbeat.py:429` — add `stamp_renewer_identity=True` to the
-  `renew_only=True` extend.
-- `agent/session_executor.py:246` — add `stamp_renewer_identity=True`.
+- `tools/sdlc_lease_heartbeat.py:429` — add
+  `stamp_renewer_identity=True, renewer_module="tools.sdlc_lease_heartbeat"` to
+  the `renew_only=True` extend.
+- `agent/session_executor.py:246` — add
+  `stamp_renewer_identity=True, renewer_module="agent.session_executor"`.
+- **Regression test for the `-m` trap, in the real invocation shape.** A test
+  using a plain `import tools.sdlc_lease_heartbeat` **cannot** detect the
+  round-3 BLOCKER class of defect, because `__name__` resolves correctly under
+  import and only diverges under `-m`. Exercise the real shape instead —
+  `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or an
+  actual subprocess — and assert the stamp still lands on the payload. This test
+  is the only thing standing between a green suite and a fix that is inert on
+  every real deployment.
 - Confirm by grep that no other call site carries the flag (Verification row 5).
 - **Do not name the flag, even in a comment, inside the four ephemeral-renewer
   files** (`tools/_sdlc_utils.py`, `tools/sdlc_stage_marker.py`,
@@ -1282,6 +1415,17 @@ most one TTL window".
 - It MUST go through the compare-and-set path
   (`_RENEW_IF_VALUE_MATCHES_LUA`, `models/session_lifecycle.py:1301`) so a
   successor that already took the lease is untouched (Race 5).
+- **Bound a 2-attempt re-GET/re-CAS retry around it** (Race 6, mode 1). Check
+  `result.acquired`; retry once on a lost CAS, then fall through to the existing
+  swallow. A same-run_id ephemeral renewal racing the clear wins the retry; a
+  genuine successor with a different `run_id` fails both attempts, so Race 5's
+  guarantee is preserved. Without the retry the clear is a single unverified
+  write with nothing downstream to notice its loss — unlike the tick loop, which
+  catches a lost CAS via `EXIT_LEASE_LOST`.
+- **The retry alone does not make the clear durable.** Race 6 mode 2 (an
+  ephemeral renewal landing *after* a successful clear and re-carrying the stale
+  identity through the non-CAS default branch) is closed by Task 2's strip, not
+  here. Both are required; neither substitutes for the other.
 - Call it at BOTH non-releasing deadline exits in `tools/sdlc_lease_heartbeat.py`:
   `EXIT_UNSUPERVISED_MAX_LIFETIME` (`:360`) and `EXIT_MAX_LIFETIME` (`:365`).
   Do NOT add it to `EXIT_SUPERVISOR_DEAD` (`:392`), which already releases the
@@ -1384,6 +1528,11 @@ belongs in this plan and the PR body, neither of which the row greps.
 | Heartbeat opts in | `grep -c 'stamp_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 1 |
 | Runtime allowlist exists (Risk 6) | `grep -c '_DURABLE_RENEWER_MODULES' models/session_lifecycle.py` | output > 1 |
 | Allowlist is enforced, not just declared | `grep -c 'def test_disallowed_module_stamp_is_dropped' tests/unit/test_session_lifecycle.py` | output contains 1 |
+| **No `__name__` introspection in the renewal path** (round-3 BLOCKER) | `grep -n '_getframe\|inspect.stack\|inspect.getmodule' models/session_lifecycle.py` | **no output** |
+| Both durable renewers pass an explicit token | `grep -c 'renewer_module=' tools/sdlc_lease_heartbeat.py agent/session_executor.py` | 1 per file |
+| **`-m` invocation regression test exists** | `grep -c 'run_name="__main__"' tests/unit/test_sdlc_lease_heartbeat.py` | output > 0 |
+| **Ephemeral renewal strips the group** (Race 6 mode 2) | `grep -c 'def test_ephemeral_renewal_strips_renewer_identity' tests/unit/test_session_lifecycle.py` | output contains 1 |
+| Exit clear retries a lost CAS (Race 6 mode 1) | `grep -c 'acquired' tools/sdlc_lease_heartbeat.py` | output > 1 |
 | **Shape (a):** the clear exists and is CAS | `grep -c 'drop_renewer_identity' models/session_lifecycle.py` | output > 1 |
 | **Shape (a):** both non-releasing exits clear | `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 2 |
 | **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -l 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | **no output** (`-l` prints only filenames that match, so a clean build prints nothing; `-c` prints a `file:0` line per file and invites a builder to read the exit code as failure) |
@@ -1408,10 +1557,10 @@ belongs in this plan and the PR body, neither of which the row greps.
 | NIT | Scope & Value | Three statements about the reaper-layer test disagree: Task 5 mandates ADDING two tests at `_iter_orphan_sessions`; Test Impact lists tests/unit/test_sdlc_session_ensure.py only as 'VERIFY UNCHANGED ... if present'; and Verification has no row asserting the new reaper test, unlike SC1/5/6/8. The 'if present' hedge is stale -- `TestKillOrphans` is at tests/unit/test_sdlc_session_ensure.py:1212 and `_iter_orphan_sessions` at tools/sdlc_session_ensure.py:1059. **Suggestion:** Change the Test Impact row to ADD (plus verify the existing TestKillOrphans rows at :1212 unchanged) and add a Verification grep row for the new reaper test's name so SC7 is mechanically checkable. | **Test Impact** (ADD rows, `TestKillOrphans` at `:1211`); **Task 6**; Verification row `Reaper-layer test exists (SC7)` | n/a (NIT) |
 | NIT | Scope & Value | Two Verification rows are ineffective. `grep -c 'GRAIN OF SALT' models/session_lifecycle.py \| output > 1` already passes on main (3 occurrences today), so it cannot detect a new constant shipped without its annotation. Separately the row greps .claude/skills/sdlc/SKILL.md for `ISSUE_LOCK_RENEWER_GRACE_SECONDS`, but the matching Documentation checkbox only asks for the orphaned_lock contract wording and never says to name the constant. **Suggestion:** Anchor the provisional row to the new constant (assert the count rises to 4, or grep the constant name inside its GRAIN OF SALT block) and add 'name ISSUE_LOCK_RENEWER_GRACE_SECONDS' to the SKILL.md documentation checkbox. | **Verification**: GRAIN OF SALT row anchored to exactly 4; **Documentation**: SKILL.md checkbox now names the constant | n/a (NIT) |
 | NIT | History & Consistency | The constant-placement argument aims to avoid a 'split, undiscoverable knob', but docs/features/config-timeout-catalog.md:82-92 already catalogs ISSUE_LOCK_TTL_SECONDS with the same 'not TIMEOUTS__*' caveat, and the Documentation section does not add the new sibling there -- producing the discoverability gap the argument claims to prevent. **Suggestion:** Add a Documentation checkbox for docs/features/config-timeout-catalog.md covering ISSUE_LOCK_RENEWER_GRACE_SECONDS (and opportunistically the currently-uncatalogued ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS), with a matching Verification grep row. | **Documentation**: new `config-timeout-catalog.md` checkbox covering the grace constant and the uncatalogued freshness constant; matching Verification row | n/a (NIT) |
-| BLOCKER | History & Consistency (round 3); component corroborated by Scope & Value | The `_DURABLE_RENEWER_MODULES` allowlist cannot match for the detached heartbeat, silently disabling the fix on exactly the path it was written for. Task 2 specifies the allowlist is "checked inside the renewal path against the calling module's `__name__`", with members `tools.sdlc_lease_heartbeat` and `agent.session_executor`. But `tools/sdlc_session_ensure.py:235-238` launches the heartbeat as `argv = [sys.executable, "-m", "tools.sdlc_lease_heartbeat", ...]`. Under `-m` execution the module runs as `__main__`, so every frame defined in that file resolves `f_globals["__name__"]` to `"__main__"`, never the dotted path — the file's own `if __name__ == "__main__":` guard at `tools/sdlc_lease_heartbeat.py:531` is proof it executes under that name. The detached heartbeat therefore fails the allowlist on every call and never stamps `renewer_pid` / `renewer_create_time` in production. Because Task 2 mandates the drop be **silent plus one `logger.warning`, never an exception**, the failure is invisible. `agent/session_executor.py` is unaffected (imported normally by the worker), so the defect is scoped precisely to the local-supervisor heartbeat that spike-3, spike-5 and the entire #2648 incident depend on. Worse, SC5's mandated test would still pass: unit tests reach the heartbeat via a plain `import tools.sdlc_lease_heartbeat`, where `__name__` resolves correctly — so the suite goes green while the fix is inert on every real deployment. **Suggestion:** Do not derive caller identity from frame/module `__name__` introspection at all. Have each of the two durable call sites pass an explicit, invocation-invariant caller token that `touch_issue_lock` checks against the allowlist. | pending | Replace the introspection with an explicit parameter: `touch_issue_lock(..., stamp_renewer_identity=True, renewer_module="tools.sdlc_lease_heartbeat")` at `tools/sdlc_lease_heartbeat.py:429` and `renewer_module="agent.session_executor"` at `agent/session_executor.py:246`, checked as `if renewer_module not in _DURABLE_RENEWER_MODULES: <drop + warn>`. Do NOT use `sys._getframe`, `inspect.stack()[n].frame.f_globals["__name__"]`, or `inspect.getmodule(frame).__name__` — all three return `"__main__"` under `-m`. Add a regression test that exercises the real invocation shape, e.g. `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or an actual subprocess, and asserts the stamp still lands; a test using a plain `import` cannot detect this class of defect. Note the plan's own Verification rows (`_DURABLE_RENEWER_MODULES` count, `test_disallowed_module_stamp_is_dropped` presence) are existence greps and also cannot detect it. |
-| CONCERN | Risk & Robustness (round 3) | Race 5 closes the deadline-exit clear against a *successor* takeover but not against a benign same-run_id ephemeral renewal, and the plan's own default renewal branch makes that window a re-poisoning path rather than merely a lost write. `models/session_lifecycle.py:1373-1380` is the same-owner default branch: a plain `_R.set(key, json.dumps(new_payload), ex=ttl)` with **no CAS**, whose payload comes from `_healed_renewal_payload`, which by design spreads the existing payload (`models/session_lifecycle.py:1084-1096`, "spread the EXISTING payload ... never reconstruct a subset"). So any of the five ephemeral CLI renewers landing after the heartbeat's CAS clear will re-carry the stale `renewer_pid` / `renewer_create_time` it read before the clear AND refresh `renewed_at`. Unlike the heartbeat's tick loop, which stops on a lost CAS via `EXIT_LEASE_LOST`, the Task 5 exit clear is a single best-effort exception-swallowed write with no retry and no verification, so the run silently re-enters spike-5 row I (false-dead, reaped within the grace on the next quiet stretch) with no backstop until the 1800 s TTL. This is the shape Task 5 exists to close. **Suggestion:** Give the exit clear a bounded re-GET/re-CAS retry, and separately make the drop durable against the non-CAS default branch. | pending | Two parts, both needed. (1) At `tools/sdlc_lease_heartbeat.py:360` and `:365`, wrap the `drop_renewer_identity=True` call in a loop bounded to 2 attempts checking `result.acquired`; fall through to the existing swallow only after the budget is exhausted — a genuine successor (different `run_id`) still fails both attempts, preserving Race 5's guarantee. (2) A retry alone does NOT close the re-poisoning path, because the default branch at `models/session_lifecycle.py:1378` is an unconditional `_R.set` that can land at any later time. Either give `_healed_renewal_payload` an explicit drop of the `renewer_*` group unless `stamp_renewer_identity` is set for this call (making the clear sticky rather than a one-shot write), or add a `renewer_cleared_at` tombstone key the stamp path refuses to overwrite. Decide which in the revision; the current design leaves the clear defeasible by any `sdlc-tool` CLI write. |
-| CONCERN | Scope & Value (round 3) | Risk 6's evidence for the runtime allowlist does not support it. The three "renewal-adjacent call sites [that] already exist outside that set" are cited as proof a future caller could stamp past the four-file grep, but all three are read-only peeks, verified: `tools/sdlc_session_release.py:92` is `touch_issue_lock(issue_number, None, peek=True)`, `tools/merge_predicate.py:656` is `touch_issue_lock(issue_number, run_id, peek=True)`, and `agent/supervised_run.py:256` is `touch_issue_lock(issue_number, None, peek=True)`. None reaches a renewal branch; each would have to be rewritten from a peek into a renewal call before the flag could matter, which is a visible edit this repo's mandatory REVIEW stage catches. The mitigation is therefore precautionary against a caller shape that does not exist, and it is the same mechanism the round-3 BLOCKER shows is broken as specified. **Suggestion:** Given the BLOCKER, decide the allowlist's fate deliberately rather than repairing it by reflex — either drop it and rely on the grep anti-criterion plus review, or keep it with an explicit caller token and restate Risk 6 as precautionary rather than evidence-backed. | pending | If dropping: remove `_DURABLE_RENEWER_MODULES` and its check from the renewal path, delete `test_disallowed_module_stamp_is_dropped`, and delete the two Verification rows "Runtime allowlist exists (Risk 6)" and "Allowlist is enforced, not just declared"; SC5 then reduces to the grep anti-criterion alone. If keeping: rewrite Risk 6 to say plainly that no current caller performs a renewal write outside the four watched files, so the allowlist guards a hypothetical, and implement it via the explicit `renewer_module` token from the BLOCKER row — never `__name__` introspection. Do not leave the three peek-site citations in place as if they were near-misses. |
-| NIT | Scope & Value (round 3) | `appetite: Small` has not been re-examined across two revision rounds that each added a mechanism. The label is defended in the Appetite section on the grounds that "the reasoning ... is the expensive part", but round 2 added an entire second subsystem (the CAS `drop_renewer_identity` clear at two heartbeat exits, Task 5) and Task 2 carries the runtime allowlist, neither present in the original pid-stamp idea. Both prior rounds were scoped to correctness rather than proportionality, so nothing has tested whether the mechanism count now exceeds the appetite. **Suggestion:** Either relabel the appetite to Medium, or use the round-3 allowlist findings to trim scope back toward the original estimate. | pending | n/a (NIT) |
+| BLOCKER | History & Consistency (round 3); component corroborated by Scope & Value | The `_DURABLE_RENEWER_MODULES` allowlist cannot match for the detached heartbeat, silently disabling the fix on exactly the path it was written for. Task 2 specifies the allowlist is "checked inside the renewal path against the calling module's `__name__`", with members `tools.sdlc_lease_heartbeat` and `agent.session_executor`. But `tools/sdlc_session_ensure.py:235-238` launches the heartbeat as `argv = [sys.executable, "-m", "tools.sdlc_lease_heartbeat", ...]`. Under `-m` execution the module runs as `__main__`, so every frame defined in that file resolves `f_globals["__name__"]` to `"__main__"`, never the dotted path — the file's own `if __name__ == "__main__":` guard at `tools/sdlc_lease_heartbeat.py:531` is proof it executes under that name. The detached heartbeat therefore fails the allowlist on every call and never stamps `renewer_pid` / `renewer_create_time` in production. Because Task 2 mandates the drop be **silent plus one `logger.warning`, never an exception**, the failure is invisible. `agent/session_executor.py` is unaffected (imported normally by the worker), so the defect is scoped precisely to the local-supervisor heartbeat that spike-3, spike-5 and the entire #2648 incident depend on. Worse, SC5's mandated test would still pass: unit tests reach the heartbeat via a plain `import tools.sdlc_lease_heartbeat`, where `__name__` resolves correctly — so the suite goes green while the fix is inert on every real deployment. **Suggestion:** Do not derive caller identity from frame/module `__name__` introspection at all. Have each of the two durable call sites pass an explicit, invocation-invariant caller token that `touch_issue_lock` checks against the allowlist. | **Technical Approach → The runtime allowlist / introspection trap**; **Key Element 4**; Task 2 (explicit token, introspection forbidden); Task 4 (`renewer_module=` at both sites + `-m` regression test); **SC5/SC5b**; Verification rows `No __name__ introspection`, `explicit token`, `-m regression test` | Replace the introspection with an explicit parameter: `touch_issue_lock(..., stamp_renewer_identity=True, renewer_module="tools.sdlc_lease_heartbeat")` at `tools/sdlc_lease_heartbeat.py:429` and `renewer_module="agent.session_executor"` at `agent/session_executor.py:246`, checked as `if renewer_module not in _DURABLE_RENEWER_MODULES: <drop + warn>`. Do NOT use `sys._getframe`, `inspect.stack()[n].frame.f_globals["__name__"]`, or `inspect.getmodule(frame).__name__` — all three return `"__main__"` under `-m`. Add a regression test that exercises the real invocation shape, e.g. `runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")` or an actual subprocess, and asserts the stamp still lands; a test using a plain `import` cannot detect this class of defect. Note the plan's own Verification rows (`_DURABLE_RENEWER_MODULES` count, `test_disallowed_module_stamp_is_dropped` presence) are existence greps and also cannot detect it. |
+| CONCERN | Risk & Robustness (round 3) | Race 5 closes the deadline-exit clear against a *successor* takeover but not against a benign same-run_id ephemeral renewal, and the plan's own default renewal branch makes that window a re-poisoning path rather than merely a lost write. `models/session_lifecycle.py:1373-1380` is the same-owner default branch: a plain `_R.set(key, json.dumps(new_payload), ex=ttl)` with **no CAS**, whose payload comes from `_healed_renewal_payload`, which by design spreads the existing payload (`models/session_lifecycle.py:1084-1096`, "spread the EXISTING payload ... never reconstruct a subset"). So any of the five ephemeral CLI renewers landing after the heartbeat's CAS clear will re-carry the stale `renewer_pid` / `renewer_create_time` it read before the clear AND refresh `renewed_at`. Unlike the heartbeat's tick loop, which stops on a lost CAS via `EXIT_LEASE_LOST`, the Task 5 exit clear is a single best-effort exception-swallowed write with no retry and no verification, so the run silently re-enters spike-5 row I (false-dead, reaped within the grace on the next quiet stretch) with no backstop until the 1800 s TTL. This is the shape Task 5 exists to close. **Suggestion:** Give the exit clear a bounded re-GET/re-CAS retry, and separately make the drop durable against the non-CAS default branch. | **Key Element 0** (invariant) + **Key Element 2** (strip on non-stamping renewal); **Race 6** (both modes); Task 2 (strip); Task 5 (bounded 2-attempt retry); **SC5c** | Two parts, both needed. (1) At `tools/sdlc_lease_heartbeat.py:360` and `:365`, wrap the `drop_renewer_identity=True` call in a loop bounded to 2 attempts checking `result.acquired`; fall through to the existing swallow only after the budget is exhausted — a genuine successor (different `run_id`) still fails both attempts, preserving Race 5's guarantee. (2) A retry alone does NOT close the re-poisoning path, because the default branch at `models/session_lifecycle.py:1378` is an unconditional `_R.set` that can land at any later time. Either give `_healed_renewal_payload` an explicit drop of the `renewer_*` group unless `stamp_renewer_identity` is set for this call (making the clear sticky rather than a one-shot write), or add a `renewer_cleared_at` tombstone key the stamp path refuses to overwrite. Decide which in the revision; the current design leaves the clear defeasible by any `sdlc-tool` CLI write. |
+| CONCERN | Scope & Value (round 3) | Risk 6's evidence for the runtime allowlist does not support it. The three "renewal-adjacent call sites [that] already exist outside that set" are cited as proof a future caller could stamp past the four-file grep, but all three are read-only peeks, verified: `tools/sdlc_session_release.py:92` is `touch_issue_lock(issue_number, None, peek=True)`, `tools/merge_predicate.py:656` is `touch_issue_lock(issue_number, run_id, peek=True)`, and `agent/supervised_run.py:256` is `touch_issue_lock(issue_number, None, peek=True)`. None reaches a renewal branch; each would have to be rewritten from a peek into a renewal call before the flag could matter, which is a visible edit this repo's mandatory REVIEW stage catches. The mitigation is therefore precautionary against a caller shape that does not exist, and it is the same mechanism the round-3 BLOCKER shows is broken as specified. **Suggestion:** Given the BLOCKER, decide the allowlist's fate deliberately rather than repairing it by reflex — either drop it and rely on the grep anti-criterion plus review, or keep it with an explicit caller token and restate Risk 6 as precautionary rather than evidence-backed. | **Risk 6 rewritten**: the three peek citations verified and removed, risk restated as precautionary; allowlist KEPT with the explicit token per the round-3 BLOCKER, with **Technical Approach** stating plainly it is a declaration checked against a list, not an unforgeable barrier | If dropping: remove `_DURABLE_RENEWER_MODULES` and its check from the renewal path, delete `test_disallowed_module_stamp_is_dropped`, and delete the two Verification rows "Runtime allowlist exists (Risk 6)" and "Allowlist is enforced, not just declared"; SC5 then reduces to the grep anti-criterion alone. If keeping: rewrite Risk 6 to say plainly that no current caller performs a renewal write outside the four watched files, so the allowlist guards a hypothetical, and implement it via the explicit `renewer_module` token from the BLOCKER row — never `__name__` introspection. Do not leave the three peek-site citations in place as if they were near-misses. |
+| NIT | Scope & Value (round 3) | `appetite: Small` has not been re-examined across two revision rounds that each added a mechanism. The label is defended in the Appetite section on the grounds that "the reasoning ... is the expensive part", but round 2 added an entire second subsystem (the CAS `drop_renewer_identity` clear at two heartbeat exits, Task 5) and Task 2 carries the runtime allowlist, neither present in the original pid-stamp idea. Both prior rounds were scoped to correctness rather than proportionality, so nothing has tested whether the mechanism count now exceeds the appetite. **Suggestion:** Either relabel the appetite to Medium, or use the round-3 allowlist findings to trim scope back toward the original estimate. | **Appetite** relabelled Small -> Medium, with the mechanism count named (stamp/gate, CAS clear, invariant + allowlist) | n/a (NIT) |
 
 ---
 
