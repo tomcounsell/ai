@@ -7,7 +7,7 @@ created: 2026-08-18
 tracking: https://github.com/tomcounsell/ai/issues/2846
 last_comment_id: 5324621012
 revision_applied: true
-revision_applied_at: 2026-08-18T07:07:43Z
+revision_applied_at: 2026-08-18T07:16:39Z
 ---
 
 # Fix stale tests on main: steering-call assertions (#2846) and MessageDraft expectations kwarg (#2822)
@@ -88,8 +88,9 @@ incorporated into the Technical Approach:
 1. The issue body's third Cluster-A snippet is mislabeled — the
    `'core-sess', 'continue', 'resume:cli'` output is from
    `test_valor_session_resume_release.py:622`, not `test_steer_child.py`. The
-   real `test_steer_child.py:89` fails with a keyword-style diff adding
-   `room_id=None`.
+   real `test_steer_child.py::test_abort_flag` (test function at line 72; the
+   failing `assert_called_once_with` at line 89) fails with a keyword-style diff
+   adding `room_id=None`.
 2. `room_id=None` is **load-bearing** in `steer_child` (a literal with an intent
    comment) but a **fixture artifact** in the bridge tests (the parameter
    default falling through). The two call sites need different fixes — see
@@ -170,11 +171,14 @@ edit against existing production code.
 ### Key Elements
 
 - **Cluster A1 — bridge-ack tests (8 tests, `test_bridge_ack_steering_routed.py`):**
-  pass an explicit `room_id` into `_ack_steering_routed` and assert it arrives
-  unchanged at `push_steering_message`. This pins the pass-through (the live
-  Room-leg path) rather than the `None` fixture default. At most one case retains
-  the `None` default to cover the legacy fallback. Also assert the
-  `context_advisory` push rides the same leg as the human message.
+  the 6 steer/media tests pass an explicit `room_id="test|system"` into
+  `_ack_steering_routed` and assert it arrives unchanged at
+  `push_steering_message`, pinning the live Room-leg pass-through rather than
+  the `None` fixture default. The 2 abort tests keep the `None` default and
+  assert `room_id=None` — an abort is demoted to the legacy leg regardless, so
+  the abort tests pin the legacy leg, not a Room-leg value. Also assert the
+  `context_advisory` push rides the same leg as the human message (on a
+  steer/media test).
 - **Cluster A2 — steer_child abort test (1 test, `test_steer_child.py::test_abort_flag`):**
   add `room_id=None` to the assertion. This `None` is load-bearing (a literal
   with an intent comment: an abort must die with its session).
@@ -200,23 +204,39 @@ fleet.
 The helper `_ack_steering_routed(session_id, text, sender_name, ..., room_id=None)`
 passes `room_id=room_id` through to `push_steering_message` (line 1032). The
 tests currently call the helper without `room_id`, so `None` is the parameter
-default — a fixture artifact, not intent. Per the triage correction, do **not**
-assert `room_id=None` here (that would pin the artifact and leave the live
-Room-leg pass-through uncovered). Instead:
+default — a fixture artifact, not intent. The 8 failing tests split into **2
+abort** and **6 steer/media** tests, and the two groups must be fixed
+differently: an abort is demoted to the legacy leg regardless of the `room_id`
+passed (see the `_ack_steering_routed` docstring: "An abort — explicit or
+keyword-detected — lands on the legacy key regardless"). So:
 
-- Pass an explicit `room_id` (e.g. `"test|system"`) into `_ack_steering_routed`
-  in the 8 failing tests and assert it arrives unchanged at
-  `push_steering_message` (i.e. `assert_called_once_with(..., room_id="test|system")`).
-- Keep **exactly one** case calling the helper without `room_id` and asserting
-  `room_id=None` to cover the legacy fallback (a floor, not a ceiling — the
-  fallback must stay covered).
+- **6 steer/media tests** (`test_pushes_with_is_abort_false`,
+  `test_media_only_replaces_sentinel_with_description`,
+  `test_media_with_caption_composes_description_and_caption`,
+  `test_text_only_path_skips_process_incoming_media`,
+  `test_process_incoming_media_failure_leaves_sentinel_intact`,
+  `test_ingest_task_exception_does_not_block_push`): pass an explicit
+  `room_id="test|system"` into `_ack_steering_routed` and assert it arrives
+  unchanged at `push_steering_message` (i.e.
+  `assert_called_once_with(..., room_id="test|system")`). This pins the live
+  Room-leg pass-through, not the `None` fixture default.
+- **2 abort tests** (`test_abort_detected_and_salute_reaction`,
+  `test_abort_keyword_case_insensitive`): keep calling `_ack_steering_routed`
+  **without** a `room_id` kwarg (so `None` is the default) and add
+  `room_id=None` to the assertion:
+  `push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True, room_id=None)`
+  (and the `"  STOP  "` variant). This pins the legacy leg — the leg an abort
+  always lands on in production — rather than a Room-leg value the abort path
+  never reaches. These two tests are the legacy-fallback coverage; no separate
+  "exactly one None case" is needed.
 - The `context_advisory` push (line 1066) is documented as riding the *same leg*
   as the human message. No current test passes `context_advisory`, so the
   advisory push never fires. Add `context_advisory="advisory text"` to **one**
-  helper call (e.g. the same case that asserts the explicit `room_id`
-  pass-through) and assert `push.call_args_list` has **two** calls, both with
-  `room_id="test|system"` (human message + advisory), pinning the same-leg
-  invariant.
+  steer/media helper call (e.g. `test_pushes_with_is_abort_false`) and assert
+  `push.call_args_list` has **two** calls, both with `room_id="test|system"`
+  (human message + advisory), pinning the same-leg invariant. Do **not** add it
+  to an abort test — the abort demotes the human message to the legacy leg while
+  the advisory keeps the Room leg, so the legs split there by design.
 
 **Cluster A2 — steer_child abort test (`test_steer_child.py::test_abort_flag`, 1 test).**
 `scripts/steer_child.py:119-129` passes a literal `room_id=None` with an inline
@@ -240,7 +260,10 @@ helpers:
   `test_failed_with_uuid_resumes` line ~303,
   `test_abandoned_with_uuid_resumes` line ~458). Set `s.project_key = "test"`
   (a real string). This makes the derived room id `"test|system"` and is safe —
-  no test in the file asserts on `project_key` being absent.
+  no test in the file asserts on `project_key` being absent. Add a one-line
+  comment in `_make_session` noting the field exists to support the room-id
+  assertion — the helper is shared by ~40 call sites, so the comment documents
+  why the field is set for future readers.
 - **`TestResumeSessionCore._make_mock_session` (line 500)** — used by the 5th
   test, `test_steering_push_before_transition` (line ~622, `resume:cli` source).
   This helper sets no `project_key`, so without a fix here the derived room id
@@ -255,8 +278,13 @@ Delete line 146:
 `patch("tools.emoji_embedding._custom_embedding_cache", {})`.
 The preceding line 145 `patch("tools.emoji_embedding._embedding_cache", fake_cache)`
 still exists and drives the hostile-candidate skip. Per the triage comment,
-confirm the test still fails when the block filter is removed (i.e. it is not
-passing vacuously) — the guard (#1882) has been erroring in setup since
+confirm the test is not passing vacuously (demonstrated-red): the HOSTILE block
+filter is the `if emoji in BLOCKED_REACTION_EMOJIS: continue` guard at
+`tools/emoji_embedding.py:368` inside `find_best_emoji`. Temporarily comment out
+that one line, run
+`./scripts/pytest-clean.sh tests/unit/test_reaction_never_hostile.py::TestFindBestEmojiNeverHostile::test_hostile_top_candidate_is_skipped -p no:randomly`,
+and confirm it FAILS (😡 would be returned as the top candidate). Restore the
+line before committing. The guard (#1882) has been erroring in setup since
 2026-08-17.
 
 **Cluster C — context-recall tests (`test_context_recall_wiring.py`, 11 tests).**
@@ -280,11 +308,12 @@ Not applicable — no user-visible output is involved.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_ack_steering_routed.py` — UPDATE: 8 tests pass an
-      explicit `room_id` into `_ack_steering_routed` and assert it arrives
-      unchanged at `push_steering_message`; at most one case retains the `None`
-      default for the legacy fallback; assert the `context_advisory` same-leg
-      invariant.
+- [ ] `tests/unit/test_bridge_ack_steering_routed.py` — UPDATE: the 6 steer/media
+      tests pass an explicit `room_id="test|system"` into `_ack_steering_routed`
+      and assert it arrives unchanged at `push_steering_message`; the 2 abort
+      tests keep the `None` default and assert `room_id=None` (the legacy leg an
+      abort always lands on); assert the `context_advisory` same-leg invariant
+      on a steer/media test.
 - [ ] `tests/unit/test_steer_child.py::TestSteerChild::test_abort_flag` — UPDATE:
       add `room_id=None` to the assertion (load-bearing literal).
 - [ ] `tests/unit/test_valor_session_resume_release.py` — UPDATE: set
@@ -311,12 +340,15 @@ Not applicable — no user-visible output is involved.
 ## Risks
 
 ### Risk 1: Bridge-ack tests assert the wrong leg
-**Impact:** The 8 bridge tests pin a fixture artifact (`room_id=None`) instead of
+**Impact:** The bridge tests pin a fixture artifact (`room_id=None`) instead of
 the live Room-leg pass-through, leaving the actual behavior uncovered and
-repeating the "loosened until they stop failing" failure mode.
-**Mitigation:** Follow the triage correction: pass an explicit `room_id` into the
-helper and assert it arrives unchanged. This pins the pass-through, not the
-default.
+repeating the "loosened until they stop failing" failure mode — or, conversely,
+pin a Room-leg value on an abort test that production always demotes to the
+legacy leg.
+**Mitigation:** Follow the triage correction and the critique concern: the 6
+steer/media tests pass an explicit `room_id` into the helper and assert it
+arrives unchanged (pinning the pass-through); the 2 abort tests assert
+`room_id=None` (pinning the legacy leg an abort always lands on).
 
 ### Risk 2: `project_key` change breaks other tests
 **Impact:** Adding `s.project_key = "test"` to `_make_session` (and
@@ -383,11 +415,13 @@ production docstrings and `docs/features/session-steering.md`.
       tests/unit/test_valor_session_resume_release.py -p no:randomly`
 - [ ] All 11 #2822 node ids pass:
       `./scripts/pytest-clean.sh tests/unit/test_context_recall_wiring.py -q`
-- [ ] Cluster A assertions pin the intended steering leg: bridge tests assert an
-      explicit `room_id` pass-through (incl. the `context_advisory` same-leg
-      invariant); steer_child asserts `room_id=None` (load-bearing); resume tests
-      assert a concrete room-id string (`"test|system"`), not a `MagicMock` —
-      including `test_steering_push_before_transition` (line 622).
+- [ ] Cluster A assertions pin the intended steering leg: the 6 bridge
+      steer/media tests assert an explicit `room_id="test|system"` pass-through
+      (incl. the `context_advisory` same-leg invariant); the 2 bridge abort tests
+      assert `room_id=None` (the legacy leg an abort always lands on);
+      steer_child asserts `room_id=None` (load-bearing); resume tests assert a
+      concrete room-id string (`"test|system"`), not a `MagicMock` — including
+      `test_steering_push_before_transition` (line 622).
 - [ ] Caller-sweep grep clean: no `push_steering_message` assertion lacks the
       intended `room_id`; no `expectations=` remains in
       `test_context_recall_wiring.py`.
@@ -432,11 +466,12 @@ The lead NEVER builds directly — they deploy team members and coordinate.
 - **Task ID**: build-bridge-ack
 - **Depends On**: none
 - **Description**: In `tests/unit/test_bridge_ack_steering_routed.py`, update the
-  8 failing tests to pass an explicit `room_id` (e.g. `"test|system"`) into
-  `_ack_steering_routed` and assert it arrives unchanged at
-  `push_steering_message`. Keep at most one case with the `None` default for the
-  legacy fallback. Assert the `context_advisory` push rides the same leg as the
-  human message.
+  8 failing tests: the 6 steer/media tests pass an explicit `room_id="test|system"`
+  into `_ack_steering_routed` and assert it arrives unchanged at
+  `push_steering_message`; the 2 abort tests keep the `None` default and assert
+  `room_id=None` (the legacy leg an abort always lands on). Assert the
+  `context_advisory` push rides the same leg as the human message (on a
+  steer/media test).
 
 ### 2. Fix Cluster A2 — steer_child abort test
 - **Task ID**: build-steer-child
@@ -483,8 +518,8 @@ The lead NEVER builds directly — they deploy team members and coordinate.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Cluster A1 passes an explicit `room_id="test\|system"` into all 8 bridge-ack tests, but 2 of those are abort tests (`test_abort_detected_and_salute_reaction`, `test_abort_keyword_case_insensitive`). Aborts are demoted to the legacy leg (room_id=None) by design — the demotion is internal to `push_steering_message` (see `bridge/telegram_bridge.py:1055-1060`) — so asserting `room_id="test\|system"` on an abort test pins a Room-leg value for a call that in production always lands on the legacy leg, contradicting the plan's desired outcome of encoding the intended steering leg. The "keep exactly one case with None" ceiling does not guarantee the abort tests stay on the legacy leg | pending | Keep BOTH abort tests calling `_ack_steering_routed(...)` without a `room_id` kwarg and assert `push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True, room_id=None)` (and the `"  STOP  "` variant); pass `room_id="test\|system"` only in the 6 steer/media tests |
-| NIT | Risk & Robustness | Cluster B demonstrated-red verification is underspecified — the plan says "confirm the test still fails when the block filter is removed" but does not name which block filter or how to remove it | pending | Name the HOSTILE block filter in `find_best_emoji` and the exact temporary edit that demonstrates the test is not passing vacuously |
-| NIT | Risk & Robustness, Scope & Value | Setting `s.project_key = "test"` in the shared module-level `_make_session` helper (line 45) affects ~40 call sites, not just the 5 failing resume tests; safe (no test asserts on `project_key` being absent) but broad | pending | Optionally scope `project_key` to the failing tests, or add a comment in `_make_session` noting the field supports the room-id assertion |
-| NIT | Scope & Value | The `context_advisory` same-leg assertion is a small scope addition beyond fixing stale assertions, but it is justified by the desired outcome of pinning intended behavior | pending | None required — proportionate and documented |
-| NIT | History & Consistency | Freshness Check note cites `test_steer_child.py:89` for the abort test, but the actual `test_abort_flag` is at line 72; the Technical Approach correctly omits the line number | pending | Correct the note to line 72 (or drop the line number) |
+| CONCERN | Risk & Robustness | Cluster A1 passes an explicit `room_id="test\|system"` into all 8 bridge-ack tests, but 2 of those are abort tests (`test_abort_detected_and_salute_reaction`, `test_abort_keyword_case_insensitive`). Aborts are demoted to the legacy leg (room_id=None) by design — the demotion is internal to `push_steering_message` (see `bridge/telegram_bridge.py:1055-1060`) — so asserting `room_id="test\|system"` on an abort test pins a Room-leg value for a call that in production always lands on the legacy leg, contradicting the plan's desired outcome of encoding the intended steering leg. The "keep exactly one case with None" ceiling does not guarantee the abort tests stay on the legacy leg | **Resolved in this revision** — Technical Approach Cluster A1 now keeps BOTH abort tests calling `_ack_steering_routed(...)` without a `room_id` kwarg and asserting `room_id=None` (the legacy leg an abort always lands on); `room_id="test\|system"` is passed only to the 6 steer/media tests. The "exactly one None case" instruction is removed (the 2 abort tests are the legacy-fallback coverage). `context_advisory` is scoped to a steer/media test, not an abort test | Keep BOTH abort tests calling `_ack_steering_routed(...)` without a `room_id` kwarg and assert `push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True, room_id=None)` (and the `"  STOP  "` variant); pass `room_id="test\|system"` only in the 6 steer/media tests |
+| NIT | Risk & Robustness | Cluster B demonstrated-red verification is underspecified — the plan says "confirm the test still fails when the block filter is removed" but does not name which block filter or how to remove it | **Resolved** — Technical Approach Cluster B names the HOSTILE block filter (`if emoji in BLOCKED_REACTION_EMOJIS: continue` at `tools/emoji_embedding.py:368`) and the exact temporary edit (comment out that line, run the single test, confirm it fails, restore) | Name the HOSTILE block filter in `find_best_emoji` and the exact temporary edit that demonstrates the test is not passing vacuously |
+| NIT | Risk & Robustness, Scope & Value | Setting `s.project_key = "test"` in the shared module-level `_make_session` helper (line 45) affects ~40 call sites, not just the 5 failing resume tests; safe (no test asserts on `project_key` being absent) but broad | **Resolved** — Technical Approach Cluster A3 adds a one-line comment in `_make_session` documenting that the field supports the room-id assertion | Optionally scope `project_key` to the failing tests, or add a comment in `_make_session` noting the field supports the room-id assertion |
+| NIT | Scope & Value | The `context_advisory` same-leg assertion is a small scope addition beyond fixing stale assertions, but it is justified by the desired outcome of pinning intended behavior | No change — proportionate and documented (kept, scoped to a steer/media test) | None required — proportionate and documented |
+| NIT | History & Consistency | Freshness Check note cites `test_steer_child.py:89` for the abort test, but the actual `test_abort_flag` is at line 72; the Technical Approach correctly omits the line number | **Resolved** — Freshness Check note corrected to reference `test_steer_child.py::test_abort_flag` (test function at line 72; failing assertion at line 89) | Correct the note to line 72 (or drop the line number) |
