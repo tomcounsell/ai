@@ -7,7 +7,7 @@ created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2739
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-18T03:45:26Z
+revision_applied_at: 2026-08-18T04:03:52Z
 ---
 
 # Docs Auditor Review Gate
@@ -394,7 +394,9 @@ results below.
    **open-PR-for-slug guard**. Both hoisted guards fire **before** any write, and both
    sit *after* vault-drift detection so a capped day still reports vault drift (B2).
    A capped run does skip the substrate's advisory issue loop; that narrowing is
-   accepted and bounded in Q4 item 1.
+   accepted and bounded in Q4 item 1. A fired guard **still stamps the rotation hash
+   for the picked doc** before returning, so the pointer advances past the blocked slug
+   (NEW-1).
 3. **`audit(scope_mode="rotation")`** writes fixes to the shared main checkout.
 4. **Zero-diff gate** unchanged.
 5. **`_push_branch_and_pr(slug, root, files_touched, withheld)`:** records the
@@ -406,7 +408,18 @@ results below.
    foreign dirt outside `files_touched` is preserved by design. A failed restore is a
    hard error, not a discarded result.
 7. **Outcome routing:** PR created → `status="ok"`. Guard fired pre-write →
-   `status="skipped"`, nothing written. Anything else → `status="error"`, escalated.
+   `status="skipped"`: **no working-tree write and no git operation**, but the rotation
+   hash **is** stamped for the picked doc (NEW-1, below). Anything else →
+   `status="error"`, escalated.
+
+   **The invariant is "no working-tree writes and no git operations", not "no Redis
+   writes" (NEW-1).** These are different claims and the plan needs only the first one.
+   A guard fires precisely to keep the substrate from touching the shared main checkout;
+   stamping `REDIS_LAST_RUN_HASH` touches Redis and nothing else, so it cannot wedge the
+   checkout, cannot enter a PR, and cannot reach `main`. Wherever this plan says a
+   guard-fired run performs "zero writes", read it as **zero writes to the working tree**
+   — the rotation-pointer stamp is a deliberate, required exception, and Q4 item 1
+   explains why omitting it produces a permanent silent shutdown.
 8. **The review gate:** the PR. Nothing merges it automatically.
 9. **Output:** `summary` → scheduler → `output_summary` → dashboard; withheld →
    deduped GitHub issue.
@@ -479,14 +492,25 @@ Two constraints on the shape of these commands, both structural:
 - **POSIX `/bin/sh` only.** `shell=True` is `/bin/sh`, not bash: `test "$X" = Y`, never
   `[[ ]]`.
 
+**Recorded finding on `gh --search "head:"` (NEW-7).** The critic flagged the old
+docs-audit row as possibly fail-open because GitHub does not document `head:` as a prefix
+match. Tested directly at revision time against this repo's open PRs: it **is** a prefix
+match — `head:session` and `head:sess` both returned `session/sdlc-2494` and
+`session/hook-validator-target-resolution`, while the mid-string probes `head:hook` and
+`head:router` returned nothing. So `head:docs-audit` would in fact have matched
+`docs-audit/{slug}-{ts}` and the row was not fail-open. It was still replaced, for a
+different and stronger reason: the behavior is undocumented, and the critic's proposed
+`jq` replacement is unusable under this table's own pipe constraint. The row now tests
+the prefix explicitly in Python and depends on no undocumented search semantics.
+
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | PR #2728 merged to main — **satisfied 2026-08-13** | `test "$(gh pr view 2728 --json state -q .state)" = MERGED` | Build depends on `fixes_withheld`, `withheld`, `WITHHELD_PR_MARKER`, `_absent_new_path_refs`, `_file_issue_if_new`, `_open_issue_exists` — all confirmed present on main. Fails closed: an unmerged PR yields `OPEN`, and a `gh` failure yields an empty string; both compare unequal and exit 1 |
 | PR #2842 merged to main — **satisfied 2026-08-18** | `test "$(gh pr view 2842 --json state -q .state)" = MERGED` | Q5's escalation is only trustworthy once the permanent withheld generator is gone (spike-2). Merged as `a9205b065`. Same fail-closed argument |
 | Rename channel actually absent | `! grep -q _git_log_follow_renames reflections/docs_auditor.py` | Guards against building Q5 on a tree where #2842 was reverted. Shape is deliberate: both `grep -c` (exits 1 on a zero count) and `grep -L` (BSD grep still exits 1 when no line was selected) report *absence* as failure, so the negation is the only form that reads correctly. Exits 1 exactly when the symbol is back |
 | No rotation in flight | `.venv/bin/python -c "import sys; from reflections.docs_auditor import _get_redis, REDIS_RUNNING_KEY; sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)"` | Changing commit behavior mid-rotation could interleave with a live `checkout -b` in the shared checkout. `sys.exit` carries the answer, so a live rotation is a FAIL rather than a printed `True` nobody reads. Must be the venv interpreter — a bare `python` has no `popoto`, and that too now fails closed, since `ModuleNotFoundError` exits 1 |
-| Shared main checkout clean | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain)"` | A pre-existing dirty tree is the wedged state item 4 describes; must be cleared and its cause understood before landing. Non-empty porcelain output now exits 1. Verified failing for the right reason at revision time — one file belonging to a concurrent lane |
-| No open docs-audit PR mid-flight | `test "$(gh pr list --state open --search "head:docs-audit" --json number -q length)" = 0` | An in-flight PR opened by the old code carries old-format staging. A `gh` failure yields an empty string, which is also unequal to `0`, so this fails closed too |
+| Shared main checkout clean **on the auditor's own write surface** | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs/features)"` | Scoped to `docs/features/` in critique round 2 (NEW-3). The whole-tree form was practically unsatisfiable and contradicted this plan's own model: other lanes routinely hold uncommitted work in the shared checkout, and No-Gos forbids the builder from clearing it, so a whole-tree row handed the builder a FAIL they were not permitted to fix — it failed for exactly that reason during the round-1 revision. `docs/features/` is the auditor's only write surface (spike-5: the module's one write is `_apply_fixes_to_file`, and rotation only ever selects `docs/features/*.md`), so dirt there is the wedged state item 4 describes and must be understood before landing. Foreign dirt outside `docs/features/` does **not** block and is preserved by design (Race 1) |
+| No open docs-audit PR mid-flight | `.venv/bin/python -c "import json,subprocess,sys; o=subprocess.run(['gh','pr','list','--state','open','--json','headRefName'],capture_output=True,text=True); sys.exit(0 if o.returncode==0 and not [x for x in json.loads(o.stdout or '[]') if x['headRefName'].startswith('docs-audit/')] else 1)"` | An in-flight PR opened by the old code carries old-format staging. Rewritten in critique round 2 (NEW-7) to an explicit `startswith("docs-audit/")` test rather than `--search "head:docs-audit"`. The critic's own suggested `gh … -q` replacement cannot be used: `check_prerequisites.py:62` runs a naive `row.strip("|").split("|")`, which is blind to quoting, so the pipes inside the jq program truncate the cell. This form is pipe-free, and matches the `.venv/bin/python -c` shape the rotation-probe row above already uses. Fails closed twice over: a non-zero `gh` exit and an unparseable payload both exit 1. Both branches executed at revision time — exit 0 with no `docs-audit/` PR open, exit 1 against a `session/` control |
 | `gh` authenticated | `gh auth status` | Sweeper and PR tests reason about real `gh` JSON shapes. Already exit-code correct — `gh auth status` exits non-zero when no account is logged in |
 
 ## Solution
@@ -676,7 +700,35 @@ verification fixes the rest.
    `_has_open_pr_for_slug(slug, PROJECT_ROOT)` (`:1416`) needs `slug`, which does not
    exist before `:1881`. `_daily_pr_cap_reached(PROJECT_ROOT)` (`:1436`) needs nothing
    but Redis, but it goes in the same place so both guards read as one block. A fired
-   guard returns `status="skipped"` with **zero writes**.
+   guard returns `status="skipped"` with **zero writes to the working tree and no git
+   operations** — and with the rotation hash stamped, per the ruling immediately below.
+
+   **Ruling: a guard-fired `skipped` run MUST stamp the rotation hash (NEW-1).** Before
+   this change `_update_rotation_hash` (`:1950`) fired unconditionally, so even a blocked
+   rotation advanced the pointer. This plan makes it fire only on `ok` (Task 2) and makes
+   a fired guard write nothing. Those two changes are individually sound and jointly
+   catastrophic: `_select_primary_doc` (`:1344-1383`) always picks the
+   least-recently-audited doc out of `REDIS_LAST_RUN_HASH`, so an unstamped slug is
+   re-picked on **every** subsequent run for as long as the guard keeps firing. For
+   `_daily_pr_cap_reached` that self-clears at the next calendar day. For
+   `_has_open_pr_for_slug` it lasts the PR's whole lifetime — and **forever** for a
+   withheld PR, because Q5 item 2 mandates the sweeper never close a
+   `WITHHELD_PR_MARKER` PR and Open Question 2 chooses to leave it open. One immortal
+   withheld PR would therefore become a permanent, silent, whole-rotation shutdown
+   reporting `skipped` rather than `error` — the exact failure class this plan exists to
+   eliminate.
+
+   So the guard path calls `_update_rotation_hash(project_key, [str(primary)])` for the
+   picked doc before returning. **This is not a new mechanism: the zero-diff path at
+   `:1912` already does precisely this**, stamping the single picked doc on a run that
+   produced no PR, and the guard path is the same shape — a run that legitimately
+   produced no PR and must not thereby freeze the rotation. Follow that precedent
+   literally, including the `[str(primary)]` single-element list form.
+
+   **The bound, stated accurately.** The deferral a fired guard costs is: **≤1 day for
+   the daily cap**; and for the open-PR guard, **this doc** is deferred for the PR's
+   lifetime, while **rotation continues on other docs because the hash is stamped**. The
+   guard therefore skips one document, not the rotation.
 
    **Ruling on the substrate's advisory issue channel (B2, second half).** Skipping
    `audit()` also skips the advisory `_file_issue_if_new` loop at `:1290`
@@ -685,7 +737,7 @@ verification fixes the rest.
    first decisive:
 
    - The critic's proposed alternative, `audit(..., apply_mode="dry-run")`, **does not
-     work**. The advisory filing loop at `:1278` is gated on
+     work**. The advisory filing loop is gated at `:1279` on
      `apply_mode == "apply" and scope_mode == "rotation"`, so a dry-run pass files
      nothing. It would run every detector, produce no writes and no issues, and cost a
      full rotation's I/O for no output. Adopting it would have been a second silent
@@ -763,7 +815,15 @@ verification fixes the rest.
 4. **Outcome routing in `run_docs_auditor`.** Because the guards moved,
    `pr_url is None` after `audit()` now unambiguously means failure, not "a guard
    fired". The three outcomes become distinct: `ok` (PR created), `skipped`
-   (guard fired, nothing written), `error` (write happened, PR did not).
+   (guard fired; nothing written to the working tree, no git operation, **rotation hash
+   stamped**), `error` (write happened, PR did not).
+
+   **What fires on which outcome, exhaustively (NEW-1).** The success Telegram (`:1947`)
+   and `_write_liveness(..., "ok", ...)` (`:1955`) fire **only** on `ok`.
+   `_update_rotation_hash` (`:1950`) fires on `ok` **and** on `skipped` — on `ok` with
+   `files_touched`, on `skipped` with `[str(primary)]`. It does **not** fire on `error`:
+   a run that wrote and failed to produce a PR has not audited the doc, and re-picking it
+   on the next run is the correct behavior there.
 
 On the failure mode this replaces: today's plain `git checkout main` in the `finally`
 block (`:1557-1563`, no `check=`, return code discarded) fails when local
@@ -810,11 +870,34 @@ not build Q5 without it, which the Prerequisites table now checks.
    **No volatile component may appear in any title this module files** — no age, no
    date, no count, no run id. A title that changes between runs defeats dedup in the
    worst direction: it files a fresh issue every single run instead of suppressing one.
+
+   **Cap the per-run volume, reusing the module's own bound (NEW-4).** "One issue per
+   withheld entry" is unbounded per run, while the module's advisory loop already caps
+   itself at 5 with the comment *"Hard per-run cap prevents flood"* (`:1277-1289`). A
+   single pathological rotation pass could otherwise mint dozens of issues at once.
+   Reuse the **same cap of 5** and the same suppression shape: file at most 5 withheld
+   issues per run, and on hitting the cap emit one `logger.warning` naming how many were
+   suppressed, exactly as `:1281-1288` does. Nothing is lost — rotation runs daily and
+   the per-defect titles are stable, so a suppressed entry is filed on the next run under
+   the title it would have had. Do **not** invent a separate constant: read `per_run_cap`
+   from the same expression so the two channels cannot drift apart.
    Note also that `_file_issue_if_new` hardcodes `--label documentation`
    (`:1115-1116`), so every issue this channel files carries that label and no other;
    nothing here needs a new label.
 2. **The sweeper never closes a PR carrying `WITHHELD_PR_MARKER`**, and it files its own
-   escalation under a **distinct** title. On encountering such a PR at stale age it
+   escalation under a **distinct** title.
+
+   **Deleting the predicate removes the sweeper's only access to a PR body — restore it
+   (NEW-2).** The sweeper's own PR query at `:2147-2148` requests
+   `number,state,createdAt` and nothing else; the `body` field is fetched at
+   `:2023-2024`, inside `_pr_is_auto_merge_eligible`, which Q2 deletes. So after Q2 the
+   marker check this item depends on has no data to read. The fix is one field: add
+   `body` to the sweeper's `gh pr list --json` field set at `:2147`, making it
+   `number,state,createdAt,body`. No second `gh pr view` round-trip is needed, and the
+   test `gh` dispatcher must return `body` in its canned `pr list` payload or the marker
+   test passes vacuously.
+
+   On encountering such a PR at stale age it
    leaves both PR and branch untouched. This is what stops the
    propose → withhold → close → re-propose loop: the loop today is silent, and an
    open issue is not. Non-marker stale PRs keep their existing
@@ -1087,6 +1170,26 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       failure and `run_docs_auditor` returns `status="error"`.
 - [ ] Guard hoisting: with the daily cap set, assert `audit()` is never called and
       the tree is untouched.
+- [ ] **Guard-fired run still advances the rotation (NEW-1).** The direct regression test
+      for the permanent-shutdown defect. Force `_has_open_pr_for_slug` true for the
+      picked slug, run `run_docs_auditor`, and assert: the result is `status="skipped"`;
+      `REDIS_LAST_RUN_HASH` carries a fresh timestamp for that slug; and a second
+      immediately-following run selects a **different** doc. A build that fires
+      `_update_rotation_hash` only on `ok` fails this test by re-picking the same slug
+      forever.
+- [ ] **Guard-fired run performs no working-tree write (NEW-1).** Same setup, asserting
+      `git status --porcelain` is byte-identical across the run. Paired with the row
+      above so the two halves of the invariant are pinned together: Redis is written,
+      the tree is not.
+- [ ] **Sweeper reads the marker from its own query (NEW-2).** Have the `gh` dispatcher
+      return a `pr list` payload **without** a `body` field and assert the marker path
+      fails loudly rather than silently treating the PR as unmarked and closing it. Then
+      assert the built code requests `body` at `:2147`. Without this, the
+      "withheld PR is not closed" test passes vacuously against a payload that never
+      carried a body.
+- [ ] **Withheld filing respects the per-run cap (NEW-4).** Feed more than 5 withheld
+      entries and assert at most 5 issues are filed and that the suppression warning
+      names the remainder.
 - [ ] `files_touched == []` creates no branch and no commit.
 - [ ] Sweeper close path: real repo + `gh` dispatcher. Assert a PR whose body
       contains `WITHHELD_PR_MARKER` is **not** closed and **no** `--delete-branch`
@@ -1149,8 +1252,11 @@ feature branch that means the fixes silently vanish at the next checkout, or wor
 get swept into an unrelated commit.
 **Mitigation:** the skill's Step 4 already ends in `git add -A && git commit` — the
 commit is not new machinery, only the review in front of it. The three doc edits are
-explicit acceptance criteria. Add a Verification anti-criterion asserting the phrase
-"commits them itself" appears nowhere in the repo, and a positive check that the
+explicit acceptance criteria. Add a Verification anti-criterion asserting the stale
+contract phrases appear nowhere **under `.claude/` or `docs/features/`** (NEW-5 — that
+scope is deliberate and matches the Verification row exactly; a repo-wide reading would
+fire on this plan document and on `docs/plans/completed/docs-auditor-rename-guard.md`,
+both of which quote the phrase to describe history), plus a positive check that the
 skill-context declares the new ownership.
 
 ### Risk 2: A reviewer reads this plan's docs as still owning the rename deletion
@@ -1342,6 +1448,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       14 days** if nobody acts. Frame that as the intended "nobody cared" outcome,
       not a failure mode.
 - [ ] Update the `## Tests` section (`:558-566`) to name the new real-git test file.
+- [ ] State the rotation-pointer rule plainly (NEW-1): a run that a guard skips still
+      stamps the rotation hash for the doc it picked, so a blocked slug defers **that
+      doc** rather than the whole rotation. Name the consequence of the alternative —
+      an unreviewed withheld PR that is never closed would otherwise pin rotation on one
+      document indefinitely — so nobody "simplifies" the stamp back onto the `ok` path.
 - [ ] `docs/features/reflections.md:147-152` (the Caller B filing note) and the registry
       rows at `:205` (`docs-auditor`) and `:206` (`do-docs-branch-sweeper`, which still
       describes the pre-Q5 close behavior) — update both.
@@ -1396,12 +1507,17 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       passed a review gate; the gate is named and documented for each caller.
 - [ ] `_commit_current_branch` is gone; `.claude/skill-context/do-docs.md` and
       `.claude/skills-global/do-docs/SKILL.md` state the new commit ownership, and no
-      "do not re-commit, it commits them itself" instruction survives anywhere.
+      "do not re-commit, it commits them itself" instruction survives **under `.claude/`
+      or `docs/features/`** (NEW-5 — the same scope the Verification row uses; plan
+      documents that quote the phrase historically are deliberately out of scope).
 - [ ] `git add -A` does not appear in `reflections/docs_auditor.py`; rotation stages
       only `files_touched`.
 - [ ] `_pr_is_auto_merge_eligible` is gone and the sweeper never runs `gh pr merge`.
 - [ ] A rotation run that returns early leaves the shared main checkout exactly as it
       found it, and does not report `status="ok"` for a pass whose output it discarded.
+- [ ] A rotation run that a guard skips still advances the rotation pointer for the doc
+      it picked, so no blocked slug — including one behind a withheld PR that is never
+      closed — can pin the rotation on a single document.
 - [ ] A run that withholds fixes files a deduped GitHub issue, and the sweeper never
       closes or deletes the branch of a PR carrying `WITHHELD_PR_MARKER`.
 - [ ] `agent/reflection_scheduler.py` passes `output_summary` to `mark_completed`, and
@@ -1518,8 +1634,8 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   before vault-drift detection, which its own comment says runs unconditionally. The
   advisory `_file_issue_if_new` loop inside `audit()` (`:1290`) is knowingly skipped on a
   capped run; that narrowing is ruled on and accepted in Q4 item 1 — do **not** "fix" it
-  with a `apply_mode="dry-run"` pass, which files nothing (`:1278` gates filing on
-  `apply_mode == "apply"`).
+  with a `apply_mode="dry-run"` pass, which files nothing (`:1279` gates filing on
+  `apply_mode == "apply"`; `:1278` is the `per_run_cap` assignment).
 - Q4 (restore, B3): record the starting ref on entry to `_push_branch_and_pr`; make the
   `finally` restore (`:1557-1563`) verified — check the `checkout` return code, run
   **`git checkout HEAD -- <files_touched>`** (the `HEAD` is required; the bare form
@@ -1528,9 +1644,17 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   outside `files_touched` survives (Race 1). No `checkout -f`, no `reset --hard`, no
   `clean`. Make a failed restore a reported failure, judged on both porcelain columns for
   `files_touched` only.
-- Q4: route outcomes as `ok` / `skipped` / `error` and ensure `_write_liveness`
-  (`:1955`), `_update_rotation_hash` (`:1950`), and the success Telegram (`:1947`) fire
-  only on `ok`.
+- Q4: route outcomes as `ok` / `skipped` / `error`. `_write_liveness(..., "ok", ...)`
+  (`:1955`) and the success Telegram (`:1947`) fire **only** on `ok`.
+- Q4 (NEW-1): `_update_rotation_hash` (`:1950`) is the **exception** — it must fire on
+  `ok` *and* on the guard-fired `skipped` path, never on `error`. On the `skipped` path
+  call `_update_rotation_hash(project_key, [str(primary)])` for the picked doc, copying
+  the zero-diff path at `:1912` verbatim in shape. Do **not** simplify this to "fires
+  only on `ok`": `_select_primary_doc` (`:1344-1383`) re-picks the least-recently-audited
+  doc, so an unstamped slug is re-picked every run, and an immortal withheld PR (Q5 item
+  2 forbids the sweeper from closing one) would then pin the rotation on that one doc
+  permanently while reporting `skipped`. The `skipped` path stamps Redis and nothing
+  else — it still performs no working-tree write and no git operation.
 
 ### 3. Auto-merge deletion and escalation (Q2, Q5) — commit 3 of 3
 
@@ -1565,6 +1689,15 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `docs-auditor: withheld fix in {doc} ({old} -> {new})`. The title is the dedup key
   (`:1075-1076`), so it must be per-defect and must contain **no** volatile component —
   no age, date, count, or run id.
+- Q5 (NEW-4): bound the withheld filing at the module's existing per-run cap of 5
+  (`:1277-1289`), reusing that `per_run_cap` expression rather than a new constant, and
+  log a suppression warning naming the remainder exactly as `:1281-1288` does.
+- Q5 (NEW-2): add `body` to the sweeper's `gh pr list --json` field set at `:2147`
+  (`number,state,createdAt` → `number,state,createdAt,body`). Deleting
+  `_pr_is_auto_merge_eligible` removes the only place the sweeper ever fetched a PR body
+  (`:2023-2024`), and the `WITHHELD_PR_MARKER` check below has nothing to read without
+  it. The test `gh` dispatcher must return `body` in its canned `pr list` payload, or the
+  marker test passes vacuously.
 - Q5 (B4): the sweeper must skip close **and** branch deletion (`:2263`) for any PR whose
   body contains `WITHHELD_PR_MARKER`, and file its own escalation under the **distinct**
   title `docs-auditor: withheld PR #{n} still unreviewed`. A same-title filing is a
@@ -1651,6 +1784,10 @@ post-build expectation that legitimately fails now.
 | No whole-tree force restore | `grep -c 'checkout", "-f\|reset", "--hard\|"clean"' reflections/docs_auditor.py` | `0` | holds now — must still hold after Q4 |
 | Restore is index-safe (B3) | `grep -c 'checkout", "HEAD"' reflections/docs_auditor.py` | > 0 | post-build (currently `0`). The bare `git checkout -- <paths>` form restores from the index and re-applies the auditor's staged content on the commit-failed path; this row is the grep-level guard that `HEAD` did not get dropped |
 | Vault drift stays reachable when the cap fires (B2) | Read `run_docs_auditor` and confirm the hoisted `_daily_pr_cap_reached` / `_has_open_pr_for_slug` guards appear **after** the `_run_vault_drift_detection` call (today `:1869`) and after `slug` is computed, and before the `audit()` call. Structural check: `grep -n '_run_vault_drift_detection\|_daily_pr_cap_reached\|_has_open_pr_for_slug\|slug = _path_to_slug\|result = audit' reflections/docs_auditor.py` | the line numbers appear in that order: vault-drift, `slug =`, the two guards, `audit(` | post-build (today the two guards are not in `run_docs_auditor` at all) |
+| Guard-fired run still advances the rotation (NEW-1) | Real-git/Redis test: force `_has_open_pr_for_slug` true for the picked slug, run `run_docs_auditor`, assert the run returns `status="skipped"`, that `REDIS_LAST_RUN_HASH` now holds a fresh timestamp for that slug, and that a second immediately-following run picks a **different** doc. Grep-level guard that the call was not dropped: `grep -c '_update_rotation_hash' reflections/docs_auditor.py` | `status="skipped"`, the slug is stamped, the next pick differs; grep `> 2` (zero-diff path, guard path, success path) | post-build (today the guards are not in `run_docs_auditor` at all and the grep reads `3` for unrelated reasons — assert the behavior, not the count alone) |
+| Guard-fired run touches no working tree (NEW-1) | Real-git test: with the daily cap set, assert `git status --porcelain` in the temp repo is byte-identical before and after the run, and that `audit()` was never called. Redis writes are expected and are **not** covered by this row | porcelain unchanged; `audit()` not called | post-build |
+| Sweeper can still read a PR body (NEW-2) | `grep -c 'number,state,createdAt,body' reflections/docs_auditor.py` | > 0 | post-build (currently `0` — the sweeper's `pr list` at `:2147` omits `body`, and the only `body` fetch is inside the predicate Q2 deletes) |
+| Withheld filing is flood-capped (NEW-4) | Read the withheld filing loop and confirm it breaks at the same `per_run_cap` expression the advisory loop uses (`:1278`), rather than declaring its own constant. Structural check: `grep -c 'per_run_cap' reflections/docs_auditor.py` | > 2 (assignment, advisory loop, withheld loop) | post-build (currently `2`) |
 | Dashboard renders the summary (C3) | `grep -c 'output_summary' ui/templates/reflections/_partials/modal_content.html` | > 0 | post-build (currently `0` — the value reaches `dashboard.json` and no template) |
 | Issue titles carry no volatile field (B4) | Read the two title templates in the built code and confirm neither interpolates an age, date, count, or run id — only `{doc}`/`{old}`/`{new}` for the per-defect title and `#{n}` for the sweeper title | no volatile interpolation | post-build |
 | New commit ownership declared | `grep -c 'files_touched' .claude/skill-context/do-docs.md` | > 0 | post-build (currently `0`) |
