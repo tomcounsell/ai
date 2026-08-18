@@ -6,11 +6,16 @@ scanners (``bridge/catchup.py``, ``bridge/reconciler.py``,
 ``bridge/agent_catchup.py``) now call ``shadow_append_inbox`` alongside their
 untouched enqueue, mirroring live intake's append-precedes-dispatch order.
 
-Two invariants per scanner:
+Three invariants per scanner:
 1. A re-enqueued message produces a matching Room-inbox entry (same
    ``chat_id``/``message_id`` shape as live intake).
 2. An inbox failure (``Room.resolve`` raising) NEVER prevents the re-enqueue —
    shadow mode has no durability responsibility; dispatch is untouched.
+3. ``<private>``-wrapped content never reaches the persisted entry. Live intake
+   persists ``strip_private(text)``; the inbox is a durable no-TTL list, so a
+   recovery path that persisted raw text would leak the documented user opt-out
+   into storage the live path keeps it out of. This assertion is what keeps the
+   two paths from drifting apart again.
 
 Logging containment: importing ``bridge.telegram_bridge`` anywhere in the
 pytest process attaches a root RotatingFileHandler on ``logs/bridge.log``, so
@@ -197,6 +202,21 @@ class TestCatchupShadowAppend:
         enqueue_fn.assert_called_once()
         assert any("shadow append failed" in rec.message for rec in caplog.records)
 
+    @pytest.mark.asyncio
+    async def test_private_content_is_stripped_before_persist(self, scratch_project):
+        dialog = _make_dialog("Test Group", entity_id=502)
+        msg = _make_message(803, text="keep this <private>sk-secret-abc</private> tail")
+        enqueue_fn = AsyncMock()
+
+        with _dedup_patches():
+            queued = await _run_catchup(_client_for(dialog, msg), scratch_project, enqueue_fn)
+
+        assert queued == 1
+        entry = _inbox_entries(scratch_project, dialog.id)[0]
+        assert "sk-secret-abc" not in entry["text"]
+        assert "<private>" not in entry["text"]
+        assert "keep this" in entry["text"]
+
 
 class TestReconcilerShadowAppend:
     @pytest.mark.asyncio
@@ -231,6 +251,21 @@ class TestReconcilerShadowAppend:
         assert recovered == 1, "inbox outage must not block the recovery re-enqueue"
         enqueue_fn.assert_called_once()
         assert any("shadow append failed" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_private_content_is_stripped_before_persist(self, scratch_project):
+        dialog = _make_dialog("Test Group", entity_id=602)
+        msg = _make_message(903, text="keep this <private>sk-secret-abc</private> tail")
+        enqueue_fn = AsyncMock()
+
+        with _dedup_patches():
+            recovered = await _run_reconciler(_client_for(dialog, msg), scratch_project, enqueue_fn)
+
+        assert recovered == 1
+        entry = _inbox_entries(scratch_project, dialog.id)[0]
+        assert "sk-secret-abc" not in entry["text"]
+        assert "<private>" not in entry["text"]
+        assert "keep this" in entry["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -331,3 +366,28 @@ class TestAgentCatchupShadowAppend:
         assert result.enqueued == 1, "inbox outage must not block the recovery enqueue"
         assert len(enqueue_calls) == 1
         assert any("shadow append failed" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_private_content_is_stripped_before_persist(self, scratch_project):
+        chat = _owned_chat(scratch_project, chat_id=557)
+        messages = [_make_thread_msg(44, "keep this <private>sk-secret-abc</private> tail")]
+        client = _FakeClient({chat.entity: messages})
+        enqueue_calls: list[dict] = []
+
+        async def enqueue_fn(**kwargs):
+            enqueue_calls.append(kwargs)
+
+        result = await sweep_chat(
+            client,
+            chat,
+            enqueue_fn=enqueue_fn,
+            judge_fn=_unanswered_judge,
+            record_processed_fn=_noop_record,
+            record_last_fn=_noop_record,
+        )
+
+        assert result.enqueued == 1
+        entry = _inbox_entries(scratch_project, chat.chat_id)[0]
+        assert "sk-secret-abc" not in entry["text"]
+        assert "<private>" not in entry["text"]
+        assert "keep this" in entry["text"]
