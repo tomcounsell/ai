@@ -1438,32 +1438,156 @@ def _record_daily_pr(repo_root: Path) -> None:
         logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
 
 
+def _current_ref(repo_root: Path) -> str | None:
+    """Return the ref the checkout is currently on, or None if it cannot be read."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            return None
+        return (result.stdout or "").strip() or None
+    except Exception as e:
+        logger.warning(f"docs_auditor: current-ref read failed: {e}")
+        return None
+
+
+def _restore_checkout(
+    repo_root: Path, starting_ref: str, branch: str, files_touched: list[str]
+) -> bool:
+    """Return the checkout to ``starting_ref`` and discard only the auditor's own paths.
+
+    Scoped by construction: no ``checkout -f``, no ``reset --hard``, no ``clean``.
+    The auditor runs in the shared main checkout where other lanes routinely hold
+    uncommitted work, so a whole-tree force-restore would destroy it. Foreign dirt
+    *outside* ``files_touched`` is preserved by design.
+
+    ``git checkout HEAD -- <paths>`` is deliberate and the ``HEAD`` is load-bearing:
+    the bare ``git checkout -- <paths>`` restores the worktree from the **index**,
+    which on the staged-then-commit-failed path still holds the auditor's own
+    content. The ``HEAD`` form resets index *and* worktree for those paths only.
+
+    Returns True only when the postcondition holds: HEAD is back on
+    ``starting_ref`` **and** no ``files_touched`` path is dirty in either column of
+    ``git status --porcelain``.
+    """
+    ok = True
+    try:
+        checkout = subprocess.run(
+            ["git", "checkout", starting_ref],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+        )
+        if checkout.returncode != 0:
+            ok = False
+            logger.error(
+                f"docs_auditor: restore failed to check out {starting_ref}: "
+                f"{(checkout.stderr or '').strip()}"
+            )
+
+        if files_touched:
+            discard = subprocess.run(
+                ["git", "checkout", "HEAD", "--", *files_touched],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+            if discard.returncode != 0:
+                ok = False
+                logger.error(
+                    "docs_auditor: restore failed to discard auditor paths: "
+                    f"{(discard.stderr or '').strip()}"
+                )
+
+        # Delete the created branch if it exists.
+        exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+        )
+        if exists.returncode == 0:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+
+        # Postcondition (a): back on the starting ref.
+        if _current_ref(repo_root) != starting_ref:
+            ok = False
+            logger.error(f"docs_auditor: restore left the checkout off {starting_ref}")
+
+        # Postcondition (b): no files_touched path dirty in either column. This is
+        # deliberately NOT `not _git_dirty(repo_root)` — foreign dirt outside
+        # files_touched is expected to survive.
+        if files_touched:
+            scoped = subprocess.run(
+                ["git", "status", "--porcelain", "--", *files_touched],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+            if (scoped.stdout or "").strip():
+                ok = False
+                logger.error(
+                    "docs_auditor: restore left auditor paths dirty: "
+                    f"{(scoped.stdout or '').strip()}"
+                )
+    except Exception as e:
+        logger.error(f"docs_auditor: restore error: {e}")
+        return False
+    return ok
+
+
 def _push_branch_and_pr(
-    slug: str, repo_root: Path, withheld: list[dict] | None = None
+    slug: str, repo_root: Path, files_touched: list[str], withheld: list[dict] | None = None
 ) -> str | None:
     """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
 
-    Always returns the repo to the main branch afterward, even on error.
-    Skips PR creation if an open PR for the same slug already exists or if
-    the daily cap (1 PR per calendar day) has been reached.
+    ``files_touched`` is the exact set of repo-relative paths the substrate wrote,
+    and it is the **only** thing staged: the commit is built from
+    ``git add -- <files_touched>``, never a whole-tree sweep. An empty list means
+    the auditor wrote nothing, so no branch is created and no commit is run.
+
+    On every exit path the checkout is returned to the ref it started on and the
+    auditor's own paths are discarded, scoped to ``files_touched`` — see
+    ``_restore_checkout``. A failed restore is reported: the function returns None
+    even if the PR was created, so the caller escalates rather than recording a
+    clean run over a wedged checkout.
+
+    The daily-cap and open-PR guards do **not** live here. They run in
+    ``run_docs_auditor``'s preflight, before the substrate writes anything, so a
+    guard can no longer fire after the shared checkout has already been dirtied.
 
     ``withheld`` is the run's existence-invariant rejections. When non-empty the
     PR body lists them and carries ``WITHHELD_PR_MARKER``, which disqualifies the
     PR from the sweeper's auto-merge path.
     """
+    if not files_touched:
+        logger.info("docs_auditor: no files touched, skipping branch/commit/PR")
+        return None
+
+    starting_ref = _current_ref(repo_root)
+    if starting_ref is None:
+        logger.error("docs_auditor: cannot read starting ref, refusing to branch")
+        return None
+
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
+    url: str | None = None
     try:
-        # Guard: daily cap
-        if _daily_pr_cap_reached(repo_root):
-            logger.info("docs_auditor: daily PR cap reached, skipping PR creation")
-            return None
-
-        # Guard: open PR already exists for this slug
-        if _has_open_pr_for_slug(slug, repo_root):
-            logger.info(f"docs_auditor: open PR already exists for {slug}, skipping")
-            return None
-
         subprocess.run(
             ["git", "checkout", "-b", branch],
             capture_output=True,
@@ -1473,7 +1597,7 @@ def _push_branch_and_pr(
             check=True,
         )
         subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "--", *files_touched],
             capture_output=True,
             timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
@@ -1525,25 +1649,22 @@ def _push_branch_and_pr(
             cwd=str(repo_root),
             check=False,
         )
-        url = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
-        if url and url.startswith("http"):
+        candidate = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
+        if candidate and candidate.startswith("http"):
             _record_daily_pr(repo_root)
-            return url
-        return None
+            url = candidate
     except subprocess.CalledProcessError as e:
         logger.warning(f"docs_auditor: branch/push/PR failed: {e}")
-        return None
     except Exception as e:
         logger.warning(f"docs_auditor: branch/push/PR error: {e}")
-        return None
     finally:
-        # Always return to main so the next run starts from a clean base.
-        subprocess.run(
-            ["git", "checkout", "main"],
-            capture_output=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-        )
+        # Verified, scoped restore — runs on every exit path.
+        restored = _restore_checkout(repo_root, starting_ref, branch, files_touched)
+
+    if not restored:
+        logger.error("docs_auditor: shared checkout restore failed, reporting failure")
+        return None
+    return url
 
 
 def _write_liveness(
@@ -1804,7 +1925,7 @@ def run_docs_auditor() -> dict:
       1. Auth probe (cheap, no side effects)
       2. SETNX lock acquire (global)
       3. Dirty-tree guard
-      4. Rotation pick
+      4. Rotation pick, then the daily-cap and open-PR guards (pre-write)
       5. Run substrate
       6. Zero-diff gate
       7. (If diff) push branch + PR
@@ -1862,6 +1983,32 @@ def run_docs_auditor() -> dict:
 
         slug = _path_to_slug(primary)
 
+        # 4b. PR guards — hoisted here from _push_branch_and_pr so they fire
+        # strictly BEFORE the substrate writes to the shared main checkout. They
+        # sit after the dirty-tree guard, after _run_vault_drift_detection (which
+        # its own comment declares runs unconditionally), and after `slug` is
+        # computed, which _has_open_pr_for_slug needs. A fired guard performs no
+        # working-tree write and no git operation — but it MUST still stamp the
+        # rotation hash for the picked doc, exactly as the zero-diff path does.
+        # Without the stamp, _select_primary_doc re-picks the same
+        # least-recently-audited doc on every subsequent run for as long as the
+        # guard fires, and a withheld PR (which the sweeper never closes) would
+        # pin the rotation on one doc permanently while reporting "skipped".
+        guard_reason: str | None = None
+        if _daily_pr_cap_reached(PROJECT_ROOT):
+            guard_reason = "daily PR cap reached"
+        elif _has_open_pr_for_slug(slug, PROJECT_ROOT):
+            guard_reason = f"open PR already exists for {slug}"
+        if guard_reason is not None:
+            logger.info(f"docs_auditor: {guard_reason}, skipping before any write")
+            _update_rotation_hash(project_key, [str(primary)])
+            _write_liveness(slug, "skipped", None, 0, fixes_withheld=0)
+            return {
+                "status": "skipped",
+                "findings": [f"docs-auditor skipped: {guard_reason}"],
+                "summary": f"docs-auditor skipped ({slug}): {guard_reason}",
+            }
+
         # 5. Substrate
         result = audit(
             primary_path=primary,
@@ -1906,8 +2053,26 @@ def run_docs_auditor() -> dict:
             }
 
         # 7. Memory refresh hook (fire-and-forget) — fired after commit
-        # 8. Push branch + PR
-        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, withheld=withheld)
+        # 8. Push branch + PR. The guards moved to the preflight, so a None here
+        # unambiguously means the branch/commit/push/PR or the restore failed —
+        # never "a guard declined". That routes to status="error": no success
+        # Telegram, no rotation-hash stamp (the doc was written but not audited to
+        # completion, so re-picking it next run is correct), and no liveness "ok".
+        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, files_touched, withheld=withheld)
+
+        if pr_url is None:
+            findings.append(
+                f"docs-auditor: rotation wrote {len(files_touched)} file(s) for {slug} "
+                "but produced no PR"
+            )
+            return {
+                "status": "error",
+                "findings": findings,
+                "summary": (
+                    f"docs-auditor error ({slug}): {len(files_touched)} file(s) written, "
+                    f"no PR created{withheld_note}"
+                ),
+            }
 
         try:
             refresh_docs_in_memory(files_touched)
@@ -1924,7 +2089,7 @@ def run_docs_auditor() -> dict:
                 if fixes_withheld
                 else ""
             )
-            + (f"\nPR: {pr_url}" if pr_url else "")
+            + f"\nPR: {pr_url}"
         )
         _send_telegram_notification(msg)
 
@@ -1954,8 +2119,7 @@ def run_docs_auditor() -> dict:
             findings.extend(
                 f"withheld: {w.get('doc')} {w.get('old')!r} -> {w.get('new')!r}" for w in withheld
             )
-        if pr_url:
-            findings.append(f"PR: {pr_url}")
+        findings.append(f"PR: {pr_url}")
 
         return {
             "status": "ok",
@@ -1963,7 +2127,7 @@ def run_docs_auditor() -> dict:
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
                 f"{result.get('fixes_applied', 0)} fixes{withheld_note}, "
-                f"PR={pr_url or 'none'}"
+                f"PR={pr_url}"
             ),
         }
 
