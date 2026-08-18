@@ -100,10 +100,11 @@ as a table of contents, the deck will too. See "Action titles" in `CONTENT_GUIDE
 
 ### Step 4: Apply the theme
 
-Every deck uses **Yudame House**, the house theme. Read `THEME.md`, copy its style block verbatim into
-the deck's front matter, and set the deck slug in the masthead rule. There is no theme detection and
-no per-deck restyling — the theme is the constant, and holding it constant is what makes a deck read
-as a Yudame artifact rather than a template.
+There is one theme, **Yudame House**, and every deck uses it. This is not a decision to make or to
+put to the user. Read `THEME.md`, paste its style block into the deck's front matter, and set the
+deck slug in the masthead rule. Choose that slug yourself, a short uppercase line naming the project
+and the deck's purpose. Nothing else in the block changes: no design-system detection, no per-deck
+restyling, no adjusting `:root`.
 
 Two rules from `THEME.md` govern everything downstream and belong in working memory now:
 
@@ -112,8 +113,8 @@ Two rules from `THEME.md` govern everything downstream and belong in working mem
 - **Light ground, square corners, hairlines over boxes.** Cream `#FAF9F6`, no shadows, no gradients,
   no rounded cards.
 
-`THEME.md`'s closing section covers the single override case: a deck whose subject *is* another
-product, presented to that product's own audience. Swap the `:root` values, keep the structure.
+A deck about another company's product still ships in Yudame House. Their brand appears as a logo
+(Step 5), never in the slide's colors or type.
 
 ### Step 5: Collect brand logos
 

@@ -81,7 +81,14 @@ Inline components: `.eyebrow` `.cols` `.cols-3` `.plate` `.card` `.note` `.rose`
 
 ## The Marp style block
 
-Paste this verbatim into the deck's front matter under `style: |`. Change values in `:root` only.
+Paste this into the deck's front matter under `style: |`, then set exactly one thing: the deck slug
+in the masthead rule (`section::before { content: "…" }`). Everything else is verbatim, `:root`
+included.
+
+**Choose the slug yourself when you start writing the deck.** It is chrome, not content, and needs
+no approval: a short uppercase line naming the project and the deck's purpose, roughly two to five
+words, for example `CYNDRA · ONBOARDING REVIEW` or `Q4 PLATFORM REVIEW`. Interpuncts separate parts.
+Pick one and move on.
 
 ```css
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&family=Lora:ital,wght@0,400;0,500;1,400;1,500&display=swap');
@@ -347,18 +354,6 @@ section pre code .hljs-comment,
 section pre code .hljs-quote { color: var(--ink-gray) !important; font-style: italic; }
 ```
 
-## Per-deck slug
-
-The masthead reads `data-slug` off each slide. Set it once per slide with a Marp directive:
-
-```markdown
-<!-- _backgroundColor: #FAF9F6 -->
-<section data-slug="…">
-```
-
-Simpler in practice: replace `content: attr(data-slug)` with the literal deck slug when you write
-the style block, for example `content: "CYNDRA · ONBOARDING REVIEW";`. One edit, whole deck.
-
 ## Charts
 
 Flat vertical or horizontal bars in `--ink`, the one key bar in `--red`, values labeled directly on
@@ -367,10 +362,13 @@ No gridlines, no y-axis, no legend, no second accent. If the chart needs a legen
 the marks directly instead. For anything beyond a bar comparison, read the `dataviz` skill and
 carry these palette constraints into it.
 
-## When the deck is about someone else's product
+## There is one theme
 
-Yudame House is the house theme and the default for every deck. The one override: a deck whose subject
-*is* a specific product with its own strong brand, presented to that product's own audience. Then
-swap the `:root` values (ground, ink, accent, three font families) for theirs and leave the
-structure alone. Keep the light ground, the single-accent discipline, and the square corners
-regardless. Never mix two brands' colors in one deck.
+Yudame House is it. Every deck, every audience, every repo. Do not detect a design system, do not
+restyle per deck, do not offer the user a choice, and do not treat the values in `:root` as
+adjustable. A deck about another company's product still ships in Yudame House, because the deck is
+a Yudame artifact regardless of its subject. Their brand shows up in a logo, never in the slide's
+colors or type.
+
+Holding the theme constant is the whole point. A deck that looks like every other deck is
+recognisable as ours on sight, which is worth more than any per-deck tailoring.
