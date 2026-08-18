@@ -1,11 +1,13 @@
 ---
 status: Planning
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2739
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-08-18T03:45:26Z
 ---
 
 # Docs Auditor Review Gate
@@ -200,8 +202,8 @@ results below.
 > dead code. **That claim was false** and has been removed. It was produced by
 > sampling only paths that were absent at HEAD *and had never been a rename
 > destination*, plus a positive control that was present at HEAD — which misses the
-> reachable case entirely. The corrected finding below is stronger, and it changes
-> what Task 1 is.
+> reachable case entirely. The corrected finding below is stronger, and it is the
+> finding #2741 acted on.
 
 - **Assumption being tested:** issue #2739 item 2 asserts the detectors "pick the
   wrong target" — `renames[0][1]`, the newest rename hop.
@@ -387,16 +389,22 @@ results below.
 **Caller A (rotation) — after this change:**
 
 1. **Entry point:** scheduler invokes `run_docs_auditor` daily.
-2. **Preflight (new position):** auth → lock → dirty-tree guard → **daily-PR cap
-   guard** → rotation pick → **open-PR-for-slug guard**. All guards now fire
-   **before** any write.
+2. **Preflight (new position):** auth → lock → dirty-tree guard → **vault-drift
+   detection** → rotation pick → `slug` → **daily-PR cap guard** →
+   **open-PR-for-slug guard**. Both hoisted guards fire **before** any write, and both
+   sit *after* vault-drift detection so a capped day still reports vault drift (B2).
+   A capped run does skip the substrate's advisory issue loop; that narrowing is
+   accepted and bounded in Q4 item 1.
 3. **`audit(scope_mode="rotation")`** writes fixes to the shared main checkout.
 4. **Zero-diff gate** unchanged.
 5. **`_push_branch_and_pr(slug, root, files_touched, withheld)`:** records the
    starting ref, `checkout -b`, stages **only `files_touched`**, commits, pushes,
    opens the PR.
-6. **Restore, verified:** `finally` returns to the recorded starting ref and asserts
-   the tree is clean. A failed restore is a hard error, not a discarded result.
+6. **Restore, verified and scoped:** `finally` returns to the recorded starting ref,
+   runs `git checkout HEAD -- <files_touched>`, and asserts that no `files_touched` path
+   is dirty in either porcelain column. It does **not** assert the whole tree is clean —
+   foreign dirt outside `files_touched` is preserved by design. A failed restore is a
+   hard error, not a discarded result.
 7. **Outcome routing:** PR created → `status="ok"`. Guard fired pre-write →
    `status="skipped"`, nothing written. Anything else → `status="error"`, escalated.
 8. **The review gate:** the PR. Nothing merges it automatically.
@@ -422,28 +430,64 @@ results below.
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large
 
-**Team:** Solo dev, PM, code reviewer
+Resized from Medium in the critique round 1 revision (C1). The inventory the critic
+counted is real: a deleted helper, a changed signature, an ~80-line predicate deletion,
+a guard hoist plus a restore rewrite inside a live writer against the *shared* main
+checkout, a sweeper branch deletion, a cross-cutting scheduler change that affects every
+function reflection, two skill bodies plus one skill-context, roughly eight doc passages,
+fourteen existing test dispositions (two of which break at import), and a synchronous
+`gh` dispatcher this plan itself says has no in-repo precedent.
+
+**The lane stays single.** The critic proposed splitting into three lanes
+(A = Q1, B = Q3+Q4, C = Q2+Q5). That is declined: the lane assignment is held at fleet
+level, and splitting would fragment a change set whose parts share one test file, one
+feature doc, and one set of anti-criteria. The isolation the split was reaching for is
+preserved a cheaper way: **Step by Step Tasks is sequenced so each Q-group lands as its
+own independently reviewable commit** (task 1 = Q1, task 2 = Q3+Q4, task 3 = Q2+Q5), so a
+reviewer can read them one at a time and a bad group can be reverted alone. The three-way
+split remains available to the coordinator as an override if the lane stalls.
+
+**Team:** substrate-builder, git-test-engineer, contract-documentarian, gate-validator
+(the four agents named in **Team Orchestration**), plus PM and a code reviewer.
 
 **Interactions:**
-- PM check-ins: 1 (Q2 is the one owner-visible ruling left — Q6 was settled and landed
-  upstream by #2741 / PR #2842 — and it is settled here with a recommendation, so the
-  check-in is a confirm, not a design session)
+- PM check-ins: 2. One to confirm Q2 (unreviewed auto-merge dies), one to confirm Open
+  Question 3 (whether the rotation reflection is re-enabled at all). OQ3 is explicitly a
+  post-merge owner call and does not block the build; OQ2 is settled in this plan with a
+  stated choice and needs no check-in.
 - Review rounds: 2 (this touches a live scheduled reflection that writes to the
   shared main checkout)
 
 ## Prerequisites
 
+**Every row is an exit-code assertion (B1).** `scripts/check_prerequisites.py:80-106` runs
+each command with `shell=True` and judges **purely on the return code** — it never reads
+stdout. A row phrased as *"run this and look at the output"* therefore passes no matter
+what the output says. Five of the seven rows were that shape before the critique round 1
+revision, including the two that matter most (no rotation in flight, clean shared
+checkout), which made Risk 3's stated mitigation inert. Each row below now exits non-zero
+in the state it is meant to catch, and every one was executed in both states while writing
+this revision.
+
+Two constraints on the shape of these commands, both structural:
+
+- **No bare `|` in any cell.** `check_prerequisites.py:62` splits table rows on the pipe
+  character, so a pipeline inside a cell truncates the command. No alternation in greps
+  either.
+- **POSIX `/bin/sh` only.** `shell=True` is `/bin/sh`, not bash: `test "$X" = Y`, never
+  `[[ ]]`.
+
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| PR #2728 merged to main — **satisfied 2026-08-13** | `gh pr view 2728 --json state -q .state` → `MERGED` | Build depends on `fixes_withheld`, `withheld`, `WITHHELD_PR_MARKER`, `_absent_new_path_refs`, `_file_issue_if_new`, `_open_issue_exists` — all confirmed present on main |
-| PR #2842 merged to main — **satisfied 2026-08-18** | `gh pr view 2842 --json state -q .state` → `MERGED` | Q5's escalation is only trustworthy once the permanent withheld generator is gone (spike-2). Merged as `a9205b065` |
-| Rename channel actually absent | `! grep -q _git_log_follow_renames reflections/docs_auditor.py` → exit 0 | Guards against building Q5 on a tree where #2842 was reverted. Shape is deliberate: `check_prerequisites.py` judges purely on exit code, and both `grep -c` (exits 1 on a zero count) and `grep -L` (BSD grep still exits 1 when no line was selected) report absence as failure, so the negation is the only form that reads correctly. No alternation either — the checker splits table cells on a bare pipe |
-| No rotation in flight | `.venv/bin/python -c "from reflections.docs_auditor import _get_redis, REDIS_RUNNING_KEY; print(bool(_get_redis().exists(REDIS_RUNNING_KEY)))"` → `False` | Changing commit behavior mid-rotation could interleave with a live `checkout -b` in the shared checkout. Must be the venv interpreter — a bare `python` has no `popoto` and the row fails with `ModuleNotFoundError` rather than a real answer |
-| Shared main checkout clean | `git -C /Users/valorengels/src/ai status --porcelain` → empty | A pre-existing dirty tree is the wedged state item 4 describes; must be cleared and its cause understood before landing |
-| No open docs-audit PR mid-flight | `gh pr list --state open --search "head:docs-audit" --json number -q length` → `0` | An in-flight PR opened by the old code carries old-format staging. Rewritten pipe-free for the same table-parsing reason as the rename row |
-| `gh` authenticated | `gh auth status` | Sweeper and PR tests reason about real `gh` JSON shapes |
+| PR #2728 merged to main — **satisfied 2026-08-13** | `test "$(gh pr view 2728 --json state -q .state)" = MERGED` | Build depends on `fixes_withheld`, `withheld`, `WITHHELD_PR_MARKER`, `_absent_new_path_refs`, `_file_issue_if_new`, `_open_issue_exists` — all confirmed present on main. Fails closed: an unmerged PR yields `OPEN`, and a `gh` failure yields an empty string; both compare unequal and exit 1 |
+| PR #2842 merged to main — **satisfied 2026-08-18** | `test "$(gh pr view 2842 --json state -q .state)" = MERGED` | Q5's escalation is only trustworthy once the permanent withheld generator is gone (spike-2). Merged as `a9205b065`. Same fail-closed argument |
+| Rename channel actually absent | `! grep -q _git_log_follow_renames reflections/docs_auditor.py` | Guards against building Q5 on a tree where #2842 was reverted. Shape is deliberate: both `grep -c` (exits 1 on a zero count) and `grep -L` (BSD grep still exits 1 when no line was selected) report *absence* as failure, so the negation is the only form that reads correctly. Exits 1 exactly when the symbol is back |
+| No rotation in flight | `.venv/bin/python -c "import sys; from reflections.docs_auditor import _get_redis, REDIS_RUNNING_KEY; sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)"` | Changing commit behavior mid-rotation could interleave with a live `checkout -b` in the shared checkout. `sys.exit` carries the answer, so a live rotation is a FAIL rather than a printed `True` nobody reads. Must be the venv interpreter — a bare `python` has no `popoto`, and that too now fails closed, since `ModuleNotFoundError` exits 1 |
+| Shared main checkout clean | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain)"` | A pre-existing dirty tree is the wedged state item 4 describes; must be cleared and its cause understood before landing. Non-empty porcelain output now exits 1. Verified failing for the right reason at revision time — one file belonging to a concurrent lane |
+| No open docs-audit PR mid-flight | `test "$(gh pr list --state open --search "head:docs-audit" --json number -q length)" = 0` | An in-flight PR opened by the old code carries old-format staging. A `gh` failure yields an empty string, which is also unequal to `0`, so this fails closed too |
+| `gh` authenticated | `gh auth status` | Sweeper and PR tests reason about real `gh` JSON shapes. Already exit-code correct — `gh auth status` exits non-zero when no account is logged in |
 
 ## Solution
 
@@ -502,10 +546,18 @@ are needed:
    *"If there are unexpected files, revert them"* (`:252`) would today condemn every
    substrate-touched file, since they are not in the Step 2 task list. The expected
    set becomes **Step 2 task list ∪ substrate `files_touched`**.
-3. `.claude/skill-context/do-docs.md:144-146` and `:166-168`: rewrite the descriptive
-   claim ("commits them to the **current branch**... fires the memory-refresh hook
-   after the commit") and delete the imperative ("Do not re-commit the substrate's
-   changes — it commits them itself").
+3. `.claude/skill-context/do-docs.md` — **three** stale-contract passages, not two
+   (corrected in critique round 1, C6):
+   - `:142-144` (the anchor previously given as `:144-146`, twice, and wrong both
+     times): rewrite the descriptive claim ("commits them to the **current branch**...
+     fires the memory-refresh hook after the commit").
+   - `:152`: "Before trusting the substrate's **self-committed** output:" — a third
+     stale string that the anti-criterion grep (`commits itself`) does not match, so it
+     would survive a green validator. Rewrite it to say "Before trusting the substrate's
+     applied-but-uncommitted output:". The Verification anti-criterion is widened to
+     match `self-committed` for exactly this reason.
+   - `:166-168`: delete the imperative ("Do not re-commit the substrate's changes — it
+     commits them itself").
 
 No other Caller B site is left writing to a tree nobody commits. Recon enumerated
 all four `audit()` callers:
@@ -546,8 +598,16 @@ The sweeper keeps its two legitimate jobs: deleting stale `docs-audit/*` branche
 whose PRs are already closed, and closing stale PRs (modified per Q5).
 
 **Who actually gets told — the mechanism already exists.** Removing auto-merge only
-works if a human learns the PR is there. Nothing automated merges a `docs-audit/*` PR:
-`sdlc_progress.py:116`'s `_SDLC_BRANCH_RE` is `^session/sdlc-\d+$`, and
+works if a human learns the PR is there. Nothing automated merges a `docs-audit/*` PR.
+The evidence for that was re-cited in critique round 1 (C4): the earlier citation,
+`sdlc_progress.py:116`'s `_SDLC_BRANCH_RE = ^session/sdlc-\d+$`, names a symbol that no
+longer exists — it was deleted by
+`docs/plans/completed/sdlc-progress-lane-discovery-branch-shape.md`, which *widened* the
+discovery shape. The conclusion survives the widening, but only because the boundary is
+a namespace rather than a regex: `reflections/sdlc_progress.py:248`
+(`_list_open_lane_prs`) restricts the corpus to the `session/` namespace and `:315`
+(`_slug_from_branch`) reads the slug out of a `session/<slug>` branch. `docs-audit/*` is
+not in the `session/` namespace, so lane discovery never sees it at all, and
 `pr_review_audit` only inspects already-merged PRs. But the notification route is
 already wired and was overlooked in the first revision of this plan:
 `run_docs_auditor` calls `_send_telegram_notification` (`:1147`) with the PR URL to chat
@@ -599,20 +659,71 @@ checkout, which is the bug.
 The issue offers these as alternatives. They are not: hoisting fixes the common case,
 verification fixes the rest.
 
-1. **Hoist both guards into `run_docs_auditor`, before `audit()` runs.** They live at
-   `:1476-1483` today, inside `_push_branch_and_pr` and after the write.
-   `_daily_pr_cap_reached(PROJECT_ROOT)` (`:1436`) needs nothing but Redis and can move
-   to the preflight block alongside the dirty-tree guard at `:1858`.
-   `_has_open_pr_for_slug(slug, PROJECT_ROOT)` (`:1416`) needs `slug`, which is computed
-   before the substrate call at `:1884`. A fired guard now returns `status="skipped"`
-   with **zero writes**, which is the clean fix.
+1. **Hoist both guards to immediately before the `audit()` call — not into the top of
+   the preflight block.** They live at `:1476-1483` today, inside `_push_branch_and_pr`
+   and after the write. The obvious move is to put them beside the dirty-tree guard at
+   `:1858`, and critique round 1 (B2) showed that is wrong: a guard that returns from
+   `:1858` returns **before** `_run_vault_drift_detection` at `:1866-1869`, whose own
+   comment declares it runs *"unconditionally, NOT gated behind the `_select_primary_doc`
+   pick"*. A plan whose thesis is "declining must be loud" cannot start its build by
+   silently switching off an unrelated reporting channel.
+
+   **Correct placement:** after the dirty-tree guard, after
+   `_run_vault_drift_detection` (`:1866-1869`), after the rotation pick, and after
+   `slug = _path_to_slug(primary)` (`:1881`) — i.e. in the few lines immediately
+   preceding the `audit()` call at `:1884`. That is still strictly **pre-write**, which
+   is the whole point of the hoist, and it also solves the ordering problem for free:
+   `_has_open_pr_for_slug(slug, PROJECT_ROOT)` (`:1416`) needs `slug`, which does not
+   exist before `:1881`. `_daily_pr_cap_reached(PROJECT_ROOT)` (`:1436`) needs nothing
+   but Redis, but it goes in the same place so both guards read as one block. A fired
+   guard returns `status="skipped"` with **zero writes**.
+
+   **Ruling on the substrate's advisory issue channel (B2, second half).** Skipping
+   `audit()` also skips the advisory `_file_issue_if_new` loop at `:1290`
+   (deleted-target, stub-doc, orphan-plan findings). **This narrowing is accepted in
+   writing; the plan does not add a dry-run pass on the capped path.** Two reasons, the
+   first decisive:
+
+   - The critic's proposed alternative, `audit(..., apply_mode="dry-run")`, **does not
+     work**. The advisory filing loop at `:1278` is gated on
+     `apply_mode == "apply" and scope_mode == "rotation"`, so a dry-run pass files
+     nothing. It would run every detector, produce no writes and no issues, and cost a
+     full rotation's I/O for no output. Adopting it would have been a second silent
+     no-op in a plan about silent no-ops.
+   - The residual loss is bounded and self-healing. Both guards fire only in states that
+     imply the channel already ran recently for the same content: the daily cap fires
+     only when a rotation **already opened a PR today**, and that earlier run executed
+     the advisory loop; the open-PR guard fires only when a PR for **this same slug** is
+     already open, meaning this doc's advisory findings were filed on the run that
+     opened it. On top of that, rotation runs daily and `_file_issue_if_new` dedups by
+     title for 30 days, so a finding skipped on a capped day is filed on the next
+     uncapped day and lands as the same issue it would have. The exposure is a deferral
+     of at most one day per capped day, not a lost report.
+
+   A Verification row asserts the placement holds structurally: vault-drift detection
+   must remain reachable when the daily cap is set.
 2. **A verified restore still matters,** because `checkout -b`, `add`, `commit`,
    `push`, and `gh pr create` can all fail after the substrate has written.
    `_push_branch_and_pr` records the starting ref via
    `git rev-parse --abbrev-ref HEAD` at entry, and on every exit path:
    - `git checkout <starting ref>` with the return code **checked**;
-   - `git checkout -- <files_touched>` to discard the auditor's own edits;
+   - **`git checkout HEAD -- <files_touched>`** to discard the auditor's own edits;
    - delete the created branch if it exists.
+
+   **`HEAD` is load-bearing and is not decoration (B3).** The bare form
+   `git checkout -- <paths>` restores the worktree **from the index**, not from HEAD.
+   There is a reachable path where the index holds the auditor's content at restore
+   time: `git add -- <files_touched>` succeeds, `git commit` then fails, and
+   `git checkout <starting ref>` carries the staged content across. A bare
+   `checkout --` at that point rewrites the worktree *from* the auditor's own staged
+   content and leaves it both staged and applied on `main` in the shared checkout —
+   precisely the wedge this plan exists to remove, and the plan has already ruled out
+   `reset --hard` and `checkout -f` as the remedy. `git checkout HEAD -- <paths>`
+   (equivalently `git restore --source=HEAD --staged --worktree -- <paths>`) resets the
+   index **and** the worktree for those paths only, so the "foreign dirt outside
+   `files_touched` survives" property is untouched. This exact spelling appears in
+   three places — here, Race 1's mitigation, and the Task 2 bullet — and they must be
+   changed together; the drift between them is what let the defect live.
 
    **The restore is scoped to `files_touched` and must never be a whole-tree
    operation.** No `git checkout -f`, no `git reset --hard`, no `git clean`. The
@@ -622,9 +733,29 @@ verification fixes the rest.
    as Race 1, and the two must not drift apart again.
 3. **A failed restore is a hard error, judged on scoped state.** The postcondition is
    **(a)** HEAD is back on the starting ref, and **(b)** no path in `files_touched` is
-   dirty. It is explicitly **not** `not _git_dirty(repo_root)` — foreign dirt is
-   expected to survive by design, so a whole-tree dirtiness check would fire a
+   dirty in **either** column of `git status --porcelain` (staged or worktree — the
+   two-column check is what catches the B3 case above). It is explicitly **not**
+   `not _git_dirty(repo_root)` — foreign dirt **outside `files_touched`** is expected to
+   survive by design, so a whole-tree dirtiness check would fire a
    spurious `status="error"` on every run that coincides with another lane's work.
+
+   **Accepted residual: the `files_touched` overlap case (C5).** The safety claim is
+   *"foreign dirt outside `files_touched` is preserved"*, not the flat "foreign dirt is
+   preserved" this plan asserted before critique round 1. If a concurrent lane holds an
+   uncommitted edit to a file the auditor also rewrites, the scoped restore discards
+   that lane's edit along with the auditor's. This is accepted rather than fixed, and
+   the bound is: (a) the dirty-tree guard at `:1858` aborts the whole rotation if
+   *anything* is uncommitted when it starts, so the overlap requires a foreign write
+   landing inside the window between that guard and the failure, a window of one
+   substrate pass; (b) `REDIS_RUNNING_KEY` serializes rotation globally, so at most one
+   auditor is ever in that window; (c) the auditor only ever writes `.md` files it
+   selected by rotation, so the collision requires a concurrent lane editing that same
+   doc in that window. The residual is real but small, and every alternative is worse:
+   leaving the auditor's own dirt behind is the wedge, and a whole-tree restore destroys
+   strictly more. An optional hardening, not required for this build: before discarding,
+   skip and report any `files_touched` path whose on-disk content no longer matches what
+   `_apply_fixes_to_file` wrote, which converts the overlap from a silent discard into a
+   named finding.
    If either scoped condition fails, `_push_branch_and_pr` signals failure and
    `run_docs_auditor` returns `status="error"` and escalates via Q5's channel. It must
    not write liveness `"ok"`, must not stamp the rotation hash, and must not send a
@@ -638,8 +769,9 @@ On the failure mode this replaces: today's plain `git checkout main` in the `fin
 block (`:1557-1563`, no `check=`, return code discarded) fails when local
 edits conflict, and the current code discards that failure. The fix is **not** to add
 `-f` — that trades a wedged checkout for destroyed foreign work. The fix is to discard
-the auditor's own paths first (`git checkout -- <files_touched>`), which removes the
-conflict without touching anything else, and then to **check** the return code.
+the auditor's own paths first (`git checkout HEAD -- <files_touched>`, index and
+worktree, per item 2), which removes the conflict without touching anything else, and
+then to **check** the return code.
 
 ---
 
@@ -659,20 +791,89 @@ not build Q5 without it, which the Prerequisites table now checks.
    invent a channel. `gh issue create` is the most-used escalation across
    `reflections/` (six modules), it is durable rather than ephemeral, and the docs
    auditor already owns a deduped wrapper for it at `:1064` with 30-day Redis dedup and
-   a cross-machine `_open_issue_exists` (`:1003`) pre-check. A run with
-   `fixes_withheld > 0` files one issue naming the doc, the attempted rewrite, and the PR.
-2. **The sweeper never closes a PR carrying `WITHHELD_PR_MARKER`.** On encountering
-   one at stale age it files (or refreshes, via dedup) the escalation issue and
+   a cross-machine `_open_issue_exists` (`:1003`) pre-check.
+
+   **The title template is mandated, not left to the builder (B4).** The title *is* the
+   dedup key — `_file_issue_if_new:1075-1076` hashes it, and `_open_issue_exists` matches
+   on it — so choosing it is the single most load-bearing decision in Q5. A per-run title
+   ("docs-auditor withheld fixes") would swallow every distinct withhold for 30 days.
+   Use a **per-defect** title:
+
+   ```
+   docs-auditor: withheld fix in {doc} ({old} -> {new})
+   ```
+
+   with `{doc}` the repo-relative path and `{old}`/`{new}` the withheld substitution, and
+   file **one issue per withheld entry**, not one per run. The body names the reason
+   (`target-absent` or bare-name), the run, and the PR URL when there is one.
+
+   **No volatile component may appear in any title this module files** — no age, no
+   date, no count, no run id. A title that changes between runs defeats dedup in the
+   worst direction: it files a fresh issue every single run instead of suppressing one.
+   Note also that `_file_issue_if_new` hardcodes `--label documentation`
+   (`:1115-1116`), so every issue this channel files carries that label and no other;
+   nothing here needs a new label.
+2. **The sweeper never closes a PR carrying `WITHHELD_PR_MARKER`**, and it files its own
+   escalation under a **distinct** title. On encountering such a PR at stale age it
    leaves both PR and branch untouched. This is what stops the
    propose → withhold → close → re-propose loop: the loop today is silent, and an
    open issue is not. Non-marker stale PRs keep their existing
    `gh pr close --delete-branch` behavior (`:2263`) — no withheld fixes are at risk there.
+
+   **Ruling: the sweeper-side filing survives, with its own title (B4).** As written
+   before critique round 1 this was a guaranteed no-op: item 1 files its issue on day 0
+   and `_file_issue_if_new` returns `False` on a title it has already seen — it never
+   comments, refreshes, or bumps — so a day-14 filing under the same title could never
+   fire. The fix is a title that describes a *different fact*, because it is a different
+   fact: item 1 says "the auditor declined to write something", the sweeper says
+   "a PR carrying declined fixes has been sitting unreviewed past the stale bar". Use:
+
+   ```
+   docs-auditor: withheld PR #{n} still unreviewed
+   ```
+
+   Keyed on the PR number and nothing else. Dedup is then naturally per-PR: one issue
+   per stuck PR, filed on the first sweeper pass that finds it past `STALE_PR_AGE_DAYS`
+   and suppressed on every pass after. The age deliberately does **not** appear in the
+   title — including it would mint a new issue every day, which is the failure mode
+   the no-volatile-fields rule in item 1 exists to prevent. Put the age in the body.
+
+   Correction of the phrasing this plan used before: `_file_issue_if_new` does not
+   "refresh, via dedup". On a dedup hit it **is suppressed** and returns `False`. Any
+   design that needs a second signal for the same subject needs a second title.
 3. **Wire `summary` → `output_summary`** in `agent/reflection_scheduler.py:514-515`:
    `state.mark_completed(duration, projects=projects_list, output_summary=summary)`
    where `summary = result.get("summary") if isinstance(result, dict) else None`.
-   The field already exists on the model (`models/reflection.py:186`, `:221`, `:254`) and
-   the dashboard already renders it (`ui/data/reflections.py:139`, `:286`). This makes
-   every function reflection's summary visible, not just the auditor's.
+   The field already exists on the model (`models/reflection.py:186`, stored into
+   `last_run_summary` at `:221`, and onto the `ReflectionRun` row at `:254`), and
+   `ui/data/reflections.py` already carries it out to the API — `:139` as the
+   `last_run_summary` dict and `:286` on each run row.
+
+   **Correction from critique round 1 (C3): it reaches `dashboard.json`, it is not
+   rendered.** The earlier claim "the dashboard already renders it" was false. The value
+   travels as far as `get_all_reflections()` → `ui/app.py:931` → the `dashboard.json`
+   payload, and **no template under `ui/templates/` references `output_summary` or
+   `last_run_summary`** (verified by grep at revision time). Leaving it there would have
+   left this plan arguing that `_write_liveness` deserves no reader while promoting a
+   JSON key with no rendered reader — the same defect, one layer up.
+
+   **Ruling: render it, in this lane.** Add a one-line render of the last run's
+   `output_summary` to `ui/templates/reflections/_partials/modal_content.html`, beside
+   the existing `{% if r.last_error %}` block at `:54-56` and in the same shape:
+
+   ```jinja
+   {% if r.last_run_summary and r.last_run_summary.output_summary %}
+   <h3>Last summary</h3>
+   <div style="font-size: 12px; white-space: pre-wrap; word-break: break-word;">{{ r.last_run_summary.output_summary }}</div>
+   {% endif %}
+   ```
+
+   That is the whole change — the data is already on `r` via `ui/data/reflections.py:139`
+   and `models/reflection.py:221`. It carries a Documentation checkbox and a Verification
+   row of its own. With it, "on the dashboard" in the Success Criteria is true as written;
+   without it the criterion would have to be weakened to "in `dashboard.json`", and the
+   argument against `_write_liveness` weakens with it. This makes every function
+   reflection's summary visible, not just the auditor's.
 
 **Deliberately not doing:** repairing `_write_liveness` (`:1567`). Its two Redis keys
 (`:1592`, `:1603`) have no programmatic readers, and this plan gives the same information
@@ -867,12 +1068,21 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       `gh pr create` returning non-zero, `git add --` on a missing path) and assert
       HEAD is back on the starting ref, the created branch is gone, and
       `git status --porcelain` matches the pre-call state byte for byte.
-- [ ] **Foreign dirt survives (Race 1 / B4).** Seed an unrelated modified file that the
+- [ ] **Foreign dirt survives (Race 1).** Seed an unrelated modified file that the
       auditor never touches, force a failure, and assert the file is **still modified**
       after the restore and that the run did **not** report `status="error"` merely
       because the tree was dirty. This is the regression test for the scoped-restore
       postcondition; a whole-tree `checkout -f` or a `not _git_dirty(repo_root)`
-      assertion both fail it.
+      assertion both fail it. Scope note: the assertion is about a file **outside**
+      `files_touched`; the overlap case is an accepted residual (Q4 item 3) and is
+      deliberately not asserted either way.
+- [ ] **Staged-then-commit-failed restore (B3).** The direct regression test for the
+      index-vs-HEAD defect. In a real repo: let `git add -- <files_touched>` succeed,
+      force `git commit` to fail, run the restore, then assert **neither column** of
+      `git status --porcelain` mentions any `files_touched` path — not the staged column,
+      not the worktree column — and that HEAD is back on the starting ref. A restore
+      written as bare `git checkout -- <paths>` leaves the auditor's content staged and
+      applied and fails this test; `git checkout HEAD -- <paths>` passes it.
 - [ ] Failed-restore reporting: make `checkout` fail and assert the function reports
       failure and `run_docs_auditor` returns `status="error"`.
 - [ ] Guard hoisting: with the daily cap set, assert `audit()` is never called and
@@ -1000,10 +1210,22 @@ force-restore would still destroy it.
 **State prerequisite:** the restore must not touch paths outside `files_touched`.
 **Mitigation:** stage an explicit path list (Q3), and scope the restore exactly as Q4
 specifies — `git checkout <starting ref>` (no `-f`) plus
-`git checkout -- <files_touched>`, with the postcondition asserted only over
-`files_touched`, never `_git_dirty(repo_root)`. Foreign dirt is preserved by design.
-Assert in a real-git test that an unrelated dirty file survives the commit **and** the
-restore, and that its presence does **not** produce `status="error"`.
+**`git checkout HEAD -- <files_touched>`**, with the postcondition asserted only over
+`files_touched`, never `_git_dirty(repo_root)`. The `HEAD` is required, not stylistic:
+the bare form restores from the index, which on the staged-then-commit-failed path still
+holds the auditor's own content (B3). This spelling must stay identical to Q4 item 2 and
+to the Task 2 bullet.
+
+**The safety claim, stated precisely (C5):** foreign dirt **outside `files_touched`** is
+preserved by design. Dirt *inside* `files_touched` — a concurrent lane editing the very
+doc the auditor rewrote, inside the window between the dirty-tree guard at `:1858` and
+the failure — is discarded along with the auditor's edit. That overlap is an accepted
+residual with its bounding argument recorded in Q4 item 3; it is not covered by the
+regression test below and is not silently claimed away.
+
+Assert in a real-git test that an unrelated dirty file (outside `files_touched`) survives
+the commit **and** the restore, and that its presence does **not** produce
+`status="error"`.
 
 ### Race 2: Two machines run the sweeper simultaneously
 
@@ -1069,8 +1291,14 @@ One deployment note that is not a code change: `.claude/skills/update/SKILL.md:6
 runs `pytest tests/unit/test_docs_auditor_substrate.py -x -q` as a smoke test. That file
 is modified by this plan (five `_commit_current_branch` patch sites, nine
 `_push_branch_and_pr` references including two direct calls that break on the new
-required parameter, and one class rename), so the smoke test must be green before merge
-or `/update` will fail on every machine. The new real-git file is
+required parameter, and one class rename), so the smoke test must be green before merge.
+**Corrected in critique round 1 (N2):** a red suite does *not* "fail `/update` on every
+machine". The implementation is `scripts/update/deps.py:426-438`, which runs that smoke
+test only inside the `anthropic` / `claude-agent-sdk` auto-bump path — a path only the
+lockfile-maintainer machine takes. The real consequence is that a red suite **blocks the
+dependency auto-bump on the lockfile-maintainer machine**. Still worth keeping green
+before merge, but it is one machine and one code path, not a fleet-wide breakage. The new
+real-git file is
 deliberately **not** added to the update smoke test — it shells out to git and `gh`
 and is too slow for that path.
 
@@ -1111,7 +1339,7 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       describe the withheld-PR exemption.
 - [ ] State plainly that a rotation PR is announced by Telegram to `Eng: Valor` at
       creation, is merged only by a human via `/do-merge`, and is **closed unmerged at
-      14 days** if nobody acts (B3). Frame that as the intended "nobody cared" outcome,
+      14 days** if nobody acts. Frame that as the intended "nobody cared" outcome,
       not a failure mode.
 - [ ] Update the `## Tests` section (`:558-566`) to name the new real-git test file.
 - [ ] `docs/features/reflections.md:147-152` (the Caller B filing note) and the registry
@@ -1134,13 +1362,23 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       (`scripts/update/hardlinks.py`); the edit propagates on `/update`.
 - [ ] `.claude/skills-global/do-docs/SKILL.md` Step 4 (`:250-252`) — the expected file
       set is the Step 2 task list **∪** the substrate's `files_touched`.
-- [ ] `.claude/skill-context/do-docs.md` (`:144-146` descriptive, `:166-168`
-      imperative) — rewrite the description and delete the imperative.
+- [ ] `.claude/skill-context/do-docs.md` — all **three** stale-contract passages:
+      `:142-144` (descriptive; the anchor was wrong as `:144-146` before critique round
+      1), `:152` ("Before trusting the substrate's **self-committed** output:"), and
+      `:166-168` (imperative). Rewrite the first two, delete the third. `:152` is the one
+      the old anti-criterion grep missed, so it is called out separately here on purpose.
 - [ ] `.claude/skills-global/new-audit-skill/BEST_PRACTICES.md:32` — cites the docs
       auditor as the canonical "Skill commits results" full-apply pattern to copy.
       Leaving it is a historical artifact that will propagate the deleted contract into
       new skills. (The companion citation in that skill's `SKILL.md` that this plan
       previously named is already gone; re-grep at build time rather than assuming.)
+
+### Dashboard Rendering (Q5 item 3)
+
+- [ ] `ui/templates/reflections/_partials/modal_content.html` — add the one-line
+      `r.last_run_summary.output_summary` block beside the existing `{% if r.last_error %}`
+      block at `:54-56`, so the summary the scheduler now forwards has an actual rendered
+      reader and not just a `dashboard.json` key. Exact snippet in Q5 item 3.
 
 ### Inline Documentation
 
@@ -1166,7 +1404,9 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       found it, and does not report `status="ok"` for a pass whose output it discarded.
 - [ ] A run that withholds fixes files a deduped GitHub issue, and the sweeper never
       closes or deletes the branch of a PR carrying `WITHHELD_PR_MARKER`.
-- [ ] `agent/reflection_scheduler.py` passes `output_summary` to `mark_completed`.
+- [ ] `agent/reflection_scheduler.py` passes `output_summary` to `mark_completed`, and
+      the value is **rendered** on the reflections dashboard modal, not merely present in
+      `dashboard.json`.
 - [ ] No surviving string in the module, the skills, or the feature docs promises
       auto-merge — including the rotation Telegram message, which says
       "PR is not auto-merge eligible" today.
@@ -1210,6 +1450,20 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 
 ## Step by Step Tasks
 
+**Sequencing rule (C1).** The lane is not split, so the isolation comes from the commit
+boundaries: **each build task lands as its own commit** — task 1 = Q1, task 2 = Q3+Q4,
+task 3 = Q2+Q5 — so a reviewer reads one Q-group at a time and a bad group can be
+reverted without unpicking the others. Do not squash the build tasks together.
+
+**On N3 (parallelism).** Partially applied. `document-contract` is moved to depend on
+`preflight` and run in parallel, because every documentation decision is already fixed in
+this plan's text and none of it needs to see the code. The three **build** tasks stay
+sequential, and the critique's premise that Q2/Q5 are disjoint from Q1/Q3/Q4 does not
+hold: Q2 rewrites the Telegram messages at `:1915-1919` and `:1936-1946`, and Q5 files
+issues, all inside `run_docs_auditor` — the same function whose outcome routing task 2
+restructures. Running them in parallel would produce conflicting edits to one function
+and destroy exactly the per-group reviewability the sequencing rule exists for.
+
 ### 0. Preflight
 
 - **Task ID**: preflight
@@ -1228,36 +1482,60 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
   the baseline commit and nothing more.
 - Do not enter any worktree other than `.worktrees/docs-auditor-review-gate`.
 
-### 1. Substrate git surface (Q1, Q3, Q4)
+### 1. Cascade commit ownership (Q1) — commit 1 of 3
 
-- **Task ID**: build-substrate
+- **Task ID**: build-cascade
 - **Depends On**: preflight
+- **Validates**: tests/unit/test_docs_auditor_substrate.py
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- **Domain**: substrate / caller contract
+- Q1: delete `_commit_current_branch` (`:1313`) and its call site (`:1297`); keep
+  `refresh_docs_in_memory` firing on the applied set.
+- Update the `audit()` docstring and the `__main__` comment block (`:2289-2295`) in the
+  same commit — the contract change and its inline documentation belong together.
+- Land this as its own commit before touching the rotation path.
+
+### 2. Rotation git surface (Q3, Q4) — commit 2 of 3
+
+- **Task ID**: build-rotation
+- **Depends On**: build-cascade
 - **Validates**: tests/unit/test_docs_auditor_substrate.py, tests/unit/reflections/test_docs_auditor_git_surface.py (create)
 - **Informed By**: spike-5 (files_touched is the complete write set)
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - **Domain**: git / shared-checkout safety
-- Q1: delete `_commit_current_branch` (`:1313`) and its call site (`:1297`); keep
-  `refresh_docs_in_memory` firing on the applied set.
 - Q3: add the required `files_touched` parameter to `_push_branch_and_pr` (`:1459`);
   replace the `git add -A` at `:1494` with `git add -- <files_touched>`; return early
   without creating a branch when the list is empty.
-- Q4: hoist `_daily_pr_cap_reached` (`:1436`) and `_has_open_pr_for_slug` (`:1416`) out
-  of `_push_branch_and_pr` (`:1476-1483`) and into `run_docs_auditor`'s preflight,
-  before the `audit()` call at `:1884`; record the starting ref on entry to
-  `_push_branch_and_pr`; make the `finally` restore (`:1557-1563`) verified — check the
-  `checkout` return code, `git checkout -- <files_touched>`, delete the created branch —
-  and **scoped**, so foreign dirt survives (Race 1). No `checkout -f`, no
-  `reset --hard`, no `clean`. Make a failed restore a reported failure.
+- Q4 (guard hoist, B2): move `_daily_pr_cap_reached` (`:1436`) and
+  `_has_open_pr_for_slug` (`:1416`) out of `_push_branch_and_pr` (`:1476-1483`) into
+  `run_docs_auditor` — **immediately before the `audit()` call at `:1884`, after
+  `_run_vault_drift_detection` (`:1866-1869`) and after `slug` is computed (`:1881`)**.
+  Do **not** put them beside the dirty-tree guard at `:1858`: that placement returns
+  before vault-drift detection, which its own comment says runs unconditionally. The
+  advisory `_file_issue_if_new` loop inside `audit()` (`:1290`) is knowingly skipped on a
+  capped run; that narrowing is ruled on and accepted in Q4 item 1 — do **not** "fix" it
+  with a `apply_mode="dry-run"` pass, which files nothing (`:1278` gates filing on
+  `apply_mode == "apply"`).
+- Q4 (restore, B3): record the starting ref on entry to `_push_branch_and_pr`; make the
+  `finally` restore (`:1557-1563`) verified — check the `checkout` return code, run
+  **`git checkout HEAD -- <files_touched>`** (the `HEAD` is required; the bare form
+  restores from the index and re-applies the auditor's own staged content on the
+  commit-failed path), delete the created branch — and **scoped**, so foreign dirt
+  outside `files_touched` survives (Race 1). No `checkout -f`, no `reset --hard`, no
+  `clean`. Make a failed restore a reported failure, judged on both porcelain columns for
+  `files_touched` only.
 - Q4: route outcomes as `ok` / `skipped` / `error` and ensure `_write_liveness`
   (`:1955`), `_update_rotation_hash` (`:1950`), and the success Telegram (`:1947`) fire
   only on `ok`.
 
-### 2. Escalation and the review gate (Q2, Q5)
+### 3. Auto-merge deletion and escalation (Q2, Q5) — commit 3 of 3
 
 - **Task ID**: build-escalation
-- **Depends On**: build-substrate
+- **Depends On**: build-rotation
 - **Validates**: tests/unit/reflections/test_docs_auditor_git_surface.py
 - **Informed By**: spike-4 (gh issue is the durable channel; output_summary is one line)
 - **Assigned To**: substrate-builder
@@ -1265,18 +1543,40 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - **Parallel**: false
 - Q2: delete `_pr_is_auto_merge_eligible` (`:2005-2086`) and the auto-merge branch of
   `run_docs_branch_sweeper` (`:2235-2258`).
+- Q2 (C2): **the two ranges above are not the whole job.** The Verification row demands
+  `grep -c 'auto-merge' reflections/docs_auditor.py` → `0` against **16** hits, and eight
+  of them are outside both ranges. Every anchor, re-derived at revision time:
+  `:79`, `:90`, `:91` (module header comments), `:1470` (`_push_branch_and_pr`
+  docstring), `:1527` (PR body text), `:1894`, `:1896` (`run_docs_auditor` comments),
+  `:1941` (Telegram), `:1970` (findings string), `:2006`, `:2051`, `:2085` (the
+  predicate), `:2095` (sweeper docstring), `:2255`, `:2258` (merge-branch logging),
+  `:2276` (summary string). Sweep all of them, not just the two ranges.
+- Q2 (C2): deleting the merge branch also requires removing the `prs_merged` counter —
+  initialised `:2108`, incremented `:2248`, reported `:2276` — and its clause in the
+  sweeper summary string. Left in place, the sweeper permanently reports
+  "0 PRs auto-merged", which is both a dangling reference to a deleted mechanism and a
+  `grep -c 'auto-merge'` hit that keeps the anti-criterion red.
 - Q2: rewrite the two rotation Telegram messages (`:1915-1919` zero-diff-with-withheld,
   `:1936-1946` success) so neither promises auto-merge, and so the success message says
   review is required and that an unreviewed PR is closed at
   `STALE_PR_AGE_DAYS = 14` (`:75`).
-- Q5: file a deduped issue via `_file_issue_if_new` (`:1064`) when
-  `fixes_withheld > 0`.
-- Q5: the sweeper must skip close **and** branch deletion (`:2263`) for any PR whose
-  body contains `WITHHELD_PR_MARKER`, filing the escalation issue instead.
-- Q5: wire `output_summary` in `agent/reflection_scheduler.py:514-515`, guarded by the
-  existing `isinstance(result, dict)` check, coerced to `str` and truncated.
+- Q5 (B4): when `fixes_withheld > 0`, file **one issue per withheld entry** via
+  `_file_issue_if_new` (`:1064`), titled
+  `docs-auditor: withheld fix in {doc} ({old} -> {new})`. The title is the dedup key
+  (`:1075-1076`), so it must be per-defect and must contain **no** volatile component —
+  no age, date, count, or run id.
+- Q5 (B4): the sweeper must skip close **and** branch deletion (`:2263`) for any PR whose
+  body contains `WITHHELD_PR_MARKER`, and file its own escalation under the **distinct**
+  title `docs-auditor: withheld PR #{n} still unreviewed`. A same-title filing is a
+  guaranteed no-op — `_file_issue_if_new` returns `False` on a dedup hit and never
+  comments or refreshes. Keep the age out of the title and put it in the body.
+- Q5 (C3): wire `output_summary` in `agent/reflection_scheduler.py:514-515`, guarded by
+  the existing `isinstance(result, dict)` check, coerced to `str` and truncated; **and**
+  add the one-line render to `ui/templates/reflections/_partials/modal_content.html`
+  beside the `{% if r.last_error %}` block at `:54-56`. Without the render the value
+  reaches `dashboard.json` and nothing else.
 
-### 3. Real-git test surface
+### 4. Real-git test surface
 
 - **Task ID**: build-tests
 - **Depends On**: build-escalation
@@ -1303,18 +1603,20 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - Every run: `POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh <file> -q`. Never DB 15,
   never bare pytest.
 
-### 4. Contract documentation
+### 5. Contract documentation
 
 - **Task ID**: document-contract
-- **Depends On**: build-escalation
+- **Depends On**: preflight
 - **Assigned To**: contract-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: true
+- Runs alongside the build tasks (N3): every documentation decision is already fixed in
+  this plan's text, so nothing here needs to read the finished code.
 - Apply every checkbox in the **Documentation** section.
 - Describe only the new status quo. No "previously", no migration notes.
 - Remember `.claude/skills-global/do-docs/SKILL.md` is a hardlink; edit it in the repo.
 
-### 5. Final validation
+### 6. Final validation
 
 - **Task ID**: validate-all
 - **Depends On**: build-tests, document-contract
@@ -1344,9 +1646,13 @@ post-build expectation that legitimately fails now.
 | Auto-merge predicate gone | `grep -c '_pr_is_auto_merge_eligible' reflections/docs_auditor.py` | `0` | post-build (currently `3`) |
 | Sweeper never merges | `grep -c '"merge"' reflections/docs_auditor.py` | `0` | post-build (currently `1`, at `:2240`) |
 | No auto-merge concept survives anywhere in the module | `grep -c 'auto-merge' reflections/docs_auditor.py` | `0` | post-build (currently **16**: module comments `:79`, `:90-91`; `_push_branch_and_pr` docstring `:1470` and PR body text `:1527`; `run_docs_auditor` comments `:1894-1896`, Telegram `:1941`, findings `:1970`; the predicate `:2006`ff. All of them go with Q2 — this row is the reason Q2 is not just a function deletion) |
-| Old contract instruction gone | `grep -rn 'commits itself\|commits them itself' .claude/ docs/features/` | exit code 1 | post-build (currently exit 0: `SKILL.md:221`, `skill-context/do-docs.md:166`). **Scope is deliberately `.claude/` and `docs/features/` only** — this plan lives in `docs/plans/` and quotes the phrase, so widening the scope makes the row fail on the plan itself. Do not widen it. |
+| Old contract instruction gone | `grep -rn 'commits itself\|commits them itself\|self-committed' .claude/ docs/features/` | exit code 1 | post-build (currently exit 0: `SKILL.md:221`, `skill-context/do-docs.md:166`, and `skill-context/do-docs.md:152` via the third alternative). **Scope is deliberately `.claude/` and `docs/features/` only** — this plan lives in `docs/plans/` and quotes the phrase, so widening the *path* scope makes the row fail on the plan itself. Do not widen the paths. The `self-committed` alternative was added in critique round 1 (C6): without it, `skill-context/do-docs.md:152` survives a green validator |
 | Rename channel stays gone | `grep -c '_git_log_follow_renames\|_detect_renamed' reflections/docs_auditor.py` | `0` | **holds now** (#2842) — regression guard only |
 | No whole-tree force restore | `grep -c 'checkout", "-f\|reset", "--hard\|"clean"' reflections/docs_auditor.py` | `0` | holds now — must still hold after Q4 |
+| Restore is index-safe (B3) | `grep -c 'checkout", "HEAD"' reflections/docs_auditor.py` | > 0 | post-build (currently `0`). The bare `git checkout -- <paths>` form restores from the index and re-applies the auditor's staged content on the commit-failed path; this row is the grep-level guard that `HEAD` did not get dropped |
+| Vault drift stays reachable when the cap fires (B2) | Read `run_docs_auditor` and confirm the hoisted `_daily_pr_cap_reached` / `_has_open_pr_for_slug` guards appear **after** the `_run_vault_drift_detection` call (today `:1869`) and after `slug` is computed, and before the `audit()` call. Structural check: `grep -n '_run_vault_drift_detection\|_daily_pr_cap_reached\|_has_open_pr_for_slug\|slug = _path_to_slug\|result = audit' reflections/docs_auditor.py` | the line numbers appear in that order: vault-drift, `slug =`, the two guards, `audit(` | post-build (today the two guards are not in `run_docs_auditor` at all) |
+| Dashboard renders the summary (C3) | `grep -c 'output_summary' ui/templates/reflections/_partials/modal_content.html` | > 0 | post-build (currently `0` — the value reaches `dashboard.json` and no template) |
+| Issue titles carry no volatile field (B4) | Read the two title templates in the built code and confirm neither interpolates an age, date, count, or run id — only `{doc}`/`{old}`/`{new}` for the per-defect title and `#{n}` for the sweeper title | no volatile interpolation | post-build |
 | New commit ownership declared | `grep -c 'files_touched' .claude/skill-context/do-docs.md` | > 0 | post-build (currently `0`) |
 | Scheduler wires the summary | `grep -c 'output_summary' agent/reflection_scheduler.py` | > 0 | post-build (currently `0`) |
 | Git surface is never blanket-mocked | `grep -c 'patch("subprocess.run"\|patch.object(subprocess' tests/unit/reflections/test_docs_auditor_git_surface.py` | `0` | post-build |
