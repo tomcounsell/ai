@@ -217,8 +217,13 @@ If the repo-context file declares an auto-fix substrate, run it against the chan
 **before** doing manual edits. Such a substrate typically handles mechanical fixes —
 renamed markdown links, renamed paths/symbols, index entries pointing at deleted files, and
 stale-term renames — so Step 3 only handles cases requiring human judgment. Follow the
-context file's invocation and output-handling instructions exactly, and do not re-commit
-changes the substrate commits itself.
+context file's invocation and output-handling instructions exactly.
+
+The substrate applies its fixes to the working tree and does **not** commit them — you own
+the commit, and the diff it produced has to pass your review in Step 4 before it becomes a
+permanent record. Record the set of files it reports touching (the `files_touched` key of its
+output, if it reports one) and carry that list into Step 4, where it joins the Step 2 task
+list as an expected file.
 
 If no substrate is declared (the generic case), skip this step — all edits are made manually in Step 3.
 
@@ -249,7 +254,10 @@ After all edits are complete:
    ```bash
    git diff --name-only
    ```
-   Every file in this list should appear in the Step 2 task list. If there are unexpected files, revert them.
+   Every file in this list should appear in the expected set: the Step 2 task list **plus**
+   the `files_touched` the Step 2d substrate reported. If there are unexpected files, revert
+   them. Substrate-touched files are expected, but they are not exempt from review — read
+   their diffs in the next sub-step like any other, and revert any change you cannot justify.
 
 2. **Review each diff is minimal and correct:**
    ```bash
