@@ -367,9 +367,10 @@ tightened branch against that site specifically.
 - **No schema change.** `session:issuelock:{N}` is a plain non-Popoto Redis
   string key holding JSON. New keys are additive; absent keys keep today's
   behavior exactly. No migration, no `scripts/update/migrations.py` entry.
-- **No new module, no new process.** All edits land in five existing source
-  files (`models/session_lifecycle.py`, `tools/sdlc_lease_heartbeat.py`,
-  `agent/session_executor.py`, plus two test modules).
+- **No new module, no new process.** Three existing source files change
+  (`models/session_lifecycle.py`, `tools/sdlc_lease_heartbeat.py`,
+  `agent/session_executor.py`), plus three existing test modules and one new
+  one (`tests/unit/reflections/test_utilities_lock_says_live.py`).
 - **One predicate stays one predicate.** `_lock_owner_is_live` remains the
   single authoritative liveness signal shared by **all three** consumers — the
   peek path, the orphan reaper, and `reflections/utilities.py::_lock_says_live`
@@ -384,10 +385,11 @@ tightened branch against that site specifically.
 
 ## Appetite
 
-**Small.** Four files, one new constant, one new payload-writing branch, one new
-predicate branch, and a test class. The reasoning (the #2620/#2703 tension) is
-the expensive part and is done in this document. No new services, no schema, no
-migration.
+**Small.** Three source files, one new constant, one new payload-writing branch,
+one payload-clearing branch, one new predicate branch, and tests across four
+modules. The reasoning (the #2620/#2703 tension, and the composition hole
+spike-5 measured) is the expensive part and is done in this document. No new
+services, no schema, no migration.
 
 ## Prerequisites
 
@@ -732,23 +734,48 @@ where a heartbeat does exist. Making heartbeat-expected a payload assertion is a
 
 ### Exception Handling Coverage
 
-- `psutil` raising inside the renewer-pid check must be caught by the existing
-  blanket handler and read as LIVE (never crash the predicate, never hard-kill
-  on unverifiable evidence). Covered by a test that makes
-  `_psutil_process_for_pid` raise.
+- **The new branch needs its OWN `try/except Exception -> True`. It does NOT
+  reuse the existing blanket handler.** That handler lives inside the `try:` at
+  `models/session_lifecycle.py:1046-1063`, which is *below* the short-circuit at
+  `:1033` where the new branch goes, and is entered only after the pid /
+  machine_id / create_time guards at `:1035-1045` that a renewer-only payload
+  need not satisfy. A builder who assumes the existing handler covers the new
+  code adds none, and a `psutil` raise then escapes `_lock_owner_is_live`
+  entirely: the reaper catches it (`tools/sdlc_session_ensure.py:1120-1127`) but
+  the peek path at `:1249` does not, turning it into an `acquired=False`
+  fail-closed on a lease the caller owns. Structure the branch so
+  `except Exception: return True` is reachable before any `return False` is.
+  Covered by a test that makes `_psutil_process_for_pid` raise.
 - `_current_process_create_time()` returning `None` inside a durable renewal
   must produce a **partial** identity that the predicate treats as *no* identity
   (fail-toward-live), mirroring `_resolved_supervisor`'s "a pid without a
   create_time is no identity" rule.
+- The heartbeat's deadline-exit clear (shape (a)) is best-effort: any exception
+  from the CAS write is swallowed and the exit proceeds, matching the release at
+  `tools/sdlc_lease_heartbeat.py:377-390`. A failure to clear must never block
+  the exit; the lease TTL remains the backstop.
+- The durable-renewer module allowlist never raises. A disallowed caller passing
+  the flag gets the stamp silently dropped plus one `logger.warning` — an
+  exception here would break lock acquisition itself.
 
 ### Empty/Invalid Input Handling
 
 - `renewer_pid` present but `renewer_create_time` absent → partial identity →
   short-circuit as today.
 - `renewer_pid` non-numeric / zero / negative → treated as absent.
-- `renewer_machine_id` naming a different machine → cross-machine →
-  fail-toward-live.
+- Payload not same-machine per `_payload_from_same_machine` → fail-toward-live.
+  (There is no `renewer_machine_id` key; see **Technical Approach**.)
 - `renewed_at` unparseable → existing `None` path, pid fall-through unchanged.
+
+### Reflection-Layer Coverage (BLOCKER 1)
+
+`reflections/utilities.py::_lock_says_live` (`:277-307`) returns `bool | None`
+and its callers `continue` on `True` and on `None` but **act** on `False`. Every
+new early-return in the tightened branch must therefore be `True`; only the full
+conjunction (complete renewer identity AND same-machine AND renewer pid
+dead-or-recycled AND `renewed_at` age > grace) may return `False`. This is a
+property of the predicate, tested at the reflection layer as well as the
+predicate layer — see **Test Impact**.
 
 ### Error State Rendering
 
@@ -765,7 +792,11 @@ beyond one debug line naming the dead renewer pid.
 - [ ] `tests/unit/test_session_lifecycle.py::test_same_owner_renewal_restamps_renewed_at` (`:1310`) — UPDATE: add an assertion that a renewal WITHOUT `stamp_renewer_identity` writes no `renewer_*` keys. The existing "identity fields survive" assertions at `:1331-1333` stay.
 - [ ] `tests/unit/test_session_lifecycle.py::test_renewal_preserves_pid_and_hostname_from_original_payload` (`:1456`) — KEEP UNCHANGED.
 - [ ] `tests/unit/test_session_lifecycle.py` `TestLockOwnerIsLive` rows at `:576`, `:586`, `:598`, `:610`, `:629`, `:650` — KEEP UNCHANGED: no `renewer_pid` in any payload, so all must stay green byte-for-byte. Running them unmodified IS the backward-compatibility proof.
-- [ ] `tests/unit/test_sdlc_session_ensure.py` (orphan-reaper tests, if present for `_iter_orphan_sessions`) — VERIFY UNCHANGED: locate and run; a live-owner exemption test must not change behavior.
+- [ ] `tests/unit/test_sdlc_session_ensure.py::TestKillOrphans` (`:1211`) — VERIFY UNCHANGED: the existing rows must stay green byte-for-byte. (The "if present" hedge in the first draft was stale; the class exists and `_iter_orphan_sessions` is at `tools/sdlc_session_ensure.py:1059`.)
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — ADD two rows to `TestKillOrphans`: an `sdlc-local-{N}` row with `last_heartbeat_at = None` whose payload carries a fresh stamp and a LIVE `renewer_pid` must NOT be yielded; the same row with a dead `renewer_pid` past the grace MUST be yielded. This is SC7 at the consumer layer, not the predicate layer.
+- [ ] `tests/unit/reflections/test_utilities_lock_says_live.py` — NEW module (BLOCKER 1). Patch `reflections.utilities._get_redis` to return each payload shape and assert `_lock_says_live(N)`: dead-renewer-past-grace → `False`; live-renewer → `True`; inside-grace → `True`; no-renewer-identity → `True`; cross-machine → `True`. The existing `tests/unit/reflections/test_sdlc_upvote_lanes.py` stubs `_lock_says_live` wholesale, so it exercises the gate but never the payload→verdict path; this module covers the half that matters here.
+- [ ] `tests/unit/reflections/test_sdlc_upvote_lanes.py` (`:697`, `:704`) — KEEP UNCHANGED: the "imported not forked" guards must stay green, since this plan's whole posture is one predicate for all three consumers.
+- [ ] `tests/unit/test_sdlc_lease_heartbeat.py` — ADD: the two non-releasing deadline exits perform the `renewer_*` clear (shape (a)), and a clear that raises does not block the exit. Locate the existing exit-path tests and extend them rather than adding a parallel class.
 
 No xfail markers (decorator or runtime `pytest.xfail()`) exist in `tests/`
 relating to the issue lock, so there are none to convert.
@@ -799,8 +830,36 @@ owner as a ghost, which is the #1915 duplicate-PR shape, and it makes an
 fires only when a *complete* renewer identity is present (partial → today's
 behavior); only when same-machine (cross-machine → fail-toward-live); and only
 after `ISSUE_LOCK_RENEWER_GRACE_SECONDS` of dead-renewer evidence. Plus the
-existing blanket `except -> True`. The demonstrated-red test suite asserts all
-three gates in the *live* direction, not only the dead one.
+branch's own `try/except Exception -> True`. The demonstrated-red test suite
+asserts all three gates in the *live* direction, not only the dead one.
+
+**Per-consumer, worst-first — the reflection gate argued specifically
+(BLOCKER 1).** The three consumers do not share a failure cost, so the
+mitigation is argued against each:
+
+- **`_lock_says_live` → `sdlc_upvote_lanes.py:529` (gate 3).** This is the worst
+  case and the reason the "every early-return is `True`" rule is a hard
+  constraint rather than a style preference: `False` is the *only* verdict that
+  lets the reflection fall through to `create_session`, and it does so with no
+  operator in the loop. Two things bound it. First, gate 2
+  (`_ledger_has_recorded_stage`) runs *before* the lock read and excludes every
+  candidate whose `PipelineLedger.stage_states_json` is non-empty, so a live run
+  that has recorded any stage never reaches the predicate at all; the exposed
+  window is the pre-first-stage-marker gap, in which spike-3 shows the heartbeat
+  is freshly spawned and its pid resolves ALIVE (spike-5 row III). Second, shape
+  (a) removes the systematic false-dead generator that would otherwise reach
+  this gate on every lane outliving 90 minutes (spike-5 rows I/Ia).
+- **`sdlc_progress.py:942`** is the wider exposure, because its `create` rung
+  fires for an issue that already has a PR and a pushed branch — a shape a live
+  mid-flight lane matches, and where the lock read is the binding gate rather
+  than a second opinion. It is covered by the same two bounds, but without gate
+  2's help, which is why the reflection-layer test is mandatory (SC9) rather
+  than implied by the predicate-layer tests.
+- **`_iter_orphan_sessions`** reaps immediately on a dead verdict (no idle gate
+  on the payload-present path, `tools/sdlc_session_ensure.py:1128`), covered by
+  SC7's consumer-layer test.
+- **The peek path** reports before it acts, so an operator can intervene; it is
+  the cheapest of the three and needs no additional guard.
 
 ### Risk 2: An ephemeral CLI renewer acquires the stamp later and re-poisons the field
 
@@ -816,10 +875,14 @@ edit before it is trusted.
 
 ### Risk 3: The grace window is mis-sized for a machine with a slower renewer
 
-A machine that has raised `ISSUE_LOCK_TTL_SECONDS` (and therefore the heartbeat's
-`TTL//3` cadence) does not need a larger grace — the check is on pid liveness,
-not tick recency (argued above) — but a machine with an unusually slow worker
-restart could exceed 180 s.
+A machine that has raised `ISSUE_LOCK_TTL_SECONDS` (and therefore the
+heartbeat's `TTL//3` cadence) does not need a larger grace: **while the renewer
+pid resolves alive**, the branch returns `True` without ever consulting the
+clock, so cadence is irrelevant. The narrower true statement is the one that
+binds — **once the renewer pid resolves dead, `renewed_at` recency is the
+signal**, and `renewed_at` is refreshed by every renewer including the five
+ephemeral ones. What could still exceed 180 s is an unusually slow worker
+restart.
 
 **Mitigation.** The constant is env-overridable
 (`ISSUE_LOCK_RENEWER_GRACE_SECONDS`) and explicitly marked provisional/tunable
@@ -829,10 +892,55 @@ steals.
 
 ### Risk 4: Redis payload growth / forward compatibility
 
-Three new keys on a JSON string value. Negligible size; and an older process
-reading a newer payload simply ignores unknown keys (the predicate reads by
-`.get`, the renewal branch spreads `{**payload}`), so a mixed-version machine is
-safe in both directions.
+Two new keys on a JSON string value (`renewer_pid`, `renewer_create_time`).
+Negligible size; and an older process reading a newer payload simply ignores
+unknown keys (the predicate reads by `.get`, the renewal branch spreads
+`{**payload}`), so a mixed-version machine is safe in both directions. The
+shape-(a) clear removes keys rather than adding them, which an older reader
+also tolerates — it is the pre-#2648 payload shape exactly.
+
+### Risk 5: Shape (a)'s residual — a heartbeat that dies without running its exit path
+
+Clearing the `renewer_*` group at the two non-releasing deadline exits does
+nothing for a heartbeat killed without executing either return: SIGKILL, OOM,
+an unhandled exception outside the tick handler, power loss. Spike-5 row Ib
+measures that state as still reading dead past the grace, on a run that may be
+alive.
+
+**Disposition: accepted and documented, not closed.** The size of the residual
+is the size of the conjunction it needs — the heartbeat dies without either
+non-releasing return and without the supervisor-death release; *and* that death
+spares the run; *and* the run then goes ≥180 s with zero `sdlc-tool` lock
+writes. The middle condition is the narrow one and it is narrow in the helpful
+direction: the heartbeat is spawned `start_new_session=True`, so it survives a
+kill of the supervisor's process tree, and the deaths that do take it out are
+overwhelmingly machine-scoped (reboot, sleep, power loss, an operator kill
+sweep) — every one of which kills the run too, making the DEAD verdict
+**correct** and identical to the #2648 incident this plan fixes. The residual is
+the strict subset where something kills the detached heartbeat *alone*. In
+worker mode it does not exist at all: `_maybe_launch_lease_heartbeat` is skipped
+under `VALOR_WORKER_MODE`, the durable renewer is the worker itself, and if the
+worker dies the run dies with it. Backstops are unchanged: the 1800 s lease TTL,
+#2784's release where the heartbeat lives to perform it, and the fact that any
+single `sdlc-tool` write resets the grace clock.
+
+The trade this risk records is the one the plan is making deliberately: a
+*systematic* false-dead generator (a deadline exit, which fires on every lane
+outliving 90 minutes) is exchanged for an *anomaly-conditioned* one.
+
+### Risk 6: A future caller reaches the renewal path without touching a watched file
+
+The grep anti-criterion watches four ephemeral-renewer files, but
+renewal-adjacent call sites already exist outside that set
+(`tools/sdlc_session_release.py:92`, `tools/merge_predicate.py:656`,
+`agent/supervised_run.py:256`). A new caller could therefore stamp a durable
+identity from an ephemeral process while the anti-criterion stays green — which
+is Risk 2 arriving through a door the grep does not watch.
+
+**Mitigation.** The `_DURABLE_RENEWER_MODULES` allowlist inside the renewal path
+(Task 2) is the runtime enforcement; the grep row is the cheap build-time
+signal. Directly tested by calling the renewal path from a disallowed module and
+asserting no `renewer_*` keys are written.
 
 ## Race Conditions
 
@@ -862,6 +970,19 @@ Covered by the grace window (spike-2 row G). The new worker re-stamps within one
 The OS reassigns the dead renewer's pid to an unrelated process, which would read
 alive. Closed by carrying `renewer_create_time` and applying the same `1e-3`
 create_time comparison the existing pid path uses.
+
+### Race 5: The deadline-exit clear lands after a successor has taken the lease
+
+The retiring heartbeat's final `renewer_*` clear could otherwise overwrite a
+payload that now belongs to a *different*, live run — stripping that run's
+durable renewer identity and handing it the full 1200 s blind window.
+
+Closed by making the clear compare-and-set: it reuses
+`_RENEW_IF_VALUE_MATCHES_LUA` (`models/session_lifecycle.py:1301`), which writes
+only if the stored value is byte-identical to the one read. A successor's
+payload never matches, so the clear no-ops. This is the same reason #2714 made
+the renew path a CAS, and the same reason the supervisor-death release at
+`tools/sdlc_lease_heartbeat.py:379-381` is a compare-and-delete.
 
 ## No-Gos (Out of Scope)
 
@@ -906,9 +1027,11 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-issue-ownership-lock.md`: add `renewer_pid` /
-      `renewer_create_time` / `renewer_machine_id` to the payload example
-      (around `:79`) and its field description (`:82`); rewrite the "Renewal
+- [ ] Update `docs/features/sdlc-issue-ownership-lock.md`: add `renewer_pid` and
+      `renewer_create_time` — **exactly two keys, no `renewer_machine_id`** — to
+      the payload example (around `:79`) and its field description (`:82`),
+      noting that the group is written only by a durable renewer and cleared
+      when one retires on its own deadline; rewrite the "Renewal
       freshness short-circuit" bullet (`:215`) and the "Renewal freshness, not
       pid liveness" section (`:221-249`) to describe freshness as *corroborating
       when a durable renewer identity is present, conclusive otherwise*;
@@ -921,7 +1044,21 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
 - [ ] Update `.claude/skills/sdlc/SKILL.md` (the ISSUE_LOCKED paragraph around
       `:202`) so the `orphaned_lock` contract matches: a dead durable renewer is
       now reported orphaned within the grace window rather than after the full
-      freshness window.
+      freshness window. **Name `ISSUE_LOCK_RENEWER_GRACE_SECONDS` explicitly** —
+      the Verification row greps for it, and a checkbox that only asks for
+      reworded prose would leave that row unsatisfiable (NIT 2).
+- [ ] Update `docs/features/config-timeout-catalog.md` (the `ISSUE_LOCK_*`
+      paragraph at `:82-92`): add `ISSUE_LOCK_RENEWER_GRACE_SECONDS` beside
+      `ISSUE_LOCK_TTL_SECONDS` with the same "env var, not `TIMEOUTS__*`"
+      caveat, and record that it is deliberately **TTL-independent** and should
+      be lowered by hand if an operator lowers the TTL. Add the
+      currently-uncatalogued `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` in the same
+      pass, since the constant-placement argument in **Technical Approach**
+      rests on these three being discoverable as one family (NIT 3).
+- [ ] Update `tools/sdlc_lease_heartbeat.py`'s deadline-exit comments (`:351-365`)
+      to record that the exit now clears the `renewer_*` group, and why: the
+      exits' existing prose already says failing to resolve a supervisor is not
+      proof of death, and the clear is that judgement applied to the payload.
 - [ ] Update `tools/sdlc_lease_heartbeat.py`'s module docstring (`:33-42`),
       which currently asserts the payload pid "is dead before this detached
       heartbeat's first tick" — still true of `pid`, now false of
@@ -948,13 +1085,28 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
    evidence, not two independent checks; a build that produces only one of them
    has not demonstrated red.
 5. `tools/sdlc_lease_heartbeat.py` and `agent/session_executor.py` are the ONLY
-   call sites passing `stamp_renewer_identity=True` (anti-criterion).
+   call sites passing `stamp_renewer_identity=True` (anti-criterion), **and**
+   the runtime `_DURABLE_RENEWER_MODULES` allowlist drops the stamp for any
+   other calling module — proved by calling the renewal path from a disallowed
+   module and asserting no `renewer_*` keys appear (Risk 6).
 6. `ISSUE_LOCK_RENEWER_GRACE_SECONDS` is a named, env-overridable, GRAIN OF
-   SALT-annotated module constant beside its two siblings.
+   SALT-annotated module constant beside its two siblings, and is catalogued in
+   `docs/features/config-timeout-catalog.md`.
 7. `--kill-orphans` still exempts a live-but-quiet `sdlc-local-{N}` anchor whose
    heartbeat is alive (explicit test at the `_iter_orphan_sessions` layer, not
    only at the predicate layer).
-8. Docs listed above updated; `ruff check` and `ruff format --check` clean.
+8. **Shape (a) holds (the BLOCKER 3 criterion).** Both non-releasing deadline
+   exits in `tools/sdlc_lease_heartbeat.py` clear the `renewer_*` group via the
+   CAS path, and a payload so cleared reads `_lock_owner_is_live is True` at
+   800 s of quiet — byte-identical to today's verdict (spike-5 row Ia). A build
+   that ships the tightening **without** this clear satisfies criteria 1-4 and
+   is still wrong; this criterion is what separates them.
+9. **The reflection layer is proved, not inferred (the BLOCKER 1 criterion).**
+   `reflections/utilities.py::_lock_says_live` returns `False` for a
+   dead-renewer-past-grace payload and `True` for live-renewer, inside-grace,
+   no-identity, and cross-machine payloads. Tested against the real predicate
+   with `_get_redis` patched, mirroring SC7's consumer-layer posture.
+10. Docs listed above updated; `ruff check` and `ruff format --check` clean.
 
 ## Team Orchestration
 
@@ -1030,23 +1182,76 @@ Now the work:
   OF SALT comment recording the 180 s sizing argument (three worker ticks; below
   the 210 s incident-observation age).
 - Extend `_healed_renewal_payload(payload, target_repo, *, stamp_renewer_identity=False)`
-  to write `renewer_pid` (`os.getpid()`), `renewer_create_time`
-  (`_current_process_create_time()`), and `renewer_machine_id`
-  (`_local_machine_id()`) when the flag is set. Write all three or none: a
-  `None` create_time must leave the whole group unwritten (partial identity is
-  no identity).
+  to write **exactly two** keys when the flag is set: `renewer_pid`
+  (`os.getpid()`) and `renewer_create_time` (`_current_process_create_time()`).
+
+  **Do NOT write `renewer_machine_id`.** It is redundant — renewal already
+  requires a `run_id` match (`:1289` CAS, `:1369` default) and run_ids are
+  minted on exactly one machine, so the renewer is always on the owner's
+  machine, whose `machine_id` the payload already carries. And it is unsafe:
+  `_local_machine_id()` returns `""`, not `None`, when unresolvable
+  (`:924-936`), so on a host that cannot identify itself a naive equality gate
+  would read `"" == ""` as *same machine* — a false-dead on exactly the
+  indeterminate evidence `_payload_from_same_machine` is careful to reject.
+
+  The write rule is therefore **both or neither**: stamp only when
+  `_current_process_create_time()` is not `None`, mirroring
+  `_resolved_supervisor`'s "a pid without a create_time is no identity" rule.
+- **Add the runtime durable-renewer allowlist (Risk 6).** A module-level
+  `_DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat",
+  "agent.session_executor"}`, checked inside the renewal path against the
+  calling module's `__name__`. A disallowed caller passing the flag gets the
+  stamp **silently dropped plus one `logger.warning`** — never an exception,
+  because nothing on this path may be allowed to break lock acquisition. The
+  four-file grep anti-criterion is necessary but not sufficient: renewal-adjacent
+  call sites already exist outside the watched set
+  (`tools/sdlc_session_release.py:92`, `tools/merge_predicate.py:656`,
+  `agent/supervised_run.py:256`), so a future caller could stamp from an
+  ephemeral process while the grep stays green. The grep is the build-time
+  signal; this allowlist is what holds at runtime.
 - Add keyword-only `stamp_renewer_identity: bool = False` to `touch_issue_lock`
   and plumb it to BOTH renewal branches (`:1296` renew_only CAS, `:1378`
-  default).
+  default). Put the "why only two callers" rationale in the `touch_issue_lock`
+  docstring, which the anti-criterion row does not grep.
 
 ### 3. Tighten `_lock_owner_is_live`
 
 - Replace the bare short-circuit at `:1033` with the branch specified in
   **Solution → Flow**. Keep every line below the fall-through untouched.
-- Reuse `_payload_from_same_machine`-equivalent logic against
-  `renewer_machine_id`, and the existing `1e-3` create_time tolerance.
-- Wrap the renewer psutil call so any exception reads LIVE, matching the
-  existing handler's posture; log at debug naming the dead renewer pid.
+- **Gate on the existing `_payload_from_same_machine(payload)`** (`:939-959`),
+  not on any renewer-specific machine field. That helper already carries both
+  the truthiness guard at `:957` (`if payload_machine_id and local_machine_id:`)
+  and the legacy `hostname` fallback, neither of which a `renewer_machine_id`
+  group would have. The gate reads:
+
+  ```python
+  if renewer_pid and renewer_create_time is not None and _payload_from_same_machine(payload):
+  ```
+
+  Use the existing `1e-3` create_time tolerance for the recycled-pid comparison.
+- **The new branch does its own function-body import of the pid helper, and must
+  NOT hoist it to module scope.** Write
+  `from agent.session_health import _psutil_process_for_pid` *inside* the new
+  branch's `try`, exactly mirroring the existing lazy import at `:1046`. The new
+  branch sits at `:1033`, **above** that import, so it cannot rely on it — but
+  satisfying that by adding a module-scope import in
+  `models/session_lifecycle.py` would silently invalidate Task 1's
+  PATCH-LOCATION TRAP: the module-level name would come into existence,
+  `patch("models.session_lifecycle._psutil_process_for_pid")` would stop raising
+  `AttributeError`, and every pre-existing test at
+  `tests/unit/test_session_lifecycle.py:564-567` relies on
+  `agent.session_health` being the only working target. Task 1 and Task 3 must
+  not be allowed to undermine each other here.
+- **The branch needs its OWN `try/except Exception -> True`** — it does not and
+  cannot reuse the handler at `:1046-1063`, which lives below the short-circuit
+  and behind guards a renewer-only payload need not satisfy. Structure it so
+  `except Exception: return True` is reachable before any `return False` is, and
+  do NOT move the new branch inside the `try:` at `:1046`. Log at debug naming
+  the dead renewer pid.
+- Read the grace clock as `time.time() - float(payload["renewed_at"])`. Because
+  the branch is only reached when `_lock_renewal_is_fresh(payload) is True`,
+  `renewed_at` is guaranteed present and float-parseable: no second `try/except`
+  for the parse, and do not re-derive it through a helper that can return `None`.
 - Run the new test class: the previously-red case must now be green.
 
 ### 4. Wire the two durable renewers
@@ -1064,23 +1269,63 @@ Now the work:
   without recording a durable renewer identity (see #2648)" — and put the
   rationale in the `touch_issue_lock` docstring, which the row does not grep.
 
-### 5. Prove the reaper is unharmed
+### 5. Clear the renewer identity at the heartbeat's non-releasing exits (shape (a))
 
-- Add a test at the `tools/sdlc_session_ensure.py::_iter_orphan_sessions` layer:
-  an `sdlc-local-{N}` row with `last_heartbeat_at = None` whose lock payload
+**This task is the fix for BLOCKER 3 and is not optional. Without it the
+tightening is strictly worse than the bug it fixes** — spike-5 rows I/I' measure
+a live run being reaped within 180 s, mid-stage, where today it merely "loses at
+most one TTL window".
+
+- Add keyword-only `drop_renewer_identity: bool = False` to `touch_issue_lock`.
+  When set, it performs a same-owner renewal writing a payload with the
+  `renewer_pid` / `renewer_create_time` group **removed**.
+- It MUST go through the compare-and-set path
+  (`_RENEW_IF_VALUE_MATCHES_LUA`, `models/session_lifecycle.py:1301`) so a
+  successor that already took the lease is untouched (Race 5).
+- Call it at BOTH non-releasing deadline exits in `tools/sdlc_lease_heartbeat.py`:
+  `EXIT_UNSUPERVISED_MAX_LIFETIME` (`:360`) and `EXIT_MAX_LIFETIME` (`:365`).
+  Do NOT add it to `EXIT_SUPERVISOR_DEAD` (`:392`), which already releases the
+  lease outright (#2784) and has nothing to clear.
+- It MUST be best-effort and exception-swallowed, matching the release at
+  `:377-390`: a failure to clear can never block the exit. The lease TTL is the
+  backstop.
+- **Do not "fix" this by weakening the predicate instead.** Shape (b) — an
+  idle-time conjunct at the reaper's payload-present path — was measured and
+  rejected in spike-5: it protects only one of three consumers, leaves the
+  autonomous reflection lane fully exposed, and re-imports the `updated_at`
+  liveness mirage that #2305 removed from that path on purpose.
+- Test: both exits perform the clear; a raising clear does not block the exit;
+  and a cleared payload reads `_lock_owner_is_live is True` at 800 s of quiet
+  (spike-5 row Ia — the verdict must be byte-identical to today's).
+
+### 6. Prove the other two consumers are unharmed
+
+- **Reaper (SC7).** Add a test at the
+  `tools/sdlc_session_ensure.py::_iter_orphan_sessions` layer: an
+  `sdlc-local-{N}` row with `last_heartbeat_at = None` whose lock payload
   carries a fresh stamp and a LIVE `renewer_pid` must NOT be yielded; the same
-  row with a dead `renewer_pid` past the grace MUST be yielded.
+  row with a dead `renewer_pid` past the grace MUST be yielded. Extend
+  `tests/unit/test_sdlc_session_ensure.py::TestKillOrphans` (`:1211`) rather
+  than adding a parallel class, and verify its existing rows stay green.
+- **Reflection layer (SC9, BLOCKER 1).** Add
+  `tests/unit/reflections/test_utilities_lock_says_live.py`: patch
+  `reflections.utilities._get_redis` to return each payload shape and assert
+  `_lock_says_live(N)` is `False` only for dead-renewer-past-grace, and `True`
+  for live-renewer, inside-grace, no-identity, and cross-machine. This exercises
+  the real predicate; the existing `test_sdlc_upvote_lanes.py` stubs
+  `_lock_says_live` wholesale and so proves nothing about the payload→verdict
+  path.
 - Run the full pre-existing lock-liveness set unmodified
   (`scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py -q`) and
   confirm all green.
 
-### 6. Documentation
+### 7. Documentation
 
 - Execute every checkbox in **## Documentation**.
 
-### 7. Final Validation
+### 8. Final Validation
 
-- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/test_sdlc_session_ensure.py -q`
+- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_lease_heartbeat.py tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q`
 - `python -m ruff check .` and `python -m ruff format --check .`
 - Run every row in **## Verification**.
 - Paste the full demonstrated-red PAIR into the PR body: half (a) red on `main`
@@ -1108,45 +1353,64 @@ recursive root. That is deliberate and must stay that way:
 - The two "opts in" rows above are positive checks over the two durable
   renewers only, so they cannot collide with the anti-criterion's file set.
 
+**The same trap applies to the `renewer_machine_id` row, and it is easier to
+fall into.** That row greps source and docs roots recursively for a token this
+plan spends two paragraphs arguing *against*. A builder who records the decision
+as a code comment — `# deliberately no renewer_machine_id, see #2648` — turns a
+correct build red. Paraphrase in code and docs (e.g. "the renewer is always on
+the owner's machine, so no separate machine field is recorded"); the reasoning
+belongs in this plan and the PR body, neither of which the row greps.
+`docs/plans/` is deliberately absent from the row's root list for that reason.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Lock-liveness tests pass | `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py -q` | exit code 0 |
 | Orphan-reaper tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check models/ tools/ agent/ tests/` | exit code 0 |
-| Format clean | `python -m ruff format --check models/ tools/ agent/ tests/` | exit code 0 |
+| Heartbeat tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_lease_heartbeat.py -q` | exit code 0 |
+| Reflection-layer tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check models/ tools/ agent/ tests/ reflections/` | exit code 0 |
+| Format clean | `python -m ruff format --check models/ tools/ agent/ tests/ reflections/` | exit code 0 |
 | Grace constant is named and env-overridable | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS = int(os.environ.get("ISSUE_LOCK_RENEWER_GRACE_SECONDS"' models/session_lifecycle.py` | output contains 1 |
-| Grace constant marked provisional | `grep -c 'GRAIN OF SALT' models/session_lifecycle.py` | output > 1 |
+| Grace constant marked provisional | `grep -c 'GRAIN OF SALT' models/session_lifecycle.py` | output contains 4 (exactly one more than the 3 on `main`; a bare `> 1` already passes today and cannot detect a constant shipped without its annotation) |
 | Renewer identity reaches the payload | `grep -c 'renewer_pid' models/session_lifecycle.py` | output > 1 |
+| **No `renewer_machine_id` anywhere** (BLOCKER 2) | `grep -rl 'renewer_machine_id' models/ tools/ agent/ tests/ reflections/ docs/features/` | no output |
 | Both durable renewers opt in | `grep -rl 'stamp_renewer_identity=True' tools/ agent/ \| sort` | output contains agent/session_executor.py |
 | Heartbeat opts in | `grep -c 'stamp_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 1 |
-| **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -c 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | match count == 0 |
+| Runtime allowlist exists (Risk 6) | `grep -c '_DURABLE_RENEWER_MODULES' models/session_lifecycle.py` | output > 1 |
+| Allowlist is enforced, not just declared | `grep -c 'def test_disallowed_module_stamp_is_dropped' tests/unit/test_session_lifecycle.py` | output contains 1 |
+| **Shape (a):** the clear exists and is CAS | `grep -c 'drop_renewer_identity' models/session_lifecycle.py` | output > 1 |
+| **Shape (a):** both non-releasing exits clear | `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 2 |
+| **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -l 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | **no output** (`-l` prints only filenames that match, so a clean build prints nothing; `-c` prints a `file:0` line per file and invites a builder to read the exit code as failure) |
 | **Anti-criterion:** the #2620 short-circuit still exists for identity-less payloads | `grep -c 'test_peek_dead_pid_with_fresh_renewal_is_not_orphaned' tests/unit/test_session_lifecycle.py` | output contains 1 |
 | Demonstrated-red test exists | `grep -c 'class TestRenewerIdentityLiveness' tests/unit/test_session_lifecycle.py` | output contains 1 |
+| Reaper-layer test exists (SC7) | `grep -c 'renewer_pid' tests/unit/test_sdlc_session_ensure.py` | output > 1 |
 | Feature doc updated | `grep -c 'renewer_pid' docs/features/sdlc-issue-ownership-lock.md` | output > 1 |
 | SDLC skill contract updated | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS' .claude/skills/sdlc/SKILL.md` | output contains 1 |
+| Timeout catalog updated (NIT 3) | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS' docs/features/config-timeout-catalog.md` | output contains 1 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_session_lifecycle.py` | exit code 1 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; History & Consistency | Blast radius is enumerated as two consumers but there are three. Data Flow and Architectural Impact assert `_lock_owner_is_live` is 'shared by the peek path and the orphan reaper'; `reflections/utilities.py::_lock_says_live` (:277-302) is a third wrapper, read by `reflections/sdlc_upvote_lanes.py:529,573` (gate 3) and `reflections/sdlc_progress.py:571,942,981`. At sdlc_upvote_lanes.py:530 only a `False` verdict lets the reflection proceed to create_session, so a false-dead starts an autonomous rival SDLC lane on a live run (the #1915 shape, unattended). Risk 1, Success Criteria and Test Impact never mention this layer. **Suggestion:** Correct Data Flow + Architectural Impact to list all three consumers; extend the Risk 1 per-consumer argument to the reflection gate; add a Success Criterion and a test at the `_lock_says_live` layer mirroring SC7. | pending | `_lock_says_live` returns `bool \| None`; callers fail closed on `None` but ACT on `False`. Every new early-return in the tightened branch must be `True` (fail-toward-live); only the full conjunction (renewer identity complete AND same-machine AND pid dead/recycled AND renewed_at age > GRACE) may return `False`. Test: patch `reflections.utilities._get_redis` to return a dead-renewer-past-grace payload and assert `_lock_says_live(N) is False`; live-renewer and inside-grace payloads must return `True`. |
-| BLOCKER | Risk & Robustness; Scope & Value | `renewer_machine_id` is both redundant and unsafe. `_healed_renewal_payload`'s own docstring (models/session_lifecycle.py:1112-1118) states renewal requires a run_id match and run_ids are minted on exactly one machine, so the renewer is always on the owner's machine; both renewal branches enforce that match (:1289 CAS, :1369 default). Meanwhile `_local_machine_id()` returns `""` (not None) when unresolvable (:924-936), and the plan's 'write all three or none' rule only covers a None create_time -- so a naive equality gate makes `"" == ""` read as same-machine on a host that cannot identify itself, a false-dead on exactly the indeterminate evidence `_payload_from_same_machine` is careful to reject. Two critics flagged the same component, so this is elevated. **Suggestion:** Drop `renewer_machine_id`; stamp only `renewer_pid` + `renewer_create_time` and gate the tightened branch on the existing `_payload_from_same_machine(payload)`. If the key is kept, treat a falsy machine id on either side as incomplete identity and do not write the group at all. | pending | Gate becomes `if renewer_pid and renewer_create_time is not None and _payload_from_same_machine(payload):`. That helper (:939-959) already falls back to `payload['hostname'] == socket.gethostname()`, which the renewer group has no equivalent for. If kept, mirror the truthiness guard at :957 (`if payload_machine_id and local_machine_id:`), never a bare `==`, and gate the write as `if stamp_renewer_identity and (ct := _current_process_create_time()) is not None and (mid := _local_machine_id()):`. |
-| BLOCKER | Risk & Robustness (round 2) | The composition claim has a counterexample: a live run whose heartbeat exited WITHOUT releasing. The plan asserts 'There is no payload shape reachable by a live-but-quiet local run that the tightened branch turns dead', but tools/sdlc_lease_heartbeat.py has two deadline exits that deliberately do not release -- `EXIT_UNSUPERVISED_MAX_LIFETIME` at :351-365 (UNSUPERVISED_MAX_LIFETIME_SECONDS, 90 min, :156; its comment reads 'Deliberately NO release -- failing to resolve a supervisor is not positive proof the run is dead') and `EXIT_MAX_LIFETIME` at :365 (MAX_LIFETIME_SECONDS, 4 h, :146). Only EXIT_SUPERVISOR_DEAD (:372-397) releases, and only on confirmed supervisor death (#2784). So: run alive, heartbeat ran (payload therefore DOES carry renewer_pid), heartbeat exits at its bound, supervisor blocked inside a claude -p stage issuing zero sdlc-tool writes (docs/features/config-timeout-catalog.md:85-87) -- renewed_at ages with a dead renewer_pid, complete identity, same machine, and at 180 s the tightened branch returns False. tools/sdlc_session_ensure.py:1128 is `if not owner_live: yield s` with NO idle-time gate when a payload is present, so --kill-orphans reaps the live sdlc-local-{N} anchor immediately, well inside a 6-25 min stage (today it reads live for the full 1200 s window). #2703 defect 1 is re-opened by the composition, not preserved by it. Spike-2's eight rows contain no 'renewer exited normally, run still alive' entry -- rows B/C/G all presuppose the renewer died because the run died or is restarting. **Suggestion:** Add the missing spike-2 row and close it: either treat a heartbeat's non-releasing deadline exit as a payload event (clear the renewer_* group before exiting at :359 and :365, so the payload falls back to the untouched #2620 short-circuit), or gate the tightened branch so it cannot fire against a session the reaper would reap without an idle-time check. Re-run the Risk 1 argument against this shape. | pending | Clearing the group on exit is the cheaper fix and needs no predicate change: at both non-releasing returns, perform one final `touch_issue_lock(issue_number, run_id, renew_only=True)`-shaped write whose payload omits renewer_pid / renewer_create_time / renewer_machine_id. It must be compare-and-set (reuse the _RENEW_IF_VALUE_MATCHES_LUA path at models/session_lifecycle.py:1300) so a successor that already took the lease is untouched, and it must be best-effort/exception-swallowed like the release at :377-390 -- a failure to clear must never block the exit. |
-| CONCERN | Risk & Robustness | The grace clock's subject is misstated. Technical Approach argues 'the check is on the renewer's pid, not on tick recency', but Solution -> Flow makes tick recency the second half of the dead branch (`renewed_at age > GRACE -> False`). The clock runs on `renewed_at` age -- re-stamped unconditionally by every same-owner renewal including all five ephemeral CLI renewers -- not on how long the renewer pid has been dead. A builder could reasonably implement the other reading, which needs state the payload does not carry and would change every spike-2 row. **Suggestion:** State the clock explicitly in Solution -> Flow ('age of `renewed_at`, not duration of renewer death') and narrow the cadence argument to what holds: cadence is irrelevant while the renewer pid resolves alive; once it resolves dead, `renewed_at` recency is the binding signal. | pending | The condition is `time.time() - float(payload['renewed_at']) > ISSUE_LOCK_RENEWER_GRACE_SECONDS`, reusing the parse `_lock_renewal_is_fresh` (:962-980) already did. Because the branch is only reached when `_lock_renewal_is_fresh(payload) is True`, `renewed_at` is guaranteed present and float-parseable -- no second try/except needed, and do not re-derive it from a helper that can return None. |
-| CONCERN | History & Consistency | Failure Path Test Strategy contradicts Task 3 on exception handling. The former says a psutil raise in the renewer-pid check 'must be caught by the existing blanket handler'; Task 3 says to wrap the new call so any exception reads LIVE. Task 3 is correct: the existing handler is inside the `try:` at models/session_lifecycle.py:1046-1063, BELOW the short-circuit at :1033 where the new branch goes. A builder following the Failure Path wording adds no handler, and the exception escapes `_lock_owner_is_live`. The reaper catches it (tools/sdlc_session_ensure.py:1120-1127) but the peek path at :1249 does not, turning it into an `acquired=False` fail-closed on a lease the caller owns. **Suggestion:** Correct the Failure Path Test Strategy bullet to require the new branch's OWN `try/except Exception -> True` (matching the posture at :1055-1063, not reusing that handler); keep Task 3's wording as the authority. | pending | Structure the branch as `try: proc = _psutil_process_for_pid(renewer_pid) ... except Exception: return True` before any `return False` is reachable. Do NOT move the new branch inside the `try:` at :1046 -- that block is entered only after the pid / machine_id / create_time guards at :1035-1045, which a renewer-only payload need not satisfy. |
-| CONCERN | History & Consistency (round 2) | Task 1's PATCH-LOCATION TRAP is correct today but the plan does not protect it against its own Task 3. The trap tells the builder that `patch("agent.session_health._psutil_process_for_pid")` is the only working target because _lock_owner_is_live does a lazy function-body import at models/session_lifecycle.py:1046. The new branch goes in at :1033, ABOVE that import, so it needs its own access to the helper. If the builder satisfies it by hoisting the import to module scope in models/session_lifecycle.py, the module-level name comes into existence and the plan's own patch guidance silently stops holding for the new TestRenewerIdentityLiveness class. **Suggestion:** Task 3 must explicitly require the new branch to use its own function-body import of _psutil_process_for_pid, matching the existing lazy import, and must forbid hoisting it to module scope. | pending | Write it as `from agent.session_health import _psutil_process_for_pid` INSIDE the new branch's try block, exactly mirroring models/session_lifecycle.py:1046. Do not add a module-scope import in models/session_lifecycle.py: `patch("models.session_lifecycle._psutil_process_for_pid")` currently raises AttributeError and every pre-existing test (tests/unit/test_session_lifecycle.py:564-567) relies on the agent.session_health target being the only one. |
-| NIT | Scope & Value | Three statements about the reaper-layer test disagree: Task 5 mandates ADDING two tests at `_iter_orphan_sessions`; Test Impact lists tests/unit/test_sdlc_session_ensure.py only as 'VERIFY UNCHANGED ... if present'; and Verification has no row asserting the new reaper test, unlike SC1/5/6/8. The 'if present' hedge is stale -- `TestKillOrphans` is at tests/unit/test_sdlc_session_ensure.py:1212 and `_iter_orphan_sessions` at tools/sdlc_session_ensure.py:1059. **Suggestion:** Change the Test Impact row to ADD (plus verify the existing TestKillOrphans rows at :1212 unchanged) and add a Verification grep row for the new reaper test's name so SC7 is mechanically checkable. | pending | n/a (NIT) |
-| NIT | Scope & Value | Two Verification rows are ineffective. `grep -c 'GRAIN OF SALT' models/session_lifecycle.py \| output > 1` already passes on main (3 occurrences today), so it cannot detect a new constant shipped without its annotation. Separately the row greps .claude/skills/sdlc/SKILL.md for `ISSUE_LOCK_RENEWER_GRACE_SECONDS`, but the matching Documentation checkbox only asks for the orphaned_lock contract wording and never says to name the constant. **Suggestion:** Anchor the provisional row to the new constant (assert the count rises to 4, or grep the constant name inside its GRAIN OF SALT block) and add 'name ISSUE_LOCK_RENEWER_GRACE_SECONDS' to the SKILL.md documentation checkbox. | pending | n/a (NIT) |
-| NIT | History & Consistency | The constant-placement argument aims to avoid a 'split, undiscoverable knob', but docs/features/config-timeout-catalog.md:82-92 already catalogs ISSUE_LOCK_TTL_SECONDS with the same 'not TIMEOUTS__*' caveat, and the Documentation section does not add the new sibling there -- producing the discoverability gap the argument claims to prevent. **Suggestion:** Add a Documentation checkbox for docs/features/config-timeout-catalog.md covering ISSUE_LOCK_RENEWER_GRACE_SECONDS (and opportunistically the currently-uncatalogued ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS), with a matching Verification grep row. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness; History & Consistency | Blast radius is enumerated as two consumers but there are three. Data Flow and Architectural Impact assert `_lock_owner_is_live` is 'shared by the peek path and the orphan reaper'; `reflections/utilities.py::_lock_says_live` (:277-302) is a third wrapper, read by `reflections/sdlc_upvote_lanes.py:529,573` (gate 3) and `reflections/sdlc_progress.py:571,942,981`. At sdlc_upvote_lanes.py:530 only a `False` verdict lets the reflection proceed to create_session, so a false-dead starts an autonomous rival SDLC lane on a live run (the #1915 shape, unattended). Risk 1, Success Criteria and Test Impact never mention this layer. **Suggestion:** Correct Data Flow + Architectural Impact to list all three consumers; extend the Risk 1 per-consumer argument to the reflection gate; add a Success Criterion and a test at the `_lock_says_live` layer mirroring SC7. | **Data Flow** (three-consumer table, worst-first); **Risk 1** per-consumer argument; **Failure Path Test Strategy → Reflection-Layer Coverage**; **SC9**; Task 6; new `tests/unit/reflections/test_utilities_lock_says_live.py` | `_lock_says_live` returns `bool \| None`; callers fail closed on `None` but ACT on `False`. Every new early-return in the tightened branch must be `True` (fail-toward-live); only the full conjunction (renewer identity complete AND same-machine AND pid dead/recycled AND renewed_at age > GRACE) may return `False`. Test: patch `reflections.utilities._get_redis` to return a dead-renewer-past-grace payload and assert `_lock_says_live(N) is False`; live-renewer and inside-grace payloads must return `True`. |
+| BLOCKER | Risk & Robustness; Scope & Value | `renewer_machine_id` is both redundant and unsafe. `_healed_renewal_payload`'s own docstring (models/session_lifecycle.py:1112-1118) states renewal requires a run_id match and run_ids are minted on exactly one machine, so the renewer is always on the owner's machine; both renewal branches enforce that match (:1289 CAS, :1369 default). Meanwhile `_local_machine_id()` returns `""` (not None) when unresolvable (:924-936), and the plan's 'write all three or none' rule only covers a None create_time -- so a naive equality gate makes `"" == ""` read as same-machine on a host that cannot identify itself, a false-dead on exactly the indeterminate evidence `_payload_from_same_machine` is careful to reject. Two critics flagged the same component, so this is elevated. **Suggestion:** Drop `renewer_machine_id`; stamp only `renewer_pid` + `renewer_create_time` and gate the tightened branch on the existing `_payload_from_same_machine(payload)`. If the key is kept, treat a falsy machine id on either side as incomplete identity and do not write the group at all. | **Technical Approach → Why `renewer_machine_id` is dropped**; Task 2 (writes exactly two keys); Task 3 (gates on `_payload_from_same_machine`); Verification row `No renewer_machine_id anywhere` | Gate becomes `if renewer_pid and renewer_create_time is not None and _payload_from_same_machine(payload):`. That helper (:939-959) already falls back to `payload['hostname'] == socket.gethostname()`, which the renewer group has no equivalent for. If kept, mirror the truthiness guard at :957 (`if payload_machine_id and local_machine_id:`), never a bare `==`, and gate the write as `if stamp_renewer_identity and (ct := _current_process_create_time()) is not None and (mid := _local_machine_id()):`. |
+| BLOCKER | Risk & Robustness (round 2) | The composition claim has a counterexample: a live run whose heartbeat exited WITHOUT releasing. The plan asserts 'There is no payload shape reachable by a live-but-quiet local run that the tightened branch turns dead', but tools/sdlc_lease_heartbeat.py has two deadline exits that deliberately do not release -- `EXIT_UNSUPERVISED_MAX_LIFETIME` at :351-365 (UNSUPERVISED_MAX_LIFETIME_SECONDS, 90 min, :156; its comment reads 'Deliberately NO release -- failing to resolve a supervisor is not positive proof the run is dead') and `EXIT_MAX_LIFETIME` at :365 (MAX_LIFETIME_SECONDS, 4 h, :146). Only EXIT_SUPERVISOR_DEAD (:372-397) releases, and only on confirmed supervisor death (#2784). So: run alive, heartbeat ran (payload therefore DOES carry renewer_pid), heartbeat exits at its bound, supervisor blocked inside a claude -p stage issuing zero sdlc-tool writes (docs/features/config-timeout-catalog.md:85-87) -- renewed_at ages with a dead renewer_pid, complete identity, same machine, and at 180 s the tightened branch returns False. tools/sdlc_session_ensure.py:1128 is `if not owner_live: yield s` with NO idle-time gate when a payload is present, so --kill-orphans reaps the live sdlc-local-{N} anchor immediately, well inside a 6-25 min stage (today it reads live for the full 1200 s window). #2703 defect 1 is re-opened by the composition, not preserved by it. Spike-2's eight rows contain no 'renewer exited normally, run still alive' entry -- rows B/C/G all presuppose the renewer died because the run died or is restarting. **Suggestion:** Add the missing spike-2 row and close it: either treat a heartbeat's non-releasing deadline exit as a payload event (clear the renewer_* group before exiting at :359 and :365, so the payload falls back to the untouched #2620 short-circuit), or gate the tightened branch so it cannot fire against a session the reaper would reap without an idle-time check. Re-run the Risk 1 argument against this shape. | **spike-5** (row set + measured dispositions, shape (a) chosen over (b)/(c)); **Technical Approach → The hole in that argument**; **Key Elements 4**; **Task 5** (dedicated task); **Risk 5** (residual); **Race 5** (CAS); **SC8** | Clearing the group on exit is the cheaper fix and needs no predicate change: at both non-releasing returns, perform one final `touch_issue_lock(issue_number, run_id, renew_only=True)`-shaped write whose payload omits renewer_pid / renewer_create_time / renewer_machine_id. It must be compare-and-set (reuse the _RENEW_IF_VALUE_MATCHES_LUA path at models/session_lifecycle.py:1300) so a successor that already took the lease is untouched, and it must be best-effort/exception-swallowed like the release at :377-390 -- a failure to clear must never block the exit. |
+| CONCERN | Risk & Robustness | The grace clock's subject is misstated. Technical Approach argues 'the check is on the renewer's pid, not on tick recency', but Solution -> Flow makes tick recency the second half of the dead branch (`renewed_at age > GRACE -> False`). The clock runs on `renewed_at` age -- re-stamped unconditionally by every same-owner renewal including all five ephemeral CLI renewers -- not on how long the renewer pid has been dead. A builder could reasonably implement the other reading, which needs state the payload does not carry and would change every spike-2 row. **Suggestion:** State the clock explicitly in Solution -> Flow ('age of `renewed_at`, not duration of renewer death') and narrow the cadence argument to what holds: cadence is irrelevant while the renewer pid resolves alive; once it resolves dead, `renewed_at` recency is the binding signal. | **Solution → Flow → The grace clock's subject**; **Risk 3** (cadence claim narrowed); Task 3 bullet on the grace clock | The condition is `time.time() - float(payload['renewed_at']) > ISSUE_LOCK_RENEWER_GRACE_SECONDS`, reusing the parse `_lock_renewal_is_fresh` (:962-980) already did. Because the branch is only reached when `_lock_renewal_is_fresh(payload) is True`, `renewed_at` is guaranteed present and float-parseable -- no second try/except needed, and do not re-derive it from a helper that can return None. |
+| CONCERN | History & Consistency | Failure Path Test Strategy contradicts Task 3 on exception handling. The former says a psutil raise in the renewer-pid check 'must be caught by the existing blanket handler'; Task 3 says to wrap the new call so any exception reads LIVE. Task 3 is correct: the existing handler is inside the `try:` at models/session_lifecycle.py:1046-1063, BELOW the short-circuit at :1033 where the new branch goes. A builder following the Failure Path wording adds no handler, and the exception escapes `_lock_owner_is_live`. The reaper catches it (tools/sdlc_session_ensure.py:1120-1127) but the peek path at :1249 does not, turning it into an `acquired=False` fail-closed on a lease the caller owns. **Suggestion:** Correct the Failure Path Test Strategy bullet to require the new branch's OWN `try/except Exception -> True` (matching the posture at :1055-1063, not reusing that handler); keep Task 3's wording as the authority. | **Failure Path Test Strategy → Exception Handling Coverage** (rewritten: the branch needs its OWN handler); Task 3 | Structure the branch as `try: proc = _psutil_process_for_pid(renewer_pid) ... except Exception: return True` before any `return False` is reachable. Do NOT move the new branch inside the `try:` at :1046 -- that block is entered only after the pid / machine_id / create_time guards at :1035-1045, which a renewer-only payload need not satisfy. |
+| CONCERN | History & Consistency (round 2) | Task 1's PATCH-LOCATION TRAP is correct today but the plan does not protect it against its own Task 3. The trap tells the builder that `patch("agent.session_health._psutil_process_for_pid")` is the only working target because _lock_owner_is_live does a lazy function-body import at models/session_lifecycle.py:1046. The new branch goes in at :1033, ABOVE that import, so it needs its own access to the helper. If the builder satisfies it by hoisting the import to module scope in models/session_lifecycle.py, the module-level name comes into existence and the plan's own patch guidance silently stops holding for the new TestRenewerIdentityLiveness class. **Suggestion:** Task 3 must explicitly require the new branch to use its own function-body import of _psutil_process_for_pid, matching the existing lazy import, and must forbid hoisting it to module scope. | **Task 3** (function-body import required, module-scope hoist forbidden, with the reason it would invalidate Task 1) | Write it as `from agent.session_health import _psutil_process_for_pid` INSIDE the new branch's try block, exactly mirroring models/session_lifecycle.py:1046. Do not add a module-scope import in models/session_lifecycle.py: `patch("models.session_lifecycle._psutil_process_for_pid")` currently raises AttributeError and every pre-existing test (tests/unit/test_session_lifecycle.py:564-567) relies on the agent.session_health target being the only one. |
+| NIT | Scope & Value | Three statements about the reaper-layer test disagree: Task 5 mandates ADDING two tests at `_iter_orphan_sessions`; Test Impact lists tests/unit/test_sdlc_session_ensure.py only as 'VERIFY UNCHANGED ... if present'; and Verification has no row asserting the new reaper test, unlike SC1/5/6/8. The 'if present' hedge is stale -- `TestKillOrphans` is at tests/unit/test_sdlc_session_ensure.py:1212 and `_iter_orphan_sessions` at tools/sdlc_session_ensure.py:1059. **Suggestion:** Change the Test Impact row to ADD (plus verify the existing TestKillOrphans rows at :1212 unchanged) and add a Verification grep row for the new reaper test's name so SC7 is mechanically checkable. | **Test Impact** (ADD rows, `TestKillOrphans` at `:1211`); **Task 6**; Verification row `Reaper-layer test exists (SC7)` | n/a (NIT) |
+| NIT | Scope & Value | Two Verification rows are ineffective. `grep -c 'GRAIN OF SALT' models/session_lifecycle.py \| output > 1` already passes on main (3 occurrences today), so it cannot detect a new constant shipped without its annotation. Separately the row greps .claude/skills/sdlc/SKILL.md for `ISSUE_LOCK_RENEWER_GRACE_SECONDS`, but the matching Documentation checkbox only asks for the orphaned_lock contract wording and never says to name the constant. **Suggestion:** Anchor the provisional row to the new constant (assert the count rises to 4, or grep the constant name inside its GRAIN OF SALT block) and add 'name ISSUE_LOCK_RENEWER_GRACE_SECONDS' to the SKILL.md documentation checkbox. | **Verification**: GRAIN OF SALT row anchored to exactly 4; **Documentation**: SKILL.md checkbox now names the constant | n/a (NIT) |
+| NIT | History & Consistency | The constant-placement argument aims to avoid a 'split, undiscoverable knob', but docs/features/config-timeout-catalog.md:82-92 already catalogs ISSUE_LOCK_TTL_SECONDS with the same 'not TIMEOUTS__*' caveat, and the Documentation section does not add the new sibling there -- producing the discoverability gap the argument claims to prevent. **Suggestion:** Add a Documentation checkbox for docs/features/config-timeout-catalog.md covering ISSUE_LOCK_RENEWER_GRACE_SECONDS (and opportunistically the currently-uncatalogued ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS), with a matching Verification grep row. | **Documentation**: new `config-timeout-catalog.md` checkbox covering the grace constant and the uncatalogued freshness constant; matching Verification row | n/a (NIT) |
 
 ---
 
 ## Open Questions
 
 Both questions carry a decided default in the plan body, so neither blocks
-build; they are raised for the critique war room to adjudicate rather than
-left unresolved.
+build. Both survived two critique rounds without being challenged on their
+substance, so the defaults stand as decided; they are recorded here because the
+evidence behind them is thin (see the n=1 caveat), not because they are open.
 
 1. **Grace window default.** 180 s is derived from two constraints (three worker
    ticks below; the 210 s incident observation above). It is the largest value
