@@ -753,6 +753,16 @@ Net effect at the default TTL: the blind window for a dead durable renewer
 collapses from 1200 s to ≤180 s of quiet, and to ~0 s of *additional* exposure
 beyond what the grace deliberately buys.
 
+**Scope of that claim, stated precisely (round-4 CONCERN).** It holds while a
+durable renewer identity is on the payload. It does **not** hold after a
+heartbeat's non-releasing deadline exit: shape (a) clears the group there by
+design, so such a run reverts to the untouched #2620 behavior and its blind
+window is the full 1200 s freshness window again. That is the deliberate price
+of not reaping live runs (Risk 5), not an oversight — but the collapse is a
+property of stamped leases, not of every lease. Because Task 5's clear preserves
+`renewed_at` and the remaining TTL, the reverted window is the *same* one `main`
+would have had, not a refreshed one.
+
 **Constant placement — deviation from the `TimeoutSettings` default, argued.**
 `docs/features/config-timeout-catalog.md`'s promote-vs-name-locally criterion
 would nominally promote a session-lifecycle TTL to `settings.timeouts.*`. This
@@ -975,9 +985,20 @@ sweep) — every one of which kills the run too, making the DEAD verdict
 the strict subset where something kills the detached heartbeat *alone*. In
 worker mode it does not exist at all: `_maybe_launch_lease_heartbeat` is skipped
 under `VALOR_WORKER_MODE`, the durable renewer is the worker itself, and if the
-worker dies the run dies with it. Backstops are unchanged: the 1800 s lease TTL,
-#2784's release where the heartbeat lives to perform it, and the fact that any
-single `sdlc-tool` write resets the grace clock.
+worker dies the run dies with it.
+
+**Backstops are unchanged — but only because Task 5 makes the clear a pure
+key-removal** (round-4 CONCERN). They are the 1800 s lease TTL, #2784's release
+where the heartbeat lives to perform it, and the fact that any single
+`sdlc-tool` write resets the grace clock. That first backstop is only intact
+because the exit clear preserves the payload's existing `renewed_at` and the
+key's *remaining* TTL. Had it been implemented as an ordinary same-owner renewal
+— the obvious reading of "a CAS renewal that drops two keys" — it would have
+re-stamped `renewed_at` to now and reset the lease to a full 1800 s, handing a
+run that is genuinely dead at its deadline exit up to ~600 s of extra false-live
+*and* up to ~600 s of extra lease life versus `main`, on the exact path where
+the tightening has already been surrendered. The backstop claim is therefore
+load-bearing on Task 5's implementation detail, not free.
 
 The trade this risk records is the one the plan is making deliberately: a
 *systematic* false-dead generator (a deadline exit, which fires on every lane
@@ -1165,9 +1186,18 @@ No new `pyproject.toml [project.scripts]` entry, no bridge import.
       which currently asserts the payload pid "is dead before this detached
       heartbeat's first tick" — still true of `pid`, now false of
       `renewer_pid`, and the distinction is the whole point.
-- [ ] Inline: docstrings on `_healed_renewal_payload`, `_lock_owner_is_live`,
-      and the new constant must carry the #2648 rationale and the GRAIN OF SALT
-      note, matching the existing house style in that module.
+- [ ] Inline, and **scoped so it cannot fight the Verification table**
+      (round-4 CONCERN): the new constant's comment carries both the #2648
+      rationale and the literal `GRAIN OF SALT` marker, on a **single** comment
+      line, matching the existing shape at `models/session_lifecycle.py:842` and
+      `:855`. The docstrings on `_healed_renewal_payload` and
+      `_lock_owner_is_live` carry the #2648 rationale **in prose, WITHOUT the
+      literal marker.** `grep -c` counts matching *lines*, so the Verification
+      target of exactly 4 (3 on `main` plus one new) holds only if precisely one
+      new line contains the token; a builder who put the marker in all three
+      places would land on 6 and turn a faithful build red against its own
+      table. Do not "fix" that by relaxing the row back to `> 1` — that is the
+      ineffective form round 3 replaced.
 
 ## Success Criteria
 
@@ -1281,6 +1311,12 @@ Now the work:
     that out. Success Criterion 4's "unmodified pre-existing tests stay green"
     is the same obligation stated at suite level; this is the explicit
     per-case form of it.
+- Add `test_drop_renewer_identity_preserves_renewed_at` (round-4 CONCERN):
+  after a `drop_renewer_identity=True` write, the stored `renewed_at` must equal
+  its pre-clear value **exactly**, and the key's TTL must not have been reset to
+  `ISSUE_LOCK_TTL_SECONDS`. This is the case that catches the obvious-but-wrong
+  implementation of Task 5 — delegating the clear to `_healed_renewal_payload`,
+  whose `:1118` re-stamps `renewed_at` unconditionally.
 - Run the new class against `main` BEFORE touching source. The (a) case MUST
   fail; if every case passes on `main`, the test does not construct the
   stamp-then-die state and must be rewritten.
@@ -1369,8 +1405,16 @@ Now the work:
   cannot reuse the handler at `:1046-1063`, which lives below the short-circuit
   and behind guards a renewer-only payload need not satisfy. Structure it so
   `except Exception: return True` is reachable before any `return False` is, and
-  do NOT move the new branch inside the `try:` at `:1046`. Log at debug naming
-  the dead renewer pid.
+  do NOT move the new branch inside the `try:` at `:1046`.
+- **Log the DEAD verdict at `logger.warning`, not debug** (round-4 NIT), naming
+  the renewer pid, the `renewed_at` age, and the grace value. Risk 1 identifies
+  this branch's false-dead as the worst failure in the plan — on the
+  `_lock_says_live` → `create_session` path it starts an autonomous rival lane
+  with no operator in the loop — so an operator investigating an unexplained
+  rival lane or a reaped `sdlc-local-{N}` anchor must be able to tell that the
+  new tightening fired without having had debug logging enabled beforehand.
+  Keep the LIVE paths and the `except Exception -> True` fallback at debug;
+  only the `return False` path is elevated.
 - Read the grace clock as `time.time() - float(payload["renewed_at"])`. Because
   the branch is only reached when `_lock_renewal_is_fresh(payload) is True`,
   `renewed_at` is guaranteed present and float-parseable: no second `try/except`
@@ -1410,8 +1454,28 @@ a live run being reaped within 180 s, mid-stage, where today it merely "loses at
 most one TTL window".
 
 - Add keyword-only `drop_renewer_identity: bool = False` to `touch_issue_lock`.
-  When set, it performs a same-owner renewal writing a payload with the
+  When set, it performs a same-owner CAS write of a payload with the
   `renewer_pid` / `renewer_create_time` group **removed**.
+- **The clear must be a pure key-removal: it must NOT refresh `renewed_at` and
+  must NOT extend the TTL** (round-4 CONCERN). Do **not** delegate to
+  `_healed_renewal_payload`, whose `:1118` is an unconditional
+  `new_payload["renewed_at"] = time.time()`, and do not let the CAS take the
+  default `ttl` (`ISSUE_LOCK_TTL_SECONDS`, 1800). Build the CAS payload inline —
+  `{**payload}` minus the two `renewer_*` keys, `renewed_at` untouched — and
+  pass the key's *remaining* lifetime into the eval via `_R.pttl(key) // 1000`,
+  guarding the `-1` (no expiry) and `-2` (missing key) sentinels by falling
+  through to the swallow rather than inventing a TTL. This is a second, narrower
+  exception to the helper's "spread the EXISTING payload" rule and must be
+  commented alongside Key Element 2's.
+
+  Why it matters: today the deadline exits perform **no Redis write at all**, so
+  the payload's `renewed_at` is already up to one 600 s tick stale and the TTL is
+  decaying on its own clock. A clear that re-stamped both would hand a run that
+  is genuinely dead at its deadline exit up to ~600 s of *extra* false-live plus
+  up to ~600 s of extra lease lifetime versus `main` — widening the very window
+  this issue exists to narrow, on the one path where the tightening has already
+  been given up (Risk 5). Spike-5 row Ia measured the verdict at an instant and
+  so could not have caught this; the divergence is in the decay clock.
 - It MUST go through the compare-and-set path
   (`_RENEW_IF_VALUE_MATCHES_LUA`, `models/session_lifecycle.py:1301`) so a
   successor that already took the lease is untouched (Race 5).
@@ -1533,6 +1597,8 @@ belongs in this plan and the PR body, neither of which the row greps.
 | **`-m` invocation regression test exists** | `grep -c 'run_name="__main__"' tests/unit/test_sdlc_lease_heartbeat.py` | output > 0 |
 | **Ephemeral renewal strips the group** (Race 6 mode 2) | `grep -c 'def test_ephemeral_renewal_strips_renewer_identity' tests/unit/test_session_lifecycle.py` | output contains 1 |
 | Exit clear retries a lost CAS (Race 6 mode 1) | `grep -c 'acquired' tools/sdlc_lease_heartbeat.py` | output > 1 |
+| **Clear preserves the decay clock** (round-4 CONCERN) | `grep -c 'def test_drop_renewer_identity_preserves_renewed_at' tests/unit/test_session_lifecycle.py` | output contains 1 |
+| Clear does not reset the TTL | `grep -c 'pttl' models/session_lifecycle.py` | output > 0 |
 | **Shape (a):** the clear exists and is CAS | `grep -c 'drop_renewer_identity' models/session_lifecycle.py` | output > 1 |
 | **Shape (a):** both non-releasing exits clear | `grep -c 'drop_renewer_identity=True' tools/sdlc_lease_heartbeat.py` | output contains 2 |
 | **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -l 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | **no output** (`-l` prints only filenames that match, so a clean build prints nothing; `-c` prints a `file:0` line per file and invites a builder to read the exit code as failure) |
@@ -1561,9 +1627,9 @@ belongs in this plan and the PR body, neither of which the row greps.
 | CONCERN | Risk & Robustness (round 3) | Race 5 closes the deadline-exit clear against a *successor* takeover but not against a benign same-run_id ephemeral renewal, and the plan's own default renewal branch makes that window a re-poisoning path rather than merely a lost write. `models/session_lifecycle.py:1373-1380` is the same-owner default branch: a plain `_R.set(key, json.dumps(new_payload), ex=ttl)` with **no CAS**, whose payload comes from `_healed_renewal_payload`, which by design spreads the existing payload (`models/session_lifecycle.py:1084-1096`, "spread the EXISTING payload ... never reconstruct a subset"). So any of the five ephemeral CLI renewers landing after the heartbeat's CAS clear will re-carry the stale `renewer_pid` / `renewer_create_time` it read before the clear AND refresh `renewed_at`. Unlike the heartbeat's tick loop, which stops on a lost CAS via `EXIT_LEASE_LOST`, the Task 5 exit clear is a single best-effort exception-swallowed write with no retry and no verification, so the run silently re-enters spike-5 row I (false-dead, reaped within the grace on the next quiet stretch) with no backstop until the 1800 s TTL. This is the shape Task 5 exists to close. **Suggestion:** Give the exit clear a bounded re-GET/re-CAS retry, and separately make the drop durable against the non-CAS default branch. | **Key Element 0** (invariant) + **Key Element 2** (strip on non-stamping renewal); **Race 6** (both modes); Task 2 (strip); Task 5 (bounded 2-attempt retry); **SC5c** | Two parts, both needed. (1) At `tools/sdlc_lease_heartbeat.py:360` and `:365`, wrap the `drop_renewer_identity=True` call in a loop bounded to 2 attempts checking `result.acquired`; fall through to the existing swallow only after the budget is exhausted — a genuine successor (different `run_id`) still fails both attempts, preserving Race 5's guarantee. (2) A retry alone does NOT close the re-poisoning path, because the default branch at `models/session_lifecycle.py:1378` is an unconditional `_R.set` that can land at any later time. Either give `_healed_renewal_payload` an explicit drop of the `renewer_*` group unless `stamp_renewer_identity` is set for this call (making the clear sticky rather than a one-shot write), or add a `renewer_cleared_at` tombstone key the stamp path refuses to overwrite. Decide which in the revision; the current design leaves the clear defeasible by any `sdlc-tool` CLI write. |
 | CONCERN | Scope & Value (round 3) | Risk 6's evidence for the runtime allowlist does not support it. The three "renewal-adjacent call sites [that] already exist outside that set" are cited as proof a future caller could stamp past the four-file grep, but all three are read-only peeks, verified: `tools/sdlc_session_release.py:92` is `touch_issue_lock(issue_number, None, peek=True)`, `tools/merge_predicate.py:656` is `touch_issue_lock(issue_number, run_id, peek=True)`, and `agent/supervised_run.py:256` is `touch_issue_lock(issue_number, None, peek=True)`. None reaches a renewal branch; each would have to be rewritten from a peek into a renewal call before the flag could matter, which is a visible edit this repo's mandatory REVIEW stage catches. The mitigation is therefore precautionary against a caller shape that does not exist, and it is the same mechanism the round-3 BLOCKER shows is broken as specified. **Suggestion:** Given the BLOCKER, decide the allowlist's fate deliberately rather than repairing it by reflex — either drop it and rely on the grep anti-criterion plus review, or keep it with an explicit caller token and restate Risk 6 as precautionary rather than evidence-backed. | **Risk 6 rewritten**: the three peek citations verified and removed, risk restated as precautionary; allowlist KEPT with the explicit token per the round-3 BLOCKER, with **Technical Approach** stating plainly it is a declaration checked against a list, not an unforgeable barrier | If dropping: remove `_DURABLE_RENEWER_MODULES` and its check from the renewal path, delete `test_disallowed_module_stamp_is_dropped`, and delete the two Verification rows "Runtime allowlist exists (Risk 6)" and "Allowlist is enforced, not just declared"; SC5 then reduces to the grep anti-criterion alone. If keeping: rewrite Risk 6 to say plainly that no current caller performs a renewal write outside the four watched files, so the allowlist guards a hypothetical, and implement it via the explicit `renewer_module` token from the BLOCKER row — never `__name__` introspection. Do not leave the three peek-site citations in place as if they were near-misses. |
 | NIT | Scope & Value (round 3) | `appetite: Small` has not been re-examined across two revision rounds that each added a mechanism. The label is defended in the Appetite section on the grounds that "the reasoning ... is the expensive part", but round 2 added an entire second subsystem (the CAS `drop_renewer_identity` clear at two heartbeat exits, Task 5) and Task 2 carries the runtime allowlist, neither present in the original pid-stamp idea. Both prior rounds were scoped to correctness rather than proportionality, so nothing has tested whether the mechanism count now exceeds the appetite. **Suggestion:** Either relabel the appetite to Medium, or use the round-3 allowlist findings to trim scope back toward the original estimate. | **Appetite** relabelled Small -> Medium, with the mechanism count named (stamp/gate, CAS clear, invariant + allowlist) | n/a (NIT) |
-| CONCERN | Risk & Robustness (round 4) | Shape (a)'s exit clear buys the retiring run a FRESH liveness window, so Risk 5's "backstops are unchanged" is inaccurate. Task 5 specifies `drop_renewer_identity` as "a same-owner CAS renewal", which routes through `_healed_renewal_payload` (`models/session_lifecycle.py:1084-1120`), whose docstring states `renewed_at` is "deliberately OVERWRITTEN on every renewal" and whose `:1118` is an unconditional `new_payload["renewed_at"] = time.time()`; and through the `renew_only` CAS at `:1296-1301`, which passes `ttl` (default `ISSUE_LOCK_TTL_SECONDS` = 1800) into `_RENEW_IF_VALUE_MATCHES_LUA`. So at `EXIT_UNSUPERVISED_MAX_LIFETIME` — the exit whose own comment says failing to resolve a supervisor "is not positive proof the run is dead" — the heartbeat's last act re-stamps `renewed_at` to now AND extends the lease a full 1800 s. Today that exit performs no Redis write at all, so the payload's `renewed_at` is already up to one 600 s tick stale and the TTL is decaying on its own clock. For a run that IS dead at its deadline exit, shape (a) therefore adds up to ~600 s of extra false-live plus up to ~600 s of extra lease lifetime versus `main`. spike-5 row Ia measured the verdict at an instant ("live", byte-identical to today) but not the decay clock, which is exactly where the two diverge. **Suggestion:** either make the drop write preserve the payload's existing `renewed_at` and remaining TTL, or accept the widening explicitly and correct Risk 5 plus the "Net effect" paragraph, which currently claims the blind window collapses to <=180 s without noting that post-deadline-exit runs revert to a *refreshed* 1200 s window. | pending | The unconditional re-stamp is `models/session_lifecycle.py:1118` (`new_payload["renewed_at"] = time.time()`) — verify the line yourself, an earlier draft of this note cited a wrong offset. Two viable shapes: (1) thread a `bump_renewed_at: bool = True` kwarg from `drop_renewer_identity` into `_healed_renewal_payload` and skip the re-stamp when `False`; or (2) have `touch_issue_lock`'s `drop_renewer_identity` branch build its CAS payload inline (`{**payload}` minus the two `renewer_*` keys, `renewed_at` untouched) instead of delegating to the helper — note this is a second, narrower exception to that helper's "spread the EXISTING payload" rule and must be commented alongside Key Element 2's. For the TTL, pass the key's remaining lifetime (`_R.pttl(key) // 1000`, guarding the `-1`/`-2` sentinels) into the CAS eval rather than the 1800 s default. If the TTL half is judged not worth the mechanism, say so in Risk 5 rather than leaving "backstops are unchanged" standing. Add a Task 1 case asserting that after a `drop_renewer_identity=True` write the stored `renewed_at` equals its pre-clear value. |
-| CONCERN | History & Consistency (round 4) | The Documentation checkbox and the `Grace constant marked provisional` Verification row cannot both be satisfied. The last Documentation bullet requires that "docstrings on `_healed_renewal_payload`, `_lock_owner_is_live`, and the new constant must carry the #2648 rationale and the GRAIN OF SALT note" — three locations. `models/session_lifecycle.py` carries exactly 3 `GRAIN OF SALT` lines on `main` (verified by `grep -c`: lines 750, 842, 855, all on module-level constants), and neither function docstring carries the phrase today. A builder following the checkbox literally lands on 6, while the Verification row hard-codes "output contains 4 (exactly one more than the 3 on `main`)". A faithful build therefore goes red against its own Verification table — the same self-counting-prose trap the plan already documents for the two anti-criterion rows and for the `renewer_machine_id` row. **Suggestion:** narrow the Documentation bullet so only the new constant carries the literal marker, with the two function docstrings carrying the #2648 rationale in prose only. | pending | Reword the bullet to: "the new constant's comment carries both the #2648 rationale and the literal GRAIN OF SALT marker; docstrings on `_healed_renewal_payload` and `_lock_owner_is_live` carry the #2648 rationale in prose, WITHOUT the literal marker." `grep -c` counts matching LINES, not occurrences, so the target of 4 holds only if exactly ONE new line contains the token — keep the marker on a single comment line above the constant, matching the existing shape at `models/session_lifecycle.py:842` and `:855`. Do not "fix" this by relaxing the Verification row back to `> 1`; that is the ineffective form round 3 already replaced (NIT 2). |
-| NIT | Risk & Robustness (round 4) | Task 3 specifies the new branch "Log at debug naming the dead renewer pid" — the same level as today's routine paths — even though Risk 1 names this branch's false-dead as the worst-case failure across all three consumers ("no operator in the loop" on the `_lock_says_live` to `create_session` path). An operator investigating an unexplained rival lane or a reaped `sdlc-local-{N}` anchor gets no elevated signal distinguishing "the new grace-tightening fired" from any other liveness path, unless debug logging happened to be enabled beforehand. **Suggestion:** emit the DEAD-verdict path only at `logger.info` or `logger.warning`, naming the renewer pid, the `renewed_at` age, and the grace value; keep the LIVE paths and the `except Exception -> True` fallback at debug. | pending | n/a (NIT) |
+| CONCERN | Risk & Robustness (round 4) | Shape (a)'s exit clear buys the retiring run a FRESH liveness window, so Risk 5's "backstops are unchanged" is inaccurate. Task 5 specifies `drop_renewer_identity` as "a same-owner CAS renewal", which routes through `_healed_renewal_payload` (`models/session_lifecycle.py:1084-1120`), whose docstring states `renewed_at` is "deliberately OVERWRITTEN on every renewal" and whose `:1118` is an unconditional `new_payload["renewed_at"] = time.time()`; and through the `renew_only` CAS at `:1296-1301`, which passes `ttl` (default `ISSUE_LOCK_TTL_SECONDS` = 1800) into `_RENEW_IF_VALUE_MATCHES_LUA`. So at `EXIT_UNSUPERVISED_MAX_LIFETIME` — the exit whose own comment says failing to resolve a supervisor "is not positive proof the run is dead" — the heartbeat's last act re-stamps `renewed_at` to now AND extends the lease a full 1800 s. Today that exit performs no Redis write at all, so the payload's `renewed_at` is already up to one 600 s tick stale and the TTL is decaying on its own clock. For a run that IS dead at its deadline exit, shape (a) therefore adds up to ~600 s of extra false-live plus up to ~600 s of extra lease lifetime versus `main`. spike-5 row Ia measured the verdict at an instant ("live", byte-identical to today) but not the decay clock, which is exactly where the two diverge. **Suggestion:** either make the drop write preserve the payload's existing `renewed_at` and remaining TTL, or accept the widening explicitly and correct Risk 5 plus the "Net effect" paragraph, which currently claims the blind window collapses to <=180 s without noting that post-deadline-exit runs revert to a *refreshed* 1200 s window. | **Task 5** (clear is a pure key-removal: inline CAS payload, `renewed_at` untouched, remaining TTL via `pttl` with sentinel guards); **Risk 5** ("backstops are unchanged" now stated as load-bearing on that detail); **Net effect** paragraph scoped to stamped leases; Task 1 case + Verification rows `Clear preserves the decay clock` / `Clear does not reset the TTL` | The unconditional re-stamp is `models/session_lifecycle.py:1118` (`new_payload["renewed_at"] = time.time()`) — verify the line yourself, an earlier draft of this note cited a wrong offset. Two viable shapes: (1) thread a `bump_renewed_at: bool = True` kwarg from `drop_renewer_identity` into `_healed_renewal_payload` and skip the re-stamp when `False`; or (2) have `touch_issue_lock`'s `drop_renewer_identity` branch build its CAS payload inline (`{**payload}` minus the two `renewer_*` keys, `renewed_at` untouched) instead of delegating to the helper — note this is a second, narrower exception to that helper's "spread the EXISTING payload" rule and must be commented alongside Key Element 2's. For the TTL, pass the key's remaining lifetime (`_R.pttl(key) // 1000`, guarding the `-1`/`-2` sentinels) into the CAS eval rather than the 1800 s default. If the TTL half is judged not worth the mechanism, say so in Risk 5 rather than leaving "backstops are unchanged" standing. Add a Task 1 case asserting that after a `drop_renewer_identity=True` write the stored `renewed_at` equals its pre-clear value. |
+| CONCERN | History & Consistency (round 4) | The Documentation checkbox and the `Grace constant marked provisional` Verification row cannot both be satisfied. The last Documentation bullet requires that "docstrings on `_healed_renewal_payload`, `_lock_owner_is_live`, and the new constant must carry the #2648 rationale and the GRAIN OF SALT note" — three locations. `models/session_lifecycle.py` carries exactly 3 `GRAIN OF SALT` lines on `main` (verified by `grep -c`: lines 750, 842, 855, all on module-level constants), and neither function docstring carries the phrase today. A builder following the checkbox literally lands on 6, while the Verification row hard-codes "output contains 4 (exactly one more than the 3 on `main`)". A faithful build therefore goes red against its own Verification table — the same self-counting-prose trap the plan already documents for the two anti-criterion rows and for the `renewer_machine_id` row. **Suggestion:** narrow the Documentation bullet so only the new constant carries the literal marker, with the two function docstrings carrying the #2648 rationale in prose only. | **Documentation** inline bullet rewritten: literal `GRAIN OF SALT` marker on the new constant's single comment line ONLY; the two function docstrings carry the #2648 rationale in prose without the marker, keeping the `grep -c` target at exactly 4 | Reword the bullet to: "the new constant's comment carries both the #2648 rationale and the literal GRAIN OF SALT marker; docstrings on `_healed_renewal_payload` and `_lock_owner_is_live` carry the #2648 rationale in prose, WITHOUT the literal marker." `grep -c` counts matching LINES, not occurrences, so the target of 4 holds only if exactly ONE new line contains the token — keep the marker on a single comment line above the constant, matching the existing shape at `models/session_lifecycle.py:842` and `:855`. Do not "fix" this by relaxing the Verification row back to `> 1`; that is the ineffective form round 3 already replaced (NIT 2). |
+| NIT | Risk & Robustness (round 4) | Task 3 specifies the new branch "Log at debug naming the dead renewer pid" — the same level as today's routine paths — even though Risk 1 names this branch's false-dead as the worst-case failure across all three consumers ("no operator in the loop" on the `_lock_says_live` to `create_session` path). An operator investigating an unexplained rival lane or a reaped `sdlc-local-{N}` anchor gets no elevated signal distinguishing "the new grace-tightening fired" from any other liveness path, unless debug logging happened to be enabled beforehand. **Suggestion:** emit the DEAD-verdict path only at `logger.info` or `logger.warning`, naming the renewer pid, the `renewed_at` age, and the grace value; keep the LIVE paths and the `except Exception -> True` fallback at debug. | **Task 3**: DEAD verdict logs at `logger.warning` naming the renewer pid, `renewed_at` age, and grace value; LIVE paths and the `except -> True` fallback stay at debug | n/a (NIT) |
 
 ---
 
