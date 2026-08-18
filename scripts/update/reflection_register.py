@@ -30,14 +30,14 @@ vault source (``~/Desktop/Valor/reflections.yaml``), refreshed by
 the entry only to the in-repo copy is silently clobbered the next time that copy
 step runs, so registration for real means appending the entry to the *vault*
 file. The target is resolved via
-``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which in
-the primary checkout -- where this module always runs, via the ``/update`` step
--- picks the vault ahead of the config copy: that resolver's fourth,
-owning-checkout-fallback level (issue #2734) is only reached when the local
-config copy is absent, and in the primary checkout it is present. A builder who
-hardcoded the config copy would reproduce #1539's "looks wired, never lands"
-failure; see ``_resolve_target``'s docstring for the worktree-caller caveat this
-qualification exists to flag. This step runs BEFORE Step 1.66's vault->config
+``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which
+picks the vault ahead of the config copy **only when ``VALOR_LAUNCHD`` is
+unset** -- that resolver gates the vault candidate on the environment, not on
+checkout identity. Under ``VALOR_LAUNCHD=1`` it returns the soon-clobbered
+config copy even in the primary checkout, reproducing #1539's "looks wired,
+never lands" failure; a builder who hardcoded the config copy would reproduce it
+unconditionally. See ``_resolve_target``'s docstring for both reachable paths
+and issue #2855 for the fix. This step runs BEFORE Step 1.66's vault->config
 copy (critique NIT) so the appended entry propagates into the per-machine
 ``config/reflections.yaml`` on the same cycle.
 
@@ -191,27 +191,35 @@ def _resolve_target() -> Path:
     fourth fallback level (issue #2734): when *this* checkout's
     ``config/reflections.yaml`` is absent, it reads the owning checkout's copy
     instead of the vault. C6 -- "the entry lands where the scheduler will
-    actually look, not in the soon-clobbered config copy" -- still holds for
-    every real caller of this function, but only because of a reachability
-    condition, not because the resolver always prefers the vault: the fourth
-    level is reached only when this checkout's local ``config/reflections.yaml``
-    is absent, which never holds in the **primary checkout**, where ``/update``
-    (and therefore this function) runs. There the vault branch is hit first,
-    exactly as C6 assumed.
+    actually look, not in the soon-clobbered config copy" -- holds only when
+    ``VALOR_LAUNCHD`` is unset. It is **not** guaranteed by running in the
+    primary checkout, and the resolver does not always prefer the vault.
 
-    That reachability condition is caller-specific, not resolver-enforced. A
-    hypothetical caller of this function running from a **worktree** under
-    ``VALOR_LAUNCHD=1`` -- where the local config copy is genuinely absent --
-    would have this function resolve to the *primary checkout's* install-time
-    ``config/reflections.yaml`` and write the registration there. That copy is
-    live scheduler input, so the write would silently succeed, but the next
-    ``/update`` overwrites it from the vault and the registration is lost with
-    no error. See Risk 3 in
-    ``docs/plans/reflection-registry-schedule-contract.md`` for why this is a
-    contained CONCERN rather than a blocker: no such caller exists today,
-    because this module runs only as an ``/update`` step in the primary
-    checkout. That is the whole of the containment, and it is sufficient under
-    every real invocation path.
+    The vault level is gated on the environment, not on checkout identity:
+    ``agent/reflection_scheduler.py`` appends the vault candidate only ``if not
+    os.environ.get("VALOR_LAUNCHD")`` (macOS TCC blocks ``~/Desktop`` access
+    from launchd agents). So there are two distinct ways to land on a
+    soon-clobbered ``config/reflections.yaml``:
+
+    - **Under ``VALOR_LAUNCHD=1``, even in the primary checkout.** The vault
+      candidate is skipped, control reaches the local-config level, and that
+      file exists in the primary checkout -- so this function returns the
+      config copy. The worker plist sets ``VALOR_LAUNCHD=1`` and a
+      worker-spawned ``claude -p`` session inherits it, so an agent running
+      ``/update`` hits this path. The write succeeds silently and Step 1.66's
+      vault->config copy discards it on the next cycle: #1539's "looks wired,
+      never lands" failure, with no error.
+    - **From a worktree under ``VALOR_LAUNCHD=1``**, where the local copy is
+      absent, the fourth owning-checkout level (issue #2734) resolves to the
+      *primary checkout's* copy, with the same silent-loss outcome.
+
+    Issue #2855 tracks the real fix. It is not attempted here because a
+    write-side caller must not share the scheduler's read-side resolver at all;
+    splitting them into distinct read and write functions is the ``[ORDERED]``
+    No-Go in ``docs/plans/reflection-registry-schedule-contract.md`` (Risk 3),
+    sequenced as a separate change. Until then, treat "unset ``VALOR_LAUNCHD``"
+    as a precondition of correct registration rather than an invariant this
+    module enforces.
 
     ``_this_machine_owns_valor`` is **not** a second, independent leg. It fails
     closed in a worktree only because ``config/projects.json`` is gitignored and
