@@ -346,7 +346,7 @@ tests/
 | unit | `test_health_check.py` | 12 | Health monitoring |
 | unit | `test_bridge_watchdog.py` | — | Bridge watchdog |
 | unit | `test_watchdog_log_isolation.py` | 17 | Import-time logging isolation for `monitoring/bridge_watchdog.py`, `monitoring/worker_watchdog.py`, `scripts/log_rotate.py` — no root handler, no file opened at import, config only from `__main__` (#2643) |
-| unit | `test_doctor_console_scripts.py` | 42 | Doctor's `[project.scripts]` health check, both halves: PATH resolution into a repo venv bin dir with three-state remedy attribution (#2566/#2665), and interpreter identity for the winning script's shebang (`ok`/`missing`/`off-pin`/`outside`/`unverified`, #2748) |
+| unit | `test_doctor_console_scripts.py` | 43 | Doctor's `[project.scripts]` health check, both halves: PATH resolution into a repo venv bin dir with three-state remedy attribution (#2566/#2665), and interpreter identity for the winning script's shebang (`ok`/`missing`/`off-pin`/`outside`/`unverified`, #2748) |
 | integration | `test_connectivity_gaps.py` | 12 | Connectivity failure handling |
 | integration | `test_silent_failures.py` | 7 | Silent failure detection |
 | performance | `test_benchmarks.py` | 16 | Latency, throughput, memory |
