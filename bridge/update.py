@@ -138,6 +138,7 @@ def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
     elided_chars = len(combined) - len(kept_text)
     return f"[... {elided_chars} characters elided ...]\n{kept_text}"
 
+
 # Bounded beacon poll (Race 1 mitigation, issue #1898 Decision 20): 15 x 2s
 # (30s), matching run.py's worker-heartbeat freshness poll.
 UPDATE_POLL_ATTEMPTS = 15
@@ -235,9 +236,7 @@ async def _queue_fix_session(
         from agent.agent_session_queue import enqueue_agent_session
 
         problem = "Update failed" if failed else "Update has warnings"
-        warnings_block = (
-            "\n".join(f"  ⚠️ {w}" for w in warnings) if warnings else "  (none parsed)"
-        )
+        warnings_block = "\n".join(f"  ⚠️ {w}" for w in warnings) if warnings else "  (none parsed)"
 
         log_path = None
         for line in (stdout or "").split("\n"):
@@ -431,6 +430,31 @@ async def handle_update_command(tg_client, event):
         if failed or has_warnings:
             status += " — spawning agent session to fix"
             await _queue_fix_session(event, machine, stdout, stderr, warnings, failed=failed)
+
+        # Suppression trailer forwarding (#2845, Task 5): the interactive
+        # path is the only one with a chat to push into, so a suppressed
+        # condition (warn_state) arrives unasked here even on an otherwise
+        # clean run. OUTSIDE the failed/has_warnings branch above — the
+        # modal suppressed case is a run where BOTH are False, and nesting
+        # inside that branch would make the trailer silently disappear on
+        # exactly the run this exists to cover. Match on SUPPRESSED_PREFIX
+        # imported from scripts.update.warn_state, never a locally-spelled
+        # literal — that drift is exactly what produced Defect 2.
+        try:
+            from scripts.update.warn_state import SUPPRESSED_PREFIX
+
+            suppressed_line = next(
+                (
+                    line.strip()
+                    for line in status_lines
+                    if line.strip().startswith(SUPPRESSED_PREFIX)
+                ),
+                None,
+            )
+            if suppressed_line:
+                status += f"\n{suppressed_line}"
+        except Exception as e:
+            logger.debug("[update] suppressed-trailer forwarding failed (non-fatal): %s", e)
 
         await tg_client.send_message(event.chat_id, f"{machine} - {status}")
     except subprocess.TimeoutExpired:
