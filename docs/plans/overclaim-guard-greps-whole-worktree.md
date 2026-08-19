@@ -516,6 +516,36 @@ assert not missing, f"SCAN_DIRS roots absent from the checkout: {missing} — th
 Keep the total floor as well. The two catch different failures — a vanished root
 versus a corpus-wide collapse — and neither subsumes the other.
 
+**The meta-guard flags itself unless it self-exempts by resolved path.** The
+meta-guard matches the literal shapes (`"-r"` / `"-rn"` with `"grep"` as argv0)
+and scans every test under `tests/`, but it lives in
+`tests/unit/test_tracked_content_helper.py` and must *contain* those literals to
+do its matching. On first run it is its own top offender. The plan's generic
+escape hatch — "an explicit opt-out comment for a justified survivor" — is the
+wrong instrument here: it invites stamping an opt-out on the one guard that must
+never carry one, or loosening the matcher until the self-hit disappears, which
+weakens it for every real offender.
+
+Self-exempt by **resolved path**, using the idiom already in this repo at
+`tests/unit/test_template_filter_registry.py:128-131`:
+
+```python
+self_path = Path(__file__).resolve()
+...
+if py_file.resolve() == self_path:
+    continue
+```
+
+Never a filename substring — that would also exempt any future file whose name
+happens to contain this one's.
+
+Pair the self-exemption with a **planted-offender positive control in the same
+file**: write a temp file under `tmp_path` containing
+`subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at
+`tmp_path`, and assert it is flagged. Without that control, a correct
+self-exemption and a matcher that flags nothing at all are indistinguishable —
+both present as a green meta-guard.
+
 **Out-of-scope-but-adjacent**, recorded so the next reader is not surprised:
 `scripts/checks/no_new_rebuild_callers.sh:46` has the same ambient-cwd hazard and
 is invoked by no test; `reflections/maintenance.py::run_legacy_code_scan` is
@@ -526,20 +556,34 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 
 ### Exception Handling Coverage
 - [ ] The helper must not contain `except Exception: pass`. A `git` invocation
-      that fails raises a named scan-failure error carrying the exit code and
-      stderr. Test: force failure via `GIT_INDEX_FILE=/dev/null` (empirically
-      yields 128) and assert the helper **raises**, never returns clean.
+      that fails raises `TrackedScanError` carrying the exit code and stderr.
+      Test: force failure via `GIT_INDEX_FILE=/dev/null` (empirically yields
+      128) and assert `pytest.raises(TrackedScanError, match="128")` — the
+      helper **raises**, never returns clean.
+- [ ] **Scan-failure and vacuity must be asserted apart, not merely "the helper
+      fails".** Both produce empty `git ls-files` stdout (measured: rc 128 vs
+      rc 0), so a probe that only checks "did it fail" passes for the wrong
+      reason. Two distinct classes make the distinction assertable:
+      `pytest.raises(TrackedScanError)` for the broken index,
+      `pytest.raises(VacuousScanError)` for `'nosuchdir/*.py'`. A test that
+      accepts either class for either input does not verify Success Criterion 6.
 - [ ] No exception handlers exist in the converted call sites today; none are
       added.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty pathspec match set → the non-vacuity floor fails with a message
-      naming the pathspec. Test explicitly: pass `'nosuchdir/*.py'` and assert
-      the helper fails rather than reporting clean (spike-1 proves raw
-      `git grep` returns 1 here).
+- [ ] Empty pathspec match set → `VacuousScanError`, with a message naming the
+      pathspec and the expected minimum. Test explicitly: pass
+      `'nosuchdir/*.py'` and assert the helper fails rather than reporting clean
+      (spike-1 proves raw `git grep` returns 1 here).
 - [ ] Empty pattern → rejected by the helper with a clear error, since
       `git grep ""` matches every line and would produce a nonsense guard.
 - [ ] Whitespace-only pattern → same rejection.
+
+### Regex Dialect Coverage
+- [ ] The metacharacter path is **exercised, not assumed**. A pattern such as
+      `zzz\.never(` must report clean against the real corpus, and must trip on
+      a planted `zzz.never(` in a tracked file. This is the test that would
+      catch a builder adding `-F` and silently neutering A3.
 
 ### Error State Rendering
 - [ ] A real violation must render `file:line` of the *tracked source*, not a
@@ -554,17 +598,17 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 - [ ] `tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted` — **UPDATE**: route through the helper; add the `#2093`-style explanatory comment naming the `.pyc` hazard so it is not "simplified" back (required by #2809 AC2).
 - [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; preserve the `_ALLOWED_DIRECT_CONSTRUCTORS` exemption via the helper's `allow=` parameter.
 - [ ] `tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary` — **UPDATE**: route through the helper. Single-file scope, so the floor is `min_files=1`.
-- [ ] `tests/unit/test_no_legacy_paths.py::test_no_legacy_claude_code_paths` — **UPDATE**: replace the `if rc == 0:` gate with three-way triage; keep the `ALLOWED_FILES` and `docs/plans/` exemptions.
+- [ ] `tests/unit/test_no_legacy_paths.py::test_no_legacy_claude_code_paths` — **UPDATE**: replace the `if rc == 0:` gate with three-way triage; move the `ALLOWED_FILES` and `docs/plans/` exemptions into negative pathspecs. Corpus stays **all tracked file types**, not `*.py`.
 - [ ] `tests/unit/test_template_filter_registry.py::test_no_hand_copied_filter_registration_in_tests` — **UPDATE**: add non-vacuity floor.
 - [ ] `tests/unit/test_sdlc_lease_helper_binding.py::test_no_module_level_from_import_of_lease_helpers` — **UPDATE**: add non-vacuity floor.
 - [ ] `tests/unit/test_sdlc_tool_wrapper.py::TestSkillMarkdownParity` (both tests) — **UPDATE**: add non-vacuity floor over `_iter_include_paths`.
 - [ ] `tests/integration/test_dm_recovery.py::TestNoChatTitleFilterRemains::test_scanners_do_not_skip_titleless_dialogs` — **UPDATE**: add non-vacuity floor.
-- [ ] `tests/unit/test_no_positional_query_get.py::test_no_positional_agent_session_query_get` — **UPDATE**: add non-vacuity floor.
+- [ ] `tests/unit/test_no_positional_query_get.py::test_no_positional_agent_session_query_get` — **UPDATE**: add non-vacuity floor **and** a per-root assertion; replace `if not root.exists(): continue` at `:66-68` with an accumulate-then-assert over all eight `SCAN_DIRS`. The total floor alone cannot see a lost `worker/` (0.24% of the corpus).
 - [ ] `tests/unit/test_harness_model_coverage.py` (`_agent_py_files`) — **UPDATE**: replace `if not agent_dir.is_dir(): return []` with a raise; add floor.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` — **NO CHANGE, verified**: its scanner only flags subprocess calls where `_argv_reaches_python(argv)` holds. `["git", "grep", …]` does not reach Python, so the new helper needs no `ALLOWLIST` entry. Confirmed by reading `_argv0_is_skipped`/`_argv_reaches_python` at `:216-260`.
 - [ ] `tests/unit/test_plan_migration_invariant.py` — **NO CHANGE**: already correct; it is the reference pattern this plan generalizes.
-- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, scan-failure (128), vacuous pathspec, empty pattern, and `allow=` filtering.
-- [ ] **NEW** meta-guard (in the same new file): no test under `tests/` invokes a bare recursive `grep` over a directory.
+- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, `TrackedScanError` on a broken index (128), `VacuousScanError` on a vacuous pathspec, the two asserted **apart**, empty pattern, whitespace-only pattern, BRE metacharacter round-trip, and `allow=` line filtering.
+- [ ] **NEW** meta-guard (in the same new file): no test under `tests/` invokes a bare recursive `grep` over a directory. Self-exempts by resolved path, carries its own non-vacuity floor, and ships with a `tmp_path` planted-offender positive control.
 
 ## Rabbit Holes
 
@@ -723,9 +767,13 @@ deliberately not exposed to the agent.
 - [ ] **Demonstrated red:** reintroducing the banned string into a tracked `.py` under `tools/` or `agent/` fails the test, with the offending `file:line` in the message. (#2807 AC3, #2808 AC4)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan failed to run" — an errored scan does not read as a pass. (#2808 AC5)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan examined nothing" via a non-vacuity floor. (net-new, spike-1)
+- [ ] **Scan-failure and vacuity are separately assertable:** `TrackedScanError` and `VacuousScanError` are distinct classes, and `tests/unit/test_tracked_content_helper.py` asserts each against the input that produces it (broken index → `TrackedScanError`; `'nosuchdir/*.py'` → `VacuousScanError`). (net-new, critique — makes Criterion 6 verifiable rather than assumed)
+- [ ] **The six floored walks are covered:** each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count, and each floor is individually demonstrated-red by task 5's per-guard mutation. B13 and B14 additionally raise on a missing scan root rather than skipping it. (net-new, critique — 6 of the 10 touched files previously mapped to no criterion)
+- [ ] **The regex dialect is pinned and exercised:** no converted guard passes `-F`, `-E`, or `-P`, and a helper test proves a BRE metacharacter pattern (`zzz\.never(`) both reports clean and trips on a planted match. (net-new, critique — an `-F` would leave A3 permanently green)
+- [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. (net-new, critique)
 - [ ] `tests/` contains no remaining recursive-`grep`-over-a-directory assertion, enforced by the new meta-guard. (#2807 AC4)
-- [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each either converted or documented as safe. (#2809 AC4)
-- [ ] The two `cwd=`-less siblings each fail loudly rather than passing vacuously when the ambient cwd is not the repo root. (#2808 AC7)
+- [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each **converted, floored, or documented as safe (4 / 6 / 17)**. (#2809 AC4)
+- [ ] **Neither converted sibling reads the ambient cwd.** `assert_absent_from_tracked` derives `REPO_ROOT` from `Path(__file__).resolve().parents[N]` and passes it as `cwd=` on every git call. Verified by running both nodes from `/tmp` and observing the same verdict as from the repo root. Today the two diverge from a foreign cwd (A2 returns rc=1 with empty stdout and passes vacuously; A3 returns rc=2 and fails); after the fix both must match their in-repo run. (#2808 AC7)
 - [ ] A decision on concern B is recorded — deferred to #2883, with the pin-bump warning shipped here. (#2808 AC6, #2809 AC5)
 - [ ] Tests pass (`/do-test`) via `scripts/pytest-clean.sh`, never bare `pytest`.
 - [ ] Documentation updated (`/do-docs`).
