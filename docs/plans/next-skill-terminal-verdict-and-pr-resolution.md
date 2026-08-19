@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
 last_comment_id: 5324622874
 revision_applied: true
-revision_applied_at: 2026-08-19T08:17:24Z
+revision_applied_at: 2026-08-19T09:02:44Z
 ---
 
 # Terminal Verdict: the router and review-probe residuals left outside #2826's fence
@@ -680,7 +680,10 @@ one issue of a multi-issue lane. "Terminal" should mean the tracker agrees, and 
 `CLOSED` makes the router's terminal fact and the tracker's fact the same fact.
 
 **Cost containment for the extra `gh` call.** Resolve `issue_state` **only when
-`stage_states["MERGE"] == "completed"`**. Every non-terminal ledger — the overwhelming
+`stage_states["MERGE"] == "completed"` and an issue number is present** — `_compute_meta`
+takes `issue_number: int | None` and the session-keyed path passes `None`, which would
+otherwise buy a `gh issue view None` subprocess and its timeout for a guaranteed `None`.
+Every non-terminal ledger — the overwhelming
 majority of ticks — pays nothing, and a terminal ledger pays one repo-scoped `gh issue view`
 on a path that already makes two or more `gh` calls. Resolve it once per
 `_compute_meta` invocation, inside the existing `cached_target_repo_resolution()` scope, and
@@ -868,7 +871,7 @@ patched.
 - [ ] **`tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable` (`:1692`) — UPDATE, and this is the one router test file WS-A provably reds.** Round 1 omitted this file entirely; it is the repo's primary router-decision suite (**95** `decide_next_dispatch(` call sites, re-counted 2026-08-19; the bare `grep -c decide_next_dispatch` figure of 97 counts import and reference lines too) and holds the **only** `"MERGE": "completed"` fixture in any router test — **claim restated over all three router suites at round-5 critique**, because rounds 1–4 scoped the grep to two files and there is a third. Verified 2026-08-19: `grep -rn '"MERGE": "completed"' tests/unit/test_sdlc_router*.py` returns exactly one hit, `test_sdlc_router_decision.py:1706`, with **0** in `test_sdlc_router.py` and **0** in `test_sdlc_router_oscillation.py`. Its `_unowned_state()` helper builds PLAN/CRITIQUE/BUILD/REVIEW/DOCS/MERGE all completed plus an APPROVED verdict, with `meta = {"pr_number": 4242, "pr_merge_state": "BLOCKED"}`. `test_no_rule_block_uses_no_rule_sentinel` asserts `result.guard_id == "NO_RULE"` and fails outright once a first-position guard returns `TERMINAL`; `test_no_rule_block_renders_distinguishably_from_a_guard_block` consumes the same helper. **Disposition: re-key `_unowned_state()` onto a non-terminal unowned ledger — drop the `"MERGE": "completed"` entry, keep everything else including `pr_merge_state: "BLOCKED"`.** Do **not** flip the assertion to `"TERMINAL"`: these two tests are the only proof of the `NO_RULE` sentinel's distinguishability (#2767b), and flipping them retires that guarantee instead of preserving it. **The re-key is verified to work** — measured on `f491306c5`, the helper's ledger returns `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` with `MERGE` completed, with `MERGE` absent, **and** with `MERGE: "pending"`, so dropping the key leaves both assertions passing for the same reason they pass today. (These tests will additionally be insulated by the `issue_state` gate, since the fixture's `meta` carries no `issue_state` and the guard requires `"CLOSED"` — but the re-key is still the correct disposition, because a fixture should not depend on a gate to stay meaningful.)
 - [ ] `tests/unit/test_sdlc_router_oscillation.py` — **NO CHANGE EXPECTED, verify rather than assume.** Round 1 listed two UPDATE dispositions against this file; both were **vacuous** — it contains zero `"MERGE": "completed"` fixtures (verified), so no fixture in it can reach the terminal guard. Re-run it and confirm green. If anything in it does move, that is a signal the guard is placed wrong, not a fixture to patch.
 - [ ] **All three router suites — REVIEW (165 `decide_next_dispatch(` call sites in total)**: `tests/unit/test_sdlc_router_decision.py` (95), `tests/unit/test_sdlc_router.py` (35), `tests/unit/test_sdlc_router_oscillation.py` (43), counts re-taken 2026-08-19. Sweep all three for any fixture that sets MERGE completed **indirectly** — via a helper or a `dict` update — rather than by the literal the grep counts. The grep bounds literals, not construction. Rounds 1–4 scoped this sweep to one file's "other 94 call sites"; widened at round-5 critique.
-- [ ] `tests/unit/test_sdlc_router.py` — **NO CHANGE EXPECTED, verify rather than assume.** Never named in rounds 1–4. Its `_ALL_COMPLETED` helper (`:1158`) sets `MERGE: "pending"` (`:1166`), so nothing in it is terminal today. It is also a **free second witness for the Risk 6 mutation**: no fixture in it carries an `issue_state` in `meta`, so a guard that dropped the issue-state gate would red here even though the guard's own tests live elsewhere. Carried as a Verification row and added to task 6's mutation runs.
+- [ ] `tests/unit/test_sdlc_router.py` — **NO CHANGE EXPECTED, verify rather than assume.** Never named in rounds 1–4. Its `_ALL_COMPLETED` helper (`:1158`) sets `MERGE: "pending"` (`:1166`), and `MERGE` appears in the file only as `"pending"` (`:73`, `:329`, `:1166`, verified 2026-08-19, no indirect construction), so nothing in it is terminal today. **It is therefore a regression control and not a witness for the Risk 6 mutation** — a guard with the issue-state gate deleted still returns `None` on every non-terminal ledger, so no fixture here can move under that mutation. Round 5's "free second witness" claim was self-contradictory (the same sentence recorded that nothing in the file is terminal) and is retired at round-6 critique. Carried as a Verification row and run on every mutation, to prove the first-position guard leaves non-terminal routing untouched.
 - [ ] `tests/unit/test_sdlc_stage_query.py:270-400` — **NO CHANGE** (was UPDATE before WS-B was deferred). The D4 resolution-order tests encode the current ladder order, which this lane leaves byte-identical. [#2869](https://github.com/tomcounsell/ai/issues/2869) owns rewriting them.
 - [ ] `tests/unit/test_sdlc_stage_query.py:364-399` — **NO CHANGE** (was UPDATE before WS-D was deferred). `_gh_pr_search_issue_ref`'s "first body-validating candidate" contract is unchanged by this lane; these tests keep asserting it. [#2868](https://github.com/tomcounsell/ai/issues/2868) owns rewriting them.
 - [ ] `tests/unit/test_sdlc_stage_query.py:1436-1520` — **NO CHANGE**: the #2757 two-pass block. Nothing in this lane touches the ladder; the comment at `:1517` documenting "returns the FIRST body-validating candidate" stays accurate and needs only the #2868 pointer added by the Documentation task.
@@ -879,6 +882,7 @@ patched.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **REVIEW**: **10** tests (round-1 said 11), green today. Re-run; no expected change, but they exercise the marker path WS-C touches. **This file holds `test_terminal_merged_pipeline_routes_to_merge_not_build` at `:498`** — round 1 attributed it to `tests/unit/test_sdlc_router_oscillation.py`, which is wrong (citation corrected at round-2 critique). The plan's claim *about* the fixture is correct: its docstring reads "No `MERGE` marker is set, deliberately", so it should survive WS-A untouched. **Verify that rather than assume it** — if it changes, the guard is placed wrong.
 - [ ] `tests/unit/test_sdlc_stage_query.py` — **UPDATE**: cover the `issue_state` meta key — resolved **only** when `MERGE == "completed"`, absent/`None` otherwise, `None` rather than a raise when the `gh` call fails, `None` on any value outside `{"OPEN", "CLOSED"}`, and **`--repo` present in the argv** whenever a repo resolves (round-3 blocker).
 - [ ] `tests/unit/test_lane_identity.py` — **NO CHANGE**: WS-B added `lane_branch_exists_on_remote` here and is deferred to #2869, which owns that coverage.
+- [ ] **`tests/integration/test_sdlc_next_skill_terminal.py` — CREATE.** Invokes the real `sdlc-tool next-skill` binary against a terminal ledger and asserts the JSON carries `complete: true` alongside `blocked: true`, distinguishably from an escalation `Blocked`. It is the only artifact that can discharge the "real binary, not `decide()` in-process" Success Criterion, so it carries its **own Verification row** — a file named only in a task's `Validates` list can be written and never run (round-6 concern 2).
 
 No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` count: **0**), so there are none to convert.
 
@@ -941,7 +945,9 @@ failure for this change, and strictly worse than the bug being fixed.
 by `sdlc-tool stage-marker --stage MERGE --status completed` — documented in
 `docs/sdlc/do-merge.md:100` as the post-merge step. The same transition already
 triggers the run-lease release (`_release_run_best_effort`, `:823-836`) on the
-understanding that nothing downstream still needs the lease, and
+understanding that nothing downstream still needs *that run's* lease — a scope worth
+stating, because a later supervisor on the same finished issue takes a **different**
+lease at its own Step 2, which is why the `do-sdlc` Step 5 edit is required — and
 `_pipeline_is_terminal` already makes `reestablish_run_id` decline to re-mint after it.
 The system already treats this marker as terminal in two other places; the router is
 the outlier.
@@ -963,11 +969,27 @@ issue-state gate rather than keying on `MERGE` alone.
 **Verification tasks (both required):**
 1. Confirm by grep that no code path other than `sm.complete_stage("MERGE")` writes
    `MERGE = completed`.
-2. Assert **positively** that when `sm.complete_stage("MERGE")` returns, every
-   `DISPLAY_STAGES` entry that is *not* PATCH is in `SETTLED_STATUSES`
-   (`agent/pipeline_state.py:66`, `frozenset({"completed", "skipped"})`), and that PATCH
-   is documented as the intentional exemption the guard settles. This is the assertion
-   that bounds the ledger shape; task 1's grep only bounds the writer.
+2. Assert **positively** that after a successful `--stage MERGE --status completed` marker
+   write — the write path, `tools/sdlc_stage_marker._write_marker_impl`, which backfills at
+   `:621` (`sm.start_stage(stage, backfill_predecessors=True)`) and `:800`
+   (`sm._backfill_predecessors(stage)`) — every `DISPLAY_STAGES` entry
+   (`agent/pipeline_graph.py:97`, eight stages: ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW,
+   DOCS, MERGE) is in `SETTLED_STATUSES` (`agent/pipeline_state.py:66`,
+   `frozenset({"completed", "skipped"})`); and assert **separately** that PATCH may be
+   unsettled, since it is off-spine and explicitly exempt from `_backfill_predecessors`
+   (`agent/pipeline_state.py:689-690`, "Off-spine predecessors (PATCH, reached via TEST's
+   second success in-edge) are never walked or promoted"). That unsettled PATCH is the ninth
+   matrix cell the guard deliberately settles. **Owner: task 1**, beside item 1's grep.
+
+   *Corrected at round-6 critique, twice over.* The earlier wording named
+   `PipelineStateMachine.complete_stage` (`agent/pipeline_state.py:1004-1043`), which sets
+   the target stage to `completed` and marks the next stage `ready` and **never walks
+   predecessors** — so the assertion was false of the callable it named and true only of the
+   marker-CLI write path one layer up. And it carried a "not PATCH" carve-out against
+   `DISPLAY_STAGES`, which was cited to the wrong module and **does not contain PATCH** at
+   all (`tests/unit/test_pipeline_graph.py:196` asserts `"PATCH" not in DISPLAY_STAGES`), so
+   the exclusion excluded nothing and the assertion said nothing about the one stage Risk 1's
+   third paragraph is about. The rewrite splits the two claims so each is checkable.
 3. Add the exact-string parametrized test from the Failure Path section so
    `"in_progress"` / `"failed"` / `None` / `""` provably do not terminate.
 
@@ -1013,10 +1035,13 @@ scoping and the `{"OPEN","CLOSED"}` whitelist unpinned, and those are exactly wh
 round-3 blocker lived. Deleting `--repo` from the argv must red a named test on its own.
 **The live route sweep is a mutation-table row, not a control** — it is expected to invert
 (17/17 `/do-merge` → 17/17 `TERMINAL`), so reverting WS-A must move it back.
-**Two Verification rows cannot be proved by reverting a workstream and get their own
-mutations**: the No-Go tripwire against the four guard variants, and the executable-line
-hash against its two poles. Round 4 shipped a tripwire that passed under both single edits
-it existed to catch, which is the whole reason this bullet exists.
+**Four Verification rows cannot be proved by reverting a workstream and get their own
+mutations**: the No-Go tripwire against the four guard variants, the executable-line
+hash against its two poles, and **both Risk 6 rows against a fourth mutation that deletes
+the `issue_state` gate from the guard body** (reverting the meta key leaves the gate in
+place and both rows green, so only deleting the gate moves them). Round 4 shipped a tripwire
+that passed under both single edits it existed to catch, and round 6 found the Risk 6 rows
+in the same state, which is the whole reason this bullet exists.
 
 ### Risk 6: The terminal guard latches a re-entered issue shut, permanently
 **Impact:** The worst outcome in this plan. `MERGE == "completed"` is durable and
@@ -1137,23 +1162,29 @@ resolves itself on the following tick.
   Wiring the recipe above without doing the measurement turns that row red, which is the
   point: this No-Go is now enforced by a test rather than by an argument default.
 
-- **A third, unscoped `gh issue view --json state` reader stays as it is:
-  `scripts/migrate_completed_plan.py:362::_gh_issue_state`.** Found in round 4, live on
-  `main`, and cited here so the next reader does not think this plan swept the surface.
-  It carries **both** divergences this lane fixes elsewhere: the argv has no `--repo`
-  (`["gh", "issue", "view", str(issue_number), "--json", "state"]` at `:366`), and it
-  `.lower()`s the result and returns `"unknown"` on failure, so its vocabulary is
-  `{"open", "closed", "unknown"}` against `_compute_meta`'s `{"OPEN", "CLOSED", None}`.
-  Its two call sites are `:392` and `:421`.
+- **The other unscoped `gh issue view` readers stay as they are.** Two of them, not one —
+  the round-4 framing said "a third reader" and undercounted (corrected at round-6 critique):
 
-  **Disposition: out of scope for this lane, named rather than fixed.** It is a
-  human-invoked one-shot migration script, not a router input — nothing it returns reaches
-  `decide_next_dispatch`, so it cannot terminate a live lane, which is the failure the
-  round-3 `--repo` blocker was about. Touching it would put a fourth file in a two-file PR
-  and dilute the mutation table with a workstream that has no measured failure behind it.
-  **Follow-up obligation:** task 8 files a `bug`-labelled issue naming the file, both
-  divergences, and the two call sites, and links it from this bullet. This lane does not
-  add `--repo` there, and a build that does has exceeded scope.
+  - `scripts/migrate_completed_plan.py:362::_gh_issue_state` carries **both** divergences
+    this lane fixes elsewhere: the argv has no `--repo`
+    (`["gh", "issue", "view", str(issue_number), "--json", "state"]` at `:366`), and it
+    `.lower()`s the result and returns `"unknown"` on failure, so its vocabulary is
+    `{"open", "closed", "unknown"}` against `_compute_meta`'s `{"OPEN", "CLOSED", None}`.
+    Its two call sites are `:392` and `:421`.
+  - `tools/agent_session_scheduler.py:147::_validate_issue` runs
+    `["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"]` with no
+    `--repo` and no `cwd`, and its result **gates whether an autonomous session is scheduled
+    on an issue** — the higher-stakes of the two.
+  - Checked and **not** an instance: `reflections/housekeeping/merged_branch_cleanup.py:170`
+    appends `-R` when a repo is known.
+
+  **Disposition: out of scope for this lane, named rather than fixed.** Neither is a router
+  input — nothing either returns reaches `decide_next_dispatch`, so neither can terminate a
+  live lane, which is the failure the round-3 `--repo` blocker was about. Touching them would
+  put further files in a two-file PR and dilute the mutation table with work that has no
+  measured failure behind it. **Follow-up obligation:** task 8 files one `bug`-labelled issue
+  naming **both** files, their divergences, and their call sites, and links it from this
+  bullet. This lane adds `--repo` to neither, and a build that does has exceeded scope.
 
 Everything else #2817 and #2825 describe is in scope for this plan. #2824 is scoped out in
 full and handed to #2869.
@@ -1233,12 +1264,12 @@ in-process.
 
 ### SDLC Stage Addenda
 - [ ] **Update `.claude/skills-global/do-sdlc/SKILL.md` — the supervisor's `blocked`
-      contract, at all four load-bearing sites.** Because Q2 settles on the **additive**
+      contract, at all five load-bearing sites.** Because Q2 settles on the **additive**
       key, the terminal payload still carries `blocked: true`, so every site that classifies
       a `blocked` payload classifies the terminal shape too. Editing one of them leaves a
       numbered Hard Rule instructing surface-and-stop-to-the-human on the exact payload the
       Success Criteria require be routed to loop-exit-success — the regression this checkbox
-      exists to prevent, surviving its own remedy. Nothing holds the other three: the plan
+      exists to prevent, surviving its own remedy. Nothing holds the other four: the plan
       already establishes that `_GUARD_ROW_RE = re.compile(r"^G\d+")` cannot parse a
       `TERMINAL` id and that the parity test runs one direction only.
 
@@ -1252,12 +1283,31 @@ in-process.
       | Step 3a table tail (`:136`) | "`{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human…" | Add the `{"blocked": true, "complete": true, "guard_id": "TERMINAL", ...}` case → *exit the loop reporting **success**, not escalation*. |
       | Step 3e (`:295`) | "Router returned `blocked` → already stopped in 3a." Its only success exit is the `/do-merge` + `gh pr view … MERGED` path, which a terminal ledger can no longer reach once the guard pre-empts row 10. | Add a terminal exit condition **beside** the merged one: a `complete: true` router decision → **exit the loop, success**. |
       | Step 4 Final Report (`:303`) | "**Outcome**: merged / blocked (with guard + reason) / cap reached" — a taxonomy with no terminal member. | Add a fourth outcome value: `already complete (terminal pipeline)`. |
+      | Step 5 lease-release list (`:324`) | "a **`blocked`** router decision (3a / 3e)", listed alongside the 3d.4 HALT and the iteration cap, with the contrast paragraph at `:327` reading "The **merged** exit needs no action from you". | Name the terminal shape in that bullet: "a **`blocked`** router decision (3a / 3e), **including the `complete: true` terminal shape**". |
 
-      **Step 5's lease-release list needs no change and must not get one.** On a
-      `MERGE == completed` ledger the lease was already released by
-      `complete_stage("MERGE")`'s `_release_run_best_effort` — the same fact Risk 1 depends
-      on — so adding a terminal branch there would either double-release or imply the lease
-      is still held. Leave it.
+      **Why Step 5 needs the clause — the earlier "must not get one" rationale was false and
+      is corrected here rather than deleted silently. (Round-6 blocker.)** Earlier rounds
+      argued that on a `MERGE == completed` ledger the lease "was already released by
+      `complete_stage("MERGE")`'s `_release_run_best_effort`", so a terminal branch would
+      double-release or imply a lease still held. **That release hands back the *merging*
+      run's lease.** A supervisor invoked later on an already-finished issue mints its **own**
+      run and takes its **own** lease at Step 2 — `session-ensure` has no terminal gate, and
+      `_pipeline_is_terminal` is consulted only by `reestablish_run_id`
+      (`tools/_sdlc_run_identity.py:200`) — and then hits the new terminal exit on iteration 1.
+      That is exactly the population WS-A serves (17/17 live terminal ledgers), so without the
+      clause the terminal exit strands a lease on every such run and the next run on that
+      issue refuses with a foreign-owner `ISSUE_LOCKED` until renewal freshness lapses.
+
+      The misclassification is produced by this plan's own other edits: three of them tell
+      the supervisor the terminal shape is "a finished pipeline, not a guard escalation" and
+      route it to loop-exit-success beside the merged exit, while `:327` says the merged exit
+      needs no action. A supervisor reading the terminal exit as merged-like skips
+      `session-release`. **Do not fix it by routing the terminal exit through the merged
+      branch** — the merged exit is correct only because `complete_stage("MERGE")` released
+      the lease *in the same process*, which a later supervisor's run cannot inherit.
+      `session-release` is ownership-checked and best-effort (the body already says "run it
+      whenever in doubt"), so the clause is a no-op in the same-run case and the fix in the
+      fresh-run case.
 
       Keep the wording **generic** (it is a global skill hardlinked to every machine by
       `scripts/update/hardlinks.py`, and the body already documents `blocked`/`guard_id`
@@ -1370,8 +1420,11 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 **WS-A — the `issue_state` gate that feeds the guard**
 
-- [ ] `_compute_meta` resolves `issue_state` **only** when `MERGE == "completed"`, and
-      degrades to `None` rather than raising when the `gh` call fails.
+- [ ] `_compute_meta` resolves `issue_state` **only** when `MERGE == "completed"` **and an
+      issue number is present**, and degrades to `None` rather than raising when the `gh`
+      call fails. The session-keyed path reaches `_compute_meta` with `issue_number=None`
+      (`:515-519`); without that leg a terminal session-keyed query shells out to
+      `gh issue view None` and pays a subprocess plus its timeout for a guaranteed `None`.
 - [ ] **The `gh issue view` argv carries `--repo <resolved_repo>` whenever a repo resolves**,
       built exactly like its sibling at `tools/sdlc_stage_query.py:192`. Asserted **on the
       argv**, because a wrong-repo lookup *succeeds* — no result assertion can catch it, and
@@ -1457,7 +1510,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 - **Validator**
   - Name: `lane-validator`
-  - Role: independently re-run every live measurement and the whole Verification table; confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` changed in **docstring text only** — no signature, no control flow, no argv — by the executable-line hash row, **not** by reading the raw diff. The two functions are *expected* to carry a docstring annotation each (the Documentation section mandates it); a validator who blocks on any diff at all blocks a compliant PR.
+  - Role: independently re-run every live measurement and the whole Verification table — **including both integration rows**, since `tests/integration/test_sdlc_next_skill_terminal.py` is the only artifact that exercises the real `sdlc-tool next-skill` binary and a file that is written but never run reports nothing; confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` changed in **docstring text only** — no signature, no control flow, no argv — by the executable-line hash row, **not** by reading the raw diff. The two functions are *expected* to carry a docstring annotation each (the Documentation section mandates it); a validator who blocks on any diff at all blocks a compliant PR.
   - Agent Type: validator
   - Resume: true
 
@@ -1481,7 +1534,8 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - Re-run `_review_artifact_posted(1785/2073/2104)` → True/True/True.
 - Re-run the terminal-ledger CLOSED sweep **with `--repo`** and confirm both numbers are **equal** and the population is **non-empty**. It was `16 16` on 2026-08-19 and `17 17` when re-measured later that day; it grows by one on every merge, so a builder will legitimately see a larger number. An **inequality** — not a change in the count — means the `!= "CLOSED"` polarity now costs real coverage and the argument needs restating before any code is written.
 - **Re-run the live route sweep over the same population** and record where those ledgers actually route today. It walks the identical set the CLOSED check walks, so it costs one extra pass and no extra `gh` calls. It must go through the **real context builder** — `query_enriched(issue_number=n)` → `tools.sdlc_next_skill._build_context(None, n, res["stages"], res["_meta"])` → `decide_next_dispatch`, all inside `cached_target_repo_resolution()` — never a hand-built `{"branch_exists": ...}` dict, which omits `stage_artifacts_verified` and so cannot see a G8 interaction. Measured 2026-08-19: **`17 17 0`** (population, `/do-merge` hits, `TERMINAL` hits). This is the number that converts WS-A's severity claim from argued to measured, and it is what the PR body should carry rather than "reproduces live today". **Expected to invert after WS-A** — 0 `/do-merge`, N `TERMINAL` — which makes it positive coverage, so it owes a watch-it-fail in task 2 and a row in Risk 5's mutation table.
-- Confirm no code path other than `sm.complete_stage("MERGE")` writes `MERGE = completed` (Risk 1's verification task).
+- Confirm no code path other than `sm.complete_stage("MERGE")` writes `MERGE = completed` (Risk 1's verification item 1).
+- **Bound the ledger shape, not just the writer (Risk 1's verification item 2).** After a successful `--stage MERGE --status completed` marker write through `tools/sdlc_stage_marker._write_marker_impl` (which backfills at `:621` and `:800`), assert every `DISPLAY_STAGES` entry (`agent/pipeline_graph.py:97` — eight stages, **PATCH is not among them**) is in `SETTLED_STATUSES` (`agent/pipeline_state.py:66`), and **separately** that PATCH may be unsettled, being off-spine and explicitly exempt from `_backfill_predecessors` (`agent/pipeline_state.py:689-690`). That unsettled PATCH is spike-1's ninth cell, which the guard deliberately settles. **Do not assert this of `PipelineStateMachine.complete_stage`** — it never walks predecessors; the backfill lives in the marker CLI. Round-6 concern 3: this item previously named the wrong callable, carried a vacuous "not PATCH" carve-out, and had no owning task.
 - Record everything as the red-state paper trail for the PR body.
 - **Do not measure `_lookup_pr`.** It is unchanged by this lane; its fixtures belong to #2869.
 
@@ -1494,7 +1548,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Write every assertion from Success Criteria against **unmodified** source and watch each one fail. Paste the real failure output into the PR body.
-- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the `_lookup_pr` executable-line-unchanged row, the 8-route negative-control sweep, the three router-suite rows, the xfail row, and the two lint/format rows). **The live-route sweep is NOT on this list** — it is positive coverage (17/17 `/do-merge` today → 17/17 TERMINAL after WS-A), so it owes a watch-it-fail and it belongs in Risk 5's mutation table. They are anti-criteria, controls, and hygiene checks; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table. **A GREEN TODAY row still owes a mutation proof** — task 6 owns the two anti-criterion greps, and round 4 found both passing vacuously precisely because nobody ever watched them move.
+- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the `_lookup_pr` executable-line-unchanged row, the 8-route negative-control sweep, the three router-suite rows, the session-ensure integration control row, the xfail row, the two lint/format rows, and **both Risk 6 rows**, which are vacuously green until the guard exists and are proved instead by task 6's third WS-A mutation). **The live-route sweep is NOT on this list** — it is positive coverage (17/17 `/do-merge` today → 17/17 TERMINAL after WS-A), so it owes a watch-it-fail and it belongs in Risk 5's mutation table. They are anti-criteria, controls, and hygiene checks; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table. **A GREEN TODAY row still owes a mutation proof** — task 6 owns the two anti-criterion greps, and round 4 found both passing vacuously precisely because nobody ever watched them move.
 - Every negative assertion must be paired with a positive one (`"error" not in result`) so a crash cannot go green — the #2826 discipline.
 - **Assert the `gh issue view` argv, not just its result.** The round-3 blocker is a lookup that returns a confident wrong answer, so a result-shaped test cannot see it. Patch `subprocess.run`, capture `call_args`, and assert `--repo` is present.
 - Write **no** `_lookup_pr` tests. That surface is unchanged; its tests belong to #2869.
@@ -1516,7 +1570,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - Insert it **first in `GUARDS`, ahead of G1** (Resolved Question 1), with the rationale in the docstring.
 - Map the terminal `guard_id` to its JSON shape in `tools/sdlc_next_skill.py::decide()` — an additive `complete: true` key alongside `blocked` (Resolved Question 2).
 - **Update BOTH router-consumer skill bodies in this same commit**, at every site that classifies a `blocked` payload. Because Q2 ships the additive key, the terminal payload still carries `blocked: true`, so a one-line edit leaves the other sites classifying it as an escalation.
-  - `.claude/skills-global/do-sdlc/SKILL.md` — **four sites**: Hard Rule 3 (`:23`), the Step 3a table tail (`:136`), Step 3e's exit conditions (`:295`), and Step 4's outcome taxonomy (`:303`). Exact edits are in the Documentation → SDLC Stage Addenda checkbox. Anchor on text, not offsets — `grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md` returns them all. **Step 5's lease-release list gets no change**: on a `MERGE == completed` ledger `complete_stage("MERGE")`'s `_release_run_best_effort` already released the lease, which is the fact Risk 1 depends on.
+  - `.claude/skills-global/do-sdlc/SKILL.md` — **five sites**: Hard Rule 3 (`:23`), the Step 3a table tail (`:136`), Step 3e's exit conditions (`:295`), Step 4's outcome taxonomy (`:303`), and **Step 5's lease-release list (`:324`)**. Exact edits are in the Documentation → SDLC Stage Addenda checkbox. Anchor on text, not offsets — `grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md` returns them all. **Step 5's bullet must name the terminal shape** (`"a blocked router decision (3a / 3e), including the complete: true terminal shape"`): `complete_stage("MERGE")`'s `_release_run_best_effort` released the *merging* run's lease, and a supervisor invoked later on a finished issue holds a **different** one it took at Step 2. Without the clause the terminal exit strands that lease. Do **not** instead route the terminal exit through the merged branch at `:327`.
   - `.claude/skills/sdlc/SKILL.md` — **one site** (`:261`). Its other `blocked` mentions (`:169`, `:202`, `:251`, `:256`) are the guard table and the `ISSUE_LOCKED` contract and classify no terminal payload. The asymmetry is real; do not go looking for three more.
   - Both bodies carry the identical operative instruction; fixing one path and not the other leaves the regression live on the other. Neither is conditional on the parity test, which provably cannot hold either of them (`_GUARD_ROW_RE` is `^G\d+`).
 - **Re-key `tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable._unowned_state()`** (`:1692`) — drop `"MERGE": "completed"`, change nothing else. Verified to keep both assertions passing. Do **not** flip either assertion to `"TERMINAL"`; that retires the #2767b sentinel guarantee.
@@ -1531,7 +1585,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Assigned To**: `router-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Add the `issue_state` key to `_compute_meta` (`tools/sdlc_stage_query.py:515`), resolved **only when `MERGE == "completed"`** so non-terminal ticks cost nothing, once per invocation inside the existing `cached_target_repo_resolution()` scope, degrading to `None` on any failure rather than raising.
+- Add the `issue_state` key to `_compute_meta` (`tools/sdlc_stage_query.py:515`), resolved **only when `MERGE == "completed"` and `issue_number is not None`** so non-terminal ticks cost nothing, once per invocation inside the existing `cached_target_repo_resolution()` scope, degrading to `None` on any failure rather than raising. The issue-number leg is not defensive styling: `_compute_meta`'s signature is `(raw_states, session, issue_number: int | None)` (`:515-519`) and the session-keyed path reaches it with no issue number, so a MERGE-only gate shells out to `gh issue view None` and burns a subprocess and its timeout on every terminal session-keyed query before degrading to `None` (round-6 nit).
 - **Thread `--repo` into the argv**, built exactly like `_fetch_pr_merge_state` at `:192`:
   `["gh","issue","view",str(issue_number), *(["--repo",resolved_repo] if resolved_repo else []), "--json","state","-q",".state"]`.
   This is not tidiness. `gh` resolves `GH_REPO` from the environment **before** cwd, so a bare call can answer about a foreign repository's issue #N and **exit 0**; a foreign CLOSED issue then terminates a live lane through the very gate built to prevent that. The fail-soft-to-`None` contract does not cover it, because a wrong-repo lookup succeeds.
@@ -1560,7 +1614,8 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Parallel**: false
 - Revert each of WS-A and WS-C **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
 - Mutate the two halves of WS-A **separately**: the guard and the `issue_state` key. A test suite that reds only on the guard revert leaves the `--repo` scoping and the `{"OPEN","CLOSED"}` whitelist unpinned, which is exactly the round-3 blocker going unnoticed. Deleting `--repo` from the argv must red a named test on its own.
-- **Run all three router suites on every mutation**, not just `test_sdlc_router_decision.py`. `test_sdlc_router.py` carries 35 `decide_next_dispatch(` call sites and no `issue_state` in any of its metas, so it is a free second witness: a guard that dropped the issue-state gate should red there.
+- **Mutate the `issue_state` *gate* as a third, distinct WS-A mutation.** Reverting the `issue_state` meta key is not the same edit: with the key gone the gate is still in the guard body, `meta.get("issue_state")` is `None`, and the guard declines to terminate — so both Risk 6 rows stay green and the gate's own correctness goes unproved. Delete the `issue_state` gate line from the guard body, keeping the `isinstance` check and the reason gate, and confirm **both Risk 6 Verification rows flip to red** (measured `True / False` for as-specified vs. gate-deleted on `40c4fe0a9`). Record that **the No-Go tripwire row stays `True` under this mutation** — it is not a witness for the gate — and that `tests/unit/test_sdlc_router.py` stays green for the same reason. Round-6 concern 1: the mitigation for "the worst outcome in this plan" had no mutation entry anywhere.
+- **Run all three router suites on every mutation**, not just `test_sdlc_router_decision.py`. `test_sdlc_router.py` carries 35 `decide_next_dispatch(` call sites and every one of its `MERGE` values is `"pending"`, so it is a **regression control**: it must stay green on every mutation, proving the first-position guard changes no non-terminal routing. It cannot witness the issue-state-gate mutation, and the bullet above is what does.
 - **Mutation-prove the No-Go tripwire row against the four guard variants**, not just against a revert. Build (A) the guard as task 3 specifies, (B) the No-Gos recipe wired with the reason gate kept, (C) the reason gate deleted with `pr_open=None`, (D) both, and confirm the row scores `True / False / False / False`. Proved at plan time on `054f0f0fa`; round 4's ledger-shaped form scored `True / True / True / False` on the same four, which is how it reached a fifth round undetected.
 - **Mutation-prove the executable-line hash row on both poles**: a docstring line added to each of `_lookup_pr` and `_gh_pr_search_issue_ref` must leave the output `True True` (confirm the edit landed with `git diff --stat`), and `lane_branch: str \| None = None` added to `_lookup_pr`'s signature must flip the first leg to `False`. Proved at plan time; re-prove against build-time source since the recorded hashes are pinned to `f491306c5`. **If an unrelated commit changes either function's executable lines before this lane builds, the pinned hash is stale — re-record it and say so in the PR body, do not relax the row.**
 - Revert both workstreams together and confirm the two original reported shapes return.
@@ -1572,7 +1627,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 ### 7. Documentation
 - **Task ID**: document-feature
 - **Validates**: no test files — it discharges against the Documentation section's checkboxes and against the executable-line hash row, which is the gate proving the two docstring annotations landed **without** touching signature, control flow, or argv
-- **Informed By**: round-5 blocker 2 (the annotations are mandatory and were previously in contradiction with the scope check), round-5 blocker 3 (the `do-sdlc` contract lives at four sites)
+- **Informed By**: round-5 blocker 2 (the annotations are mandatory and were previously in contradiction with the scope check), round-5 blocker 3 (the `do-sdlc` contract lives at four sites), round-6 blocker (Step 5 is the fifth)
 - **Depends On**: mutation-check
 - **Assigned To**: `lane-documentarian`
 - **Agent Type**: documentarian
@@ -1591,16 +1646,21 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - Comment the measured post-fix shape on **#2817** and **#2825** before either closes — #2826's explicit request.
 - **On #2824, post an honest deferral disposition, and do not close it.** The PR refs it rather than closing it, so the issue must explain itself or it goes quiet under a merged PR that mentions it. State: the mechanism (head-ref authority gated on the branch existing on origin) is designed and measured at 0 gains / 0 losses / 11 unchanged; it keys on a recorded lane slug; #2494 and #2518 carry none; the eleven slugged ledgers are all in-flight lanes, so the slugged and reopened populations are **disjoint**; and [#2869](https://github.com/tomcounsell/ai/issues/2869) carries both the mechanism and the slug-adoption gap that gives it a population. Link the plan's *Technical Approach → WS-B* section, which is the finished design #2869 inherits.
 - Confirm the PR body's closing refs read `Closes #2817`, `Closes #2825`, `Refs #2824` — a bare `#2824` mention closes nothing and records nothing.
-- **File the follow-up issue for `scripts/migrate_completed_plan.py:362::_gh_issue_state`** (label `bug`): the unscoped `gh issue view` argv at `:366`, the `.lower()` + `"unknown"` vocabulary divergence, and the two call sites at `:392` and `:421`. Link it back from the No-Gos bullet that names it. This lane does not fix that file; the issue is what keeps the named-not-fixed disposition honest.
+- **File the follow-up issue for the unscoped `gh issue view` readers** (label `bug`), covering **both** call sites, not one:
+  - `scripts/migrate_completed_plan.py:362::_gh_issue_state` — unscoped argv at `:366`, the `.lower()` + `"unknown"` vocabulary divergence against `_compute_meta`'s `{"OPEN", "CLOSED", None}`, and its two call sites at `:392` and `:421`.
+  - `tools/agent_session_scheduler.py:147::_validate_issue` — `["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"]` with no `--repo` and no `cwd`, and **its result gates whether an autonomous session is scheduled on an issue**, which makes it the higher-stakes of the two. (Round-6 nit: the No-Gos bullet was framed as naming "a third reader" and the follow-up inherited a one-file scope.)
+  - Not an instance, checked and excluded so nobody re-derives it: `reflections/housekeeping/merged_branch_cleanup.py:170` appends `-R` when a repo is known.
+  Link the issue back from the No-Gos bullet that names these. This lane fixes neither file; the issue is what keeps the named-not-fixed disposition honest.
 
 ### 9. Final validation
 - **Task ID**: validate-all
+- **Depends On**: record-outcomes
 - **Validates**: no test files — this discharges against the Verification table, every row of it
 - **Informed By**: the Success Criteria (each row exists to discharge one), round-5 blocker 2 (the scope check is executable-line, not byte)
 - **Assigned To**: `lane-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the entire Verification table, including the three router-suite rows and the live-route sweep.
+- Run the entire Verification table, including the three router-suite rows, the live-route sweep, and **both integration rows** — `tests/integration/test_sdlc_next_skill_terminal.py` (confirm it collected **at least one test**; pytest exit **5** is not a pass) and `tests/integration/test_sdlc_session_ensure_integration.py` (10 tests, still green). Round-6 concern 2: the terminal integration file is the only artifact that invokes the real binary, and without its row this task could report the table green while the file had never run.
 - **Confirm `_lookup_pr` and `_gh_pr_search_issue_ref` changed in docstring text only** — run the executable-line hash row and expect `True True`. WS-B belongs to #2869 and WS-D to #2868, and neither may have leaked in. **Do not discharge this by reading the raw diff**: both functions are *required* to gain a docstring annotation, so a diff-shaped reading blocks a compliant PR. That contradiction is round-5 blocker 2 and this bullet is its remedy.
 - Confirm no `tools/` import and no I/O entered `agent/sdlc_router.py`.
 - Confirm the `gh issue view` argv in the merged diff carries `--repo`.
@@ -1610,18 +1670,20 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 | Check | Command | Expected |
 |---|---|---|
 | **Router decision suite — the one WS-A provably reds** | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router_decision.py -q` | exit code 0. **The suite the change is known to break** — it holds the only `"MERGE": "completed"` fixture in any router test (`:1706`) and task 3 re-keys `_unowned_state()`. Round 4's table had no row for it, so task 9 and the `lane-validator` could both discharge without ever running it. |
-| Router core suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router.py -q` | exit code 0. The third router suite, unnamed in rounds 1–4. **35** further `decide_next_dispatch(` call sites and an `_ALL_COMPLETED` helper at `:1158` whose `MERGE` is `"pending"` (`:1166`), so nothing in it is terminal today — which is exactly what makes it a free second witness for the Risk 6 mutation: no fixture in it carries an `issue_state`, so a guard that ignored the issue-state gate would red here. |
+| Router core suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router.py -q` | exit code 0. **GREEN TODAY (regression control).** The third router suite, unnamed in rounds 1–4. **35** further `decide_next_dispatch(` call sites and an `_ALL_COMPLETED` helper at `:1158` whose `MERGE` is `"pending"` (`:1166`) — verified 2026-08-19, `MERGE` appears in this file only as `"pending"` at `:73`, `:329`, `:1166`, with no indirect construction. **It is a control, not a witness**: because nothing in it is terminal, a guard that dropped the issue-state gate still returns `None` on every one of its fixtures, so it cannot red under that mutation. Round 5's "free second witness" reading was wrong and is retired (round-6 concern 1). Its job is to **stay** green, proving the first-position guard disturbs no non-terminal routing. |
 | Router oscillation suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router_oscillation.py -q` | exit code 0. **NO CHANGE EXPECTED** (zero `"MERGE": "completed"` fixtures) — this row confirms rather than assumes. |
 | Stage-query unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_stage_query.py -q` | exit code 0 |
 | Stage-marker unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_stage_marker.py -q` | exit code 0 |
 | next-skill unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_next_skill.py -q` | exit code 0 |
 | Terminal predicate suite | `./scripts/pytest-clean.sh tests/unit/test_pipeline_complete_predicate.py -q` | exit code 0 |
 | Architectural constraints | `./scripts/pytest-clean.sh tests/unit/test_architectural_constraints.py -q` | exit code 0 |
+| **Terminal shape through the real binary (the integration file task 2 creates)** | `./scripts/pytest-clean.sh tests/integration/test_sdlc_next_skill_terminal.py -q` | exit code 0 **and at least one test collected** — pytest's exit **5** ("no tests collected") must not be read as a pass, and neither must a file that was written but never run. **Red today** (the file does not exist). This is the **only** artifact that can discharge the Success Criterion "`sdlc-tool next-skill` on a terminal pipeline emits a machine-distinguishable terminal shape, verified by invoking the real binary, not `decide()` in-process". Round-6 concern 2: without this row the file appeared only in task 2's `Validates` list, so task 9 could discharge the whole table green while the file had never been executed. **Workstream coverage for WS-A**; belongs in Risk 5's mutation table. Never bare `pytest` — the wrapper is `scripts/pytest-clean.sh`. |
+| **session-ensure integration suite** | `./scripts/pytest-clean.sh tests/integration/test_sdlc_session_ensure_integration.py -q` | exit code 0, **10 tests**. **GREEN TODAY (regression control).** Holds `test_terminal_merged_pipeline_routes_to_merge_not_build` at `:498`, whose docstring reads "No `MERGE` marker is set, deliberately" — so it should survive WS-A untouched, and if it moves the guard is placed wrong. Test Impact says "verify rather than assume it"; this row is what verifies it. Exempt from task 2's watch-it-fail. |
 | Terminal verdict, no `pr_number`, no branch | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'CLOSED'},{'branch_exists':False}))"` | output contains `TERMINAL` |
 | Terminal verdict, no `pr_number`, branch exists (the false rebuild) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'CLOSED'},{'branch_exists':True}))"` | output contains `TERMINAL` and does not contain `/do-build`. **Both legs** — asserting only the absence passes vacuously today (`/do-build` is what it returns, but a crash would also omit the string). |
 | Terminal verdict, `pr_number` present | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{'branch_exists':True}))"` | output contains `TERMINAL` and does not contain `/do-merge` |
-| **Risk 6 — a reopened (OPEN) issue is NOT latched** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'OPEN'},{'branch_exists':True}))"` | output does **not** contain `TERMINAL`. The single most important row in this table: a terminal ledger whose issue was reopened must route as it does today, not terminate forever. |
-| **Risk 6 — an unresolvable issue state fails open** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(all('TERMINAL' not in str(d(dict(s),m,{'branch_exists':True})) for m in [{},{'issue_state':None},{'issue_state':''},{'issue_state':'closed'},{'issue_state':42}]))"` | output contains `True`. Pins the `!= "CLOSED"` polarity: the `== "OPEN"` form would fail every case here. |
+| **Risk 6 — a reopened (OPEN) issue is NOT latched** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'OPEN'},{'branch_exists':True}))"` | output does **not** contain `TERMINAL`. The single most important row in this table: a terminal ledger whose issue was reopened must route as it does today, not terminate forever. **GREEN TODAY (vacuous until the guard exists)** — measured on `main`: it returns `Dispatch(row_id='5')`, which contains no `TERMINAL` for the trivial reason that no guard can emit one yet. **Exempt from task 2's watch-it-fail; it cannot go red before the guard lands.** Its proof is task 6's third WS-A mutation (delete the `issue_state` gate), not a red-state observation. |
+| **Risk 6 — an unresolvable issue state fails open** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(all('TERMINAL' not in str(d(dict(s),m,{'branch_exists':True})) for m in [{},{'issue_state':None},{'issue_state':''},{'issue_state':'closed'},{'issue_state':42}]))"` | output contains `True`. Pins the `!= "CLOSED"` polarity: the `== "OPEN"` form would fail every case here. **GREEN TODAY (vacuous until the guard exists)** — measured `True` on `main` for the same trivial reason. **Exempt from task 2's watch-it-fail**; proved by task 6's third WS-A mutation. |
 | **Live route sweep — where terminal ledgers actually go (WS-A's severity, measured)** | `./.venv/bin/python -c "import json; from agent.pipeline_ledger import PipelineLedger; from agent.sdlc_router import decide_next_dispatch as d; from tools._sdlc_utils import cached_target_repo_resolution; from tools.sdlc_next_skill import _build_context; from tools.sdlc_stage_query import query_enriched; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; cached_target_repo_resolution().__enter__(); rs=[str(d(q['stages'],q['_meta'],_build_context(None,n,q['stages'],q['_meta']))) for n in ns for q in [query_enriched(issue_number=n)]]; print(len(ns), sum('/do-merge' in r for r in rs), sum('TERMINAL' in r for r in rs))"` | Today: `N N 0` — measured **`17 17 0`** on 2026-08-19. After WS-A: `N 0 N`. **Positive coverage, NOT a control** — it is expected to move, so it is subject to task 2's watch-it-fail and it belongs in Risk 5's mutation table. Goes through the **real context builder**: a hand-built `{"branch_exists": ...}` dict omits `stage_artifacts_verified` and cannot see a G8 interaction. Reads the **flat** `stage_states_json` shape — see the note below on the `stages` wrapper. Takes about 80s (one `query_enriched` per ledger); run it once, not per-row. This row is what makes the Problem section's "reachable and unowned; zero live instances today" a measurement rather than a hedge. |
 | **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--repo','tomcounsell/ai','--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Re-measured **repo-scoped** 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. **The `--repo` flag is required**, not optional: without it `gh` resolves `GH_REPO` before cwd and the number describes an unknown repository. |
 | **Round-3 blocker — the `gh issue view` argv is repo-scoped** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q, subprocess; r=patch.object(q.subprocess,'run',wraps=subprocess.run).start(); q._compute_meta({k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}, None, 2711); argvs=[c.args[0] for c in r.call_args_list if isinstance(c.args[0],list) and c.args[0][:3]==['gh','issue','view']]; print(bool(argvs) and all('--repo' in a for a in argvs))"` | output contains `True`. **Red today** (the key does not exist yet). Asserts the **argv**, because a wrong-repo lookup *succeeds* and no result-shaped assertion can see it. |
@@ -1752,22 +1814,31 @@ are the round-4/5 class recurring one artifact over: a witness that cannot fire,
 test with no Verification row. The third is a Risk 1 assertion aimed at a callable that
 cannot satisfy it. No finding is about whether WS-A or WS-C should ship.
 
+**Round-6 revision applied 2026-08-19.** The blocker and all three concerns are closed in
+the plan text; three of the four nits are closed and the fourth is **falsified and recorded
+as Accepted Residual 6** rather than applied. Dispositions are in the `Addressed By` column
+below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The plan mandates that `do-sdlc`'s Step 5 lease-release list "needs no change and **must not get one**", on the ground that "on a `MERGE == completed` ledger the lease was already released by `complete_stage("MERGE")`'s `_release_run_best_effort`". That release hands back the *merging* run's lease. A supervisor invoked later on a finished issue mints its own run and takes its own lease at Step 2 — `session-ensure` has no terminal gate, `_pipeline_is_terminal` being consulted only by `reestablish_run_id` (`tools/_sdlc_run_identity.py:200`) — then hits the new terminal exit on iteration 1 and leaves the loop. That is exactly the population WS-A serves (17/17 live terminal ledgers). Meanwhile the three other mandated edits tell the supervisor this shape is "a finished pipeline, not a guard escalation", route it to loop-exit-success, and add it to Step 3e "beside the merged one", while Step 5's contrast row says "The **merged** exit needs no action from you". A supervisor that classifies the terminal exit as merged-like skips `session-release` and leaks the issue lease, so the next run on that issue refuses with a foreign-owner `ISSUE_LOCKED` until renewal freshness lapses. The plan's own prose produces the misclassification and forbids the one-line remedy. | pending | Replace the "must not get one" paragraph with a fifth site row in the four-site table: Step 5 (`:324`), text on `main` "a **`blocked`** router decision (3a / 3e)" -> "a **`blocked`** router decision (3a / 3e), **including the `complete: true` terminal shape**". Correct the rationale in one sentence: the MERGE-completion release (`tools/sdlc_stage_marker.py:836` -> `_release_run_best_effort`) hands back the *merging* run's lease; a supervisor that ran `session-ensure` this tick holds a different one. `session-release` is ownership-checked and best-effort, so the clause is a no-op in the same-run case and the fix in the fresh-run case — the skill body already says "run it whenever in doubt". Do **not** instead route the terminal exit through the merged branch: the merged exit is correct only because `complete_stage("MERGE")` released the lease in the same process. |
-| CONCERN | Risk & Robustness | The Risk 6 issue-state gate — the mitigation for what the plan calls "the worst outcome in this plan" — has no mutation entry anywhere, and the witness named for it provably cannot fire. The "Router core suite" row argues `tests/unit/test_sdlc_router.py` is "a free second witness for the Risk 6 mutation ... a guard that ignored the issue-state gate would red here", while the same sentence records that its `_ALL_COMPLETED` helper sets `MERGE: "pending"` "so nothing in it is terminal today". Both cannot be true: a guard with no issue-state gate still returns `None` on every non-terminal ledger. Verified — `MERGE` appears in that file only as `"pending"` (`:73`, `:329`, `:1166`) with no indirect construction — so no fixture in it can move under that mutation. Measured directly: a variant of the plan's own guard body with the `issue_state` gate deleted leaves the No-Go tripwire row at **True** and is caught only by the two Risk 6 Verification rows, both of which pass **vacuously today** (on `main` the OPEN row returns `Dispatch(row_id='5')` and the fail-open row prints `True`) yet carry no GREEN TODAY label, so task 2 demands red-state evidence they cannot produce. Risk 5's list of rows that "cannot be proved by reverting a workstream" names two; these are the third and fourth. | pending | Add a **third** WS-A mutation to task 6, distinct from the guard/`issue_state`-key split already there (reverting the key leaves the gate present and the rows still green, so only deleting the gate moves them): "delete the `issue_state` gate from the guard body, keeping the `isinstance` check and the reason gate, and confirm the two Risk 6 rows flip to red — measured `True / False` for as-specified vs. gate-deleted on `40c4fe0a9`; the tripwire row stays `True` under this mutation and is not a witness for it." Label both Risk 6 rows **GREEN TODAY (vacuous until the guard exists)** so task 2 stops demanding a watch-it-fail they cannot give, and rewrite the "Router core suite" row's justification to what is true: a regression control with zero terminal fixtures, which is why it must stay green rather than why it would red. |
-| CONCERN | Scope & Value | `tests/integration/test_sdlc_next_skill_terminal.py` is created by task 2 and is the only artifact that can discharge the Success Criterion "`sdlc-tool next-skill` on a terminal pipeline emits a machine-distinguishable terminal shape, **verified by invoking the real binary, not `decide()` in-process**". It appears exactly once in the plan — task 2's `Validates` list — with **no Verification row**, no Test Impact entry, and no mention in task 9 or the `lane-validator` role. Since task 9 discharges "against the Verification table, every row of it", the file can be written, never run, and the table still reports green; no row anywhere invokes the real binary. `tests/integration/test_sdlc_session_ensure_integration.py` has the same gap: Test Impact says "Re-run; no expected change ... **Verify that rather than assume it** — if it changes, the guard is placed wrong", and no row re-runs it. This is round-5 concern 2 recurring one file over — that finding added three router-suite rows precisely because task 9 and the validator "both discharge without ever running the suite the change is known to break". | pending | Add two rows in the existing suite-row shape. (a) `./scripts/pytest-clean.sh tests/integration/test_sdlc_next_skill_terminal.py -q` -> exit code 0 **with at least one test collected** (an exit-5 "no tests collected" must not read as a pass); **red today**, workstream coverage, belongs in Risk 5's mutation table. (b) `./scripts/pytest-clean.sh tests/integration/test_sdlc_session_ensure_integration.py -q` -> exit code 0, **GREEN TODAY (regression control)**, 10 tests, holding `test_terminal_merged_pipeline_routes_to_merge_not_build` at `:498` whose docstring reads "No `MERGE` marker is set, deliberately"; exempt from task 2's watch-it-fail. Never bare `pytest` — the wrapper is `scripts/pytest-clean.sh`. |
-| CONCERN | History & Consistency | Risk 1's verification item 2 is written against a callable that cannot satisfy it, and its carve-out is vacuous. `PipelineStateMachine.complete_stage` (`agent/pipeline_state.py:1004-1043`) sets the target stage to `completed` and marks the next stage `ready`; it never walks predecessors. The backfill that settles the spine lives one layer up in the marker CLI, at `tools/sdlc_stage_marker.py:621` (`sm.start_stage(stage, backfill_predecessors=True)`) and `:800` (`sm._backfill_predecessors(stage)`), and only on the `current not in ("in_progress", "ready")` branch. So "when `sm.complete_stage("MERGE")` returns, every `DISPLAY_STAGES` entry that is *not* PATCH is in `SETTLED_STATUSES`" is false of the named callable and true only of the write path. Separately `DISPLAY_STAGES` lives in `agent/pipeline_graph.py:97-106`, not `agent/pipeline_state.py`, and **does not contain PATCH** — `tests/unit/test_pipeline_graph.py:196` asserts `"PATCH" not in DISPLAY_STAGES` — so the "not PATCH" exclusion excludes nothing and the assertion the plan calls "the assertion that bounds the ledger shape" says nothing about the stage Risk 1's third paragraph is about. Compounding it, this is the only Risk 1 verification item with no owning task and no Verification row: task 1 carries item 1's grep and task 2 carries item 3's parametrized test, so item 2 discharges nowhere. | pending | Rewrite item 2 as: "assert that after a successful `--stage MERGE --status completed` marker write (`tools/sdlc_stage_marker._write_marker_impl`, which backfills at `:621`/`:800`), every `DISPLAY_STAGES` entry (`agent/pipeline_graph.py:97`, eight stages, PATCH not among them) is in `SETTLED_STATUSES` (`agent/pipeline_state.py:66`), and separately that PATCH — off-spine and explicitly exempt from `_backfill_predecessors` (`agent/pipeline_state.py:689-690`) — may be unsettled, which is the ninth matrix cell the guard deliberately settles." Add it to task 1's bullet list beside the existing grep: task 1 already owns Risk 1's verification and runs before any code exists. |
-| NIT | Risk & Robustness | The `issue_state` gate is specified as `MERGE == "completed"` alone, but `_compute_meta`'s signature is `(raw_states, session, issue_number: int \| None)` (`tools/sdlc_stage_query.py:515-519`) and the session-keyed path can reach it with no issue number. The guard then shells out to `gh issue view None`, burning a subprocess and its timeout on every terminal session-keyed query before degrading to `None`. | pending | (NIT — exempt.) Gate on the issue number as well as the MERGE state. |
-| NIT | Scope & Value | Task 9 is the only task with no **Depends On** field (9 `Task ID` fields, 8 `Depends On` fields). It must run after task 8: it re-runs the whole table, including rows that task 7's documentation edits and task 8's issue comments can move. | pending | (NIT — exempt.) Add `- **Depends On**: record-outcomes`. |
-| NIT | History & Consistency | Three places state that `tests/unit/test_architectural_constraints.py` "forbids `agent/sdlc_router.py` from importing **`tools/`**". It forbids exactly two modules, `tools.sdlc_dispatch` and `tools.sdlc_verdict`, as named cycle guards (`TestSdlcRouterImportBoundary`, module docstring `:4-7`). The conclusion drawn from it is right for a stronger reason — `agent/pipeline_complete.py` is an `agent/` -> `agent/` import the test never touches — but the Success Criterion "imports nothing from `tools/` (existing constraint test still green)" cannot be discharged by that test; only the already-mutation-proved `grep` anti-criterion row checks it. | pending | (NIT — exempt.) State the constraint as the two-module cycle guard it is and cite the grep row as the discharge. |
-| NIT | History & Consistency | The No-Gos bullet is framed as naming "a **third**, unscoped `gh issue view --json state` reader" and task 8 files a `bug` issue for that one file. At least one more has the same shape: `tools/agent_session_scheduler.py:147` runs `["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"]` with no `--repo` and no `cwd`, and its result gates whether an autonomous session is scheduled on an issue. (`reflections/housekeeping/merged_branch_cleanup.py:170` is not an instance — it appends `-R` when a repo is known.) The disclaimer is honest but the follow-up issue inherits the wrong scope. | pending | (NIT — exempt.) Widen task 8's follow-up to both call sites. |
+| BLOCKER | Risk & Robustness | The plan mandates that `do-sdlc`'s Step 5 lease-release list "needs no change and **must not get one**", on the ground that "on a `MERGE == completed` ledger the lease was already released by `complete_stage("MERGE")`'s `_release_run_best_effort`". That release hands back the *merging* run's lease. A supervisor invoked later on a finished issue mints its own run and takes its own lease at Step 2 — `session-ensure` has no terminal gate, `_pipeline_is_terminal` being consulted only by `reestablish_run_id` (`tools/_sdlc_run_identity.py:200`) — then hits the new terminal exit on iteration 1 and leaves the loop. That is exactly the population WS-A serves (17/17 live terminal ledgers). Meanwhile the three other mandated edits tell the supervisor this shape is "a finished pipeline, not a guard escalation", route it to loop-exit-success, and add it to Step 3e "beside the merged one", while Step 5's contrast row says "The **merged** exit needs no action from you". A supervisor that classifies the terminal exit as merged-like skips `session-release` and leaks the issue lease, so the next run on that issue refuses with a foreign-owner `ISSUE_LOCKED` until renewal freshness lapses. The plan's own prose produces the misclassification and forbids the one-line remedy. | **Fixed** — Documentation → SDLC Stage Addenda now carries a **fifth** site row for Step 5 (`:324`) plus a rationale paragraph correcting the false claim rather than deleting it; task 3's bullet and the "four sites" count updated to five; Risk 1's mitigation prose now scopes the release to *that run's* lease. | Replace the "must not get one" paragraph with a fifth site row in the four-site table: Step 5 (`:324`), text on `main` "a **`blocked`** router decision (3a / 3e)" -> "a **`blocked`** router decision (3a / 3e), **including the `complete: true` terminal shape**". Correct the rationale in one sentence: the MERGE-completion release (`tools/sdlc_stage_marker.py:836` -> `_release_run_best_effort`) hands back the *merging* run's lease; a supervisor that ran `session-ensure` this tick holds a different one. `session-release` is ownership-checked and best-effort, so the clause is a no-op in the same-run case and the fix in the fresh-run case — the skill body already says "run it whenever in doubt". Do **not** instead route the terminal exit through the merged branch: the merged exit is correct only because `complete_stage("MERGE")` released the lease in the same process. |
+| CONCERN | Risk & Robustness | The Risk 6 issue-state gate — the mitigation for what the plan calls "the worst outcome in this plan" — has no mutation entry anywhere, and the witness named for it provably cannot fire. The "Router core suite" row argues `tests/unit/test_sdlc_router.py` is "a free second witness for the Risk 6 mutation ... a guard that ignored the issue-state gate would red here", while the same sentence records that its `_ALL_COMPLETED` helper sets `MERGE: "pending"` "so nothing in it is terminal today". Both cannot be true: a guard with no issue-state gate still returns `None` on every non-terminal ledger. Verified — `MERGE` appears in that file only as `"pending"` (`:73`, `:329`, `:1166`) with no indirect construction — so no fixture in it can move under that mutation. Measured directly: a variant of the plan's own guard body with the `issue_state` gate deleted leaves the No-Go tripwire row at **True** and is caught only by the two Risk 6 Verification rows, both of which pass **vacuously today** (on `main` the OPEN row returns `Dispatch(row_id='5')` and the fail-open row prints `True`) yet carry no GREEN TODAY label, so task 2 demands red-state evidence they cannot produce. Risk 5's list of rows that "cannot be proved by reverting a workstream" names two; these are the third and fourth. | **Fixed** — task 6 gains a **third WS-A mutation** (delete the `issue_state` gate, keep `isinstance` and the reason gate; both Risk 6 rows must flip red, tripwire stays `True`); both Risk 6 rows labelled **GREEN TODAY (vacuous until the guard exists)** and added to task 2's exempt list; Risk 5's "cannot be proved by reverting" list widened from two rows to four; the "Router core suite" row and its Test Impact entry rewritten as a **regression control**, retiring the free-second-witness claim. | Add a **third** WS-A mutation to task 6, distinct from the guard/`issue_state`-key split already there (reverting the key leaves the gate present and the rows still green, so only deleting the gate moves them): "delete the `issue_state` gate from the guard body, keeping the `isinstance` check and the reason gate, and confirm the two Risk 6 rows flip to red — measured `True / False` for as-specified vs. gate-deleted on `40c4fe0a9`; the tripwire row stays `True` under this mutation and is not a witness for it." Label both Risk 6 rows **GREEN TODAY (vacuous until the guard exists)** so task 2 stops demanding a watch-it-fail they cannot give, and rewrite the "Router core suite" row's justification to what is true: a regression control with zero terminal fixtures, which is why it must stay green rather than why it would red. |
+| CONCERN | Scope & Value | `tests/integration/test_sdlc_next_skill_terminal.py` is created by task 2 and is the only artifact that can discharge the Success Criterion "`sdlc-tool next-skill` on a terminal pipeline emits a machine-distinguishable terminal shape, **verified by invoking the real binary, not `decide()` in-process**". It appears exactly once in the plan — task 2's `Validates` list — with **no Verification row**, no Test Impact entry, and no mention in task 9 or the `lane-validator` role. Since task 9 discharges "against the Verification table, every row of it", the file can be written, never run, and the table still reports green; no row anywhere invokes the real binary. `tests/integration/test_sdlc_session_ensure_integration.py` has the same gap: Test Impact says "Re-run; no expected change ... **Verify that rather than assume it** — if it changes, the guard is placed wrong", and no row re-runs it. This is round-5 concern 2 recurring one file over — that finding added three router-suite rows precisely because task 9 and the validator "both discharge without ever running the suite the change is known to break". | **Fixed** — two Verification rows added in the suite-row shape: `tests/integration/test_sdlc_next_skill_terminal.py` (red today, exit 0 **and ≥1 test collected**, workstream coverage, in Risk 5's mutation table) and `tests/integration/test_sdlc_session_ensure_integration.py` (GREEN TODAY regression control, 10 tests). The terminal file also gains a Test Impact CREATE entry, a task 9 bullet, and a clause in the `lane-validator` role. | Add two rows in the existing suite-row shape. (a) `./scripts/pytest-clean.sh tests/integration/test_sdlc_next_skill_terminal.py -q` -> exit code 0 **with at least one test collected** (an exit-5 "no tests collected" must not read as a pass); **red today**, workstream coverage, belongs in Risk 5's mutation table. (b) `./scripts/pytest-clean.sh tests/integration/test_sdlc_session_ensure_integration.py -q` -> exit code 0, **GREEN TODAY (regression control)**, 10 tests, holding `test_terminal_merged_pipeline_routes_to_merge_not_build` at `:498` whose docstring reads "No `MERGE` marker is set, deliberately"; exempt from task 2's watch-it-fail. Never bare `pytest` — the wrapper is `scripts/pytest-clean.sh`. |
+| CONCERN | History & Consistency | Risk 1's verification item 2 is written against a callable that cannot satisfy it, and its carve-out is vacuous. `PipelineStateMachine.complete_stage` (`agent/pipeline_state.py:1004-1043`) sets the target stage to `completed` and marks the next stage `ready`; it never walks predecessors. The backfill that settles the spine lives one layer up in the marker CLI, at `tools/sdlc_stage_marker.py:621` (`sm.start_stage(stage, backfill_predecessors=True)`) and `:800` (`sm._backfill_predecessors(stage)`), and only on the `current not in ("in_progress", "ready")` branch. So "when `sm.complete_stage("MERGE")` returns, every `DISPLAY_STAGES` entry that is *not* PATCH is in `SETTLED_STATUSES`" is false of the named callable and true only of the write path. Separately `DISPLAY_STAGES` lives in `agent/pipeline_graph.py:97-106`, not `agent/pipeline_state.py`, and **does not contain PATCH** — `tests/unit/test_pipeline_graph.py:196` asserts `"PATCH" not in DISPLAY_STAGES` — so the "not PATCH" exclusion excludes nothing and the assertion the plan calls "the assertion that bounds the ledger shape" says nothing about the stage Risk 1's third paragraph is about. Compounding it, this is the only Risk 1 verification item with no owning task and no Verification row: task 1 carries item 1's grep and task 2 carries item 3's parametrized test, so item 2 discharges nowhere. | **Fixed** — item 2 rewritten against the marker write path (`_write_marker_impl`, backfilling at `:621`/`:800`), citing `DISPLAY_STAGES` at `agent/pipeline_graph.py:97` (eight stages, PATCH not among them) and splitting the PATCH claim into a separate assertion grounded at `agent/pipeline_state.py:689-690`. Owner assigned: **task 1**, as a bullet beside item 1's grep. | Rewrite item 2 as: "assert that after a successful `--stage MERGE --status completed` marker write (`tools/sdlc_stage_marker._write_marker_impl`, which backfills at `:621`/`:800`), every `DISPLAY_STAGES` entry (`agent/pipeline_graph.py:97`, eight stages, PATCH not among them) is in `SETTLED_STATUSES` (`agent/pipeline_state.py:66`), and separately that PATCH — off-spine and explicitly exempt from `_backfill_predecessors` (`agent/pipeline_state.py:689-690`) — may be unsettled, which is the ninth matrix cell the guard deliberately settles." Add it to task 1's bullet list beside the existing grep: task 1 already owns Risk 1's verification and runs before any code exists. |
+| NIT | Risk & Robustness | The `issue_state` gate is specified as `MERGE == "completed"` alone, but `_compute_meta`'s signature is `(raw_states, session, issue_number: int \| None)` (`tools/sdlc_stage_query.py:515-519`) and the session-keyed path can reach it with no issue number. The guard then shells out to `gh issue view None`, burning a subprocess and its timeout on every terminal session-keyed query before degrading to `None`. | **Fixed** | **Fixed** — the gate is now `MERGE == "completed"` **and** `issue_number is not None` in task 4, the Success Criterion, and the cost-containment paragraph. |
+| NIT | Scope & Value | Task 9 is the only task with no **Depends On** field (9 `Task ID` fields, 8 `Depends On` fields). It must run after task 8: it re-runs the whole table, including rows that task 7's documentation edits and task 8's issue comments can move. | **Fixed** | **Fixed** — task 9 now carries `- **Depends On**: record-outcomes`. |
+| NIT | History & Consistency | Three places state that `tests/unit/test_architectural_constraints.py` "forbids `agent/sdlc_router.py` from importing **`tools/`**". It forbids exactly two modules, `tools.sdlc_dispatch` and `tools.sdlc_verdict`, as named cycle guards (`TestSdlcRouterImportBoundary`, module docstring `:4-7`). The conclusion drawn from it is right for a stronger reason — `agent/pipeline_complete.py` is an `agent/` -> `agent/` import the test never touches — but the Success Criterion "imports nothing from `tools/` (existing constraint test still green)" cannot be discharged by that test; only the already-mutation-proved `grep` anti-criterion row checks it. | **Falsified — Accepted Residual 6** | **Falsified, not applied — Accepted Residual 6.** `tests/unit/test_architectural_constraints.py::TestSdlcRouterImportBoundary` carries a **third** method, `test_sdlc_router_does_not_import_tools_package` (`:64-72`), which asserts `[m for m in imports if m.startswith("tools")] == []` — the whole-package constraint, not two named modules. The plan's three statements are accurate as written and stand. |
+| NIT | History & Consistency | The No-Gos bullet is framed as naming "a **third**, unscoped `gh issue view --json state` reader" and task 8 files a `bug` issue for that one file. At least one more has the same shape: `tools/agent_session_scheduler.py:147` runs `["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"]` with no `--repo` and no `cwd`, and its result gates whether an autonomous session is scheduled on an issue. (`reflections/housekeeping/merged_branch_cleanup.py:170` is not an instance — it appends `-R` when a repo is known.) The disclaimer is honest but the follow-up issue inherits the wrong scope. | **Fixed** | **Fixed** — task 8's follow-up now names both `scripts/migrate_completed_plan.py:362` and `tools/agent_session_scheduler.py:147`, and the No-Gos bullet is re-framed from "a third reader" to both, recording `merged_branch_cleanup.py:170` as a checked non-instance. |
 
 ## Accepted Residuals
 
-Round 5 is the last revision pass this run can afford. Everything below is a deliberate
-non-closure with its reason stated, rather than a finding carried `pending` into a sixth
-round. Nothing here changes the design.
+Everything below is a deliberate non-closure with its reason stated, rather than a finding
+carried `pending` into another round. Nothing here changes the design. Entries 1–5 were
+recorded at round 5 and **accepted by round 6 on independent re-measurement** — including
+entry 1's load-bearing clause, where the five non-router files containing
+`"MERGE": "completed"` were each confirmed to contain **0** occurrences of
+`decide_next_dispatch`, so narrowing the claim to `tests/unit/test_sdlc_router*.py` is safe.
+Entry 6 is new at round 6.
 
 1. **The round-5 exhaustiveness remedy's own premise is wrong, and the plan states the
    accurate claim instead.** Concern 2's implementation note asserted the claim is "TRUE
@@ -1808,11 +1879,32 @@ round. Nothing here changes the design.
    diff is one guard and one argument. The honest severity is recorded in the Problem section
    and in spike-1 so the PR body carries it rather than an overclaim.
 
-5. **`scripts/migrate_completed_plan.py:362::_gh_issue_state` stays unscoped and
-   case-lowering.** Unchanged disposition from round 4, restated here so it is not mistaken
-   for an oversight: it is a human-invoked one-shot migration script, nothing it returns
-   reaches `decide_next_dispatch`, and task 8 files the `bug`-labelled follow-up naming both
-   divergences and both call sites.
+5. **The unscoped `gh issue view` readers stay unscoped.** Unchanged disposition from round
+   4, widened at round 6 and restated here so it is not mistaken for an oversight.
+   `scripts/migrate_completed_plan.py:362::_gh_issue_state` is a human-invoked one-shot
+   migration script, and `tools/agent_session_scheduler.py:147::_validate_issue` gates
+   autonomous session scheduling; **neither result reaches `decide_next_dispatch`**, so
+   neither can terminate a live lane, which is the failure the round-3 `--repo` blocker was
+   about. Task 8 files one `bug`-labelled follow-up naming both files, both divergences, and
+   all call sites. Adding `--repo` here would put two more files in a two-file PR.
+
+6. **Round 6's third nit is falsified; the plan's wording stands and was not changed.** The
+   nit said the plan overstates `tests/unit/test_architectural_constraints.py` as forbidding
+   `agent/sdlc_router.py` from importing **`tools/`**, when it "forbids exactly two modules,
+   `tools.sdlc_dispatch` and `tools.sdlc_verdict`". Re-read on `main` 2026-08-19:
+   `TestSdlcRouterImportBoundary` carries a **third** method those two do not exhaust —
+   `test_sdlc_router_does_not_import_tools_package` (`:64-72`), which computes
+   `tools_imports = [m for m in imports if m.startswith("tools")]` and asserts it is `[]`.
+   Reproduce without pytest (the test-DB slots are often contended on this machine):
+   `./.venv/bin/python -c "import tests.unit.test_architectural_constraints as t; print([m for m in t._get_imports(t.SDLC_ROUTER) if m.startswith('tools')])"`
+   → `[]`, and the class's method list is
+   `['test_sdlc_router_does_not_import_sdlc_dispatch', 'test_sdlc_router_does_not_import_sdlc_verdict', 'test_sdlc_router_does_not_import_tools_package', ...]`.
+   That is the whole-package constraint, so the plan's three statements (Spike-3,
+   Architectural Impact, and the Success Criterion "imports nothing from `tools/` (existing
+   constraint test still green)") are accurate and **discharge against that test**, with the
+   already-mutation-proved `grep` anti-criterion row as a second, independent witness.
+   Recorded rather than silently ignored, because a future reader who reaches only for the
+   two named cycle-guard methods will re-derive the same wrong conclusion.
 
 ---
 ## Resolved Questions
@@ -1918,3 +2010,46 @@ which is a self-healing wrong answer rather than a latch.
 overlapping — the first reopened issue that carries a recorded slug naming a real branch.
 That is the number #2869 should re-take before building WS-B, and it is the honest trigger
 for reviving it.
+
+---
+## Handover
+
+**This supervision run ended here, at the plan/critique boundary, with its dispatch budget
+exhausted.** The stopping point is a budget fact, not a plan fact: round 6 returned 1 blocker
+and 3 concerns, all four are closed in the text above, three of four nits are closed and the
+fourth is falsified and recorded as Accepted Residual 6. No finding is carried `pending`.
+
+**What the next `/do-sdlc` run on #2817 should expect.**
+
+1. **The router will route to `/do-plan-critique` first — row 2b, stale verdict.** The
+   recorded `latest_critique_verdict` is `NEEDS REVISION` and this pass set
+   `revision_applied` / `revision_applied_at` afresh, so the recorded verdict predates the
+   current plan text. That dispatch is correct and expected; it is not a sign the plan
+   regressed. Round 7 should be a confirmation pass over the five deltas listed below.
+2. **Then BUILD.** Nothing in the plan is unresolved: all four Resolved Questions are
+   settled, the scope is fixed at WS-A + WS-C in one PR, and the closing refs are
+   `Closes #2817`, `Closes #2825`, `Refs #2824`.
+
+**Six critique rounds have run and `critique_cycle_count` is still `0` in the ledger.** Read
+directly on 2026-08-19: `critique_cycle_count=0`, `latest_critique_verdict='NEEDS REVISION'`,
+`revision_applied=True`, `slug='sdlc-2817'`. The counter is not tracking the rounds this lane
+actually consumed, so **do not read a low count as "this plan is early"** — any
+oscillation-style budget reasoning keyed on it will be wrong by six. Judge the plan's maturity
+from the `## Critique Results` table and the `## Accepted Residuals` list instead, both of
+which record the real history.
+
+**The five deltas round 7 should confirm, and nothing more:**
+
+| Delta | Where |
+|---|---|
+| `do-sdlc` Step 5 gains a **fifth** site row (`:324`) and the false "already released" rationale is corrected, not deleted | Documentation → SDLC Stage Addenda; task 3 |
+| Task 6 gains a **third** WS-A mutation (delete the `issue_state` gate); both Risk 6 rows labelled GREEN TODAY (vacuous until the guard exists); Risk 5's "cannot be proved by reverting" list goes from two rows to four; `test_sdlc_router.py` re-described as a control | Risk 5, Verification, Test Impact, task 6 |
+| Two integration Verification rows added, one red-today (`test_sdlc_next_skill_terminal.py`, ≥1 test collected) and one GREEN TODAY control (`test_sdlc_session_ensure_integration.py`) | Verification, Test Impact, task 9, `lane-validator` |
+| Risk 1 item 2 re-aimed at the marker write path with the PATCH claim split out, and given task 1 as its owner | Risk 1, task 1 |
+| Nits: `issue_number is None` in the gate; task 9 `Depends On`; task 8's follow-up widened to `tools/agent_session_scheduler.py:147` | Technical Approach, tasks 4/8/9, No-Gos |
+
+**Round 6's re-measured PASSes are untouched by this pass** and should not be re-litigated:
+the No-Go tripwire rewrite (`True/False/False/False`), the executable-line hash contract
+(`a6f41605c55d5de5` / `3ab927d8486561bd`), the four-site text-anchored `blocked` enumeration
+(now five), the severity sweep (`17 17 0`; CLOSED sweep `17 17`; 8-route negative control
+`8`), the three router-suite rows, and both round-5 nits.
