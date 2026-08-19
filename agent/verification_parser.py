@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Split on a `|` that is not backslash-escaped. A row's cells are the pieces
 # between these; `\|` inside a cell survives the split and is unescaped after.
@@ -136,7 +136,7 @@ class ParsedTable:
 
     checks: list[VerificationCheck]
     malformed: list[MalformedRow]
-    skipped: list[SkippedTable] = field(default_factory=list)
+    skipped: list[SkippedTable]
 
 
 @dataclass
