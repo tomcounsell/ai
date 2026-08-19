@@ -93,12 +93,31 @@ file:line references moved and one factual claim in #2808 is wrong.
 | `tools/doctor.py:442` | `worktree_interpreters` check, no bytecode dimension | **Confirmed.** `grep -c "pycache\|\.pyc\|bytecode" tools/doctor.py` → `0`. |
 
 **Factual correction to #2808.** #2808 states both `cwd=`-less siblings "go
-vacuously green". Only one does. Verified by execution from a foreign cwd:
+vacuously green". Only one does. Re-measured from `/tmp` at `cefc07e7e` by
+running each site's exact argv through `subprocess.run` (not through a shell,
+which glob-expands `--include=*.py` and changes the answer):
 
-| Site | rc from wrong cwd | Assertion | Outcome |
-|---|---|---|---|
-| `test_anthropic_client_semaphore.py:164` | 1, empty stdout | `assert not hits` | **passes vacuously** (false green) |
-| `test_memory_extraction.py:2563` | 2 | `assert returncode == 1` | **fails loudly** (false red) |
+| Site | rc from wrong cwd | stderr | Assertion | Reads rc? | Outcome |
+|---|---|---|---|---|---|
+| `test_anthropic_client_semaphore.py:164` | **1** | empty | `assert not hits` | **no** | **passes vacuously** (false green) |
+| `test_memory_extraction.py:2563` | **2** | `No such file or directory` | `assert returncode == 1` | yes | **fails loudly** (false red) |
+
+> **Round-3 critique nit rejected on measurement.** The round-3 critique
+> asserted both siblings return rc 2 from a foreign cwd and that the recorded
+> rc 1 was wrong. It is not. A2 passes `-r` with the *directory* operands
+> `agent/ bridge/ tools/`; BSD `grep` (`/usr/bin/grep`, the only `grep` on
+> `PATH` on this machine — `/opt/homebrew/bin/grep` is absent) returns **1**
+> with empty stderr when a recursive root does not exist. A3 passes a *file*
+> operand and gets the conventional rc 2 plus a diagnostic. Reproduced against
+> the resolved `PATH` binary and `/usr/bin/grep` explicitly; both give 1 for A2.
+> The two sites differ in *both* dimensions, and the returncode difference is
+> the less important one.
+
+The distinction that actually matters is the one in the "Reads rc?" column:
+A2 discards the returncode entirely, so an errored scan is indistinguishable
+from a clean one, while A3 asserts on it and is merely noisy. That is why
+obligation 3 (three-way triage) is mandatory rather than stylistic — a guard
+that never looks at the exit code cannot be rescued by any exit-code contract.
 
 These carry different remediation priorities and the plan treats them
 separately. A false-green guard has silently stopped guarding; a false-red one
@@ -276,7 +295,11 @@ step 4. Fixing only step 2 (what all three issues propose) leaves step 4 open.
 
 **Size:** Medium
 
-**Team:** Solo dev, plus a validator and a documentarian.
+**Team:** Two builders — `guard-converter` (helper, conversions, meta-guard) and
+`walk-hardener` (the six `rglob` floors), run in parallel because task 3 has no
+dependency on the helper — plus a validator and a documentarian. This matches
+the four-member roster in Team Orchestration; the concurrency is declared here
+so it does not get quietly serialized at build time.
 
 **Interactions:**
 - PM check-ins: 1-2 (scope of the sweep; the concern-B split)
