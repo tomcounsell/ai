@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T05:16:12Z
+revision_applied_at: 2026-08-19T05:37:22Z
 ---
 
 # Docs Auditor Review Gate
@@ -682,13 +682,21 @@ under `scope_mode == "rotation"`, still feeds the same `issue_findings` list and
 1. `_detect_deleted_target_issues` emits findings for **two** reference shapes —
    backticked `.py` paths as today, and markdown-link `.md` targets resolved
    **doc-relative** (Q7a).
-2. Both shapes pass through the **same widened** `_is_documented_deletion`, so a reference
-   that a document is narrating rather than asserting is suppressed for either shape
-   (Q7b).
-3. `_file_issue_if_new` → `_issue_exists` now dedups against **all** issues, open and
-   closed, so a human's ruling is durable and the channel converges (Q7c).
+2. Both shapes pass through the **same widened** `_is_documented_deletion`, called with
+   `live_claim_veto=True`, so a reference a document is narrating rather than asserting is
+   suppressed for either shape, and a reference the document claims is still live is
+   reported for either shape (Q7b).
+3. `_file_issue_if_new` → `_issue_exists` now dedups reference findings against **all**
+   issues, open and closed, so a human's ruling is durable and the channel converges.
+   Vault-drift, whose finding is a recurring timestamp comparison, keeps the open-only
+   gate (Q7c).
 
-No write path is added or touched. A Q7 finding's only effect is a GitHub issue.
+**No write path is added or touched, and the one change that could have leaked onto the
+existing one does not.** `_is_documented_deletion` is shared with
+`_make_stale_term_replacer` on the apply path, where the same `True` means "do not
+rewrite". The three cue widenings suppress more there, which is the safe direction; the
+live-claim veto would suppress *less*, so it is gated behind a keyword argument the write
+path never passes (Q7b). A Q7 finding's only effect is a GitHub issue.
 
 ## Architectural Impact
 
@@ -701,20 +709,31 @@ No write path is added or touched. A Q7 finding's only effect is a GitHub issue.
   - `agent/reflection_scheduler.py` passes `output_summary` to `mark_completed`.
     This is a generic change affecting **every** function reflection, all
     beneficially (a summary that was discarded now renders).
-  - `_open_issue_exists` — **renamed** `_issue_exists` and widened to `--state all`
-    (Q7c). Signature unchanged. This changes dedup semantics for *every* finding the
-    module files, deliberately: see Q7c.
+  - `_open_issue_exists` — **renamed** `_issue_exists`, default query widened to
+    `--state all`, and given a keyword-only `states: str = "all"` (Q7c). This changes
+    dedup semantics for every reference-shaped finding the module files, deliberately;
+    `_file_issue_if_new` holds vault-drift on `states="open"` because its condition is a
+    recurring comparison rather than a durable property. See Q7c.
+  - `_file_issue_if_new` — signature unchanged; selects the dedup mode from the finding's
+    existing `category` key.
   - `_is_placeholder_path` — extended to strip a `.md` suffix as well as `.py`.
-  - `_is_documented_deletion` — widened cue matching plus a live-claim veto (Q7b).
-    Internal to the module; both call sites are inside `_detect_deleted_target_issues`.
+  - `_is_documented_deletion` — widened cue matching, plus a live-claim veto behind a
+    keyword-only `live_claim_veto: bool = False`. Internal to the module, with **two**
+    call sites that read the return value differently: `_detect_deleted_target_issues`
+    (`:903` and the new `.md` branch) passes `True` and treats the result as "do not
+    report"; `_make_stale_term_replacer` (`:679`) takes the default and treats it as "do
+    not rewrite". The flag exists because the veto is safe on the first and unsafe on the
+    second (Q7b).
   - `_detect_deleted_target_issues` — gains a second match branch. Return shape
     unchanged (a list of `{title, body, category}` dicts); the new `category` value is
     `broken-md-link`.
 - **Coupling:** decreases. The substrate stops owning git for Caller B; the skill
   that already owns git for the rest of the docs stage owns it for all of it.
 - **Data ownership:** the commit decision moves from the substrate to each caller.
-- **Reversibility:** high. Every change is a deletion or a narrowing, and the
-  deployed code only changes on the next `/update` service restart.
+- **Reversibility:** high. Every change to a *write* path is a deletion or a narrowing;
+  the widenings are confined to what the auditor reports to a human, and each is a
+  parameter or a cue list that reverts in one line. Deployed code only changes on the
+  next `/update` service restart.
 
 ## Appetite
 
@@ -1460,31 +1479,76 @@ for three independent reasons, each measured in spike-7. Fix all three plus add 
 
 Then add the guard that keeps the widening from over-suppressing:
 
-**The live-claim veto.** A cue on the match's **own line** asserting that the target is
-present — `remain`, `remains`, `still`, `defined in`, `lives in`, `currently`,
-`implemented in`, word-anchored — **cancels** the suppression. Checked before the heading
-and prose tiers, after the fence tier (a fenced block is illustrative regardless of what
-it says). spike-7 measured this as the difference between trading two false positives for
-five false negatives and trading fifteen for four. Concretely it is what keeps
-`docs/features/sdlc-stage-tracking.md:48` — *"`classify_outcome()` and `fail_stage()`
-remain defined in `agent/hooks/subagent_stop.py`"* — reported, which is correct: that
-sentence is a claim about the present and it is false.
+**The live-claim veto, opt-in at the call site.** A cue on the match's **own line**
+asserting that the target is present — `remain`, `remains`, `still`, `defined in`,
+`lives in`, `currently`, `implemented in`, word-anchored — **cancels** the suppression.
+Checked before the heading and prose tiers, after the fence tier (a fenced block is
+illustrative regardless of what it says). spike-7 measured this as the difference between
+trading two false positives for five false negatives and trading fifteen for four.
+Concretely it is what keeps `docs/features/sdlc-stage-tracking.md:48` —
+*"`classify_outcome()` and `fail_stage()` remain defined in
+`agent/hooks/subagent_stop.py`"* — reported, which is correct: that sentence is a claim
+about the present and it is false.
 
-**Blast radius: `_is_documented_deletion` is on the write path too, and that is fine.**
-It has two call sites, not one: `:903` in the detector, and **`:679` inside
-`_make_stale_term_replacer` (`:648`)**, which `_apply_fixes_to_file` uses to decide
-whether a stale-term rewrite may be applied. Widening the hatch therefore also makes the
-**write** path more conservative: a stale term sitting in deletion narrative that today
-gets rewritten will instead be left alone and counted in `suppressed`.
+The veto is reached only when the caller asks for it:
 
-That is the right direction and it needs no separate ruling. #2782 added the
-migration-context hatch to the stale-term channel for exactly this reason — an auditor
-rewriting a sentence that is narrating history is the generator bug class this whole lane
-exists to gate — and declining to write is the outcome #2739 prefers by construction. The
-effect is fewer *applied* fixes, not more *withheld* ones: the suppression returns the
-original text rather than producing a rejected candidate, so `fixes_withheld` and Q5's
-escalation signal are untouched. State this in `_is_documented_deletion`'s docstring so
-the shared call site is not later mistaken for detector-only code.
+```python
+def _is_documented_deletion(
+    line_idx: int,
+    lines: list[str],
+    in_fence: list[bool],
+    heading_for_line: list[str],
+    *,
+    live_claim_veto: bool = False,
+) -> bool:
+```
+
+`_detect_deleted_target_issues` passes `live_claim_veto=True` from both of its branches
+(`:903` and the new `.md` branch). `_make_stale_term_replacer` (`:679`) takes the default
+`False` and is not edited. The next section is why that asymmetry is mandatory rather
+than tidy.
+
+**Blast radius: `_is_documented_deletion` has two call sites, and the four changes do
+NOT all push the same direction.** The call sites are `:903` in the detector and **`:679`
+inside `_make_stale_term_replacer` (`:648`)**, which `_apply_fixes_to_file` uses to decide
+whether a stale-term rewrite may be applied. At `:679` the predicate's return value is
+read as *"suppress this rewrite"*: `True` returns `match.group(0)` unchanged and appends
+to `suppressed`; `False` returns the replacement and the file is edited.
+
+Split the four changes by direction on that call site:
+
+| Change | Effect on `_is_documented_deletion` | Effect on the write path at `:679` |
+|---|---|---|
+| Heading stems | more `True` | **fewer** rewrites applied — more conservative |
+| Word-anchored prose cues | more `True` | **fewer** rewrites applied — more conservative |
+| ±2 adjacent window | more `True` | **fewer** rewrites applied — more conservative |
+| Live-claim veto | **more `False`** | **more** rewrites applied — *less* conservative |
+
+The three widenings are monotone in the safe direction and need no separate ruling.
+#2782 added the migration-context hatch to the stale-term channel for exactly this reason
+— an auditor rewriting a sentence that is narrating history is the generator bug class
+this whole lane exists to gate — and declining to write is the outcome #2739 prefers by
+construction. For those three the effect is fewer *applied* fixes, not more *withheld*
+ones: the suppression returns the original text rather than producing a rejected
+candidate, so `fixes_withheld` and Q5's escalation signal are untouched.
+
+**The veto is the exception, and unguarded it would run the wrong way.** Every line the
+veto un-suppresses is a line the auditor now **rewrites** and did not before. A line
+reading `` `old_term` remains defined in `agent/x.py` `` under a `## Migration` heading
+is left alone today; with a call-site-blind veto the auditor would edit it — a sentence
+narrating history, rewritten by a generator, on the cascade path that runs on **every**
+PR (the rotation this plan also touches is `enabled: false`, so the write exposure here
+is not hypothetical and not deferred). That is precisely the class #2782 added the hatch
+for and precisely what #2739 exists to gate. Shipping it would make this plan's own
+build the counterexample to its thesis.
+
+Hence the keyword-only flag. The detector wants the veto because a *report* about a false
+present-tense claim costs a human one triage pass; the writer must not have it, because a
+*rewrite* of narrative prose is unreviewable once committed. Different consequences,
+different defaults — state this in `_is_documented_deletion`'s docstring, naming both
+call sites, so the shared predicate is never mistaken for detector-only code and nobody
+later "harmonizes" the flag away. The `TestNonMarkdownApplyGuard` write-path case in
+**Test Impact** is what pins it.
 
 **Do not reach for `_has_migration_context` (`:439`).** #2834's comment describes the fix
 as "give `_detect_deleted_target_issues` the migration-context hatch that #2782 gave the
@@ -1506,11 +1570,42 @@ is to meter the flood by gating filing to rotation.
 **Change `_open_issue_exists` to query `--state all` with `--limit 100`, and rename it
 `_issue_exists`.** No compatibility alias — Principle 1.
 
-- **Why `all` is right for every title this module files, not just Q7's.** Each title is a
-  stable per-defect key: the `.py` and `.md` findings key on (doc, target); the stub-doc
-  and orphan-plan findings key on the doc; Q5's withheld findings key on (doc, old, new);
-  Q5's sweeper finding keys on the PR number. A **closed** issue on any of those keys is a
-  human's ruling on that exact defect. Re-asking is not diligence, it is not listening.
+- **Why `all` is right for the reference-shaped titles.** Each of those titles is a
+  stable per-defect key over a **durable property of the tree**: the `.py` and `.md`
+  findings key on (doc, target); the stub-doc and orphan-plan findings key on the doc;
+  Q5's withheld findings key on (doc, old, new); Q5's sweeper finding keys on the PR
+  number. A **closed** issue on any of those keys is a human's ruling on that exact
+  defect, and the defect does not un-fix itself. Re-asking is not diligence, it is not
+  listening.
+- **Vault-drift is the one channel `all` must not cover, and it gets an exemption.**
+  `_run_vault_drift_detection` files through the same `_file_issue_if_new` (`:1806`)
+  under the title `docs-auditor: vault narrative '{path}' has drifted from {site}`
+  (`:1748-1749`, `:1767-1769`). That title is stable per (vault path, site page) pair,
+  but the condition behind it is not a durable property — it is a **timestamp
+  comparison** (`vault_mtime > site_ts`) that goes true again every time either side is
+  edited. "A closed issue is a human's ruling on that exact defect" does not transfer:
+  closing one drift issue means *"I reconciled this pair once"*, and under `--state all`
+  it would silence that pair permanently, turning the vault-drift channel off one pair at
+  a time with no signal that it happened. That is a functional regression to a channel
+  this lane is not otherwise touching.
+
+  **The exemption is a parameter, not a second function** (Principle 1 — no parallel
+  path): `def _issue_exists(title: str, repo_root: Path, *, states: str = "all")`,
+  splicing `"--state", states` into the argv. `_file_issue_if_new` selects it from the
+  finding's own `category`, which vault-drift findings **already carry** at `:1757` and
+  `:1777` — no new key is needed, so this is three lines, not a data-model change:
+
+  ```python
+  states = "open" if finding.get("category") == "vault-drift" else "all"
+  if _issue_exists(title, repo_root, states=states):
+  ```
+
+  Vault-drift therefore keeps exactly today's semantics (open-only gate, 30-day Redis
+  fast-path), and every reference-shaped category converges. The default is `"all"` so a
+  future category converges unless it deliberately opts out, and the opt-out list stays
+  one line long and readable. State the rule in `_file_issue_if_new`'s docstring: *dedup
+  matches closed issues for findings about durable tree state, and open issues only for
+  findings about a recurring comparison.*
 - **Why `--limit 100` is not decoration.** `gh issue list` defaults to `--limit 30`.
   Under `--state open` the candidate set is small; under `--state all` a full-text search
   can easily return more than 30 issues, and the exact-title match this function needs
@@ -1640,15 +1735,26 @@ Q7 breaks existing tests in three places (re-derived on `f491306c5`):
 - [ ] `_open_issue_exists` has **19** references in `tests/unit/test_docs_auditor_substrate.py`,
       concentrated in `TestCrossMachineDedup` (`:1689`) — UPDATE: rename every one to
       `_issue_exists`, and update any assertion on the `gh` argv to expect
-      `--state all` and `--limit 100` rather than `--state open`. A test that asserts the
-      old argv is asserting the defect. **`tests/unit/test_reflections_memory.py:1177` is
-      a false hit** — `test_skips_filing_when_open_issue_exists_for_same_signal` is a test
-      *name* in a different module and must not be renamed.
+      `--state all` and `--limit 100` rather than `--state open` — **except** on a
+      `vault-drift` finding, which keeps `--state open` by the Q7c exemption. A test that
+      asserts the old argv on a reference finding is asserting the defect; a test that
+      asserts `--state all` on a drift finding is asserting the new one.
+      **`tests/unit/test_reflections_memory.py:1177` is a false hit** —
+      `test_skips_filing_when_open_issue_exists_for_same_signal` is a test *name* in a
+      different module and must not be renamed.
 - [ ] `TestDeletedTargetFiltering` (`:1552`) — UPDATE: this class owns the deletion-narrative
-      suppression cases. Every case must still pass after Q7b's widening (the widening
-      only ever suppresses *more*), and the class gains the Q7b control cases. If a case
-      asserts that a specific non-suppressed input **is** reported and Q7b now suppresses
-      it, that is the over-suppression signal — investigate before relaxing the assertion.
+      suppression cases. The three widenings only ever suppress *more*, so every existing
+      case that asserts suppression still passes; the **live-claim veto is the one change
+      that can flip a case the other way**, and only on the detector path, where the veto
+      is enabled. Read a newly-reported case as intended veto behavior and a newly-
+      suppressed case as the over-suppression signal — investigate the latter before
+      relaxing any assertion. The class gains the Q7b control cases.
+- [ ] `TestNonMarkdownApplyGuard` (`:445` on `origin/main`, `:474` on the branch) —
+      UPDATE beyond the `_commit_current_branch` patch removals listed above: this class
+      is the write-path home for the R4-1 regression case. Every existing apply-path
+      assertion must still hold unchanged, because `_make_stale_term_replacer` keeps the
+      default `live_claim_veto=False` — if any existing case here goes red, the veto
+      leaked to the write path and that is a build defect, not a test to update.
 - [ ] `_is_placeholder_path` has **11** references in the same file — UPDATE: the `.md`
       stem strip and the three new `_PLACEHOLDER_PATH_COMPONENTS` entries widen its
       `True` set. Existing cases stay valid; add the `.md` cases.
@@ -1686,12 +1792,37 @@ The auto-merge assertions Q2 invalidates, enumerated so none is missed:
 
 New coverage required (new file `tests/unit/reflections/test_docs_auditor_git_surface.py`,
 real git throughout — the filename keeps the `docs_auditor` keyword so
-`tests/conftest.py` `FEATURE_MAP` auto-tags it `validation`):
+`tests/conftest.py` `FEATURE_MAP` auto-tags it `validation`).
 
-- [ ] Staging set: after `_push_branch_and_pr`, the commit contains **exactly**
-      `files_touched`. Seed an unrelated dirty file in the temp repo and assert it is
-      **not** in `git show --name-only HEAD` and is still dirty afterward. This is the
-      direct anti-regression for `git add -A`.
+**Five of these bullets already landed with task 2 and must not be rebuilt.**
+`6261e2d2c` added `TestHoistedPRGuards` (`:1567`) and `TestExplicitStagingSet` (`:1653`)
+to `tests/unit/test_docs_auditor_substrate.py`. They are marked ✅ LANDED below the same
+way tasks 1 and 2 are marked in **Step by Step Tasks**. A second implementation of any of
+them is duplicate coverage, and — because two of them are asserted with a real repo on
+disk — would force a second real-git harness for assertions that already have one. Settle
+the boundary mechanically at preflight with
+`--collect-only -k "HoistedPRGuards or ExplicitStagingSet"`, not by re-reading this list.
+The Verification row demanding `grep -c '"init"'` in the new file is satisfied by the
+bullets that genuinely remain; it is not an instruction to re-host the landed ones.
+
+- [x] ✅ **LANDED** in `test_docs_auditor_substrate.py` (`6261e2d2c`) — Staging set:
+      `TestExplicitStagingSet::test_staging_command_names_the_touched_paths_only` asserts
+      the commit contains exactly `files_touched`. The direct anti-regression for
+      `git add -A`.
+- [x] ✅ **LANDED** (`6261e2d2c`) — `files_touched == []` creates no branch and no commit:
+      `TestExplicitStagingSet::test_empty_files_touched_creates_no_branch_and_no_commit`.
+- [x] ✅ **LANDED** (`6261e2d2c`) — **Staged-then-commit-failed restore (B3)**:
+      `TestExplicitStagingSet::test_restore_uses_head_so_staged_content_cannot_survive`.
+      The index-vs-HEAD regression test; a restore written as bare
+      `git checkout -- <paths>` fails it, `git checkout HEAD -- <paths>` passes.
+- [x] ✅ **LANDED** (`6261e2d2c`) — Guard hoisting, no substrate run:
+      `TestHoistedPRGuards::test_guard_returns_skipped_without_running_the_substrate`,
+      with `test_no_guard_lets_the_substrate_run` as the negative control.
+- [x] ✅ **LANDED** (`6261e2d2c`) — **Guard-fired run still advances the rotation
+      (NEW-1)**: `TestHoistedPRGuards::test_guard_still_stamps_the_rotation_hash_for_the_picked_doc`.
+
+Still owed by task 5 — nothing below is covered by `6261e2d2c`:
+
 - [ ] Early-return restore: force each failure (`git push` to a nonexistent remote,
       `gh pr create` returning non-zero, `git add --` on a missing path) and assert
       HEAD is back on the starting ref, the created branch is gone, and
@@ -1704,28 +1835,14 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       assertion both fail it. Scope note: the assertion is about a file **outside**
       `files_touched`; the overlap case is an accepted residual (Q4 item 3) and is
       deliberately not asserted either way.
-- [ ] **Staged-then-commit-failed restore (B3).** The direct regression test for the
-      index-vs-HEAD defect. In a real repo: let `git add -- <files_touched>` succeed,
-      force `git commit` to fail, run the restore, then assert **neither column** of
-      `git status --porcelain` mentions any `files_touched` path — not the staged column,
-      not the worktree column — and that HEAD is back on the starting ref. A restore
-      written as bare `git checkout -- <paths>` leaves the auditor's content staged and
-      applied and fails this test; `git checkout HEAD -- <paths>` passes it.
 - [ ] Failed-restore reporting: make `checkout` fail and assert the function reports
       failure and `run_docs_auditor` returns `status="error"`.
-- [ ] Guard hoisting: with the daily cap set, assert `audit()` is never called and
-      the tree is untouched.
-- [ ] **Guard-fired run still advances the rotation (NEW-1).** The direct regression test
-      for the permanent-shutdown defect. Force `_has_open_pr_for_slug` true for the
-      picked slug, run `run_docs_auditor`, and assert: the result is `status="skipped"`;
-      `REDIS_LAST_RUN_HASH` carries a fresh timestamp for that slug; and a second
-      immediately-following run selects a **different** doc. A build that fires
-      `_update_rotation_hash` only on `ok` fails this test by re-picking the same slug
-      forever.
-- [ ] **Guard-fired run performs no working-tree write (NEW-1).** Same setup, asserting
-      `git status --porcelain` is byte-identical across the run. Paired with the row
-      above so the two halves of the invariant are pinned together: Redis is written,
-      the tree is not.
+- [ ] **Guard-fired run performs no working-tree write (NEW-1).** The landed
+      `TestHoistedPRGuards` cases assert the substrate is not reached and that Redis is
+      stamped; neither asserts the tree. With the daily cap set, assert
+      `git status --porcelain` is byte-identical across the run. This is the second half
+      of the invariant whose first half already landed: Redis is written, the tree is
+      not.
 - [ ] **Sweeper reads the marker from its own query (NEW-2).** Have the `gh` dispatcher
       return a `pr list` payload **without** a `body` field and assert the marker path
       fails loudly rather than silently treating the PR as unmarked and closing it. Then
@@ -1737,13 +1854,13 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       warning names the remainder. This is the Verification row for NEW-4 — it is
       behavioral on purpose, because a `grep -c` on the cap symbol cannot tell a shared
       constant from a second one the withheld loop declared for itself.
-- [ ] `files_touched == []` creates no branch and no commit.
 - [ ] Sweeper close path: real repo + `gh` dispatcher. Assert a PR whose body
       contains `WITHHELD_PR_MARKER` is **not** closed and **no** `--delete-branch`
       is issued for it, and that an escalation issue is filed. Assert a non-marker
       stale PR is still closed.
 - [ ] Sweeper auto-merge absence (anti-criterion): assert no `gh pr merge` is ever
       dispatched for any input.
+
 Q7 coverage (#2834) — **home is `tests/unit/test_docs_auditor_substrate.py`, not the new
 real-git file**. Every one of these is a pure function over a string and a `tmp_path`
 tree; none of them touches git or `gh`, so putting them in the real-git file would slow
@@ -1789,10 +1906,24 @@ existing detector classes:
       heading stem (`## Dead SDK Path Deletion`), heading stem (`## Hook Cleanup`),
       word-level prose cue (`deleted (250 lines)`), ±2 window (cue two lines above), and
       word-anchoring (a line containing only `removed_at` must **not** suppress).
-- [ ] **Live-claim veto (Q7b).** A line reading
+- [ ] **Live-claim veto reports on the detector path (Q7b).** A line reading
       *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a
       `## Migration` heading still produces a finding. Without the veto the heading
       suppresses it. Cover the other veto words too.
+- [ ] **Live-claim veto does NOT reach the write path (Q7b) — the R4-1 regression.**
+      Home is `TestNonMarkdownApplyGuard`, beside the existing apply-path cases. A
+      `STALE_TERMS` hit on a line reading *"`old_term` remains defined in `agent/x.py`"*
+      under a `## Migration` heading must still land in `suppressed` and the file must
+      come back byte-identical. This is the single test that distinguishes a
+      keyword-gated veto from a call-site-blind one: with the flag defaulting to `False`
+      the rewrite stays suppressed, and a build that evaluates the veto unconditionally
+      rewrites the line and fails here. Add the mirror control — the same stale term on a
+      plain line under the same heading is still suppressed — so the case cannot be
+      passed by disabling the heading tier instead.
+- [ ] **The flag is opt-in, asserted directly.** Call `_is_documented_deletion` on the
+      veto fixture twice: with no keyword (expect `True`, suppressed) and with
+      `live_claim_veto=True` (expect `False`). Cheap, and it pins the default rather than
+      inferring it from two callers' behavior.
 - [ ] **Both shapes share one hatch.** A `.md` link under a `## Removed` heading is
       suppressed, proving Q7a routes through the same `_is_documented_deletion` rather
       than growing a second filter.
@@ -1801,6 +1932,14 @@ existing detector classes:
       matches exactly, and still returns `False` (fail open) on a non-zero `gh` exit.
       Assert `_file_issue_if_new` does not file when `_issue_exists` is `True`. Assert
       the symbol `_open_issue_exists` no longer exists in the module.
+- [ ] **Vault-drift keeps the open-only gate (Q7c exemption).** Home is
+      `TestVaultSiteDrift` or `TestCrossMachineDedup`. With a `gh` stub, assert that
+      `_file_issue_if_new` on a finding carrying `"category": "vault-drift"` dispatches
+      `--state open`, while the same call on a `deleted-target` or `broken-md-link`
+      finding dispatches `--state all`. Then assert the behavioral consequence: a
+      **closed** drift issue for the same vault/site pair does **not** suppress a fresh
+      filing, and a closed `broken-md-link` issue does. A build that applies `all`
+      uniformly passes every other Q7c case and fails this one.
 - [ ] **Cap sharing.** A rotation pass whose findings are a mix of `deleted-target` and
       `broken-md-link` still files at most `ISSUE_FILING_PER_RUN_CAP` issues in total —
       Q7 must not get its own budget.
@@ -1942,10 +2081,18 @@ suite tells you immediately which controls it breaks.
 
 **Impact:** a doc is fixed, its issue closed, the doc later regresses in exactly the same
 way, and `_issue_exists` matches the closed issue so nothing is filed.
-**Mitigation:** accepted, and stated in the feature doc rather than left to be discovered.
-The alternative is the status quo, which re-litigates every human ruling on a 30-day timer
-and has already produced two flood incidents (#1555, #1716). If a specific finding needs
-re-raising, reopening the closed issue is one click and is the honest signal.
+**Mitigation:** accepted for the reference-shaped categories, and stated in the feature doc
+rather than left to be discovered. The alternative is the status quo, which re-litigates
+every human ruling on a 30-day timer and has already produced two flood incidents (#1555,
+#1716). If a specific finding needs re-raising, reopening the closed issue is one click and
+is the honest signal.
+**Scope bound — vault-drift is exempt and stays on `states="open"`.** Its condition is a
+recurring `vault_mtime > site_ts` comparison, not a durable property of the tree, so a
+closed issue there records one reconciliation rather than a standing ruling. Under `all`
+one human close would silence that vault/site pair forever and the channel would decay
+pair by pair with no signal. The `states` keyword in Q7c is what keeps that from
+happening; `docs/features/vault-drift-audit.md` records the exemption and its reason so a
+later reader does not "unify" the two dedup modes.
 
 ### Risk 8: The `.md` branch reports the 19-finding backlog as a burst
 
@@ -2155,18 +2302,31 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - [ ] Same file — state that the auditor **reports** broken `.md` links and does not
       repair them, and that the auto-repairing predecessor
       (`_detect_readme_broken_entries`) was deleted by #2741 and is not coming back.
-- [ ] Same file — document the convergence rule: a finding is filed **once, ever**.
-      `_issue_exists` matches open **and closed** issues, so closing an issue without
-      changing the doc is a durable human ruling. Name the cost: a defect that is fixed,
-      closed, and later regresses identically stays silent.
+- [ ] Same file — document the convergence rule: a reference finding is filed **once,
+      ever**. `_issue_exists` matches open **and closed** issues by default, so closing an
+      issue without changing the doc is a durable human ruling. Name the cost: a defect
+      that is fixed, closed, and later regresses identically stays silent. Name the one
+      exemption in the same breath — vault-drift keeps the open-only gate.
+- [ ] `docs/features/vault-drift-audit.md` — state that vault-drift findings dedup
+      against **open** issues only, unlike every other category the auditor files, and
+      why: the finding is a recurring `vault_mtime > site_ts` comparison, so a closed
+      issue records one reconciliation rather than a standing ruling, and matching closed
+      issues would silence that vault/site pair permanently. Describe it as the status
+      quo of the channel, not as a carve-out that was "added".
 - [ ] `docs/features/reflections.md` — the `docs-auditor` registry row and the Caller B
       filing note (`:147-152`) describe what the auditor files; update for the second
-      finding category and the once-ever dedup.
+      finding category and the once-ever dedup, including the vault-drift exemption.
 - [ ] Inline: `_detect_deleted_target_issues`' docstring must name both branches, the
-      doc-relative frame, the inline-code asymmetry, and the scope rule.
-      `_is_documented_deletion`'s docstring must name the live-claim veto and why it
-      evaluates after the fence tier. `_issue_exists`' docstring must say why `--state all`
-      and why `--limit 100` is not decoration.
+      doc-relative frame, the inline-code asymmetry, the scope rule, and that it is the
+      only caller that passes `live_claim_veto=True`.
+      `_is_documented_deletion`'s docstring must name **both** call sites, say that `True`
+      means "suppress" on each, and explain why the live-claim veto is opt-in: the
+      detector's cost for a wrong suppression is a missed report, the writer's cost for a
+      wrong un-suppression is an unreviewed rewrite of narrative prose. It must also say
+      why the veto evaluates after the fence tier. `_issue_exists`' docstring must say why
+      the default is `--state all`, why `--limit 100` is not decoration, and what
+      `states="open"` is for. `_file_issue_if_new`'s docstring must state the selection
+      rule by category.
 
 ### Skill Documentation (the review gate itself)
 
@@ -2243,9 +2403,16 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - [ ] A `.py` path named by a document that is recording its deletion no longer files an
       issue: the three real sites behind #2840 and #2841 are silent, and the true positive
       behind #2839 is still reported (#2834 second half).
-- [ ] A finding a human closes without editing the doc is **not** re-filed:
+- [ ] A **reference** finding a human closes without editing the doc is **not** re-filed:
       `_issue_exists` matches closed issues, `_open_issue_exists` no longer exists, and
       the `gh` query carries `--limit 100`.
+- [ ] A **vault-drift** finding a human closes **is** re-filed when the pair drifts again:
+      `_file_issue_if_new` passes `states="open"` for that category, so one reconciliation
+      does not silence a vault/site pair permanently.
+- [ ] The stale-term apply path is unchanged in behavior by Q7b's veto: a `STALE_TERMS`
+      hit on a live-claim line under a deletion heading is still suppressed, because
+      `_make_stale_term_replacer` never passes `live_claim_veto=True`. The auditor gains a
+      report, not a rewrite.
 - [ ] Q7's findings share `ISSUE_FILING_PER_RUN_CAP` with the existing advisory loop —
       no second budget — and the sizing spike re-run on the built code reports per-run
       volume within range of the plan-time baseline (mean 0.29 for `.md`, combined mean
@@ -2301,14 +2468,46 @@ Branch head is `6261e2d2c`. Files touched across the two commits:
 `.claude/skill-context/do-docs.md`, `.claude/skills-global/do-docs/SKILL.md`,
 `reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`.
 
-**Two obligations follow from this, and they are not optional.**
+**Three obligations follow from this, and they are not optional.**
 
-1. **Rebase before anything else.** The branch is 30 commits behind `origin/main`. Every
-   `file:line` anchor in this plan is stated against `f491306c5`, so a build that reads
-   the plan's anchors against the pre-rebase tree will read the wrong lines. Rebase
-   `session/sdlc-2739` onto `origin/main` in the preflight task, resolve conflicts, and
-   re-run the substrate suite before starting task 3.
-2. **Verify, then move on.** For tasks 1 and 2 the acceptance evidence is the diff plus
+1. **Rebase before anything else, for currency — not for anchors.** The branch is 30
+   commits behind `origin/main`. Rebase `session/sdlc-2739` onto `origin/main` in the
+   preflight task, resolve conflicts, and re-run the substrate suite before starting
+   task 3. Rebasing is what puts the branch on current upstream code; it is **not** what
+   makes this plan's anchors read correctly, and obligation 2 is why.
+2. **Every `file:line` in this plan is an `origin/main` anchor, and tasks 3-4 run on a
+   tree that already carries `49574989e` + `6261e2d2c`.** Those two commits move
+   `reflections/docs_auditor.py` by +150 net lines, so the task-3 anchors below —
+   including the C2 sweep list, which reads as authoritative — are wrong on the build
+   tree no matter how the rebase goes. Measured on `6261e2d2c`:
+
+   | Symbol | `origin/main` | branch |
+   |---|---|---|
+   | `_push_branch_and_pr` | `:1459` | `:1554` |
+   | `_has_open_pr_for_slug` | `:1416` | `:1398` (**backward** 18) |
+   | `_daily_pr_cap_reached` | `:1436` | `:1418` (**backward** 18) |
+   | `_run_vault_drift_detection` | `:1784` | `:1887` |
+   | `run_docs_auditor` | `:1818` | `:1921` |
+   | `_pr_is_auto_merge_eligible` | `:2005` | `:2151` |
+   | `run_docs_branch_sweeper` | `:2089` | `:2235` |
+   | sweeper `pr list --json` | `:2147` | `:2294` |
+
+   The drift is **undetectable by the anti-criterion**: `grep -c 'auto-merge'` returns
+   `16` on both trees. The branch's 16 hits sit at `:79`, `:90`, `:91`, `:1576`, `:1633`,
+   `:2023`, `:2025`, `:2088`, `:2117`, `:2152`, `:2197`, `:2231`, `:2241`, `:2401`,
+   `:2404`, `:2422` — use these for the task-3 sweep, and re-derive them anyway per the
+   preflight deliverable, because task 3 lands on top of whatever the rebase produced.
+
+   **Q7's anchors are unaffected — do not spend preflight re-deriving them.** Everything
+   Q7 touches is at or below `:1064` and is byte-identical on `6261e2d2c`:
+   `STALE_PR_AGE_DAYS:75`, write-path call site `:679`, `_PLACEHOLDER_PATH_COMPONENTS`
+   `:773-775`, `_DELETION_HEADING_KEYWORDS:778`, `_DELETION_PROSE_CUES:781-789`,
+   `_is_placeholder_path:790`, `_build_line_context:815`, `_is_documented_deletion:847`,
+   `_detect_deleted_target_issues:876`, its regex `:893`, detector call site `:903`,
+   `_open_issue_exists:1003`, its `--state open` `:1025-1026`, `_file_issue_if_new:1064`.
+   Verified by `git diff main 6261e2d2c -- reflections/docs_auditor.py` touching nothing
+   above that boundary.
+3. **Verify, then move on.** For tasks 1 and 2 the acceptance evidence is the diff plus
    the Verification rows those Q-groups own, run against the rebased branch. If a row that
    should be green post-Q1/Q3/Q4 is red, that is a task-3-blocking repair, not a reason to
    redo the commits.
@@ -2336,17 +2535,27 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Agent Type**: builder
 - **Parallel**: false
 - **Rebase `session/sdlc-2739` onto `origin/main` first.** The branch is 30 commits
-  behind at plan time. Do this before reading any anchor: the plan's `file:line`
-  references are stated against `f491306c5`.
+  behind at plan time. Rebase for currency, not for anchors — see obligation 2 in the
+  lane-status block: the two landed commits move the module by +150 net lines, so the
+  task-3 anchors are wrong on the build tree regardless of the rebase.
 - Confirm PR #2728 and PR #2842 are both `MERGED`, and that
   `grep -c '_git_log_follow_renames\|_detect_renamed' reflections/docs_auditor.py`
   returns `0`. If any of the three fails, stop and report — Q5 is unsound on a tree
   where the rename channel is present (spike-2).
 - Run every row of the Prerequisites table. In particular confirm
   `REDIS_RUNNING_KEY` is unset and `${AI_REPO_ROOT:-$HOME/src/ai}` is clean.
-- Re-run `--collect-only` on `tests/unit/test_docs_auditor_substrate.py` and re-grep
-  every `file:line` in this plan before relying on it. The anchors are current as of
-  the baseline commit and nothing more.
+- **Named deliverable: a re-derived anchor table for task 3, written into the build
+  notes before task 3 starts.** Re-derive, on the post-rebase tree, every symbol in
+  obligation 2's drift table plus the 16 `auto-merge` hit lines
+  (`grep -n 'auto-merge' reflections/docs_auditor.py`). This is a required output, not a
+  reminder: the anti-criterion count is `16` on both trees, so nothing downstream can
+  detect that the sweep was run against stale line numbers. **Do not re-derive Q7's
+  anchors** — obligation 2 records them as byte-identical at or below `:1064`, and
+  spending preflight on 20 stable references is how the real drift gets missed.
+- Re-run `--collect-only` on `tests/unit/test_docs_auditor_substrate.py`. Also run
+  `--collect-only -k "HoistedPRGuards or ExplicitStagingSet"` and paste the result into
+  the build notes: that command is what settles which **Test Impact** bullets task 5
+  still owes, mechanically rather than by re-reading the plan.
 - **Verify tasks 1 and 2 rather than redoing them.** `49574989e` and `6261e2d2c` are
   already on the branch. Read their diffs, run the substrate suite on the rebased tree,
   and run the Verification rows owned by Q1, Q3 and Q4. Report the row-by-row result;
@@ -2423,11 +2632,17 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- **Every anchor in this task is an `origin/main` anchor and will not read correctly on
+  the build tree.** `49574989e` + `6261e2d2c` move this file by +150 net lines; see
+  obligation 2 in the lane-status block for the measured drift table and the branch's 16
+  `auto-merge` hit lines, and use the preflight anchor deliverable as the working set.
+  The symbol names below are exact and are the reliable handle.
 - Q2: delete `_pr_is_auto_merge_eligible` (`:2005-2086`) and the auto-merge branch of
   `run_docs_branch_sweeper` (`:2235-2258`).
 - Q2 (C2): **the two ranges above are not the whole job.** The Verification row demands
   `grep -c 'auto-merge' reflections/docs_auditor.py` → `0` against **16** hits, and eight
-  of them are outside both ranges. Every anchor, re-derived at revision time:
+  of them are outside both ranges. Every anchor, re-derived at revision time on
+  `origin/main` (the branch's equivalents are listed in obligation 2):
   `:79`, `:90`, `:91` (module header comments), `:1470` (`_push_branch_and_pr`
   docstring), `:1527` (PR body text), `:1894`, `:1896` (`run_docs_auditor` comments),
   `:1941` (Telegram), `:1970` (findings string), `:2006`, `:2051`, `:2085` (the
@@ -2502,6 +2717,18 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `currently`, `implemented in`) cancels the suppression. Evaluate the veto **after** the
   fence tier and **before** the heading and prose tiers — a fenced block is illustrative
   no matter what it says.
+- **The veto is keyword-only and off by default. This is not a style choice.** Give
+  `_is_documented_deletion` a `*, live_claim_veto: bool = False` parameter and evaluate
+  the veto only when it is `True`. Pass `live_claim_veto=True` from
+  `_detect_deleted_target_issues` only — both the `.py` branch (`:903`) and the new `.md`
+  branch. **Leave `_make_stale_term_replacer` (`:679`) untouched**, on the default. The
+  three widenings make the write path more conservative; the veto alone makes it *less*
+  conservative, because `:679` reads `True` as "suppress this rewrite", so every line the
+  veto un-suppresses is a line the auditor starts rewriting. On the cascade path, which
+  runs on every PR, that is the auditor editing narrative prose on its own judgment — the
+  #2782 hatch class and the exact behavior #2739 exists to gate. A build that evaluates
+  the veto unconditionally ships this plan's own counterexample. See the direction table
+  in Q7b.
 - **Q7b controls are mandatory and are named.** After the widening, assert against the
   three real sites: `docs/features/harness-abstraction.md:189` and
   `docs/features/harness-adapter.md:19` / `:115` are **suppressed** (#2840, #2841), and
@@ -2520,11 +2747,20 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `Doc references missing link target: {target} (in {doc})` with `{target}` the
   **resolved repo-relative path**. No age, date, count, or run id — the same
   no-volatile-fields rule Q5 states, for the same reason.
-- **Q7c: rename `_open_issue_exists` (`:1003`) to `_issue_exists`, change `--state open`
-  (`:1025-1026`) to `--state all`, and add `--limit 100`.** No compatibility alias.
-  `--limit` is load-bearing: `gh issue list` defaults to 30, and under `--state all` the
-  exact title this function needs can fall off page one, which is a silent fail-open that
-  files a duplicate. Keep the fail-open-on-`gh`-error behavior exactly as it is.
+- **Q7c: rename `_open_issue_exists` (`:1003`) to `_issue_exists`, give it
+  `*, states: str = "all"`, splice `"--state", states` into the argv in place of the
+  hardcoded `--state open` (`:1025-1026`), and add `--limit 100`.** No compatibility
+  alias. `--limit` is load-bearing: `gh issue list` defaults to 30, and under
+  `--state all` the exact title this function needs can fall off page one, which is a
+  silent fail-open that files a duplicate. Keep the fail-open-on-`gh`-error behavior
+  exactly as it is.
+- **Q7c: `_file_issue_if_new` (`:1064`) selects the mode from the finding's `category`.**
+  `states = "open" if finding.get("category") == "vault-drift" else "all"`, passed
+  through. Vault-drift findings already carry that key (`:1757`, `:1777`), so no finding
+  shape changes. This is the one channel `all` must not cover: its condition is a
+  recurring `vault_mtime > site_ts` comparison, so under `all` a single human close would
+  silence that vault/site pair permanently. A parameter, not a second function — the
+  parallel path Principle 1 forbids.
 - Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
   *"(and re-files any that were closed without fixing the doc, since the dedup gate only
   sees open issues)"*. Delete it; do not annotate it.
@@ -2553,7 +2789,21 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   **Test Impact** first — `test_merged_branch_cleanup.py` patches
   `asyncio.create_subprocess_exec` and is **not** reusable; this dispatcher has no
   in-repo precedent and must be written from scratch.
-- Cover every bullet in the "New coverage required" list under **Test Impact**.
+- Cover every bullet in the **"Still owed by task 5"** list under **Test Impact** — and
+  only those. Five bullets in that section are marked ✅ LANDED (`6261e2d2c`,
+  `TestHoistedPRGuards` + `TestExplicitStagingSet` in the substrate suite): staging names
+  only `files_touched`, empty `files_touched` creates no branch or commit, the B3
+  staged-then-commit-failed restore, the guard-fired run that never reaches the
+  substrate, and the NEW-1 rotation-hash stamp. **Do not reimplement them here.** Settle
+  the boundary with the preflight `--collect-only -k "HoistedPRGuards or
+  ExplicitStagingSet"` output rather than by re-reading the plan; if a bullet is claimed
+  landed but does not appear in that output, treat it as owed and say so in the build
+  notes.
+- Cover the Q7 coverage list too, in `tests/unit/test_docs_auditor_substrate.py` per its
+  stated home — including the two R4-1 write-path cases in `TestNonMarkdownApplyGuard`
+  and the Q7c vault-drift exemption case. The `TestNonMarkdownApplyGuard` case is the
+  only guard against the veto reaching the write path; a suite without it passes a build
+  that rewrites deletion narrative.
 - Apply every disposition in the existing-test list under **Test Impact**. Re-derive the
   patch sites yourself — the anchors there are current as of the baseline commit only,
   and the two **direct** `_push_branch_and_pr` calls at `:1158` and `:1218` will fail
@@ -2628,12 +2878,15 @@ post-build expectation that legitimately fails now.
 | `.md` reporting branch exists (Q7a) | `grep -c 'broken-md-link' reflections/docs_auditor.py` | > 0 | post-build (currently `0`) |
 | Old auto-repairing `.md` detector stays gone (Q7a) | `grep -c '_detect_readme_broken_entries' reflections/docs_auditor.py` | `0` | **holds now** (#2842) — anti-criterion: Q7a must add a *reporting* branch, never resurrect the repair |
 | `.md` targets resolve doc-relative, not repo-root (Q7a / #2725) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: a `tmp_path` repo with `docs/features/a.md` linking `[x](target.md)` **and** `<root>/target.md` present must still produce a `broken-md-link` finding; with `docs/features/target.md` present it must produce none | finding produced in the first case, none in the second | post-build. Deliberately behavioral: a grep cannot tell `doc_path.parent`-based resolution from `repo_root`-based resolution, and spike-3 showed the existence invariant is structurally blind to exactly this distinction |
-| Deletion-narrative hatch was widened, not replaced (Q7b) | `grep -c '_is_documented_deletion' reflections/docs_auditor.py` | `> 4` | post-build (currently **4**: docstring reference `:499`, write-path call site `:679` inside `_make_stale_term_replacer`, definition `:847`, detector call site `:903`). A count still at `4` after the build means the `.md` branch grew its own filter instead of sharing the widened one |
+| Both reference shapes share one hatch (Q7b) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: a `.md` link under a `## Removed` heading is suppressed, proving the `.md` branch routes through `_is_documented_deletion` rather than growing a second filter | suppressed | post-build. This is the row that owns the intent. The companion grep below is advisory only |
+| Companion (advisory): hatch reference count | `grep -c '_is_documented_deletion' reflections/docs_auditor.py` | `>= 4` | post-build (currently **4**: docstring reference `:499`, write-path call site `:679` inside `_make_stale_term_replacer`, definition `:847`, detector call site `:903`). **Deliberately not `> 4` (R4-5).** A builder who routes both match branches through one shared filter loop inside `_detect_deleted_target_issues` — the cleanest reading of "both shapes share one hatch" — leaves the count at exactly 4, and a `> 4` row would fail the structure it is meant to reward. A count *below* 4 means a call site was dropped and is a real red |
+| Live-claim veto never reaches the write path (Q7b / R4-1) | **Behavioral**, in `TestNonMarkdownApplyGuard`: a `STALE_TERMS` hit on a line reading *"`old_term` remains defined in `agent/x.py`"* under a `## Migration` heading lands in `suppressed` and the file is byte-identical afterward. Companion structural check: `grep -c 'live_claim_veto' reflections/docs_auditor.py` | rewrite suppressed, file unchanged; grep `> 2` (signature, detector `.py` branch, detector `.md` branch) | post-build (currently `0`). **The highest-consequence Q7b row.** The three widenings make the write path more conservative; the veto alone makes it *less* conservative, since `_make_stale_term_replacer` (`:679`) reads `True` as "suppress this rewrite". A veto evaluated unconditionally makes the auditor start rewriting deletion narrative on the cascade path — every PR — which is the behavior #2739 exists to gate. No other row in this table catches it |
 | Heading matching is stem-based (Q7b) | `grep -c '_DELETION_HEADING_KEYWORDS' reflections/docs_auditor.py` and read the tuple | the tuple holds stems (`delet`, `remov`, `deprecat`, `migrat`, `cleanup`, `obsolete`, `retire`), not exact inflections | post-build (today the tuple is `(\"migration\", \"removed\", \"deleted\", \"deprecated\")`). Companion only — the behavioral controls below are the real gate |
 | Q7b controls: the two false positives go, the true positive stays | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: inline the prose from `docs/features/harness-abstraction.md:189` and `docs/features/harness-adapter.md:19`/`:115` and assert **no** finding; inline the `SessionType.GRANITE` row from `docs/features/standardized-enums.md:19` and assert a finding **is** produced | 3 suppressed, 1 reported | post-build. This is the single most important Q7 row: a widening that silences #2839 is wrong no matter how many false positives it removes |
 | Live-claim veto is present (Q7b) | **Behavioral**: a line reading *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a `## Migration` heading still produces a finding | finding produced | post-build. Without the veto the heading suppresses it; spike-7 measured the veto as the difference between 5 new false negatives and 0 |
 | Dedup converges (Q7c) | `grep -c '_open_issue_exists' reflections/docs_auditor.py` and `grep -c 'def _issue_exists' reflections/docs_auditor.py` | `0` and `1` respectively | post-build (currently `3` and `0`). No compatibility alias — Principle 1. Note `_issue_exists` is a substring of `_open_issue_exists`, so the bare symbol grep cannot tell them apart; anchor on `def ` |
-| Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c '\"all\"' reflections/docs_auditor.py` and `grep -c '\"100\"' reflections/docs_auditor.py` | `2` and `> 0` | post-build (currently `1` and `0`). The existing `\"all\"` at `:2146` is the **sweeper's** `gh pr list --state all` and is unrelated — the count must rise to 2, not merely be nonzero. `gh issue list` defaults to `--limit 30`; under `--state all` the exact title can fall off page one, which files a duplicate of an issue that already exists |
+| Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c '\"all\"' reflections/docs_auditor.py` and `grep -c '\"100\"' reflections/docs_auditor.py` | `2` and `> 0` | post-build (currently `1` and `0`). The existing `\"all\"` at `:2146` is the **sweeper's** `gh pr list --state all` and is unrelated — the count must rise to 2, not merely be nonzero. The second occurrence is `_issue_exists`' `states: str = \"all\"` default. `gh issue list` defaults to `--limit 30`; under `--state all` the exact title can fall off page one, which files a duplicate of an issue that already exists |
+| Vault-drift keeps the open-only gate (Q7c exemption / R4-2) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: with a `gh` stub, `_file_issue_if_new` on a `"category": "vault-drift"` finding dispatches `--state open`, and on a `deleted-target` or `broken-md-link` finding dispatches `--state all`; a **closed** drift issue for the same vault/site pair does not suppress a fresh filing, while a closed `broken-md-link` issue does. Companion structural check: `grep -c 'vault-drift' reflections/docs_auditor.py` | drift → `open`, references → `all`; grep `> 2` (the two finding-construction sites plus the selection in `_file_issue_if_new`) | post-build (grep currently `2`). Vault-drift's condition is a recurring `vault_mtime > site_ts` comparison, not a durable property of the tree, so `all` would let one human close silence that vault/site pair forever. A build that applies `all` uniformly passes every other Q7c row and fails only this one |
 | The stale non-convergence comment is deleted (Q7c) | `grep -c 'dedup gate only sees open issues' reflections/docs_auditor.py` | `0` | post-build (currently `1`, in `audit()` at `:1259-1265`). Describe only the new status quo |
 | Q7 shares the per-run cap, no second budget | **Behavioral**: a rotation pass whose findings mix `deleted-target` and `broken-md-link` files at most `ISSUE_FILING_PER_RUN_CAP` issues **in total** | total ≤ 5 | post-build |
 | Q7 adds no write path | `git diff origin/main -- reflections/docs_auditor.py` shows no new `write_text`, `open(..., "w")`, or `git`/`gh` mutation introduced by the Q7 commit | no new write | post-build. #2739's whole thesis; a `.md` *repair* is the one thing Q7 must not grow |
@@ -2664,9 +2917,21 @@ reopens them. What changed:
 
 **One finding surfaced while re-anchoring, recorded here because it changes blast radius:**
 `_is_documented_deletion` has **two** call sites, not one — `:903` in the detector and
-`:679` inside `_make_stale_term_replacer`, on the **write** path. Q7b's widening therefore
-makes stale-term application more conservative as well. Ruled acceptable and argued in
-Q7b; the Verification row's expected count was corrected from `> 2` to `> 4` accordingly.
+`:679` inside `_make_stale_term_replacer`, on the **write** path. This entry's original
+reading of that blast radius was wrong in one direction and is superseded by the
+2026-08-19 round-4 entry below: the three widenings do make the write path more
+conservative, the live-claim veto does the opposite, and the veto is now keyword-gated
+off for the write call site.
+
+**2026-08-19 — round-4 revision. Targeted; the #2739 core (Q1-Q6) was not reopened.**
+
+| Finding | Disposition | Where |
+|---|---|---|
+| R4-1 (BLOCKER) | Adopted as specified. The veto is now `*, live_claim_veto: bool = False`, passed `True` only from `_detect_deleted_target_issues`; `_make_stale_term_replacer` stays on the default. The asserted-monotonic ruling is replaced by a per-change direction table that names the veto as the one anti-monotone change | Q7b, task 4, Test Impact (`TestNonMarkdownApplyGuard` + flag-default case), Verification (new highest-consequence row), Documentation (docstring obligations) |
+| R4-2 (CONCERN) | Adopted, via the parameter route. `_issue_exists` gains `*, states: str = "all"`; `_file_issue_if_new` selects `"open"` for `category == "vault-drift"`, a key those findings already carry at `:1757`/`:1777`. No second function, no finding-shape change | Q7c, Risk 7 (scope bound), Documentation (`vault-drift-audit.md` checkbox), Test Impact, Verification |
+| R4-3 (CONCERN) | Adopted. The causal claim is corrected — rebasing is for currency, not anchors — and the +150-line drift is tabulated per symbol. Anchor re-derivation is now a named preflight **deliverable**, with the branch's 16 `auto-merge` hit lines recorded, and Q7's ≤ `:1064` anchors named byte-identical so preflight does not re-derive 20 stable references | Lane status (obligation 2), task 0 preflight, task 3 header |
+| R4-4 (CONCERN) | Adopted. Five "New coverage required" bullets are marked ✅ LANDED (`6261e2d2c`) with their test names and removed from the owed list; the remainder sits under an explicit "Still owed by task 5" heading. Task 5 is scoped to that list, settled mechanically by a preflight `--collect-only -k` whose output is a build-notes deliverable | Test Impact, task 0 preflight, task 5 |
+| R4-5 (NIT) | Adopted. The `grep -c '_is_documented_deletion'` row is demoted to an advisory companion at `>= 4`, and the behavioral "both reference shapes share one hatch" row now owns the intent. A shared filter loop leaving the count at exactly 4 no longer false-reds | Verification |
 
 ## Critique Results
 
@@ -2734,6 +2999,28 @@ Scope of this round: the Q7 fold-in plus the lane-status block that records task
 | CONCERN | History & Consistency | R4-3: the rebase obligation states its causal claim backwards — rebasing onto `origin/main` does not make the plan's anchors read correctly, because the two landed commits themselves moved `reflections/docs_auditor.py` by +150 net lines. Measured on `6261e2d2c`: `_push_branch_and_pr` `:1459`→`:1554`, `run_docs_auditor` `:1818`→`:1921`, `_run_vault_drift_detection` `:1784`→`:1887`, `_pr_is_auto_merge_eligible` `:2005`→`:2151`, the sweeper `:2089`→`:2235`, its `pr list --json` `:2147`→`:2294`, the stale-close `:2263`→`:2409`; `_has_open_pr_for_slug` and `_daily_pr_cap_reached` move **backward** 18 lines. Every task-3 anchor, including the C2 list presented as authoritative, is wrong on the tree the builder works in — and `grep -c 'auto-merge'` still returns 16 there, so the count cannot detect the drift. | Step by Step Tasks (lane status, preflight, task 3) | Say that the plan's anchors are `origin/main` anchors and that tasks 3-4 run on a tree carrying `49574989e` + `6261e2d2c`, then make anchor re-derivation a named preflight deliverable. State that **Q7's anchors are unaffected** so preflight does not re-derive 20 stable ones: everything at or below `:1064` is byte-identical on the branch (`_DELETION_HEADING_KEYWORDS:778`, `_is_placeholder_path:790`, `_build_line_context:815`, `_is_documented_deletion:847`, `_detect_deleted_target_issues:876`, regex `:893`, write-path call site `:679`, `_open_issue_exists:1003`, `_file_issue_if_new:1064`, `STALE_PR_AGE_DAYS:75`). The branch's 16 hits sit at `:79,:90,:91,:1576,:1633,:2023,:2025,:2088,:2117,:2152,:2197,:2231,:2241,:2401,:2404,:2422`. |
 | CONCERN | Scope & Value | R4-4: **Test Impact** was not reconciled against what the landed commits already test. `6261e2d2c` added `TestHoistedPRGuards` and `TestExplicitStagingSet` to `tests/unit/test_docs_auditor_substrate.py`, covering five "New coverage required" bullets — staging names only `files_touched`, empty `files_touched` creates no branch or commit, the B3 staged-then-commit-failed restore, the guard-fired `skipped` run that never reaches the substrate, and the NEW-1 rotation-hash stamp. Task 5 still says "cover every bullet", so those five get a second implementation, and the `grep -c '"init"'` Verification row forces a second real-git harness for assertions that already have one. | Test Impact / Task 5 | Mark the five landed bullets `✅ LANDED in test_docs_auditor_substrate.py (6261e2d2c)` the way tasks 1 and 2 are marked. What task 5 genuinely still owes: early-return restore per failure mode, foreign dirt survives (Race 1), failed-restore reporting → `status="error"`, the sweeper close path with the `WITHHELD_PR_MARKER` exemption, the sweeper reading `body` from its own `pr list` (NEW-2), the auto-merge anti-criterion, and the >5-withheld cap (NEW-4 / R3-3). Settle it mechanically at preflight with `--collect-only -k "HoistedPRGuards or ExplicitStagingSet"` rather than by re-reading the plan. |
 | NIT | History & Consistency | R4-5: the Verification row "Deletion-narrative hatch was widened, not replaced" expects `grep -c '_is_documented_deletion'` → `> 4` and reads exactly 4 as proof the `.md` branch grew its own filter. A builder who routes both match branches through one shared filter loop inside `_detect_deleted_target_issues` — the cleanest reading of "Both shapes share one hatch" — leaves the count at 4 and fails a row meant to reward that structure. | Verification | Demote to a companion check and rely on the behavioral row that already covers the intent (a `.md` link under a `## Removed` heading is suppressed). |
+
+**Round 4 revision applied — 2026-08-19. All five findings adopted; none accepted as a residual.**
+
+Every claim the round made was re-verified against the tree before acting on it, and all
+of them hold. `_make_stale_term_replacer._replace` reads `_is_documented_deletion`'s
+`True` as `return match.group(0)` with an append to `suppressed`, so the veto genuinely
+inverts that call site (R4-1). Vault-drift findings already carry
+`"category": "vault-drift"` at `:1757` and `:1777`, which makes R4-2's remedy three lines
+rather than a data-model change. The R4-3 drift was re-measured symbol by symbol on
+`6261e2d2c`: `_pr_is_auto_merge_eligible` `:2005`→`:2151`, sweeper `:2089`→`:2235`,
+`pr list --json` `:2147`→`:2294`, and the two guards backward 18 to `:1398`/`:1418`, with
+`grep -c 'auto-merge'` reading `16` on both trees. `TestHoistedPRGuards` (`:1567`) and
+`TestExplicitStagingSet` (`:1653`) are on the branch with the six test functions R4-4
+named (R4-4).
+
+| Finding | Disposition |
+|---|---|
+| R4-1 | **Adopted as specified.** Keyword-only `live_claim_veto: bool = False`; `True` only from `_detect_deleted_target_issues`. The asserted-monotonic ruling in Q7b is replaced by a four-row direction table that names the veto as the single anti-monotone change and says plainly why the write path must not have it. Pinned by a `TestNonMarkdownApplyGuard` case plus a direct assertion on the flag default, and by a new Verification row — the only row in the table that can catch a call-site-blind veto |
+| R4-2 | **Adopted, parameter route.** `_issue_exists(..., *, states: str = "all")`; `_file_issue_if_new` selects `"open"` for `vault-drift`. Q7c's enumeration now separates "durable property of the tree" titles from the recurring-comparison title, Risk 7 carries the scope bound, and `docs/features/vault-drift-audit.md` gains a Documentation checkbox. Not accepted-with-reason: an accepted silence would decay the channel one vault/site pair at a time with no signal |
+| R4-3 | **Adopted.** Rebase is restated as a currency obligation, not an anchor fix. New obligation 2 tabulates the per-symbol drift, records the branch's 16 `auto-merge` hit lines, and names Q7's ≤ `:1064` anchors byte-identical. Preflight gains a named anchor-table deliverable; task 3 opens with the warning |
+| R4-4 | **Adopted.** Five bullets marked ✅ LANDED with their test-function names and removed from the owed list, which now sits under "Still owed by task 5". Task 5's scope is that list only, settled by a preflight `--collect-only -k "HoistedPRGuards or ExplicitStagingSet"` whose output goes in the build notes |
+| R4-5 | **Adopted.** Grep row demoted to advisory at `>= 4`; a new behavioral row owns "both reference shapes share one hatch" |
 
 ---
 
