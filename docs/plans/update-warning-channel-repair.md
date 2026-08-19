@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2845
 last_comment_id: 5317246173
 revision_applied: true
-revision_applied_at: 2026-08-19T05:27:35Z
+revision_applied_at: 2026-08-19T06:02:33Z
 ---
 
 # /update Warning Channel Repair
@@ -146,7 +146,7 @@ No merged PR search results for `warn_state env-completeness` — the `gh pr lis
 ## Architectural Impact
 
 - **New dependencies**: none. `warn_state`, `redis_acl`, and `verify` are all existing first-party modules.
-- **Interface changes**: `_parse_env_example` returns `list[tuple[str, str, bool, str | None]]` — `(key, description, optional, passthrough)`, where `passthrough` is the binary name from a `# @passthrough <binary>` line or `None` — instead of today's `list[tuple[str, str]]`. The 4-tuple, not a record type: Task 2 and Test Impact specify "the 4-element return" and three Verification rows unpack it positionally, so the shape is pinned rather than left to builder choice. One parser owns every `.env.example` comment sigil; a second sigil reader living in the guard test would be the same producer/consumer drift that produced Defect 2. It is an internal helper with two callers, both in `verify.py` (`:1108`) and its tests (`tests/unit/test_env_completeness.py:149`) — plus the new guard test in Task 3. `bridge/update.py` gains one pure module-level helper, `extract_update_warnings(status_lines) -> list[str]`, exported for tests.
+- **Interface changes**: `_parse_env_example` returns `list[tuple[str, str, bool, str | None]]` — `(key, description, optional, passthrough)`, where `passthrough` is the binary name from a `# @passthrough <binary>` line or `None` — instead of today's `list[tuple[str, str]]`. The 4-tuple, not a record type: Task 2 and Test Impact specify "the 4-element return" and five Verification rows unpack it positionally, so the shape is pinned rather than left to builder choice. One parser owns every `.env.example` comment sigil; a second sigil reader living in the guard test would be the same producer/consumer drift that produced Defect 2. It is an internal helper with two callers, both in `verify.py` (`:1108`) and its tests (`tests/unit/test_env_completeness.py:149`) — plus the new guard test in Task 3. `bridge/update.py` gains one pure module-level helper, `extract_update_warnings(status_lines) -> list[str]`, exported for tests.
 - **Coupling**: decreases slightly. Today `bridge/update.py` knows an ad-hoc prefix tuple that duplicates knowledge of `run.py`'s output format implicitly; after this, the two summary formats are named and parsed in one place with a test that pins them against `run.py`'s actual emission.
 - **Data ownership**: unchanged. `warn_state`'s JSON state file (`data/`, gitignored) gains two more keys.
 - **Reversibility**: high. Every change is additive or a marker convention; reverting the `# @optional` annotations restores the old (noisy) behaviour with no data migration.
@@ -158,7 +158,7 @@ No merged PR search results for `warn_state env-completeness` — the `gh pr lis
 **Team:** Six agents over eight tasks — three builders on disjoint files, a code reviewer, a documentarian, and a validator (see Team Orchestration). The three builders are parallel; everything after them is sequential, including Task 5, where `update-channel-builder` returns to `bridge/update.py` once `warn_state` exports the shared trailer constant. This is larger than the "solo dev" the first draft assumed, because folding the suppression-visibility work in added a third build surface (`warn_state` retrieval + the summary trailer) and a cross-cutting reviewer to cover the seam between builders 1 and 3. The appetite stays **Medium**: the roster is wider, not longer, and no task grew.
 
 **Interactions:**
-- PM check-ins: 3 — one per Open Question below (scope confirmation, the `@optional` sigil convention, and whether any key the criterion marks optional is genuinely required somewhere). Each is a decision only a human can make, so they are check-ins rather than spikes.
+- PM check-ins: 0 remaining. All three questions are settled — see Resolved Questions. Scope is the whole of #2845; the `@optional` / `@passthrough` sigils establish a convention the file did not previously have; and optionality is decided by the two-leg criterion plus the named floor, never by a machine's check output.
 - Review rounds: 1
 
 ## Prerequisites
@@ -749,10 +749,26 @@ gate, and the 26 tests in `test_bridge_update.py`. Six of the eight findings are
 suppression and required/optional work being specified but never executed end to end against the real
 files. None is a regression introduced by the round-5 revision, which stands.
 
+**Revision applied, 2026-08-19.** All eight findings are resolved in place — see each row's `Addressed By`.
+The blocker took the critique's three-leg shape with `@passthrough <binary>` as the sigil, chosen so
+the existing `grep -ci 'ALLOWLIST\|KNOWN_UNREAD\|EXEMPT'` anti-criterion still reads 0. Both
+"choose one" findings took the *fix the code* branch rather than the *narrow the prose* branch:
+the trailer now emits twice with a widened `data/update.txt` write gate, and `tools/doctor.py` gains
+`_check_gws_auth` instead of the plan retracting its retrieval claim. Two claims this document
+previously carried were found false while working the findings and are corrected in place rather
+than quietly swapped: `verify.py:1128`'s `dict(declared)` raises on an over-wide tuple (it does not
+degrade silently, as Task 2 claimed), and `_parse_env_example` now returns a **4-tuple**, so the
+"3-element return" pinned in earlier rounds is superseded. All three Open Questions are settled and
+moved to Resolved Questions.
+
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Scope confirmation.** The routed task was "diagnose and fix the 2 warnings this machine reported." Issue #2845 is broader — it also covers the fix-session truncation and the `has_warnings` blindness, which are the reasons nobody saw these warnings properly in the first place. This plan implements the whole issue on the grounds that half-implementing it leaves it open and its acceptance criteria unmet. Confirm that is the intended scope, or say the word and I will split Defects 1–2 into a separate issue and land only 3–4.
-2. **`@optional` sigil.** I chose `@optional` over a bare `# optional` because `.env.example` contains seven prose uses of the word, one of them line-initial directly above the `SDLC_AGENT_GH_TOKEN` credential (`# Optional. GitHub PAT for ...`, `:135`), so a prose match would silently mark a real secret optional. If there is an existing annotation convention in this repo I should be reusing instead, name it.
-3. **Anything genuinely required among the keys the criterion clears?** Each one gets traced to a read site with an in-code default and screened against the not-a-credential leg. If you know of a machine where one of these is load-bearing and unset would be wrong, say which — that is the one thing the code cannot tell me. (This question got sharper on re-verification: the flagged set turns out to vary by machine, so the criterion, not the check's output, is what decides. If you disagree with either leg of it, now is the moment.)
+All three questions that stood open through critique rounds 1–6 are settled. They are recorded here rather than deleted, because each one's answer is a constraint the builder needs.
+
+1. **Scope: implement all four defects. Settled.** The routed task was narrower than the issue, so this was worth asking. Issue #2845's acceptance criteria enumerate all four — criteria 1–5 cover the 500-char truncation, the summary-detection blindness, the required/optional split, `warn_state` routing, and the regression tests. Landing only Defects 3–4 leaves the issue open with its stated criteria unmet, and it leaves the two defects that explain *why nobody saw these warnings* in place. No split issue. This plan is the whole of #2845.
+
+2. **The `@optional` sigil stands, and no competing convention exists. Settled by inspection.** `grep '^#.*@[a-z]' .env.example` returns **zero** — the file carries no annotation convention today, so `@optional` (and `@passthrough`, added in round 6) establish one rather than colliding with one. The `@` remains load-bearing for the original reason: the file contains seven prose uses of the word "optional", one of them line-initial directly above the `SDLC_AGENT_GH_TOKEN` credential (`# Optional. GitHub PAT for ...`, `:135`), so a prose match would silently mark a real secret optional. Both sigils go in the `.env.example` header block and in `docs/features/env-completeness-validation.md` (Documentation section) so the convention is discoverable rather than folklore.
+
+3. **The criterion decides optionality, never any machine's check output. Settled.** This was the right question and it has a repo answer rather than a human one: the flagged set is a per-machine measurement (27 keys where this plan was written, 64 on this checkout), so no machine's output can be the authority. The two-leg criterion in Technical Approach → Defect 3 part 3 is — a traced read site with an in-code default, and not a credential — with three defences layered behind it: the six-key floor stops under-marking, the credential anti-criterion row plus `update-channel-reviewer`'s check 4 stop over-marking, and unmarked-is-required keeps the failure mode of a forgotten marker loud and cheap. If a human later knows of a machine where one of the six floor keys is load-bearing and unset would be wrong, that is a one-line edit to the floor set, not a reason to hold the plan.
