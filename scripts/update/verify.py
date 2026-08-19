@@ -1185,7 +1185,9 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
                 parts.append(k)
         if len(sorted_missing) > _INLINE_KEY_CAP:
             remaining = len(sorted_missing) - _INLINE_KEY_CAP
-            parts.append(f"(+{remaining} more — run scripts/update/run.py --verify for the full list)")
+            parts.append(
+                f"(+{remaining} more — run scripts/update/run.py --verify for the full list)"
+            )
         error = f"{len(missing_keys)} missing: {'; '.join(parts)} ({optional_unset} optional unset)"
         return ToolCheck(name="env-completeness", available=False, error=error)
 

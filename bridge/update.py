@@ -116,9 +116,9 @@ def extract_update_warnings(status_lines: list[str]) -> list[str]:
 def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
     """Combine stdout/stderr into one tail block, capped at whole-line boundaries.
 
-    A silent character-index cut (the historical ``stdout[:500]``) is what
-    produced the original truncation defect (#2845); a marked, line-boundary
-    cut is recoverable — the reader can tell there is more and go get it.
+    A silent character-index cut at a fixed, tiny size is what produced the
+    original truncation defect (#2845); a marked, line-boundary cut is
+    recoverable — the reader can tell there is more and go get it.
     """
     combined = f"stdout:\n{stdout or '(empty)'}\n\nstderr:\n{stderr or '(empty)'}"
     if len(combined) <= cap:
@@ -228,9 +228,9 @@ async def _queue_fix_session(
     """Queue an agent session to diagnose and fix update issues.
 
     The complete, un-truncated warning list leads the brief (issue #2845:
-    the historical ``stdout[:500]`` cap cut the warning list — the entire
-    reason the session exists — mid-word). The raw stdout/stderr tail
-    follows under a much larger, line-boundary cap.
+    the historical fixed 500-character stdout/stderr slice cut the warning
+    list — the entire reason the session exists — mid-word). The raw
+    stdout/stderr tail follows under a much larger, line-boundary cap.
     """
     try:
         from agent.agent_session_queue import enqueue_agent_session

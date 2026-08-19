@@ -124,8 +124,7 @@ def test_count_mismatch_appends_synthetic_entry_by_content():
     result = extract_update_warnings(status_lines)
     assert "only warning present" in result
     assert any(
-        text == "[update] WARN: summary declared 3 warning(s) but 1 were parsed"
-        for text in result
+        text == "[update] WARN: summary declared 3 warning(s) but 1 were parsed" for text in result
     )
 
 
@@ -234,7 +233,10 @@ def test_suppressed_trailer_shape_is_inert():
     """A line shaped like the suppression trailer (no ⚠️, no legacy prefix)
     must extract as zero warnings. This is a shape-only guess at the
     trailer's spelling — Task 5 pins the real `SUPPRESSED_PREFIX`."""
-    line = "suppressed (unchanged since first warning): gws-auth — details: python -m scripts.update.warn_state"
+    line = (
+        "suppressed (unchanged since first warning): gws-auth — "
+        "details: python -m scripts.update.warn_state"
+    )
     assert extract_update_warnings([line]) == []
 
 

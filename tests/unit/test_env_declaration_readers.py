@@ -9,8 +9,9 @@ A declaration passes through one of two legs:
    for keys an external binary reads straight out of the environment, where
    no tracked Python can name them.
 
-No hand-written allowlist. No second sigil parser here — `@passthrough` is
-read exclusively through `_parse_env_example`'s fourth return element.
+No hand-maintained exception list of key names. No second sigil parser here
+— `@passthrough` is read exclusively through `_parse_env_example`'s fourth
+return element.
 
 **Self-exclusion is load-bearing, not tidiness.** The leg-2 pin below writes
 all three passthrough key names into this very file (to assert the set is
@@ -111,7 +112,11 @@ def test_deleted_declarations_have_no_reader_mutation():
     the red-state demo for the guard's own usefulness. Run live rather than
     asserted as a fixed list, so it stays truthful if the reader surface
     ever changes."""
-    for dead_key in ("OLLAMA_URL", "OLLAMA_VISION_MODEL", "SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES"):
+    for dead_key in (
+        "OLLAMA_URL",
+        "OLLAMA_VISION_MODEL",
+        "SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES",
+    ):
         assert not _has_tracked_non_markdown_reader(dead_key), (
             f"{dead_key} was deleted from .env.example because nothing reads it; "
             "a tracked non-markdown reader has appeared. Either the deletion was "
