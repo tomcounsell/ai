@@ -1657,6 +1657,34 @@ task 2 pins both names.
 | NIT | Scope & Value | Task 3 case 17 describes a single-venv fixture ("whose `pyvenv.cfg` has been deleted") but illustrates the ratio assertion as `"2 of 3 interpreter-verified"`. The fixture venv is the only venv the default three shims point at, so deleting its `pyvenv.cfg` makes all three classify `unverified` and the message reads `0 of 3`. A builder taking the example literally either writes a failing assertion or adds a second venv the case does not need. | Task 3 case 17 — the pinned string is now `", 0 of 3 interpreter-verified"`, with the mixed-ratio alternative named as optional | n/a (NIT) — with `_fake_checkout`'s three shims all shebanged at the fixture's own `.venv/bin/python3`, deleting `.venv/pyvenv.cfg` makes `venv_python_version(parent.parent)` return `None` for every one, so the pinned clause is `", 0 of 3 interpreter-verified"`. Assert that string, or point one shim at a second venv that still carries a valid `pyvenv.cfg` if a mixed ratio reads better. The criterion (excluded from the verified ratio) is proved either way. |
 | NIT | History & Consistency | The pass `CheckResult` is cited as `tools/doctor.py:313-318` in the Technical Approach composition bullet and as `:312-317` in Technical Approach step 4 and task 2. Measured on `main`: the `return CheckResult(` is line 312 and the closing paren is 317, with 318 blank. Every other cited reference re-verified clean this round (`:150`, `:228`, `:242/:243/:244`, `:253`, `:254`, `:259`, `:271/:273/:275`, `:300`, `:108`, `:138`, `:442`, `:485`, `:496-498`). | Technical Approach composition bullet — now `:312-317`, re-measured this round (`return CheckResult(` at 312, closing paren at 317, 318 blank) | n/a (NIT) — change `:313-318` to `:312-317` so the two citations agree. A plan whose verification posture is "measured, not remembered" should not carry two ranges for the same six lines. |
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound after round 5's
+critique. The revision committed alongside that critique (`594cb3811`) already
+embeds concrete fixes for both round-5 CONCERN rows into the plan body — no
+concern was left unaddressed in the text — but no subsequent re-critique round
+ran to confirm a clean READY TO BUILD verdict before the bound was hit. Recorded
+here so a reader can see that BUILD proceeded on a revision that was never
+re-scored, rather than assuming a round 6 critique exists.
+
+- **Hardlink trailer fires on a symlinked on-PATH copy** — `not in_bin_dir and
+  _same_file(...)` cannot distinguish a symlink from a hardlink, so the trailer's
+  instruction and rationale were both false for a symlink. Accepted because: the
+  revision already adds the `not found_path.is_symlink()` leg to the gate
+  (Technical Approach remediation bullet, task 2 gate bullet), and task 3 case 18
+  plus its task 4 mutation row exist specifically to prove this guard is reachable
+  and correct. The build's own validator re-verifies case 18 before this plan can
+  be called done.
+- **Grouped trailer under-specified for mixed hardlink/non-hardlink members** — a
+  `(reason, target)` group can hold scripts of which only some were accepted via
+  `_same_file`, and naming one member's path arbitrarily leaves the others
+  winning `shutil.which` after the rebuild. Accepted because: the revision
+  already specifies a group-level `hardlinked_paths` aggregate with singular and
+  plural rendering (Technical Approach remediation bullet, task 2 render bullet),
+  and task 3 case 19 plus its task 4 mutation row exist specifically to prove it.
+  The build's own validator re-verifies case 19 before this plan can be called
+  done.
+
 ---
 
 ## Resolved Questions
