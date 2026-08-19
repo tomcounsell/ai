@@ -290,7 +290,7 @@ reconciliation gap between two divergent liveness inferences.
 
 Peek is used by two read-only checkpoints -- a routing *decision* must never itself claim or extend a lock:
 
-- `tools/sdlc_next_skill.py::decide()`'s pre-check, ahead of all G1-G8 guard evaluation. When the caller supplies `--run-id` (issue #2766), that stated identity IS the peek identity directly -- no session lookup at all. Otherwise it falls back to the identity read back from the resolved issue session's own `active_run_id`. Either way this remains read-only: `next-skill` never mints, adopts, or renews.
+- `tools/sdlc_next_skill.py::decide()`'s pre-check, ahead of all G1-G9 guard evaluation. When the caller supplies `--run-id` (issue #2766), that stated identity IS the peek identity directly -- no session lookup at all. Otherwise it falls back to the identity read back from the resolved issue session's own `active_run_id`. Either way this remains read-only: `next-skill` never mints, adopts, or renews.
 - `tools/sdlc_dispatch.py::_peek_issue_lock_conflict()`, called by `dispatch record`'s CLI wrapper after a write failure, to disambiguate lock contention from an unrelated write error.
 
 ### Compare-and-delete release
@@ -351,7 +351,7 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 |---|---|---|---|
 | `ensure_session()` -- all return points | `tools/sdlc_session_ensure.py` | Every session resolution for an issue (cold-start create, or any early-return branch) | Mints a fresh candidate per top-level call via `_acquire_run_lock_and_bind()`, invoked immediately before *each* `return` so no branch can silently skip it. |
 | `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | The caller's explicit `run_id` (CLI `--run-id`), falling back to `session.active_run_id` for in-process callers. An issue-scoped session with **no** run identity at all refuses the write outright. |
-| `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G8 guard evaluation | Read-only: a caller-supplied `--run-id` (issue #2766) is used directly as the peek identity; otherwise falls back to the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews either way. |
+| `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G9 guard evaluation | Read-only: a caller-supplied `--run-id` (issue #2766) is used directly as the peek identity; otherwise falls back to the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews either way. |
 | `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `active_run_id` re-fetched from Redis each tick via `_fetch_live_active_run_id()` (read-back only; skips the tick if absent or fetch fails). Warns at WARNING on a not-owner result. |
 | `revalidate_ledger_lease()` pre-write gate | `tools/_sdlc_utils.py`, called by `sdlc_stage_marker.py` (3 sites), `sdlc_dispatch.py`, `sdlc_verdict.py`, `sdlc_meta_set.py`, `sdlc_review_finalize.py` | Immediately before every ledger mutation, closing the peek-to-write TOCTOU window | The caller's explicit `--run-id`. Non-peek, so it renews the TTL as a side effect of re-validating; also refreshes the supervised-run signal under an `acquired` result (#2659). |
 
@@ -414,7 +414,7 @@ When a lock check finds the issue owned by a different live run, the caller surf
 Two call sites emit the full `{"blocked": true, ...}` shape:
 
 - **`tools/sdlc_session_ensure.py::ensure_session()`** -- any of its return points returns `{"blocked": True, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ...}` in place of the normal `{"session_id": ..., "created": ..., "run_id": ...}` payload when `touch_issue_lock()` reports contention.
-- **`tools/sdlc_next_skill.py::decide()`** -- the peek pre-check returns `{"blocked": True, "reason": "ISSUE_LOCKED", "guard_id": "ISSUE_LOCK", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}` before any G1-G8 guard runs.
+- **`tools/sdlc_next_skill.py::decide()`** -- the peek pre-check returns `{"blocked": True, "reason": "ISSUE_LOCKED", "guard_id": "ISSUE_LOCK", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}` before any G1-G9 guard runs.
 
 `dispatch record` surfaces the same lock information through a different shape, described next -- it never returns `blocked: true`.
 

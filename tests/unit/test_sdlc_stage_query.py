@@ -1026,6 +1026,86 @@ class TestFetchPrMergeState:
         assert "tomcounsell/popoto" in cmd
         assert result[0] == "CLEAN"
 
+    def test_retries_once_on_unknown_and_uses_settled_state(self):
+        """A transient UNKNOWN read (GitHub computes mergeability
+        asynchronously) is retried once; if the retry settles to a real
+        value, that value wins (#2796 tech debt round 1). Reproduces the race
+        the reviewer hit directly on PR #2797: first read UNKNOWN, retry 3s
+        later read CLEAN."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        first = MagicMock(
+            returncode=0,
+            stdout=_json.dumps({"mergeStateStatus": "UNKNOWN", "statusCheckRollup": []}),
+        )
+        second = MagicMock(
+            returncode=0,
+            stdout=_json.dumps(
+                {
+                    "mergeStateStatus": "CLEAN",
+                    "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+                }
+            ),
+        )
+        with (
+            patch("tools.sdlc_stage_query.subprocess.run", side_effect=[first, second]) as mock_run,
+            patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
+        ):
+            merge_state, ci_passing = _fetch_pr_merge_state(2797)
+
+        assert merge_state == "CLEAN"
+        assert ci_passing is True
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_still_unknown_after_retry_returns_unknown(self):
+        """If the retry read is still UNKNOWN (or fails), the caller sees the
+        honest unresolved state rather than a fabricated settled value —
+        guard G9 must keep escalating on a genuinely unresolved PR."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        still_unknown = MagicMock(
+            returncode=0,
+            stdout=_json.dumps({"mergeStateStatus": "UNKNOWN", "statusCheckRollup": []}),
+        )
+        with (
+            patch(
+                "tools.sdlc_stage_query.subprocess.run",
+                side_effect=[still_unknown, still_unknown],
+            ) as mock_run,
+            patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
+        ):
+            merge_state, ci_passing = _fetch_pr_merge_state(2797)
+
+        assert merge_state == "UNKNOWN"
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_non_unknown_state_never_retries(self):
+        """No retry cost for the common case — only a first-read UNKNOWN
+        triggers the second `gh pr view` call."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps({"mergeStateStatus": "DIRTY", "statusCheckRollup": []})
+        with (
+            patch(
+                "tools.sdlc_stage_query.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=gh_output),
+            ) as mock_run,
+            patch("tools.sdlc_stage_query.time.sleep") as mock_sleep,
+        ):
+            merge_state, _ = _fetch_pr_merge_state(2797)
+
+        assert merge_state == "DIRTY"
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
+
 
 class TestResolveTargetRepo:
     """Tests for _resolve_target_repo in tools._sdlc_utils."""

@@ -10,11 +10,11 @@ ISSUE → PLAN → CRITIQUE → BUILD → TEST → PATCH → REVIEW → DOCS →
 
 Each stage is tracked as a JSON dict with stage-status keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", ...}`). Since issue #2012 the durable primary store is the issue-keyed `PipelineLedger` (`(target_repo, issue_number)`), with the PM session's `AgentSession.stage_states` retained as a fallback for callers with no live per-issue lease — see [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md). The SDLC router reads this state (via `sdlc-tool stage-query`) and dispatches one sub-skill per invocation.
 
-## Legal Dispatch Guards (G1–G8)
+## Legal Dispatch Guards (G1–G9)
 
 Guards are evaluated **in `GUARDS` list order** before the dispatch table; the
 first guard to return a non-`None` decision wins and overrides the table. The
-pinned order is `[G1, G2, G3, G4, G8, G7, G5, G6]` — guard IDs are historical
+pinned order is `[G1, G2, G3, G4, G9, G8, G7, G5, G6]` — guard IDs are historical
 (assigned in the order each guard was introduced), not the evaluation order.
 The table below is listed in evaluation order:
 
@@ -24,10 +24,25 @@ The table below is listed in evaluation order:
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` AND CRITIQUE not completed | `blocked` |
 | G3: PR lock | PR open AND last/proposed dispatch is plan-stage skill | Redirect to appropriate PR-stage skill |
 | G4: Oscillation | Same skill dispatched `MAX_SAME_STAGE_DISPATCHES` times without state change | `blocked` |
+| G9: Blocked-on-conflict | Recorded REVIEW verdict is `BLOCKED_ON_CONFLICT` AND `pr_merge_state` is not in the non-conflicting set (`CLEAN`, `HAS_HOOKS`, `UNSTABLE`, `BLOCKED`, `BEHIND`) AND the verdict is not stale (#2796) | `blocked` — no SDLC skill resolves merge conflicts |
 | G8: Stage-advance verification | `context["stage_artifacts_verified"] is False` (a claimed stage artifact failed live verification) | Re-dispatch the unverified stage's skill |
 | G7: Plan-revising lock | `plan_revising=True` AND no `/do-plan` revision has landed since the latest CRITIQUE verdict AND no open PR | `/do-plan` or `blocked` |
 | G5: Unchanged plan hash | Critique verdict exists with matching `artifact_hash` | Reuse cached verdict |
 | G6: Terminal merge | PR open, CI green, DOCS done, review APPROVED (head_sha-fresh, #2062) | `/do-merge` |
+
+**G9 (issue #2796).** `BLOCKED_ON_CONFLICT` is a first-class verdict token
+that `/do-pr-review`'s preflight records when a PR is DIRTY/CONFLICTING (or
+mergeability is UNKNOWN after retry) — the preflight stops before reviewing
+any code. Before G9 existed, the router had no row for that token: a
+DIRTY PR ping-ponged between `/do-patch` (which cannot rebase) and
+`/do-pr-review` (which short-circuits on preflight and re-records the same
+verdict) until G4 escalated with a message naming neither the conflict nor
+the rebase. G9 escalates immediately with a reason that names both. Its
+non-conflicting step-aside set mirrors `/do-pr-review`'s own preflight
+decision table exactly (`.claude/skills-global/do-pr-review/sub-skills/checkout.md`)
+so a resolved-but-still-`BEHIND`/`UNSTABLE` PR is never told it "has merge
+conflicts" when it does not. `tools/sdlc_stage_query.py::_fetch_pr_merge_state`
+retries once on a transient `UNKNOWN` read before G9 ever sees the value.
 
 **Why G4 precedes G8.** G8 re-dispatches the same stage's skill on a false
 artifact claim, with nothing upstream to stop it from doing so forever on a

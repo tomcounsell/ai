@@ -254,6 +254,37 @@ def test_guard_row_ids_in_python():
     )
 
 
+_GUARD_FN_NAME_RE = re.compile(r"^guard_(g\d+)_")
+
+
+def test_every_guard_has_skill_md_row():
+    """Reverse direction of test_guard_row_ids_in_python (#2796 tech debt round
+    1). The forward test only proves every guard_id *mentioned in SKILL.md* has
+    a Python callable — it says nothing about a guard landing in ``GUARDS``
+    with no SKILL.md row at all, which is exactly what happened when G9 was
+    added: the guard shipped, the pinned order and Step 3.5 table were never
+    updated, and this suite stayed green because nothing checked the other
+    direction. Without this assertion a future guard can land undocumented
+    again with no test noticing."""
+    md = SKILL_MD.read_text(encoding="utf-8")
+    guard_rows = parse_guard_rows(md)
+    documented_ids = {r["guard_id"].upper() for r in guard_rows}
+
+    missing = []
+    for guard in GUARDS:
+        match = _GUARD_FN_NAME_RE.match(guard.__name__.lower())
+        if not match:
+            continue
+        guard_id = match.group(1).upper()
+        if guard_id not in documented_ids:
+            missing.append(guard_id)
+
+    assert not missing, (
+        f"Guards in GUARDS without a matching row in SKILL.md Step 3.5: {missing}\n"
+        f"Documented guard IDs: {sorted(documented_ids)}"
+    )
+
+
 def test_g6_guard_row_present_in_skill_md():
     """SKILL.md Step 3.5 guard table must contain a G6 row."""
     md = SKILL_MD.read_text(encoding="utf-8")

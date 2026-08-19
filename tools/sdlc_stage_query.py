@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -173,6 +174,14 @@ def _fetch_pr_merge_state(
     On any ``gh`` CLI failure (network error, unknown PR, timeout), both fields
     default to ``None``. Guard G6 will not fire if either is ``None``.
 
+    GitHub computes ``mergeStateStatus`` asynchronously, so a just-updated PR
+    (e.g. immediately after a rebase) can read back ``"UNKNOWN"`` on the first
+    query. A single ``"UNKNOWN"`` read is retried once after a short delay,
+    mirroring the retry ``/do-pr-review``'s own preflight already performs
+    (`.claude/skills-global/do-pr-review/sub-skills/checkout.md`) — without it,
+    every caller of this helper (guard G9, guard G6) can fail-closed on a
+    transient read instead of the settled state (#2796 tech debt).
+
     Args:
         pr_number: The PR number to query.
         repo: Optional owner/name slug for cross-repo PRs (e.g. "tomcounsell/popoto").
@@ -183,16 +192,17 @@ def _fetch_pr_merge_state(
     if not pr_number:
         return None, None
 
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(pr_number),
+        *(["--repo", repo] if repo else []),
+        "--json",
+        "mergeStateStatus,statusCheckRollup",
+    ]
+
     try:
-        cmd = [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            *(["--repo", repo] if repo else []),
-            "--json",
-            "mergeStateStatus,statusCheckRollup",
-        ]
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -206,6 +216,22 @@ def _fetch_pr_merge_state(
         merge_state = data.get("mergeStateStatus")
         if not isinstance(merge_state, str):
             merge_state = None
+
+        if merge_state == "UNKNOWN":
+            time.sleep(2)
+            retry_proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if retry_proc.returncode == 0:
+                retry_data = json.loads(retry_proc.stdout or "{}")
+                retry_state = retry_data.get("mergeStateStatus")
+                if isinstance(retry_state, str):
+                    data = retry_data
+                    merge_state = retry_state
+
         rollup = data.get("statusCheckRollup")
         if not isinstance(rollup, list):
             ci_all_passing = None

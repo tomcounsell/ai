@@ -7,7 +7,7 @@ delegates to ``decide_next_dispatch()`` in this module.
 
 Two sources of truth in the pipeline:
 - **Dispatch decisions**: ``agent/sdlc_router.py`` — ``DISPATCH_RULES`` + guards
-  G1–G6. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
+  G1–G9. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
 - **State-machine bookkeeping**: ``agent/pipeline_graph.py`` — ``PIPELINE_EDGES``,
   ``get_next_stage()``. Used by ``PipelineStateMachine`` to mark the next stage
   'ready' when one completes. Never consulted for dispatch decisions.
@@ -17,7 +17,7 @@ The algorithm:
     decide_next_dispatch(stage_states, meta, context)
         -> Dispatch | Blocked
 
-    1. Evaluate guards (G1–G6). If any guard trips, return its decision.
+    1. Evaluate guards (G1–G9). If any guard trips, return its decision.
     2. Otherwise, walk the ``DISPATCH_RULES`` list in row order and return
        the first rule whose ``state_predicate`` accepts ``(stage_states, meta,
        context)``.
@@ -119,6 +119,11 @@ CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
 # underscore forms and mixed-case inputs still resolve correctly (#1638).
 REVIEW_APPROVED = "APPROVED"
 REVIEW_CHANGES_REQUESTED = "CHANGES REQUESTED"
+# Preflight short-circuit verdict (#2796): /do-pr-review records this when the
+# PR is CONFLICTING/DIRTY (or mergeability is UNKNOWN after retry) and stops
+# WITHOUT performing a code review. Canonical spaced form — the skills emit the
+# underscore form ``BLOCKED_ON_CONFLICT``, which normalize_verdict folds to this.
+REVIEW_BLOCKED_ON_CONFLICT = "BLOCKED ON CONFLICT"
 
 # Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
 # and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
@@ -815,11 +820,111 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     )
 
 
+# The non-conflicting mergeStateStatus values /do-pr-review's own preflight
+# treats as proceed-worthy (.claude/skills-global/do-pr-review/sub-skills/
+# checkout.md decision table) — anything outside this set (DIRTY, None,
+# UNKNOWN, or an unrecognized value) still reads as a live conflict to G9.
+_G9_NON_CONFLICTING_MERGE_STATES = frozenset(
+    {"CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND"}
+)
+
+
+def guard_g9_blocked_on_conflict(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G9: escalate when the recorded REVIEW verdict is BLOCKED_ON_CONFLICT (#2796).
+
+    ``BLOCKED_ON_CONFLICT`` is a first-class verdict token in
+    ``tools/sdlc_verdict.py``, ``tools/sdlc_review_finalize.py`` and
+    ``tools/sdlc_stage_marker.py``: ``/do-pr-review``'s preflight records it
+    when the PR is ``CONFLICTING``/``DIRTY`` (or mergeability is ``UNKNOWN``
+    after retry) and stops WITHOUT reviewing any code. Until this guard, the
+    router had no notion of the token at all, so a correctly-finalized
+    conflict verdict routed by accident:
+
+        row 8  (``_rule_review_has_findings``, via REVIEW==failed) → /do-patch
+        row 8b (``_rule_patch_applied_after_review``)              → /do-pr-review
+        → preflight short-circuits again, re-records the same verdict, repeat
+
+    ``/do-patch`` cannot resolve a merge conflict (its remit is failing tests
+    and review blockers) and the re-review never reaches the code, so the pair
+    ping-pongs until G4 escalates with a generic "stage oscillation" message
+    that names neither the conflict nor the rebase. Observed on popoto PRs
+    #546 and #548.
+
+    **Why Blocked rather than a dispatch row.** Nothing in the skill set can
+    resolve conflicts: ``/do-merge`` declares conflict resolution explicitly
+    out of scope, ``/do-patch`` is not specced for rebases, and there is no
+    rebase skill. The ``/do-pr-review`` outcome contract already states the
+    conclusion this guard enforces —
+    ``BLOCKED_ON_CONFLICT`` carries ``next_skill: null``, "the pipeline should
+    NOT auto-advance; the author must rebase". A guard is also the only shape
+    that CAN express this: a ``DispatchRule`` always yields a ``Dispatch``.
+
+    Two step-asides keep a resolved conflict from wedging the lane, so this
+    escalates on a LIVE conflict only:
+
+    - ``pr_merge_state`` is in the non-conflicting set ``/do-pr-review``'s own
+      preflight already treats as proceed-worthy (issue #2796 tech debt round
+      1): ``CLEAN``, ``HAS_HOOKS``, ``UNSTABLE``, ``BLOCKED`` (GitHub's status
+      for a missing required review/check — not a merge conflict), and
+      ``BEHIND`` (out of date, not conflicting). The live world says the PR is
+      mergeable or at least not blocked by conflicts, so the recorded verdict
+      is describing a conflict that has since been resolved. Any other value
+      (including ``None``/``UNKNOWN``/``DIRTY``) still escalates: fail-closed,
+      since ``DIRTY`` and an unresolved/unknown merge state are exactly what
+      preflight itself treats as conflicting. ``_fetch_pr_merge_state``
+      (``tools/sdlc_stage_query.py``) retries once on a transient ``UNKNOWN``
+      read before this guard ever sees the value, so a resolved-but-just-read
+      ``UNKNOWN`` settles to its real state instead of reaching this guard at
+      all.
+    - ``_review_verdict_is_stale`` — a ``/do-patch`` was dispatched after the
+      verdict was recorded, so the rebase may already have landed. Step aside
+      and let row 8b re-review; if the conflict survives, the re-review
+      records a FRESH conflict verdict and this guard fires on the next turn.
+
+    Ordered immediately after G4 so an already-oscillating lane keeps G4's
+    existing precedence (no behavior change for states that escalate today),
+    while a newly-conflicted lane stops here on turn 1 — before it can burn
+    a patch/review cycle — with a reason that names the rebase.
+    """
+    if not meta.get("pr_number"):
+        return None
+    verdict = normalize_verdict(_latest_review_verdict(stage_states, meta))
+    if REVIEW_BLOCKED_ON_CONFLICT not in verdict:
+        return None
+    if meta.get("pr_merge_state") in _G9_NON_CONFLICTING_MERGE_STATES:
+        return None
+    if _review_verdict_is_stale(stage_states):
+        return None
+
+    pr_number = meta.get("pr_number")
+    merge_state = meta.get("pr_merge_state")
+    if merge_state == "DIRTY":
+        state_clause = "has merge conflicts"
+    else:
+        # None/UNKNOWN/any other unrecognized value: mergeability could not be
+        # confirmed, not confirmed-conflicting — say so rather than asserting
+        # a conflict that may not exist (#2796 tech debt round 1).
+        state_clause = "has an unresolved or unconfirmed merge state"
+    return Blocked(
+        reason=(
+            f"G9: PR #{pr_number} {state_clause} "
+            f"(review recorded BLOCKED_ON_CONFLICT, merge state {merge_state!r}). "
+            f"No code review was performed. Rebase the branch onto main and "
+            f"resolve the conflicts, then re-run /do-pr-review. No SDLC skill "
+            f"resolves conflicts — this needs a human."
+        ),
+        guard_id="G9",
+    )
+
+
 GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g1_critique_loop,
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
     guard_g4_oscillation,
+    guard_g9_blocked_on_conflict,
     guard_g8_artifact_verification,
     guard_g7_plan_revising,
     guard_g5_artifact_hash_cache,
@@ -1900,7 +2005,7 @@ def decide_next_dispatch(
     """Decide which sub-skill the SDLC router should dispatch next.
 
     Algorithm:
-      1. Evaluate guards G1–G7. If any guard trips, return its decision.
+      1. Evaluate guards G1–G9. If any guard trips, return its decision.
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
          rule whose ``state_predicate`` returns True as the primary dispatch.
       3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.
