@@ -983,16 +983,22 @@ def main() -> int:
         just_dispatched = list(confirmed_failing)
         dispatch_nodes: list[str] = []
         if confirmed_failing:
+            seed_size = len(confirmed_failing)
+            seed_title = (
+                f"Nightly regression baseline: {seed_size} nodes absorbed "
+                f"on {current['head_commit']}"
+            )
             seed_prompt = (
                 "Nightly regression detector re-baselined its test collection "
                 f"(old={prev.get('collection')!r}, new={COLLECTION_PATHS!r}). "
-                f"The following {len(confirmed_failing)} node(s) were already failing "
-                "at the moment of the re-baseline and have been absorbed into the "
-                "seed — they are NOT individually filed. Open ONE umbrella issue "
-                "titled 'Nightly regression baseline: pre-existing failures after "
-                "collection widening' summarizing the population, its size, and "
-                "pointing at the persisted state file for the full node list. Do "
-                "NOT file per-node issues for these. Do NOT attempt an auto-hotfix.\n\n"
+                f"The following {seed_size} node(s) were already failing at the "
+                "moment of the re-baseline and have been absorbed into the seed — "
+                "they are NOT individually filed. Search open issues for the EXACT "
+                f'title "{seed_title}". If found, comment on it. If not found, open '
+                f"ONE umbrella issue with EXACTLY that title, summarizing the "
+                "population, its size, and pointing at the persisted state file "
+                "for the full node list. Do NOT file per-node issues for these. Do "
+                "NOT attempt an auto-hotfix.\n\n"
                 "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in confirmed_failing)
             )
             triage_session_id = maybe_dispatch_triage_session(

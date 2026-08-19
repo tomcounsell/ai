@@ -978,6 +978,16 @@ class TestMainDispatchPersistence:
         assert saved["dispatched_nodes"] == sorted(standing)
         assert saved["seed_size"] == 2
 
+    def test_seed_prompt_carries_the_exact_umbrella_title(self, tmp_path: Path) -> None:
+        standing = ["a::t1", "b::t2"]
+        rc, saved, mock_dispatch, _ = self._run_main(tmp_path, {}, standing, "seed-session")
+        assert rc == 0
+        prompt = mock_dispatch.call_args.kwargs.get("prompt")
+        expected_title = (
+            f"Nightly regression baseline: {len(standing)} nodes absorbed on {saved['head_commit']}"
+        )
+        assert expected_title in prompt
+
     def test_dispatched_hash_is_gone_from_persisted_state(self, tmp_path: Path) -> None:
         prev = self._prev(failing_tests=[], dispatched_hash="stale", dispatched_nodes=[])
         rc, saved, _, _ = self._run_main(tmp_path, prev, ["a::t1"], "s1")
