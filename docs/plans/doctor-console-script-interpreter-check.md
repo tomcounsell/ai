@@ -57,7 +57,12 @@ and the fix line matches the state rather than repeating generic PATH advice.
 
 ## Freshness Check
 
-**Baseline commit:** `f491306c5491c93b1481094ff602552c010521c7`
+**Baseline commit:** `327dacb82` (this plan's parent). All code reads below were taken
+at `f491306c5`; main advanced to `327dacb82` while the plan was being written, and
+`git diff f491306c5..327dacb82` over `tools/doctor.py`,
+`tests/unit/test_doctor_console_scripts.py`, `agent/worktree_manager.py`, and
+`pyproject.toml` shows a single change: `claude-agent-sdk` bumped 0.2.139 → 0.2.140.
+`[project.scripts]` is untouched, so every reading below holds at the parent.
 **Issue filed at:** 2026-08-13T04:29:44Z (6 days before planning)
 **Disposition:** Minor drift
 
@@ -884,11 +889,11 @@ new finding inside an existing check that the agent already knows how to run and
 | New test matrix exists | `grep -c "class TestWinningScriptInterpreter" tests/unit/test_doctor_console_scripts.py` | output > 0 |
 | Healthy machine still passes (live control) | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; print(c().passed)"` | output contains True |
 | Pass message discloses verification | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; print(c().message)"` | output contains interpreter |
-| Existing assertions unmodified | `git diff main -- tests/unit/test_doctor_console_scripts.py \| grep -c "^-.*assert "` | match count == 0 |
+| Existing assertions unmodified | `.venv/bin/python -c "import subprocess;d=subprocess.run(['git','diff','main','--','tests/unit/test_doctor_console_scripts.py'],capture_output=True,text=True).stdout;print(sum(1 for l in d.splitlines() if l.startswith('-') and 'assert ' in l))"` | match count == 0 |
 | Anti-criterion: no subprocess in this check | `.venv/bin/python -c "import re,pathlib;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));print(len(re.findall('subprocess','\n'.join(s[a:b]))))"` | match count == 0 |
 | Anti-criterion: doctor deletes nothing (#2780 stays out) | `grep -c unlink tools/doctor.py` | match count == 0 |
 | Anti-criterion: doctor removes no trees (#2780 stays out) | `grep -c rmtree tools/doctor.py` | match count == 0 |
-| Anti-criterion: no gate exit-code handling added (#2749 stays out) | `grep -c "127" tools/doctor.py` | match count == 0 |
+| Anti-criterion: check inspects no process result (#2749 stays out) | `.venv/bin/python -c "import re,pathlib;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));print(len(re.findall('returncode','\n'.join(s[a:b]))))"` | match count == 0 |
 | Docs updated | `grep -c interpreter docs/features/local-doctor.md` | output > 0 |
 | Lint clean | `python -m ruff check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit code 0 |
