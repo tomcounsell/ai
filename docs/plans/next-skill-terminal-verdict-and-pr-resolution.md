@@ -753,8 +753,9 @@ patched.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — **UPDATE**: any fixture whose ledger has `MERGE: "completed"` and asserts a non-terminal `row_id` now hits the terminal guard first. `test_terminal_merged_pipeline_routes_to_merge_not_build` is the one #2826 repaired; it deliberately does **not** set `MERGE: "completed"` (setting it would have made the fixture dead code), so it should survive untouched — **verify this rather than assume it**, and if it does change, that is a signal the guard is placed wrong.
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — **UPDATE**: G4 tests that drive `same_stage_dispatch_count` on a `MERGE`-completed ledger would now terminate before G4 fires. Re-key those fixtures onto a non-terminal ledger so they keep testing G4.
+- [ ] **`tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable` (`:1691`) — UPDATE, and this is the one router test file WS-A provably reds.** Round 1 omitted this file entirely; it is the repo's primary router-decision suite (**97** `decide_next_dispatch` call sites, verified) and holds the **only** `"MERGE": "completed"` fixture in any router test (verified: `grep -c` returns **1** here and **0** in `test_sdlc_router_oscillation.py`). Its `_unowned_state()` helper builds PLAN/CRITIQUE/BUILD/REVIEW/DOCS/MERGE all completed plus an APPROVED verdict, with `meta = {"pr_number": 4242, "pr_merge_state": "BLOCKED"}`. `test_no_rule_block_uses_no_rule_sentinel` asserts `result.guard_id == "NO_RULE"` and fails outright once a first-position guard returns `TERMINAL`; `test_no_rule_block_renders_distinguishably_from_a_guard_block` consumes the same helper. **Disposition: re-key `_unowned_state()` onto a non-terminal unowned ledger — drop the `"MERGE": "completed"` entry, keep everything else including `pr_merge_state: "BLOCKED"`.** Do **not** flip the assertion to `"TERMINAL"`: these two tests are the only proof of the `NO_RULE` sentinel's distinguishability (#2767b), and flipping them retires that guarantee instead of preserving it. **The re-key is verified to work** — measured on `f491306c5`, the helper's ledger returns `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` with `MERGE` completed, with `MERGE` absent, **and** with `MERGE: "pending"`, so dropping the key leaves both assertions passing for the same reason they pass today. (These tests will additionally be insulated by the `issue_state` gate, since the fixture's `meta` carries no `issue_state` and the guard requires `"CLOSED"` — but the re-key is still the correct disposition, because a fixture should not depend on a gate to stay meaningful.)
+- [ ] `tests/unit/test_sdlc_router_oscillation.py` — **NO CHANGE EXPECTED, verify rather than assume.** Round 1 listed two UPDATE dispositions against this file; both were **vacuous** — it contains zero `"MERGE": "completed"` fixtures (verified), so no fixture in it can reach the terminal guard. Re-run it and confirm green. If anything in it does move, that is a signal the guard is placed wrong, not a fixture to patch.
+- [ ] `tests/unit/test_sdlc_router_decision.py` — **REVIEW (the other 96 call sites)**: sweep for any other fixture that sets MERGE completed indirectly (via a helper or a `dict` update) rather than by the literal the grep counts. The grep bounds literals, not construction.
 - [ ] `tests/unit/test_sdlc_stage_query.py:270-400` — **UPDATE**: the D4 resolution-order tests (`_lookup_pr` issue-search primary + branch-head fallback) encode the old ladder order directly, several by `assert_called_once` / call-count on the search leg. WS-B inverts the order when a slug is present; these must be rewritten to assert the new contract, and a new case added for "slug present → fuzzy leg never called".
 - [ ] `tests/unit/test_sdlc_stage_query.py:364-399` — **NO CHANGE** (was UPDATE before WS-D was deferred). `_gh_pr_search_issue_ref`'s "first body-validating candidate" contract is unchanged by this lane; these tests keep asserting it. [#2868](https://github.com/tomcounsell/ai/issues/2868) owns rewriting them.
 - [ ] `tests/unit/test_sdlc_stage_query.py:1436-1520` — **REVIEW**: the #2757 two-pass block. WS-B changes the ladder *above* it, so re-run and confirm the two-pass cases still hold; the comment at `:1517` documenting "returns the FIRST body-validating candidate" stays accurate under this lane and needs only the #2868 pointer added by the Documentation task.
@@ -762,7 +763,10 @@ patched.
 - [ ] `tests/unit/test_pipeline_complete_predicate.py` — **UPDATE (additive)**: add the router's exact call shape (`outcome="success"`, `pr_open=None`) as a pinned case, so a future change to the predicate's default behavior surfaces as a router-facing failure rather than a silent routing change.
 - [ ] `tests/unit/test_architectural_constraints.py` — **UPDATE**: extend the router import-boundary class with an explicit positive assertion that importing `agent.pipeline_complete` is allowed, so the new import is documented as intentional and a future blanket tightening does not silently forbid it.
 - [ ] `tests/unit/test_sdlc_next_skill.py:1631` — **REVIEW**: patches `_lookup_pr` to `None`; confirm the terminal shape does not change its expectation, and update if it does.
-- [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **REVIEW**: 11 tests, green today. Re-run; no expected change, but they exercise the marker path WS-C touches.
+- [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — **REVIEW**: **10** tests (round-1 said 11), green today. Re-run; no expected change, but they exercise the marker path WS-C touches. **This file holds `test_terminal_merged_pipeline_routes_to_merge_not_build` at `:498`** — round 1 attributed it to `tests/unit/test_sdlc_router_oscillation.py`, which is wrong (citation corrected at round-2 critique). The plan's claim *about* the fixture is correct: its docstring reads "No `MERGE` marker is set, deliberately", so it should survive WS-A untouched. **Verify that rather than assume it** — if it changes, the guard is placed wrong.
+- [ ] `tests/unit/test_sdlc_stage_query.py` — **UPDATE (new in round 2)**: add cases for the branch-existence precondition — recorded slug + branch exists → head-ref authoritative, fuzzy leg never called; recorded slug + branch absent → fuzzy leg called exactly once. Assert by call count on both legs. Patch the existence helper rather than shelling to `git` so the test is hermetic.
+- [ ] `tests/unit/test_lane_identity.py` — **UPDATE (new in round 2)**: cover `lane_branch_exists_on_remote` — `True` on a matching `ls-remote` line, `False` on empty stdout, `False` on non-zero exit, `False` on timeout, and never raises.
+- [ ] `tests/unit/test_sdlc_stage_query.py` — **UPDATE (new in round 2)**: cover the `issue_state` meta key — present and resolved only when `MERGE == "completed"`, absent/`None` otherwise, and `None` rather than a raise when the `gh` call fails.
 
 No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` count: **0**), so there are none to convert.
 
@@ -816,6 +820,11 @@ rest of the ledger looks like when they do." The reachable gap is PATCH:
 `MERGE=completed + PATCH=pending` is a real ledger. It is now measured and carried as the
 ninth matrix cell in spike-1, and the guard **deliberately settles it**.
 
+**And the write path plus the write-time ledger shape are still only two thirds of the
+risk. The third is *time*: what happens to this ledger on a tick that arrives weeks later.**
+That is Risk 6, added at round-2 critique, and it is the reason the guard carries an
+issue-state gate rather than keying on `MERGE` alone.
+
 **Verification tasks (both required):**
 1. Confirm by grep that no code path other than `sm.complete_stage("MERGE")` writes
    `MERGE = completed`.
@@ -831,30 +840,43 @@ ninth matrix cell in spike-1, and the guard **deliberately settles it**.
 **Impact:** Lanes whose PR was opened from a branch not matching `session/{slug}` stop
 resolving their PR, disarming the PR-gated rows — the same class of failure as #2824
 itself, pointed the other way.
-**Mitigation:** Gate strictly on *slug recorded*, never on *head-ref returned None*.
-Then measure before merging.
+**Mitigation:** Gate on *slug recorded* **and** *branch exists on origin*, never on
+*head-ref returned `None`*. Then measure before merging.
 
-**The corpus is pinned and the bar is split, because a zero-tolerance bar here is
-unfalsifiable.** WS-B's entire mechanism is *suppressing* the fuzzy leg when a slug is
-recorded, so every lane whose PR came off a branch other than `session/{slug}` is a
-guaranteed counterexample. Stated as "any counterexample blocks the change", the gate
-either blocks WS-B outright or is settled by whoever picks the corpus. Neither is a test.
+**Round 2 measured this risk as real and the existence check as the thing that retires
+it.** Under the round-1 shape the risk was not hypothetical: it scored 0 gains / 1 loss on
+live data, i.e. it fired only in the harmful direction. Under the round-2 shape it scores
+0 / 0. The mechanism is why: the round-1 shape asserted authority on a branch name that
+might not exist, and a nonexistent branch trivially has no PR, so `None` was returned with
+false confidence. Existence is exactly the missing precondition.
 
-Corpus (runnable, not described):
+**The acceptance bar, stated once and only here.** Success Criteria references this
+section rather than restating a number, because round 1 left two different bars in two
+places and the plan was red under one of them.
+
+Corpus (runnable, not described) — the live ledger set, which is the population the
+mechanism actually acts on:
 
 ```bash
-gh issue list --state closed --limit 50 --json number -q '.[].number'
+./.venv/bin/python -c "
+from agent.pipeline_ledger import PipelineLedger
+print([int(r.issue_number) for r in PipelineLedger.query.all() if getattr(r,'slug',None)])
+"
 ```
 
-For each issue, resolve the PR under both ladder orders and classify every difference:
+For each such issue, resolve the PR under both ladder orders and classify every difference:
 
 | Difference | Meaning | Disposition |
 |---|---|---|
-| Resolves old, not new; resolved PR's head ref is **not** `session/{slug}` | The fuzzy leg was doing work lane-branch authority deliberately gives up | **Expected cost.** Count it, report the count and the issue numbers in the PR body. Does not block. |
-| Resolves old, not new; resolved PR's head ref **is** `session/{slug}` | The head-ref leg should have found this and did not — the mechanism is broken | **Blocks the change.** This is the only invalidating shape. |
-| Resolves new, not old | Lane-branch authority recovered something fuzzy search missed | Report as a gain. |
+| Resolves old, not new; resolved PR's head ref **is** `session/{slug}` | The head-ref leg should have found this and did not — the mechanism is broken | **Blocks the change.** |
+| Resolves old, not new; resolved PR's head ref is **not** `session/{slug}`, and `session/{slug}` **does not exist** on origin | The existence check should have fallen through to fuzzy and did not — the mechanism is broken | **Blocks the change.** New in round 2: under the existence-checked shape this is no longer an expected cost, it is a defect. |
+| Resolves old, not new; resolved PR's head ref is **not** `session/{slug}`, and `session/{slug}` **does** exist on origin | Two branches for one lane; authority went to the real recorded one | **Expected cost, ceiling 1.** Report the issue numbers in the PR body. Measured today: **0**. More than one means the recorded-slug vocabulary is less trustworthy than #2869 assumes — stop and reassess rather than absorbing it. |
+| Resolves new, not old | Lane-branch authority recovered something fuzzy search missed | Report as a gain. Measured today: **0**. |
 
-Without that split the gate is not falsifiable, which is the same as not having one.
+The stated ceiling matters: round 1's "expected cost, does not block" bucket had no bound,
+so an arbitrary regression could have been absorbed into it. Under the existence-checked
+shape the expected-cost bucket should be empty, and it measures empty, so a ceiling of 1
+is a real constraint rather than a formality.
 
 ### Risk 3: *(retired)*
 Previously covered WS-D's MERGED-first ordering sharpening #2824 if it landed alone.
@@ -878,6 +900,44 @@ record which tests re-red, in a demonstrated-red table in the PR body. A workstr
 with zero re-reds has no real coverage. Assert lookup ordering by **call count on the
 legs**, never by result equality, since both orders can return the same number for the
 common case.
+
+### Risk 6: The terminal guard latches a re-entered issue shut, permanently
+**Impact:** The worst outcome in this plan. `MERGE == "completed"` is durable and
+un-writable-backwards, and `PipelineLedger.get_or_create(target_repo, issue_number)` returns
+the same ledger for a second lifecycle, so a reopened issue would terminate on every tick
+forever with **no sanctioned remedy** — `stage-marker --status` offers no backwards
+transition (`tools/sdlc_stage_marker.py:957`), `dispatch reset` clears `_sdlc_dispatches`
+only (`tools/sdlc_dispatch.py:296`), and hand-zeroing `stage_states_json` is documented as a
+clobber (`docs/features/sdlc-issue-keyed-stage-ledger.md:324`). That is worse than G4's wrong
+remedy, which this plan is careful to forbid: G4 at least *has* a remedy.
+
+**Reachability (measured, not argued):** 17 reopened issues in the repo, 8 with a merged PR
+that merged before the reopen (spike-4). **16 of 36 live `PipelineLedger` rows carry
+`MERGE == "completed"` today.** No live wedge exists yet only because all 16 of those issues
+are currently CLOSED — one reopen would create one.
+
+**Mitigation:** The guard requires **positive `CLOSED` evidence**, not merely the absence of
+`OPEN`. `_compute_meta` resolves an `issue_state` key (only when `MERGE == "completed"`, so
+non-terminal ticks pay nothing), and the guard returns `None` on anything that is not the
+exact string `"CLOSED"` — including `None`, which is what a `gh` failure yields. A reopened
+issue is `OPEN`, so the guard stands down and the ledger routes exactly as it does today.
+Full reasoning, including why the `== "OPEN"` polarity would reintroduce the latch through a
+transient network failure, is in *Technical Approach → WS-A*.
+
+**Direction of failure:** fail-open, into today's well-understood behavior. The guard can
+only ever *decline* to terminate when it is unsure.
+
+**Verification:** a parametrized test asserting the guard returns `None` for
+`issue_state` in `{"OPEN", None, "", "closed", "CLOSED_STALE", 42}` on an otherwise fully
+terminal ledger, and `Blocked(guard_id="TERMINAL")` for exactly `"CLOSED"`. Lowercase
+`"closed"` is in the set deliberately: `gh issue view --json state` emits uppercase, and a
+case-insensitive match here would be a second, silently divergent definition of the same
+fact.
+
+**Interaction to build against:** this mitigation is what makes WS-B load-bearing. By
+standing down on an OPEN issue, WS-A hands every reopened ledger back to the fuzzy PR
+resolution that WS-B fixes. The two workstreams cover the reopened case together and neither
+covers it alone.
 
 ## Race Conditions
 
@@ -999,19 +1059,52 @@ in-process.
       body already documents `blocked`/`guard_id` generically); no
       `.claude/skill-context/do-sdlc.md` is needed and none exists today.
       **This is a blocking dependency of WS-A, not a follow-up.**
+- [ ] **Update `.claude/skills/sdlc/SKILL.md:261` — the router skill's `blocked` contract.
+      Unconditional, same commit as WS-A. Not a checkbox gated on a parity test.**
+      That line today reads: "If `blocked` is `true`: surface the `reason` to the human and
+      wait. Do NOT loop or guess an alternative skill." (verified verbatim). It is the
+      *identical* instruction to `.claude/skills-global/do-sdlc/SKILL.md:136`, so leaving it
+      unfixed turns WS-A into an immediate false escalation for every `/sdlc`-routed lane —
+      exactly the regression the `do-sdlc` edit exists to prevent, arriving through the other
+      door. Add the `{"blocked": true, "complete": true, "guard_id": "TERMINAL", ...}` case →
+      *exit reporting **success**, not escalation*.
+
+      Round 1 deferred this to "if the parity test requires it". **That question is now
+      answered and the answer is that the checkbox could never have fired**, so the deferral
+      was a guaranteed no-op dressed as a conditional:
+      `tests/unit/test_sdlc_skill_md_parity.py::test_guard_row_ids_in_python` runs one
+      direction only — it parses guard rows *out of* SKILL.md and asserts each has a matching
+      callable in `GUARDS`, so adding a callable with no SKILL.md row cannot fail it. And its
+      row regex is `_GUARD_ROW_RE = re.compile(r"^G\d+")` (`:176`, verified), which cannot
+      parse a `TERMINAL` id as a row at all. Meanwhile the same module already declares
+      `ROUTER_CONSUMER_SKILLS = (SKILL_MD, DO_SDLC_MD)` (`:33`), so the repo has **already
+      decided both bodies are router consumers**. The parity test is not the authority on
+      this edit; that declaration is.
+
+      Note this is a **project-only** skill (`.claude/skills/`, never synced), unlike the
+      `do-sdlc` global body — so the two edits have different wording constraints even though
+      they carry the same instruction. Keep `do-sdlc`'s generic; this one may name repo
+      specifics.
+- [ ] Consider adding a `TERMINAL` row to `.claude/skills/sdlc/SKILL.md`'s guard table for
+      human readers. **Optional and explicitly not load-bearing** — `_GUARD_ROW_RE` cannot
+      parse the id, so such a row is documentation only and no test will hold it accurate.
+      If added, it must not be described as parity-enforced.
 - [ ] Update `docs/sdlc/do-merge.md` if the terminal verdict changes what a supervisor
       does after the MERGE marker lands.
-- [ ] Update `.claude/skills/sdlc/SKILL.md`'s row/guard table if the parity test
-      requires the new guard to appear there (the parity test cross-checks rule
-      docstrings against SKILL.md state cells — **check whether guards are in scope for
-      it before assuming either way**).
 
 ## Success Criteria
 
-- [ ] A terminal ledger (`MERGE == completed`) returns an explicit terminal verdict
-      from `decide_next_dispatch` in **all eight** cells of spike-1's matrix **and in the
-      ninth `PATCH`-unsettled cell** — no `/do-build`, no `/do-pr-review`, no `/do-merge`,
-      no `NO_RULE`.
+- [ ] A terminal ledger (`MERGE == completed` **and `issue_state == "CLOSED"`**) returns an
+      explicit terminal verdict from `decide_next_dispatch` in **all eight** cells of
+      spike-1's matrix **and in the ninth `PATCH`-unsettled cell** — no `/do-build`, no
+      `/do-pr-review`, no `/do-merge`, no `NO_RULE`.
+- [ ] **The terminal guard never latches a re-entered issue.** On an otherwise fully
+      terminal ledger it returns `None` for every `issue_state` other than the exact string
+      `"CLOSED"` — parametrized over `{"OPEN", None, "", "closed", "CLOSED_STALE", 42}` —
+      and `Blocked(guard_id="TERMINAL")` for `"CLOSED"` alone. This is the Risk 6 bar; a
+      guard that fires on an unresolvable issue state fails it.
+- [ ] `_compute_meta` resolves `issue_state` **only** when `MERGE == "completed"`, and
+      degrades to `None` rather than raising when the `gh` call fails.
 - [ ] The terminal guard returns `None` (falls through), never `Blocked`, on a non-dict
       `stage_states` — asserted against the guard directly.
 - [ ] The four non-terminal `/do-merge` routes measured in spike-1 (`MERGE` not
@@ -1022,9 +1115,20 @@ in-process.
       call count).
 - [ ] `_lookup_pr` with no recorded slug behaves byte-identically to today (asserted by
       call count and result).
-- [ ] The old-versus-new ladder diff over a corpus of recent closed issues produces
-      **zero** issues that resolve under the old order and fail under the new one
-      (Risk 2's counterexample check).
+- [ ] **WS-B's ladder diff meets Risk 2's bar — which is stated in Risk 2 and nowhere
+      else.** Round 1 stated two different bars in two places: this criterion demanded
+      "**zero** issues that resolve under the old order and fail under the new one" while
+      Risk 2's revised table classified exactly that shape as "expected cost… does not
+      block." The plan was **red today under the stricter reading** — the round-1 mechanism
+      measured 0 gains / 1 loss. Both are now superseded: the existence-checked mechanism
+      measures **0 gains / 0 losses / 11 unchanged**, and Risk 2 carries the single
+      authoritative bar (two blocking shapes, one expected-cost bucket with a stated ceiling
+      of 1). Do not restate a number here.
+- [ ] `_lookup_pr` asserts head-ref authority **only** when the recorded slug names a branch
+      that exists on origin; a recorded slug naming a nonexistent branch falls through to the
+      fuzzy leg (asserted by call count on both legs, both directions).
+- [ ] The two-pass lookup (`open` then `merged`) performs **one** branch-existence check,
+      not two.
 - [ ] `_review_artifact_posted(1785)` and `_review_artifact_posted(2073)` return
       **False**; `_review_artifact_posted(2104)` returns **True** via merged PR 2109.
 - [ ] The #2539 control holds 5/5 live: #2860, #2831, #2716, #2734, #2741.
@@ -1037,8 +1141,10 @@ in-process.
       correct going forward", not as "the two live instances are repaired" — backfilling
       their ledgers to make the fix look complete is an explicit Rabbit Hole. Stating this
       here, at the completion bar, rather than only in task 8's issue comment.
-- [ ] The terminal shape is consumed correctly end to end: `.claude/skills-global/do-sdlc/SKILL.md`
-      routes `complete: true` to loop-exit-success, not to human escalation.
+- [ ] The terminal shape is consumed correctly end to end by **both** router consumers:
+      `.claude/skills-global/do-sdlc/SKILL.md` **and** `.claude/skills/sdlc/SKILL.md` route
+      `complete: true` to loop-exit-success, not to human escalation. Both edits land in the
+      same commit as WS-A; neither is conditional.
 - [ ] `agent/sdlc_router.py` imports nothing from `tools/` (existing constraint test
       still green) and performs no I/O.
 - [ ] Demonstrated-red table in the PR body: each of WS-A/B/C reverted individually
