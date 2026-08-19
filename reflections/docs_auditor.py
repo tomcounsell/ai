@@ -811,7 +811,15 @@ _PLACEHOLDER_PATH_COMPONENTS = frozenset(
 # Heading-keyword stems whose presence means the doc is deliberately recording a
 # deletion. Stems, not exact inflections, so "## Dead SDK Path Deletion" and
 # "## Hook Cleanup" both match without listing every inflected form.
-_DELETION_HEADING_KEYWORDS = ("delet", "remov", "deprecat", "migrat", "cleanup", "obsolete", "retire")
+_DELETION_HEADING_KEYWORDS = (
+    "delet",
+    "remov",
+    "deprecat",
+    "migrat",
+    "cleanup",
+    "obsolete",
+    "retire",
+)
 
 # Word-anchored prose cues that a nearby line is documenting a deletion rather
 # than a live reference. Individual words/short phrases, not full sentences —
@@ -950,7 +958,11 @@ def _is_documented_deletion(
     """
     if line_idx < len(in_fence) and in_fence[line_idx]:
         return True
-    if live_claim_veto and line_idx < len(lines) and _LIVE_CLAIM_VETO_RE.search(lines[line_idx].lower()):
+    if (
+        live_claim_veto
+        and line_idx < len(lines)
+        and _LIVE_CLAIM_VETO_RE.search(lines[line_idx].lower())
+    ):
         return False
     if line_idx < len(heading_for_line):
         heading = heading_for_line[line_idx]
@@ -1080,7 +1092,9 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             )
             continue
         line_idx = content.count("\n", 0, m.start())
-        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line, live_claim_veto=True):
+        if _is_documented_deletion(
+            line_idx, lines, in_fence, heading_for_line, live_claim_veto=True
+        ):
             logger.debug(
                 "docs_auditor: suppressed deleted-target finding for %s in %s "
                 "(fenced block or documented deletion)",
@@ -2386,7 +2400,8 @@ def run_docs_auditor() -> dict:
                         f"Files touched: {', '.join(files_touched)}\n\n"
                         "If the shared checkout is left dirty, clean it up with:\n\n"
                         "```\n"
-                        'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude\n'
+                        'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain '
+                        "-- docs .claude\n"
                         "```\n\n"
                         "See the `docs_auditor: branch/push/PR …` warning in the reflection "
                         "log for the step that failed."
@@ -2664,8 +2679,7 @@ def run_docs_branch_sweeper() -> dict:
                         logger.warning(f"sweeper: gh pr close failed for #{pr_num}: {e}")
 
         summary = (
-            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, "
-            f"{prs_closed} PRs closed"
+            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, {prs_closed} PRs closed"
         )
         logger.info(summary)
         return {"status": "ok", "findings": findings, "summary": summary}

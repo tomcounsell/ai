@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -562,8 +561,7 @@ class TestNonMarkdownApplyGuard:
         content = (
             "# Runtime\n\n"
             "## Migration\n\n"
-            "The `session_log` field remains defined in `agent/x.py`.\n"
-            + "Padding line.\n" * 6
+            "The `session_log` field remains defined in `agent/x.py`.\n" + "Padding line.\n" * 6
         )
         md.write_text(content)
 
@@ -1635,9 +1633,7 @@ class TestPRCreationFailure:
         # mean failure — it routes to "error", never a silent "ok".
         assert result["status"] == "error"
 
-    def test_push_failure_escalates_via_operational_failure_issue(
-        self, repo, auth_ok, patch_redis
-    ):
+    def test_push_failure_escalates_via_operational_failure_issue(self, repo, auth_ok, patch_redis):
         """R5-1: status="error" alone reaches nobody — a real issue must be filed
         before the function returns, or the wedge signal dies at the return."""
         primary = repo / "docs" / "features" / "foo.md"
@@ -1657,10 +1653,16 @@ class TestPRCreationFailure:
         assert result["status"] == "error"
         file_issue.assert_called_once()
         finding = file_issue.call_args.args[0]
-        assert finding["title"] == "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+        assert (
+            finding["title"]
+            == "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+        )
         assert finding["category"] == "operational-failure"
         # No volatile fields — no date, count, or run id in the title.
-        assert "docs-auditor: rotation failed to produce a PR for docs_features_foo_md" == finding["title"]
+        assert (
+            "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+            == finding["title"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1898,14 +1900,15 @@ class TestDeletedTargetFiltering:
 
     def test_heading_stem_hook_cleanup(self, repo: Path):
         """'## Hook Cleanup' — the heading tuple had no 'cleanup' entry pre-Q7b."""
-        content = "## Hook Cleanup (Phase 5)\n\ndeleted `agent/hooks/gone_thing_xyz.py` (250 lines)\n"
+        content = (
+            "## Hook Cleanup (Phase 5)\n\ndeleted `agent/hooks/gone_thing_xyz.py` (250 lines)\n"
+        )
         assert _mk_finding(content, repo) == []
 
     def test_word_level_prose_cue_deleted_parenthetical(self, repo: Path):
         """'deleted (250 lines)' — the old cue list wanted the exact phrase 'deleted module'."""
         content = (
-            "## Architecture\n\n"
-            "`agent/gone_thing_xyz.py` deleted (250 lines) — no longer needed.\n"
+            "## Architecture\n\n`agent/gone_thing_xyz.py` deleted (250 lines) — no longer needed.\n"
         )
         assert _mk_finding(content, repo) == []
 
@@ -1920,8 +1923,11 @@ class TestDeletedTargetFiltering:
         assert _mk_finding(content, repo) == []
 
     def test_word_anchoring_does_not_fire_on_a_substring(self, repo: Path):
-        """A line containing only 'removed_at' must NOT suppress — word-anchored, not substring."""
-        content = "## Architecture\n\nThe `removed_at` field is a timestamp.\n`agent/gone_thing_xyz.py` is live.\n"
+        """A line with only 'removed_at' must NOT suppress — word-anchored, not substring."""
+        content = (
+            "## Architecture\n\nThe `removed_at` field is a timestamp.\n"
+            "`agent/gone_thing_xyz.py` is live.\n"
+        )
         findings = _mk_finding(content, repo)
         assert len(findings) == 1
 
@@ -1982,7 +1988,7 @@ class TestDeletedTargetFiltering:
 
     def test_q7b_control_live_table_row_still_reported(self, repo: Path):
         content = (
-            "| `SessionType.GRANITE` | `\"granite\"` | Direct invocations of the standalone "
+            '| `SessionType.GRANITE` | `"granite"` | Direct invocations of the standalone '
             "`valor-granite-loop` CLI (`tools/granite_thing_xyz/cli.py`) |\n"
         )
         findings = _mk_finding(content, repo)
@@ -2151,9 +2157,7 @@ class TestBrokenMdLinkDetection:
         assert findings == []
 
     def test_inline_code_span_skipped(self, repo: Path):
-        content = (
-            "`[Feature Name](gone_thing_xyz.md)`\n" "[Feature Name](gone_thing_xyz2.md)\n"
-        )
+        content = "`[Feature Name](gone_thing_xyz.md)`\n[Feature Name](gone_thing_xyz2.md)\n"
         findings = docs_auditor._detect_deleted_target_issues(
             Path("docs/features/a.md"), content, repo
         )
@@ -2423,7 +2427,11 @@ class TestCrossMachineDedup:
         ``gh issue create``, because the read is gated off for this category.
         """
         patch_redis.exists.return_value = True  # would short-circuit a non-recurring finding
-        finding = {"title": "docs-auditor: vault narrative drift", "body": "b", "category": "vault-drift"}
+        finding = {
+            "title": "docs-auditor: vault narrative drift",
+            "body": "b",
+            "category": "vault-drift",
+        }
         out = f'[{{"number": 5, "title": "{finding["title"]}", "state": "CLOSED"}}]'
 
         def fake_run(cmd, *a, **k):

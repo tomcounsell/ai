@@ -45,7 +45,9 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
-    subprocess.run(["git", "config", "user.name", "Docs Auditor Git Surface Test"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Docs Auditor Git Surface Test"], cwd=root, check=True
+    )
     (root / "docs" / "features").mkdir(parents=True)
     (root / "README.md").write_text("# Test\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
@@ -63,7 +65,9 @@ def _git(cwd: Path, *args: str) -> str:
 
 def _porcelain(cwd: Path, *paths: str) -> str:
     return subprocess.run(
-        ["git", "status", "--porcelain", "--", *paths] if paths else ["git", "status", "--porcelain"],
+        ["git", "status", "--porcelain", "--", *paths]
+        if paths
+        else ["git", "status", "--porcelain"],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -153,7 +157,9 @@ def fake_redis():
 
 
 class TestFailedRotationEscalates:
-    def test_files_one_issue_before_returning_status_error(self, repo: Path, gh, monkeypatch, fake_redis):
+    def test_files_one_issue_before_returning_status_error(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
         """``_push_branch_and_pr`` returning None must file an issue naming the
         slug, category ``operational-failure``, before the ``status="error"``
         return — a plain dict alone reaches nobody
@@ -182,7 +188,10 @@ class TestFailedRotationEscalates:
         assert result["status"] == "error"
         assert len(filed) == 1
         finding = filed[0]
-        assert finding["title"] == "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+        assert (
+            finding["title"]
+            == "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+        )
         assert finding["category"] == "operational-failure"
         # No volatile fields: no date, count, or run id.
         assert "20" not in finding["title"]  # no year-like date fragment
@@ -255,9 +264,7 @@ class TestEarlyReturnRestore:
 
         gh.pr_create_url = None  # force gh pr create to fail
 
-        url = docs_auditor._push_branch_and_pr(
-            "slug", repo, ["docs/features/x.md"]
-        )
+        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -287,9 +294,7 @@ class TestEarlyReturnRestore:
         # Point origin at a nonexistent path so the real `git push` fails.
         _git(repo, "remote", "set-url", "origin", "/nonexistent/path/origin.git")
 
-        url = docs_auditor._push_branch_and_pr(
-            "slug", repo, ["docs/features/x.md"]
-        )
+        url = docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/x.md"])
 
         assert url is None
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == starting_ref
@@ -390,7 +395,9 @@ class TestFailedRestoreReporting:
 
 
 class TestGuardFiredNoWorkingTreeWrite:
-    def test_daily_cap_guard_leaves_the_tree_byte_identical(self, repo: Path, gh, monkeypatch, fake_redis):
+    def test_daily_cap_guard_leaves_the_tree_byte_identical(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
         primary = repo / "docs" / "features" / "foo.md"
         primary.write_text("# Foo\n" + "Padding line.\n" * 6)
         _git(repo, "add", "-A")
@@ -441,7 +448,9 @@ class TestSweeperReadsMarkerFromOwnQuery:
         for c in pr_list_calls:
             assert "number,state,createdAt,body" in c
 
-    def test_marker_check_fails_loudly_without_body_in_payload(self, repo: Path, gh, monkeypatch, fake_redis):
+    def test_marker_check_fails_loudly_without_body_in_payload(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
         """A `pr list` payload without `body` must not be silently read as
         unmarked and closed — that would pass the sweeper test vacuously."""
         branch = "docs-audit/foo-20260101-0000"
@@ -531,7 +540,7 @@ class TestSweeperClosePath:
     def test_withheld_pr_is_not_closed_and_branch_is_not_deleted(
         self, repo: Path, gh, monkeypatch, fake_redis
     ):
-        branch = self._push_docs_audit_branch(repo, "withheld-20260101-0000")
+        self._push_docs_audit_branch(repo, "withheld-20260101-0000")
         monkeypatch.setattr(docs_auditor, "PROJECT_ROOT", repo)
         monkeypatch.setattr(docs_auditor, "_get_redis", lambda: fake_redis)
         gh.pr_list_result = [
