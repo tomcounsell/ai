@@ -727,9 +727,21 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 
 ### Regex Dialect Coverage
 - [ ] The metacharacter path is **exercised, not assumed**. A pattern such as
-      `zzz\.never(` must report clean against the real corpus, and must trip on
-      a planted `zzz.never(` in a tracked file. This is the test that would
-      catch a builder adding `-F` and silently neutering A3.
+      `zzz\.never(` must report clean against `'tools/*.py'`, and must trip on a
+      **committed** `zzz.never(` literal in
+      `tests/unit/test_tracked_content_helper.py`. This is the test that would
+      catch a builder adding `-F` and silently neutering A3. The fixture is
+      committed rather than planted at runtime so the case needs no mutation of
+      the working tree and cannot be left half-applied by an `os._exit`.
+
+### Scratch-Corpus Coverage
+- [ ] No test in `tests/unit/test_tracked_content_helper.py` moves, deletes, or
+      writes a file inside the primary checkout. Cases that need a mutable
+      corpus build one with `git init` in `tmp_path` and pass `repo_root=`.
+      Asserted by V-29.
+- [ ] `repo_root=` is passed by the helper's own tests and by nothing else.
+      Asserted by V-28. A converted guard that reaches for the seam is a
+      regression of the fence, not a convenience.
 
 ### Error State Rendering
 - [ ] A real violation must render `file:line` of the *tracked source*, not a
