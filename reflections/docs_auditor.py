@@ -74,11 +74,30 @@ STUB_DOC_LINE_THRESHOLD = 5
 STALE_BRANCH_AGE_DAYS = 7
 STALE_PR_AGE_DAYS = 14
 
+# Per-run cap shared by audit()'s advisory issue-filing loop and the rotation
+# withheld-fix filing loop. A separate budget from VAULT_DRIFT_ISSUE_CAP, which
+# bounds only _run_vault_drift_detection's own pre-rotation loop — the two are
+# deliberately never merged (R5-2), so the true module-wide ceiling for one
+# rotation run is ISSUE_FILING_PER_RUN_CAP (advisory) + VAULT_DRIFT_ISSUE_CAP
+# (vault-drift) + ISSUE_FILING_PER_RUN_CAP (withheld) = 15 issues, plus at most
+# one operational-failure filing.
+ISSUE_FILING_PER_RUN_CAP = 5
+
+# Finding categories whose underlying condition can recur after a human closes
+# the issue that reported it — a recurring Redis/vault comparison or a run
+# outcome, never a durable property of the tree. `_file_issue_if_new` selects
+# `states="open"` for these so a closed issue never silences a fresh
+# occurrence; every other category is "all", matched once, ever.
+_RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})
+
 # Marker stamped into a docs-audit PR body when the existence invariant withheld
-# any fix on the run that opened it. The rotation path is the one path with no
-# human review — it opens the PR and the branch sweeper can auto-merge it — so
-# `_pr_is_auto_merge_eligible` refuses any PR carrying this marker. A withheld
-# fix means the auditor wanted to write something wrong; that needs a human read.
+# any fix on the run that opened it. Every docs-audit PR requires a human
+# merge (`/do-merge`) — the rotation path opens no code path that lands a
+# commit unreviewed — and the sweeper reads this marker to exempt a withheld
+# PR from its stale-close at STALE_PR_AGE_DAYS, since closing it would
+# discard fixes that already passed the existence invariant. A withheld fix
+# means the auditor wanted to write something wrong; that needs a human read
+# before the surviving fixes are merged.
 #
 # This is a *conditional* instance of the "review requirement" option that #2726
 # defers — it applies only on the withheld path, leaves clean-run commit/staging
@@ -87,11 +106,11 @@ STALE_PR_AGE_DAYS = 14
 # owner rules with the shipped partial gate in view, not against a blank slate.
 #
 # NOTE: The marker lives in the PR body with no cross-check, so a human
-# `gh pr edit` that rewrites the body re-enables auto-merge. A
-# `do-not-auto-merge` label would be sturdier, but the label does not exist in
-# this repo and `gh pr create --label` fails outright when it is missing — a
-# worse failure than the human-only path this guards. No automation here runs
-# `gh pr edit`.
+# `gh pr edit` that rewrites the body loses the sweeper's stale-close
+# exemption. A `do-not-close` label would be sturdier, but the label does not
+# exist in this repo and `gh pr create --label` fails outright when it is
+# missing — a worse failure than the human-only path this guards. No
+# automation here runs `gh pr edit`.
 WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
 
 # Redis key namespace for state/locks/liveness.
@@ -1000,8 +1019,8 @@ def _filing_machine_name() -> str:
     return get_machine_display_name()
 
 
-def _open_issue_exists(title: str, repo_root: Path) -> bool:
-    """Return True if an open `documentation` issue already has this exact title.
+def _issue_exists(title: str, repo_root: Path, *, states: str = "all") -> bool:
+    """Return True if an issue with this exact title already exists.
 
     This is the authoritative cross-machine dedup gate: local Redis dedup keys
     are per-machine and invisible across hosts, so two machines would otherwise
@@ -1010,10 +1029,28 @@ def _open_issue_exists(title: str, repo_root: Path) -> bool:
     an exact normalized-title comparison in Python (the title already encodes
     both the path and the doc, making it a natural composite key).
 
+    ``states`` defaults to ``"all"`` — most findings this module files (a
+    broken doc reference, an orphan plan, a stub doc) are a claim about the
+    tree's current state, and a human who reads one, rules on it, and closes
+    it without editing the doc has made a durable decision; matching only
+    ``"open"`` issues would re-file that exact finding a month later once the
+    per-machine Redis dedup key expires. ``states="open"`` is for the two
+    *recurring-condition* categories (see ``_RECURRING_CONDITION_CATEGORIES``)
+    whose underlying comparison can genuinely recur after a close: closing one
+    of those would otherwise silence the condition forever.
+
+    ``--limit 100`` is not decoration: ``gh issue list`` defaults to 30, and
+    under ``--state all`` a repo with more than 30 issues matching the search
+    term can push the exact title off the first page, which is a silent
+    fail-open that files a duplicate. No label filter — the label a triager
+    applied at filing time can be edited later, and the authoritative match
+    below is the exact title compare, not the label.
+
     Fails open: on any `gh` failure, non-zero exit, or malformed output, log a
     WARNING and return False so a genuine finding is never silently dropped —
     the worst case is the duplicate this gate was meant to prevent, which the
-    Redis fast-path still suppresses on the next run.
+    Redis fast-path still suppresses on the next run (for ``states="all"``
+    callers; the recurring-condition callers skip that fast-path by design).
     """
     normalized_query = _normalize_title(title)
     try:
@@ -1023,9 +1060,9 @@ def _open_issue_exists(title: str, repo_root: Path) -> bool:
                 "issue",
                 "list",
                 "--state",
-                "open",
-                "--label",
-                "documentation",
+                states,
+                "--limit",
+                "100",
                 "--search",
                 title,
                 "--json",
@@ -1065,26 +1102,42 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
     """File a GitHub issue via gh CLI, deduped by title. Returns True if filed.
 
     Two-tier dedup: a local Redis fast-path (per-machine cache) gates the
-    expensive live-tracker query, and `_open_issue_exists` is the authoritative
+    expensive live-tracker query, and `_issue_exists` is the authoritative
     cross-machine gate. Local Redis alone is insufficient because each machine
     keeps its own Redis, so the same finding would be filed once per machine.
+
+    The fast-path is gated on the finding's category. For a recurring-condition
+    category (``_RECURRING_CONDITION_CATEGORIES``) the 30-day Redis key would
+    otherwise suppress a genuine recurrence of the same condition for up to a
+    month after a human closed the issue the first time — the fast-path never
+    reaches `_issue_exists`, so its `states="open"` selection would be inert for
+    that whole window. Gating only the *read* is sufficient: `dedup_key` has
+    exactly one reader (this `exists` check) and two writers (both below), so
+    once the read is off for a category the key is never consulted for it
+    again — the two `set()` calls stay unconditional as a fail-open cap during
+    a `gh` outage (R8-1).
     """
     title = finding.get("title", "").strip()
     if not title:
         return False
+    states = "open" if finding.get("category") in _RECURRING_CONDITION_CATEGORIES else "all"
     title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
     dedup_key = f"{REDIS_ISSUE_DEDUP_PREFIX}:{title_hash}"
     redis_client = None
     try:
         redis_client = _get_redis()
-        # Fast-path: if this machine already filed it, skip the tracker query entirely.
-        if redis_client.exists(dedup_key):
+        # Fast-path: if this machine already filed it, skip the tracker query
+        # entirely — but only for a once-ever category. A recurring-condition
+        # category must always reach `_issue_exists(states="open")`, or a
+        # closed issue for a condition that has genuinely returned stays
+        # silenced by this per-machine cache for up to 30 days.
+        if states == "all" and redis_client.exists(dedup_key):
             return False  # already filed
     except Exception:
         redis_client = None  # If Redis is unavailable, attempt to file without dedup
 
     # Authoritative cross-machine gate: another machine may have already filed this.
-    if _open_issue_exists(title, repo_root):
+    if _issue_exists(title, repo_root, states=states):
         # Record the local fast-path key so subsequent runs skip the tracker query.
         if redis_client is not None:
             try:
@@ -1267,10 +1320,9 @@ def audit(
         # deleted-target reference has no rename to correct to. These are
         # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
         # every PR's docs stage, so filing advisory issues there re-files the
-        # same unfixable findings per-PR (and re-files any that were closed
-        # without fixing the doc, since the dedup gate only sees open issues),
-        # which is the documentation-label duplicate flood. Auto-fix detectors
-        # above still run per-PR; only issue-filing is gated to rotation.
+        # same unfixable findings per-PR, which is the documentation-label
+        # duplicate flood. Auto-fix detectors above still run per-PR; only
+        # issue-filing is gated to rotation.
         if scope_mode == "rotation":
             issue_findings.extend(_detect_deleted_target_issues(path, content, root))
             stub = _detect_stub_doc(path, content)
@@ -1283,7 +1335,7 @@ def audit(
 
     # File issues (deduped); only when applying in rotation scope.
     # Hard per-run cap prevents flood: rotation allows up to 5.
-    per_run_cap = 5 if scope_mode == "rotation" else 3
+    per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3
     if apply_mode == "apply" and scope_mode == "rotation":
         for finding in issue_findings:
             if issues_filed >= per_run_cap:
@@ -1572,8 +1624,9 @@ def _push_branch_and_pr(
     guard can no longer fire after the shared checkout has already been dirtied.
 
     ``withheld`` is the run's existence-invariant rejections. When non-empty the
-    PR body lists them and carries ``WITHHELD_PR_MARKER``, which disqualifies the
-    PR from the sweeper's auto-merge path.
+    PR body lists them and carries ``WITHHELD_PR_MARKER``, which exempts the PR
+    from the sweeper's stale-close so the surviving fixes are not discarded
+    before a human reviews them.
     """
     if not files_touched:
         logger.info("docs_auditor: no files touched, skipping branch/commit/PR")
@@ -1630,8 +1683,8 @@ def _push_branch_and_pr(
                 f"\n\n{WITHHELD_PR_MARKER}\n"
                 f"⚠️ **{len(withheld)} fix(es) withheld** by the existence invariant — "
                 "the auditor tried to introduce a path that is absent from the working "
-                "tree. Not eligible for auto-merge; review the surviving fixes before "
-                f"merging.\n\n{rejected}"
+                "tree. Review the surviving fixes before merging.\n\n"
+                f"{rejected}"
             )
         pr_result = subprocess.run(
             [
@@ -1949,7 +2002,7 @@ def run_docs_auditor() -> dict:
     # 2. Lock
     if not _acquire_lock(REDIS_RUNNING_KEY, LOCK_TTL_SECONDS):
         return {
-            "status": "ok",
+            "status": "skipped",
             "findings": ["docs-auditor already running, skipped"],
             "summary": "docs-auditor skipped: locked",
         }
@@ -1957,11 +2010,16 @@ def run_docs_auditor() -> dict:
     project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
 
     try:
-        # 3. Dirty-tree guard
+        # 3. Dirty-tree guard. Deliberately files nothing: `_git_dirty` tests the
+        # whole shared main checkout, where concurrent lanes routinely hold
+        # uncommitted work as a matter of routine, so a filing guard would mint
+        # issues blaming the auditor for a peer's dirt. The escalation belongs on
+        # the failure path below, which knows it caused the dirt — this guard,
+        # which cannot know, stays quiet (Q4 item 5).
         if _git_dirty(PROJECT_ROOT):
             _write_liveness("(dirty)", "skipped", None, 0)
             return {
-                "status": "ok",
+                "status": "skipped",
                 "findings": ["docs-auditor skipped: working tree dirty"],
                 "summary": "docs-auditor skipped: dirty_tree",
             }
@@ -1976,7 +2034,7 @@ def run_docs_auditor() -> dict:
         if primary is None:
             _write_liveness("(no-candidates)", "skipped", None, 0)
             return {
-                "status": "ok",
+                "status": "skipped",
                 "findings": ["No candidate docs found"],
                 "summary": "docs-auditor skipped: no candidates",
             }
@@ -2019,11 +2077,12 @@ def run_docs_auditor() -> dict:
         )
 
         files_touched: list[str] = result.get("files_touched", [])
-        # Existence-invariant rejections. This is the one caller with no human in
-        # the loop — it opens a PR the sweeper may auto-merge — so the withheld
-        # count must reach every surface this function produces, not just a log
-        # line: findings, summary, Telegram, the PR body (auto-merge gate) and
-        # the Redis liveness summary, which is the only durable queryable one.
+        # Existence-invariant rejections. This is the one caller with no human
+        # review before the PR opens — every rotation PR still requires a human
+        # merge, but the withheld count must reach every surface this function
+        # produces so the human reviewing it sees it, not just a log line:
+        # findings, summary, Telegram, the PR body, and the Redis liveness
+        # summary, which is the only durable queryable one.
         # Telegram has two mutually exclusive senders, and a run can also reach
         # neither. Three cases: files were touched — step 9 sends the pass
         # summary; nothing was touched but fixes were withheld — the zero-diff
@@ -2036,6 +2095,48 @@ def run_docs_auditor() -> dict:
             f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
         )
 
+        # Q5 (B4): file one issue per withheld entry so a human is pointed at the
+        # specific substitution the existence invariant rejected, not just a log
+        # line. Deduped per-defect by `_file_issue_if_new`'s title-based gate.
+        # Bounded at the module's shared per-run cap (NEW-4 / R3-3) — a withheld
+        # flood must not spend a different budget than the advisory loop's.
+        if withheld:
+            for i, w in enumerate(withheld):
+                if i >= ISSUE_FILING_PER_RUN_CAP:
+                    logger.warning(
+                        "docs_auditor: withheld-fix per-run cap (%d) reached — "
+                        "%d finding(s) suppressed",
+                        ISSUE_FILING_PER_RUN_CAP,
+                        len(withheld) - ISSUE_FILING_PER_RUN_CAP,
+                    )
+                    break
+                # `old` is a regex source (rf"\b{re.escape(old_term)}\b"), not the
+                # substitution term itself — unwrap it before it becomes the
+                # dedup key (R5-3), or the title carries a literal `\b` into
+                # `gh issue list --search`.
+                term = re.sub(
+                    r"\\(.)",
+                    r"\1",
+                    w["old"].removeprefix(r"\b").removesuffix(r"\b"),
+                )
+                _file_issue_if_new(
+                    {
+                        "title": (
+                            f"docs-auditor: withheld fix in {w.get('doc')} "
+                            f"({term} -> {w.get('new')})"
+                        ),
+                        "body": (
+                            f"The docs auditor tried to rewrite `{term}` to "
+                            f"`{w.get('new')}` in `{w.get('doc')}`, but the rewrite "
+                            "would have introduced a path that does not exist in "
+                            f"the working tree ({w.get('reason', 'target-absent')}), "
+                            "so it was withheld and the file was left unchanged."
+                        ),
+                        "category": "withheld-fix",
+                    },
+                    PROJECT_ROOT,
+                )
+
         # 6. Zero-diff gate
         if not files_touched or _git_diff_quiet(PROJECT_ROOT):
             _update_rotation_hash(project_key, [str(primary)])
@@ -2047,7 +2148,7 @@ def run_docs_auditor() -> dict:
                     "nothing was written and no PR was opened to review them"
                 )
             return {
-                "status": "ok",
+                "status": "skipped",
                 "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
                 "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
             }
@@ -2065,6 +2166,34 @@ def run_docs_auditor() -> dict:
                 f"docs-auditor: rotation wrote {len(files_touched)} file(s) for {slug} "
                 "but produced no PR"
             )
+            # R5-1: a wedged shared checkout must escalate through a real channel
+            # before this returns, not just log a warning nobody reads — the
+            # `status="error"` alone reaches nobody, since
+            # agent/reflection_scheduler.py:639-640 reads only `projects` from
+            # this dict. Slug-keyed only, no run id or date, so a failure that
+            # repeats every run files once. Deliberately silent on which step
+            # failed and on whether the scoped restore succeeded — neither fact
+            # reaches this branch (`_push_branch_and_pr` returns `str | None`),
+            # and a body that asserts a restore outcome it never observed is
+            # worse than one that omits it.
+            _file_issue_if_new(
+                {
+                    "title": f"docs-auditor: rotation failed to produce a PR for {slug}",
+                    "body": (
+                        f"Rotation wrote {len(files_touched)} file(s) for `{slug}` but the "
+                        "branch/push/PR sequence did not produce a PR URL.\n\n"
+                        f"Files touched: {', '.join(files_touched)}\n\n"
+                        "If the shared checkout is left dirty, clean it up with:\n\n"
+                        "```\n"
+                        'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude\n'
+                        "```\n\n"
+                        "See the `docs_auditor: branch/push/PR …` warning in the reflection "
+                        "log for the step that failed."
+                    ),
+                    "category": "operational-failure",
+                },
+                PROJECT_ROOT,
+            )
             return {
                 "status": "error",
                 "findings": findings,
@@ -2079,17 +2208,20 @@ def run_docs_auditor() -> dict:
         except Exception as e:
             logger.warning(f"docs_auditor: refresh_docs_in_memory hook failed: {e}")
 
-        # 9. Telegram notification
+        # 9. Telegram notification. Every rotation PR requires a human merge —
+        # `/do-merge` — and is closed unmerged at STALE_PR_AGE_DAYS if nobody
+        # acts, which is the intended "nobody cared" outcome, not a failure mode.
         msg = (
             f"docs-auditor pass for {slug}: "
             f"{len(files_touched)} files, {result.get('fixes_applied', 0)} fixes"
             + (
-                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                "PR is not auto-merge eligible"
+                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; see the "
+                "filed issue(s) for details"
                 if fixes_withheld
                 else ""
             )
             + f"\nPR: {pr_url}"
+            + f"\nReview required — closed unmerged after {STALE_PR_AGE_DAYS} days if unreviewed."
         )
         _send_telegram_notification(msg)
 
@@ -2114,7 +2246,7 @@ def run_docs_auditor() -> dict:
         if fixes_withheld:
             findings.append(
                 f"{fixes_withheld} fix(es) withheld by the existence invariant "
-                "(target-absent); PR is not auto-merge eligible"
+                "(target-absent); see the filed issue(s) for details"
             )
             findings.extend(
                 f"withheld: {w.get('doc')} {w.get('old')!r} -> {w.get('new')!r}" for w in withheld
@@ -2148,98 +2280,16 @@ def run_docs_auditor() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
-    """Return True if a docs-audit PR meets the conservative auto-merge bar.
-
-    Heuristics (all must pass):
-    - Only ``docs/`` files changed (no code, no config)
-    - ≤ 5 files changed
-    - ≤ 50 net lines changed (additions + deletions)
-    - No reviews, review requests, or comments
-    - PR is between 1 and 7 days old (not brand-new, not stale)
-    - The opening run withheld no fixes (no ``WITHHELD_PR_MARKER`` in the body)
-    """
-    try:
-        meta_res = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "files,reviews,reviewRequests,comments,createdAt,additions,deletions,body",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(PROJECT_ROOT),
-        )
-        if meta_res.returncode != 0:
-            return False
-        meta = json.loads(meta_res.stdout or "{}")
-
-        # Withheld fixes disqualify: the run that opened this PR proposed at least
-        # one rewrite to a nonexistent path, so its surviving output is suspect.
-        #
-        # KNOWN ESCALATION GAP — tracked by #2729:
-        # this disqualification is permanent, so a withheld PR nobody reviews
-        # falls through to the sweeper's stale-close at STALE_PR_AGE_DAYS —
-        # closed with --delete-branch, discarding the fixes that *did* pass the
-        # invariant, and the next rotation onto the same slug re-proposes,
-        # re-opens and re-closes it forever. Nothing pages a human: the only
-        # record is a `findings` entry, and the scheduler reads only `projects`
-        # from a function reflection. Still strictly safer than auto-merging
-        # suspect output. Ownership of the escalation (exempt from stale-close,
-        # or notify before closing) is deliberately out of scope here and needs
-        # an owner ruling; see #2729.
-        if WITHHELD_PR_MARKER in (meta.get("body") or ""):
-            logger.info(
-                "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number
-            )
-            return False
-
-        # No reviewer activity
-        if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
-            return False
-
-        # File count and path guard
-        files = meta.get("files", [])
-        if not files or len(files) > 5:
-            return False
-        for f in files:
-            path = f.get("path", "")
-            if not (path.startswith("docs/") or path in ("README.md", "CLAUDE.md")):
-                return False
-
-        # Diff size guard
-        net_lines = meta.get("additions", 0) + meta.get("deletions", 0)
-        if net_lines > 50:
-            return False
-
-        # Age guard: 1–7 days
-        created_raw = meta.get("createdAt", "")
-        if not created_raw:
-            return False
-        age_days = (
-            datetime.now(UTC) - datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-        ).days
-        if age_days < 1 or age_days > 7:
-            return False
-
-        return True
-    except Exception as e:
-        logger.warning(f"docs_auditor: auto-merge eligibility check failed for #{pr_number}: {e}")
-        return False
-
-
 def run_docs_branch_sweeper() -> dict:
     """Sweep stale ``docs-audit/*`` branches and PRs.
 
     Conservative: only touches ``docs-audit/*`` branches, never any other
-    prefix and never branches with reviewer activity.
-
-    Also auto-merges PRs that pass the conservative eligibility check (docs-only,
-    small diff, no reviewer activity, 1–7 days old).
+    prefix. Every ``docs-audit/*`` PR requires a human merge; this sweeper only
+    closes ones nobody reviewed within ``STALE_PR_AGE_DAYS`` — except a PR
+    carrying ``WITHHELD_PR_MARKER``, which it never closes or deletes, because
+    the withheld fixes it holds already have their own escalation issue and
+    closing the PR would discard the surviving fixes that passed the existence
+    invariant.
     """
     if not _acquire_lock(REDIS_SWEEPER_RUNNING_KEY, SWEEPER_LOCK_TTL_SECONDS):
         return {
@@ -2251,7 +2301,6 @@ def run_docs_branch_sweeper() -> dict:
     findings: list[str] = []
     branches_deleted = 0
     prs_closed = 0
-    prs_merged = 0
 
     try:
         # List remote branches under docs-audit/
@@ -2291,7 +2340,7 @@ def run_docs_branch_sweeper() -> dict:
                         "--state",
                         "all",
                         "--json",
-                        "number,state,createdAt",
+                        "number,state,createdAt,body",
                     ],
                     capture_output=True,
                     text=True,
@@ -2379,29 +2428,25 @@ def run_docs_branch_sweeper() -> dict:
                 if not pr_num:
                     continue
 
-                # Auto-merge eligible PRs before stale-close check
-                if _pr_is_auto_merge_eligible(pr_num):
-                    try:
-                        merge_res = subprocess.run(
-                            ["gh", "pr", "merge", str(pr_num), "--squash", "--delete-branch"],
-                            capture_output=True,
-                            text=True,
-                            timeout=settings.timeouts.git_subprocess_s,
-                            cwd=str(PROJECT_ROOT),
-                            check=False,
-                        )
-                        if merge_res.returncode == 0:
-                            prs_merged += 1
-                            findings.append(
-                                f"Auto-merged PR #{pr_num} (branch={branch}, {age_days}d)"
-                            )
-                            continue
-                        else:
-                            logger.warning(
-                                f"sweeper: auto-merge failed for #{pr_num}: {merge_res.stderr}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"sweeper: auto-merge error for #{pr_num}: {e}")
+                # A withheld PR is exempt from stale-close: closing it would
+                # discard fixes that already passed the existence invariant.
+                # The escalation issue is distinct from `_file_issue_if_new`'s
+                # per-defect withheld-fix titles, since a same-title filing is
+                # a guaranteed no-op — this names the PR, not the substitution.
+                if WITHHELD_PR_MARKER in (pr.get("body") or ""):
+                    _file_issue_if_new(
+                        {
+                            "title": f"docs-auditor: withheld PR #{pr_num} still unreviewed",
+                            "body": (
+                                f"PR #{pr_num} (branch `{branch}`) is {age_days} day(s) old "
+                                "and carries withheld fixes that need a human review before "
+                                "merge. The sweeper will not close it or delete its branch."
+                            ),
+                            "category": "withheld-pr",
+                        },
+                        PROJECT_ROOT,
+                    )
+                    continue
 
                 if age_days >= STALE_PR_AGE_DAYS:
                     try:
@@ -2419,7 +2464,7 @@ def run_docs_branch_sweeper() -> dict:
 
         summary = (
             f"do-docs-branch-sweeper: {branches_deleted} branches deleted, "
-            f"{prs_closed} PRs closed, {prs_merged} PRs auto-merged"
+            f"{prs_closed} PRs closed"
         )
         logger.info(summary)
         return {"status": "ok", "findings": findings, "summary": summary}
