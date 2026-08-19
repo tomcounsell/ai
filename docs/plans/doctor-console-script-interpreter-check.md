@@ -550,9 +550,9 @@ three example names → **fix** names the rebuild
 
 - [ ] Zero-byte script file → extractor returns `None`, classified unverified, no crash.
 - [ ] Shebang line present but empty after `#!` (`"#!\n"`) → `None`, unverified.
-- [ ] `/bin/sh` first line with **no** second line, or a second line that is not the
-      `'''exec'` construct → `None`, unverified. It must not fall back to reporting
-      `/bin/sh` as the interpreter.
+- [ ] Any `#!` naming a shell (`sh`, `bash`, `dash`) or `env`, or a relative target →
+      `None`, unverified, regardless of what follows on line 2. It must never fall back
+      to reporting `/bin/sh` or `env` as the interpreter.
 - [ ] Shebang with trailing arguments (`#!/path/python -E -s`) → the interpreter path
       alone is extracted; the flags are discarded.
 - [ ] `repo_interpreter_pin` returns `None` → off-pin comparison skipped; `missing` and
@@ -1028,20 +1028,34 @@ new finding inside an existing check that the agent already knows how to run and
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Console-script tests pass | `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q` | exit code 0 |
-| Pin-guard tests unaffected | `scripts/pytest-clean.sh tests/unit/test_interpreter_pin_guard.py -q` | exit code 0 |
-| Interpreter read exists | `grep -c shebang tools/doctor.py` | output > 0 |
-| New test matrix exists | `grep -c "class TestWinningScriptInterpreter" tests/unit/test_doctor_console_scripts.py` | output > 0 |
-| Healthy machine still passes (live control) | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; print(c().passed)"` | output contains True |
-| Pass message discloses verification | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; print(c().message)"` | output contains interpreter |
-| Existing assertions unmodified | `.venv/bin/python -c "import subprocess;d=subprocess.run(['git','diff','main','--','tests/unit/test_doctor_console_scripts.py'],capture_output=True,text=True).stdout;print(sum(1 for l in d.splitlines() if l.startswith('-') and 'assert ' in l))"` | match count == 0 |
-| Anti-criterion: no subprocess in this check | `.venv/bin/python -c "import re,pathlib;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));print(len(re.findall('subprocess','\n'.join(s[a:b]))))"` | match count == 0 |
-| Anti-criterion: doctor deletes nothing (#2780 stays out) | `grep -c unlink tools/doctor.py` | match count == 0 |
-| Anti-criterion: doctor removes no trees (#2780 stays out) | `grep -c rmtree tools/doctor.py` | match count == 0 |
-| Anti-criterion: check inspects no process result (#2749 stays out) | `.venv/bin/python -c "import re,pathlib;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));print(len(re.findall('returncode','\n'.join(s[a:b]))))"` | match count == 0 |
-| Docs updated | `grep -c interpreter docs/features/local-doctor.md` | output > 0 |
-| Lint clean | `python -m ruff check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit code 0 |
-| Format clean | `python -m ruff format --check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit code 0 |
+Every row is exit-code-honest: the command exits 0 exactly when the Expected column is
+satisfied, so a runner can key on exit status alone. `grep -c` is avoided throughout,
+because it exits 1 on a zero count — which makes a count row indistinguishable from a
+failed row, and inverts for the anti-criteria, whose passing state *is* zero. Measured on
+main: `grep -c unlink tools/doctor.py` prints `0` and exits 1 in its **passing** state,
+while `grep -c shebang tools/doctor.py` prints `0` and exits 1 in its **failing** state.
+`grep -q` and `! grep -q` give the two directions unambiguously.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Console-script tests pass | `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q` | exit 0 |
+| Pin-guard tests unaffected | `scripts/pytest-clean.sh tests/unit/test_interpreter_pin_guard.py -q` | exit 0 |
+| Interpreter read exists | `grep -q shebang tools/doctor.py` | exit 0 (present) |
+| New test matrix exists | `grep -q "class TestWinningScriptInterpreter" tests/unit/test_doctor_console_scripts.py` | exit 0 (present) |
+| Healthy machine still passes (live control) | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if c().passed else 1)"` | exit 0 |
+| Pass message discloses verification | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if 'interpreter' in c().message else 1)"` | exit 0 |
+| Pass message keeps #2665's prefix | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if c().message.startswith('26 console scripts resolve into ') else 1)"` | exit 0 |
+| Existing assertions unmodified | `.venv/bin/python -c "import subprocess,sys;d=subprocess.run(['git','diff','main','--','tests/unit/test_doctor_console_scripts.py'],capture_output=True,text=True).stdout;sys.exit(0 if not any(l.startswith('-') and 'assert ' in l for l in d.splitlines()) else 1)"` | exit 0 |
+| Anti-criterion: no subprocess in this check | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if 'subprocess' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Anti-criterion: interpreter target never realpath-ed | `.venv/bin/python -c "import pathlib,re,sys;s=pathlib.Path('tools/doctor.py').read_text();sys.exit(0 if not re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', s) else 1)"` | exit 0 (absent) |
+| Anti-criterion: no `/update` remedy in this check | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if '/update' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Anti-criterion: doctor deletes nothing (#2780 stays out) | `! grep -q unlink tools/doctor.py` | exit 0 (absent) |
+| Anti-criterion: doctor removes no trees (#2780 stays out) | `! grep -q rmtree tools/doctor.py` | exit 0 (absent) |
+| Anti-criterion: check inspects no process result (#2749 stays out) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if 'returncode' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Docs cover the interpreter half | `grep -q interpreter docs/features/local-doctor.md` | exit 0 (present) |
+| Docs cover the resolution half | `grep -q "console script" docs/features/local-doctor.md` | exit 0 (present) |
+| Lint clean | `python -m ruff check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit 0 |
+| Format clean | `python -m ruff format --check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit 0 |
 
 ## Critique Results
 
