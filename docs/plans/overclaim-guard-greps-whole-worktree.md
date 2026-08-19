@@ -338,28 +338,123 @@ pipeline. It is already the in-repo precedent (`test_plan_migration_invariant.py
 "match found" — for an empty file list, which is the most dangerous possible
 misreading, and its batched exit code is not portable between BSD and GNU xargs.
 
-**The helper's contract.** Roughly:
+**The helper's contract.**
 
 ```python
+class TrackedScanError(RuntimeError):
+    """The scan could not run (git failed). Never a pass."""
+
+class VacuousScanError(AssertionError):
+    """The scan ran but examined too few files to mean anything."""
+
 def assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=()):
     """Assert no tracked file matching *pathspecs* contains *pattern*."""
 ```
 
-with three obligations that the current call sites each get wrong in a
-different way:
+Two **distinct** exception classes are mandatory, not stylistic. A single class
+with two messages cannot be asserted apart except by string matching, and the
+whole point of the helper is that "scan failed" and "scan examined nothing" stay
+separable from each other and from "clean". They are asserted apart in
+`tests/unit/test_tracked_content_helper.py` via
+`pytest.raises(TrackedScanError, match="128")` under `GIT_INDEX_FILE=/dev/null`
+and a separate `pytest.raises(VacuousScanError)` for `'nosuchdir/*.py'`.
+
+Four obligations, which the current call sites each get wrong in a different way:
 
 1. **Index-scoped corpus.** `git grep` with `cwd=REPO_ROOT` (always explicit —
-   never inherited from pytest's ambient cwd) and an explicit `*.py` pathspec.
-2. **Three-way exit triage.** `0` → match, report `file:line`. `1` → clean.
-   **anything else** → raise a *scan failure*, distinct from a pass. Exit 128
-   (not a worktree / unreadable index) and 129 (bad flag) must never read as
-   clean. This is the obligation `test_no_legacy_paths.py` currently violates
-   despite already using `git grep`.
-3. **Non-vacuity floor.** Assert `git ls-files -- <pathspecs>` returns at least
-   `min_files` paths. Without this, spike-1 shows a renamed directory turns the
-   guard into a silent no-op. Modelled on the strongest existing pattern in the
-   repo, `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored
-   roots, explicit required-anchor list, `len(found) > 250` floor).
+   never inherited from pytest's ambient cwd) and an **explicit pathspec, never
+   an implicit whole-repo default**. `*.py` for the source-code guards; `*` plus
+   negative pathspecs for corpus-wide guards such as A7. The pathspec is
+   explicit so the corpus is stated rather than inherited — it is *not*
+   required to be Python-only. A7's corpus is deliberately every tracked file
+   type, because the legacy path can return in a shell script, a `.md`, or a
+   JSON config; a Python-only helper would silently narrow it from 2654 tracked
+   files to 1363 (measured at `40c4fe0a9`).
+
+2. **Returncode triage before anything else, on *every* git call.** This
+   ordering is load-bearing and is the single easiest thing to get wrong.
+   Measured at `40c4fe0a9`:
+
+   | Invocation | rc | stdout |
+   |---|---|---|
+   | `GIT_INDEX_FILE=/dev/null git ls-files -- 'tools/*.py'` | **128** | empty |
+   | `git ls-files -- 'nosuchdir/*.py'` | **0** | empty |
+
+   Both produce **empty stdout**. A floor implemented as "count the lines of
+   `git ls-files` output" therefore cannot tell a broken index from a pathspec
+   that legitimately matches nothing — it would raise the *vacuity* error for a
+   *scan failure*, the Failure Path probe would go green for the wrong reason,
+   and Success Criterion 6 would ship unverified. The returncode does separate
+   them cleanly, so check it first:
+
+   ```python
+   ls = subprocess.run(["git", "ls-files", "--", *pathspecs], cwd=REPO_ROOT, ...)
+   if ls.returncode != 0:
+       raise TrackedScanError(f"git ls-files failed (rc={ls.returncode}): {ls.stderr.strip()}")
+   files = [p for p in ls.stdout.splitlines() if p]
+   if len(files) < min_files:
+       raise VacuousScanError(...)
+   ```
+
+3. **Three-way exit triage on `git grep`.** `0` → match, report `file:line`.
+   `1` → clean. **anything else** → raise `TrackedScanError`, distinct from a
+   pass. Exit 128 (not a worktree / unreadable index) and 129 (bad flag) must
+   never read as clean. This is the obligation `test_no_legacy_paths.py`
+   currently violates despite already using `git grep`.
+
+4. **Non-vacuity floor.** Assert the (returncode-checked) `git ls-files` result
+   holds at least `min_files` paths. Without this, spike-1 shows a renamed
+   directory turns the guard into a silent no-op. Modelled on the strongest
+   existing pattern in the repo,
+   `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored roots,
+   explicit required-anchor list, `len(found) > 250` floor).
+
+**Regex dialect is pinned: POSIX basic regular expressions.** The four call
+sites disagree about what `pattern` is — A1 passes a literal, A3 at
+`tests/unit/test_memory_extraction.py:2558-2560` passes BRE with escaped
+metacharacters (`anthropic\.Anthropic(`). A builder reaching for `-F` (a
+defensible instinct, since three of four patterns are literals) would turn A3's
+`\.` into a literal backslash-dot that never matches, leaving A3 **permanently
+green** — the exact vacuous-green class this plan exists to close, reintroduced
+by the fix itself.
+
+`git grep` already defaults to POSIX basic regular expressions, the same dialect
+`grep` uses without `-E`, so A3's patterns carry over byte-for-byte with no flag
+change (verified at `40c4fe0a9`: `git grep -c 'anthropic\.Anthropic(' --
+'agent/*.py'` exits 0, i.e. matches). **Do not add `-F`, `-E`, or `-P`.**
+Docstring line: *"`pattern` is a POSIX basic regular expression interpreted by
+`git grep` exactly as `grep` would; `(` is literal, `\.` is a literal dot."*
+A helper test must exercise the metacharacter path rather than assume it.
+
+**Exemptions go in the pathspec, not in `allow=`.** A single `allow=()` matched
+by substring over stdout cannot carry three incompatible semantics. A2 at
+`tests/unit/test_anthropic_client_semaphore.py:176-180` filters output *lines*
+by module-path substring; A7 at `tests/unit/test_no_legacy_paths.py:33-37`
+filters *file paths* two ways at once (exact membership in `ALLOWED_FILES` plus
+a prefix rule on `docs/plans/`). One substring-matched tuple over-exempts:
+`scripts/update/run.py` would also exempt a future
+`tools/scripts/update/run.py`, and any allowed fragment appearing in matched
+source *text* rather than in a path would exempt a real violation.
+
+Push every **path-shaped** exemption into git pathspec exclusions, which git
+applies to the corpus instead of to stdout. No new parameter is needed — the
+helper already takes `*pathspecs`. This is the idiom already at
+`tests/unit/test_plan_migration_invariant.py:150`
+(`f":!{this_file.relative_to(REPO_ROOT)}"`). Reserve `allow=` for A2's genuine
+line-substring case and say so in the docstring.
+
+**Accepted boundary: the corpus is tracked content only.** Moving to `git grep`
+closes the build-artifact hole and opens a smaller one — without `--untracked`
+it does not see brand-new, never-committed source. **Do not add `--untracked`.**
+It implies `--exclude-standard`, so it would still skip gitignored
+`__pycache__` and buy nothing against the reported defect, while re-walking the
+working tree and reopening the mid-walk race that Race 1 credits `git grep` with
+closing. Record the boundary instead, in both
+`docs/features/tracked-content-sweep-guards.md` and the helper docstring:
+*"The corpus is tracked content only. A violation in a new, unstaged file is
+caught on first commit, which is where CI and the nightly detector read.
+`--untracked` would close that window but reopens the #2093 mid-walk race, so it
+is deliberately not used."*
 
 **Sweep dispositions** (spike-4; 27 codebase-content assertion sites, all
 classified — this table *is* the #2809 enumeration deliverable):
@@ -376,7 +471,7 @@ classified — this table *is* the #2809 enumeration deliverable):
 | B8 | `test_sdlc_lease_helper_binding.py:89` | no floor, no anchor list | **ADD FLOOR** |
 | B11 | `test_sdlc_tool_wrapper.py:54` | no floor; a renamed skills root empties the sweep | **ADD FLOOR** |
 | B12 | `test_dm_recovery.py:426` | no floor | **ADD FLOOR** |
-| B13 | `test_no_positional_query_get.py:69` | no floor | **ADD FLOOR** |
+| B13 | `test_no_positional_query_get.py:66-68` | `if not root.exists(): continue` over 8 `SCAN_DIRS` — same explicit vacuous path as B14 | **ADD FLOOR — convert to raise** |
 | B14 | `test_harness_model_coverage.py:60` | explicit `if not agent_dir.is_dir(): return []` vacuous path | **ADD FLOOR** — convert to raise |
 | B1-B6, B9, B10, B15-B20 | 14 further walks | already carry non-vacuity floors | **DOCUMENT AS SAFE** |
 
@@ -384,6 +479,42 @@ The B-series are `rglob("*.py")` walks. They are **not** `.pyc`-vulnerable
 (`*.py` does not match `*.pyc`); their only defect is the missing floor. That
 distinction is deliberate — this plan does not rewrite them to use `git grep`,
 which would be churn for no correctness gain.
+
+**B13 needs a per-root assertion, not only a total floor.** B14 was singled out
+for a raise because of its explicit vacuous early return, but
+`tests/unit/test_no_positional_query_get.py:66-68` carries the identical shape —
+`root = REPO_ROOT / top` then `if not root.exists(): continue` inside a loop over
+eight `SCAN_DIRS`. A corpus-total floor cannot catch a vanished root, and the
+measured distribution makes that far worse than an even split would suggest
+(tracked `.py` per root at `40c4fe0a9`):
+
+| Root | Files | Share |
+|---|---|---|
+| `tests` | 784 | 63.7% |
+| `tools` | 180 | 14.6% |
+| `scripts` | 90 | 7.3% |
+| `agent` | 86 | 7.0% |
+| `bridge` | 44 | 3.6% |
+| `models` | 34 | 2.8% |
+| `ui` | 10 | 0.8% |
+| `worker` | **3** | **0.24%** |
+| total | 1231 | |
+
+A renamed `worker/` drops **0.24%** of the corpus, and `ui/` 0.8% — an order of
+magnitude inside *any* percentage floor, so those roots would silently stop
+being guarded while the floor stayed green. (The critique estimated ~12% on an
+even-split assumption; the real measurement makes the case stronger, not weaker,
+and a total floor is decisively insufficient here.) This is precisely the
+fix-one-instance-never-sweep pattern this plan indicts #2093, #2430, #2557 and
+#2597 for, so B13 gets the same treatment as B14 plus a per-root check:
+
+```python
+missing = [t for t in SCAN_DIRS if not (REPO_ROOT / t).is_dir()]
+assert not missing, f"SCAN_DIRS roots absent from the checkout: {missing} — the sweep would silently skip them"
+```
+
+Keep the total floor as well. The two catch different failures — a vanished root
+versus a corpus-wide collapse — and neither subsumes the other.
 
 **Out-of-scope-but-adjacent**, recorded so the next reader is not surprised:
 `scripts/checks/no_new_rebuild_callers.sh:46` has the same ambient-cwd hazard and
