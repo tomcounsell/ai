@@ -3397,22 +3397,84 @@ was a two-word argv deletion. The plan's mechanism surface is the same size it w
 end of round 4.
 
 **Round 6 — 2026-08-19, against commit `6f5628f8b` (the round-5 revision). Verdict:
-MAJOR REWORK (CRITIQUE INCOMPLETE: roster 0/3). NO FINDINGS — the war room never ran.**
+READY TO BUILD (with concerns), 0 blockers / 1 concern. Roster 3/3, all grounded.**
 
-**This is a harness outcome, not a plan judgement. Do not revise the plan on the strength
-of it.** The critique driver executed the full structural pass and then could not dispatch
-a single war-room critic: no agent-spawn tool was present in its execution context, so the
-frozen roster (`Risk & Robustness`, `Scope & Value`, `History & Consistency`) reported
-0 of 3. `critique-roster-check` returned
-`{"complete": false, "completed_count": 0, "missing": [all three]}` and the run directory
-`.critique-runs/2739-1787119710594255000/` is preserved as the forensic record. Per the
-`MAX_CRITIC_REDISPATCH` rule the stage must emit a verdict rather than exit silently, and
-`MAJOR REWORK` is the only string that routes a non-completing round back for another
-pass — hence the label. **The correct next action is to re-run `/do-plan-critique 2739`
-from a context that can spawn subagents, not to open a round-6 revision.**
+This round was mandated as a **convergence round**, not a fresh lens: five rounds had each
+produced a new blocker and the plan had reached ~3500 lines, so the single question put to
+the war room was *is this plan buildable as written?* The severity bar was raised to match —
+a BLOCKER required something that would actually break the build or ship a defect, and
+anchor drift, stale figures, and plan-text imprecision were explicitly demoted to concern or
+nit. Q1-Q6 and everything rounds 4 and 5 verified sound were declared out of scope.
 
-What the round *did* establish, mechanically, before it stopped — all of it green, and all
-of it re-usable by the next round so it need not be re-derived:
+**Process note, for honest comparison with earlier rounds.** Rounds 1-5 ran their roster
+lenses sequentially inside one context because no agent-spawn tool was available to the
+driver; their three "critics" were not independent samples. This round is the first where
+the three roster members ran as genuinely independent subagents with their own contexts,
+each reading the real tree. An initial round-6 attempt aborted at roster 0/3 when its driver
+context also lacked the spawn tool and recorded a `MAJOR REWORK (CRITIQUE INCOMPLETE)`
+harness verdict (commit `f8c6ecb62`); that record is superseded by this one, and its
+run directory has been garbage-collected as a stale-hash sibling. The structural evidence it
+gathered is retained below.
+
+**All six round-5 dispositions were re-verified against real bytes and all six hold.**
+
+| Item | Verification |
+|---|---|
+| R5-1 escalation | Plan `:1144`, `:1172`, `:2496`, `:2611` mandate the `pr_url is None` filing `docs-auditor: rotation failed to produce a PR for {slug}`, category `operational-failure`, before the `status="error"` return; Verification rows at `:3192` and `:3193` |
+| R5-1 guard relabel | Plan `:1169`, `:1220`, `:1831`, `:2953` consistently specify `status="skipped"` with no filing |
+| R5-2 | `reflections/docs_auditor.py:70` is `VAULT_DRIFT_ISSUE_CAP = 5`; `grep -c` reads exactly 4, matching the Verification row |
+| R5-3 | Plan `:1312` carries the unwrap verbatim: `re.sub(r"\\(.)", r"\1", w["old"].removeprefix(r"\b").removesuffix(r"\b"))` |
+| R5-4 | `"--label"` appears exactly twice today (`:1027` query side, `:1115` filing side); the row at `:3189` expects 1 post-build. The exact `_normalize_title` compare is at `:1051-1053` as claimed |
+| R5-5 / R5-6 | Risk 8 restated at spike-6's measured 0.29/run; no live behind-count anywhere in the plan; the `grep -c 'vault-drift'` companion row is deleted and its deletion documented in the surviving behavioral row at `:3190` |
+
+**R5-1's argued acceptance was adjudicated on its merits and is upheld.** Issue #2739's
+acceptance criterion — *"A rotation run that returns early leaves the shared main checkout
+exactly as it found it, and does not report status=ok for a pass whose output it
+discarded"* — is met by the two halves the revision did adopt. The second half is satisfied
+outright by the `"ok"` → `"skipped"` relabel. The first half is satisfied by the scoped
+`_restore_checkout`, and critically the wedge case cannot go unreported: a failed restore
+makes `_push_branch_and_pr` return `None` **even when the PR was created** (branch
+`:1662-1667`, stated in its docstring at `:1566`), so every wedged checkout funnels into the
+`pr_url is None` path that now files. The dirty-tree half was correctly argued down:
+`_git_dirty` (branch `:1368`) is `git status --porcelain` over the whole `repo_root`, so a
+filing guard would mint issues blaming the auditor for a peer lane's uncommitted work —
+empirically true on this machine at the time of the round, where two other lanes held
+modified plan documents. The escalation belongs on the failure path, which knows it caused
+the dirt; the guard, which cannot know, stays quiet.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness (raised as BLOCKER, downgraded on aggregation — see below) | R6-1: the escalation issue body mandates two facts the filing site cannot see. Q4 item 3 (`:1146-1147`) and Task 3 (`:2947-2948`) both require the body to name "the failing step" and "whether the scoped restore succeeded", but `_push_branch_and_pr`'s contract is `str \| None` and no task widens it. The failing step and `_restore_checkout`'s `ok` boolean are locals that reach only `logger.error` / `logger.warning`; at the `pr_url is None` branch in `run_docs_auditor` no variable holds either fact, and `pr_url is None` is consistent with at least three distinct causes (unresolvable starting ref before any write, push/PR-create failure with a clean restore, restore failure regardless of PR outcome). A builder implementing the body literally must either invent an unplanned plumbing change or fill the fields with a placeholder. | Q4 item 3 / Task 3 | The plan must pick, as it did for R5-3, rather than leaving it to the builder. Option (a): widen the contract to `def _push_branch_and_pr(...) -> tuple[str \| None, dict]` returning `(url, {"failing_step": str, "restore_ok": bool})`, with `failing_step` set at each `except` site (`"checkout -b"`, `"add"`, `"commit"`, `"push"`, `"gh pr create"`) or `"restore"` when `_restore_checkout` returns `False`, and `"none"` on the clean path; then thread it into the body. This adds the two direct call sites at `:1158` and `:1218` to Task 5's rework list, which already flags them as breaking on the new required parameter. Option (b), cheaper: strike "the failing step" and "whether the scoped restore succeeded" from both `:1146-1147` and `:2947-2948`, leaving the body to name the slug, the `files_touched` paths, and the `git status --porcelain -- docs .claude` cleanup command — all of which the filing site already has. Whichever is chosen, do **not** let the body assert a restore outcome it did not observe: a body that reads "restore succeeded" on a run where it failed would tell the on-call human the checkout is clean when it is wedged, defeating the exact visibility R5-1 exists to guarantee. |
+
+**Why the single finding was downgraded from BLOCKER to CONCERN.** It is a real
+under-specification and the critic's citations are exact, but it fails the round's stated
+blocker bar on both legs. It does not break the build: the filing call, the title, the
+category, and the slug keying are all fully specified, and the four assertions the
+Verification row at `:3192` makes — one filing, slug-keyed, category set, before the
+`status="error"` return — are all satisfiable without either contested field, so no test
+goes red either way. And it ships a defect only under the assumption that a builder
+affirmatively fabricates a restore status rather than omitting a fact they have no source
+for; the degraded honest outcome is a slightly less informative issue body that still names
+the slug and still carries the `git status --porcelain` remediation the operator actually
+acts on. The Implementation Note is concrete enough to apply without re-investigation, which
+is precisely the definition of a concern under this skill's contract.
+
+**Scope & Value returned `No findings.`** It walked the Problem, Appetite, Prerequisites,
+Data Flow, Rabbit Holes, Risks, No-Gos, Success Criteria, Team Orchestration, and all eight
+tasks, and found the size justified by the two-issue scope: the Rabbit Holes section already
+excludes ten scope-creep candidates with stated reasons, every task traces to a named bullet
+in #2739's "Current behavior" list or #2834's false-positive table, and the one cross-cutting
+change (`output_summary` reaching every function reflection) is bounded as Risk 5 with a
+narrow mitigation rather than left open.
+
+**History & Consistency returned `No findings.`** It read the full plan and cross-checked the
+module-level constants and the `_open_issue_exists` / `_file_issue_if_new` argv against real
+bytes. The three-budget accounting, the `WITHHELD_PR_MARKER` stamp-and-read pairing, and the
+task commit-boundary sequencing are internally consistent everywhere they are restated, and
+no new contradiction or repeated historical mistake surfaced.
+
+Structural evidence, all green, carried forward from the aborted attempt and re-checked in
+part this round:
 
 - `reflections/docs_auditor.py` is still byte-identical to the plan baseline `f491306c5`
   (`git diff f491306c5 HEAD -- reflections/docs_auditor.py` is empty), so every anchor in
@@ -3434,13 +3496,14 @@ of it re-usable by the next round so it need not be re-derived:
 - `agent/reflection_scheduler.py:639-640` and
   `ui/templates/reflections/_partials/modal_content.html:54` are exactly as cited; no
   template references `output_summary` or `last_run_summary` today, so C3's ruling still holds.
+- Tasks 0-7 carry no numbering gap, every `Depends On` resolves, and there are no cycles.
 - The substrate suite collects **130**, matching `tests/README.md:272`.
 - `origin/session/sdlc-2739` head is `6261e2d2c`, matching the lane-status block.
 - Prerequisites: **8 of 9 PASS**. The one FAIL is the `docs .claude` cleanliness row,
   tripped by another lane's uncommitted `docs/plans/move-bridge-utc-to-utils.md` — the
   stop-and-ask outcome that row's own note predicts, not a defect.
 
-One sub-anchor is off by one and is recorded here so the next round does not spend a
+One sub-anchor is off by one and is recorded here so a later round does not spend a
 finding on it: the plan cites the dirty-tree guard's `assert result["status"] == "ok"` at
 `tests/unit/test_docs_auditor_substrate.py:1497` (Test Impact, Q4 item 5, and one
 Verification row); it is at `:1498`, and `:1497` is the
