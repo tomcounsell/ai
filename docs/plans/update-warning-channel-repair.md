@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2845
 last_comment_id: 5317246173
 revision_applied: true
-revision_applied_at: 2026-08-19T06:25:01Z
+revision_applied_at: 2026-08-19T06:51:51Z
 ---
 
 # /update Warning Channel Repair
@@ -808,6 +808,22 @@ row's sibling gate — and the remaining two (the 82-site conversion having no g
 `env_prefix` premise) are long-standing specification gaps that no earlier round probed by
 re-measuring. No design decision is in question: the blocker and three concerns are gate repairs, one
 concern is a respecification of an unimplementable introspection, and the nit is a numeric correction.
+
+**Revision round 8, applied 2026-08-19.** All six findings resolved; the `Addressed By` column above
+records each one. Two of the six were resolved differently from the prescription, both times because
+implementing the prescription and mutation-checking it exposed a further hole: the flagship leak row
+moved to a count comparison rather than the prescribed token match (Task 2's 5-key inline cap makes
+*every* name-matching form blind past alphabetical position five), and the `--quick` finding was
+resolved by deleting two rows and adding one identity-based membership row rather than by patching
+the `awk` in place.
+
+The Verification table is net unchanged in size — two doctor rows out, one membership row and one
+append-conversion row in — and every row that moved was mutation-checked in both directions before
+being written down: run it against current code, remove the thing it guards, confirm it goes red.
+That discipline also covered the four rows adjacent to the ones edited (floor, passthrough-set,
+disjointness, credential anti-criterion), each confirmed `CLEAN` on correct annotation and red under
+the single mutation it exists to catch. The design is unchanged from round 4; this round, like rounds
+7 and 8, touched only gates.
 
 ---
 
