@@ -1084,7 +1084,7 @@ def _query_non_terminal_sessions(project_key: str) -> list:
     # ghost as a live record (popoto silently drops empty hashes), so
     # subject-coalescing can never attach to a session that no longer exists
     # -- this call only accelerates removing the stale index entry instead of
-    # waiting for the nightly popoto-index-cleanup sweep. Rate-limited
+    # waiting for the daily redis-index-cleanup sweep. Rate-limited
     # internally; see models/ghost_reconcile.py.
     from models.ghost_reconcile import reconcile_ghost_members
     from models.session_lifecycle import NON_TERMINAL_STATUSES

@@ -21,7 +21,9 @@ class SessionType(StrEnum):
     ``valor-granite-loop`` CLI) was deleted with the PTY substrate (plan
     #1924). The value is retained so pre-cutover Redis records that carry
     ``session_type="granite"`` keep hydrating and rendering; nothing creates
-    new sessions with it. Removal is #1927's (schema diet) scope.
+    new sessions with it. Removing the member would be a schema change, not
+    a prose change; the schema-diet issue that owned removal closed without
+    acting, so it needs a fresh decision.
     """
 
     ENG = "eng"

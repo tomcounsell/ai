@@ -66,8 +66,8 @@ class DedupRecord(Model):
         # model to accumulate ghost index members (hash expired, class-set
         # membership survives). get_or_create() runs on every inbound
         # message, so it is a good place to opportunistically self-heal the
-        # index instead of waiting up to 24h for the nightly
-        # popoto-index-cleanup reflection. Rate-limited internally (at most
+        # index instead of waiting up to 24h for the daily
+        # redis-index-cleanup reflection. Rate-limited internally (at most
         # once/60s) -- safe to call unconditionally on every read.
         # query.filter() itself already silently drops ghost members from
         # `existing` (never attaches a dead record's data); this only
