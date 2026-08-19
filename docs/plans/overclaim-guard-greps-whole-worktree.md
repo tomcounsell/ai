@@ -831,10 +831,15 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 - **Chasing the `scripts/` and `reflections/` occurrences of the same shape.**
   Real, noted in Technical Approach, but they are not tests, so they are outside
   #2809's acceptance criteria and outside this lane.
-- **Making the meta-guard clever.** An AST-based analyser that understands every
-  way to build a grep argv will spend more time on false positives than the
-  problem is worth. Match the literal shapes (`"-r"`/`"-rn"` with `"grep"` as
-  argv[0]) and allow an explicit opt-out comment.
+- **Making the meta-guard clever.** An analyser that understands every way to
+  build a grep argv — f-strings, list concatenation, argv assembled across
+  functions, `shell=True` command strings — will spend more time on false
+  positives than the problem is worth. The line is drawn at a **single `ast.List`
+  of string constants**: first element `grep`, a recursive flag among the
+  siblings. That is one `ast.walk` and it flags exactly the two real offenders
+  and none of the five textual near-misses (measured at `cefc07e7e`). Anything
+  requiring dataflow is out of scope; an explicit opt-out comment covers a
+  genuine future survivor.
 
 ## Risks
 
@@ -1239,8 +1244,51 @@ the same moment:
 - **Agent Type**: builder
 - **Parallel**: false
 - Add a test asserting no test under `tests/` invokes a bare recursive `grep` over a directory (argv[0] `grep` with `-r`/`-rn`).
-- Match literal shapes only; provide an explicit opt-out comment for a justified survivor **elsewhere** in the suite.
-- **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so it flags itself otherwise — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
+- **The discriminator is pinned, and it is structural, not textual.** A naive
+  text matcher ("the file mentions `grep` and mentions `-r`") flags **7** files
+  under `tests/` at `cefc07e7e`, of which exactly **2** are real offenders. The
+  five innocents are hook-validator fixtures
+  (`test_validate_no_redis_flush.py`, `test_validate_no_raw_redis_delete.py`),
+  payload strings (`test_tool_call_delivery.py`, `test_verification_parser.py`),
+  and — most awkwardly — `tests/unit/test_plan_migration_invariant.py`, which is
+  A6, dispositioned **DOCUMENT AS SAFE** and cited throughout this plan as the
+  reference pattern; its `grep -r` occurrence is the explanatory comment #2093
+  added. Demanding an opt-out stamp on the plan's own exemplar is absurd, and the
+  builder's alternative — loosening the matcher until the false positives vanish —
+  is the exact weakening this task already forbids for the self-hit.
+
+  Parse with `ast` and flag only an `ast.List` whose elements are **all** string
+  constants, whose **first** element is `grep`, and which contains `-r`, `-rn`,
+  `-nr`, or `-R` as a **sibling list element**. Co-occurrence anywhere in the
+  file is never enough. Measured at `cefc07e7e`, that matcher flags exactly two
+  nodes across all of `tests/`:
+
+  | Flagged | Site |
+  |---|---|
+  | `tests/unit/test_anthropic_client_semaphore.py:165` | A2 |
+  | `tests/unit/test_sdlc_review_finalize.py:1093` | A1 |
+
+  Both are converted by task 2, so **the expected flagged set after this lane is
+  empty**. State that in the test's own message.
+- **Record the five known-innocent files in a comment in the test**, with one
+  line each saying why they are not offenders, so the next author can tell a real
+  regression from a re-litigated false positive. Run the matcher against all
+  seven textual candidates *before* wiring it into the assertion and confirm it
+  returns only A1 and A2 — a matcher validated against only the two offenders
+  proves nothing about the five it must not flag.
+- The explicit opt-out comment survives for a genuine future survivor
+  **elsewhere** in the suite, but stamping one on any of these five means the
+  matcher is wrong and must be fixed instead. It is never the instrument for the
+  meta-guard's own self-hit (see the resolved-path self-exemption below).
+- **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so a textual matcher flags it — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
+- **Keep the self-exemption even though the AST discriminator probably makes it
+  inert.** The positive control writes its offender as a *string* handed to
+  `write_text`, not as a live `ast.List`, so the structural matcher will most
+  likely not flag this file at all. Keep the resolved-path skip anyway: it costs
+  one line, it is correct under any future tightening of the matcher, and
+  removing it would make the file's behaviour depend on an implementation detail
+  of the parser. What it must **not** become is the reason the guard is green —
+  that is the positive control's job, and V-21 is what tells the two apart.
 - **Ship a planted-offender positive control in the same file:** write a temp file under `tmp_path` containing `subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at `tmp_path`, and assert it is flagged. Without it, a correct self-exemption and a matcher that flags nothing are indistinguishable.
 - **Take root and floor as independent parameters** so the floor and the positive control do not collide: `def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]`, raising `AssertionError` when `len(scanned) < min_files`. The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control calls `_scan_for_bare_grep(tmp_path, min_files=1)`. A floor baked into the scanner would be tripped by the control's one-file root *before* the offender assertion ran, so the control would pass for the wrong reason and V-21 would be uninformative.
 - `min_files=500` because `tests/` holds 784 tracked `.py` at `7ba89ca5c` (63.8%, inside Risk 1's 60-70% band). Not 600, which is 76.5% and outside it.
@@ -1256,7 +1304,7 @@ the same moment:
 - **Parallel**: false
 - For **each** of the four converted guards separately: introduce the banned pattern into a tracked source file **that guard actually scans**, run the node, capture the FAIL output, revert. A single mutation tripping several guards proves nothing about the ones it did not reach — this satisfies #2809 AC3/AC4 and #2808 AC3/AC4, which are per-guard obligations, never a blanket run.
 - For **each** of the six floored walks separately: force an empty scan (temporarily point the root at a nonexistent path), confirm the floor fails, revert.
-- For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: `worker/`, the 0.24% root) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check.
+- For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: **`ui/`**, 10 tracked `.py`, 0.8% of the 1231-file corpus) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check. **Do not use `worker/` for this**, even though its 0.24% share is smaller: `com.valor.worker` is a live launchd job running `python -m worker` from this checkout under `KeepAlive` (pid 72972 at plan time), so renaming the package breaks a production service for the duration of the mutation. `ui/` demonstrates the identical property and nothing runs it. See the launchd note under the Verification table.
 - Confirm the helper raises `TrackedScanError` (not `VacuousScanError`) when `GIT_INDEX_FILE=/dev/null`, and `VacuousScanError` (not `TrackedScanError`) for `'nosuchdir/*.py'`. Assert the classes apart, not merely "it failed".
 - **Absent-file mutation (net-new, round 2).** Move one tracked file out of A1's corpus with a plain `mv` — *not* `git mv`, which updates the index and so exercises only the case the index-row count already catches — then run A1 and confirm it raises `VacuousScanError` naming the absent path. Measured at `7ba89ca5c`: with `tools/doctor.py` moved aside, `git grep` returns rc=1 (false clean) while `git ls-files` still reports 180, and the present count is 265 of 266 — above the floor of 170, so **only** the absence check fires. Restore with `mv` and confirm `git status` is clean. This is V-18b.
 - Confirm the BRE metacharacter test both reports clean and trips on a planted match, so an added `-F` would be caught.
@@ -1274,8 +1322,24 @@ the same moment:
 - Run the primary node in the **primary checkout** with the stale `.pyc` present. It must pass.
 - Run the same node in a **fresh worktree**. It must pass.
 - Confirm the two agree at the same commit. A worktree-only green proves nothing (#2808).
+- **Provision the worktree's venv before running it, and assert the pin.** A bare
+  `git worktree add` produces a checkout with **no `.venv`**, and both guards that
+  would normally catch that are inert in exactly this case:
+  `scripts/pytest-clean.sh` falls through its `[ -x "$REPO_ROOT/.venv/bin/pytest" ]`
+  test and resolves a bare `pytest` from `PATH`, while
+  `scripts/check-interpreter-pin.sh` exits 0 without comparing anything because
+  `[ -f "$ROOT/.venv/pyvenv.cfg" ] || exit 0` is its documented "no venv yet"
+  no-op. The run then either aborts with "no usable pytest found" or silently
+  compares the pinned primary against whatever interpreter `PATH` resolved —
+  which makes an agreement uninformative and a disagreement unattributable. Run
+  `uv sync --all-extras` in the worktree (`.python-version` is committed, so this
+  lands on the pin by construction) and then `./scripts/check-interpreter-pin.sh .`
+  as an explicit assertion, not as a safety net. Verified at `cefc07e7e`: a fresh
+  `/tmp` worktree synced to `version_info = 3.14`, matching the pin, and the node
+  then ran in 3.8s.
 - Run the A2 and A3 nodes from `/tmp` (foreign ambient cwd) and confirm each returns the **same verdict** as from the repo root. This is the #2808 AC7 observable: today they diverge (A2 passes vacuously, A3 fails); after the fix both must match.
-- Use `scripts/pytest-clean.sh`; never bare `pytest`; never pattern-kill pytest processes.
+- **V-20 is the one row that does not go through `scripts/pytest-clean.sh`, and that is deliberate.** The wrapper normalizes the ambient cwd away before pytest ever starts: when the caller's cwd has no `pyproject.toml` carrying a `[tool.pytest` table it sets `REPO_ROOT="$SCRIPT_ROOT"` and `cd "$REPO_ROOT"` (lines 36-42), and pytest is not invoked until line 241 with no intervening `cd`. So `cd /tmp && …/scripts/pytest-clean.sh …` runs the nodes with cwd already at the repo root — it measures the wrapper, not the guards, and would report "same verdict" today, before any conversion exists. Invoke `.venv/bin/pytest` directly instead so `os.getcwd()` stays `/tmp`. This is a bounded exception to the repo's never-bare-`pytest` rule: the row passes `-n 0`, so there are no xdist workers to orphan and nothing for the reaper to do. Every other row in this lane uses the wrapper.
+- Never pattern-kill pytest processes.
 - Set `PYTHONPATH` explicitly when running in a worktree — the shared venv `.pth` can otherwise import the wrong checkout.
 
 ### 7. Documentation
@@ -1425,7 +1489,7 @@ the table has shipped rows that could never have run.
 | V-26 | Lint clean | `python -m ruff check .` | exit code 0 |
 | V-27 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | V-28 | **The `repo_root=` seam is fenced:** exactly two tracked files pass it — the helper and its own tests. No guard reaches for it | `test "$(git grep -l 'repo_root=' -- 'tests/*.py' ; true)" = "$(printf 'tests/tracked_content.py\ntests/unit/test_tracked_content_helper.py')"` | exit code 0. A third file in the output means a guard is choosing its own corpus |
-| V-29 | **No helper unit test mutates the primary checkout.** Run the helper's own module and confirm the tree is untouched afterwards | `git status --porcelain > /tmp/zz_before.txt; ./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0; rc=$?; git status --porcelain > /tmp/zz_after.txt; diff /tmp/zz_before.txt /tmp/zz_after.txt; test $rc -eq 0 -a $? -eq 0` | exit code 0, and `diff` reports nothing. A non-empty diff means a scratch-repo case leaked into `~/src/ai` |
+| V-29 | **No helper unit test mutates the primary checkout.** Run the helper's own module and confirm the tree is untouched afterwards | `git status --porcelain > /tmp/zz_before.txt; ./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0; rc=$?; git status --porcelain > /tmp/zz_after.txt; diff /tmp/zz_before.txt /tmp/zz_after.txt; d=$?; test $rc -eq 0 -a $d -eq 0` | exit code 0, and `diff` reports nothing. A non-empty diff means a scratch-repo case leaked into `~/src/ai` |
 
 > **On the mutation rows (V-17, V-18, V-18b).** These deliberately break the tree,
 > observe a FAIL, and revert. Run them one at a time from the lane's own worktree,
