@@ -3774,6 +3774,66 @@ table asserts was re-measured and matches, with the single exception recorded as
 
 ---
 
+**Round 8 — 2026-08-19, against commit `97f96dac6` (the round-7 revision). Verdict:
+READY TO BUILD (WITH CONCERNS), 0 blockers / 2 concerns / 1 nit. Roster 3/3, all
+grounded.**
+
+**Process disclosure, in the same terms round 6 used about rounds 1-5.** This round's
+three roster lenses ran **sequentially inside one driver context**, because the driver
+had no agent-spawn tool. They are not independent samples. Round 6 is still the only
+round whose critics were genuinely separate subagents. Recording this rather than
+letting the roster manifest imply an independence the run did not have; the alternative
+on offer was a `MAJOR REWORK (CRITIQUE INCOMPLETE)` harness verdict on a plan with zero
+blockers, which would have been a false statement about the plan rather than an honest
+one about the harness.
+
+**All six round-7 dispositions were verified as landed**, and every structural claim in
+the plan was re-measured against real bytes rather than re-read. `reflections/docs_auditor.py`
+is still byte-identical to the plan baseline `f491306c5` even though `origin/main` has
+advanced past it, and so are `agent/reflection_scheduler.py`,
+`tests/unit/test_docs_auditor_substrate.py`, both do-docs skill surfaces,
+`ui/templates/reflections/_partials/modal_content.html`, `tests/README.md`,
+`ui/data/reflections.py`, `models/reflection.py`, `scripts/check_prerequisites.py`, and
+`reflections/sdlc_progress.py`. Every "currently N" grep baseline the Verification table
+asserts is exactly N: `auto-merge`=16, `_is_documented_deletion`=4, `per_run_cap`=3,
+`vault-drift`=4, `VAULT_DRIFT_ISSUE_CAP`=4, `"--label"`=2, `"all"`=1, `"--limit"`=0,
+`"-A"`=1, `_pr_is_auto_merge_eligible`=3, `"merge"`=1, `_open_issue_exists`=3,
+`_update_rotation_hash`=3, `"status": "ok"`=7, and all six post-build-only symbols read
+0. All 18 sampled symbol anchors land on their claimed definition. The substrate suite
+collects **130**, matching `tests/README.md:272`. Tasks 0-7 carry no numbering gap and
+every `Depends On` resolves. **Prerequisites are 9 of 9 PASS** — the `docs .claude`
+cleanliness row that FAILed in rounds 4, 6 and 7 now passes, the peer lane's plan edits
+having been committed.
+
+**Two candidate findings were killed by measurement and are recorded so a later round
+does not spend a finding on them.** (1) R5-3's residual — that the withheld title's
+parentheses and `->` would break the `gh issue list --search` dedup key — is **false**.
+Probed directly against this repo: the module's existing `deleted-target` title shape
+resolves to exactly its own issue (#2865) with parentheses, slashes and dots intact, and
+injecting a `->` token changes neither that result nor a three-hit control. GitHub search
+discards the punctuation. (2) The Test Impact instruction that any red in
+`TestNonMarkdownApplyGuard` means "the veto leaked to the write path" is **sound as
+written**: both existing fixtures in that class (`:455` HTML, `:499` markdown) were read
+and neither carries a deletion heading or a prose cue within ±2 lines, so the three Q7b
+widenings cannot flip them.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness + History & Consistency | R8-1: R7-1's write-gating half is unjustified, contradicted twice in the plan's own text, and silently removes the recurring categories' flood cap. Q7c gates **both** the Redis `exists` read and the two `set` writes on `states == "all"`. The read-gating is necessary and correct. The write-gating is not: `dedup_key` has exactly one reader in the module (`:1081`) and two writers (`:1091`, `:1133`), so once the read is gated off for a category the key is never consulted for it again — the stated reason, "gating only the read would re-stamp the key on every suppressed run and the window would never close", describes a window nothing looks through. The cost is unnamed: `_issue_exists` fails open on any `gh` non-zero exit, and `_open_issue_exists`' docstring (`:1013-1016`) records the worst case as "the duplicate this gate was meant to prevent, which the Redis fast-path still suppresses on the next run" — a backstop that disappears for exactly the two categories that recur by construction. The plan then contradicts itself in consecutive paragraphs: `:1835-1837` says recurring categories "give up the local cache", `:1839-1840` says vault-drift "keeps exactly today's semantics (open-only gate, 30-day Redis fast-path)". The Test Impact setup at `:2251-2253` inherits it, telling the builder to "let the key be written" for a finding that under this mandate never writes one. | Q7c (`:1825-1840`), task 4 (`:3226-3233`), Test Impact (`:2251-2253`) | Gate only the `exists` read; leave `:1091` and `:1133` unconditional. In `_file_issue_if_new` (`:1064`) compute `states` above the Redis block, then `if states == "all" and redis_client.exists(dedup_key): return False`. The exemption still works — a recurring finding always reaches `_issue_exists(states="open")` and re-files once a human has closed the issue and the condition returns — and the key survives as the fail-open cap. Verify with `grep -n 'dedup_key' reflections/docs_auditor.py`: 4 hits, one read, two writes; a key written but never read suppresses nothing. Failure this prevents: during a `gh` outage every `_issue_exists` call returns False and a daily rotation re-files up to 5 vault-drift plus 1 `operational-failure` issue **per run** for the duration, where today the post-create key caps it at one round. Adopting this makes `:1839-1840` true as written and makes the test setup reachable through the normal path, so only `:1835-1837` needs rewording. If the write-gating is kept instead, all three sites must move together — `:1839-1840` corrected to say the fast-path is lost, `:2251-2253` to say the key is seeded by hand — per Q4 item 4's own "table and prose are edited together" rule. |
+| CONCERN | History & Consistency + Scope & Value | R8-2: the "no auto-merge survives in the feature docs" Success Criterion has no instrument and three live counterexamples. The criterion (`:2759-2761`) reads "No surviving string in the module, the skills, or the feature docs promises auto-merge", but the only auto-merge Verification row is scoped to `reflections/docs_auditor.py`, and the Documentation checkboxes for `docs/features/docs-auditor.md` name `:27`, `:40-46`, `:42`, `:433-434`, `:443-450`, `:546-547`, `:558-566` and `:599` — none of which reaches `:64-65` ("the rotation caller opens a PR the branch sweeper can auto-merge with nobody in between", the stated premise of the whole `### Four gates guard every rewrite` section), `:314` ("it opens a PR the branch sweeper can auto-merge"), or `:317` ("`_pr_is_auto_merge_eligible` refuses any PR carrying that marker, so a run that withheld a fix always requires a human merge"), which names a symbol Q2 deletes. Same class as C6 (`skill-context/do-docs.md:152` surviving a green validator) and NEW-5 (anti-criterion scope stated three ways). | Documentation (`:2590-2620`), Verification, Success Criteria (`:2759-2761`) | Add the three passages to the `docs/features/docs-auditor.md` checkbox list and add one path-scoped Verification row: `grep -rn 'auto-merge' docs/features/docs-auditor.md` expecting exit code 1, plus `grep -c '_pr_is_auto_merge_eligible' docs/features/docs-auditor.md` expecting `0` (currently `1`). Scope it to that one file, deliberately, the same way the "Old contract instruction gone" row is scoped: six other feature docs legitimately mention auto-merge for unrelated systems (`autoexperiment.md`, `pm-sdlc-decision-rules.md`, `remote-update.md`, `bridge-workflow-gaps.md`, `sdlc-repo-addenda.md`, `README.md`), so a directory-wide row fails for reasons this lane does not own. `:317` is a rewrite, not a deletion: after Q2 the guarantee is carried by the sweeper skipping close and branch deletion for a `WITHHELD_PR_MARKER` PR. |
+| NIT | Risk & Robustness | R8-3: Q4 item 4 claims the three-outcome table "becomes literally true of the function rather than of one branch of it" (`:1216-1217`), but `run_docs_auditor` has a fourth return status the plan never names — `"status": "disabled"` at `:1841`. After R7-2's relabel the function returns `disabled`, `skipped`, `ok`, or `error`. | Q4 item 4 (`:1216-1217`) | `:1841` sits above the lock acquisition at `:1847`, so it is a pre-flight bail rather than a run outcome — one clause ("of every return that reached the lock") settles it. Wording only: no code, no task, no Verification row, and the Success Criterion "`ok` survives on exactly one return" is already true as written. |
+
+**Why no finding was graded BLOCKER.** R8-1 is the closest call and fails the bar on both
+legs. It does not break the build: either reading of the mandate compiles, and the
+behavioral test that pins the exemption passes under both, because its setup seeds the
+Redis key directly. It ships a degraded behavior only under a concurrent `gh` failure,
+in a channel whose caller is `enabled: false` on this machine, and the degradation is a
+bounded duplicate-issue flood rather than a silent loss — the first wedge is still
+reported loudly. R8-2 is a documentation gap with a one-row instrument. Neither requires
+a spike, a new mechanism, or a re-scoped task.
+
+---
+
 ## Open Questions
 
 > **Resolved and removed in the 2026-08-18 refresh.** The former Q1 ("confirm the
