@@ -245,8 +245,10 @@ lives:
 
 1. **Entry point**: pytest collects a guard test.
 2. **Scan**: the guard names a corpus. Today: a *directory tree on disk*
-   (`grep -r tools/`). After: *tracked content in the index*
-   (`git grep -- 'tools/*.py'`).
+   (`grep -r tools/`), which is why `__pycache__` is read. After: the *file list
+   comes from the index* and each file's *content is read from the working tree*
+   (`git grep -- 'tools/*.py'`). Those are two different sources and the
+   distinction matters at step 4 — see obligation 1.
 3. **Result**: an exit code plus stdout.
 4. **Triage**: today, a single `== 1` comparison that conflates no-match with
    several failure modes. After: an explicit three-way split — match / clean /
@@ -349,9 +351,15 @@ class TrackedScanError(RuntimeError):
 class VacuousScanError(AssertionError):
     """The scan ran but examined too few files to mean anything."""
 
-def assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=()):
+def assert_absent_from_tracked(pattern, *pathspecs, min_files):
     """Assert no tracked file matching *pathspecs* contains *pattern*."""
 ```
+
+There is deliberately **no `allow=` parameter**. Every exemption across all four
+call sites turned out to be path-shaped, so all of them belong in negative
+pathspecs — see "Exemptions go in the pathspec" below. Shipping an unused
+`allow=` would leave the substring hazard in the signature for a future author
+to reach for.
 
 Two **distinct** exception classes are mandatory, not stylistic. A single class
 with two messages cannot be asserted apart except by string matching, and the
@@ -363,9 +371,28 @@ and a separate `pytest.raises(VacuousScanError)` for `'nosuchdir/*.py'`.
 
 Four obligations, which the current call sites each get wrong in a different way:
 
-1. **Index-scoped corpus.** `git grep` with `cwd=REPO_ROOT` (always explicit —
-   never inherited from pytest's ambient cwd) and an **explicit pathspec, never
-   an implicit whole-repo default**. `*.py` for the source-code guards; `*` plus
+1. **Index-scoped file list, working-tree content.** This is a two-part contract
+   and getting it wrong in either direction breaks a different guarantee:
+
+   > `git grep` resolves the **file list** from the index and reads each file's
+   > **content from the working tree**. `--cached` would read content from the
+   > index instead. This helper deliberately uses the working-tree form so an
+   > uncommitted reintroduction is caught before it is staged.
+
+   Measured at `7ba89ca5c`: an unstaged append to `tools/doctor.py` is found by
+   `git grep` (rc=0) and **not** by `git grep --cached` (rc=1). So "index-scoped"
+   describes only *which files are opened*, never *what bytes are compared*.
+
+   Two consequences the rest of this plan depends on. First, `--cached` is not
+   an available fix for anything here: it would make V-17's unstaged
+   `printf … >> tools/sdlc_stage_marker.py` invisible and turn the
+   demonstrated-red proof green. Second, because content comes from the working
+   tree, a tracked file that is *absent* from the working tree is silently
+   skipped — which is obligation 4's problem, not a theoretical one.
+
+   Invoke with `cwd=REPO_ROOT` (always explicit — never inherited from pytest's
+   ambient cwd) and an **explicit pathspec, never an implicit whole-repo
+   default**. `*.py` for the source-code guards; `*` plus
    negative pathspecs for corpus-wide guards such as A7. The pathspec is
    explicit so the corpus is stated rather than inherited — it is *not*
    required to be Python-only. A7's corpus is deliberately every tracked file
@@ -394,7 +421,16 @@ Four obligations, which the current call sites each get wrong in a different way
    if ls.returncode != 0:
        raise TrackedScanError(f"git ls-files failed (rc={ls.returncode}): {ls.stderr.strip()}")
    files = [p for p in ls.stdout.splitlines() if p]
-   if len(files) < min_files:
+
+   # Count what the scan can actually READ, not what the index lists.
+   present = [p for p in files if (REPO_ROOT / p).exists()]
+   absent = sorted(set(files) - set(present))
+   if absent:
+       raise VacuousScanError(
+           f"{len(absent)} of {len(files)} tracked paths are absent from the "
+           f"working tree, so git grep skipped them silently: {absent[:5]}"
+       )
+   if len(present) < min_files:
        raise VacuousScanError(...)
    ```
 
@@ -404,12 +440,39 @@ Four obligations, which the current call sites each get wrong in a different way
    never read as clean. This is the obligation `test_no_legacy_paths.py`
    currently violates despite already using `git grep`.
 
-4. **Non-vacuity floor.** Assert the (returncode-checked) `git ls-files` result
-   holds at least `min_files` paths. Without this, spike-1 shows a renamed
-   directory turns the guard into a silent no-op. Modelled on the strongest
-   existing pattern in the repo,
-   `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored roots,
-   explicit required-anchor list, `len(found) > 250` floor).
+4. **Non-vacuity floor — over readable files, plus an exact absence check.**
+   The floor must count what `git grep` can actually open. Counting index rows
+   instead reintroduces the vacuous-green class *inside this plan's flagship
+   mitigation*: `git ls-files` reports index entries while `git grep` reads
+   working-tree content, so a tracked file missing from disk (plain `mv`/`rm`,
+   an interrupted checkout, a sparse checkout) leaves the index count intact
+   while `git grep` skips the file and returns 1 — clean.
+
+   Measured at `7ba89ca5c` with `tools/doctor.py` moved aside by a plain `mv`:
+
+   | Probe | Result |
+   |---|---|
+   | `git grep -l "worktree_interpreters" -- 'tools/*.py'` | rc=0 → **rc=1 (false clean)** |
+   | `git ls-files -- 'tools/*.py'` | still **180** |
+   | present-on-disk count for `'tools/*.py' 'agent/*.py'` | **265** of 266 |
+
+   **Two checks are required, and a `present`-count floor alone is not enough.**
+   With A1's floor at `min_files=170`, 265 present clears it comfortably, so the
+   floor stays green on exactly the failure that produced the false clean. Only
+   an exact absence check fires. Verified at `7ba89ca5c`: present-count floor
+   fires? **False**. Absent-set check fires? **True**.
+
+   So: raise `VacuousScanError` if **any** corpus path is absent from the working
+   tree, *and* separately raise it if `len(present) < min_files`. The two catch
+   different failures — a partially-materialized checkout versus a corpus-wide
+   collapse or a pathspec typo — and neither subsumes the other. This is the same
+   reasoning that makes B13 keep both a per-root check and a total floor.
+
+   Failing closed on a sparse or interrupted checkout is intended, not
+   collateral: per Risk 3 a guard that cannot see its whole corpus must say so
+   rather than report clean. Modelled on the strongest existing pattern in the
+   repo, `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored
+   roots, explicit required-anchor list, `len(found) > 250` floor).
 
 **Regex dialect is pinned: POSIX basic regular expressions.** The four call
 sites disagree about what `pattern` is — A1 passes a literal, A3 at
