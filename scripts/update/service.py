@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -552,17 +553,30 @@ def install_worker(project_dir: Path) -> bool:
         return False
 
 
-def install_nightly_tests(project_dir: Path) -> bool:
+# The installer's own stable success line (scripts/install_nightly_tests.sh).
+# Classifying on this *success* marker — rather than on a skip string — fails
+# closed: the worktree refusal and any future early-exit path that forgets to
+# update a skip string still read as "skipped" instead of falsely as
+# "installed".
+_NIGHTLY_TESTS_SUCCESS_MARKER = "Nightly regression test service installed successfully."
+
+
+def install_nightly_tests(project_dir: Path) -> Literal["installed", "skipped", "failed"]:
     """Install/reload nightly-tests plist via the self-gating install script.
 
-    Delegates to scripts/install_nightly_tests.sh which contains a has_bridge_role()
-    gate — it skips install on non-bridge machines and removes any stale plist.
-    Returns True if the script exits 0 (installed or cleanly skipped).
+    Delegates to scripts/install_nightly_tests.sh, which contains a worktree
+    refusal and a has_worker_role() gate — it skips install on a lane worktree
+    or a machine that owns no project, and removes any stale plist either way.
+
+    Returns ``"installed"`` when the script exited 0 AND its stable success
+    marker appears in stdout, ``"skipped"`` when it exited 0 without that
+    marker (a role-gate or worktree-refusal early exit), and ``"failed"`` on a
+    non-zero exit or an exception running it.
     """
     install_script = project_dir / "scripts" / "install_nightly_tests.sh"
     if not install_script.exists():
         logger.warning("install_nightly_tests: install script not found at %s", install_script)
-        return False
+        return "failed"
 
     try:
         result = run_cmd(
@@ -570,18 +584,21 @@ def install_nightly_tests(project_dir: Path) -> bool:
             cwd=project_dir,
             timeout=60,
         )
-        if result.returncode == 0:
-            logger.info("install_nightly_tests: script completed (rc=0)")
-            return True
-        logger.warning(
-            "install_nightly_tests: script exited with rc=%d; stdout=%s",
-            result.returncode,
-            (result.stdout or "").strip()[:200],
-        )
-        return False
+        if result.returncode != 0:
+            logger.warning(
+                "install_nightly_tests: script exited with rc=%d; stdout=%s",
+                result.returncode,
+                (result.stdout or "").strip()[:200],
+            )
+            return "failed"
+        if _NIGHTLY_TESTS_SUCCESS_MARKER in (result.stdout or ""):
+            logger.info("install_nightly_tests: installed")
+            return "installed"
+        logger.info("install_nightly_tests: skipped (role gate or worktree refusal)")
+        return "skipped"
     except Exception as exc:
         logger.warning("install_nightly_tests: failed to run install script: %s", exc)
-        return False
+        return "failed"
 
 
 def install_reflection_worker(project_dir: Path) -> bool:

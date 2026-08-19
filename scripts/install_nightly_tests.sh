@@ -20,14 +20,28 @@ PLIST_SRC="$PROJECT_DIR/com.valor.nightly-tests.plist"
 LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-# ── Bridge-role gate ────────────────────────────────────────────────────
-# Nightly-test alerts route through the Telegram bridge, so the schedule is
-# only meaningful on a machine that has at least one Telegram-configured
-# (bridge) project assigned to it. Non-bridge machines (e.g. skills-only
-# laptops) skip the install and remove any stale plist from a prior install.
-#
-# Mirrors the has_email_role() pattern from scripts/install_email_bridge.sh.
-has_bridge_role() {
+# ── Worktree refusal (issue #2823) ──────────────────────────────────────
+# The plist is machine-global and hardcodes an absolute PROJECT_DIR. Installing
+# from a lane worktree would aim the fleet's nightly detector at a directory
+# that `/do-build` cleanup deletes once the lane's PR merges. Refuse before the
+# role gate — a worktree's `.git` is a FILE containing `gitdir: <main-repo>/
+# .git/worktrees/<slug>`, never a directory.
+if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/\.git/worktrees/' "$PROJECT_DIR/.git" 2>/dev/null; then
+    echo "Skipping nightly-tests install: running from a worktree checkout ($PROJECT_DIR)"
+    echo "The nightly detector must only be installed from a machine's main checkout."
+    exit 0
+fi
+# ── End worktree refusal ─────────────────────────────────────────────────
+
+# ── Worker-role gate ─────────────────────────────────────────────────────
+# Running the test suite requires a checkout and a worker, not a Telegram
+# bridge — gating on has_bridge_role() (this script's prior form) stranded the
+# detector on zero of 20 fleet projects, since none carry a truthy `telegram`
+# key. has_worker_role() is has_bridge_role() minus the Telegram-block clause,
+# the same fix #1379 applied to the reflection-worker installer
+# (scripts/install_reflection_worker.sh). Any machine that owns a project
+# qualifies, regardless of whether that project bridges Telegram.
+has_worker_role() {
     local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
     if [ ! -f "$config" ]; then
         return 0  # Fail open when config is unreadable
@@ -53,26 +67,24 @@ except Exception:
 
 target = host.lower()
 for proj in cfg.get("projects", {}).values():
-    if (proj.get("machine") or "").lower() != target:
-        continue
-    if proj.get("telegram"):
-        sys.exit(0)  # At least one bridge-role project found — qualify
-sys.exit(1)  # No bridge-role project found for this host
+    if (proj.get("machine") or "").lower() == target:
+        sys.exit(0)  # This host owns at least one project — qualify
+sys.exit(1)  # No project assigned to this host
 PYEOF
 }
 
-if ! has_bridge_role; then
+if ! has_worker_role; then
     host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
-    echo "Skipping nightly-tests install (no bridge projects assigned to '$host')"
+    echo "Skipping nightly-tests install (no projects assigned to '$host')"
     if [ -f "$PLIST_DST" ]; then
-        echo "Removing stale nightly-tests plist from non-bridge machine..."
+        echo "Removing stale nightly-tests plist from non-worker machine..."
         launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
         rm -f "$PLIST_DST"
         echo "Stale nightly-tests plist removed."
     fi
     exit 0
 fi
-# ── End bridge-role gate ────────────────────────────────────────────────
+# ── End worker-role gate ─────────────────────────────────────────────────
 
 # Prerequisite: pytest-json-report must be installed
 if ! "$PROJECT_DIR/.venv/bin/python" -m pytest --json-report --help > /dev/null 2>&1; then
