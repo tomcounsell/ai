@@ -737,8 +737,24 @@ three example names → **fix** names the rebuild
 
   ```python
   in_bin_dir = found_path.parent == match or os.path.realpath(found_path.parent) == os.path.realpath(match)
-  # trailer applies when: not in_bin_dir and _same_file(found_path, match / name)
+  # trailer applies when:
+  #   not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)
   ```
+
+  **The `is_symlink()` leg is load-bearing, not defensive padding.** `_same_file` calls
+  `os.stat`, which follows symlinks, so it cannot tell a hardlink from a symlink — it is
+  `True` for both. Measured on this machine with
+  `venv_bins = [<tmp>/repo/.venv/bin]` and `found_path = <tmp>/local/bin/foo`:
+  for a symlink, `is_symlink()` is `True`, `_same_file` is `True`, and `in_bin_dir` is
+  `False`, so a two-leg gate fires the trailer. It should not. Replacing the venv copy
+  with a new inode (what `uv sync` does) leaves the symlink reading the **new** shebang
+  while the hardlinked control still reads the **old** one — measured directly. For a
+  symlink both halves of the trailer are false: there is nothing stale to remove, and it
+  does not survive the rebuild carrying the old shebang. Emitting it anyway is
+  remediation text for a state it does not describe, the same defect class as the
+  `/update` sentence dropped above. `is_symlink()` is an `lstat`, it is the only cheap
+  discriminator between the two shapes, and it returns `True` without raising on a
+  dangling link (measured), so it needs no guard of its own.
 
   A predicate written as `found_path.parent not in venv_bins and _same_file(...)` drops the
   realpath leg and is wrong on any host where PATH spells a venv bin dir differently from

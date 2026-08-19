@@ -1293,9 +1293,9 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
   - Agent Type: builder
   - Resume: true
 
-- **Builder (PR resolution)**
+- **Builder (marker scope)**
   - Name: `resolution-builder`
-  - Role: WS-B and WS-C — the `_lookup_pr` ladder and the marker scope. **Not** `_gh_pr_search_issue_ref`, which this lane leaves alone (#2868).
+  - Role: WS-C only — the `state="all"` → `state="merged"` argument and its rationale comment. **Nothing in `_lookup_pr` or `_gh_pr_search_issue_ref`**, which this lane leaves alone (#2869, #2868).
   - Agent Type: builder
   - Resume: true
 
@@ -1307,19 +1307,19 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 - **Validator**
   - Name: `lane-validator`
-  - Role: independently re-run every live measurement and the whole Verification table; confirm `_gh_pr_search_issue_ref` is unmodified in the merged diff (WS-D scope leak check)
+  - Role: independently re-run every live measurement and the whole Verification table; confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` are unmodified in the merged diff (the WS-B / WS-D scope-leak check)
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `lane-documentarian`
-  - Role: the Documentation section, including the two docstring rewrites that currently document the old behavior as intentional
+  - Role: the Documentation section, including the docstring annotations that currently document known gaps as intentional design
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Re-measure all three shapes against build-time main
+### 1. Re-measure both shipped shapes against build-time main
 - **Task ID**: measure-baseline
 - **Depends On**: none
 - **Validates**: no test files — this produces the red-state record
@@ -1328,22 +1328,25 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Agent Type**: validator
 - **Parallel**: false
 - Re-run spike-1's eight-cell matrix and confirm it still matches this plan. If it has moved, **stop and report** — a drifted baseline invalidates the design, not just the numbers.
-- Re-run `_lookup_pr(2494/2518, state="merged")` → 2516 / 2538, and `_review_artifact_posted(1785/2073/2104)` → True/True/True.
+- Re-run `_review_artifact_posted(1785/2073/2104)` → True/True/True.
+- Re-run the terminal-ledger CLOSED sweep **with `--repo`** and confirm it is still `16 16`. A drop means the `!= "CLOSED"` polarity now costs real coverage and the argument needs restating before any code is written.
 - Confirm no code path other than `sm.complete_stage("MERGE")` writes `MERGE = completed` (Risk 1's verification task).
 - Record everything as the red-state paper trail for the PR body.
+- **Do not measure `_lookup_pr`.** It is unchanged by this lane; its fixtures belong to #2869.
 
-### 2. Write the failing tests first (all three workstreams)
+### 2. Write the failing tests first (both workstreams)
 - **Task ID**: red-tests
 - **Depends On**: measure-baseline
-- **Validates**: tests/unit/test_sdlc_router_oscillation.py, tests/unit/test_sdlc_stage_query.py, tests/unit/test_sdlc_stage_marker.py, tests/unit/test_pipeline_complete_predicate.py, tests/integration/test_sdlc_next_skill_terminal.py (create)
+- **Validates**: tests/unit/test_sdlc_router_decision.py, tests/unit/test_sdlc_router_oscillation.py, tests/unit/test_sdlc_stage_query.py, tests/unit/test_sdlc_stage_marker.py, tests/unit/test_pipeline_complete_predicate.py, tests/integration/test_sdlc_next_skill_terminal.py (create)
 - **Informed By**: spike-1 (the eight-cell matrix is the test matrix), spike-4 (the live issue numbers are the fixtures)
 - **Assigned To**: `mutation-tester`
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Write every assertion from Success Criteria against **unmodified** source and watch each one fail. Paste the real failure output into the PR body.
-- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the xfail row, the two lint/format rows, and WS-B's slugless negative control). They are anti-criteria and controls; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table.
+- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the `_lookup_pr` byte-unchanged row, the xfail row, and the two lint/format rows). They are anti-criteria and hygiene checks; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table.
 - Every negative assertion must be paired with a positive one (`"error" not in result`) so a crash cannot go green — the #2826 discipline.
-- Assert lookup ordering by **call count on the legs**, never result equality.
+- **Assert the `gh issue view` argv, not just its result.** The round-3 blocker is a lookup that returns a confident wrong answer, so a result-shaped test cannot see it. Patch `subprocess.run`, capture `call_args`, and assert `--repo` is present.
+- Write **no** `_lookup_pr` tests. That surface is unchanged; its tests belong to #2869.
 
 ### 3. WS-A — terminal guard
 - **Task ID**: build-terminal-guard
@@ -1355,29 +1358,29 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Parallel**: true
 - **Open the guard body with `if not isinstance(stage_states, dict): return None`** before delegating. `evaluate_guards` has no try/except and `is_pipeline_complete` calls `.get` on its first argument. Return `None`, never `Blocked` — an unreadable ledger falls through to the table.
 - **Then gate on `(meta or {}).get("issue_state") != "CLOSED": return None`** (Risk 6). Exact-string, case-sensitive, positive evidence only. **Do not write the `== "OPEN"` form** — it terminates on an unresolvable state and reintroduces the permanent latch through a transient `gh` failure.
-- Add the `issue_state` key to `_compute_meta` (`tools/sdlc_stage_query.py:515`), resolved **only when `MERGE == "completed"`** so non-terminal ticks cost nothing, memoized once per invocation inside the existing `cached_target_repo_resolution()` scope, degrading to `None` on any failure rather than raising.
 - Then delegate to `agent.pipeline_complete.is_pipeline_complete(stage_states, "success", pr_open=None)`; ship the `merge_success` leg only.
 - Insert it **first in `GUARDS`, ahead of G1** (Resolved Question 1), with the rationale in the docstring.
 - Map the terminal `guard_id` to its JSON shape in `tools/sdlc_next_skill.py::decide()` — an additive `complete: true` key alongside `blocked` (Resolved Question 2).
 - **Update BOTH router-consumer skill bodies in this same commit** — `.claude/skills-global/do-sdlc/SKILL.md:136` **and** `.claude/skills/sdlc/SKILL.md:261` — so each exits reporting success on `complete: true` instead of escalating. They carry the identical `blocked` instruction; fixing one and not the other leaves the regression live on the other path. Neither is conditional on the parity test, which provably cannot hold either of them (`_GUARD_ROW_RE` is `^G\d+`).
-- **Re-key `tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable._unowned_state()`** — drop `"MERGE": "completed"`, change nothing else. Verified to keep both assertions passing. Do **not** flip either assertion to `"TERMINAL"`; that retires the #2767b sentinel guarantee.
+- **Re-key `tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable._unowned_state()`** (`:1692`) — drop `"MERGE": "completed"`, change nothing else. Verified to keep both assertions passing. Do **not** flip either assertion to `"TERMINAL"`; that retires the #2767b sentinel guarantee.
 - Do **not** modify row 5, row 8e, or row 10 — the guard pre-empts them and they stay correct for non-terminal ledgers.
 - Do **not** harden G1 against non-dict ledgers here; that fragility predates this lane and is out of scope.
 
-### 4. WS-B — lane-branch authority
-- **Task ID**: build-resolution-ladder
+### 4. WS-A — the `issue_state` meta key
+- **Task ID**: build-issue-state-key
 - **Depends On**: red-tests
-- **Validates**: tests/unit/test_sdlc_stage_query.py, tests/unit/test_lane_identity.py
-- **Informed By**: spike-4 (a bare reorder is a measured no-op; the suppression clause is the fix), Risk 2 as revised in round 2 (the unconditional form scores 0 gains / 1 loss on live data — do not build it)
-- **Assigned To**: `resolution-builder`
+- **Validates**: tests/unit/test_sdlc_stage_query.py
+- **Informed By**: Risk 6 (the gate the guard reads), round-3 blocker 1 (the scoping is a safety property)
+- **Assigned To**: `router-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `lane_branch_exists_on_remote(branch)` to `tools/lane_identity.py` — **not** to `tools/sdlc_stage_query.py`, and **do not** import `_check_branch_pushed` from `tools/sdlc_next_skill.py` (that module imports `sdlc_stage_query`, so the edge would be circular; verified there is no reverse edge from `lane_identity` today). Mirror `_check_branch_pushed`'s disposition: `git ls-remote --heads origin <branch>`, `False` on non-zero exit or timeout, never raises.
-- Gate head-ref authority on *slug recorded* **and** *branch exists on origin*. Never on *head-ref returned `None`* — `lane_branch_name(None)` returns `None`, so conflating "no slug" with "no PR on this branch" would suppress the fuzzy leg for every slugless lane.
-- Memoize the existence check so the two-pass lookup (`open` then `merged`) pays **one** `ls-remote`, not two.
-- **Do not build WS-D here.** Deterministic candidate ordering is deferred to [#2868](https://github.com/tomcounsell/ai/issues/2868); leave `_gh_pr_search_issue_ref`'s selection logic alone. Widening the `--json` field list is part of that deferred work, not this task.
-- **Do not fix the slug-adoption gap here** either — that is [#2869](https://github.com/tomcounsell/ai/issues/2869). WS-B is deliberately correct *despite* a minted-but-wrong slug, which is the whole point of the existence check.
-- Run Risk 2's counterexample check over the live slugged-ledger corpus and attach the classified diff. Two shapes block: a lost resolution whose PR head **is** `session/{slug}`, and a lost resolution where `session/{slug}` **does not exist** on origin. The expected-cost bucket has a **ceiling of 1** and measures **0** today.
+- Add the `issue_state` key to `_compute_meta` (`tools/sdlc_stage_query.py:515`), resolved **only when `MERGE == "completed"`** so non-terminal ticks cost nothing, once per invocation inside the existing `cached_target_repo_resolution()` scope, degrading to `None` on any failure rather than raising.
+- **Thread `--repo` into the argv**, built exactly like `_fetch_pr_merge_state` at `:192`:
+  `["gh","issue","view",str(issue_number), *(["--repo",resolved_repo] if resolved_repo else []), "--json","state","-q",".state"]`.
+  This is not tidiness. `gh` resolves `GH_REPO` from the environment **before** cwd, so a bare call can answer about a foreign repository's issue #N and **exit 0**; a foreign CLOSED issue then terminates a live lane through the very gate built to prevent that. The fail-soft-to-`None` contract does not cover it, because a wrong-repo lookup succeeds.
+- **Whitelist the parse**: `state = (proc.stdout or "").strip()`, then `issue_state = state if state in ("OPEN","CLOSED") else None`. The `!= "CLOSED"` polarity is fail-open only if a garbage value cannot be the literal `"CLOSED"`.
+- Do **not** persist it. A stored copy goes stale on reopen and reintroduces Risk 6 through the cache instead of the ledger.
+- Do **not** touch `_lookup_pr` or the two-pass block that sits beside this code. WS-B is #2869.
 
 ### 5. WS-C — review-probe scope
 - **Task ID**: build-marker-scope
@@ -1392,12 +1395,13 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 ### 6. Mutation proofs
 - **Task ID**: mutation-check
-- **Depends On**: build-terminal-guard, build-resolution-ladder, build-marker-scope
+- **Depends On**: build-terminal-guard, build-issue-state-key, build-marker-scope
 - **Assigned To**: `mutation-tester`
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Revert each of WS-A/B/C **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
-- Revert all three together and confirm the three original reported shapes return.
+- Revert each of WS-A and WS-C **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
+- Mutate the two halves of WS-A **separately**: the guard and the `issue_state` key. A test suite that reds only on the guard revert leaves the `--repo` scoping and the `{"OPEN","CLOSED"}` whitelist unpinned, which is exactly the round-3 blocker going unnoticed. Deleting `--repo` from the argv must red a named test on its own.
+- Revert both workstreams together and confirm the two original reported shapes return.
 - Produce the demonstrated-red table for the PR body.
 
 ### 7. Documentation
@@ -1407,16 +1411,17 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Every checkbox in the Documentation section.
-- The two docstring rewrites are the priority: both currently document the old behavior as deliberate, which is exactly what made these bugs look like features.
+- The docstring annotations are the priority: they currently document known gaps as deliberate design, which is exactly what made these bugs look like features. Both now point at the issue that owns them (#2868, #2869) rather than at a change in this diff.
 
-### 8. Post measured outcomes to all three issues
+### 8. Record the disposition on all three issues
 - **Task ID**: record-outcomes
 - **Depends On**: document-feature
 - **Assigned To**: `lane-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Comment the measured post-fix shape on #2817, #2824, and #2825 before any of them closes — #2826's explicit request, applied to all three.
-- For #2824, state plainly that #2494 and #2518 remain unfixed because they carry no recorded slug, and that the fix covers lanes that record one.
+- Comment the measured post-fix shape on **#2817** and **#2825** before either closes — #2826's explicit request.
+- **On #2824, post an honest deferral disposition, and do not close it.** The PR refs it rather than closing it, so the issue must explain itself or it goes quiet under a merged PR that mentions it. State: the mechanism (head-ref authority gated on the branch existing on origin) is designed and measured at 0 gains / 0 losses / 11 unchanged; it keys on a recorded lane slug; #2494 and #2518 carry none; the eleven slugged ledgers are all in-flight lanes, so the slugged and reopened populations are **disjoint**; and [#2869](https://github.com/tomcounsell/ai/issues/2869) carries both the mechanism and the slug-adoption gap that gives it a population. Link the plan's *Technical Approach → WS-B* section, which is the finished design #2869 inherits.
+- Confirm the PR body's closing refs read `Closes #2817`, `Closes #2825`, `Refs #2824` — a bare `#2824` mention closes nothing and records nothing.
 
 ### 9. Final validation
 - **Task ID**: validate-all
@@ -1425,8 +1430,9 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the entire Verification table.
-- Confirm `_gh_pr_search_issue_ref` is byte-unchanged in the merged diff — WS-D belongs to #2868 and must not have leaked in.
+- Confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff — WS-B belongs to #2869 and WS-D to #2868, and neither may have leaked in.
 - Confirm no `tools/` import and no I/O entered `agent/sdlc_router.py`.
+- Confirm the `gh issue view` argv in the merged diff carries `--repo`.
 
 ## Verification
 
@@ -1443,24 +1449,24 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 | Terminal verdict, `pr_number` present | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{'branch_exists':True}))"` | output contains `TERMINAL` and does not contain `/do-merge` |
 | **Risk 6 — a reopened (OPEN) issue is NOT latched** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'OPEN'},{'branch_exists':True}))"` | output does **not** contain `TERMINAL`. The single most important row in this table: a terminal ledger whose issue was reopened must route as it does today, not terminate forever. |
 | **Risk 6 — an unresolvable issue state fails open** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(all('TERMINAL' not in str(d(dict(s),m,{'branch_exists':True})) for m in [{},{'issue_state':None},{'issue_state':''},{'issue_state':'closed'},{'issue_state':42}]))"` | output contains `True`. Pins the `!= "CLOSED"` polarity: the `== "OPEN"` form would fail every case here. |
-| **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Measured 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. |
+| **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--repo','tomcounsell/ai','--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Re-measured **repo-scoped** 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. **The `--repo` flag is required**, not optional: without it `gh` resolves `GH_REPO` before cwd and the number describes an unknown repository. |
+| **Round-3 blocker — the `gh issue view` argv is repo-scoped** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q, subprocess; r=patch.object(q.subprocess,'run',wraps=subprocess.run).start(); q._compute_meta({k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}, None, 2711); argvs=[c.args[0] for c in r.call_args_list if isinstance(c.args[0],list) and c.args[0][:3]==['gh','issue','view']]; print(bool(argvs) and all('--repo' in a for a in argvs))"` | output contains `True`. **Red today** (the key does not exist yet). Asserts the **argv**, because a wrong-repo lookup *succeeds* and no result-shaped assertion can see it. |
+| **Round-3 blocker — `issue_state` is whitelisted to `{"OPEN","CLOSED"}`** | `./.venv/bin/python -c "from unittest.mock import patch,MagicMock; import tools.sdlc_stage_query as q; f=lambda o: patch.object(q.subprocess,'run',return_value=MagicMock(returncode=0,stdout=o)); print(all([q._compute_meta({'ISSUE':'completed','MERGE':'completed'},None,2711).get('issue_state') is None for o in ['','error: not found','MERGED','closed','Closed'] if f(o).start()]))"` | output contains `True` — every value outside `{"OPEN","CLOSED"}` becomes `None`, so the `!= "CLOSED"` polarity stays fail-open. **Red today** (the key does not exist yet). Prefer a real parametrized unit test over this one-liner; the row exists to state the bar, and the Test Impact entry owns the implementation. |
+for out in ['','error: not found','MERGED','closed','Closed']:
+    with patch.object(q.subprocess,'run',return_value=MagicMock(returncode=0,stdout=out)):
+        ok.append(q._compute_meta({k:'completed' for k in ['ISSUE','MERGE']}, None, 2711).get('issue_state') is None)
+print(all(ok))"` | output contains `True` — every value outside `{\"OPEN\", \"CLOSED\"}` becomes `None`. **Red today.** Written multi-line; run it from a file rather than `-c` if the shell fights the newlines. |
 | Negative control — non-terminal still routes to merge | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{'branch_exists':False}))"` | output contains `/do-merge` |
 | Terminal verdict, `PATCH` unsettled (ninth cell) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','MERGE']}; s['PATCH']='pending'; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{}))"` | output contains `TERMINAL` (red today: returns `/do-merge` row 10) |
 | Terminal guard survives a non-dict ledger | `./.venv/bin/python -c "from agent.sdlc_router import guard_terminal_pipeline as g; print(all(g(b,{},{}) is None for b in [None,'x',42,[]]))"` | output contains `True`. Asserts **the new guard alone**, not `evaluate_guards` — see the note under the table. |
 | Terminal reason does not give G4's wrong remedy | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; r=str(d(s,{'issue_state':'CLOSED'},{})); print('TERMINAL' in r and 'dispatch reset' not in r)"` | output contains `True` — **both legs**: `TERMINAL` present AND `dispatch reset` absent. Asserting only the absence passes vacuously today (`Blocked(NO_RULE)` contains neither), which is what the critique caught. |
-| **WS-B — authority asserted when the branch exists** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); l=patch.object(q,'_gh_pr_list',return_value=None).start(); patch.object(q,'lane_branch_exists_on_remote',return_value=True).start(); q._lookup_pr(2739, slug='sdlc-2739', repo='tomcounsell/ai'); print(f'fuzzy={f.call_count} head={l.call_count}')"` | output contains `fuzzy=0 head=1` |
-| **WS-B — authority declined when the branch does NOT exist (round-2 blocker fix)** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); patch.object(q,'lane_branch_exists_on_remote',return_value=False).start(); q._lookup_pr(2694, slug='sdlc-2694', repo='tomcounsell/ai'); print(f'fuzzy={f.call_count}')"` | output contains `fuzzy=1`. The row that pins the fix: without it, `sdlc-2694` (a slug naming a branch that does not exist) suppresses the fuzzy leg and loses PR 2695. |
-| **WS-B — the measured live regression is gone** | `./.venv/bin/python -c "import tools.sdlc_stage_query as q; print(q._lookup_pr(2694, slug='sdlc-2694', repo='tomcounsell/ai', state='merged'))"` | output contains `2695`. **Red today under the round-1 shape** (returns `None`); green under the existence-checked shape and green on unmodified `main`. |
-| **WS-B — one existence check per two-pass lookup** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; e=patch.object(q,'lane_branch_exists_on_remote',return_value=True).start(); patch.object(q,'_gh_pr_list',return_value=None).start(); q._compute_meta({'MERGE':'pending'}, None, 2739); print(f'ls_remote_calls={e.call_count}')"` | output contains `ls_remote_calls=1` (not 2) |
-| **WS-B — no live resolution is lost across the slugged corpus** | Re-run Risk 2's classified ladder diff over every `PipelineLedger` with a recorded slug | `GAINS=0 LOSSES=0 SAME=11` (measured 2026-08-19). Any LOSS blocks; see Risk 2 for the two blocking shapes and the ceiling-1 expected-cost bucket. |
 | `issue_state` resolved only on a terminal ledger | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; import subprocess; c=patch.object(subprocess,'run',wraps=subprocess.run).start(); m=q._compute_meta({'MERGE':'pending'}, None, 2739); print('issue_state' in m and m.get('issue_state') is not None)"` | output contains `False` — a non-terminal ledger pays no `gh issue view`. |
 | #2825 fail-open closed (1785) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(1785,'tomcounsell/ai'))"` | output contains `False` |
 | #2825 fail-open closed (2073) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(2073,'tomcounsell/ai'))"` | output contains `False` |
 | #2539 control preserved (5 live issues) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(all(m._review_artifact_posted(n,'tomcounsell/ai') for n in [2860,2831,2716,2734,2741]))"` | output contains `True` |
+| **Anti-criterion — PR resolution is byte-unchanged** | `git diff main -- tools/sdlc_stage_query.py \| grep -E '^[-+]' \| grep -nE '_lookup_pr\|_gh_pr_search_issue_ref\|lane_branch'` | no output. **GREEN TODAY (scope-leak check).** WS-B is #2869 and WS-D is #2868; the only permitted change in this file is the `issue_state` key inside `_compute_meta`. Counts as coverage for no workstream. |
 | Anti-criterion — no `tools/` import in the router | `grep -c '^from tools\|^import tools\|from tools\.' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Proves nothing about any workstream; counts as coverage for none of them in Risk 5's mutation table. |
 | Anti-criterion — no I/O in the router (No-Go: DOCS-terminal leg) | `grep -cE 'subprocess\.\|requests\.\|urllib' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Same disposition. |
-| WS-B — recorded slug never calls the fuzzy leg | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); l=patch.object(q,'_gh_pr_list',return_value=None).start(); q._lookup_pr(2494, slug='sdlc-2494', repo='tomcounsell/ai'); print(f'fuzzy_calls={f.call_count} head_calls={l.call_count}')"` | output contains `fuzzy_calls=0 head_calls=1`. **Verified red today**: returns `fuzzy_calls=1 head_calls=1`. |
-| WS-B — no recorded slug still calls the fuzzy leg | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); q._lookup_pr(2494, slug=None, repo='tomcounsell/ai'); print(f'fuzzy_calls={f.call_count}')"` | output contains `fuzzy_calls=1`. **GREEN TODAY by design** (verified): WS-B's negative control, whose job is to *stay* green. Counts as coverage for no workstream in the mutation table. |
 | Anti-criterion — `state="all"` gone from the **call site** | `grep -c 'state="all")' tools/sdlc_stage_marker.py` | match count == 0. Scoped to the call so it cannot match prose: today this returns **1** (the call at `:263`), while the unscoped `grep -c 'state="all"'` returns **2** because the rationale comment at `:259` literally opens `# state="all": ...`. The unscoped form is unsatisfiable alongside the Documentation task that keeps that comment. |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1. **GREEN TODAY (regression anti-criterion).** Counts as coverage for no workstream. |
 | Lint clean | `python -m ruff check .` | exit code 0. **GREEN TODAY (hygiene row).** Not workstream coverage. |
