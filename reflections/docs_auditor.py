@@ -842,20 +842,65 @@ def _apply_fixes_to_file(
 
 
 # Path components that are obvious illustrative stand-ins, not real module names.
+# `filename`/`path`/`name` are the link-specific stand-ins the `.md` branch
+# surfaces (spike-6); `_is_placeholder_path` is shared by both branches.
 _PLACEHOLDER_PATH_COMPONENTS = frozenset(
-    {"foo", "bar", "baz", "qux", "quux", "example", "your-module", "mymodule", "sample"}
+    {
+        "foo",
+        "bar",
+        "baz",
+        "qux",
+        "quux",
+        "example",
+        "your-module",
+        "mymodule",
+        "sample",
+        "filename",
+        "path",
+        "name",
+    }
 )
 
-# Heading keywords whose presence means the doc is deliberately recording a deletion.
-_DELETION_HEADING_KEYWORDS = ("migration", "removed", "deleted", "deprecated")
+# Heading-keyword stems whose presence means the doc is deliberately recording a
+# deletion. Stems, not exact inflections, so "## Dead SDK Path Deletion" and
+# "## Hook Cleanup" both match without listing every inflected form.
+_DELETION_HEADING_KEYWORDS = ("delet", "remov", "deprecat", "migrat", "cleanup", "obsolete", "retire")
 
-# Prose cues that a nearby line is documenting a deletion rather than a live reference.
-_DELETION_PROSE_CUES = (
-    "deleted module",
-    "no longer in the codebase",
-    "no longer exists",
-    "previously in",
+# Word-anchored prose cues that a nearby line is documenting a deletion rather
+# than a live reference. Individual words/short phrases, not full sentences —
+# real corpus prose reads "deleted (250 lines)" or "no longer needed", not the
+# single fixed phrase "deleted module". Compiled once, in the shape of
+# `_MIGRATION_CUE_WORD_RE`, so a bare substring test cannot fire inside an
+# unrelated longer word.
+_DELETION_PROSE_CUE_WORDS = (
+    "deleted",
+    "removed",
+    "no longer",
+    "previously",
     "formerly",
+    "deprecated",
+)
+_DELETION_PROSE_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _DELETION_PROSE_CUE_WORDS) + r")\b"
+)
+
+# Word-anchored cues that a match's own line is a *live* claim, not a deletion
+# record — cancels the deletion-narrative suppression when present. Keyword-only
+# and evaluated only when the caller opts in via `live_claim_veto=True` (see
+# `_is_documented_deletion`): the detector's cost for a wrong suppression is a
+# missed report, while the write path's cost for a wrong un-suppression is an
+# unreviewed rewrite of narrative prose, so only the detector opts in.
+_LIVE_CLAIM_VETO_WORDS = (
+    "remain",
+    "remains",
+    "still",
+    "defined in",
+    "lives in",
+    "currently",
+    "implemented in",
+)
+_LIVE_CLAIM_VETO_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _LIVE_CLAIM_VETO_WORDS) + r")\b"
 )
 
 
@@ -865,16 +910,19 @@ def _is_placeholder_path(path: str) -> bool:
     A path is a placeholder when any of its components is a well-known stand-in
     (``foo``, ``bar``, ``example`` ...) or a single lowercase letter directory.
     Empty or single-segment paths return False (the detector regex guarantees a
-    ``dir/file.py`` shape, so this only guards malformed/odd input).
+    ``dir/file.{py,md}`` shape, so this only guards malformed/odd input).
     """
     if not path or "/" not in path:
         return False
     components = path.split("/")
     for i, component in enumerate(components):
-        # For the final component, compare the file stem (strip the .py suffix)
-        # so ``agent/docs_handler/foo.py`` is caught on its ``foo`` stem.
+        # For the final component, compare the file stem (strip a .py or .md
+        # suffix) so ``agent/docs_handler/foo.py`` is caught on its ``foo``
+        # stem, and so is ``docs/features/name.md``.
         is_last = i == len(components) - 1
-        candidate = component[:-3] if is_last and component.endswith(".py") else component
+        candidate = component
+        if is_last and (candidate.endswith(".py") or candidate.endswith(".md")):
+            candidate = candidate[:-3]
         lowered = candidate.lower()
         if lowered in _PLACEHOLDER_PATH_COMPONENTS:
             return True
@@ -917,42 +965,157 @@ def _build_line_context(content: str) -> tuple[list[bool], list[str]]:
 
 
 def _is_documented_deletion(
-    line_idx: int, lines: list[str], in_fence: list[bool], heading_for_line: list[str]
+    line_idx: int,
+    lines: list[str],
+    in_fence: list[bool],
+    heading_for_line: list[str],
+    *,
+    live_claim_veto: bool = False,
 ) -> bool:
     """Return True if a match at ``line_idx`` is an illustrative or documented deletion.
 
-    Three conservative cues (any one suppresses the finding):
-    1. The match falls inside a fenced code block (illustrative example).
-    2. The nearest preceding heading names a deletion (migration/removed/
-       deleted/deprecated).
-    3. The match's line or an immediately adjacent line carries a deletion-prose
-       cue ("deleted module", "no longer exists", ...).
+    Three conservative cues (any one suppresses the finding), evaluated in
+    order:
+    1. The match falls inside a fenced code block (illustrative example) —
+       always wins; a fenced block is illustrative no matter what it says.
+    2. The nearest preceding heading names a deletion, matched on a stem
+       (``delet``, ``remov``, ``deprecat``, ``migrat``, ``cleanup``,
+       ``obsolete``, ``retire``) rather than an exact inflection.
+    3. The match's line or a line within 2 lines carries a word-anchored
+       deletion-prose cue (``deleted``, ``removed``, ``no longer``, ...).
+
+    ``live_claim_veto`` (keyword-only, default ``False``) cancels tiers 2 and 3
+    when the match's own line carries a live-claim cue (``remains``, ``still``,
+    ``defined in``, ...) — evaluated **after** the fence tier (a fenced block
+    stays illustrative regardless) and **before** the heading/prose tiers, so
+    a line like *"`fail_stage()` remains defined in `agent/hooks/gone.py`"*
+    under a ``## Migration`` heading is still reported. Off by default and
+    opt-in only from ``_detect_deleted_target_issues`` — see that function and
+    ``_make_stale_term_replacer``, which never sets it, for why: this
+    predicate's ``True`` means "suppress" at both call sites, but suppression
+    costs differently on each. Widening what the *detector* suppresses costs a
+    missed report; widening what the *write path* suppresses costs an
+    auditor-authored rewrite of narrative prose on every PR — the exact
+    behavior #2739 exists to gate.
 
     Inline single-backtick code is NOT suppressed — that is how genuine
     references are written.
     """
     if line_idx < len(in_fence) and in_fence[line_idx]:
         return True
+    if live_claim_veto and line_idx < len(lines) and _LIVE_CLAIM_VETO_RE.search(lines[line_idx].lower()):
+        return False
     if line_idx < len(heading_for_line):
         heading = heading_for_line[line_idx]
         if any(kw in heading for kw in _DELETION_HEADING_KEYWORDS):
             return True
-    for adj in (line_idx - 1, line_idx, line_idx + 1):
+    for adj in (line_idx - 2, line_idx - 1, line_idx, line_idx + 1, line_idx + 2):
         if 0 <= adj < len(lines):
-            lowered = lines[adj].lower()
-            if any(cue in lowered for cue in _DELETION_PROSE_CUES):
+            if _DELETION_PROSE_CUE_RE.search(lines[adj].lower()):
                 return True
     return False
+
+
+# Markdown link syntax: `[label](target)`. Anchor/query stripping and scheme
+# detection happen after the match, in `_resolve_md_link_target`.
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def _in_md_link_scope(doc_path: Path) -> bool:
+    """Whether ``doc_path`` is in scope for the ``.md`` broken-link branch.
+
+    Scope is ``docs/`` minus ``docs/plans/completed/`` and ``docs/plans/done/``
+    — archived plans deliberately record history and are not a live surface a
+    human reviews for broken links. Everything outside ``docs/`` (including
+    ``.claude/``) is out of scope for this branch; the ``.py`` branch has no
+    such restriction because it runs over whatever neighborhood the caller
+    already resolved.
+    """
+    parts = doc_path.parts
+    if not parts or parts[0] != "docs":
+        return False
+    if len(parts) >= 3 and parts[1] == "plans" and parts[2] in ("completed", "done"):
+        return False
+    return True
+
+
+def _resolve_md_link_target(raw_target: str, doc_path: Path, repo_root: Path) -> Path | None:
+    """Resolve a markdown link target to a repo-relative ``Path``, or ``None``.
+
+    Anchors and queries are stripped before resolution — ``./gone.md#section``
+    resolves as ``gone.md``, so the title (and dedup key) stay stable regardless
+    of which section a link points at. Resolution is **doc-relative**: a
+    leading ``/`` resolves against the repo root, everything else resolves
+    against the containing document's own directory — the frame markdown
+    renderers actually use (the #2725 / #2741 regression this branch exists to
+    keep fixed). Returns ``None`` for a non-``.md`` target, or one that
+    normalizes outside the repo root.
+    """
+    target = raw_target.split("#", 1)[0].split("?", 1)[0].strip()
+    if not target or not target.endswith(".md"):
+        return None
+    root = repo_root.resolve()
+    if target.startswith("/"):
+        candidate = (root / target.lstrip("/")).resolve()
+    else:
+        candidate = (root / doc_path.parent / target).resolve()
+    try:
+        return candidate.relative_to(root)
+    except ValueError:
+        return None
+
+
+def _match_inside_code_span(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` lies wholly inside an inline `` `code span` ``.
+
+    Scanning is confined to the match's own line, mirroring
+    ``_match_inside_path_token``. A markdown link inside a code span is a
+    literal illustration of syntax, not a live reference — the deliberate
+    asymmetry with the ``.py`` branch, which requires backticks to be a
+    reference at all.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    rel_start, rel_end = start - line_start, end - line_start
+    return any(
+        bm.start() <= rel_start and rel_end <= bm.end() for bm in re.finditer(r"`[^`]*`", line)
+    )
 
 
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
     """File issues for references to deleted targets.
 
-    Suppresses four classes of false positive before emitting a finding:
-    placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
-    code blocks, paths under a deletion-recording heading or deletion prose, and
-    package-relative paths that resolve by component-anchored suffix (#2936).
-    Every suppressed match is logged at DEBUG so operators can audit the filter.
+    Two reference shapes, sharing one deletion-narrative hatch
+    (``_is_documented_deletion``):
+
+    * Backticked ``.py`` paths, e.g. `` `agent/gone.py` `` — repo-wide, no
+      scope restriction beyond what the caller's neighborhood resolved.
+      Suppresses a fourth class beyond the two shared below: package-relative
+      paths that resolve by component-anchored suffix (#2936).
+    * Markdown-link ``.md`` targets, e.g. ``[label](gone.md)`` — scoped to
+      ``docs/`` minus ``docs/plans/completed/`` and ``docs/plans/done/`` (see
+      ``_in_md_link_scope``). Resolved **doc-relative**, not repo-root-relative
+      (the #2725 / #2741 frame rule): a target that exists at the repo root but
+      not doc-relative is still reported. A markdown link inside a code span is
+      not a reference — the deliberate asymmetry with the ``.py`` branch, which
+      requires backticks to *be* one.
+
+    Both branches suppress the same two classes of false positive:
+    placeholder/example paths and matches inside fenced illustrative code
+    blocks, plus matches under a deletion-recording heading or deletion prose
+    — the latter via ``_is_documented_deletion(..., live_claim_veto=True)``,
+    the only caller that passes the veto (it is a detector, never the write
+    path). Every suppressed match is logged at DEBUG so operators can audit
+    the filter.
+
+    The ``.md`` branch only ever *reports* a broken link; it never rewrites
+    the doc, and no auto-repairing replacement is coming back — an auditor
+    deleting lines from a human's index file on its own judgment is exactly
+    the unreviewed-write class #2739 exists to gate.
     """
     findings: list[dict] = []
     lines = content.splitlines()
@@ -973,7 +1136,7 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             )
             continue
         line_idx = content.count("\n", 0, m.start())
-        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line, live_claim_veto=True):
             logger.debug(
                 "docs_auditor: suppressed deleted-target finding for %s in %s "
                 "(fenced block or documented deletion)",
@@ -1005,6 +1168,46 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
                 "category": "deleted-target",
             }
         )
+
+    if _in_md_link_scope(doc_path):
+        for m in _MD_LINK_RE.finditer(content):
+            raw_target = m.group(1).strip()
+            if not raw_target or raw_target.startswith("#") or _URI_SCHEME_RE.match(raw_target):
+                continue
+            if _match_inside_code_span(content, m.start(), m.end()):
+                continue
+            rel = _resolve_md_link_target(raw_target, doc_path, repo_root)
+            if rel is None:
+                continue
+            rel_str = str(rel)
+            if _is_placeholder_path(rel_str):
+                logger.debug(
+                    "docs_auditor: suppressed broken-md-link finding for placeholder path %s in %s",
+                    rel_str,
+                    doc_path,
+                )
+                continue
+            line_idx = content.count("\n", 0, m.start())
+            if _is_documented_deletion(
+                line_idx, lines, in_fence, heading_for_line, live_claim_veto=True
+            ):
+                logger.debug(
+                    "docs_auditor: suppressed broken-md-link finding for %s in %s "
+                    "(fenced block or documented deletion)",
+                    rel_str,
+                    doc_path,
+                )
+                continue
+            if (repo_root / rel).exists():
+                continue
+            findings.append(
+                {
+                    "title": f"Doc references missing link target: {rel_str} (in {doc_path})",
+                    "body": f"`{doc_path}` links to `{rel_str}` which does not exist in the repo.",
+                    "category": "broken-md-link",
+                }
+            )
+
     return findings
 
 
