@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2748
 last_comment_id: 5280929435
 revision_applied: true
-revision_applied_at: 2026-08-19T05:52:15Z
+revision_applied_at: 2026-08-19T06:15:25Z
 ---
 
 # Doctor console-script check: verify the winning script's interpreter
@@ -417,10 +417,30 @@ three example names → **fix** names the rebuild
   failure impossible to report and leaves task 3 case 10 unreachable by construction.
   The required shape:
 
-  1. Inside the existing `for name in sorted(scripts):` loop at `:228-255`, on the
-     `match is not None` branch (the `elif` at `:254`), extract and classify the winning
-     path and append any non-`ok`, non-`unverified` result to a new
-     `interpreter_findings` list. Increment `verified` / `unverified` counters here too.
+  1. Inside the existing `for name in sorted(scripts):` loop at `:228-255`, extract and
+     classify the winning path on the branch where `match is not None`, appending any
+     non-`ok`, non-`unverified` result to a new `interpreter_findings` list and
+     incrementing `verified` / `unverified` counters.
+
+     **Anchor on the code shape, not the line number.** That branch is currently written
+     as a *conditional* `elif str(match) not in resolved_into:` — a first-sighting dedup
+     guard for the `resolved_into` list, whose body runs once per **distinct** venv bin
+     directory rather than once per script. `_repo_venv_bin_dirs()` returns exactly one
+     directory in the main checkout, so hanging the interpreter read off that `elif`
+     verbatim reads **1 of 26** shebangs and reports `1 of 26 interpreter-verified` while
+     25 unread scripts pass silently. Convert it to a plain `else:` and nest the dedup
+     inside:
+
+     ```python
+     else:
+         if str(match) not in resolved_into:
+             resolved_into.append(str(match))
+         # then: extract, classify, count — once per script
+     ```
+
+     Two green-under-the-bug traps make this worth stating explicitly: case 1
+     (`passed is True`) and case 9 ("finding line count below script count") both stay
+     green when only one script is read. Case 14 exists solely to catch it.
   2. Replace the `if misresolved:` guard at `:259` with
      `if misresolved or interpreter_findings:`.
   3. Inside that merged block, compute `path_note` and the PATH / `uv sync` fixes
@@ -434,8 +454,12 @@ three example names → **fix** names the rebuild
   byte), interpreter-only failure (a standalone message that does **not** borrow the
   `X/N ... do not resolve` phrasing, because they did resolve), and both at once.
 
-- **Extraction reads bounded bytes in binary mode.** Open the file, read at most the
-  first two lines with a per-line cap, and decode leniently. Binary mode matters:
+- **Extraction reads one bounded line in binary mode.** Open the file, read a single
+  length-capped first line, and decode leniently. One line, not two: every classification
+  rule below consumes line 1 alone, and the plan deliberately refuses to parse line 2 (the
+  `'''exec'` polyglot and the `dirname $0` form are declined, not parsed), so reading a
+  second line would invite a builder to infer it is meant to be inspected. Binary mode
+  matters:
   `.venv/bin` legitimately contains files that are not UTF-8 (14 on this machine), and
   a `UnicodeDecodeError` in a health check is a bug, not a finding. Sequence:
 
@@ -490,13 +514,23 @@ three example names → **fix** names the rebuild
   record that `/Users/tomcounsell/src/ai/.venv/bin/python3` realpaths to
   `~/.local/share/uv/python/cpython-3.14.6-macos-aarch64-none/bin/python3.14`. That path
   is real — the venv python **is** a symlink here. So
-  `Path(os.path.realpath(target)).parent` lands in uv's managed-download tree, which is
-  in no repo venv bin dir, and all 26 healthy scripts on this machine classify as
-  `outside`. Measured directly: `parent in venv_bins` is `True` while
-  `Path(os.path.realpath(target)).parent in venv_bins` is `False`. That is Risk 1's worst
-  case arriving on the primary path, on a correct machine. Realpath the *parent
-  directories* on both sides of the comparison and nothing else. Recorded as an
-  anti-criterion in the Verification table.
+  resolving the target first and taking that result's parent lands in uv's
+  managed-download tree, which is in no repo venv bin dir, and all 26 healthy scripts on
+  this machine classify as `outside`. Measured directly: the unresolved target's parent
+  is in `venv_bins`, while the parent of the *resolved* target is not. That is Risk 1's
+  worst case arriving on the primary path, on a correct machine. Compare the realpath of
+  the **parent directory** on both sides, and never realpath the interpreter path itself.
+
+  This rule is enforced by a **mutation check, not a source scan** (task 4): swap the
+  both-sides parent comparison for a resolve-the-target-first comparison and case 7 must
+  fail by name. An earlier draft carried a whole-file regex Verification row for it. That
+  row is deleted, because it was wrong in both directions — measured against
+  `re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', src)`: it matches the
+  prohibition written in *prose* (the very docstring sentence the Documentation section
+  asks for, so satisfying task 5 would fail a row advertised as exit-code-honest), and it
+  misses the two-step form `resolved = os.path.realpath(target)` followed by
+  `Path(resolved).parent`. Both measured directly. Phrase the docstring rule in words
+  rather than as a call expression, for the same reason.
 
 - **Fail open only where the evidence is genuinely absent, scope it narrowly, and
   disclose it.** An unresolvable `repo_interpreter_pin` disables the **off-pin
@@ -525,11 +559,43 @@ three example names → **fix** names the rebuild
   This mirrors the house rule from #2536 — runtime fails open on uncertainty, doctor
   fails loud — while refusing to let silence read as health.
 
-- **`off-pin` is kept, and its redundancy is stated rather than discovered later.**
-  Measured on this machine: `_repo_venv_bin_dirs()` returns exactly **one** directory
+- **`off-pin` fires live from a lane worktree, and that is accepted as a true positive.**
+  Measured now, with `PROJECT_DIR` pinned to `.worktrees/sdlc-2138` and PATH led by that
+  worktree's `.venv/bin`: `_repo_venv_bin_dirs()` returns **two** directories
+  (`.worktrees/sdlc-2138/.venv/bin`, then `/Users/tomcounsell/src/ai/.venv/bin`, because
+  `main_checkout_venv` walks the worktree's `.git` *file*); the check today returns
+  `passed=True` with `24 console scripts resolve into .../sdlc-2138/.venv/bin`; all 24
+  shims carry `#!/Users/tomcounsell/src/ai/.worktrees/sdlc-2138/.venv/bin/python`; and
+  `venv_python_version` of that venv is `3.13` against a `repo_interpreter_pin` of `3.14`.
+  Under this plan all 24 classify `off-pin` and the check flips red. Four worktrees on
+  this host are in that state today (`sdlc-2138`, `sdlc-2140`, `sdlc-2144`, `sdlc-2146`);
+  the other 15 are on 3.14 and stay green.
+
+  **Decision: accept the newly-red result. Do not scope `off-pin` to the venv
+  `PROJECT_DIR` owns.** Those four venvs really are off the pin. `_check_worktree_interpreters`
+  already reports them in the same run (`pin is Python 3.14 (from .python-version), 4
+  venv(s) are not: sdlc-2138 on 3.13, ...`), and `scripts/pytest-clean.sh` already aborts
+  on an off-pin venv, so doctor is red on this host before this change lands. A second
+  finding for the same condition is Risk 5's accepted redundancy arriving live, with the
+  same one-action remedy — not a false accusation. Suppressing a true positive to keep a
+  lane's doctor green would be the wrong trade for a check whose whole purpose is to
+  surface interpreter identity.
+
+  Two consequences the build must honor:
+
+  - **The classifier reads the version of the venv the shebang names**, via
+    `venv_python_version(parent.parent)` where `parent` is the shebang target's parent
+    directory — **never** `venv_bins[0]`. With a two-entry `venv_bins` those differ, and
+    reading index 0 would report the worktree's version for a main-venv shebang and vice
+    versa. Task 3 case 15 constructs a two-entry `venv_bins` specifically to pin this.
+  - **The live Verification rows run from `$AI_REPO_ROOT`, not the lane worktree** — see
+    the Verification preamble.
+
+  Everything below about redundancy still holds for the **main-checkout** topology, where
+  `_repo_venv_bin_dirs()` returns exactly **one** directory
   (`/Users/tomcounsell/src/ai/.venv/bin`), because `main_checkout_venv(PROJECT_DIR)`
-  resolves to the same venv and is deduped at `tools/doctor.py:125-134`. So in the
-  standard topology `off-pin` can only ever fire on a venv that
+  resolves to the same venv and is deduped at `tools/doctor.py:125-134`. There `off-pin`
+  can only ever fire on a venv that
   `_check_worktree_interpreters` already measures against the same pin from the same
   `pyvenv.cfg`, in the same base check list, under `--quick` too. It is red right now
   for an unrelated reason: `pin is Python 3.14 (from .python-version), 4 venv(s) are
@@ -583,9 +649,21 @@ three example names → **fix** names the rebuild
     the `X/N ... do not resolve` phrasing (they did resolve — that would be a lie).
   - *Pass path* (`tools/doctor.py:313-318`): the message **changes**, and it has to. It
     gains a trailing interpreter-verified count, so a run that verified nothing cannot
-    read as a clean bill of health. Today's measured pass message is
-    `26 console scripts resolve into /Users/tomcounsell/src/ai/.venv/bin`; the new shape
-    appends a clause, e.g. `..., 26 interpreter-verified`. This is safe against the suite
+    read as a clean bill of health.
+
+    **The clause is pinned, not left to the builder**, because cases 6, 12, and 14 all
+    assert against it. It is exactly `f", {verified} of {len(scripts)} interpreter-verified"`,
+    with `" (pin unresolvable; off-pin comparison skipped)"` appended when
+    `repo_interpreter_pin(PROJECT_DIR)` is `None`. The **ratio** form is load-bearing and
+    a bare count is not an acceptable substitute: `0 of 26 interpreter-verified` is what
+    makes an all-relocatable venv read as visibly degraded, and a bare `0 interpreter-verified`
+    loses its denominator on any message that does not carry the `N console scripts resolve
+    into ...` prefix. The clause names no path, so
+    `test_main_checkout_venv_accepted_from_a_worktree` survives it.
+
+    Today's measured pass message in the main checkout is
+    `26 console scripts resolve into /Users/tomcounsell/src/ai/.venv/bin`; the new shape is
+    that string plus `, 26 of 26 interpreter-verified`. This is safe against the suite
     because the three `passed is True` tests assert substrings, never equality:
     `test_passes_when_venv_bin_leads_path` asserts `"3 console scripts" in result.message`
     and `str(root / ".venv" / "bin") in result.message`;
@@ -609,6 +687,26 @@ three example names → **fix** names the rebuild
   Task 3 case 11 therefore asserts that the three **diagnostic prefixes** differ (the
   text up to the `In {checkout}:` clause), not that the commands differ. Asserting the
   commands differ would be asserting the opposite of Risk 5's mitigation.
+
+  **Plus one conditional trailer for the hardlink case, because the rebuild only half-fixes
+  it.** A script accepted through the `_same_file` branch is a hardlink *of the venv copy* —
+  same inode, therefore the same shebang. So when it is flagged, the venv copy is stale too,
+  and `rm -rf .venv && uv sync --all-extras` is a correct instruction as far as it goes. But
+  the rebuild writes a **new inode** at `.venv/bin/{name}`; the on-PATH hardlinked copy keeps
+  the old inode and the old shebang, still wins `shutil.which`, and `_same_file` is now
+  `False` — so the very next doctor run reports the same name as a *resolution* failure with
+  PATH advice, having converted one finding shape into another. That is precisely the
+  root-cause pattern this plan's own "Why Previous Fixes Failed" section names.
+
+  Detect it with the predicate the resolution step already computed —
+  `found_path.parent not in venv_bins and _same_file(found_path, match / name)` — and append
+  to whichever of the three sentences applies:
+
+  `Also remove the stale hardlinked copy at {found_path}, which survives the rebuild with the old shebang.`
+
+  The shared `rm -rf .venv && uv sync --all-extras` command is unchanged, so Risk 5's
+  one-action mitigation still holds; only the diagnosis grows. Task 3 case 5 asserts this
+  trailer is present and that `/update` is still absent.
 
   An earlier draft added a fourth sentence naming `/update` for scripts accepted via the
   `_same_file` branch, on the premise that `/update` hardlinks entry points into
@@ -816,6 +914,17 @@ to `_check_worktree_interpreters`'s glob at `:496-498` while visible to
 `_repo_venv_bin_dirs()`. See the `off-pin` bullet in Technical Approach for the measured
 basis and for what this plan explicitly does *not* fix.
 
+**The redundancy arrives live on this host, and that is accepted.** Measured: running from
+`.worktrees/sdlc-2138`, all 24 declared scripts carry a shebang into that worktree's 3.13
+venv against a 3.14 pin, so the check flips from green to red there once `off-pin` ships.
+Four worktrees are in that state (`sdlc-2138`, `sdlc-2140`, `sdlc-2144`, `sdlc-2146`); 15
+others are on 3.14 and stay green. This is a true positive on a venv
+`_check_worktree_interpreters` already names in the same run, and `scripts/pytest-clean.sh`
+already refuses to run there — doctor is red on this host today for the same reason. The
+plan does **not** suppress it. The only accommodation is procedural: the live Verification
+rows are pinned to `$AI_REPO_ROOT` so a drifted lane venv does not read as a defect in the
+change.
+
 ## Race Conditions
 
 **Race 1: doctor reads a shebang while `uv sync` is rewriting the script**
@@ -919,8 +1028,10 @@ new finding inside an existing check that the agent already knows how to run and
       an oversight.
 - [ ] Docstring the classifier with the existence-before-pin ordering and *why*
       (spike-3: a retired interpreter still reports a healthy `version_info`), and with
-      the rule that the interpreter target is never realpath-ed before classification —
-      only the parent directories are, on both sides of the comparison.
+      the membership rule phrased **in words, not as a call expression**: "compare the
+      realpath of the parent directory on both sides; never realpath the interpreter path
+      itself." Also state that the version comes from the venv the shebang names, not
+      from the first entry of `venv_bins`, which has two entries under a worktree.
 - [ ] Correct `_same_file`'s docstring at `tools/doctor.py:141-143` and
       `test_hardlinked_copy_outside_the_venv_is_accepted`'s at
       `tests/unit/test_doctor_console_scripts.py:95`. Both assert that `/update`
@@ -937,8 +1048,9 @@ new finding inside an existing check that the agent already knows how to run and
       the target and the two versions.
 - [ ] A shim inside a repo venv bin dir whose shebang names an interpreter outside every
       repo venv fails the check, and the message says so.
-- [ ] A hardlinked copy accepted via `_same_file` whose shebang is stale is flagged, and
-      its fix prescribes the venv rebuild and does not mention `/update`.
+- [ ] A hardlinked copy accepted via `_same_file` whose shebang is stale is flagged; its
+      fix prescribes the venv rebuild, does not mention `/update`, and additionally names
+      the hardlinked path as something the rebuild will not clear.
 - [ ] Each of the three failure reasons emits a distinct fix sentence.
 - [ ] Findings sharing one `(reason, target)` report as a single line with a count and
       capped example names, not one line per script.
@@ -955,8 +1067,16 @@ new finding inside an existing check that the agent already knows how to run and
 - [ ] The two helpers are named `_shebang_interpreter` and `_classify_interpreter`, and
       the three token anti-criteria scan the union of their bodies with
       `_check_console_scripts_resolve`'s.
-- [ ] The pass message discloses how many scripts were interpreter-verified, so an
-      all-unverified run does not read as verified.
+- [ ] **Every resolved script's shebang is read, not one per venv bin directory.** With
+      all 26 declared scripts healthy in the main checkout the pass message reads
+      `26 of 26 interpreter-verified`; `1 of 26` means the read was hung off the
+      `elif str(match) not in resolved_into:` dedup guard and 25 scripts went unread.
+- [ ] Under a two-entry `venv_bins` (doctor running from a worktree), a shebang naming the
+      main venv is version-checked against the main venv and a shebang naming the worktree
+      venv against the worktree venv — never both against `venv_bins[0]`.
+- [ ] The pass message discloses how many scripts were interpreter-verified **as a ratio**
+      (`{verified} of {total} interpreter-verified`), so an all-unverified run does not
+      read as verified and the count never loses its denominator.
 - [ ] On the **failure** path, the existing resolution clause, `path_note`, and PATH /
       `uv sync` fixes are byte-identical to today's; the interpreter clause and remedy
       are appended.
@@ -1010,11 +1130,30 @@ new finding inside an existing check that the agent already knows how to run and
 - Parameterize the fixture so a test can request an off-pin `version_info`, a broken
   `bin/python3` symlink, or a custom shebang body — the new matrix needs all three.
 - Leave `_stale_shim_dir` alone; its shims fail resolution and never reach the read.
-- Gate on a self-measured count, not a remembered literal: run
-  `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q` and confirm it
-  reports `18 passed` **before** any production change, so a later failure is
-  attributable. If the collected count is not 18, reconcile the plan against the file
-  before proceeding rather than assuming the plan is right.
+- **Two named baseline runs, not one.** Risk 2 is that the fixture upgrade masks the new
+  guard; a single "before any production change" run is ambiguous about whether it precedes
+  or follows the fixture edit, and the first reading proves nothing at all. Both runs use
+  `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q`:
+
+  1. **Run 1A — pristine `main`, nothing edited.** Record the *collected count* this run
+     reports. The plan says 18 (measured: `grep -c "    def test_" tests/unit/test_doctor_console_scripts.py`
+     is 18 on main), but gate on the self-measured number. If it is not 18, reconcile the
+     plan against the file before proceeding rather than assuming the plan is right.
+  2. **Run 1B — fixture edited, `tools/doctor.py` still identical to `main`.** Confirm
+     `git diff main -- tools/doctor.py` is empty, then re-run and confirm the same count
+     still passes. Only after 1B is green does task 2 start.
+
+  Without 1B, a fixture rewrite that changes *resolution* behavior — a new
+  `.venv/bin/python3` file, a fixture-root `.python-version` that `repo_interpreter_pin`
+  now finds, shims no longer bodied `#!/bin/sh` — is indistinguishable from a task 2
+  regression, and the natural repair is to edit an assertion.
+- The two tests most likely to move between 1A and 1B, to be named explicitly in the run
+  report: `test_a_shadowed_name_still_reads_as_shadowed` (asserts `"uv sync" not in result.fix`,
+  so any spurious remedy breaks it) and
+  `test_fix_signals_omission_when_more_than_five_names_are_not_installed`
+  (`tests/unit/test_doctor_console_scripts.py:270` calls `_fake_checkout(tmp_path, names=())`,
+  so the upgraded fixture must still create `.venv/bin/python3` and `pyvenv.cfg` when there
+  are **zero** shims — the venv scaffolding cannot be built inside the per-name loop).
 
 ### 2. Implement the interpreter read inside the console-script check
 
@@ -1044,13 +1183,25 @@ new finding inside an existing check that the agent already knows how to run and
   `off-pin` / `outside`, ordered existence → venv membership → pin, reusing
   `_repo_venv_bin_dirs()`, `venv_python_version`, and `repo_interpreter_pin`. Compare
   membership by realpathing **both sides of the parent directory** (mirroring
-  `tools/doctor.py:242-243`); never compute `Path(os.path.realpath(target)).parent`.
+  `tools/doctor.py:242-243`); never realpath the interpreter path itself.
+- **Read the version of the venv the shebang actually names**: `venv_python_version(parent.parent)`
+  where `parent` is the matched parent directory — never `venv_bins[0]`. `venv_bins` has
+  **two** entries whenever doctor runs from a worktree (measured: from
+  `.worktrees/sdlc-2138` it is `[sdlc-2138/.venv/bin, main/.venv/bin]`), and indexing 0
+  would report the worktree's version for a main-venv shebang and the reverse. Task 3
+  case 15 pins this.
 - Call both **inside the existing resolution loop** at `tools/doctor.py:228-255`, on the
-  `match is not None` branch (the `elif` at `:254`), appending to an
-  `interpreter_findings` list and incrementing verified / unverified counters. Do **not**
-  add the read after the `if misresolved:` early return at `:300-310` — that placement
-  makes a simultaneous resolution + interpreter failure unreportable and leaves task 3
-  case 10 unreachable. See the control-flow bullet in Technical Approach.
+  branch where `match is not None`, appending to an `interpreter_findings` list and
+  incrementing verified / unverified counters. **That branch is today a conditional
+  `elif str(match) not in resolved_into:` — a per-venv-bin-dir dedup guard, not a
+  per-script branch.** Convert it to a plain `else:` with the dedup nested inside, so the
+  interpreter read runs once per script rather than once per distinct bin dir. Hanging
+  the read off the `elif` as written reads 1 of 26 shebangs in the main checkout and
+  reports `1 of 26 interpreter-verified` while 25 scripts pass unread. See the
+  control-flow bullet in Technical Approach for the exact shape.
+- Do **not** add the read after the `if misresolved:` early return at `:300-310` — that
+  placement makes a simultaneous resolution + interpreter failure unreportable and leaves
+  task 3 case 10 unreachable.
 - Widen the tail guard at `:259` from `if misresolved:` to
   `if misresolved or interpreter_findings:`, and inside it compute `path_note` and the
   PATH / `uv sync` fixes only when `misresolved` is non-empty, and the interpreter clause
@@ -1067,9 +1218,14 @@ new finding inside an existing check that the agent already knows how to run and
   the pass and the failure path. The comparison is skipped in the classifier; the
   disclosure lives in the message construction.
 - Add no `/update` sentence: `/update` hardlinks no `[project.scripts]` name (see the
-  remediation bullet in Technical Approach).
-- Extend the pass message with the interpreter-verified count, keeping today's
-  `N console scripts resolve into <venv bin>` prefix verbatim ahead of it.
+  remediation bullet in Technical Approach). Do append the hardlink trailer
+  (`Also remove the stale hardlinked copy at {found_path}, ...`) when the finding's script
+  was accepted via `_same_file`, since the rebuild alone leaves that copy winning PATH with
+  the old shebang.
+- Extend the pass message with the pinned clause
+  `f", {verified} of {len(scripts)} interpreter-verified"`, keeping today's
+  `N console scripts resolve into <venv bin>` prefix verbatim ahead of it. The ratio form
+  is required; a bare count is not an acceptable substitute (see the composition bullet).
 - Update the `:173-177` docstring to state the new two-part contract; docstring both
   helpers per the Documentation section.
 - Add no subprocess call and no filesystem write.
@@ -1092,13 +1248,19 @@ new finding inside an existing check that the agent already knows how to run and
 - Case 4 — outside: shebang points at `/usr/bin/python3` → fails as outside.
 - Case 5 — hardlink: a hardlinked copy outside the venv (built with `os.link`, as
   #2665's `test_hardlinked_copy_outside_the_venv_is_accepted` does) whose shebang is
-  stale → flagged with the rebuild remedy, and `fix` does **not** contain `/update`.
+  stale → flagged with the rebuild remedy, `fix` does **not** contain `/update`, **and**
+  `fix` carries the trailer naming the hardlinked path
+  (`Also remove the stale hardlinked copy at ...`). The trailer is the assertion that
+  stops the remedy from half-fixing the state and converting it into a resolution failure
+  on the next run.
 - Case 6 — unclassified forms, parameterized over all four: `#!/bin/sh` + `'''exec'`
   polyglot, the relocatable `dirname $0` variant, `#!/usr/bin/env python3`, and a
   shebang-less binary. Each → no finding, `passed is True`, and the pass message's
-  verified count **excludes** it. This is the false-accusation guard for every form the
-  extractor declines to classify, and asserting on the count is what stops "no finding"
-  from being satisfied by a check that silently claims verification.
+  verified count **excludes** it — asserted as the exact substring, e.g.
+  `"3 of 4 interpreter-verified" in result.message`, not an unspecified "count". This is
+  the false-accusation guard for every form the extractor declines to classify, and
+  asserting the exact ratio is what stops "no finding" from being satisfied by a check
+  that silently claims verification.
 - Case 7 — realpath guard: the fixture's `.venv/bin/python3` is a **symlink** to a base
   interpreter outside every repo venv (the live shape — `.venv/bin/python3` here
   realpaths into `~/.local/share/uv/python/...`), and the shims point at that symlink →
@@ -1120,13 +1282,35 @@ new finding inside an existing check that the agent already knows how to run and
   clauses** (the text preceding `In {checkout}:`), while all three share the
   `rm -rf .venv && uv sync --all-extras` command. Assert the three prefixes are pairwise
   unequal *and* that all three carry the shared command — asserting the commands differ
-  would contradict Risk 5's mitigation.
+  would contradict Risk 5's mitigation. The hardlink trailer is orthogonal: it is a
+  conditional suffix on whichever reason fired, not a fourth reason, so it does not enter
+  the pairwise comparison.
 - Case 12 — pass-message contract: the pass message still starts with today's
   `N console scripts resolve into <venv bin>` text and names no venv path in the
-  appended clause (guards `test_main_checkout_venv_accepted_from_a_worktree`).
+  appended clause (guards `test_main_checkout_venv_accepted_from_a_worktree`). Assert the
+  exact pinned shape, e.g. `result.message.endswith("3 of 3 interpreter-verified")`.
 - Case 13 — degenerate inputs: zero-byte file, bare `#!`, a `#!` line with only
   whitespace, and a shebang with trailing flags (`#!/path/python -E -s` → `/path/python`)
   → no crash, correct unverified/extracted result.
+- **Case 14 — every resolved script is read, not just the first.** The control-flow guard,
+  and the reason the blocker above exists. Build the default 3-shim fixture, all healthy,
+  and assert the pass message carries `3 of 3 interpreter-verified` — **not** `1 of 3`.
+  Then, in the same class, a variant where the shims resolve into one venv bin dir but
+  only the *second* one alphabetically has a bad shebang: assert it is flagged. Both
+  assertions fail under the dedup-guard anchor (`elif str(match) not in resolved_into:`),
+  where only the first script sighted per bin dir is ever opened. Case 1's `passed is True`
+  and case 9's "line count below script count" both stay green under that bug, so this case
+  is the only thing standing between the plan and shipping a check that reads 1 of 26.
+- **Case 15 — two-entry `venv_bins` (the worktree topology).** Construct a checkout plus a
+  linked worktree, each with its own `.venv` at a *different* `version_info`, `PROJECT_DIR`
+  patched to the worktree and PATH led by the worktree's `.venv/bin`, so
+  `_repo_venv_bin_dirs()` returns two directories (the live shape measured from
+  `.worktrees/sdlc-2138`). Assert: a shim whose shebang names the **main** venv's python is
+  classified against the **main** venv's version, and a shim whose shebang names the
+  **worktree** venv's python is classified against the **worktree** venv's version. An
+  implementation that reads `venv_python_version(venv_bins[0].parent)` gets exactly one of
+  the two backwards and fails this case. Also assert the off-pin finding names the correct
+  pair of versions, so a swapped read cannot pass by accident.
 
 ### 4. Mutation-check every guard
 
@@ -1135,12 +1319,29 @@ new finding inside an existing check that the agent already knows how to run and
 - **Assigned To**: `doctor-interpreter-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- For each guard independently — existence test, venv-membership test (including the
-  both-sides realpath rule: swap it for `Path(os.path.realpath(target)).parent` and
-  confirm case 7 fails), pin comparison, the non-absolute / shell / `env` refusal, the
-  no-shebang skip, the trailing-argument strip, grouping, per-reason fix distinctness,
-  and the pass-message verified count — break it, run the suite, and record **which
-  named test** fails. Restore before the next mutation.
+- For each guard independently — break it, run the suite, record **which named test**
+  fails, restore before the next mutation:
+
+  | Mutation | Expected failing case |
+  |---|---|
+  | Existence test removed (classify by pin first) | case 3 |
+  | Both-sides parent realpath swapped for resolving the target first, then taking its parent | case 7 |
+  | Version read switched to `venv_python_version(venv_bins[0].parent)` | case 15 |
+  | Pin comparison removed | case 2 |
+  | Non-absolute / shell / `env` refusal removed | case 6 |
+  | No-shebang skip removed | case 6 |
+  | Trailing-argument strip removed | case 13 |
+  | Grouping removed (one line per script) | case 9 |
+  | Per-reason fix diagnosis collapsed to one sentence | case 11 |
+  | Hardlink trailer removed | case 5 |
+  | Pass-message verified clause removed | cases 6, 12 |
+  | **Interpreter read reverted to hang off the `elif str(match) not in resolved_into:` dedup guard** | **case 14** |
+  | Merged tail guard reverted to `if misresolved:` | case 10 |
+
+  The realpath rule is verified **here**, by mutation, and not by a source scan: the
+  whole-file regex row an earlier draft carried matched the prohibition written in prose and
+  missed the two-step `resolved = os.path.realpath(target)` form, both measured. It has been
+  deleted from the Verification table.
 - A mutation that leaves the suite green is a missing test, not an acceptable result:
   report it and route back to task 3.
 - Re-measure after any change to task 3's tests; a guard verified in an earlier round
@@ -1184,6 +1385,19 @@ new finding inside an existing check that the agent already knows how to run and
 
 ## Verification
 
+**Run every row from `$AI_REPO_ROOT` (`/Users/tomcounsell/src/ai`), not from the lane
+worktree.** SDLC verification in this repo defaults to the lane worktree, and three rows
+below are live — they import doctor and measure the *running* checkout. Measured from
+`.worktrees/sdlc-2138`: the check reports `24 console scripts resolve into
+.../sdlc-2138/.venv/bin` against the main checkout's 26, and that worktree's venv is Python
+3.13 against a 3.14 pin, so once `off-pin` ships the live control row legitimately fails
+there. That is a true finding about the worktree, not a defect in the change, and it must
+not be read as one. The count is derived in-process rather than hardcoded (task 1's
+"gate on a self-measured count, not a remembered literal" rule applies to the verification
+apparatus too), but the *pass/fail* rows still need a checkout whose venv is on the pin.
+
+Every other row is a static file read and is checkout-independent.
+
 Every row is exit-code-honest: the command exits 0 exactly when the Expected column is
 satisfied, so a runner can key on exit status alone. `grep -c` is avoided throughout,
 because it exits 1 on a zero count — which makes a count row indistinguishable from a
@@ -1226,12 +1440,12 @@ task 2 pins both names.
 | Interpreter read exists | `grep -q shebang tools/doctor.py` | exit 0 (present) |
 | New test matrix exists | `grep -q "class TestWinningScriptInterpreter" tests/unit/test_doctor_console_scripts.py` | exit 0 (present) |
 | Healthy machine still passes (live control) | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if c().passed else 1)"` | exit 0 |
-| Pass message discloses verification | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if 'interpreter' in c().message else 1)"` | exit 0 |
-| Pass message keeps #2665's prefix | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if c().message.startswith('26 console scripts resolve into ') else 1)"` | exit 0 |
+| Pass message discloses verification as a ratio | `.venv/bin/python -c "import re,sys;from tools.doctor import _check_console_scripts_resolve as c;sys.exit(0 if re.search(r'\d+ of \d+ interpreter-verified', c().message) else 1)"` | exit 0 |
+| Pass message keeps #2665's prefix (count derived, never hardcoded) | `.venv/bin/python -c "import tomllib,pathlib,sys;from tools.doctor import _check_console_scripts_resolve as c;n=len(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['scripts']);sys.exit(0 if c().message.startswith(f'{n} console scripts resolve into ') else 1)"` | exit 0 |
+| Every resolved script was read, not just the first | `.venv/bin/python -c "import tomllib,pathlib,sys;from tools.doctor import _check_console_scripts_resolve as c;n=len(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['scripts']);sys.exit(0 if f'{n} of {n} interpreter-verified' in c().message else 1)"` | exit 0 (blocker guard: `1 of 26` means the read hung off the dedup guard) |
 | Existing assertions unmodified | `.venv/bin/python -c "import subprocess,sys;d=subprocess.run(['git','diff','main','--','tests/unit/test_doctor_console_scripts.py'],capture_output=True,text=True).stdout;sys.exit(0 if not any(l.startswith('-') and 'assert ' in l for l in d.splitlines()) else 1)"` | exit 0 |
 | Helpers exist under their pinned names | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text();sys.exit(0 if 'def _shebang_interpreter' in s and 'def _classify_interpreter' in s else 1)"` | exit 0 (both present) |
 | Anti-criterion: no subprocess in this check (union of 3 bodies) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if 'subprocess' not in bodies else 1)"` | exit 0 (absent) |
-| Anti-criterion: interpreter target never realpath-ed | `.venv/bin/python -c "import pathlib,re,sys;s=pathlib.Path('tools/doctor.py').read_text();sys.exit(0 if not re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', s) else 1)"` | exit 0 (absent) |
 | Anti-criterion: no `/update` remedy in this check (union of 3 bodies) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if '/update' not in bodies else 1)"` | exit 0 (absent) |
 | Anti-criterion: doctor deletes nothing (#2780 stays out) | `! grep -q unlink tools/doctor.py` | exit 0 (absent) |
 | Anti-criterion: doctor removes no trees (#2780 stays out) | `! grep -q rmtree tools/doctor.py` | exit 0 (absent) |
@@ -1245,14 +1459,14 @@ task 2 pins both names.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, History & Consistency | The interpreter read is anchored to "the `match is not None` branch (the `elif` at `:254`)" in both the Technical Approach control-flow bullet and task 2, but `tools/doctor.py:254` on main is `elif str(match) not in resolved_into:` -- a first-sighting dedup guard, not a per-script branch. Its body runs once per *distinct* venv bin directory, and `_repo_venv_bin_dirs()` returns exactly one directory on this machine, so a literal implementation reads 1 of 26 shebangs and reports `1 interpreter-verified` while 25 unread scripts pass silently. This is the round-one control-flow CONCERN recurring through the fix that was meant to close it. | pending | `elif str(match) not in resolved_into:` is a *conditional* elif; the plan treats it as an unconditional else. Cite the code shape, not the line: convert it to a plain `else:` and nest the dedup inside -- `else:` / `if str(match) not in resolved_into: resolved_into.append(str(match))` / then extract, classify, and increment `verified` / `unverified`. Add a guard asserting the verified count equals the number of resolved scripts on the healthy fixture (3, not 1): case 1's `passed is True` and case 9's "finding line count below script count" both stay green under the broken anchor, so neither catches it. |
-| CONCERN | Risk & Robustness | The only live false-positive control measures the main checkout, but the topology where `off-pin` actually fires on this fleet is a worktree, where `_repo_venv_bin_dirs()` returns two directories. Measured now: with `PROJECT_DIR` pinned to `.worktrees/sdlc-2138`, the check returns `passed=True`, `24 console scripts resolve into .../sdlc-2138/.venv/bin`, and all 24 shims carry `#!.../sdlc-2138/.venv/bin/python` whose `venv_python_version` is `3.13` against a `3.14` pin. All 24 would classify `off-pin`, flipping a currently-green check red in four worktrees on this host. No task 3 case constructs a two-entry `venv_bins`. | pending | Reproduce with `patch.object(tools.doctor, "PROJECT_DIR", worktree_root)` and a PATH led by `worktree/.venv/bin`; `_repo_venv_bin_dirs()` yields `[worktree/.venv/bin, main/.venv/bin]` because `main_checkout_venv` walks the worktree's `.git` *file*. The classifier must read `venv_python_version(parent.parent)` for the venv the shebang names, not `venv_bins[0]`. Decide explicitly: accept four newly-red worktree checks (Risk 5's redundancy arriving live), or scope `off-pin` to the venv `PROJECT_DIR` owns. |
-| CONCERN | Risk & Robustness | The "interpreter target never realpath-ed" Verification row is a whole-file regex that matches the prohibition stated in *prose*, not just offending code. Measured: `re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', ...)` matches `# never compute Path(os.path.realpath(target)).parent` -- verbatim the sentence the Documentation section tells the builder to put in `_classify_interpreter`'s docstring. Satisfying task 5 therefore fails a row advertised as exit-code-honest. It is also blind the other way: `resolved = os.path.realpath(target)` then `Path(resolved).parent` does not match (measured False). | pending | Either strip comments and strings before matching (`tokenize.generate_tokens`, skipping `tokenize.COMMENT` and `tokenize.STRING`, then regex the reconstructed source), or delete the row and record in task 4 that case 7 is the named test that fails when the both-sides realpath rule is swapped for `Path(os.path.realpath(target)).parent` -- the mutation the plan already prescribes. Either way, phrase the docstring rule without the literal call expression: "compare the realpath of the parent directory on both sides; never realpath the interpreter path itself". |
-| CONCERN | History & Consistency | Risk 2 is that the fixture upgrade masks the new guard, but the only measurement task 1 requires is a `18 passed` run "before any production change" -- ambiguous about whether it precedes or follows the fixture edit, and proving nothing in the first reading. Nothing requires the measurement that actually attributes a later failure: fixture upgraded, `tools/doctor.py` still at main, suite still green. Without it, a fixture rewrite that changes resolution behavior (a new `.venv/bin/python3`, a fixture-root `.python-version` that `repo_interpreter_pin` now finds, shims no longer bodied `#!/bin/sh`) is indistinguishable from a task 2 regression. | pending | Split task 1's gate into two named runs: (a) on pristine `main`, record the collected count; (b) after the fixture edit with `git diff main -- tools/doctor.py` empty, the same count still passes. Only then start task 2. `test_a_shadowed_name_still_reads_as_shadowed` (asserts `"uv sync" not in result.fix`) and `test_fix_signals_omission_when_more_than_five_names_are_not_installed` (calls `_fake_checkout(tmp_path, names=())`, so the upgraded fixture must still create `.venv/bin/python3` and `pyvenv.cfg` with zero shims) are the two most likely to move. |
-| CONCERN | History & Consistency | The prescribed remedy does not clear the state that a Success Criterion and task 3 case 5 are dedicated to. `rm -rf .venv && uv sync --all-extras` writes a new inode at `.venv/bin/<name>`; the hardlinked copy on PATH keeps the old inode and the stale shebang, still wins `shutil.which`, and `_same_file` is now False -- so the next run reports it as a *resolution* failure with PATH advice instead. The plan applies its own Risk 4 principle to delete the `/update` sentence but not to the hardlink case it keeps, where the advice arises for a state it half-fixes. | pending | Detect the case with the predicate the resolution step already used -- `found_path.parent not in venv_bins and _same_file(found_path, match / name)` -- and append `Also remove the stale hardlinked copy at {found_path}, which survives the rebuild with the old shebang.` Keep the shared `rm -rf .venv && uv sync --all-extras` command so Risk 5's one-action mitigation holds; only the diagnostic clause changes. If a fourth sentence is unwanted, say so in the remediation bullet and cite the two-run convergence, so the criterion is not read as claiming a one-step fix. |
-| CONCERN | Scope & Value | All three live Verification rows are checkout-dependent and one hardcodes a literal count: `c().message.startswith('26 console scripts resolve into ')`. SDLC verification in this repo runs from the lane worktree, and measured from `.worktrees/sdlc-2138` the message is `24 console scripts resolve into .../sdlc-2138/.venv/bin` -- so that row fails before a line of the change is written. Task 1 forbids exactly this ("Gate on a self-measured count, not a remembered literal") and the verification apparatus then does it. | pending | Derive the count in-process: `import tomllib, pathlib; n = len(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['scripts']); sys.exit(0 if c().message.startswith(f'{n} console scripts resolve into ') else 1)`. The `passed` control row needs the same treatment or an explicit "run from `$AI_REPO_ROOT`, not the lane worktree" note in the Verification preamble, because a drifted lane venv will legitimately fail it once `off-pin` ships. |
-| CONCERN | Scope & Value | The pass-message interpreter clause is the plan's sole fail-open disclosure, yet its exact rendering is never pinned and the plan writes it two ways: `0 of 26 interpreter-verified` (a ratio) in the scope-decision bullet and `..., 26 interpreter-verified` (a bare count) in the composition bullet. Cases 6 and 12 both assert against a shape the plan leaves to the builder, and a bare count loses its denominator on any message without the `N console scripts resolve into ...` prefix. | pending | Pin the clause in task 2 as `f", {verified} of {len(scripts)} interpreter-verified"`, with `(pin unresolvable; off-pin comparison skipped)` appended when `repo_interpreter_pin(PROJECT_DIR)` is `None`. The ratio form is the one the plan's own argument needs -- `0 of 26` is what makes an all-relocatable venv read as visibly degraded -- and it names no path, so `test_main_checkout_venv_accepted_from_a_worktree` survives. Case 6 then asserts the exact substring (e.g. `"3 of 4 interpreter-verified"`) instead of an unspecified "count". |
-| NIT | Scope & Value | The extractor is specified to "read at most the first two lines with a per-line cap", but every classification rule consumes only line 1, and the plan explicitly refuses to parse line 2 (the `'''exec'` polyglot and `dirname $0` forms are declined, not parsed). The second line has no consumer and reads as residue from the dropped parser design. | pending | n/a (NIT) -- say "read one bounded line" so a builder does not infer line 2 is meant to be inspected. |
+| BLOCKER | Risk & Robustness, History & Consistency | The interpreter read is anchored to "the `match is not None` branch (the `elif` at `:254`)" in both the Technical Approach control-flow bullet and task 2, but `tools/doctor.py:254` on main is `elif str(match) not in resolved_into:` -- a first-sighting dedup guard, not a per-script branch. Its body runs once per *distinct* venv bin directory, and `_repo_venv_bin_dirs()` returns exactly one directory on this machine, so a literal implementation reads 1 of 26 shebangs and reports `1 interpreter-verified` while 25 unread scripts pass silently. This is the round-one control-flow CONCERN recurring through the fix that was meant to close it. | Technical Approach control-flow bullet step 1 + task 2 (anchor on code shape); task 3 case 14; task 4 mutation row; Verification row "Every resolved script was read"; Success Criteria | `elif str(match) not in resolved_into:` is a *conditional* elif; the plan treats it as an unconditional else. Cite the code shape, not the line: convert it to a plain `else:` and nest the dedup inside -- `else:` / `if str(match) not in resolved_into: resolved_into.append(str(match))` / then extract, classify, and increment `verified` / `unverified`. Add a guard asserting the verified count equals the number of resolved scripts on the healthy fixture (3, not 1): case 1's `passed is True` and case 9's "finding line count below script count" both stay green under the broken anchor, so neither catches it. |
+| CONCERN | Risk & Robustness | The only live false-positive control measures the main checkout, but the topology where `off-pin` actually fires on this fleet is a worktree, where `_repo_venv_bin_dirs()` returns two directories. Measured now: with `PROJECT_DIR` pinned to `.worktrees/sdlc-2138`, the check returns `passed=True`, `24 console scripts resolve into .../sdlc-2138/.venv/bin`, and all 24 shims carry `#!.../sdlc-2138/.venv/bin/python` whose `venv_python_version` is `3.13` against a `3.14` pin. All 24 would classify `off-pin`, flipping a currently-green check red in four worktrees on this host. No task 3 case constructs a two-entry `venv_bins`. | Technical Approach `off-pin` bullet (explicit decision: accept); Risk 5; task 2 (`venv_python_version(parent.parent)`, never `venv_bins[0]`); task 3 case 15; Verification preamble | Reproduce with `patch.object(tools.doctor, "PROJECT_DIR", worktree_root)` and a PATH led by `worktree/.venv/bin`; `_repo_venv_bin_dirs()` yields `[worktree/.venv/bin, main/.venv/bin]` because `main_checkout_venv` walks the worktree's `.git` *file*. The classifier must read `venv_python_version(parent.parent)` for the venv the shebang names, not `venv_bins[0]`. Decide explicitly: accept four newly-red worktree checks (Risk 5's redundancy arriving live), or scope `off-pin` to the venv `PROJECT_DIR` owns. |
+| CONCERN | Risk & Robustness | The "interpreter target never realpath-ed" Verification row is a whole-file regex that matches the prohibition stated in *prose*, not just offending code. Measured: `re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', ...)` matches `# never compute Path(os.path.realpath(target)).parent` -- verbatim the sentence the Documentation section tells the builder to put in `_classify_interpreter`'s docstring. Satisfying task 5 therefore fails a row advertised as exit-code-honest. It is also blind the other way: `resolved = os.path.realpath(target)` then `Path(resolved).parent` does not match (measured False). | Row deleted from Verification; task 4 mutation table (case 7 is the named test); Technical Approach realpath bullet; Documentation (docstring phrased in words) | Either strip comments and strings before matching (`tokenize.generate_tokens`, skipping `tokenize.COMMENT` and `tokenize.STRING`, then regex the reconstructed source), or delete the row and record in task 4 that case 7 is the named test that fails when the both-sides realpath rule is swapped for `Path(os.path.realpath(target)).parent` -- the mutation the plan already prescribes. Either way, phrase the docstring rule without the literal call expression: "compare the realpath of the parent directory on both sides; never realpath the interpreter path itself". |
+| CONCERN | History & Consistency | Risk 2 is that the fixture upgrade masks the new guard, but the only measurement task 1 requires is a `18 passed` run "before any production change" -- ambiguous about whether it precedes or follows the fixture edit, and proving nothing in the first reading. Nothing requires the measurement that actually attributes a later failure: fixture upgraded, `tools/doctor.py` still at main, suite still green. Without it, a fixture rewrite that changes resolution behavior (a new `.venv/bin/python3`, a fixture-root `.python-version` that `repo_interpreter_pin` now finds, shims no longer bodied `#!/bin/sh`) is indistinguishable from a task 2 regression. | Task 1 (runs 1A and 1B, named canaries) | Split task 1's gate into two named runs: (a) on pristine `main`, record the collected count; (b) after the fixture edit with `git diff main -- tools/doctor.py` empty, the same count still passes. Only then start task 2. `test_a_shadowed_name_still_reads_as_shadowed` (asserts `"uv sync" not in result.fix`) and `test_fix_signals_omission_when_more_than_five_names_are_not_installed` (calls `_fake_checkout(tmp_path, names=())`, so the upgraded fixture must still create `.venv/bin/python3` and `pyvenv.cfg` with zero shims) are the two most likely to move. |
+| CONCERN | History & Consistency | The prescribed remedy does not clear the state that a Success Criterion and task 3 case 5 are dedicated to. `rm -rf .venv && uv sync --all-extras` writes a new inode at `.venv/bin/<name>`; the hardlinked copy on PATH keeps the old inode and the stale shebang, still wins `shutil.which`, and `_same_file` is now False -- so the next run reports it as a *resolution* failure with PATH advice instead. The plan applies its own Risk 4 principle to delete the `/update` sentence but not to the hardlink case it keeps, where the advice arises for a state it half-fixes. | Technical Approach remediation bullet (hardlink trailer); task 2; task 3 cases 5 and 11; Success Criteria | Detect the case with the predicate the resolution step already used -- `found_path.parent not in venv_bins and _same_file(found_path, match / name)` -- and append `Also remove the stale hardlinked copy at {found_path}, which survives the rebuild with the old shebang.` Keep the shared `rm -rf .venv && uv sync --all-extras` command so Risk 5's one-action mitigation holds; only the diagnostic clause changes. If a fourth sentence is unwanted, say so in the remediation bullet and cite the two-run convergence, so the criterion is not read as claiming a one-step fix. |
+| CONCERN | Scope & Value | All three live Verification rows are checkout-dependent and one hardcodes a literal count: `c().message.startswith('26 console scripts resolve into ')`. SDLC verification in this repo runs from the lane worktree, and measured from `.worktrees/sdlc-2138` the message is `24 console scripts resolve into .../sdlc-2138/.venv/bin` -- so that row fails before a line of the change is written. Task 1 forbids exactly this ("Gate on a self-measured count, not a remembered literal") and the verification apparatus then does it. | Verification preamble (`$AI_REPO_ROOT`); count derived in-process in both live message rows | Derive the count in-process: `import tomllib, pathlib; n = len(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['scripts']); sys.exit(0 if c().message.startswith(f'{n} console scripts resolve into ') else 1)`. The `passed` control row needs the same treatment or an explicit "run from `$AI_REPO_ROOT`, not the lane worktree" note in the Verification preamble, because a drifted lane venv will legitimately fail it once `off-pin` ships. |
+| CONCERN | Scope & Value | The pass-message interpreter clause is the plan's sole fail-open disclosure, yet its exact rendering is never pinned and the plan writes it two ways: `0 of 26 interpreter-verified` (a ratio) in the scope-decision bullet and `..., 26 interpreter-verified` (a bare count) in the composition bullet. Cases 6 and 12 both assert against a shape the plan leaves to the builder, and a bare count loses its denominator on any message without the `N console scripts resolve into ...` prefix. | Technical Approach composition bullet (clause pinned as a ratio); task 2; task 3 cases 6 and 12; Success Criteria | Pin the clause in task 2 as `f", {verified} of {len(scripts)} interpreter-verified"`, with `(pin unresolvable; off-pin comparison skipped)` appended when `repo_interpreter_pin(PROJECT_DIR)` is `None`. The ratio form is the one the plan's own argument needs -- `0 of 26` is what makes an all-relocatable venv read as visibly degraded -- and it names no path, so `test_main_checkout_venv_accepted_from_a_worktree` survives. Case 6 then asserts the exact substring (e.g. `"3 of 4 interpreter-verified"`) instead of an unspecified "count". |
+| NIT | Scope & Value | The extractor is specified to "read at most the first two lines with a per-line cap", but every classification rule consumes only line 1, and the plan explicitly refuses to parse line 2 (the `'''exec'` polyglot and `dirname $0` forms are declined, not parsed). The second line has no consumer and reads as residue from the dropped parser design. | Technical Approach extraction bullet (one bounded line) | n/a (NIT) -- say "read one bounded line" so a builder does not infer line 2 is meant to be inspected. |
 
 ---
 
