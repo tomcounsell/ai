@@ -1517,7 +1517,7 @@ new finding inside an existing check that the agent already knows how to run and
   | Hardlink trailer removed | case 5 |
   | Pass-message verified clause removed | cases 6, 12 |
   | **Interpreter read reverted to hang off the `elif str(match) not in resolved_into:` dedup guard** | **case 14** |
-  | Merged tail guard reverted to `if misresolved:` | case 10 |
+  | Merged tail guard reverted to `if misresolved:` | cases 2, 3, 4, 5, 8, 9, 11, 14, 15, 16, 18, 19 (NOT case 10 — its fixture already carries a misresolved name, so `if misresolved:` stays true; case 10 instead pins the placement mutation, interpreter read moved after the early return) |
   | Realpath leg dropped from the hardlink-trailer gate (`found_path.parent not in venv_bins and _same_file(...)`) | case 16 |
   | `v is None` guard removed from the pin comparison (`None` reaches the inequality) | case 17 |
   | `is_symlink` leg dropped from the hardlink-trailer gate | case 18 |

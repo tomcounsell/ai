@@ -433,8 +433,15 @@ class TestWinningScriptInterpreter:
             '#!/bin/sh\n\'\'\'exec\' "$(dirname "$0")"/python3 "$0" "$@"\n\'\'\'\n',
             "#!/usr/bin/env python3\n",
             "",
+            "xx/usr/bin/python3\n",
         ],
-        ids=["sh_polyglot", "relocatable_dirname", "env_indirection", "no_shebang"],
+        ids=[
+            "sh_polyglot",
+            "relocatable_dirname",
+            "env_indirection",
+            "no_shebang",
+            "malformed_shebang_prefix",
+        ],
     )
     def test_case6_unclassified_shebang_forms_produce_no_finding(
         self, tmp_path, monkeypatch, shebang_body

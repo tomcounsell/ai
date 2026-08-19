@@ -37,7 +37,7 @@ python -m tools.doctor --install-hook  # Install git pre-push hook
 
 `_check_console_scripts_resolve` (`tools/doctor.py`) is the console script
 health check. It verifies every name declared
-in `pyproject.toml`'s `[project.scripts]` table -- `valor-tts`, `sdlc-tool`,
+in `pyproject.toml`'s `[project.scripts]` table -- `valor-tts`, `valor-session`,
 `critique-roster-check`, and 23 others. Skills, hooks, and SDLC gates invoke
 these by bare name (`critique-roster-check`, `critique-resume-probe`, and
 `sdlc-push-guard` are fail-closed *gates* called that way), so what a bare name
@@ -46,7 +46,7 @@ actually resolves to -- and what the resolved file's shebang actually binds to
 can guarantee. The check has two parts, run together on every invocation
 including `--quick`.
 
-### Part 1: resolution (#2565, #2665)
+### Part 1: resolution (#2566, #2665)
 
 For each declared name, `shutil.which()` finds the winning PATH entry and the
 check classifies it into one of three states, each with its own remedy:
