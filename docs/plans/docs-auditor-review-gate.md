@@ -56,7 +56,7 @@ the auditor makes, so the next generator bug takes exactly the same path.
 - **Rotation can wedge the shared checkout and report success.** The daily-cap and
   open-PR guards in `_push_branch_and_pr` fire *after* the substrate has already
   written to disk, and rotation never commits (that path is gated to
-  `pr-changed-files`). The edits sit uncommitted in `/Users/valorengels/src/ai`.
+  `pr-changed-files`). The edits sit uncommitted in `${AI_REPO_ROOT:-$HOME/src/ai}`.
   `run_docs_auditor` then stamps the rotation hash, sends a "N files, M fixes"
   Telegram, and writes liveness `status="ok"`. Every subsequent run trips the
   dirty-tree guard and skips. The auditor is permanently disabled until a human
@@ -245,11 +245,21 @@ sites — #2840's and #2841's still classify as findings, #2839's still classifi
 finding and should (spike-7).
 
 **Portability correction applied in this pass.** Several Prerequisites and Verification
-rows hardcoded `/Users/valorengels/src/ai` as the shared main checkout. The lane can be
+rows hardcoded `${AI_REPO_ROOT:-$HOME/src/ai}` as the shared main checkout. The lane can be
 built on any fleet machine and the home directory differs per host, so a hardcoded row
 fails for a reason that has nothing to do with the condition it tests. Every such row now
 uses `${AI_REPO_ROOT:-$HOME/src/ai}`, the idiom `docs/sdlc/do-plan.md` already uses. Still
-pipe-free and still POSIX `/bin/sh`.
+pipe-free and still POSIX `/bin/sh`. The substitution was applied to the quoted commands
+inside **Critique Results** as well, so a builder copying a command out of a finding row
+gets a runnable one; no finding's substance was touched.
+
+**Lane identity re-anchored.** The recorded lane slug is **`sdlc-2739`** — worktree
+`.worktrees/sdlc-2739`, branch `session/sdlc-2739`. The plan document's filename stem
+(`docs-auditor-review-gate`) is the plan-doc slug and is deliberately different; per
+[`docs/features/sdlc-lane-identity.md`](../features/sdlc-lane-identity.md) the two are
+linked by `tracking:` frontmatter, not by name. Earlier revisions of this plan told the
+builder to work in `.worktrees/docs-auditor-review-gate`, which does not exist. Every such
+reference now names the recorded lane.
 
 ## Prior Art
 
@@ -663,6 +673,23 @@ results below.
 9. **Output:** `summary` → scheduler → `output_summary` → dashboard; withheld →
    deduped GitHub issue.
 
+**The advisory reporting channel (Q7) — after this change:**
+
+Unchanged in shape and position: it still runs inside `audit()` at `:1267`, still only
+under `scope_mode == "rotation"`, still feeds the same `issue_findings` list and the same
+`ISSUE_FILING_PER_RUN_CAP`. Three things change inside it:
+
+1. `_detect_deleted_target_issues` emits findings for **two** reference shapes —
+   backticked `.py` paths as today, and markdown-link `.md` targets resolved
+   **doc-relative** (Q7a).
+2. Both shapes pass through the **same widened** `_is_documented_deletion`, so a reference
+   that a document is narrating rather than asserting is suppressed for either shape
+   (Q7b).
+3. `_file_issue_if_new` → `_issue_exists` now dedups against **all** issues, open and
+   closed, so a human's ruling is durable and the channel converges (Q7c).
+
+No write path is added or touched. A Q7 finding's only effect is a GitHub issue.
+
 ## Architectural Impact
 
 - **New dependencies:** none.
@@ -674,6 +701,15 @@ results below.
   - `agent/reflection_scheduler.py` passes `output_summary` to `mark_completed`.
     This is a generic change affecting **every** function reflection, all
     beneficially (a summary that was discarded now renders).
+  - `_open_issue_exists` — **renamed** `_issue_exists` and widened to `--state all`
+    (Q7c). Signature unchanged. This changes dedup semantics for *every* finding the
+    module files, deliberately: see Q7c.
+  - `_is_placeholder_path` — extended to strip a `.md` suffix as well as `.py`.
+  - `_is_documented_deletion` — widened cue matching plus a live-claim veto (Q7b).
+    Internal to the module; both call sites are inside `_detect_deleted_target_issues`.
+  - `_detect_deleted_target_issues` — gains a second match branch. Return shape
+    unchanged (a list of `{title, body, category}` dicts); the new `category` value is
+    `broken-md-link`.
 - **Coupling:** decreases. The substrate stops owning git for Caller B; the skill
   that already owns git for the rest of the docs stage owns it for all of it.
 - **Data ownership:** the commit decision moves from the substrate to each caller.
@@ -692,14 +728,27 @@ function reflection, two skill bodies plus one skill-context, roughly eight doc 
 fourteen existing test dispositions (two of which break at import), and a synchronous
 `gh` dispatcher this plan itself says has no in-repo precedent.
 
-**The lane stays single.** The critic proposed splitting into three lanes
+**Still Large after folding in #2834 (Q7).** Q7 adds one function branch, three helper
+widenings, one rename, and a test class — real work, but it lands entirely inside the
+advisory reporting path, which no other Q-group touches. It does not move the plan out of
+Large and it does not justify a second lane: #2834's two halves are the same question
+about the same function, and its `.py` half depends on `_is_documented_deletion` being
+widened, which is the same edit its `.md` half consumes. Splitting them would put two
+lanes in one function.
+
+**The lane stays single.** The critique proposed splitting into three lanes
 (A = Q1, B = Q3+Q4, C = Q2+Q5). That is declined: the lane assignment is held at fleet
 level, and splitting would fragment a change set whose parts share one test file, one
 feature doc, and one set of anti-criteria. The isolation the split was reaching for is
 preserved a cheaper way: **Step by Step Tasks is sequenced so each Q-group lands as its
-own independently reviewable commit** (task 1 = Q1, task 2 = Q3+Q4, task 3 = Q2+Q5), so a
-reviewer can read them one at a time and a bad group can be reverted alone. The three-way
-split remains available to the coordinator as an override if the lane stalls.
+own independently reviewable commit** (task 1 = Q1, task 2 = Q3+Q4, task 3 = Q2+Q5,
+task 4 = Q7), so a reviewer can read them one at a time and a bad group can be reverted
+alone. The three-way split remains available to the coordinator as an override if the lane
+stalls.
+
+**Two of the four build commits are already on the lane branch.** See the status block at
+the top of **Step by Step Tasks** — BUILD verifies tasks 1 and 2 rather than
+reimplementing them, and starts real work at task 3.
 
 **Team:** substrate-builder, git-test-engineer, contract-documentarian, gate-validator
 (the four agents named in **Team Orchestration**), plus PM and a code reviewer.
@@ -748,9 +797,11 @@ the prefix explicitly in Python and depends on no undocumented search semantics.
 | PR #2842 merged to main — **satisfied 2026-08-18** | `test "$(gh pr view 2842 --json state -q .state)" = MERGED` | Q5's escalation is only trustworthy once the permanent withheld generator is gone (spike-2). Merged as `a9205b065`. Same fail-closed argument |
 | Rename channel actually absent | `! grep -q _git_log_follow_renames reflections/docs_auditor.py` | Guards against building Q5 on a tree where #2842 was reverted. Shape is deliberate: both `grep -c` (exits 1 on a zero count) and `grep -L` (BSD grep still exits 1 when no line was selected) report *absence* as failure, so the negation is the only form that reads correctly. Exits 1 exactly when the symbol is back |
 | No rotation in flight | `.venv/bin/python -c "import sys; from reflections.docs_auditor import _get_redis, REDIS_RUNNING_KEY; sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)"` | Changing commit behavior mid-rotation could interleave with a live `checkout -b` in the shared checkout. `sys.exit` carries the answer, so a live rotation is a FAIL rather than a printed `True` nobody reads. Must be the venv interpreter — a bare `python` has no `popoto`, and that too now fails closed, since `ModuleNotFoundError` exits 1 |
-| Shared main checkout clean **on the auditor's own write surface** | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs .claude)"` | Scoped rather than whole-tree in critique round 2 (NEW-3), and **widened from `docs/features` to `docs .claude` in the round-3 settle pass (R3-1)**. The whole-tree form was practically unsatisfiable and contradicted this plan's own model: other lanes routinely hold uncommitted work in the shared checkout, and No-Gos forbids the builder from clearing it, so a whole-tree row handed the builder a FAIL they were not permitted to fix — it failed for exactly that reason during the round-1 revision. The narrower `docs/features` form was satisfiable but rested on a **false** justification: `docs/features/` is where rotation picks its *primary*, not where the module writes. The write surface is the primary doc's neighborhood, `_resolve_neighborhood:259` (called at `:1220`), spanning `docs/` and outbound-linked `.md` paths — `_apply_fixes_to_file` gates only on `.endswith(".md")` (`:1251`), never on a directory, so real targets today include `docs/plans/*.md`, `docs/sdlc/*.md`, `docs/tools-reference.md`, and `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. `docs .claude` covers that surface, so leftover dirt from a wedged pre-change rotation is actually detected. Foreign dirt outside those two trees does **not** block and is preserved by design (Race 1). **Known cost of the widening:** the scope now also catches other lanes' uncommitted work under `docs/` — most commonly in-flight `docs/plans/*.md` edits. If this row FAILs on foreign non-auditor dirt, the builder must inspect it and report rather than clear it (No-Gos, [EXTERNAL]); it is a stop-and-ask, not a licence to `checkout` another lane's file |
+| Shared main checkout clean **on the auditor's own write surface** | `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"` | Scoped rather than whole-tree in critique round 2 (NEW-3), and **widened from `docs/features` to `docs .claude` in the round-3 settle pass (R3-1)**. The whole-tree form was practically unsatisfiable and contradicted this plan's own model: other lanes routinely hold uncommitted work in the shared checkout, and No-Gos forbids the builder from clearing it, so a whole-tree row handed the builder a FAIL they were not permitted to fix — it failed for exactly that reason during the round-1 revision. The narrower `docs/features` form was satisfiable but rested on a **false** justification: `docs/features/` is where rotation picks its *primary*, not where the module writes. The write surface is the primary doc's neighborhood, `_resolve_neighborhood:259` (called at `:1220`), spanning `docs/` and outbound-linked `.md` paths — `_apply_fixes_to_file` gates only on `.endswith(".md")` (`:1251`), never on a directory, so real targets today include `docs/plans/*.md`, `docs/sdlc/*.md`, `docs/tools-reference.md`, and `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. `docs .claude` covers that surface, so leftover dirt from a wedged pre-change rotation is actually detected. Foreign dirt outside those two trees does **not** block and is preserved by design (Race 1). **Known cost of the widening:** the scope now also catches other lanes' uncommitted work under `docs/` — most commonly in-flight `docs/plans/*.md` edits. If this row FAILs on foreign non-auditor dirt, the builder must inspect it and report rather than clear it (No-Gos, [EXTERNAL]); it is a stop-and-ask, not a licence to `checkout` another lane's file |
 | No open docs-audit PR mid-flight | `.venv/bin/python -c "import json,subprocess,sys; o=subprocess.run(['gh','pr','list','--state','open','--limit','200','--json','headRefName'],capture_output=True,text=True); sys.exit(0 if o.returncode==0 and not [x for x in json.loads(o.stdout or '[]') if x['headRefName'].startswith('docs-audit/')] else 1)"` | An in-flight PR opened by the old code carries old-format staging. Rewritten in critique round 2 (NEW-7) to an explicit `startswith("docs-audit/")` test rather than `--search "head:docs-audit"`. **`--limit 200` added in the round-3 settle pass:** `gh pr list` defaults to `--limit 30`, newest-first, so with more than 30 open PRs an older `docs-audit/*` PR falls off the page and the row silently passes — a narrow fail-open, and exactly the PR this row exists to catch, since a stuck docs-audit PR is by definition an old one. The critic's own suggested `gh … -q` replacement cannot be used: `check_prerequisites.py:62` runs a naive `row.strip("|").split("|")`, which is blind to quoting, so the pipes inside the jq program truncate the cell. This form is pipe-free, and matches the `.venv/bin/python -c` shape the rotation-probe row above already uses. Fails closed twice over: a non-zero `gh` exit and an unparseable payload both exit 1. Both branches executed at revision time — exit 0 with no `docs-audit/` PR open, exit 1 against a `session/` control |
 | `gh` authenticated | `gh auth status` | Sweeper and PR tests reason about real `gh` JSON shapes. Already exit-code correct — `gh auth status` exits non-zero when no account is logged in |
+| Q7's filter chain is present to widen | `.venv/bin/python -c "import reflections.docs_auditor as d; assert d._is_documented_deletion and d._build_line_context and d._is_placeholder_path and d._detect_deleted_target_issues"` | Q7b **widens** an existing hatch rather than inventing one (spike-7). If any of the four helpers is absent, the tree is not the one this plan was written against and Q7's edits have no anchor. An `AttributeError` or `ImportError` exits 1, so it fails closed both ways |
+| Q7's `.md` reporting gap is real on this tree | `! grep -q _detect_readme_broken_entries reflections/docs_auditor.py` | The gap #2834 records exists precisely because #2842 deleted this function. If it is back, the tree is a revert and Q7a would add a **second** `.md` channel beside a live auto-repairing one — the parallel path Principle 1 forbids. Same negation shape and same reasoning as the rename-channel row above |
 
 ## Solution
 
@@ -1670,7 +1721,7 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
 Test hygiene for this lane — every invocation:
 
 ```bash
-cd /Users/valorengels/src/ai/.worktrees/docs-auditor-review-gate
+cd ${AI_REPO_ROOT:-$HOME/src/ai}/.worktrees/sdlc-2739
 POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py -q
 POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q
 ```
@@ -1771,7 +1822,7 @@ already rendered for other producers, so the surface is not new.
 **Location:** `reflections/docs_auditor.py` `run_docs_auditor:1858` (dirty-tree guard)
 through `_push_branch_and_pr:1557-1563` (restore).
 **Trigger:** rotation passes the dirty-tree guard, then another process writes to
-`/Users/valorengels/src/ai` before `git add`. With `git add -A` that foreign work is
+`${AI_REPO_ROOT:-$HOME/src/ai}` before `git add`. With `git add -A` that foreign work is
 committed into a docs PR; with the narrowed staging it is not, but a whole-tree
 force-restore would still destroy it.
 **Data prerequisite:** `files_touched` must be resolved before staging.
@@ -2054,11 +2105,11 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   returns `0`. If any of the three fails, stop and report — Q5 is unsound on a tree
   where the rename channel is present (spike-2). Rebase this lane onto current `main`.
 - Run every row of the Prerequisites table. In particular confirm
-  `REDIS_RUNNING_KEY` is unset and `/Users/valorengels/src/ai` is clean.
+  `REDIS_RUNNING_KEY` is unset and `${AI_REPO_ROOT:-$HOME/src/ai}` is clean.
 - Re-run `--collect-only` on `tests/unit/test_docs_auditor_substrate.py` and re-grep
   every `file:line` in this plan before relying on it. The anchors are current as of
   the baseline commit and nothing more.
-- Do not enter any worktree other than `.worktrees/docs-auditor-review-gate`.
+- Do not enter any worktree other than `.worktrees/sdlc-2739`.
 
 ### 1. Cascade commit ownership (Q1) — commit 1 of 3
 
@@ -2232,7 +2283,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Parallel**: false
 - Run every row of the **Verification** table, including the anti-criteria.
 - Confirm each **Success Criteria** checkbox.
-- Confirm the shared main checkout at `/Users/valorengels/src/ai` is still clean and
+- Confirm the shared main checkout at `${AI_REPO_ROOT:-$HOME/src/ai}` is still clean and
   that no worktree other than this slug's was touched.
 
 ## Verification
@@ -2271,7 +2322,7 @@ post-build expectation that legitimately fails now.
 | Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_docs_auditor_git_surface.py` | > 0 | post-build |
 | No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_docs_auditor_git_surface.py` | exit code 1 | post-build |
 | Test count row is recomputed | `POPOTO_TEST_DB=13 .venv/bin/python -m pytest tests/unit/test_docs_auditor_substrate.py --collect-only -q \| tail -1` and compare against `grep -n 'test_docs_auditor_substrate' tests/README.md` | the number in `tests/README.md:272` equals the collected count | post-build (both read `130` today, and the count will move) |
-| Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
+| Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
 
 ## Critique Results
 
@@ -2281,7 +2332,7 @@ The critic re-derived every re-anchored `file:line` independently and found no a
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Prerequisites auditor | B1: 5 of 7 Prerequisites rows are exit-code-vacuous. `scripts/check_prerequisites.py:94-106` judges purely on return code, so `gh pr view … -q .state`, the `print(bool(...))` rotation probe, `git status --porcelain`, and the PR-count row all exit 0 regardless of result. The two rows that matter most (no rotation in flight, clean shared checkout) are the fail-open ones, which makes Risk 3's stated mitigation inert. | Q4 / Prerequisites | Rewrite each as an exit-code assertion, pipe-free (`check_prerequisites.py:62` splits cells on a bare `\|`): `test "$(gh pr view 2728 --json state -q .state)" = MERGED`; `sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)`; `test -z "$(git -C /Users/valorengels/src/ai status --porcelain)"`. `/bin/sh` POSIX only — no `[[ ]]`. |
+| BLOCKER | Prerequisites auditor | B1: 5 of 7 Prerequisites rows are exit-code-vacuous. `scripts/check_prerequisites.py:94-106` judges purely on return code, so `gh pr view … -q .state`, the `print(bool(...))` rotation probe, `git status --porcelain`, and the PR-count row all exit 0 regardless of result. The two rows that matter most (no rotation in flight, clean shared checkout) are the fail-open ones, which makes Risk 3's stated mitigation inert. | Q4 / Prerequisites | Rewrite each as an exit-code assertion, pipe-free (`check_prerequisites.py:62` splits cells on a bare `\|`): `test "$(gh pr view 2728 --json state -q .state)" = MERGED`; `sys.exit(1 if _get_redis().exists(REDIS_RUNNING_KEY) else 0)`; `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain)"`. `/bin/sh` POSIX only — no `[[ ]]`. |
 | BLOCKER | Control-flow critic | B2: hoisting `_daily_pr_cap_reached` to the preflight block at `:1858` returns before `_run_vault_drift_detection` at `:1866-1869`, whose own comment declares it runs "unconditionally, NOT gated behind the `_select_primary_doc` pick". Skipping `audit()` also skips the substrate's advisory `_file_issue_if_new` loop at `:1290`. A plan whose thesis is "declining must be loud" would silently narrow two reporting channels. | Q4 item 1 / Data Flow / Task 1 | Place both hoisted guards after vault-drift detection and after `slug` is computed (`:1881`), immediately before `audit()` at `:1884` — still pre-write. Then rule explicitly on the advisory channel: accept the narrowing in writing, or run `audit(..., apply_mode="dry-run")` on the capped path. Add a Verification row asserting vault-drift stays reachable when the cap is set. |
 | BLOCKER | Shared-checkout safety critic | B3: the prescribed `git checkout -- <files_touched>` restores from the **index**, not HEAD. On the reachable staged-then-commit-failed path (`add` succeeds, `commit` raises, `checkout main` carries the staged content over), the restore rewrites the worktree from the index that still holds the auditor's content — leaving staged auditor edits on `main` in the shared checkout. That is the exact wedge this plan exists to remove, and the plan forbids `reset --hard` / `checkout -f` as the remedy. | Q4 item 2 / Race 1 / Task 1 | Prescribe `git checkout HEAD -- <files_touched>` (or `git restore --source=HEAD --staged --worktree --`). Both reset index and worktree for those paths only, so "foreign dirt survives" is unaffected. Update Q4 item 2, Race 1's mitigation, and the Task 1 bullet in one pass so they cannot drift. Add a real-git test that stages `files_touched`, forces `commit` to fail, and asserts neither column of `git status --porcelain` shows those paths. |
 | BLOCKER | Escalation critic | B4: Q5's sweeper-side escalation is a guaranteed no-op. `_file_issue_if_new` (`:1072-1096`) dedups by title with a 30-day Redis key plus `_open_issue_exists`, and returns `False` on a hit — it never refreshes, comments, or bumps. Q5 item 1 claims the same title on day 0, so the day-14 sweeper filing can never fire. Separately, the issue-title template is unspecified, which is the single most load-bearing decision in Q5: a generic title swallows every distinct withhold for 30 days. | Q5 items 1-2 / Task 2 | Mandate a per-defect title for item 1 (e.g. `docs-auditor: withheld fix in {doc} ({old} → {new})`) so dedup is per-defect, not per-run. Give the sweeper a distinct title (e.g. `docs-auditor: withheld PR #{n} unreviewed at {age}d`) or drop the sweeper filing and say so. Correct the phrase "or refreshes, via dedup" to "or is suppressed by the 30-day dedup". Note `_file_issue_if_new` hardcodes `--label documentation` (`:1115-1116`). |
@@ -2318,7 +2369,7 @@ NEW-1 is **closed and the fix was traced end to end**: `_update_rotation_hash` (
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Write-surface critic | R3-1 (NEW-3 partial): the rescoped prerequisite is satisfiable but its *justification* is wrong. `docs/features/` is where rotation picks its **primary**, not the module's write surface. `audit(scope_mode="rotation")` audits `_resolve_neighborhood(primary, root, …)` (`:1220`), which (a) follows outbound `[..](*.md)` links with **no `docs/plans/` exclusion** on that branch and (b) pulls inbound refs from `grep -rln <name> docs/`; `_apply_fixes_to_file` gates only on `.endswith(".md")` (`:1251`), not on a directory. Real targets today include `docs/plans/*.md`, `docs/sdlc/*.md`, `docs/tools-reference.md`, and `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. So a wedge whose leftover dirt sits outside `docs/features/` passes both the prerequisite and the final "shared checkout clean after run" row. | Prerequisites / Verification | Blast radius is contained — nothing in Q3/Q4 depends on the claim, because staging and restore are both `files_touched`-scoped and path-agnostic. At build time either widen to `test -z "$(git -C /Users/valorengels/src/ai status --porcelain -- docs .claude)"`, or knowingly accept partial detection. Replace the "docs/features is the auditor's only write surface" sentence with "the write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), spanning `docs/` and outbound-linked `.md` paths". |
+| CONCERN | Write-surface critic | R3-1 (NEW-3 partial): the rescoped prerequisite is satisfiable but its *justification* is wrong. `docs/features/` is where rotation picks its **primary**, not the module's write surface. `audit(scope_mode="rotation")` audits `_resolve_neighborhood(primary, root, …)` (`:1220`), which (a) follows outbound `[..](*.md)` links with **no `docs/plans/` exclusion** on that branch and (b) pulls inbound refs from `grep -rln <name> docs/`; `_apply_fixes_to_file` gates only on `.endswith(".md")` (`:1251`), not on a directory. Real targets today include `docs/plans/*.md`, `docs/sdlc/*.md`, `docs/tools-reference.md`, and `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. So a wedge whose leftover dirt sits outside `docs/features/` passes both the prerequisite and the final "shared checkout clean after run" row. | Prerequisites / Verification | Blast radius is contained — nothing in Q3/Q4 depends on the claim, because staging and restore are both `files_touched`-scoped and path-agnostic. At build time either widen to `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"`, or knowingly accept partial detection. Replace the "docs/features is the auditor's only write surface" sentence with "the write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), spanning `docs/` and outbound-linked `.md` paths". |
 | CONCERN | Executability critic | R3-2: "reuse the module's existing `per_run_cap`" is not literally executable as written. `per_run_cap` is a **function-local** in `audit()` (`:1278`); the withheld filing Q5 item 1 adds lives in `run_docs_auditor`, a different function. | Q5 item 1 / Task 3 | Hoist it to a single module-level constant consumed by both loops. That is the reuse the plan intends and is still not the "separate new constant" it forbids. |
 | CONCERN | Verification-quality critic | R3-3: the NEW-4 Verification row states `grep -c 'per_run_cap'` is "currently 2" and expects `> 2`. The real current count is **3** (`:1278`, `:1281`, `:1285`), so the row is already green today and proves nothing post-build. | Verification | Change the expectation to `> 3`, or better, assert the behavior (a run with >5 withheld entries files exactly 5 issues and logs the suppression warning) rather than a grep count. |
 | CONCERN | Anchor-rot critic | R3-4: `agent/reflection_scheduler.py:514-515` is wrong in four live citations (Freshness Check, spike-4, Q5 item 3, Task 3). That range is docstring text inside `is_reflection_due`; the real site is `:639-640` (`projects_list = result.get("projects") if isinstance(result, dict) else None` / `state.mark_completed(duration, projects=projects_list)`). The *claim* is correct — only `projects` is read — and preflight mandates re-grepping, so this is anchor rot rather than misdirection. The round-1 C3 row keeps the old anchor as history and must not be edited. | Q5 item 3 / Task 3 | Correct the four live citations to `:639-640` at build time. |
