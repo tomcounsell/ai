@@ -523,6 +523,15 @@ class TestWinningScriptInterpreter:
         assert all(f for f in fixes)
         assert all("rm -rf .venv && uv sync --all-extras" in f for f in fixes)
         diags = [f.split("In ", 1)[0].strip() for f in fixes]
+        # Pairwise inequality alone is too weak here: each root lives in a
+        # different tmp_path, so the three diagnostic prefixes would differ
+        # by target *path* even if the reason-specific wording collapsed to
+        # one shared sentence. Pin the reason-specific keyword each prefix
+        # must carry, so a collapse to one generic sentence is caught even
+        # when it happens to still mention a distinct target path each time.
+        assert "does not exist" in diags[0]
+        assert "Python 3.12" in diags[1] and "pin is 3.14" in diags[1]
+        assert "outside every repo venv" in diags[2]
         assert len(set(diags)) == 3, diags
 
     # --- Case 12: pass-message contract -----------------------------------------
