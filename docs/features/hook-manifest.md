@@ -280,6 +280,20 @@ as a subprocess) must put both `.claude/hooks` and `.claude/hooks/validators`
 on `sys.path` itself, since the validator's own `sys.path.insert` line only
 runs under `if __name__ == "__main__"` execution, not under import.
 
+**`hook_utils/` is not deployed to any other machine today.** Deployment is
+directory-granular (see [Registration Is Manifest-Granular; Deployment Is
+Directory-Granular](#registration-is-manifest-granular-deployment-is-directory-granular)
+above): `sync_user_hooks()` hardlinks a directory's files only when that
+directory contains at least one declared **global-scope** script. All five
+`hook_target.py` importers are `scope = "project"`, and `hook_utils/` itself
+has no `[[hook]]` entry of its own, so nothing currently pulls `hook_utils/`
+into the global deployment set — unlike `sdlc/`, whose `sdlc_context.py`
+rides along with its global-scope siblings. A future validator that moves to
+global scope and imports `hook_utils.hook_target` will raise
+`ModuleNotFoundError` on every machine but the one it was authored on, until
+`hook_utils/` picks up a global-scope declaration (or its directory is
+otherwise forced into the deployment set) alongside that promotion.
+
 ## Removal Propagation (`RENAMED_REMOVALS` "hooks" kind)
 
 `scripts/update/hardlinks.py::RENAMED_REMOVALS` is the mechanism that sweeps stale user-level hardlinks and (for skills/commands) their sourcing when something is renamed or removed. It gained a `"hooks"` kind: `(kind, old_name)` tuples where `kind == "hooks"` use `old_name` as the script path relative to `.claude/hooks/` (e.g. `"sdlc/old_script.py"`). `_cleanup_renamed()`'s `src_for_kind` mapping grew a `"hooks": project_dir / ".claude" / "hooks"` entry so the same inode-guarded cleanup logic (never deletes a target still hardlinked to a live project source — protects a foreign repo that legitimately provides its own same-named user-level hook) now covers hooks the same way it already covered skills and commands.

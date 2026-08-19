@@ -442,6 +442,7 @@ enforces this in CI, not just in this note.
 | `isolate_catchup_kill_switch` | autouse | `conftest.py` | Repoints the operator catchup kill-switch flag at a per-test tmp path (issue #2552) |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
+| `cross_lane_repo` | function | `tests/unit/conftest.py` | Factory building the #2689 cross-lane reproducer repo (tracked anchor + another lane's untracked plan) shared by the hook-validator target-resolution tests |
 | `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
 | `make_telegram_event` | function | `tests/e2e/conftest.py` | Telegram event factory |
 | `mock_agent_response` | function | `tests/e2e/conftest.py` | Canned agent response |
