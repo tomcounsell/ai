@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
 last_comment_id: 5324622874
 revision_applied: true
-revision_applied_at: 2026-08-19T07:38:25Z
+revision_applied_at: 2026-08-19T08:17:24Z
 ---
 
 # Terminal Verdict: the router and review-probe residuals left outside #2826's fence
@@ -59,12 +59,18 @@ pipeline machinery. One PR, closing **#2817** and **#2825**.
 
 Three residuals were deliberately left outside the fence of PR #2826 ("G8 must not
 rebuild shipped work", merged 2026-08-17). Each was filed with an explicit
-"measure before changing anything" instruction. All three measurements are now
-done, and all three shapes **reproduce live on this repo today**.
+"measure before changing anything" instruction. All three measurements are now done.
+**#2824's and #2825's shapes reproduce live on this repo today. #2817's shapes are
+reachable and unowned, with zero live instances today** — measured through the real
+`query_enriched` → `_build_context` → `decide_next_dispatch` path, all **17 of 17** live
+terminal ledgers route to `/do-merge` row 10, and none lands in either `pr_number`-absent
+cell. That distinction is stated here rather than buried because this plan cut WS-B on
+exactly this standard, and the same standard is owed to WS-A's own justification.
 
 **Current behavior:**
 
-1. **#2817 — a finished pipeline has no way to say so.** `agent/sdlc_router.py`
+1. **#2817 — a finished pipeline has no way to say so.** *(Reachable and unowned; zero live
+   instances today — 17/17 live terminal ledgers route to `/do-merge` row 10.)* `agent/sdlc_router.py`
    never reads `stage_states["MERGE"]`. Not one rule, not one guard. `grep -n MERGE
    agent/sdlc_router.py` returns only the `SKILL_DO_MERGE` constant and its three
    dispatch uses. So "this pipeline is finished" is not a state the dispatch table
@@ -220,7 +226,7 @@ No prototypes, no worktrees, no committed code.
 
   | `pr_number` | `branch_exists` | APPROVED verdict | result |
   |---|---|---|---|
-  | absent | False | yes | `Blocked(NO_RULE)` — **the originally filed shape, still live** |
+  | absent | False | yes | `Blocked(NO_RULE)` — **the originally filed shape; reachable and unowned, zero live instances today** |
   | absent | False | no | `Blocked(NO_RULE)` |
   | absent | True | yes | **`/do-build` row 5 — a false rebuild of shipped work** |
   | absent | True | no | **`/do-build` row 5** |
@@ -254,12 +260,26 @@ No prototypes, no worktrees, no committed code.
   REVIEW verdict is recorded** — without one, row 8e re-dispatches `/do-pr-review`
   against an already-merged PR, a cell #2826 did not name; and (c) with `branch_exists=True`
   and no `pr_number`, **row 5 dispatches `/do-build` on shipped work.** #2826 fenced out
-  G8's false rebuild and row 5's identical false rebuild is still live.
+  G8's false rebuild and row 5's identical false rebuild is reachable and unowned.
+- **Live occupancy of this matrix (added at round-5 critique).** The eight cells above are
+  **synthetic** — they bound reachability, which is the right argument for building the
+  guard, and they are kept exactly as measured. What they do **not** establish is occupancy.
+  Measured 2026-08-19 through the real `query_enriched` → `_build_context` →
+  `decide_next_dispatch` path over every `PipelineLedger` row whose flat `stage_states_json`
+  carries `MERGE == "completed"`: **17/17 route to `/do-merge` row 10**, every one with
+  `pr_number` resolved by #2826's two-pass lookup and `branch_exists=False`. **Zero live
+  ledgers land in either `pr_number`-absent cell.** So the two `/do-build` cells and the
+  `NO_RULE` cell are reachable and unowned rather than occurring, and the honest severity
+  today is the row-10 cell: three wasted `/do-merge` ticks and G4's misleading escalation.
+  The sweep is carried as a Verification row and by task 1 so it is re-measured at build
+  time, and it is **positive coverage** (17/17 `/do-merge` today → 17/17 TERMINAL after
+  WS-A), not a control.
 - **Confidence**: high.
-- **Impact on plan**: #2817 is not a cosmetic reason-string fix. It has an active
-  failure mode in two of four `pr_number`-absent cells. It also cannot be fixed by a
-  dispatch row — rows 5 and 8e are registered earlier and evaluated first, so the
-  terminal state must pre-empt the whole table. It must be a **guard**.
+- **Impact on plan**: #2817 is not a cosmetic reason-string fix. It has a reachable,
+  unowned failure mode in two of four `pr_number`-absent cells and an occupied one in the
+  row-10 cell. It also cannot be fixed by a dispatch row — rows 5 and 8e are registered
+  earlier and evaluated first, so the terminal state must pre-empt the whole table. It must
+  be a **guard**.
 
 ### spike-2: Does G4 actually cap the terminal `/do-merge` loop?
 - **Assumption**: "the lane re-dispatches until `guard_g4_oscillation` caps it."
@@ -845,9 +865,10 @@ patched.
 
 ## Test Impact
 
-- [ ] **`tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable` (`:1692`) — UPDATE, and this is the one router test file WS-A provably reds.** Round 1 omitted this file entirely; it is the repo's primary router-decision suite (**95** `decide_next_dispatch(` call sites, re-counted 2026-08-19; the bare `grep -c decide_next_dispatch` figure of 97 counts import and reference lines too) and holds the **only** `"MERGE": "completed"` fixture in any router test (verified: `grep -c` returns **1** here and **0** in `test_sdlc_router_oscillation.py`). Its `_unowned_state()` helper builds PLAN/CRITIQUE/BUILD/REVIEW/DOCS/MERGE all completed plus an APPROVED verdict, with `meta = {"pr_number": 4242, "pr_merge_state": "BLOCKED"}`. `test_no_rule_block_uses_no_rule_sentinel` asserts `result.guard_id == "NO_RULE"` and fails outright once a first-position guard returns `TERMINAL`; `test_no_rule_block_renders_distinguishably_from_a_guard_block` consumes the same helper. **Disposition: re-key `_unowned_state()` onto a non-terminal unowned ledger — drop the `"MERGE": "completed"` entry, keep everything else including `pr_merge_state: "BLOCKED"`.** Do **not** flip the assertion to `"TERMINAL"`: these two tests are the only proof of the `NO_RULE` sentinel's distinguishability (#2767b), and flipping them retires that guarantee instead of preserving it. **The re-key is verified to work** — measured on `f491306c5`, the helper's ledger returns `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` with `MERGE` completed, with `MERGE` absent, **and** with `MERGE: "pending"`, so dropping the key leaves both assertions passing for the same reason they pass today. (These tests will additionally be insulated by the `issue_state` gate, since the fixture's `meta` carries no `issue_state` and the guard requires `"CLOSED"` — but the re-key is still the correct disposition, because a fixture should not depend on a gate to stay meaningful.)
+- [ ] **`tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable` (`:1692`) — UPDATE, and this is the one router test file WS-A provably reds.** Round 1 omitted this file entirely; it is the repo's primary router-decision suite (**95** `decide_next_dispatch(` call sites, re-counted 2026-08-19; the bare `grep -c decide_next_dispatch` figure of 97 counts import and reference lines too) and holds the **only** `"MERGE": "completed"` fixture in any router test — **claim restated over all three router suites at round-5 critique**, because rounds 1–4 scoped the grep to two files and there is a third. Verified 2026-08-19: `grep -rn '"MERGE": "completed"' tests/unit/test_sdlc_router*.py` returns exactly one hit, `test_sdlc_router_decision.py:1706`, with **0** in `test_sdlc_router.py` and **0** in `test_sdlc_router_oscillation.py`. Its `_unowned_state()` helper builds PLAN/CRITIQUE/BUILD/REVIEW/DOCS/MERGE all completed plus an APPROVED verdict, with `meta = {"pr_number": 4242, "pr_merge_state": "BLOCKED"}`. `test_no_rule_block_uses_no_rule_sentinel` asserts `result.guard_id == "NO_RULE"` and fails outright once a first-position guard returns `TERMINAL`; `test_no_rule_block_renders_distinguishably_from_a_guard_block` consumes the same helper. **Disposition: re-key `_unowned_state()` onto a non-terminal unowned ledger — drop the `"MERGE": "completed"` entry, keep everything else including `pr_merge_state: "BLOCKED"`.** Do **not** flip the assertion to `"TERMINAL"`: these two tests are the only proof of the `NO_RULE` sentinel's distinguishability (#2767b), and flipping them retires that guarantee instead of preserving it. **The re-key is verified to work** — measured on `f491306c5`, the helper's ledger returns `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')` with `MERGE` completed, with `MERGE` absent, **and** with `MERGE: "pending"`, so dropping the key leaves both assertions passing for the same reason they pass today. (These tests will additionally be insulated by the `issue_state` gate, since the fixture's `meta` carries no `issue_state` and the guard requires `"CLOSED"` — but the re-key is still the correct disposition, because a fixture should not depend on a gate to stay meaningful.)
 - [ ] `tests/unit/test_sdlc_router_oscillation.py` — **NO CHANGE EXPECTED, verify rather than assume.** Round 1 listed two UPDATE dispositions against this file; both were **vacuous** — it contains zero `"MERGE": "completed"` fixtures (verified), so no fixture in it can reach the terminal guard. Re-run it and confirm green. If anything in it does move, that is a signal the guard is placed wrong, not a fixture to patch.
-- [ ] `tests/unit/test_sdlc_router_decision.py` — **REVIEW (the other 94 call sites)**: sweep for any other fixture that sets MERGE completed indirectly (via a helper or a `dict` update) rather than by the literal the grep counts. The grep bounds literals, not construction.
+- [ ] **All three router suites — REVIEW (165 `decide_next_dispatch(` call sites in total)**: `tests/unit/test_sdlc_router_decision.py` (95), `tests/unit/test_sdlc_router.py` (35), `tests/unit/test_sdlc_router_oscillation.py` (43), counts re-taken 2026-08-19. Sweep all three for any fixture that sets MERGE completed **indirectly** — via a helper or a `dict` update — rather than by the literal the grep counts. The grep bounds literals, not construction. Rounds 1–4 scoped this sweep to one file's "other 94 call sites"; widened at round-5 critique.
+- [ ] `tests/unit/test_sdlc_router.py` — **NO CHANGE EXPECTED, verify rather than assume.** Never named in rounds 1–4. Its `_ALL_COMPLETED` helper (`:1158`) sets `MERGE: "pending"` (`:1166`), so nothing in it is terminal today. It is also a **free second witness for the Risk 6 mutation**: no fixture in it carries an `issue_state` in `meta`, so a guard that dropped the issue-state gate would red here even though the guard's own tests live elsewhere. Carried as a Verification row and added to task 6's mutation runs.
 - [ ] `tests/unit/test_sdlc_stage_query.py:270-400` — **NO CHANGE** (was UPDATE before WS-B was deferred). The D4 resolution-order tests encode the current ladder order, which this lane leaves byte-identical. [#2869](https://github.com/tomcounsell/ai/issues/2869) owns rewriting them.
 - [ ] `tests/unit/test_sdlc_stage_query.py:364-399` — **NO CHANGE** (was UPDATE before WS-D was deferred). `_gh_pr_search_issue_ref`'s "first body-validating candidate" contract is unchanged by this lane; these tests keep asserting it. [#2868](https://github.com/tomcounsell/ai/issues/2868) owns rewriting them.
 - [ ] `tests/unit/test_sdlc_stage_query.py:1436-1520` — **NO CHANGE**: the #2757 two-pass block. Nothing in this lane touches the ladder; the comment at `:1517` documenting "returns the FIRST body-validating candidate" stays accurate and needs only the #2868 pointer added by the Documentation task.
@@ -903,7 +924,9 @@ No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` 
   in particular: adding `sort:` to the search string (moves the guarantee back onto a
   remote service whose behavior we just established is not contractual) and "while I'm
   here" widening the `--json` field list (a diff on a shared function with no test in this
-  lane that needs it). A verification task checks this function is byte-unchanged.
+  lane that needs it). A verification row checks this function's **executable lines** are
+  unchanged; its docstring is expected to gain the #2868 annotation and that is the only
+  permitted edit.
 - **Rewriting `_compute_meta`'s two-pass structure while adding the `issue_state` key.**
   The two-pass is #2826's, it is measured, and it is orthogonal. The `issue_state` key sits
   beside it and reads none of it. Leave it.
@@ -988,6 +1011,12 @@ re-reds has no real coverage. **Mutate WS-A's two halves separately** — the gu
 `issue_state` key — because a suite that reds only on the guard revert leaves the `--repo`
 scoping and the `{"OPEN","CLOSED"}` whitelist unpinned, and those are exactly where the
 round-3 blocker lived. Deleting `--repo` from the argv must red a named test on its own.
+**The live route sweep is a mutation-table row, not a control** — it is expected to invert
+(17/17 `/do-merge` → 17/17 `TERMINAL`), so reverting WS-A must move it back.
+**Two Verification rows cannot be proved by reverting a workstream and get their own
+mutations**: the No-Go tripwire against the four guard variants, and the executable-line
+hash against its two poles. Round 4 shipped a tripwire that passed under both single edits
+it existed to catch, which is the whole reason this bullet exists.
 
 ### Risk 6: The terminal guard latches a re-entered issue shut, permanently
 **Impact:** The worst outcome in this plan. `MERGE == "completed"` is durable and
@@ -1203,18 +1232,43 @@ in-process.
       terminal definition.
 
 ### SDLC Stage Addenda
-- [ ] **Update `.claude/skills-global/do-sdlc/SKILL.md:136` — the supervisor's `blocked`
-      contract.** It currently routes every non-`ISSUE_LOCKED` block to "**STOP the loop.**
-      Report the `reason` and `guard_id` to the human." Until it learns the terminal shape,
-      WS-A trades three wasted ticks for an immediate false escalation. Add the
-      `{"blocked": true, "complete": true, "guard_id": "TERMINAL", ...}` case → *exit the
-      loop reporting **success**, not escalation*. Keep the wording **generic** (it is a
-      global skill hardlinked to every machine by `scripts/update/hardlinks.py`, and the
-      body already documents `blocked`/`guard_id` generically); no
-      `.claude/skill-context/do-sdlc.md` is needed and none exists today.
+- [ ] **Update `.claude/skills-global/do-sdlc/SKILL.md` — the supervisor's `blocked`
+      contract, at all four load-bearing sites.** Because Q2 settles on the **additive**
+      key, the terminal payload still carries `blocked: true`, so every site that classifies
+      a `blocked` payload classifies the terminal shape too. Editing one of them leaves a
+      numbered Hard Rule instructing surface-and-stop-to-the-human on the exact payload the
+      Success Criteria require be routed to loop-exit-success — the regression this checkbox
+      exists to prevent, surviving its own remedy. Nothing holds the other three: the plan
+      already establishes that `_GUARD_ROW_RE = re.compile(r"^G\d+")` cannot parse a
+      `TERMINAL` id and that the parity test runs one direction only.
+
+      **Anchor on text, not offsets** — the line numbers below are true on `main` today and
+      drift as the body is edited. `grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md`
+      returns them all:
+
+      | Site | Text on `main` | Edit |
+      |---|---|---|
+      | Hard Rule 3 (`:23`) | "**NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason." | Narrowest carve-out that keeps it a rule: "NEVER continue past a `blocked` decision **unless it carries `complete: true`** — that shape is a finished pipeline, not a guard escalation; exit the loop reporting success." |
+      | Step 3a table tail (`:136`) | "`{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human…" | Add the `{"blocked": true, "complete": true, "guard_id": "TERMINAL", ...}` case → *exit the loop reporting **success**, not escalation*. |
+      | Step 3e (`:295`) | "Router returned `blocked` → already stopped in 3a." Its only success exit is the `/do-merge` + `gh pr view … MERGED` path, which a terminal ledger can no longer reach once the guard pre-empts row 10. | Add a terminal exit condition **beside** the merged one: a `complete: true` router decision → **exit the loop, success**. |
+      | Step 4 Final Report (`:303`) | "**Outcome**: merged / blocked (with guard + reason) / cap reached" — a taxonomy with no terminal member. | Add a fourth outcome value: `already complete (terminal pipeline)`. |
+
+      **Step 5's lease-release list needs no change and must not get one.** On a
+      `MERGE == completed` ledger the lease was already released by
+      `complete_stage("MERGE")`'s `_release_run_best_effort` — the same fact Risk 1 depends
+      on — so adding a terminal branch there would either double-release or imply the lease
+      is still held. Leave it.
+
+      Keep the wording **generic** (it is a global skill hardlinked to every machine by
+      `scripts/update/hardlinks.py`, and the body already documents `blocked`/`guard_id`
+      generically); no `.claude/skill-context/do-sdlc.md` is needed and none exists today.
       **This is a blocking dependency of WS-A, not a follow-up.**
 - [ ] **Update `.claude/skills/sdlc/SKILL.md:261` — the router skill's `blocked` contract.
       Unconditional, same commit as WS-A. Not a checkbox gated on a parity test.**
+      **The asymmetry with `do-sdlc` is real and deliberate: this file has exactly one
+      operative site.** Its other `blocked` mentions (`:169`, `:202`, `:251`, `:256`) are the
+      guard table and the `ISSUE_LOCKED` contract, neither of which classifies a terminal
+      payload. One line here versus four there is the correct scoping, not an oversight.
       That line today reads: "If `blocked` is `true`: surface the `reason` to the human and
       wait. Do NOT loop or guess an alternative skill." (verified verbatim). It is the
       *identical* instruction to `.claude/skills-global/do-sdlc/SKILL.md:136`, so leaving it
@@ -1266,15 +1320,35 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
       guard that fires on an unresolvable issue state fails it.
 - [ ] The terminal guard returns `None` (falls through), never `Blocked`, on a non-dict
       `stage_states` — asserted against the guard directly.
-- [ ] **The guard gates on the reason, not on truthiness.** It reads
-      `is_complete, reason = is_pipeline_complete(...)` and returns `None` unless
-      `reason == "merge_success"`. Tripwire: a ledger with `DOCS = "completed"`, `MERGE`
-      absent, `issue_state = "CLOSED"`, and `pr_open = False` threaded through `meta` still
-      returns `None` from the guard. `agent/pipeline_complete.py:78-84` returns
-      `(True, "docs_success_no_pr")` the instant `pr_open is False`, and the No-Gos section
-      publishes the exact two-line recipe for supplying that argument — so without this
-      criterion the DOCS terminal leg switches on with nothing going red. This test is the
-      tripwire the No-Go leans on.
+- [ ] **The guard gates on the reason, not on truthiness — proved by isolating the gate, not
+      by a ledger shape.** It reads `is_complete, reason = is_pipeline_complete(...)` and
+      returns `None` unless `reason == "merge_success"`.
+
+      **The tripwire has two legs and both are load-bearing.** (a) With
+      `agent.sdlc_router.is_pipeline_complete` patched to return
+      `(True, "docs_success_no_pr")`, an *otherwise fully terminal* ledger still returns
+      `None` from the guard. (b) The guard passes `pr_open` as `None`, asserted off the
+      patched callable's `call_args` — the same argv-shaped discipline the `--repo` criterion
+      uses, because the value the guard *passes* is what the No-Go controls and no return
+      value can show it. Plus the merge-shaped positive leg on the unpatched predicate, so a
+      guard that returns `None` unconditionally cannot pass either.
+
+      **Patch target must be `agent.sdlc_router.is_pipeline_complete`** — the name bound in
+      the router's namespace. A `from agent.pipeline_complete import is_pipeline_complete`
+      rebinds it, so patching the source module would not take and the test would pass
+      vacuously.
+
+      **Round 4's ledger-shaped form is retired, and why matters.** It read
+      `g({'DOCS':'completed'}, {'issue_state':'CLOSED','pr_open':False}, {})` and asserted
+      the result was `None` — but that `None` is shielded twice, by the reason gate *and* by
+      `is_pipeline_complete` returning `(False, "pr_state_unavailable")` whenever the guard
+      passes `pr_open=None`. Removing either shield leaves it green. Mutation-proved
+      2026-08-19 over four guard variants built from this plan's own specified body: the
+      round-4 form scored `True / True / True / False` across (A) as-specified, (B) No-Go
+      recipe wired with the reason gate kept, (C) reason gate deleted, (D) both — detecting
+      neither single-edit regression. The two-leg form above scores
+      **`True / False / False / False`**, catching each one alone. This test is the tripwire
+      the No-Go leans on, and it now actually is one.
 - [ ] **Every `MERGE`-not-completed ledger that routes to `/do-merge` today still does** —
       the negative control. Measured on `96a44a505` as **8 routes** over `MERGE` in
       `{absent, pending, in_progress, failed}` × `pr_number` in `{None, 555}` ×
@@ -1316,10 +1390,31 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 **Scope, coverage, and honesty**
 
-- [ ] **`_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff.**
-      Both WS-B (#2869) and WS-D (#2868) live in that code and neither ships here. This is
-      the scope-leak check, and it replaces every ladder-order criterion earlier rounds
-      carried.
+- [ ] **`_lookup_pr` and `_gh_pr_search_issue_ref` change in docstring text only: no
+      signature, no control flow, no argv.** Both WS-B (#2869) and WS-D (#2868) live in that
+      code and neither ships here. This is the scope-leak check, and it replaces every
+      ladder-order criterion earlier rounds carried.
+
+      **The earlier "byte-unchanged" wording was unsatisfiable** and is retired. Documentation
+      → Inline Documentation mandates annotating **both** functions' docstrings, and both
+      docstrings sit *inside* their function bodies — so a builder could not satisfy both
+      contracts, and task 9's two discharge paths gave opposite answers on the same tree.
+      Measured 2026-08-19: applying exactly the two sanctioned annotations reports
+      `1 file changed, 3 insertions(+)` into `tools/sdlc_stage_query.py`, entirely inside the
+      two function bodies, while the old grep-shaped anti-criterion row stayed **silent** —
+      so the gate could not see the violation it was written to catch either. Dropping the
+      annotations was rejected: "a stale comment presenting a gap as intent is what let these
+      bugs survive this long" is the strongest argument in the Documentation section.
+
+      **Gated on executable lines, not on bytes.** `inspect.getsource` each function, drop the
+      docstring node via `ast.get_docstring`, `ast.unparse` the remainder, SHA-256 it, and
+      compare against the value recorded at plan time on `f491306c5`:
+      `_lookup_pr` → `a6f41605c55d5de5`, `_gh_pr_search_issue_ref` → `3ab927d8486561bd`
+      (first 16 hex chars). **Mutation-proved on both poles 2026-08-19**: adding a docstring
+      line to each function leaves both hashes unchanged, while adding
+      `lane_branch: str \| None = None` to `_lookup_pr`'s signature moves its hash to
+      `314fbe0b49859911`. The runnable form is the Verification table's *PR resolution is
+      executable-line-unchanged* row.
 - [ ] **KNOWN-UNCOVERED — #2824 is not fixed by this lane, and #2494 / #2518 stay broken.**
       They are the only OPEN reopened issues carrying a stale prior-lifecycle PR, and
       `sdlc-tool stage-query` reports `slug: None, slug_source: "unresolved"` for both
@@ -1362,7 +1457,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 - **Validator**
   - Name: `lane-validator`
-  - Role: independently re-run every live measurement and the whole Verification table; confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` are unmodified in the merged diff (the WS-B / WS-D scope-leak check)
+  - Role: independently re-run every live measurement and the whole Verification table; confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` changed in **docstring text only** — no signature, no control flow, no argv — by the executable-line hash row, **not** by reading the raw diff. The two functions are *expected* to carry a docstring annotation each (the Documentation section mandates it); a validator who blocks on any diff at all blocks a compliant PR.
   - Agent Type: validator
   - Resume: true
 
@@ -1384,7 +1479,8 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Parallel**: false
 - Re-run spike-1's eight-cell matrix and confirm it still matches this plan. If it has moved, **stop and report** — a drifted baseline invalidates the design, not just the numbers.
 - Re-run `_review_artifact_posted(1785/2073/2104)` → True/True/True.
-- Re-run the terminal-ledger CLOSED sweep **with `--repo`** and confirm both numbers are **equal** and the population is **non-empty**. It was `16 16` on 2026-08-19 and grows by one on every merge, so a builder will legitimately see a larger number. An **inequality** — not a change in the count — means the `!= "CLOSED"` polarity now costs real coverage and the argument needs restating before any code is written.
+- Re-run the terminal-ledger CLOSED sweep **with `--repo`** and confirm both numbers are **equal** and the population is **non-empty**. It was `16 16` on 2026-08-19 and `17 17` when re-measured later that day; it grows by one on every merge, so a builder will legitimately see a larger number. An **inequality** — not a change in the count — means the `!= "CLOSED"` polarity now costs real coverage and the argument needs restating before any code is written.
+- **Re-run the live route sweep over the same population** and record where those ledgers actually route today. It walks the identical set the CLOSED check walks, so it costs one extra pass and no extra `gh` calls. It must go through the **real context builder** — `query_enriched(issue_number=n)` → `tools.sdlc_next_skill._build_context(None, n, res["stages"], res["_meta"])` → `decide_next_dispatch`, all inside `cached_target_repo_resolution()` — never a hand-built `{"branch_exists": ...}` dict, which omits `stage_artifacts_verified` and so cannot see a G8 interaction. Measured 2026-08-19: **`17 17 0`** (population, `/do-merge` hits, `TERMINAL` hits). This is the number that converts WS-A's severity claim from argued to measured, and it is what the PR body should carry rather than "reproduces live today". **Expected to invert after WS-A** — 0 `/do-merge`, N `TERMINAL` — which makes it positive coverage, so it owes a watch-it-fail in task 2 and a row in Risk 5's mutation table.
 - Confirm no code path other than `sm.complete_stage("MERGE")` writes `MERGE = completed` (Risk 1's verification task).
 - Record everything as the red-state paper trail for the PR body.
 - **Do not measure `_lookup_pr`.** It is unchanged by this lane; its fixtures belong to #2869.
@@ -1398,7 +1494,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Write every assertion from Success Criteria against **unmodified** source and watch each one fail. Paste the real failure output into the PR body.
-- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the `_lookup_pr` byte-unchanged row, the 8-route negative-control sweep, the xfail row, and the two lint/format rows). They are anti-criteria, controls, and hygiene checks; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table. **A GREEN TODAY row still owes a mutation proof** — task 6 owns the two anti-criterion greps, and round 4 found both passing vacuously precisely because nobody ever watched them move.
+- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the `_lookup_pr` executable-line-unchanged row, the 8-route negative-control sweep, the three router-suite rows, the xfail row, and the two lint/format rows). **The live-route sweep is NOT on this list** — it is positive coverage (17/17 `/do-merge` today → 17/17 TERMINAL after WS-A), so it owes a watch-it-fail and it belongs in Risk 5's mutation table. They are anti-criteria, controls, and hygiene checks; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table. **A GREEN TODAY row still owes a mutation proof** — task 6 owns the two anti-criterion greps, and round 4 found both passing vacuously precisely because nobody ever watched them move.
 - Every negative assertion must be paired with a positive one (`"error" not in result`) so a crash cannot go green — the #2826 discipline.
 - **Assert the `gh issue view` argv, not just its result.** The round-3 blocker is a lookup that returns a confident wrong answer, so a result-shaped test cannot see it. Patch `subprocess.run`, capture `call_args`, and assert `--repo` is present.
 - Write **no** `_lookup_pr` tests. That surface is unchanged; its tests belong to #2869.
@@ -1416,9 +1512,13 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 - Then delegate to `agent.pipeline_complete.is_pipeline_complete(stage_states, "success", pr_open=None)` and **gate on the reason, not on truthiness**:
   `is_complete, reason = is_pipeline_complete(stage_states, "success", pr_open=None)` then
   `if not is_complete or reason != "merge_success": return None`. The `pr_open=None` argument alone is not a scope boundary — `agent/pipeline_complete.py:78-84` returns `(True, "docs_success_no_pr")` the moment `pr_open is False`, and the No-Gos section publishes the two-line recipe for supplying it. The explicit `reason` check plus the Failure-Path tripwire case (DOCS completed, MERGE absent, `pr_open=False` threaded through `meta`, guard must still return `None`) is what makes that No-Go go red instead of go quiet.
+- **Name the function `guard_terminal_pipeline`.** Not `guard_terminal`, not `guard_g9_terminal`, not `guard_pipeline_terminal`. Three Verification rows import it by that exact name (`from agent.sdlc_router import guard_terminal_pipeline as g`), including the two carrying the Risk 1 and No-Go bars, and a different name leaves them failing with `ImportError` — which reads as a real regression rather than a naming mismatch.
 - Insert it **first in `GUARDS`, ahead of G1** (Resolved Question 1), with the rationale in the docstring.
 - Map the terminal `guard_id` to its JSON shape in `tools/sdlc_next_skill.py::decide()` — an additive `complete: true` key alongside `blocked` (Resolved Question 2).
-- **Update BOTH router-consumer skill bodies in this same commit** — `.claude/skills-global/do-sdlc/SKILL.md:136` **and** `.claude/skills/sdlc/SKILL.md:261` — so each exits reporting success on `complete: true` instead of escalating. They carry the identical `blocked` instruction; fixing one and not the other leaves the regression live on the other path. Neither is conditional on the parity test, which provably cannot hold either of them (`_GUARD_ROW_RE` is `^G\d+`).
+- **Update BOTH router-consumer skill bodies in this same commit**, at every site that classifies a `blocked` payload. Because Q2 ships the additive key, the terminal payload still carries `blocked: true`, so a one-line edit leaves the other sites classifying it as an escalation.
+  - `.claude/skills-global/do-sdlc/SKILL.md` — **four sites**: Hard Rule 3 (`:23`), the Step 3a table tail (`:136`), Step 3e's exit conditions (`:295`), and Step 4's outcome taxonomy (`:303`). Exact edits are in the Documentation → SDLC Stage Addenda checkbox. Anchor on text, not offsets — `grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md` returns them all. **Step 5's lease-release list gets no change**: on a `MERGE == completed` ledger `complete_stage("MERGE")`'s `_release_run_best_effort` already released the lease, which is the fact Risk 1 depends on.
+  - `.claude/skills/sdlc/SKILL.md` — **one site** (`:261`). Its other `blocked` mentions (`:169`, `:202`, `:251`, `:256`) are the guard table and the `ISSUE_LOCKED` contract and classify no terminal payload. The asymmetry is real; do not go looking for three more.
+  - Both bodies carry the identical operative instruction; fixing one path and not the other leaves the regression live on the other. Neither is conditional on the parity test, which provably cannot hold either of them (`_GUARD_ROW_RE` is `^G\d+`).
 - **Re-key `tests/unit/test_sdlc_router_decision.py::TestNoRuleBlockIsDistinguishable._unowned_state()`** (`:1692`) — drop `"MERGE": "completed"`, change nothing else. Verified to keep both assertions passing. Do **not** flip either assertion to `"TERMINAL"`; that retires the #2767b sentinel guarantee.
 - Do **not** modify row 5, row 8e, or row 10 — the guard pre-empts them and they stay correct for non-terminal ledgers.
 - Do **not** harden G1 against non-dict ledgers here; that fragility predates this lane and is out of scope.
@@ -1452,12 +1552,17 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 ### 6. Mutation proofs
 - **Task ID**: mutation-check
+- **Validates**: tests/unit/test_sdlc_router_decision.py, tests/unit/test_sdlc_router.py, tests/unit/test_sdlc_router_oscillation.py, tests/unit/test_sdlc_stage_query.py, tests/unit/test_sdlc_stage_marker.py — plus every non-GREEN-TODAY row of the Verification table, which is where the anti-criterion and live-sweep proofs discharge
+- **Informed By**: Risk 5 (a green suite that proves nothing is the #2091 problem), round-4 blockers (both anti-criteria were found passing vacuously), round-5 blocker 1 (a tripwire row can pass under the exact edits it exists to catch)
 - **Depends On**: build-terminal-guard, build-issue-state-key, build-marker-scope
 - **Assigned To**: `mutation-tester`
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Revert each of WS-A and WS-C **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
 - Mutate the two halves of WS-A **separately**: the guard and the `issue_state` key. A test suite that reds only on the guard revert leaves the `--repo` scoping and the `{"OPEN","CLOSED"}` whitelist unpinned, which is exactly the round-3 blocker going unnoticed. Deleting `--repo` from the argv must red a named test on its own.
+- **Run all three router suites on every mutation**, not just `test_sdlc_router_decision.py`. `test_sdlc_router.py` carries 35 `decide_next_dispatch(` call sites and no `issue_state` in any of its metas, so it is a free second witness: a guard that dropped the issue-state gate should red there.
+- **Mutation-prove the No-Go tripwire row against the four guard variants**, not just against a revert. Build (A) the guard as task 3 specifies, (B) the No-Gos recipe wired with the reason gate kept, (C) the reason gate deleted with `pr_open=None`, (D) both, and confirm the row scores `True / False / False / False`. Proved at plan time on `054f0f0fa`; round 4's ledger-shaped form scored `True / True / True / False` on the same four, which is how it reached a fifth round undetected.
+- **Mutation-prove the executable-line hash row on both poles**: a docstring line added to each of `_lookup_pr` and `_gh_pr_search_issue_ref` must leave the output `True True` (confirm the edit landed with `git diff --stat`), and `lane_branch: str \| None = None` added to `_lookup_pr`'s signature must flip the first leg to `False`. Proved at plan time; re-prove against build-time source since the recorded hashes are pinned to `f491306c5`. **If an unrelated commit changes either function's executable lines before this lane builds, the pinned hash is stale — re-record it and say so in the PR body, do not relax the row.**
 - Revert both workstreams together and confirm the two original reported shapes return.
 - **Mutation-prove the two GREEN TODAY anti-criterion greps, which cannot be proved by reverting a workstream.** They count as coverage for nothing, but a gate that cannot fire is worse than no gate, and round 4 found both of them in exactly that state. Inject, measure, revert, re-measure — in the same step, leaving the tree clean:
   - **No-I/O row:** append `subprocess.run(["true"])` to `agent/sdlc_router.py`; `grep -c -e 'subprocess\.' -e 'requests\.' -e 'urllib' agent/sdlc_router.py` must go `0` → non-zero, and back to `0` on revert. (Proved at plan time on `96a44a505`: `0` → `1` → `0`.)
@@ -1466,6 +1571,8 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 ### 7. Documentation
 - **Task ID**: document-feature
+- **Validates**: no test files — it discharges against the Documentation section's checkboxes and against the executable-line hash row, which is the gate proving the two docstring annotations landed **without** touching signature, control flow, or argv
+- **Informed By**: round-5 blocker 2 (the annotations are mandatory and were previously in contradiction with the scope check), round-5 blocker 3 (the `do-sdlc` contract lives at four sites)
 - **Depends On**: mutation-check
 - **Assigned To**: `lane-documentarian`
 - **Agent Type**: documentarian
@@ -1475,6 +1582,8 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 ### 8. Record the disposition on all three issues
 - **Task ID**: record-outcomes
+- **Validates**: no test files — it discharges against the "Scope, coverage, and honesty" Success Criteria and is verified by reading the three issues and the PR body
+- **Informed By**: spike-4 (the measured numbers each comment must carry), Q4 (#2824's deferral is the decision this task publishes), round-5 concern 1 (the severity sentence posted on #2817 is the measured one, not "reproduces live today")
 - **Depends On**: document-feature
 - **Assigned To**: `lane-validator`
 - **Agent Type**: validator
@@ -1486,12 +1595,13 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 ### 9. Final validation
 - **Task ID**: validate-all
-- **Depends On**: record-outcomes
+- **Validates**: no test files — this discharges against the Verification table, every row of it
+- **Informed By**: the Success Criteria (each row exists to discharge one), round-5 blocker 2 (the scope check is executable-line, not byte)
 - **Assigned To**: `lane-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the entire Verification table.
-- Confirm **both** `_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff — WS-B belongs to #2869 and WS-D to #2868, and neither may have leaked in.
+- Run the entire Verification table, including the three router-suite rows and the live-route sweep.
+- **Confirm `_lookup_pr` and `_gh_pr_search_issue_ref` changed in docstring text only** — run the executable-line hash row and expect `True True`. WS-B belongs to #2869 and WS-D to #2868, and neither may have leaked in. **Do not discharge this by reading the raw diff**: both functions are *required* to gain a docstring annotation, so a diff-shaped reading blocks a compliant PR. That contradiction is round-5 blocker 2 and this bullet is its remedy.
 - Confirm no `tools/` import and no I/O entered `agent/sdlc_router.py`.
 - Confirm the `gh issue view` argv in the merged diff carries `--repo`.
 
@@ -1499,7 +1609,9 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 
 | Check | Command | Expected |
 |---|---|---|
-| Router unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router_oscillation.py -q` | exit code 0 |
+| **Router decision suite — the one WS-A provably reds** | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router_decision.py -q` | exit code 0. **The suite the change is known to break** — it holds the only `"MERGE": "completed"` fixture in any router test (`:1706`) and task 3 re-keys `_unowned_state()`. Round 4's table had no row for it, so task 9 and the `lane-validator` could both discharge without ever running it. |
+| Router core suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router.py -q` | exit code 0. The third router suite, unnamed in rounds 1–4. **35** further `decide_next_dispatch(` call sites and an `_ALL_COMPLETED` helper at `:1158` whose `MERGE` is `"pending"` (`:1166`), so nothing in it is terminal today — which is exactly what makes it a free second witness for the Risk 6 mutation: no fixture in it carries an `issue_state`, so a guard that ignored the issue-state gate would red here. |
+| Router oscillation suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_router_oscillation.py -q` | exit code 0. **NO CHANGE EXPECTED** (zero `"MERGE": "completed"` fixtures) — this row confirms rather than assumes. |
 | Stage-query unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_stage_query.py -q` | exit code 0 |
 | Stage-marker unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_stage_marker.py -q` | exit code 0 |
 | next-skill unit suite | `./scripts/pytest-clean.sh tests/unit/test_sdlc_next_skill.py -q` | exit code 0 |
@@ -1510,12 +1622,13 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 | Terminal verdict, `pr_number` present | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{'branch_exists':True}))"` | output contains `TERMINAL` and does not contain `/do-merge` |
 | **Risk 6 — a reopened (OPEN) issue is NOT latched** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'OPEN'},{'branch_exists':True}))"` | output does **not** contain `TERMINAL`. The single most important row in this table: a terminal ledger whose issue was reopened must route as it does today, not terminate forever. |
 | **Risk 6 — an unresolvable issue state fails open** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(all('TERMINAL' not in str(d(dict(s),m,{'branch_exists':True})) for m in [{},{'issue_state':None},{'issue_state':''},{'issue_state':'closed'},{'issue_state':42}]))"` | output contains `True`. Pins the `!= "CLOSED"` polarity: the `== "OPEN"` form would fail every case here. |
+| **Live route sweep — where terminal ledgers actually go (WS-A's severity, measured)** | `./.venv/bin/python -c "import json; from agent.pipeline_ledger import PipelineLedger; from agent.sdlc_router import decide_next_dispatch as d; from tools._sdlc_utils import cached_target_repo_resolution; from tools.sdlc_next_skill import _build_context; from tools.sdlc_stage_query import query_enriched; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; cached_target_repo_resolution().__enter__(); rs=[str(d(q['stages'],q['_meta'],_build_context(None,n,q['stages'],q['_meta']))) for n in ns for q in [query_enriched(issue_number=n)]]; print(len(ns), sum('/do-merge' in r for r in rs), sum('TERMINAL' in r for r in rs))"` | Today: `N N 0` — measured **`17 17 0`** on 2026-08-19. After WS-A: `N 0 N`. **Positive coverage, NOT a control** — it is expected to move, so it is subject to task 2's watch-it-fail and it belongs in Risk 5's mutation table. Goes through the **real context builder**: a hand-built `{"branch_exists": ...}` dict omits `stage_artifacts_verified` and cannot see a G8 interaction. Reads the **flat** `stage_states_json` shape — see the note below on the `stages` wrapper. Takes about 80s (one `query_enriched` per ledger); run it once, not per-row. This row is what makes the Problem section's "reachable and unowned; zero live instances today" a measurement rather than a hedge. |
 | **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--repo','tomcounsell/ai','--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Re-measured **repo-scoped** 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. **The `--repo` flag is required**, not optional: without it `gh` resolves `GH_REPO` before cwd and the number describes an unknown repository. |
 | **Round-3 blocker — the `gh issue view` argv is repo-scoped** | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q, subprocess; r=patch.object(q.subprocess,'run',wraps=subprocess.run).start(); q._compute_meta({k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}, None, 2711); argvs=[c.args[0] for c in r.call_args_list if isinstance(c.args[0],list) and c.args[0][:3]==['gh','issue','view']]; print(bool(argvs) and all('--repo' in a for a in argvs))"` | output contains `True`. **Red today** (the key does not exist yet). Asserts the **argv**, because a wrong-repo lookup *succeeds* and no result-shaped assertion can see it. |
 | **Round-3 blocker — `issue_state` is whitelisted to `{"OPEN","CLOSED"}`** | `./.venv/bin/python -c "from unittest.mock import patch,MagicMock; import tools.sdlc_stage_query as q; get=lambda o: [patch.object(q.subprocess,'run',return_value=MagicMock(returncode=0,stdout=o)).start(), q._compute_meta({'ISSUE':'completed','MERGE':'completed'},None,2711).get('issue_state'), patch.stopall()][1]; print(get('CLOSED')=='CLOSED' and all(get(o) is None for o in ['','error: not found','MERGED','closed','Closed']))"` | output contains `True`. **Genuinely red today — measured `False` on `96a44a505`.** The **positive pole is what makes it red**: `get('CLOSED') == 'CLOSED'` fails while the key is absent. The earlier absence-only form of this row printed `True` today (also measured) because `.get('issue_state')` is `None` for every input when the key does not exist — it could not distinguish "the whitelist is correct" from "the whitelist was never written". Prefer a real parametrized unit test over this one-liner; the row states the bar and the Test Impact entry owns the implementation. |
 | Negative control — non-terminal still routes to merge | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{'branch_exists':False}))"` | output contains `/do-merge`. The single-cell form of the row below. |
 | **Negative control — the full 8-route non-terminal `/do-merge` sweep** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; V={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; B=['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH']; mk=lambda m,v: dict({k:'completed' for k in B}, **({} if m=='absent' else {'MERGE':m}), **({'_verdicts':V} if v else {})); print(sum('/do-merge' in str(d(mk(m,v), {} if p is None else {'pr_number':p}, {'branch_exists':b})) for m in ['absent','pending','in_progress','failed'] for p in [None,555] for b in [False,True] for v in [True,False]))"` | output is `8`. **GREEN TODAY (negative control).** Measured `8` on `96a44a505` over 32 cells; all 8 hits are row 10 and all require `pr_number` **and** an APPROVED REVIEW verdict. Must still be `8` after WS-A — the terminal guard pre-empts only `MERGE == completed`, so this whole population is untouched. Exempt from task 2's "watch it fail" and excluded from Risk 5's mutation table (it is a control, not workstream coverage). |
-| **No-Go tripwire — the guard never fires on the `docs_success_no_pr` leg** | `./.venv/bin/python -c "from agent.sdlc_router import guard_terminal_pipeline as g; docs=g({'DOCS':'completed'},{'issue_state':'CLOSED','pr_open':False},{}); term=g({k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']},{'issue_state':'CLOSED'},{}); print(docs is None and 'TERMINAL' in str(term))"` | output contains `True`. **Red today** (`ImportError` — the guard does not exist). **Both poles**: the DOCS-shaped ledger must return `None` even with `pr_open=False` in `meta`, and the merge-shaped ledger must still fire, so a guard that returns `None` unconditionally cannot pass. This is the row that goes red the instant someone wires the No-Gos section's `meta["pr_open"] = _check_pr_open(issue_number)` recipe without doing the DOCS-population measurement that No-Go demands. |
+| **No-Go tripwire — the guard never fires on the `docs_success_no_pr` leg** | `./.venv/bin/python -c "from unittest.mock import patch; import agent.sdlc_router as r; S={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; M={'issue_state':'CLOSED','pr_open':False}; p=patch.object(r,'is_pipeline_complete',return_value=(True,'docs_success_no_pr')).start(); gated=r.guard_terminal_pipeline(dict(S),dict(M),{}) is None; ca=p.call_args; shape=(ca.kwargs['pr_open'] if 'pr_open' in ca.kwargs else ca.args[2]) is None; patch.stopall(); print(gated and shape and 'TERMINAL' in str(r.guard_terminal_pipeline(dict(S),dict(M),{})))"` | output contains `True`. **Red today** (`AttributeError` / `ImportError` — the guard does not exist). **Three legs, each catching a different single edit.** (a) *reason-gate leg*: with `is_pipeline_complete` patched to answer `(True, "docs_success_no_pr")`, an otherwise fully terminal ledger must still return `None` — this is what deleting the reason gate breaks. (b) *call-shape leg*: `pr_open` must be passed as `None`, read off the patched callable's `call_args` — this is what wiring the No-Gos section's `meta["pr_open"] = _check_pr_open(issue_number)` recipe breaks, since `meta` here carries `pr_open: False`. (c) *positive leg*: the unpatched merge-shaped ledger must still fire, so an unconditionally-`None` guard cannot pass. **Patch target is `agent.sdlc_router.is_pipeline_complete`**, the name bound in the router's namespace — a `from … import` rebinds it and patching `agent.pipeline_complete` would not take. **Mutation-proved 2026-08-19** over four guard variants built from task 3's specified body: this row scores `True / False / False / False` across (A) as-specified, (B) recipe wired + reason gate kept, (C) reason gate deleted, (D) both. Round 4's ledger-shaped form scored `True / True / True / False` on the same four and is retired. |
 | Terminal verdict, `PATCH` unsettled (ninth cell) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','MERGE']}; s['PATCH']='pending'; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{}))"` | output contains `TERMINAL` (red today: returns `/do-merge` row 10) |
 | Terminal guard survives a non-dict ledger | `./.venv/bin/python -c "from agent.sdlc_router import guard_terminal_pipeline as g; print(all(g(b,{},{}) is None for b in [None,'x',42,[]]))"` | output contains `True`. Asserts **the new guard alone**, not `evaluate_guards` — see the note under the table. |
 | Terminal reason does not give G4's wrong remedy | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; r=str(d(s,{'issue_state':'CLOSED'},{})); print('TERMINAL' in r and 'dispatch reset' not in r)"` | output contains `True` — **both legs**: `TERMINAL` present AND `dispatch reset` absent. Asserting only the absence passes vacuously today (`Blocked(NO_RULE)` contains neither), which is what the critique caught. |
@@ -1523,7 +1636,7 @@ exceeded scope, and the anti-criterion row in the Verification table catches it.
 | #2825 fail-open closed (1785) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(1785,'tomcounsell/ai'))"` | output contains `False` |
 | #2825 fail-open closed (2073) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(2073,'tomcounsell/ai'))"` | output contains `False` |
 | #2539 control preserved (5 live issues) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(all(m._review_artifact_posted(n,'tomcounsell/ai') for n in [2860,2831,2716,2734,2741]))"` | output contains `True` |
-| **Anti-criterion — PR resolution is byte-unchanged** | `git diff main -- tools/sdlc_stage_query.py \| grep -E '^[-+]' \| grep -n -e '_lookup_pr' -e '_gh_pr_search_issue_ref' -e 'lane_branch'` | no output (exit 1). **GREEN TODAY (scope-leak check).** WS-B is #2869 and WS-D is #2868; the only permitted change in this file is the `issue_state` key inside `_compute_meta`. Counts as coverage for no workstream. **Repeated `-e` patterns, never `\|` alternation** — see the escaping note under this table. Mutation-proved on `96a44a505`: silent at baseline and silent under an `issue_state`-shaped insertion into `_compute_meta` (the sanctioned change), emits `3:+    lane_branch: str \| None = None,` under a WS-B-shaped edit to `_lookup_pr`'s signature. |
+| **Anti-criterion — PR resolution is executable-line-unchanged** | `./.venv/bin/python -c "import ast,hashlib,inspect,textwrap,tools.sdlc_stage_query as q; h=lambda f: hashlib.sha256(ast.unparse((lambda n: (setattr(n,'body',n.body[1:] if ast.get_docstring(n) else n.body), n)[1])(ast.parse(textwrap.dedent(inspect.getsource(f))).body[0])).encode()).hexdigest()[:16]; print(h(q._lookup_pr)=='a6f41605c55d5de5', h(q._gh_pr_search_issue_ref)=='3ab927d8486561bd')"` | output is `True True`. **GREEN TODAY (scope-leak check).** WS-B is #2869 and WS-D is #2868; the only permitted changes to these two functions are the **docstring annotations** the Documentation section mandates. Counts as coverage for no workstream. Hashes recorded at plan time on `f491306c5`. **Mutation-proved 2026-08-19 on both poles, in this exact form**: a docstring line added to each function leaves the output `True True` (`git diff --stat` confirms the edit landed: 3 insertions); adding `lane_branch: str \| None = None` to `_lookup_pr`'s signature flips the first leg to `False`. Replaces round 4's grep-shaped `byte-unchanged` row, which stayed silent under the sanctioned docstring annotations and so contradicted the Documentation section it shared a plan with. |
 | Anti-criterion — no `tools/` import in the router | `grep -c '^from tools\|^import tools\|from tools\.' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Proves nothing about any workstream; counts as coverage for none of them in Risk 5's mutation table. |
 | Anti-criterion — no I/O in the router (No-Go: DOCS-terminal leg) | `grep -c -e 'subprocess\.' -e 'requests\.' -e 'urllib' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Same disposition. **Repeated `-e` patterns, never `\|` alternation** — see the escaping note under this table. Mutation-proved on `96a44a505`: appending `subprocess.run(["true"])` to `agent/sdlc_router.py` takes the count 0 → 1; reverting returns it to 0. |
 | Anti-criterion — `state="all"` gone from the **call site** | `grep -c 'state="all")' tools/sdlc_stage_marker.py` | match count == 0. Scoped to the call so it cannot match prose: today this returns **1** (the call at `:263`), while the unscoped `grep -c 'state="all"'` returns **2** because the rationale comment at `:259` literally opens `# state="all": ...`. The unscoped form is unsatisfiable alongside the Documentation task that keeps that comment. |
@@ -1642,13 +1755,64 @@ that is currently empty.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The No-Go tripwire row added at round 4 is a gate that cannot fire for the purpose the plan assigns it. The plan states the row "goes red the instant someone wires the No-Gos section's `meta["pr_open"] = _check_pr_open(issue_number)` recipe" and that "this No-Go is now enforced by a test rather than by an argument default". Mutation-proved on `054f0f0fa` against four guard variants built from the plan's own specified body: (A) as-specified -> row **True**; (B) the No-Go recipe wired, `pr_open` threaded from `meta`, reason gate kept -> row **True**; (C) reason gate deleted, `pr_open=None` -> row **True**; (D) both mutations together -> row False. The row detects neither single-edit regression it exists to catch. Its `docs is None` leg is shielded twice — by `is_pipeline_complete` returning `(False, "pr_state_unavailable")` when `pr_open` is `None`, and by the reason gate — so removing either leaves it green. Same defect in Success Criteria WS-A bullet 4, which calls the identical case "the tripwire the No-Go leans on". Round 4's BLOCKER class reproduced inside the row round 4 added to close a CONCERN, which means that CONCERN is not resolved. | pending | Replace the `docs` leg with one that isolates the reason gate: patch `agent.sdlc_router.is_pipeline_complete` to return `(True, "docs_success_no_pr")` and assert the guard still returns `None` on an otherwise-terminal ledger; add a second leg asserting the call shape (`pr_open` is passed as `None`) off the patched callable's `call_args`, the argv-style discipline the `--repo` row already uses. Patch target must be `agent.sdlc_router.is_pipeline_complete` — the name bound in the router's namespace — because a `from ... import` rebinds it and patching the source module would not take. Keep the merge-shaped positive leg so an unconditionally-`None` guard still cannot pass. Do NOT keep the current `g({'DOCS':'completed'}, {'issue_state':'CLOSED','pr_open':False}, {})` form: measured, it returns `None` whether or not the reason gate exists. |
-| BLOCKER | History & Consistency | Two contracts are mutually exclusive and one of them is a Success Criterion. "**`_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff**" is asserted in Success Criteria, repeated by task 9, and is the `lane-validator`'s defining duty — while Documentation -> Inline Documentation mandates annotating **both** functions' docstrings, and verified in source both docstrings sit **inside** their function bodies. A builder cannot do both. The gate meant to enforce it cannot see the violation: mutation-proved by applying exactly the two sanctioned annotations, `git diff --stat` reports **7 insertions** into `tools/sdlc_stage_query.py` inside both function bodies while the anti-criterion row stays **silent** (exit 1, row passes). Task 9's two discharge paths give opposite answers on the same tree — a validator reading the diff must block the PR, a validator running the table row must pass it. Round 3's mutually-exclusive-contracts class and round 4's gate-that-cannot-see-the-leak class arriving together, in the row round 4 rewrote. | pending | Restate the criterion as what it means — "`_lookup_pr` and `_gh_pr_search_issue_ref` change in **docstring text only**: no signature, no control flow, no argv" — and gate it on executable lines. Runnable form that discriminates: `inspect.getsource` each function, strip the docstring via `ast.get_docstring`, SHA-256 the remainder, compare against the value recorded at plan time. Mutation-check both poles: adding a docstring line must leave the hash unchanged; adding `lane_branch: str \\| None = None` to `_lookup_pr`'s signature must change it. Update task 9 and the `lane-validator` role in the same edit or a validator keeps discharging the literal reading and blocks a compliant PR. Do NOT resolve this by dropping the annotations — "a stale comment presenting a gap as intent is what let these bugs survive this long" is the strongest argument in the Documentation section. |
-| BLOCKER | Risk & Robustness | The `blocked` contract in `.claude/skills-global/do-sdlc/SKILL.md` lives at four load-bearing sites and the plan scopes the edit to one line. Verified verbatim on `main`: **:23** Hard Rule 3 — "**NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason."; **:136** — the line the plan names; **:295** Step 3e — "Router returned `blocked` -> already stopped in 3a", where the only success exit is the `/do-merge` + `gh pr view ... MERGED` path a terminal ledger can no longer reach once the guard pre-empts row 10; **:303** Step 4 Final Report — "**Outcome**: merged / blocked (with guard + reason) / cap reached", a taxonomy with no terminal member. Because Q2 settles on the additive key, the payload keeps `blocked: true`, so every one of those sites still classifies the terminal shape. A one-line edit leaves a numbered Hard Rule instructing surface-and-stop-to-the-human on the exact payload the Success Criterion requires be routed to "loop-exit-success, not to human escalation" — the regression the plan calls "a blocking dependency of WS-A, not a follow-up", surviving its own remedy. Nothing holds this: the plan itself establishes `_GUARD_ROW_RE = re.compile(r"^G\d+")` cannot parse a `TERMINAL` id and the parity test runs one direction only. | pending | Enumerate the sites in the checkbox and in task 3 instead of naming a single line; anchor on text, not offsets, since the numbers drift as the body is edited (`grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md` returns them all). Hard Rule 3 needs the narrowest carve-out that keeps it a rule: "NEVER continue past a `blocked` decision **unless it carries `complete: true`** — that shape is a finished pipeline, not a guard escalation; exit the loop reporting success." Add a terminal exit condition to Step 3e beside the merged one and a fourth outcome value to Step 4's taxonomy. Step 5's lease-release list needs **no** change and must not get one: on a `MERGE == completed` ledger the lease was already released by `complete_stage("MERGE")`'s `_release_run_best_effort`, which Risk 1 depends on. `.claude/skills/sdlc/SKILL.md` genuinely has only the one operative site (`:261`, verified) — its other `blocked` mentions at `:169`/`:202`/`:251`/`:256` are the guard table and the ISSUE_LOCKED contract — so the asymmetry is real and the plan should say so rather than treating the two files as symmetric. |
-| CONCERN | Scope & Value | WS-A's headline severity claim is measured empty on live data — round 4's Scope & Value concern, carried forward `pending` by the revision pass's own instruction and now re-measured rather than re-argued. Through the real `query_enriched` -> `tools.sdlc_next_skill._build_context` -> `decide_next_dispatch` path over every `PipelineLedger` row with `MERGE == "completed"`: **17/17 route to `/do-merge` row 10**, every one with `pr_number` resolved by #2826's two-pass lookup and `branch_exists=False`. Zero live ledgers land in either `pr_number`-absent cell. Yet the Problem section still says all three shapes "**reproduce live on this repo today**", spike-1 still reports "the originally filed shape, **still live**" and "**row 5's identical false rebuild is still live**", and its Impact bullet still reads "an active failure mode in two of four `pr_number`-absent cells". Reachable is not occurring. This plan cut WS-B for exactly this shape ("its measured effect on live data is **zero**", "a mechanism with no population"), so the same standard is owed to WS-A's own justification, which will be read straight into the PR body. The design does not change; only the words do. | pending | Add the live route sweep to task 1 (which already walks this population for the CLOSED check) and to the Verification table so the claim is re-measured at build time. It must go through the real context builder, never a hand-built `{"branch_exists": ...}` dict, which omits `stage_artifacts_verified` and cannot see a G8 interaction: for each ledger whose **flat** `stage_states_json` has `MERGE == "completed"`, inside `cached_target_repo_resolution()`, call `query_enriched(issue_number=n)`, then `tools.sdlc_next_skill._build_context(None, n, res["stages"], res["_meta"])`, then `decide_next_dispatch`. Expected today 17/17 `/do-merge` row 10 and **17/17 TERMINAL after WS-A** — which makes it positive coverage, NOT a control, so it is not exempt from task 2's watch-it-fail and it does belong in Risk 5's mutation table. Keep the synthetic eight-cell matrix exactly as is; it bounds reachability, which is the right argument for building the guard. Change only the three occurrence claims — "still live" -> "reachable and unowned; zero live instances today" — and restore the accurate severity sentence the record lists as Dropped. |
-| CONCERN | Risk & Robustness | The Verification table's only router-suite row runs `tests/unit/test_sdlc_router_oscillation.py` — the file Test Impact declares "**NO CHANGE EXPECTED**" with zero `"MERGE": "completed"` fixtures — while `tests/unit/test_sdlc_router_decision.py`, which the same section calls "the one router test file WS-A provably reds" and which task 3 requires re-keying, has **no row at all**. Task 9 ("Run the entire Verification table") and the `lane-validator` role therefore both discharge without ever running the suite the change is known to break. A third router suite the plan never names anywhere, `tests/unit/test_sdlc_router.py`, carries **35** further `decide_next_dispatch(` call sites and an `_ALL_COMPLETED` helper at `:1158`; measured, its `MERGE` is `"pending"` (`:1166`) so nothing in it is terminal today, but the exhaustiveness claim ("the **only** `"MERGE": "completed"` fixture in any router test") rests on a grep scoped to two files, and this is the third. | pending | Add a Verification row for `tests/unit/test_sdlc_router_decision.py` and one for `tests/unit/test_sdlc_router.py`, and widen Test Impact's REVIEW sweep from "the other 94 call sites" of one file to all three router suites. The exhaustiveness claim is actually TRUE repo-wide — `grep -rn '"MERGE": "completed"' tests/ --include='*.py'` returns exactly one hit, `tests/unit/test_sdlc_router_decision.py:1706` — so no fixture rework is owed; the fix is evidentiary, stating the claim over `tests/` rather than over two named files. Add `test_sdlc_router.py` to task 6's mutation runs as well: with 35 router call sites and no `issue_state` in any of its metas, a guard that ignored the issue-state gate would red there, making it a free second witness for the Risk 6 mutation. |
-| NIT | History & Consistency | Two Verification rows import the guard by name — `from agent.sdlc_router import guard_terminal_pipeline as g` — but no task, Success Criterion, or Documentation checkbox ever names the function. Task 3 says only "Insert it **first in `GUARDS`**, ahead of G1". A builder who names it `guard_terminal`, `guard_g9_terminal`, or `guard_pipeline_terminal` leaves two rows failing with `ImportError`, which reads as a real regression rather than a naming mismatch — on the two rows carrying the Risk 1 and No-Go bars. | pending | (NIT — exempt.) Name the function `guard_terminal_pipeline` explicitly in task 3. |
-| NIT | Scope & Value | Tasks 1-5 each carry a **Validates** field naming the test files they move (task 1 explicitly declares "no test files — this produces the red-state record"). Tasks 6 through 9 carry none, and 6-9 also drop the **Informed By** field that 1-5 all have. Task 6 is the mutation-proof step and task 9 is final validation — the two tasks whose output the reviewer most needs to locate. | pending | (NIT — exempt.) Add **Validates** to tasks 6-9, or state explicitly that they validate against the Verification table rather than a test file, matching task 1's honest "no test files" form. |
+| BLOCKER | Risk & Robustness | The No-Go tripwire row added at round 4 is a gate that cannot fire for the purpose the plan assigns it. The plan states the row "goes red the instant someone wires the No-Gos section's `meta["pr_open"] = _check_pr_open(issue_number)` recipe" and that "this No-Go is now enforced by a test rather than by an argument default". Mutation-proved on `054f0f0fa` against four guard variants built from the plan's own specified body: (A) as-specified -> row **True**; (B) the No-Go recipe wired, `pr_open` threaded from `meta`, reason gate kept -> row **True**; (C) reason gate deleted, `pr_open=None` -> row **True**; (D) both mutations together -> row False. The row detects neither single-edit regression it exists to catch. Its `docs is None` leg is shielded twice — by `is_pipeline_complete` returning `(False, "pr_state_unavailable")` when `pr_open` is `None`, and by the reason gate — so removing either leaves it green. Same defect in Success Criteria WS-A bullet 4, which calls the identical case "the tripwire the No-Go leans on". Round 4's BLOCKER class reproduced inside the row round 4 added to close a CONCERN, which means that CONCERN is not resolved. | **RESOLVED** — Verification row *No-Go tripwire*, Success Criteria WS-A bullet 4, task 6 | Replace the `docs` leg with one that isolates the reason gate: patch `agent.sdlc_router.is_pipeline_complete` to return `(True, "docs_success_no_pr")` and assert the guard still returns `None` on an otherwise-terminal ledger; add a second leg asserting the call shape (`pr_open` is passed as `None`) off the patched callable's `call_args`, the argv-style discipline the `--repo` row already uses. Patch target must be `agent.sdlc_router.is_pipeline_complete` — the name bound in the router's namespace — because a `from ... import` rebinds it and patching the source module would not take. Keep the merge-shaped positive leg so an unconditionally-`None` guard still cannot pass. Do NOT keep the current `g({'DOCS':'completed'}, {'issue_state':'CLOSED','pr_open':False}, {})` form: measured, it returns `None` whether or not the reason gate exists. |
+| BLOCKER | History & Consistency | Two contracts are mutually exclusive and one of them is a Success Criterion. "**`_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff**" is asserted in Success Criteria, repeated by task 9, and is the `lane-validator`'s defining duty — while Documentation -> Inline Documentation mandates annotating **both** functions' docstrings, and verified in source both docstrings sit **inside** their function bodies. A builder cannot do both. The gate meant to enforce it cannot see the violation: mutation-proved by applying exactly the two sanctioned annotations, `git diff --stat` reports **7 insertions** into `tools/sdlc_stage_query.py` inside both function bodies while the anti-criterion row stays **silent** (exit 1, row passes). Task 9's two discharge paths give opposite answers on the same tree — a validator reading the diff must block the PR, a validator running the table row must pass it. Round 3's mutually-exclusive-contracts class and round 4's gate-that-cannot-see-the-leak class arriving together, in the row round 4 rewrote. | **RESOLVED** — Success Criteria "Scope, coverage, and honesty" bullet 1, Verification row *PR resolution is executable-line-unchanged*, task 9, `lane-validator` role | Restate the criterion as what it means — "`_lookup_pr` and `_gh_pr_search_issue_ref` change in **docstring text only**: no signature, no control flow, no argv" — and gate it on executable lines. Runnable form that discriminates: `inspect.getsource` each function, strip the docstring via `ast.get_docstring`, SHA-256 the remainder, compare against the value recorded at plan time. Mutation-check both poles: adding a docstring line must leave the hash unchanged; adding `lane_branch: str \\| None = None` to `_lookup_pr`'s signature must change it. Update task 9 and the `lane-validator` role in the same edit or a validator keeps discharging the literal reading and blocks a compliant PR. Do NOT resolve this by dropping the annotations — "a stale comment presenting a gap as intent is what let these bugs survive this long" is the strongest argument in the Documentation section. |
+| BLOCKER | Risk & Robustness | The `blocked` contract in `.claude/skills-global/do-sdlc/SKILL.md` lives at four load-bearing sites and the plan scopes the edit to one line. Verified verbatim on `main`: **:23** Hard Rule 3 — "**NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason."; **:136** — the line the plan names; **:295** Step 3e — "Router returned `blocked` -> already stopped in 3a", where the only success exit is the `/do-merge` + `gh pr view ... MERGED` path a terminal ledger can no longer reach once the guard pre-empts row 10; **:303** Step 4 Final Report — "**Outcome**: merged / blocked (with guard + reason) / cap reached", a taxonomy with no terminal member. Because Q2 settles on the additive key, the payload keeps `blocked: true`, so every one of those sites still classifies the terminal shape. A one-line edit leaves a numbered Hard Rule instructing surface-and-stop-to-the-human on the exact payload the Success Criterion requires be routed to "loop-exit-success, not to human escalation" — the regression the plan calls "a blocking dependency of WS-A, not a follow-up", surviving its own remedy. Nothing holds this: the plan itself establishes `_GUARD_ROW_RE = re.compile(r"^G\d+")` cannot parse a `TERMINAL` id and the parity test runs one direction only. | **RESOLVED** — Documentation → SDLC Stage Addenda (four-site table), task 3 | Enumerate the sites in the checkbox and in task 3 instead of naming a single line; anchor on text, not offsets, since the numbers drift as the body is edited (`grep -n 'blocked' .claude/skills-global/do-sdlc/SKILL.md` returns them all). Hard Rule 3 needs the narrowest carve-out that keeps it a rule: "NEVER continue past a `blocked` decision **unless it carries `complete: true`** — that shape is a finished pipeline, not a guard escalation; exit the loop reporting success." Add a terminal exit condition to Step 3e beside the merged one and a fourth outcome value to Step 4's taxonomy. Step 5's lease-release list needs **no** change and must not get one: on a `MERGE == completed` ledger the lease was already released by `complete_stage("MERGE")`'s `_release_run_best_effort`, which Risk 1 depends on. `.claude/skills/sdlc/SKILL.md` genuinely has only the one operative site (`:261`, verified) — its other `blocked` mentions at `:169`/`:202`/`:251`/`:256` are the guard table and the ISSUE_LOCKED contract — so the asymmetry is real and the plan should say so rather than treating the two files as symmetric. |
+| CONCERN | Scope & Value | WS-A's headline severity claim is measured empty on live data — round 4's Scope & Value concern, carried forward `pending` by the revision pass's own instruction and now re-measured rather than re-argued. Through the real `query_enriched` -> `tools.sdlc_next_skill._build_context` -> `decide_next_dispatch` path over every `PipelineLedger` row with `MERGE == "completed"`: **17/17 route to `/do-merge` row 10**, every one with `pr_number` resolved by #2826's two-pass lookup and `branch_exists=False`. Zero live ledgers land in either `pr_number`-absent cell. Yet the Problem section still says all three shapes "**reproduce live on this repo today**", spike-1 still reports "the originally filed shape, **still live**" and "**row 5's identical false rebuild is still live**", and its Impact bullet still reads "an active failure mode in two of four `pr_number`-absent cells". Reachable is not occurring. This plan cut WS-B for exactly this shape ("its measured effect on live data is **zero**", "a mechanism with no population"), so the same standard is owed to WS-A's own justification, which will be read straight into the PR body. The design does not change; only the words do. | **RESOLVED** — Problem section, spike-1 occupancy bullet, task 1, Verification row *Live route sweep* | Add the live route sweep to task 1 (which already walks this population for the CLOSED check) and to the Verification table so the claim is re-measured at build time. It must go through the real context builder, never a hand-built `{"branch_exists": ...}` dict, which omits `stage_artifacts_verified` and cannot see a G8 interaction: for each ledger whose **flat** `stage_states_json` has `MERGE == "completed"`, inside `cached_target_repo_resolution()`, call `query_enriched(issue_number=n)`, then `tools.sdlc_next_skill._build_context(None, n, res["stages"], res["_meta"])`, then `decide_next_dispatch`. Expected today 17/17 `/do-merge` row 10 and **17/17 TERMINAL after WS-A** — which makes it positive coverage, NOT a control, so it is not exempt from task 2's watch-it-fail and it does belong in Risk 5's mutation table. Keep the synthetic eight-cell matrix exactly as is; it bounds reachability, which is the right argument for building the guard. Change only the three occurrence claims — "still live" -> "reachable and unowned; zero live instances today" — and restore the accurate severity sentence the record lists as Dropped. |
+| CONCERN | Risk & Robustness | The Verification table's only router-suite row runs `tests/unit/test_sdlc_router_oscillation.py` — the file Test Impact declares "**NO CHANGE EXPECTED**" with zero `"MERGE": "completed"` fixtures — while `tests/unit/test_sdlc_router_decision.py`, which the same section calls "the one router test file WS-A provably reds" and which task 3 requires re-keying, has **no row at all**. Task 9 ("Run the entire Verification table") and the `lane-validator` role therefore both discharge without ever running the suite the change is known to break. A third router suite the plan never names anywhere, `tests/unit/test_sdlc_router.py`, carries **35** further `decide_next_dispatch(` call sites and an `_ALL_COMPLETED` helper at `:1158`; measured, its `MERGE` is `"pending"` (`:1166`) so nothing in it is terminal today, but the exhaustiveness claim ("the **only** `"MERGE": "completed"` fixture in any router test") rests on a grep scoped to two files, and this is the third. | **RESOLVED (one documented deviation — see Accepted Residuals)** — three router-suite Verification rows, Test Impact REVIEW sweep, task 6 | Add a Verification row for `tests/unit/test_sdlc_router_decision.py` and one for `tests/unit/test_sdlc_router.py`, and widen Test Impact's REVIEW sweep from "the other 94 call sites" of one file to all three router suites. The exhaustiveness claim is actually TRUE repo-wide — `grep -rn '"MERGE": "completed"' tests/ --include='*.py'` returns exactly one hit, `tests/unit/test_sdlc_router_decision.py:1706` — so no fixture rework is owed; the fix is evidentiary, stating the claim over `tests/` rather than over two named files. Add `test_sdlc_router.py` to task 6's mutation runs as well: with 35 router call sites and no `issue_state` in any of its metas, a guard that ignored the issue-state gate would red there, making it a free second witness for the Risk 6 mutation. |
+| NIT | History & Consistency | Two Verification rows import the guard by name — `from agent.sdlc_router import guard_terminal_pipeline as g` — but no task, Success Criterion, or Documentation checkbox ever names the function. Task 3 says only "Insert it **first in `GUARDS`**, ahead of G1". A builder who names it `guard_terminal`, `guard_g9_terminal`, or `guard_pipeline_terminal` leaves two rows failing with `ImportError`, which reads as a real regression rather than a naming mismatch — on the two rows carrying the Risk 1 and No-Go bars. | **RESOLVED** — task 3, first bullet | (NIT — exempt.) Name the function `guard_terminal_pipeline` explicitly in task 3. |
+| NIT | Scope & Value | Tasks 1-5 each carry a **Validates** field naming the test files they move (task 1 explicitly declares "no test files — this produces the red-state record"). Tasks 6 through 9 carry none, and 6-9 also drop the **Informed By** field that 1-5 all have. Task 6 is the mutation-proof step and task 9 is final validation — the two tasks whose output the reviewer most needs to locate. | **RESOLVED** — tasks 6, 7, 8, 9 each gained **Validates** and **Informed By** | (NIT — exempt.) Add **Validates** to tasks 6-9, or state explicitly that they validate against the Verification table rather than a test file, matching task 1's honest "no test files" form. |
+
+## Accepted Residuals
+
+Round 5 is the last revision pass this run can afford. Everything below is a deliberate
+non-closure with its reason stated, rather than a finding carried `pending` into a sixth
+round. Nothing here changes the design.
+
+1. **The round-5 exhaustiveness remedy's own premise is wrong, and the plan states the
+   accurate claim instead.** Concern 2's implementation note asserted the claim is "TRUE
+   repo-wide — `grep -rn '"MERGE": "completed"' tests/ --include='*.py'` returns exactly one
+   hit". Re-measured 2026-08-19, that grep returns **12** hits across
+   `test_sdlc_router_decision.py`, `test_sdlc_stage_marker.py`,
+   `test_pipeline_complete_predicate.py` (6), `test_migrations.py`,
+   `test_runner_completion_guard.py`, and `test_completion_guard.py`. The claim is true over
+   the **router suites**, which is where it does its work, so Test Impact now states it as
+   `grep -rn '"MERGE": "completed"' tests/unit/test_sdlc_router*.py` → exactly one hit,
+   `test_sdlc_router_decision.py:1706`, with `0` in the other two. **Accepted rather than
+   escalated** because the correction is strictly narrower than the note asked for and no
+   fixture rework is owed either way: the nine non-router hits are the terminal predicate's
+   own tests, a marker-write test, a migration fixture, and two completion-guard suites, none
+   of which calls `decide_next_dispatch`.
+
+2. **The recorded executable-line hashes are pinned to `f491306c5` and can go stale before
+   build.** `a6f41605c55d5de5` / `3ab927d8486561bd` were taken at plan time. Any commit that
+   changes either function's executable lines between now and build makes the row red for a
+   reason that is not a scope leak. Task 6 carries the disposition: **re-record and say so in
+   the PR body, never relax the row.** A plan-time constant is the only way to gate on
+   "unchanged" without a `main` diff, and a `main` diff is what round 5 proved cannot
+   distinguish a docstring annotation from a signature edit.
+
+3. **The live route sweep costs about 80 seconds and hits GitHub once per terminal ledger.**
+   It is the row that converts WS-A's severity from argued to measured, so it stays, but it
+   is not free and it grows with the ledger population. Task 1 runs it in the same pass as
+   the CLOSED sweep over the identical set to avoid paying twice. Reviewers should expect one
+   slow row in the table rather than treating it as a hang.
+
+4. **WS-A remains correct-going-forward on a population that is currently empty, and the
+   plan now says so in its own words.** 17/17 live terminal ledgers route to `/do-merge`
+   row 10; the `NO_RULE` and false-rebuild cells are reachable and unowned. The occupied harm
+   — three wasted `/do-merge` ticks and G4's misleading `dispatch reset` advice — is real but
+   modest. **The lane is not re-scoped on this**: the guard is the only thing that makes the
+   terminal state expressible at all, the deferrals already trimmed the lane to two files,
+   and reopening the build-or-defer question would cost another round for a change whose
+   diff is one guard and one argument. The honest severity is recorded in the Problem section
+   and in spike-1 so the PR body carries it rather than an overclaim.
+
+5. **`scripts/migrate_completed_plan.py:362::_gh_issue_state` stays unscoped and
+   case-lowering.** Unchanged disposition from round 4, restated here so it is not mistaken
+   for an oversight: it is a human-invoked one-shot migration script, nothing it returns
+   reaches `decide_next_dispatch`, and task 8 files the `bug`-labelled follow-up naming both
+   divergences and both call sites.
 
 ---
 ## Resolved Questions
