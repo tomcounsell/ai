@@ -820,11 +820,35 @@ deliberately not exposed to the agent.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=())`.
-- Invoke `git grep -n` with an explicit `cwd=REPO_ROOT` derived from `__file__`, never the ambient cwd.
-- Implement three-way exit triage: 0 → violation with `file:line`; 1 → clean; anything else → raise a named scan-failure carrying the exit code and stderr.
-- Implement the non-vacuity floor via `git ls-files -- <pathspecs>`, failing with a message that names the pathspec and the expected minimum.
+- Define **two** exception classes: `TrackedScanError` (scan could not run) and
+  `VacuousScanError` (scan examined too little). One class with two messages is
+  not acceptable — it cannot be asserted apart except by string matching.
+- Derive `REPO_ROOT` from `Path(__file__).resolve().parents[N]` and pass it as
+  `cwd=` on **every** git call. Never the ambient cwd.
+- **Order matters:** check `git ls-files`'s own returncode *before* counting its
+  output. `rc != 0` → `TrackedScanError`; only then split stdout and compare
+  length against `min_files` → `VacuousScanError`. A broken index and a vacuous
+  pathspec both yield empty stdout (rc 128 vs 0), so counting first
+  misclassifies a scan failure as vacuity and the Failure Path probe goes green
+  for the wrong reason.
+- Implement three-way `git grep -n` exit triage: 0 → violation with `file:line`;
+  1 → clean; anything else → `TrackedScanError` carrying the exit code and stderr.
+- Pass **no** regex flag. `git grep` defaults to POSIX BRE, matching `grep`'s
+  own default, so A3's escaped patterns carry over byte-for-byte. Explicitly do
+  not add `-F`, `-E`, or `-P`.
+- Do **not** pass `--untracked`. Document the tracked-only boundary in the
+  docstring.
 - Reject an empty or whitespace-only pattern.
-- Write `tests/unit/test_tracked_content_helper.py` covering: match, clean, scan-failure via `GIT_INDEX_FILE=/dev/null` (→ 128), vacuous pathspec (`nosuchdir/*.py`), empty pattern, and `allow=` filtering.
+- Docstring covers all four obligations, the BRE dialect sentence, the
+  fail-closed exit-128 behavior, the tracked-only boundary, and the rule that
+  `allow=` is for line-substring exemptions only while path-shaped exemptions
+  belong in negative pathspecs.
+- Write `tests/unit/test_tracked_content_helper.py` covering: match, clean,
+  `pytest.raises(TrackedScanError, match="128")` via `GIT_INDEX_FILE=/dev/null`,
+  `pytest.raises(VacuousScanError)` via `'nosuchdir/*.py'` (the two asserted
+  **apart**, each against the input that produces it), empty pattern,
+  whitespace-only pattern, BRE metacharacter round-trip (`zzz\.never(` clean,
+  then tripping on a planted `zzz.never(`), and `allow=` line filtering.
 
 ### 2. Convert the four vulnerable subprocess guards
 - **Task ID**: build-conversions
@@ -835,9 +859,28 @@ deliberately not exposed to the agent.
 - **Agent Type**: builder
 - **Parallel**: false
 - A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`. Add the `#2093`-style comment naming the `.pyc` hazard.
-- A2 `test_anthropic_client_semaphore.py:164` — route through the helper; carry `_ALLOWED_DIRECT_CONSTRUCTORS` across as `allow=`. Note in the comment that this site was **vacuously green**, not merely unpinned.
-- A3 `test_memory_extraction.py:2563` — route through the helper over `'agent/memory_extraction.py'`, `min_files=1`. Note that this site was false-**red**, correcting #2808.
-- A7 `test_no_legacy_paths.py:25` — replace the `if rc == 0:` gate with three-way triage; add a `*.py`-free but explicit pathspec; preserve `ALLOWED_FILES` and the `docs/plans/` exemption.
+- A2 `test_anthropic_client_semaphore.py:164` — route through the helper; carry `_ALLOWED_DIRECT_CONSTRUCTORS` across as `allow=`. This is the **one** genuine line-substring exemption, since it filters matched output lines by module path rather than filtering the corpus. Note in the comment that this site was **vacuously green**, not merely unpinned.
+- A3 `test_memory_extraction.py:2563` — route through the helper over `'agent/memory_extraction.py'`, `min_files=1`. Keep both patterns exactly as written (`anthropic\.Anthropic(`, `anthropic\.AsyncAnthropic(`) — they are BRE and need no change. Note that this site was false-**red**, correcting #2808.
+- A7 `test_no_legacy_paths.py:25` — replace the `if rc == 0:` gate with three-way triage. Corpus stays **every tracked file type**, so the pathspec is `'*'` plus negative pathspecs, not `*.py`:
+  ```python
+  assert_absent_from_tracked(
+      "Desktop/claude_code",
+      "*",
+      ":!docs/plans/",
+      ":!tests/unit/test_no_legacy_paths.py",
+      ":!scripts/update/verify.py",
+      ":!scripts/update/run.py",
+      min_files=1300,
+  )
+  ```
+  Verified at `40c4fe0a9`: this exact pathspec set returns rc=1 (clean) from
+  `git grep -l`, and `git ls-files` over it yields **2060** paths, so the
+  exemptions are a drop-in replacement for the `ALLOWED_FILES` / `docs/plans/`
+  stdout filtering and no `allow=` is needed here at all.
+  **`min_files` is 1300, not the 1800 the critique suggested.** 1800 is 87% of
+  the 2060-path corpus, which violates this plan's own 60-70% band (Risk 1) and
+  would be tripped by ordinary churn — `docs/plans/` alone is 591 tracked files
+  and is actively archived. 1300 sits at 63%.
 - Do not delete or modify any `__pycache__` content.
 
 ### 3. Add non-vacuity floors to the six unfloored walks
@@ -851,7 +894,13 @@ deliberately not exposed to the agent.
 - Add a scanned-count floor to each, modelled on `tests/unit/test_update_pull_fetch_head_race.py`.
 - Set each floor at roughly 60-70% of the current count, not `current - 1`, so ordinary churn never trips it.
 - Put the rationale in the assertion message, not only in a comment.
-- In `test_harness_model_coverage.py`, replace `if not agent_dir.is_dir(): return []` with a raise — that early return is an explicit vacuous-green path.
+- In `test_harness_model_coverage.py` (B14), replace `if not agent_dir.is_dir(): return []` with a raise — that early return is an explicit vacuous-green path.
+- In `test_no_positional_query_get.py` (B13), apply the **same** treatment: replace `if not root.exists(): continue` at `:66-68` with accumulate-then-assert over all eight `SCAN_DIRS`:
+  ```python
+  missing = [t for t in SCAN_DIRS if not (REPO_ROOT / t).is_dir()]
+  assert not missing, f"SCAN_DIRS roots absent from the checkout: {missing} — the sweep would silently skip them"
+  ```
+  Keep the total floor **as well**. A total floor cannot see a lost root: `worker/` is 3 of 1231 tracked `.py` (0.24%) and `ui/` is 10 (0.8%), both an order of magnitude inside any percentage band.
 - Do **not** convert these to `git grep`. `*.py` cannot match `*.pyc`; conversion is churn.
 
 ### 4. Add the recurrence meta-guard
@@ -862,40 +911,49 @@ deliberately not exposed to the agent.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add a test asserting no test under `tests/` invokes a bare recursive `grep` over a directory (argv[0] `grep` with `-r`/`-rn`).
-- Match literal shapes only; provide an explicit opt-out comment for a justified survivor.
+- Match literal shapes only; provide an explicit opt-out comment for a justified survivor **elsewhere** in the suite.
+- **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so it flags itself otherwise — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
+- **Ship a planted-offender positive control in the same file:** write a temp file under `tmp_path` containing `subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at `tmp_path`, and assert it is flagged. Without it, a correct self-exemption and a matcher that flags nothing are indistinguishable.
 - Include a non-vacuity floor on the meta-guard's own scan — it must not become the thing it guards against.
 
 ### 5. Mutation-check every guard individually
 - **Task ID**: validate-mutations
 - **Depends On**: build-metaguard
+- **Validates**: `tests/unit/test_sdlc_review_finalize.py`, `tests/unit/test_anthropic_client_semaphore.py`, `tests/unit/test_memory_extraction.py`, `tests/unit/test_no_legacy_paths.py`, `tests/unit/test_tracked_content_helper.py`
 - **Assigned To**: sweep-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- For **each** of the four converted guards separately: introduce the banned pattern into a tracked source file, run the node, capture the FAIL output, revert. A single mutation tripping several guards proves nothing about the ones it did not reach.
+- For **each** of the four converted guards separately: introduce the banned pattern into a tracked source file **that guard actually scans**, run the node, capture the FAIL output, revert. A single mutation tripping several guards proves nothing about the ones it did not reach — this satisfies #2809 AC3/AC4 and #2808 AC3/AC4, which are per-guard obligations, never a blanket run.
 - For **each** of the six floored walks separately: force an empty scan (temporarily point the root at a nonexistent path), confirm the floor fails, revert.
-- Confirm the helper raises rather than passing when `GIT_INDEX_FILE=/dev/null`.
+- For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: `worker/`, the 0.24% root) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check.
+- Confirm the helper raises `TrackedScanError` (not `VacuousScanError`) when `GIT_INDEX_FILE=/dev/null`, and `VacuousScanError` (not `TrackedScanError`) for `'nosuchdir/*.py'`. Assert the classes apart, not merely "it failed".
+- Confirm the BRE metacharacter test both reports clean and trips on a planted match, so an added `-F` would be caught.
+- Confirm the meta-guard's `tmp_path` planted-offender control is flagged.
 - Plant a file under `tools/__pycache__/` containing the banned string; confirm A1 still passes.
 - Collect every FAIL output for the PR description.
 
 ### 6. Cross-checkout verification
 - **Task ID**: validate-both-checkouts
 - **Depends On**: validate-mutations
+- **Validates**: `tests/unit/test_sdlc_review_finalize.py`, `tests/unit/test_anthropic_client_semaphore.py`, `tests/unit/test_memory_extraction.py`, `tests/unit/test_no_legacy_paths.py`, `tests/unit/test_tracked_content_helper.py`
 - **Assigned To**: sweep-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the primary node in the **primary checkout** with the stale `.pyc` present. It must pass.
 - Run the same node in a **fresh worktree**. It must pass.
 - Confirm the two agree at the same commit. A worktree-only green proves nothing (#2808).
+- Run the A2 and A3 nodes from `/tmp` (foreign ambient cwd) and confirm each returns the **same verdict** as from the repo root. This is the #2808 AC7 observable: today they diverge (A2 passes vacuously, A3 fails); after the fix both must match.
 - Use `scripts/pytest-clean.sh`; never bare `pytest`; never pattern-kill pytest processes.
 - Set `PYTHONPATH` explicitly when running in a worktree — the shared venv `.pth` can otherwise import the wrong checkout.
 
 ### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-both-checkouts
+- **Validates**: `docs/features/tracked-content-sweep-guards.md` (create), `docs/features/README.md`, `docs/features/worktree-venv-isolation.md`, `tests/README.md`
 - **Assigned To**: sweep-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section.
+- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section, including the BRE dialect rule and the tracked-only boundary paragraph (why `--untracked` is deliberately not used).
 - Add the entry to `docs/features/README.md`.
 - Update `docs/features/worktree-venv-isolation.md` with the stranded-bytecode warning, linking #2883.
 - Update `tests/README.md` with the sweep-guard convention.
@@ -903,6 +961,7 @@ deliberately not exposed to the agent.
 ### 8. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
+- **Validates**: the Verification table as a whole (every row), plus the AC → task → verification-row mapping table
 - **Assigned To**: sweep-validator
 - **Agent Type**: validator
 - **Parallel**: false
