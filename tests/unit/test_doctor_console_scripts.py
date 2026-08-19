@@ -28,14 +28,66 @@ def _executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
     return path
 
 
-def _fake_checkout(tmp_path: Path, names: tuple[str, ...] = SCRIPTS) -> Path:
-    """A checkout with a `[project.scripts]` table and a populated `.venv/bin`."""
+def _fake_checkout(
+    tmp_path: Path,
+    names: tuple[str, ...] = SCRIPTS,
+    *,
+    venv_version: str | None = "3.14",
+    pin_version: str | None = "3.14",
+    write_pyvenv_cfg: bool = True,
+    broken_interpreter: bool = False,
+    python3_symlink_target: Path | None = None,
+    shebang_body: str | None = None,
+) -> Path:
+    """A checkout with a `[project.scripts]` table and a populated `.venv/bin`.
+
+    Builds a realistic venv so the interpreter-verification guard this file
+    tests is actually reachable: a real `.venv/bin/python3`, a `pyvenv.cfg`
+    naming its version, and a repo-root `.python-version` pin. Every generated
+    shim's shebang points at that `python3` by default.
+
+    - `venv_version`: the `version_info` written to `.venv/pyvenv.cfg`. `None`
+      omits the `version_info` line (an unresolvable venv version, case 17).
+    - `write_pyvenv_cfg`: `False` omits `.venv/pyvenv.cfg` entirely.
+    - `pin_version`: the repo-root `.python-version` content. `None` omits the
+      file (no pin, case 8).
+    - `broken_interpreter`: makes `.venv/bin/python3` a dangling symlink
+      (case 3, missing).
+    - `python3_symlink_target`: makes `.venv/bin/python3` a symlink to this
+      existing path instead of a plain file — the live shape, where the venv
+      python is itself a symlink into a base interpreter outside every repo
+      venv (case 7, the realpath guard).
+    - `shebang_body`: overrides every generated shim's shebang line/body.
+      Defaults to `#!{python3}\\n`, i.e. the fixture's own interpreter.
+    """
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
     table = "\n".join(f'{n} = "tools.{n.replace("-", "_")}:main"' for n in names)
     (root / "pyproject.toml").write_text(f'[project]\nname = "x"\n\n[project.scripts]\n{table}\n')
+
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    python3 = venv_bin / "python3"
+    if broken_interpreter:
+        python3.symlink_to(venv_bin / "does-not-exist")
+    elif python3_symlink_target is not None:
+        python3.symlink_to(python3_symlink_target)
+    else:
+        _executable(python3)
+
+    if write_pyvenv_cfg:
+        cfg_lines = ["home = /usr/bin", "implementation = CPython"]
+        if venv_version is not None:
+            cfg_lines.append(f"version_info = {venv_version}")
+        cfg_lines.append("include-system-site-packages = false")
+        (root / ".venv" / "pyvenv.cfg").write_text("\n".join(cfg_lines) + "\n")
+
+    if pin_version is not None:
+        (root / ".python-version").write_text(f"{pin_version}\n")
+
+    body = shebang_body if shebang_body is not None else f"#!{python3}\n"
     for name in names:
-        _executable(root / ".venv" / "bin" / name)
+        _executable(root / ".venv" / "bin" / name, body)
     return root
 
 
