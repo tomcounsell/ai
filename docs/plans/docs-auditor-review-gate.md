@@ -3914,6 +3914,34 @@ a spike, a new mechanism, or a re-scoped task.
 
 ---
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound: rounds 6, 7 and 8 each
+returned a `READY TO BUILD (WITH CONCERNS)` verdict, `concern_round_count` reached
+`MAX_CONCERN_RECRITIQUE_ROUNDS = 3` at round 8, and the round-8 revision (commit
+`c0009470b`) was applied afterward with no round 9 to confirm it landed cleanly. The
+revision text is carried into BUILD unreviewed by a fourth critique round.
+
+- **R8-1 (Redis fast-path write-gating)** — the round-8 revision narrows the gate to the
+  `exists` read only, leaving both `set` writes at `:1091`/`:1133` unconditional, per the
+  Implementation Note's primary recommendation. Accepted because: the revision text was
+  read directly against the plan's own Q7c section (`:1825-1840`) and it matches the
+  recommendation verbatim — `states` is computed above the Redis block and only the read
+  is gated — but no independent critic re-verified the applied diff against the tree the
+  way rounds 1-8 verified every prior revision.
+- **R8-2 (auto-merge Success Criterion has no instrument in the feature docs)** — the
+  round-8 revision adds a Documentation checkbox for
+  `docs/features/docs-auditor.md:64-65`/`:314`/`:317` and a file-scoped Verification row
+  (`grep -rn 'auto-merge' docs/features/docs-auditor.md` → exit 1). Accepted because: the
+  addition is a documentation/verification instrument only, touches no runtime code, and
+  was read to match the round's Implementation Note; it has not been re-critiqued.
+- **R8-3 (fourth return status `"disabled"` at `:1841`)** — recorded as wording-only by
+  the critic ("no code, no task, no Verification row"). Accepted because: the finding
+  itself states no plan or code change is required beyond the one qualifying clause,
+  which the round-8 revision supplies.
+
+---
+
 ## Open Questions
 
 > **Resolved and removed in the 2026-08-18 refresh.** The former Q1 ("confirm the
