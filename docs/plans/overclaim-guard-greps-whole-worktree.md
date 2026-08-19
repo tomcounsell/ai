@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2807
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-19T08:38:58Z
+revision_applied_at: 2026-08-19T09:18:16Z
 ---
 
 # Working-tree sweep guards must scan tracked content
@@ -871,10 +871,12 @@ deliberately not exposed to the agent.
 
 ### Feature Documentation
 - [ ] Create `docs/features/tracked-content-sweep-guards.md` — the convention:
-      what a sweep guard is, why it must scan tracked content rather than the
-      working tree, the three obligations (index-scoped corpus, three-way exit
-      triage, non-vacuity floor), the `git grep`-over-`xargs` decision with the
-      rc=0 evidence from spike-3, and how to use `tests/tracked_content.py`.
+      what a sweep guard is, why it must scan *tracked files* rather than walk a
+      directory tree on disk, the **four** obligations (index-resolved file list
+      with working-tree content, returncode triage on every git call, three-way
+      exit triage, non-vacuity floor over readable files plus an exact absence
+      check), the `git grep`-over-`xargs` decision with the rc=0 evidence from
+      spike-3, and how to use `tests/tracked_content.py`.
 - [ ] Add the entry to the `docs/features/README.md` index table.
 
 ### Existing Documentation
