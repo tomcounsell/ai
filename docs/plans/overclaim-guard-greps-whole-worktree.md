@@ -903,10 +903,12 @@ deliberately not exposed to the agent.
 - [ ] **Demonstrated red:** reintroducing the banned string into a tracked `.py` under `tools/` or `agent/` fails the test, with the offending `file:line` in the message. (#2807 AC3, #2808 AC4)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan failed to run" — an errored scan does not read as a pass. (#2808 AC5)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan examined nothing" via a non-vacuity floor. (net-new, spike-1)
+- [ ] **The floor counts files the scan can actually read, and any tracked path absent from the working tree is an error.** `git ls-files` reports index rows while `git grep` reads working-tree content, so counting index rows leaves a false-clean hole inside the mitigation itself. A present-count floor alone does not close it (265 of 266 present clears a floor of 170), so the helper additionally raises on a non-empty absent set. Demonstrated by V-18b's plain-`mv` mutation, which `git mv` cannot reach. (net-new, critique round 2)
+- [ ] **No guard uses substring exemption.** `assert_absent_from_tracked` has no `allow=` parameter; all six A2 exemptions and all four A7 exemptions are negative pathspecs applied to the corpus, not filters over stdout. (net-new, critique round 2)
 - [ ] **Scan-failure and vacuity are separately assertable:** `TrackedScanError` and `VacuousScanError` are distinct classes, and `tests/unit/test_tracked_content_helper.py` asserts each against the input that produces it (broken index → `TrackedScanError`; `'nosuchdir/*.py'` → `VacuousScanError`). (net-new, critique — makes Criterion 6 verifiable rather than assumed)
 - [ ] **The six floored walks are covered:** each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count, and each floor is individually demonstrated-red by task 5's per-guard mutation. B13 and B14 additionally raise on a missing scan root rather than skipping it. (net-new, critique — 6 of the 10 touched files previously mapped to no criterion)
 - [ ] **The regex dialect is pinned and exercised:** no converted guard passes `-F`, `-E`, or `-P`, and a helper test proves a BRE metacharacter pattern (`zzz\.never(`) both reports clean and trips on a planted match. (net-new, critique — an `-F` would leave A3 permanently green)
-- [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. (net-new, critique)
+- [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. Its scanner takes root and floor as independent parameters, so the control's one-file root reaches the offender assertion instead of tripping the floor. (net-new, critique)
 - [ ] `tests/` contains no remaining recursive-`grep`-over-a-directory assertion, enforced by the new meta-guard. (#2807 AC4)
 - [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each **converted, floored, or documented as safe (4 / 6 / 17)**. (#2809 AC4)
 - [ ] **Neither converted sibling reads the ambient cwd.** `assert_absent_from_tracked` derives `REPO_ROOT` from `Path(__file__).resolve().parents[N]` and passes it as `cwd=` on every git call. Verified by running both nodes from `/tmp` and observing the same verdict as from the repo root. Today the two diverge from a foreign cwd (A2 returns rc=1 with empty stdout and passes vacuously; A3 returns rc=2 and fails); after the fix both must match their in-repo run. (#2808 AC7)
@@ -1203,9 +1205,12 @@ below.
 | #2809 AC4 | All filesystem-walking assertions enumerated, each dispositioned | 2, 3 | V-10, V-11, V-22 |
 | #2809 AC5 | Decision recorded on sweeping off-pin `.pyc` | 7 | V-14, V-15 |
 | net-new | Non-vacuity floor on every converted guard | 1 | V-8 |
+| net-new | Floor counts readable files; any absent tracked path is an error | 1, 5 | V-18b |
 | net-new | Per-root assertion on B13/B14 | 3 | V-18 |
 | net-new | Regex dialect pinned to BRE | 1 | V-9, V-12 |
 | net-new | Meta-guard self-exempts and is positively controlled | 4 | V-21 |
+| net-new | Meta-guard root and floor are independent parameters | 4 | V-5, V-21 |
+| net-new | No converted guard passes `allow=`; the parameter is not built | 1, 2 | V-10 |
 
 ## Verification
 
