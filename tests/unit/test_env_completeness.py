@@ -158,8 +158,9 @@ class TestUnreadableEnvReturnsSkipped:
 
 
 class TestParsingEdgeCases:
-    def test_multiline_comment_block_uses_last_line(self, env_dir: Path) -> None:
-        """Multi-line comment blocks use the last non-empty line as description."""
+    def test_multiline_comment_block_uses_first_line(self, env_dir: Path) -> None:
+        """Multi-line comment blocks use the first non-empty line — the topic
+        sentence, not a wrapped fragment's tail (#2845)."""
         write_example(
             env_dir,
             ("# First line of comment\n# Second line — the actual description\nMY_KEY=value\n"),
@@ -170,7 +171,8 @@ class TestParsingEdgeCases:
 
         assert result.available is False
         assert result.error is not None
-        assert "Second line" in result.error
+        assert "First line of comment" in result.error
+        assert "Second line" not in result.error
 
     def test_section_separator_does_not_bleed_into_description(self, env_dir: Path) -> None:
         """Section separator lines (# ===) are not used as descriptions."""
@@ -211,3 +213,126 @@ class TestParsingEdgeCases:
         result = check_env_completeness(env_dir)
 
         assert result.available is True
+
+
+class TestOptionalSigil:
+    def test_missing_optional_key_not_reported(self, env_dir: Path) -> None:
+        """A key marked @optional and absent from .env is NOT in the missing report."""
+        write_example(
+            env_dir,
+            "# A tunable with an in-code default\n# @optional\nZZ_FIXTURE_OPTIONAL=1\n",
+        )
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is True
+        assert "1 optional unset" in (result.version or "")
+
+    def test_missing_unmarked_key_still_reported_required_by_default(self, env_dir: Path) -> None:
+        """A key with no @optional marker stays required — the fail-closed default."""
+        write_example(env_dir, "# A required secret\nZZ_FIXTURE_REQUIRED=1\n")
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is False
+        assert result.error is not None
+        assert "ZZ_FIXTURE_REQUIRED" in result.error
+
+    def test_prose_optional_does_not_mark_key_optional(self, env_dir: Path) -> None:
+        """A comment merely containing the word "Optional" must NOT set the axis —
+        only the bare `@optional` sigil does. Guards a real credential sitting
+        beneath prose like '# Optional. GitHub PAT for ...'."""
+        write_example(
+            env_dir,
+            "# Optional. GitHub PAT for a dedicated bot account\nZZ_FIXTURE_CREDENTIAL=1\n",
+        )
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is False
+        assert result.error is not None
+        assert "ZZ_FIXTURE_CREDENTIAL" in result.error
+        assert "0 optional unset" in result.error
+
+    def test_missing_required_key_reports_residual_on_error_branch(self, env_dir: Path) -> None:
+        """The optional-unset residual rides on BOTH return branches, not just success."""
+        write_example(
+            env_dir,
+            (
+                "# A required secret\nZZ_FIXTURE_REQUIRED=1\n"
+                "# A tunable with an in-code default\n# @optional\nZZ_FIXTURE_OPTIONAL=1\n"
+            ),
+        )
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is False
+        assert result.error is not None
+        assert "1 missing" in result.error
+        assert "ZZ_FIXTURE_REQUIRED" in result.error
+        assert "ZZ_FIXTURE_OPTIONAL" not in result.error
+        assert "1 optional unset" in result.error
+
+    def test_all_present_success_string_counts_required_not_declared(self, env_dir: Path) -> None:
+        """The success string's count excludes optional keys — it would otherwise
+        disagree with itself in one sentence."""
+        write_example(
+            env_dir,
+            "# A required secret\nZZ_FIXTURE_REQUIRED=1\n# @optional\nZZ_FIXTURE_OPTIONAL=1\n",
+        )
+        write_env(env_dir, "ZZ_FIXTURE_REQUIRED=1\nZZ_FIXTURE_OPTIONAL=1\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is True
+        assert "all 1 required vars present" in (result.version or "")
+        assert "0 optional unset" in (result.version or "")
+
+
+class TestPassthroughSigil:
+    def test_passthrough_key_still_reported_missing(self, env_dir: Path) -> None:
+        """@passthrough marks a key as having no Python reader — it is still
+        required (an external binary authenticates with it). The two axes
+        are orthogonal."""
+        write_example(
+            env_dir,
+            "# Service account token\n# @passthrough op\nZZ_FIXTURE_PASSTHROUGH=1\n",
+        )
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is False
+        assert result.error is not None
+        assert "ZZ_FIXTURE_PASSTHROUGH" in result.error
+
+    def test_passthrough_marker_excluded_from_description(self, env_dir: Path) -> None:
+        write_example(
+            env_dir,
+            "# Service account token\n# @passthrough op\nZZ_FIXTURE_PASSTHROUGH=1\n",
+        )
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.error is not None
+        assert "Service account token" in result.error
+        assert "@passthrough" not in result.error
+
+
+class TestInlineCap:
+    def test_inline_key_list_capped_with_more_suffix(self, env_dir: Path) -> None:
+        example_lines = [f"# Key {i}\nZZ_FIXTURE_KEY_{i}=x" for i in range(8)]
+        write_example(env_dir, "\n".join(example_lines) + "\n")
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.available is False
+        assert result.error is not None
+        assert "8 missing" in result.error
+        assert "+3 more" in result.error

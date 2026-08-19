@@ -1045,15 +1045,37 @@ def check_google_token(project_dir: Path) -> ToolCheck:
 _KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
 _SECTION_RE = re.compile(r"^#\s*={10,}")  # section separator lines (# ===...)
 
+# Two independent sigils a key's comment block may carry (#2845):
+# `@optional` — the required/optional axis. Unmarked means required, the
+#   fail-closed default (forgetting the marker costs a spurious warning;
+#   a wrong marker silences a real secret forever).
+# `@passthrough <binary>` — an external binary (op, headscale) reads this
+#   key straight out of the environment; no tracked Python names it. A
+#   passthrough key is still required — the two axes are independent.
+_OPTIONAL_SIGIL_RE = re.compile(r"^@optional$")
+_PASSTHROUGH_SIGIL_RE = re.compile(r"^@passthrough\s+(\S+)$")
 
-def _parse_env_example(path: Path) -> list[tuple[str, str]]:
-    """Return list of (key, description) pairs from a .env.example file.
+# check_env_completeness rendering caps: at most this many missing keys
+# named inline (a `(+N more)` suffix covers the rest), and each individual
+# description capped to this many characters — the key cap alone bounds how
+# many descriptions appear, not how long any one of them is.
+_INLINE_KEY_CAP = 5
+_DESCRIPTION_CHAR_CAP = 80
 
-    Description is the last non-blank, non-separator comment line immediately
-    above the key declaration. Blank lines reset the comment accumulator.
+
+def _parse_env_example(path: Path) -> list[tuple[str, str, bool, str | None]]:
+    """Return (key, description, optional, passthrough) tuples from .env.example.
+
+    Description is the FIRST non-empty, non-sigil comment line in the key's
+    comment block — the topic sentence, not a wrapped fragment's tail (for
+    single-line comments, the common case, this is identical to "last").
+    Both sigil lines are excluded from description candidates. Blank lines,
+    non-comment lines, and `# ====` separators reset the comment
+    accumulator, exactly as before — a documentation block must end with a
+    blank line or it bleeds its sigils onto the next declaration.
     """
     lines = path.read_text().splitlines()
-    result = []
+    result: list[tuple[str, str, bool, str | None]] = []
     comment_block: list[str] = []
     for line in lines:
         stripped = line.strip()
@@ -1064,9 +1086,20 @@ def _parse_env_example(path: Path) -> list[tuple[str, str]]:
             comment_block.append(stripped.lstrip("#").strip())
         elif m := _KEY_RE.match(stripped):
             key = m.group(1)
-            # Use last non-empty comment line as the description
-            description = next((c for c in reversed(comment_block) if c), "")
-            result.append((key, description))
+            optional = False
+            passthrough: str | None = None
+            description = ""
+            for comment in comment_block:
+                if _OPTIONAL_SIGIL_RE.match(comment):
+                    optional = True
+                    continue
+                passthrough_match = _PASSTHROUGH_SIGIL_RE.match(comment)
+                if passthrough_match:
+                    passthrough = passthrough_match.group(1)
+                    continue
+                if comment and not description:
+                    description = comment
+            result.append((key, description, optional, passthrough))
             comment_block = []
         else:
             comment_block = []  # blank line resets comment accumulation
@@ -1086,11 +1119,18 @@ def _parse_env_keys(path: Path) -> set[str]:
 
 
 def check_env_completeness(project_dir: Path) -> ToolCheck:
-    """Check that .env contains all keys declared in .env.example.
+    """Check that .env contains all REQUIRED keys declared in .env.example.
+
+    A declaration marked `@optional` (in-code default, not a credential) is
+    excluded from the missing-key report but its unset count still rides
+    along in both return branches — filtered, not silently dropped. A
+    `@passthrough <binary>` declaration is still required (an external
+    binary reads it straight out of the environment); the marker only
+    exempts it from the reader-recurrence guard.
 
     Returns a single ToolCheck:
-    - available=True, version="all N vars present" when .env has all declared keys
-    - available=False, error="N missing: KEY1 (desc); KEY2 (desc)" when gaps exist
+    - available=True, version="all N required vars present (M optional unset)"
+    - available=False, error="N missing: KEY1 (desc); KEY2 (desc) (M optional unset)"
     - available=True, version="skipped (.env not found)" when .env doesn't exist
     - available=True, version="skipped (read error)" on OSError
     """
@@ -1115,22 +1155,38 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             )
 
         present = _parse_env_keys(env_file)
-        declared_keys = {k for k, _ in declared}
-        missing_keys = declared_keys - present
+        declared_keys = {k for k, _d, _o, _p in declared}
+        optional_keys = {k for k, _d, o, _p in declared if o}
+        required_keys = declared_keys - optional_keys
+        missing_keys = required_keys - present
+        optional_unset = len(optional_keys - present)
 
         if not missing_keys:
             return ToolCheck(
                 name="env-completeness",
                 available=True,
-                version=f"all {len(declared_keys)} vars present",
+                version=(
+                    f"all {len(required_keys)} required vars present "
+                    f"({optional_unset} optional unset)"
+                ),
             )
 
-        desc_map = dict(declared)
-        parts = [
-            f"{k} ({desc_map.get(k, 'no description')})" if desc_map.get(k) else k
-            for k in sorted(missing_keys)
-        ]
-        error = f"{len(missing_keys)} missing: {'; '.join(parts)}"
+        desc_map = {k: d for k, d, _o, _p in declared}
+        sorted_missing = sorted(missing_keys)
+        shown = sorted_missing[:_INLINE_KEY_CAP]
+        parts = []
+        for k in shown:
+            desc = desc_map.get(k, "")
+            if desc:
+                if len(desc) > _DESCRIPTION_CHAR_CAP:
+                    desc = desc[:_DESCRIPTION_CHAR_CAP].rstrip() + "…"
+                parts.append(f"{k} ({desc})")
+            else:
+                parts.append(k)
+        if len(sorted_missing) > _INLINE_KEY_CAP:
+            remaining = len(sorted_missing) - _INLINE_KEY_CAP
+            parts.append(f"(+{remaining} more — run scripts/update/run.py --verify for the full list)")
+        error = f"{len(missing_keys)} missing: {'; '.join(parts)} ({optional_unset} optional unset)"
         return ToolCheck(name="env-completeness", available=False, error=error)
 
     except OSError:
