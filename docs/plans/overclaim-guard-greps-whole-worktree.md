@@ -1,0 +1,783 @@
+---
+status: Planning
+type: bug
+appetite: Medium
+owner: Valor Engels
+created: 2026-08-19
+tracking: https://github.com/tomcounsell/ai/issues/2807
+last_comment_id: none
+---
+
+# Working-tree sweep guards must scan tracked content
+
+**Lane scope:** this plan covers **three independently-filed reports of the same
+defect** — #2807 (lane primary), #2808, #2809. One plan, one branch, one PR. The
+PR body carries `Closes #2807`, `Closes #2808`, `Closes #2809`.
+
+## Problem
+
+`tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted`
+is a *meta-test*: it asserts a property of the repository's own source text
+rather than of runtime behavior. PR #2740 (merged `706fc4da0`) removed the
+overclaiming sentence `State NOT persisted` from four sites in
+`tools/sdlc_stage_marker.py`, and added this test in the same commit to stop the
+sentence creeping back.
+
+The test implements "the sentence is gone from `tools/` and `agent/`" as
+`subprocess.run(["grep", "-rn", "State NOT persisted", "tools/", "agent/"])` and
+asserts `returncode == 1`. But `grep -r` does not scan *source*; it scans
+*files* — including the `__pycache__/` bytecode caches sitting next to the
+source. A `.pyc` embeds its module's string literals verbatim.
+
+**Current behavior.** Reproduced at `054f0f0fa` in the primary checkout
+`/Users/tomcounsell/src/ai`, running the test's exact argv:
+
+```
+returncode 0
+'Binary file tools/__pycache__/sdlc_stage_marker.cpython-312.pyc matches\n'
+```
+
+The test asserts `returncode == 1`, so it fails. The source is clean:
+`git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'` exits 1.
+
+Three properties make this permanent rather than transient:
+
+1. **Nothing invalidates it.** CPython 3.14 reads and writes only
+   `…cpython-314.pyc`. It never stats, validates, or deletes an off-pin cache.
+   The mtime/size invalidation that keeps bytecode honest does not apply across
+   minor versions.
+2. **Nothing sweeps it.** `tools/doctor.py` contains zero occurrences of
+   `pycache`/`.pyc`/`bytecode`. No `/update` step purges bytecode.
+   `PYTHONDONTWRITEBYTECODE=1` in `scripts/pytest-clean.sh` (#2064) prevents
+   *new* writes and cannot remove pre-existing caches.
+3. **Nothing makes it visible.** `.gitignore` keeps `*.pyc` out of
+   `git status` and out of every `git grep`.
+
+The resulting signal shape is the worst available: **red in the primary
+checkout, green in every worktree, at the same commit**, decided entirely by
+untracked filesystem residue. It reads to the nightly detector as a real
+regression on `main` while no source defect exists. The more dangerous
+direction is that the guard is validating *compiled bytecode* rather than
+source — and a triager who "fixes" the red by deleting the offending `.pyc`
+silently restores a guard that never checked what its name claims.
+
+The defect is a **class**, not an instance. A PLAN-time sweep of `tests/`
+(27 codebase-content assertion call sites out of 208 candidate lines triaged)
+found three more guards with the same or an adjacent failure mode, one of which
+appears in no issue.
+
+**Desired outcome.** Every guard that asserts a string is absent from the
+codebase scans **tracked content**, returns the same verdict in any checkout on
+any machine regardless of build artifacts on disk, distinguishes "scan found
+nothing" from "scan failed to run" and from "scan examined nothing", and fails
+loudly when the banned string is reintroduced into tracked source.
+
+## Freshness Check
+
+**Baseline commit:** `054f0f0fa093efd21be272c83998103e83b02ee6`
+**Issues filed at:** #2807 2026-08-13T20:29:57Z, #2808 2026-08-13T20:31:12Z,
+#2809 2026-08-13T20:33:36Z
+**Disposition:** **Minor drift** — the defect still reproduces; two cited
+file:line references moved and one factual claim in #2808 is wrong.
+
+**File:line references re-verified:**
+
+| Cited | Claim | Status |
+|---|---|---|
+| `test_sdlc_review_finalize.py:1054-1068` | the failing test body | **Drifted.** Now `:1084` (def), `subprocess.run` at `:1093`. Claim holds. |
+| `test_plan_migration_invariant.py:133-158` | the `git grep` reference pattern | **Drifted slightly.** Comment now at `:136-145`, call at `:145-158`. Claim holds. |
+| `test_anthropic_client_semaphore.py:166` | `cwd=`-less sibling | **Confirmed** at `:164-176`. No `cwd=`. |
+| `test_memory_extraction.py:2563` | `cwd=`-less sibling | **Confirmed** at `:2563`. No `cwd=`. |
+| `tools/doctor.py:442` | `worktree_interpreters` check, no bytecode dimension | **Confirmed.** `grep -c "pycache\|\.pyc\|bytecode" tools/doctor.py` → `0`. |
+
+**Factual correction to #2808.** #2808 states both `cwd=`-less siblings "go
+vacuously green". Only one does. Verified by execution from a foreign cwd:
+
+| Site | rc from wrong cwd | Assertion | Outcome |
+|---|---|---|---|
+| `test_anthropic_client_semaphore.py:164` | 1, empty stdout | `assert not hits` | **passes vacuously** (false green) |
+| `test_memory_extraction.py:2563` | 2 | `assert returncode == 1` | **fails loudly** (false red) |
+
+These carry different remediation priorities and the plan treats them
+separately. A false-green guard has silently stopped guarding; a false-red one
+is noisy but honest.
+
+**Machine-dependence of the artifact.** #2807/#2808 name `cpython-312`; #2809
+names `cpython-313`. Both are correct on their own machines. On this machine the
+offending file is `tools/__pycache__/sdlc_stage_marker.cpython-312.pyc`
+(2 occurrences; the `-314` sibling has 0). **The fix must never hardcode an
+interpreter version.**
+
+**Blast radius re-measured here** (excluding `.venv/`, `.worktrees/`): 1143
+non-3.14 `.pyc` — 1131 × cpython-312, 12 × cpython-313, against 1238 on-pin.
+Under `tools/` + `agent/` alone: 183 off-pin. #2809 reported 2227 on its
+machine. The condition is fleet-wide; the count is not portable.
+
+**Cited sibling issues/PRs re-checked:**
+- #2740 / `706fc4da0` — merged 2026-08-13. Source removal is complete and
+  correct. This is not a regression of it.
+- #2093 — closed. Origin of the `git grep` rule in
+  `test_plan_migration_invariant.py`. Directly reusable.
+- #2064 — closed. Origin of `PYTHONDONTWRITEBYTECODE=1`. Write-prevention only.
+- #2617 / #2572 — the `.python-version` pin that orphaned the caches.
+
+**Commits on main since the issues were filed (touching referenced files):**
+`b5177404d` (plan revision doc, `g8-terminal-pipeline-no-rebuild`) is the only
+commit touching any referenced test file, and it edits a plan doc, not the
+tests. **No drift in the root cause.**
+
+**Active plans in `docs/plans/` overlapping this area:** none. 28 plans present;
+none addresses grep-based guards, `__pycache__`, or the test-sweep class.
+
+## Prior Art
+
+- **#2093 / PR #2097** — "Fix test-isolation cluster: 5 unit tests flaky under
+  `-n auto`" (merged 2026-07-15). Solved this exact hazard class in
+  `test_plan_migration_invariant.py` by switching to `git grep`, and wrote the
+  rationale into a code comment. **Succeeded.** This plan generalizes that
+  fix rather than inventing one.
+- **#2064** — "full-suite pytest lock … cross-reap xdist workers" (closed).
+  Added `PYTHONDONTWRITEBYTECODE=1` to `scripts/pytest-clean.sh` as
+  "defense-in-depth against `__pycache__` cross-checkout poisoning".
+  **Partial.** Prevents new `.pyc`; cannot reap existing ones.
+- **#2430** — "Nightly regression (6-node batch): … hardlinks `__pycache__`
+  cruft (net-new)" (closed 2026-08-06). Prior instance of gitignored
+  `__pycache__` residue changing observable repo state. **Succeeded** for its
+  own scope (the skills-hardlink area), never generalized.
+- **#2557, #2597** — earlier `__pycache__`-residue cases, both in the
+  skills-hardlink area. Same pattern: fixed locally, never swept.
+
+**Why previous fixes did not prevent this.** Every prior fix was applied at the
+*instance* layer: #2093 fixed one test, #2430/#2557/#2597 fixed one directory
+each, #2064 prevented one class of future write. None of them made the *pattern*
+un-writable, and none swept for siblings. `test_sdlc_review_finalize.py` was
+written a month after #2093 landed the remedy in a neighbouring file, by an
+author who had no mechanism telling them the remedy existed. This plan adds
+that mechanism (a shared helper plus a meta-guard) so the next author cannot
+reintroduce the shape.
+
+## Research
+
+Purely internal. The decision surface is `git grep` semantics, BSD/GNU `xargs`
+semantics, and CPython's PEP 3147 cache naming — all of which are more reliably
+settled by execution on the target machine than by search, and were settled that
+way (see Spike Results). No external findings required.
+
+## Spike Results
+
+### spike-1: `git grep` exit-code contract
+- **Assumption**: "`git grep` exits 1 on no-match and non-1 on scan failure, so
+  the assertion shape carries over from `grep`."
+- **Method**: code-read + direct execution at `054f0f0fa`
+- **Finding**: Partly true, with one hazard the issues did not anticipate.
+
+  | Condition | Exit |
+  |---|---|
+  | match found | 0 |
+  | no match, files scanned | 1 |
+  | not a git worktree | 128 |
+  | unreadable/empty index (`GIT_INDEX_FILE=/dev/null`) | 128 |
+  | invalid flag | 129 |
+  | **pathspec matches no files** (`-- 'nosuchdir/*.py'`) | **1** |
+
+  The last row is the hazard: **`git grep` cannot distinguish "clean" from
+  "scanned nothing"**. A directory rename silently converts the guard into a
+  no-op that reports success.
+- **Confidence**: high
+- **Impact on plan**: `git grep` alone does **not** close the vacuous-green
+  class. Every converted guard must be paired with a **non-vacuity floor** that
+  asserts the scan actually examined files. This is the single most important
+  finding of the planning pass and it is not in any of the three issues.
+
+### spike-2: `git grep` pathspec nesting
+- **Assumption**: "`tools/*.py` only matches the top level; nested files need `**`."
+- **Method**: direct execution
+- **Finding**: **False.** Git pathspec `*` matches `/`. `git grep -- 'tools/*.py'`
+  matched 150 files, 90 of them nested (`tools/browser/tests/test_downscale.py`
+  etc.). No `**` needed.
+- **Confidence**: high
+- **Impact on plan**: keeps the pathspecs simple and matches the existing
+  `test_plan_migration_invariant.py` form exactly.
+
+### spike-3: the `git ls-files -z | xargs -0 grep` alternative
+- **Assumption**: "`xargs` is an acceptable equivalent to `git grep`."
+- **Method**: direct execution on this machine (macOS, BSD xargs)
+- **Finding**: **Disqualifying.** With an empty file list the pipeline returns
+  **rc=0** — grep's *"match found"* code — when nothing was scanned at all:
+
+  ```
+  git ls-files -z -- 'nosuchdir/*.py' | xargs -0 grep -n 'anything'   → rc=0
+  ```
+
+  `rc=0` is therefore ambiguous between "the banned string is present" and
+  "nothing was examined", which destroys the exit-code contract in the most
+  dangerous possible direction. Batch splitting is a second, portability-scoped
+  hazard: BSD xargs returned 1 for an all-no-match batched run here, but GNU
+  xargs documents 123 when any invocation exits 1-125, so the contract is not
+  portable across the fleet. A pipeline also launders the exit code of the
+  *first* command entirely — a `git ls-files` failure is invisible.
+- **Confidence**: high
+- **Impact on plan**: **`git grep` is chosen.** It is a single process with no
+  pipe, no argv limit, no empty-input ambiguity, and it is already the in-repo
+  precedent with a written rationale (#2093). This resolves the supervisor's
+  directive to choose between the two forms.
+
+### spike-4: exhaustive sweep of `tests/` for filesystem-walking absence assertions
+- **Assumption**: "The three sites named across #2807/#2808/#2809 are the whole set."
+- **Method**: code-read, exhaustive (208 candidate lines triaged → 77 genuine
+  filesystem-search call sites → 27 codebase-content assertions)
+- **Finding**: **False.** Two additional exposures found; see the sweep table in
+  Technical Approach. Most notably `tests/unit/test_no_legacy_paths.py:25`
+  gates on `if result.returncode == 0:` and does nothing otherwise, so a
+  `git grep` exit **128** reads as "clean" — an exposure in a guard that already
+  uses `git grep`, proving that the tool switch alone is insufficient.
+- **Confidence**: high
+- **Impact on plan**: scope (B) is a real sweep with 6 additional hardening
+  targets, not a two-line adjacent fix.
+
+## Data Flow
+
+Not applicable in the runtime sense — no component boundaries are crossed. The
+relevant flow is the guard's own evaluation chain, which is where the defect
+lives:
+
+1. **Entry point**: pytest collects a guard test.
+2. **Scan**: the guard names a corpus. Today: a *directory tree on disk*
+   (`grep -r tools/`). After: *tracked content in the index*
+   (`git grep -- 'tools/*.py'`).
+3. **Result**: an exit code plus stdout.
+4. **Triage**: today, a single `== 1` comparison that conflates no-match with
+   several failure modes. After: an explicit three-way split — match / clean /
+   scan-failed — plus a separate non-vacuity assertion on corpus size.
+5. **Output**: pass, or a failure naming `file:line` of the offending tracked
+   source.
+
+The defect is entirely at step 2, and the vacuous-green class is entirely at
+step 4. Fixing only step 2 (what all three issues propose) leaves step 4 open.
+
+## Architectural Impact
+
+- **New dependencies**: none. `git` is already required by the test suite and
+  `git grep` is already used for this purpose.
+- **Interface changes**: one new internal test helper module,
+  `tests/tracked_content.py`. No production interface changes. **No production
+  code is modified by this plan at all** — the defect is entirely in test code.
+- **Coupling**: *decreases*. Guards stop depending on the filesystem state of
+  whatever checkout they run in.
+- **Data ownership**: unchanged.
+- **Reversibility**: high. Every change is test-local and independently
+  revertable per call site.
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev, plus a validator and a documentarian.
+
+**Interactions:**
+- PM check-ins: 1-2 (scope of the sweep; the concern-B split)
+- Review rounds: 1
+
+Medium rather than Small because scope (B) touches ten test files and introduces
+a shared helper plus a meta-guard, and because the verification obligation is
+unusually strict: every converted guard needs a demonstrated-red mutation check,
+and the primary node must be proven in **both** the primary checkout and a
+worktree.
+
+## Prerequisites
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Repo is a git worktree | `git rev-parse --is-inside-work-tree` | `git grep` requires it; guards must fail loudly if absent |
+| On-pin interpreter | `python -c "import sys,pathlib; assert '.'.join(map(str,sys.version_info[:2])) == pathlib.Path('.python-version').read_text().strip()"` | `scripts/pytest-clean.sh` aborts off-pin |
+| Stale artifact present for the red-state proof | `/usr/bin/grep -rl "State NOT persisted" tools/ agent/` | AC1 requires the fix be proven *with* the stale `.pyc` in place |
+
+Run via `python scripts/check_prerequisites.py docs/plans/overclaim-guard-greps-whole-worktree.md`.
+
+> **Note on the third prerequisite.** If this checkout's stale `.pyc` has been
+> swept between planning and building, the builder must **plant an equivalent
+> artifact** rather than skip the check. AC1 is meaningless without a red state
+> to contrast against. Never satisfy it by deleting bytecode.
+
+## Solution
+
+### Key Elements
+
+- **`tests/tracked_content.py`** — a small shared helper that expresses "no
+  tracked file matching this pathspec contains this pattern" correctly, once.
+  It owns the `git grep` invocation, the three-way exit-code triage, and the
+  non-vacuity floor, so that no call site has to get those right individually.
+- **Converted guards** — the four `subprocess`-based guards that are vulnerable
+  (one failing, one vacuously green, one false-red, one silently passing on
+  scan failure) route through the helper.
+- **Floored walks** — the six pure-Python `rglob` guards that are not
+  artifact-vulnerable but lack a non-vacuity floor get one.
+- **A meta-guard** — a test asserting no test in `tests/` shells out to a bare
+  recursive `grep` over a directory. This is what stops the shape recurring, and
+  it is the piece that #2093 lacked.
+- **A documented hazard** — the pin-bump/stranded-bytecode interaction recorded
+  in `docs/features/worktree-venv-isolation.md`.
+
+### Flow
+
+Guard authoring today → author writes `grep -rn` → passes locally in a fresh
+worktree → lands → goes red months later in a long-lived checkout, or silently
+stops guarding → nightly detector reports a phantom regression.
+
+After: Guard authoring → author reaches for the helper (or the meta-guard blocks
+the bare-grep shape at test time) → guard scans tracked content with a
+non-vacuity floor → identical verdict in every checkout on every machine.
+
+### Technical Approach
+
+**Decision: `git grep`, not `git ls-files | xargs grep`.** Settled empirically
+in spike-3. `git grep` is one process with no pipe, no `ARG_MAX` batching, no
+empty-input ambiguity, and an exit code that is not laundered through a
+pipeline. It is already the in-repo precedent (`test_plan_migration_invariant.py`,
+#2093) with a written rationale. The `xargs` form returns **rc=0** — grep's
+"match found" — for an empty file list, which is the most dangerous possible
+misreading, and its batched exit code is not portable between BSD and GNU xargs.
+
+**The helper's contract.** Roughly:
+
+```python
+def assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=()):
+    """Assert no tracked file matching *pathspecs* contains *pattern*."""
+```
+
+with three obligations that the current call sites each get wrong in a
+different way:
+
+1. **Index-scoped corpus.** `git grep` with `cwd=REPO_ROOT` (always explicit —
+   never inherited from pytest's ambient cwd) and an explicit `*.py` pathspec.
+2. **Three-way exit triage.** `0` → match, report `file:line`. `1` → clean.
+   **anything else** → raise a *scan failure*, distinct from a pass. Exit 128
+   (not a worktree / unreadable index) and 129 (bad flag) must never read as
+   clean. This is the obligation `test_no_legacy_paths.py` currently violates
+   despite already using `git grep`.
+3. **Non-vacuity floor.** Assert `git ls-files -- <pathspecs>` returns at least
+   `min_files` paths. Without this, spike-1 shows a renamed directory turns the
+   guard into a silent no-op. Modelled on the strongest existing pattern in the
+   repo, `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored
+   roots, explicit required-anchor list, `len(found) > 250` floor).
+
+**Sweep dispositions** (spike-4; 27 codebase-content assertion sites, all
+classified — this table *is* the #2809 enumeration deliverable):
+
+| # | Site | Defect | Disposition |
+|---|---|---|---|
+| A1 | `test_sdlc_review_finalize.py:1093` | `grep -rn`, no `--include`; reads `__pycache__` | **CONVERT** — the failing node |
+| A2 | `test_anthropic_client_semaphore.py:164` | no `cwd=`; `assert not hits` → **vacuous green** | **CONVERT** — highest priority after A1 |
+| A3 | `test_memory_extraction.py:2563` | no `cwd=`; rc 2 → **false red** | **CONVERT** — noisy, not silent |
+| A7 | `test_no_legacy_paths.py:25` | `if rc == 0:` → exit **128 reads as clean**; no `*.py` pathspec | **CONVERT** — net-new, in no issue |
+| A4, A5 | `test_valor_session_working_dir_resolution.py:441,487` | none — absolute single-file paths | **DOCUMENT AS SAFE** |
+| A6 | `test_plan_migration_invariant.py:145` | none — the reference pattern | **DOCUMENT AS SAFE** (add floor only if free) |
+| B7 | `test_template_filter_registry.py:131` | no non-vacuity floor | **ADD FLOOR** |
+| B8 | `test_sdlc_lease_helper_binding.py:89` | no floor, no anchor list | **ADD FLOOR** |
+| B11 | `test_sdlc_tool_wrapper.py:54` | no floor; a renamed skills root empties the sweep | **ADD FLOOR** |
+| B12 | `test_dm_recovery.py:426` | no floor | **ADD FLOOR** |
+| B13 | `test_no_positional_query_get.py:69` | no floor | **ADD FLOOR** |
+| B14 | `test_harness_model_coverage.py:60` | explicit `if not agent_dir.is_dir(): return []` vacuous path | **ADD FLOOR** — convert to raise |
+| B1-B6, B9, B10, B15-B20 | 14 further walks | already carry non-vacuity floors | **DOCUMENT AS SAFE** |
+
+The B-series are `rglob("*.py")` walks. They are **not** `.pyc`-vulnerable
+(`*.py` does not match `*.pyc`); their only defect is the missing floor. That
+distinction is deliberate — this plan does not rewrite them to use `git grep`,
+which would be churn for no correctness gain.
+
+**Out-of-scope-but-adjacent**, recorded so the next reader is not surprised:
+`scripts/checks/no_new_rebuild_callers.sh:46` has the same ambient-cwd hazard and
+is invoked by no test; `reflections/maintenance.py::run_legacy_code_scan` is
+notably the one place in the repo that already treats grep exit 2 as an error
+rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] The helper must not contain `except Exception: pass`. A `git` invocation
+      that fails raises a named scan-failure error carrying the exit code and
+      stderr. Test: force failure via `GIT_INDEX_FILE=/dev/null` (empirically
+      yields 128) and assert the helper **raises**, never returns clean.
+- [ ] No exception handlers exist in the converted call sites today; none are
+      added.
+
+### Empty/Invalid Input Handling
+- [ ] Empty pathspec match set → the non-vacuity floor fails with a message
+      naming the pathspec. Test explicitly: pass `'nosuchdir/*.py'` and assert
+      the helper fails rather than reporting clean (spike-1 proves raw
+      `git grep` returns 1 here).
+- [ ] Empty pattern → rejected by the helper with a clear error, since
+      `git grep ""` matches every line and would produce a nonsense guard.
+- [ ] Whitespace-only pattern → same rejection.
+
+### Error State Rendering
+- [ ] A real violation must render `file:line` of the *tracked source*, not a
+      `Binary file … matches` line. Assert the message contains `.py:` and does
+      **not** contain `Binary file`.
+- [ ] A scan failure must render distinguishably from a violation — different
+      exception type or an unambiguous prefix — so a future triager can tell
+      "the guard found something" from "the guard could not run".
+
+## Test Impact
+
+- [ ] `tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted` — **UPDATE**: route through the helper; add the `#2093`-style explanatory comment naming the `.pyc` hazard so it is not "simplified" back (required by #2809 AC2).
+- [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; preserve the `_ALLOWED_DIRECT_CONSTRUCTORS` exemption via the helper's `allow=` parameter.
+- [ ] `tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary` — **UPDATE**: route through the helper. Single-file scope, so the floor is `min_files=1`.
+- [ ] `tests/unit/test_no_legacy_paths.py::test_no_legacy_claude_code_paths` — **UPDATE**: replace the `if rc == 0:` gate with three-way triage; keep the `ALLOWED_FILES` and `docs/plans/` exemptions.
+- [ ] `tests/unit/test_template_filter_registry.py::test_no_hand_copied_filter_registration_in_tests` — **UPDATE**: add non-vacuity floor.
+- [ ] `tests/unit/test_sdlc_lease_helper_binding.py::test_no_module_level_from_import_of_lease_helpers` — **UPDATE**: add non-vacuity floor.
+- [ ] `tests/unit/test_sdlc_tool_wrapper.py::TestSkillMarkdownParity` (both tests) — **UPDATE**: add non-vacuity floor over `_iter_include_paths`.
+- [ ] `tests/integration/test_dm_recovery.py::TestNoChatTitleFilterRemains::test_scanners_do_not_skip_titleless_dialogs` — **UPDATE**: add non-vacuity floor.
+- [ ] `tests/unit/test_no_positional_query_get.py::test_no_positional_agent_session_query_get` — **UPDATE**: add non-vacuity floor.
+- [ ] `tests/unit/test_harness_model_coverage.py` (`_agent_py_files`) — **UPDATE**: replace `if not agent_dir.is_dir(): return []` with a raise; add floor.
+- [ ] `tests/unit/test_subprocess_test_db_isolation.py` — **NO CHANGE, verified**: its scanner only flags subprocess calls where `_argv_reaches_python(argv)` holds. `["git", "grep", …]` does not reach Python, so the new helper needs no `ALLOWLIST` entry. Confirmed by reading `_argv0_is_skipped`/`_argv_reaches_python` at `:216-260`.
+- [ ] `tests/unit/test_plan_migration_invariant.py` — **NO CHANGE**: already correct; it is the reference pattern this plan generalizes.
+- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, scan-failure (128), vacuous pathspec, empty pattern, and `allow=` filtering.
+- [ ] **NEW** meta-guard (in the same new file): no test under `tests/` invokes a bare recursive `grep` over a directory.
+
+## Rabbit Holes
+
+- **Rewriting the 14 already-safe `rglob` walks to use `git grep`.** They are
+  correct. `*.py` cannot match `*.pyc`. Converting them is churn that inflates
+  the diff and the review surface with zero correctness gain. Document them as
+  safe and move on.
+- **Deleting the stale `.pyc` files as part of this fix.** Explicitly dropped in
+  all three issues, and it would destroy the red state that AC1 depends on. The
+  bytecode question is #2883.
+- **Building a general-purpose repo-wide "banned string" registry.** Tempting
+  once you see four guards doing the same thing, but it invents a config format,
+  a loader, and a discovery mechanism to serve four call sites. The shared
+  helper is the right altitude.
+- **Chasing the `scripts/` and `reflections/` occurrences of the same shape.**
+  Real, noted in Technical Approach, but they are not tests, so they are outside
+  #2809's acceptance criteria and outside this lane.
+- **Making the meta-guard clever.** An AST-based analyser that understands every
+  way to build a grep argv will spend more time on false positives than the
+  problem is worth. Match the literal shapes (`"-r"`/`"-rn"` with `"grep"` as
+  argv[0]) and allow an explicit opt-out comment.
+
+## Risks
+
+### Risk 1: The non-vacuity floors become maintenance friction
+**Impact:** A legitimate refactor that removes files trips a floor, and the next
+author lowers the number reflexively rather than thinking, eroding the guard.
+**Mitigation:** Set each floor well below the current count (roughly 60-70%, not
+`current - 1`) so ordinary churn never trips it, and put the reason in the
+assertion message rather than a comment, so the person who sees the failure sees
+the rationale at the same moment.
+
+### Risk 2: The demonstrated-red proof is faked or skipped
+**Impact:** The whole point of #2809's AC3/AC4 is that the guard still catches a
+real reintroduction. A converted guard that is green for the wrong reason is
+worse than the bug, because it now *looks* rigorous.
+**Mitigation:** Mutation-check every converted guard individually and paste the
+observed FAIL output into the PR description. Do not batch this: a single
+mutation that trips several guards proves nothing about the ones it did not
+reach. (This is the standing repo lesson — a green test often reaches no code
+at all.)
+
+### Risk 3: `git grep` unavailable or the checkout is not a worktree
+**Impact:** Every converted guard fails at once, in CI or on a machine where the
+suite runs from an export rather than a clone.
+**Mitigation:** This is the *intended* behavior — fail-closed. Exit 128 raises a
+named scan-failure rather than reading as clean. Documented in the helper's
+docstring and asserted by a helper unit test, so the failure is legible instead
+of mysterious.
+
+### Risk 4: The AC1 red state has evaporated by build time
+**Impact:** The builder "verifies" AC1 against a checkout that would have passed
+anyway, proving nothing — exactly the trap #2808 names ("a worktree-only green
+proves nothing here").
+**Mitigation:** Prerequisite check 3 asserts the stale artifact exists before the
+build starts. If it is gone, plant an equivalent one rather than skipping.
+Verification must run in **both** the primary checkout and a worktree, and the
+two runs must agree.
+
+### Risk 5: Scope creep from the sweep
+**Impact:** 27 call sites is enough material to turn a bug fix into a
+test-infrastructure project.
+**Mitigation:** The sweep table fixes the disposition of all 27 up front: 4
+convert, 6 get a floor, 17 are documented as safe. Anything discovered beyond
+that table goes to a new issue, not into this PR.
+
+## Race Conditions
+
+**No race conditions identified in the shipped behavior** — the change is
+test-local and the guards are synchronous.
+
+One pre-existing race is *closed* by this work, and it is worth recording
+because it is half the reason #2093 chose `git grep`:
+
+### Race 1 (pre-existing, resolved by this plan): xdist sibling deletes a directory mid-walk
+**Location:** `tests/unit/test_sdlc_review_finalize.py:1093` (and every
+unconverted `grep -r` site)
+**Trigger:** Under `-n auto`, a concurrent worker creates or removes a runtime
+tree (`__pycache__`, `data/`, `logs/`) while `grep -r` is descending it.
+**Data prerequisite:** none.
+**State prerequisite:** the scanned corpus must be stable for the scan's duration.
+**Mitigation:** `git grep` reads an atomic index snapshot and never touches
+untracked runtime trees, so the corpus cannot shift underneath it. Verbatim from
+`test_plan_migration_invariant.py:136-145`: *"a directory vanishing mid-walk
+makes grep exit 2 and trips the returncode assertion below. `git grep` reads the
+index, so it is race-free and never scans untracked runtime artifacts (#2093)."*
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #2883] **Sweeping or purging the 1143 orphaned off-pin `.pyc`
+  files.** Concern B from #2808/#2809, split out at plan time and filed as
+  #2883. Deliberately separated for two reasons: #2807 states outright that
+  "the test must not depend on that housekeeping being done", and bundling a
+  fleet-wide file-deletion mechanism into a test-guard fix would make the
+  destructive part of the change hard to review on its own merits. Once this
+  lane lands, no test's verdict depends on bytecode, which is precisely what
+  makes the deferral safe. **The pin-bump warning is NOT deferred** — it ships
+  here, in the Documentation section, because it costs nothing and is the part
+  that prevents recurrence.
+- [SEPARATE-SLUG #2883] **A `tools/doctor.py` bytecode-drift check.** Same
+  rationale; it is option 1 in #2883's decision list.
+- **Nothing else is deferred.** The sweep (scope B) is fully in scope: all 27
+  call sites are dispositioned in the Technical Approach table, 10 are modified
+  here, and the remaining 17 are documented as safe with the reason recorded.
+
+## Update System
+
+**No update system changes required.** This lane modifies test code and one
+documentation page only; it adds no dependency, no config file, no console
+script, and no migration. `scripts/update/` is untouched.
+
+The one adjacent interaction worth naming: `/update` is a plausible *home* for
+an off-pin bytecode purge, but that is #2883's decision to make, not this
+lane's.
+
+## Agent Integration
+
+**No agent integration required.** This is a test-suite change. Nothing new is
+reachable from a Telegram message, no CLI entry point is added to
+`pyproject.toml [project.scripts]`, and `bridge/telegram_bridge.py` imports
+nothing new. `tests/tracked_content.py` is a test-only helper and is
+deliberately not exposed to the agent.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Create `docs/features/tracked-content-sweep-guards.md` — the convention:
+      what a sweep guard is, why it must scan tracked content rather than the
+      working tree, the three obligations (index-scoped corpus, three-way exit
+      triage, non-vacuity floor), the `git grep`-over-`xargs` decision with the
+      rc=0 evidence from spike-3, and how to use `tests/tracked_content.py`.
+- [ ] Add the entry to the `docs/features/README.md` index table.
+
+### Existing Documentation
+- [ ] Update `docs/features/worktree-venv-isolation.md`: record that bumping
+      `.python-version` **strands** the previous interpreter's bytecode in every
+      checkout rather than replacing it, that nothing currently sweeps it, and
+      link #2883. This is the concern-B piece that ships in this lane.
+- [ ] Update `tests/README.md`: add the sweep-guard convention to the
+      contribution guide so a new guard author finds it before writing
+      `grep -rn`.
+
+### Inline Documentation
+- [ ] The `#2093`-style explanatory comment on each converted guard, naming the
+      `.pyc` hazard (explicitly required by #2809 AC2 so it is not "simplified"
+      back).
+- [ ] Docstring on `assert_absent_from_tracked` covering all three obligations
+      and the fail-closed exit-128 behavior.
+
+## Success Criteria
+
+- [ ] `tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted` passes in the primary checkout `~/src/ai` **with the stale off-pin `.pyc` still present** — no `__pycache__` deleted or modified first. (#2807 AC1, #2808 AC1, #2809 AC1)
+- [ ] The same node passes in a fresh session worktree, and both runs agree at the same commit. (#2808 AC2)
+- [ ] The result does not depend on which `grep` binary `PATH` resolves — no converted guard invokes `grep`. (#2807 AC2)
+- [ ] **Demonstrated ignored-artifact:** with a planted file under `tools/__pycache__/` containing the banned string, the test still passes. (#2808 AC3, #2809 AC3)
+- [ ] **Demonstrated red:** reintroducing the banned string into a tracked `.py` under `tools/` or `agent/` fails the test, with the offending `file:line` in the message. (#2807 AC3, #2808 AC4)
+- [ ] Every converted guard distinguishes "scan found nothing" from "scan failed to run" — an errored scan does not read as a pass. (#2808 AC5)
+- [ ] Every converted guard distinguishes "scan found nothing" from "scan examined nothing" via a non-vacuity floor. (net-new, spike-1)
+- [ ] `tests/` contains no remaining recursive-`grep`-over-a-directory assertion, enforced by the new meta-guard. (#2807 AC4)
+- [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each either converted or documented as safe. (#2809 AC4)
+- [ ] The two `cwd=`-less siblings each fail loudly rather than passing vacuously when the ambient cwd is not the repo root. (#2808 AC7)
+- [ ] A decision on concern B is recorded — deferred to #2883, with the pin-bump warning shipped here. (#2808 AC6, #2809 AC5)
+- [ ] Tests pass (`/do-test`) via `scripts/pytest-clean.sh`, never bare `pytest`.
+- [ ] Documentation updated (`/do-docs`).
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (guard conversion)**
+  - Name: `guard-converter`
+  - Role: the helper module, its unit tests, the meta-guard, and the four
+    `subprocess`-based conversions (A1, A2, A3, A7).
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (walk hardening)**
+  - Name: `walk-hardener`
+  - Role: non-vacuity floors on the six `rglob` walks (B7, B8, B11, B12, B13,
+    B14). Independent of the helper, so it runs in parallel.
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator**
+  - Name: `sweep-validator`
+  - Role: mutation-check every converted guard individually; run the primary
+    node in both the primary checkout and a worktree.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `sweep-documentarian`
+  - Role: the new feature doc, the index entry, and the two existing-doc updates.
+  - Agent Type: documentarian
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Build the tracked-content helper
+- **Task ID**: build-helper
+- **Depends On**: none
+- **Validates**: `tests/unit/test_tracked_content_helper.py` (create)
+- **Informed By**: spike-1 (git grep returns 1 for an empty pathspec — a floor is mandatory), spike-2 (`tools/*.py` matches nested paths), spike-3 (`git grep` chosen over `xargs`; the xargs form returns rc=0 on empty input)
+- **Assigned To**: guard-converter
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=())`.
+- Invoke `git grep -n` with an explicit `cwd=REPO_ROOT` derived from `__file__`, never the ambient cwd.
+- Implement three-way exit triage: 0 → violation with `file:line`; 1 → clean; anything else → raise a named scan-failure carrying the exit code and stderr.
+- Implement the non-vacuity floor via `git ls-files -- <pathspecs>`, failing with a message that names the pathspec and the expected minimum.
+- Reject an empty or whitespace-only pattern.
+- Write `tests/unit/test_tracked_content_helper.py` covering: match, clean, scan-failure via `GIT_INDEX_FILE=/dev/null` (→ 128), vacuous pathspec (`nosuchdir/*.py`), empty pattern, and `allow=` filtering.
+
+### 2. Convert the four vulnerable subprocess guards
+- **Task ID**: build-conversions
+- **Depends On**: build-helper
+- **Validates**: `tests/unit/test_sdlc_review_finalize.py`, `tests/unit/test_anthropic_client_semaphore.py`, `tests/unit/test_memory_extraction.py`, `tests/unit/test_no_legacy_paths.py`
+- **Informed By**: spike-4 (the sweep table; A7 is net-new and appears in no issue)
+- **Assigned To**: guard-converter
+- **Agent Type**: builder
+- **Parallel**: false
+- A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`. Add the `#2093`-style comment naming the `.pyc` hazard.
+- A2 `test_anthropic_client_semaphore.py:164` — route through the helper; carry `_ALLOWED_DIRECT_CONSTRUCTORS` across as `allow=`. Note in the comment that this site was **vacuously green**, not merely unpinned.
+- A3 `test_memory_extraction.py:2563` — route through the helper over `'agent/memory_extraction.py'`, `min_files=1`. Note that this site was false-**red**, correcting #2808.
+- A7 `test_no_legacy_paths.py:25` — replace the `if rc == 0:` gate with three-way triage; add a `*.py`-free but explicit pathspec; preserve `ALLOWED_FILES` and the `docs/plans/` exemption.
+- Do not delete or modify any `__pycache__` content.
+
+### 3. Add non-vacuity floors to the six unfloored walks
+- **Task ID**: build-floors
+- **Depends On**: none
+- **Validates**: `tests/unit/test_template_filter_registry.py`, `tests/unit/test_sdlc_lease_helper_binding.py`, `tests/unit/test_sdlc_tool_wrapper.py`, `tests/integration/test_dm_recovery.py`, `tests/unit/test_no_positional_query_get.py`, `tests/unit/test_harness_model_coverage.py`
+- **Informed By**: spike-4 (these are `rglob("*.py")` walks — not `.pyc`-vulnerable; the only defect is the missing floor)
+- **Assigned To**: walk-hardener
+- **Agent Type**: builder
+- **Parallel**: true
+- Add a scanned-count floor to each, modelled on `tests/unit/test_update_pull_fetch_head_race.py`.
+- Set each floor at roughly 60-70% of the current count, not `current - 1`, so ordinary churn never trips it.
+- Put the rationale in the assertion message, not only in a comment.
+- In `test_harness_model_coverage.py`, replace `if not agent_dir.is_dir(): return []` with a raise — that early return is an explicit vacuous-green path.
+- Do **not** convert these to `git grep`. `*.py` cannot match `*.pyc`; conversion is churn.
+
+### 4. Add the recurrence meta-guard
+- **Task ID**: build-metaguard
+- **Depends On**: build-conversions, build-floors
+- **Validates**: `tests/unit/test_tracked_content_helper.py`
+- **Assigned To**: guard-converter
+- **Agent Type**: builder
+- **Parallel**: false
+- Add a test asserting no test under `tests/` invokes a bare recursive `grep` over a directory (argv[0] `grep` with `-r`/`-rn`).
+- Match literal shapes only; provide an explicit opt-out comment for a justified survivor.
+- Include a non-vacuity floor on the meta-guard's own scan — it must not become the thing it guards against.
+
+### 5. Mutation-check every guard individually
+- **Task ID**: validate-mutations
+- **Depends On**: build-metaguard
+- **Assigned To**: sweep-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- For **each** of the four converted guards separately: introduce the banned pattern into a tracked source file, run the node, capture the FAIL output, revert. A single mutation tripping several guards proves nothing about the ones it did not reach.
+- For **each** of the six floored walks separately: force an empty scan (temporarily point the root at a nonexistent path), confirm the floor fails, revert.
+- Confirm the helper raises rather than passing when `GIT_INDEX_FILE=/dev/null`.
+- Plant a file under `tools/__pycache__/` containing the banned string; confirm A1 still passes.
+- Collect every FAIL output for the PR description.
+
+### 6. Cross-checkout verification
+- **Task ID**: validate-both-checkouts
+- **Depends On**: validate-mutations
+- **Assigned To**: sweep-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the primary node in the **primary checkout** with the stale `.pyc` present. It must pass.
+- Run the same node in a **fresh worktree**. It must pass.
+- Confirm the two agree at the same commit. A worktree-only green proves nothing (#2808).
+- Use `scripts/pytest-clean.sh`; never bare `pytest`; never pattern-kill pytest processes.
+- Set `PYTHONPATH` explicitly when running in a worktree — the shared venv `.pth` can otherwise import the wrong checkout.
+
+### 7. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-both-checkouts
+- **Assigned To**: sweep-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section.
+- Add the entry to `docs/features/README.md`.
+- Update `docs/features/worktree-venv-isolation.md` with the stranded-bytecode warning, linking #2883.
+- Update `tests/README.md` with the sweep-guard convention.
+
+### 8. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: sweep-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row in the Verification table.
+- Confirm all Success Criteria, including the per-issue AC mappings.
+- Confirm the PR body carries `Closes #2807`, `Closes #2808`, `Closes #2809`.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q` | exit code 0 |
+| Stale off-pin `.pyc` was NOT deleted (AC1 precondition still holds) | `find tools agent -name '*.pyc' -not -name '*cpython-314*' \| wc -l` | output > 0 |
+| Tracked source is genuinely clean | `git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'; test $? -eq 1` | exit code 0 |
+| No converted guard shells out to `grep` | `git grep -n '"grep"' -- 'tests/unit/test_sdlc_review_finalize.py' 'tests/unit/test_anthropic_client_semaphore.py' 'tests/unit/test_memory_extraction.py' 'tests/unit/test_no_legacy_paths.py'` | exit code 1 |
+| No bare recursive grep anywhere in tests/ | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q` | exit code 0 |
+| Helper exists and is index-scoped | `git grep -c 'git.*grep' -- tests/tracked_content.py` | output > 0 |
+| Helper fails closed on a broken index | `GIT_INDEX_FILE=/dev/null python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a; a('zzz','tools/*.py',min_files=1)" 2>&1; test $? -ne 0` | exit code 0 |
+| Helper rejects a vacuous pathspec | `python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a; a('zzz','nosuchdir/*.py',min_files=1)" 2>&1; test $? -ne 0` | exit code 0 |
+| All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q` | exit code 0 |
+| All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q` | exit code 0 |
+| Feature doc exists | `test -f docs/features/tracked-content-sweep-guards.md` | exit code 0 |
+| Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
+| Stranded-bytecode warning shipped, linking #2883 | `git grep -c '2883' -- docs/features/worktree-venv-isolation.md` | output > 0 |
+| Concern-B follow-up issue is real and open | `gh issue view 2883 --json state -q .state` | output contains OPEN |
+| No production code touched | `git diff --name-only main... \| grep -Ev '^(tests/\|docs/)' \| wc -l` | output contains 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+
+---
+
+## Open Questions
+
+1. **Meta-guard strictness.** Should the meta-guard ban *all* `subprocess` calls
+   to `grep` from `tests/`, or only the recursive-over-a-directory shape? Two
+   sites (A4, A5) grep a single absolute file path and are genuinely safe; a
+   blanket ban would force them through the helper for no correctness gain, but
+   a shape-matching ban is more code and can be evaded. The plan currently
+   assumes **shape-matching with an opt-out comment**.
+
+2. **Non-vacuity floor placement.** The plan sets floors at roughly 60-70% of
+   current counts. Is a hardcoded integer the right instrument, or should the
+   floors live in one table in `tests/tracked_content.py` so a fleet-wide
+   refactor updates them in one place? One table is tidier but couples ten
+   unrelated tests to one file.
+
+3. **Scope confirmation on the six `rglob` floors.** These are not
+   `.pyc`-vulnerable and are arguably a separate concern from the reported bug.
+   #2809's AC4 says "each is either converted **or documented as safe**" — a
+   strict reading permits documenting them as safe (they cannot be fooled by
+   artifacts) and dropping task 3 entirely, which would cut the diff roughly in
+   half. The plan takes the stricter reading because a guard that can silently
+   scan nothing is the same defect class. Confirm which reading is wanted.
