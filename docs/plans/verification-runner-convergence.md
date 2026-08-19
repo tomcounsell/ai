@@ -603,38 +603,38 @@ path — the fix validates itself.
 
 ## Success Criteria
 
-- [ ] A non-check markdown table in `## Verification` produces zero executable checks and zero
+- [x] A non-check markdown table in `## Verification` produces zero executable checks and zero
       guaranteed-fail rows (#2836 AC 1).
-- [ ] A skipped table is named in both runners' reports with its header and row count
+- [x] A skipped table is named in both runners' reports with its header and row count
       (#2836 AC 2).
-- [ ] The #2741 pre-fix text parses to exactly 16 checks, 0 malformed, 1 skipped block
+- [x] The #2741 pre-fix text parses to exactly 16 checks, 0 malformed, 1 skipped block
       (#2836 AC 3).
-- [ ] Every new test fails against the current parser/validator before the fix (#2836 AC 4,
+- [x] Every new test fails against the current parser/validator before the fix (#2836 AC 4,
       demonstrated-red).
-- [ ] A second `| Anti-criterion | Command | Expected |` table still yields executable checks.
-- [ ] `## Verification` containing table rows but no `Command`-column table fails loudly, with
+- [x] A second `| Anti-criterion | Command | Expected |` table still yields executable checks.
+- [x] `## Verification` containing table rows but no `Command`-column table fails loudly, with
       exactly one `MalformedRow` per pipe-block.
-- [ ] `format_results` takes two required parameters, `results` and `table`, and both production
+- [x] `format_results` takes two required parameters, `results` and `table`, and both production
       call sites pass the `ParsedTable`.
-- [ ] Every file in `tests/fixtures/verification/` begins with a literal `## Verification` line.
-- [ ] `scripts/validate_build.py` reports PASS for `output > 0` on stdout `1` and for
+- [x] Every file in `tests/fixtures/verification/` begins with a literal `## Verification` line.
+- [x] `scripts/validate_build.py` reports PASS for `output > 0` on stdout `1` and for
       `match count == 0` on a clean `grep -c` (#2843).
-- [ ] `scripts/validate_build.py` reports FAIL for a violated `match count == 0` (#2783
+- [x] `scripts/validate_build.py` reports FAIL for a violated `match count == 0` (#2783
       Severity-1).
-- [ ] `scripts/validate_build.py` contains no `parse_verification_table` definition, no
+- [x] `scripts/validate_build.py` contains no `parse_verification_table` definition, no
       `expected.startswith` chain, and no `actual_exit == 0` fallback.
-- [ ] `scripts/pytest-clean.sh tests/unit/test_verification_parser.py tests/unit/test_validate_build.py -q`
+- [x] `scripts/pytest-clean.sh tests/unit/test_verification_parser.py tests/unit/test_validate_build.py -q`
       exits 0. (Round 3 critique: a bare `python -m pytest` here would be the third of three bare
       invocations this plan carries, against the repo's explicit prohibition on bare `pytest` --
       see `CLAUDE.md`'s xdist-reaper note. `parse_success_criteria_commands` only admits commands
       starting with `python`, `pytest`, `grep`, `test `, `ls `, `cat `, `ruff`, so a `scripts/…`
       criterion additionally drops out of the duplicate 30s-bounded build-gate run entirely.)
-- [ ] `python -m ruff check agent/verification_parser.py scripts/validate_build.py` and
+- [x] `python -m ruff check agent/verification_parser.py scripts/validate_build.py` and
       `python -m ruff format --check agent/verification_parser.py scripts/validate_build.py` are
       clean. (Round 3 critique: scoped to the two changed files so `parse_success_criteria_commands`'s
       first-backtick-span-only extraction — see `## No-Gos` — does not turn this into a bare
       repo-wide `ruff check` under the 30s-bounded build gate.)
-- [ ] Both runners produce identical per-row verdicts over the execution fixture
+- [x] Both runners produce identical per-row verdicts over the execution fixture
       `runner_agreement.md`, and identical parses over the four parse-only fixtures. No test in
       this lane invokes `scripts/pytest-clean.sh` or `pytest` as a subprocess.
 
