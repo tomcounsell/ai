@@ -499,10 +499,28 @@ three example names → **fix** names the rebuild
      `_repo_venv_bin_dirs()` realpathing **both sides of the parent directory**, exactly
      mirroring `tools/doctor.py:242-243`:
      `any(parent == b or os.path.realpath(parent) == os.path.realpath(b) for b in venv_bins)`.
-     On a match, read `venv_python_version(parent.parent)` — against the *unresolved*
-     venv, because `pyvenv.cfg` sits beside `bin/`, not beside the base interpreter.
-     Differs from the pin → **off-pin**, naming both versions. Equal, or pin
-     unresolvable → **ok**.
+     On a match, read `v = venv_python_version(parent.parent)` into a local **before any
+     comparison** — against the *unresolved* venv, because `pyvenv.cfg` sits beside
+     `bin/`, not beside the base interpreter. Then, in this order:
+
+     - `pin is None` → **ok**. The pin fail-open, disclosed in the message.
+     - `v is None` → **unverified**. No finding, and the script does **not** count
+       toward `verified` in the pass ratio, because nothing was compared.
+     - `v == pin` → **ok**.
+     - otherwise → **off-pin**, naming both versions.
+
+     **`None` must never reach the inequality.** `venv_python_version` returns `None`
+     both when `pyvenv.cfg` is absent and when it carries no parseable `version_info`
+     (measured on this machine: absent → `None`, `version_info` malformed → `None`,
+     well-formed → `3.14`). A literal `v != pin` would compare `None != "3.14"`, emit
+     `off-pin`, and render `is Python None, pin is 3.14` — a false accusation, the
+     outcome Risk 1 names as the single worst available. The state is reachable without
+     any exotic host: `_repo_venv_bin_dirs()` lists `PROJECT_DIR / ".venv" / "bin"`
+     unconditionally with no existence test and no `pyvenv.cfg` test
+     (`tools/doctor.py:115`), and Race 1's `uv sync` window rewrites `pyvenv.cfg`
+     alongside the scripts. Mapping it to `unverified` rather than `ok` keeps the
+     plan's own rule that "verified" is never claimed for something the check did not
+     actually measure — the pass ratio drops and the degradation is visible.
   3. Neither → **outside**. No version is needed: an interpreter outside every repo
      venv has no editable install of this repo regardless of its version, which is the
      `ModuleNotFoundError: No module named 'tools'` shape from #2566 and #2858. Name
@@ -698,9 +716,29 @@ three example names → **fix** names the rebuild
   PATH advice, having converted one finding shape into another. That is precisely the
   root-cause pattern this plan's own "Why Previous Fixes Failed" section names.
 
-  Detect it with the predicate the resolution step already computed —
-  `found_path.parent not in venv_bins and _same_file(found_path, match / name)` — and append
-  to whichever of the three sentences applies:
+  Detect it by **reusing the resolution step's own membership test, not by restating part
+  of it.** The accept condition at `tools/doctor.py:242-244` is a three-leg disjunction —
+  literal parent equality (`:242`), realpath parent equality (`:243`), and `_same_file`
+  (`:244`) — and the hardlink case is the third leg *without* either of the first two.
+  Compute the directory legs once inside the loop and gate the trailer on their negation:
+
+  ```python
+  in_bin_dir = found_path.parent == match or os.path.realpath(found_path.parent) == os.path.realpath(match)
+  # trailer applies when: not in_bin_dir and _same_file(found_path, match / name)
+  ```
+
+  A predicate written as `found_path.parent not in venv_bins and _same_file(...)` drops the
+  realpath leg and is wrong on any host where PATH spells a venv bin dir differently from
+  `PROJECT_DIR` — a checkout under a symlinked path, `/tmp` vs `/private/tmp` on macOS, a
+  home directory reached through a symlink. There `_same_file` is trivially `True` (it is
+  the same file), so the trailer fires on the venv's own entry point and tells the operator
+  to delete it. Measured directly: with `venv_bins = [<root>/real/.venv/bin]` and
+  `found_path = <root>/link/.venv/bin/foo` where `link` symlinks `real`, the dropped-leg
+  predicate evaluates `True` and the three-leg form evaluates `False`. Case 16 pins this,
+  and it needs a fixture whose PATH and `PROJECT_DIR` spellings genuinely diverge — cases
+  1-15 all derive every path from one `tmp_path`, so none of them can catch it.
+
+  Append to whichever of the three sentences applies:
 
   `Also remove the stale hardlinked copy at {found_path}, which survives the rebuild with the old shebang.`
 
@@ -1071,6 +1109,12 @@ new finding inside an existing check that the agent already knows how to run and
       all 26 declared scripts healthy in the main checkout the pass message reads
       `26 of 26 interpreter-verified`; `1 of 26` means the read was hung off the
       `elif str(match) not in resolved_into:` dedup guard and 25 scripts went unread.
+- [ ] A script accepted through the realpath leg at `tools/doctor.py:243` (PATH spelling
+      diverges from `PROJECT_DIR`, e.g. a symlinked checkout) is flagged for its bad
+      shebang **without** the hardlink trailer — the trailer gate uses the resolution
+      step's full three-leg membership test, not a two-leg restatement of it.
+- [ ] A venv whose `pyvenv.cfg` is absent or unparseable yields no finding and never
+      renders `is Python None`; the script is excluded from the verified ratio.
 - [ ] Under a two-entry `venv_bins` (doctor running from a worktree), a shebang naming the
       main venv is version-checked against the main venv and a shebang naming the worktree
       venv against the worktree venv — never both against `venv_bins[0]`.
@@ -1180,10 +1224,17 @@ new finding inside an existing check that the agent already knows how to run and
   `sh` / `bash` / `dash` / `env`. Write no `'''exec'` parser, no `dirname $0` resolver,
   and no `shutil.which` fallback.
 - `_classify_interpreter(target, venv_bins, pin)` — returns `ok` / `missing` /
-  `off-pin` / `outside`, ordered existence → venv membership → pin, reusing
+  `off-pin` / `outside` / `unverified`, ordered existence → venv membership → pin, reusing
   `_repo_venv_bin_dirs()`, `venv_python_version`, and `repo_interpreter_pin`. Compare
   membership by realpathing **both sides of the parent directory** (mirroring
   `tools/doctor.py:242-243`); never realpath the interpreter path itself.
+- **Bind the venv version to a local before comparing it, and return `unverified` when it
+  is `None`.** `venv_python_version` yields `None` for an absent `pyvenv.cfg` and for one
+  with no parseable `version_info`; `None != pin` is `True`, so a direct comparison emits
+  `off-pin` and renders `is Python None, pin is 3.14`. Order the tail
+  `pin is None` → `ok`, `v is None` → `unverified`, `v == pin` → `ok`, else `off-pin`.
+  A `v is None` script emits no finding and does not count toward `verified`. Case 17
+  pins this; the task 4 mutation removes the `v is None` guard.
 - **Read the version of the venv the shebang actually names**: `venv_python_version(parent.parent)`
   where `parent` is the matched parent directory — never `venv_bins[0]`. `venv_bins` has
   **two** entries whenever doctor runs from a worktree (measured: from
@@ -1222,6 +1273,15 @@ new finding inside an existing check that the agent already knows how to run and
   (`Also remove the stale hardlinked copy at {found_path}, ...`) when the finding's script
   was accepted via `_same_file`, since the rebuild alone leaves that copy winning PATH with
   the old shebang.
+- **Gate that trailer on the resolution step's full three-leg membership test**, not on a
+  restatement of two of its legs. Compute
+  `in_bin_dir = found_path.parent == match or os.path.realpath(found_path.parent) == os.path.realpath(match)`
+  inside the loop and gate on `not in_bin_dir and _same_file(found_path, match / name)`.
+  Writing `found_path.parent not in venv_bins and _same_file(...)` drops the realpath leg at
+  `tools/doctor.py:243`, so on any host whose PATH spells a venv bin dir differently from
+  `PROJECT_DIR` the trailer fires on the venv's own entry point and instructs its deletion
+  (measured; see the remediation bullet in Technical Approach). Case 16 pins this; the
+  task 4 mutation drops the realpath leg from the gate.
 - Extend the pass message with the pinned clause
   `f", {verified} of {len(scripts)} interpreter-verified"`, keeping today's
   `N console scripts resolve into <venv bin>` prefix verbatim ahead of it. The ratio form
@@ -1311,6 +1371,22 @@ new finding inside an existing check that the agent already knows how to run and
   implementation that reads `venv_python_version(venv_bins[0].parent)` gets exactly one of
   the two backwards and fails this case. Also assert the off-pin finding names the correct
   pair of versions, so a swapped read cannot pass by accident.
+- **Case 16 — divergent PATH spelling (the hardlink-trailer guard).** The one case whose
+  fixture must **not** derive every path from a single `tmp_path`: build the checkout at a
+  real directory, symlink a second spelling of it, point `PROJECT_DIR` at the real path and
+  lead PATH with the symlinked `.venv/bin`. The script is accepted through the realpath leg
+  at `tools/doctor.py:243`, not the literal-equality leg. Give it a bad shebang and assert
+  the interpreter finding fires **and** that the trailer sentence
+  (`Also remove the stale hardlinked copy at`) is **absent** from `fix` — it is the venv's
+  own entry point, and instructing its deletion is the defect. Cases 1-15 cannot catch
+  this: with one `tmp_path` behind every path, PATH and `PROJECT_DIR` never diverge in
+  spelling and the dropped-leg predicate is indistinguishable from the correct one.
+- **Case 17 — unresolvable venv version.** A shebang target inside a matched venv bin dir
+  whose `pyvenv.cfg` has been deleted (or carries a malformed `version_info`), with the
+  repo pin resolvable. Assert `passed is True`, no `off-pin` finding, and that the message
+  never contains `is Python None`. Also assert the script is excluded from the verified
+  ratio, e.g. `"2 of 3 interpreter-verified" in result.message`, so "no finding" cannot be
+  satisfied by a check that silently claims to have verified something it never compared.
 
 ### 4. Mutation-check every guard
 
@@ -1337,6 +1413,8 @@ new finding inside an existing check that the agent already knows how to run and
   | Pass-message verified clause removed | cases 6, 12 |
   | **Interpreter read reverted to hang off the `elif str(match) not in resolved_into:` dedup guard** | **case 14** |
   | Merged tail guard reverted to `if misresolved:` | case 10 |
+  | Realpath leg dropped from the hardlink-trailer gate (`found_path.parent not in venv_bins and _same_file(...)`) | case 16 |
+  | `v is None` guard removed from the pin comparison (`None` reaches the inequality) | case 17 |
 
   The realpath rule is verified **here**, by mutation, and not by a source scan: the
   whole-file regex row an earlier draft carried matched the prohibition written in prose and
