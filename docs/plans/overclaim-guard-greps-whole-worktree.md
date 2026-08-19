@@ -1341,69 +1341,124 @@ below.
 Rows are numbered for the traceability table above. Every row is runnable as
 written from the repo root unless a row states otherwise.
 
-Three conventions make that promise hold, each measured at `7ba89ca5c`:
+Five conventions make that promise hold. Each is stated so a reader can *check*
+the table against it rather than take it on faith, because two rounds running
+the table has shipped rows that could never have run.
 
-- **Single-node pytest rows pass `-n 0`.** `pyproject.toml`'s `addopts` carry
-  `-n auto`, which spawns ~50 xdist workers for a one-file run; observed here as
-  a 168-second run ending in `node down: Not properly terminated` and "no tests
-  ran". `-n 0` is `scripts/pytest-clean.sh`'s own documented remedy for running a
-  single node.
+- **Every row whose command names a specific test file or node carries `-n 0`.**
+  That is the checkable form of the rule: read the table, find a `pytest-clean.sh`
+  invocation, confirm `-n 0` is on it. `pyproject.toml`'s `addopts` carry
+  `-n auto`, which spawns ~50 xdist workers for a one-file run; observed at
+  `7ba89ca5c` as a 168-second run ending in `node down: Not properly terminated`
+  and "no tests ran", and again at `cefc07e7e` as an abort before collection with
+  "all 15 test-DB slots are held by live processes". Both are false REDs against a
+  correct implementation. `-n 0` is `scripts/pytest-clean.sh`'s own documented
+  remedy for a single node. Rows carrying it: V-1, V-5, V-7, V-8, V-10, V-11,
+  V-16, V-17, V-18, V-18b, V-19, V-20, V-21, V-29. (Round 3 found six rows —
+  including flagship V-1 — omitting it despite this bullet mandating it.)
 - **A `-k` row cannot pass vacuously.** pytest 9.0.3 exits **5**
   (`NO_TESTS_COLLECTED`) when `-k` deselects everything, and 0 only when at least
   one selected test passed. So "expect exit 0" already forecloses a `-k` typo;
   no separate selected-count assertion is needed. Task 1 pins the test names the
-  `-k` expressions rely on (`scan_error`, `vacuous`, `positive_control`).
-- **No row's command contains an unescaped `|`.** A `|` inside a table cell must
-  be written `\|`, which *renders* as a bare `|` — so a BRE alternation copied
-  from the rendered page silently becomes a literal pipe and matches nothing.
-  V-22 therefore uses repeated `-e` patterns instead of alternation. (Verified:
-  the alternation form returns count 0 where the `-e` form returns 13.)
+  `-k` expressions rely on (`scan_error`, `vacuous`, `positive_control`,
+  `scratch_repo`).
+- **No row's command contains a `|` character at all, in any role.** This is
+  stricter than "escape it correctly", deliberately, because the correct escape
+  depends on the regex dialect and the plan has now got it wrong in *both*
+  directions. A `|` inside a markdown table cell must be written `\|` in source,
+  which **renders** as a bare `|`. In BRE (`git grep`'s and `grep`'s default) a
+  bare `|` is a literal character, so a rendered alternation matches nothing;
+  measured at `cefc07e7e`, `git grep '2093|pyc'` exits 1 against a file that
+  `git grep '2093\|pyc'` matches. In ERE (`awk`, `grep -E`) a bare `|` **is**
+  alternation, so a pattern that wanted a literal pipe silently becomes an
+  alternation; measured at `cefc07e7e`, the round-2 V-22 command counted **13**
+  from source and **15** rendered. Round 2 fixed one instance and swept nothing;
+  round 3 fixed the other. The only durable rule is to keep `|` out entirely:
+  use repeated `-e` patterns instead of alternation, and pick anchors that need
+  no literal pipe instead of a shell pipeline. V-6 and V-22 are both written that
+  way now, and a reader can audit the whole table for the class in one pass by
+  searching it for `|` inside a backticked command.
 - **A row that greps a file this plan creates gates on the file being *tracked*,
   not merely present.** `git grep` searches the index's file list, so a helper
   written to disk but not yet `git add`ed is invisible to it and a bare
-  `test -f` gate lets the row pass while checking nothing. Measured: with
-  `tests/tracked_content.py` untracked and containing `"-F"`, the `test -f` form
-  returned **exit 0 (false pass)**; gated on
+  `test -f` gate lets the row pass while checking nothing. Measured at
+  `7ba89ca5c`: with `tests/tracked_content.py` untracked and containing `"-F"`,
+  the `test -f` form returned **exit 0 (false pass)**; gated on
   `git ls-files --error-unmatch` it correctly fails. V-9 uses the tracked gate.
   This is the plan's own central defect, reproduced inside its verification
   table — the same shape spike-1 found and the same one V-18b exists to catch.
+- **A row that could be satisfied by something other than the change under test
+  states its pre-fix control.** A row is only evidence if it can go red. V-6 and
+  V-20 both carry an explicitly measured "RED today" observation, because both
+  would otherwise be indistinguishable from an environment artifact — V-6 from a
+  correctly-written comment it never actually looked at, V-20 from
+  `scripts/pytest-clean.sh` normalizing the cwd away before pytest starts.
 
 | # | Check | Command | Expected |
 |---|-------|---------|----------|
-| V-1 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q` | exit code 0 |
+| V-1 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0` | exit code 0 |
 | V-2 | Stale off-pin `.pyc` was NOT deleted (AC1 precondition still holds) | `test -n "$(find tools agent -name '*.pyc' -not -name '*cpython-314*' -print -quit)"` | exit code 0 |
 | V-3 | Tracked source is genuinely clean | `git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'; test $? -eq 1` | exit code 0 |
 | V-4 | No converted guard shells out to `grep` | `git grep -n '"grep"' -- 'tests/unit/test_sdlc_review_finalize.py' 'tests/unit/test_anthropic_client_semaphore.py' 'tests/unit/test_memory_extraction.py' 'tests/unit/test_no_legacy_paths.py'` | exit code 1 |
-| V-5 | No bare recursive grep anywhere in `tests/` (meta-guard node) | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q` | exit code 0 |
-| V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q '2093\|pyc' -- "$f" \|\| { echo "MISSING: $f"; exit 1; }; done` | exit code 0, no output |
+| V-5 | No bare recursive grep anywhere in `tests/` (meta-guard node) | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0` | exit code 0 |
+| V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q -e 2093 -e pyc -- "$f"; test $? -eq 0 && continue; echo "MISSING: $f"; exit 1; done` | exit code 0, no output. **Pre-fix control:** measured at `cefc07e7e` this loop prints `MISSING: tests/unit/test_sdlc_review_finalize.py` and exits 1, so the row is RED before task 2 adds the comments |
 | V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "scan_error"` | exit code 0 |
 | V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "vacuous"` | exit code 0 |
 | V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `git ls-files --error-unmatch tests/tracked_content.py >/dev/null 2>&1 && test -f tests/tracked_content.py && { git grep -nE '"-[FEP]"' -- tests/tracked_content.py; test $? -eq 1; }` | exit code 0 |
-| V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q` | exit code 0 |
-| V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q` | exit code 0 |
+| V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q -n 0` | exit code 0 |
+| V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q -n 0` | exit code 0 |
 | V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -q 'zzz\\.never(' -- tests/unit/test_tracked_content_helper.py` | exit code 0 (exit 1 means the probe is missing or mis-escaped) |
 | V-13 | Helper exists and is index-scoped | `git grep -c 'git.*grep' -- tests/tracked_content.py` | output > 0 |
 | V-14 | Stranded-bytecode warning shipped, linking #2883 | `git grep -c '2883' -- docs/features/worktree-venv-isolation.md` | output > 0 |
 | V-15 | Concern-B follow-up issue is real and open | `gh issue view 2883 --json state -q .state` | output contains OPEN |
-| V-16 | **Demonstrated ignored-artifact.** Planted `__pycache__` file is not read (#2808 AC3, #2809 AC3) | `mkdir -p tools/__pycache__ && printf 'State NOT persisted\n' > tools/__pycache__/zz_probe.cpython-312.pyc && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; rm -f tools/__pycache__/zz_probe.cpython-312.pyc; exit $rc` | exit code 0 |
-| V-17 | **Demonstrated red, per guard, one at a time** (#2807 AC3, #2808 AC4). Repeat for each of the four converted guards against a file *that guard scans*; a single mutation tripping several proves nothing about the ones it did not reach. Shown for A1 | `printf '\n# State NOT persisted\n' >> tools/sdlc_stage_marker.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; git checkout -- tools/sdlc_stage_marker.py; test $rc -ne 0` | exit code 0, and FAIL output names `tools/sdlc_stage_marker.py:<line>` with no `Binary file` |
-| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13) | `git mv worker worker_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q -n 0; rc=$?; git mv worker_zz worker; test $rc -ne 0` | exit code 0, FAIL message names the missing root |
+| V-16 | **Demonstrated ignored-artifact.** Planted `__pycache__` file is not read (#2808 AC3, #2809 AC3) | `mkdir -p tools/__pycache__ && printf 'State NOT persisted\n' > tools/__pycache__/zz_probe.cpython-312.pyc && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; rm -f tools/__pycache__/zz_probe.cpython-312.pyc; exit $rc` | exit code 0 |
+| V-17 | **Demonstrated red, per guard, one at a time** (#2807 AC3, #2808 AC4). Repeat for each of the four converted guards against a file *that guard scans*; a single mutation tripping several proves nothing about the ones it did not reach. Shown for A1 | `printf '\n# State NOT persisted\n' >> tools/sdlc_stage_marker.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; git checkout -- tools/sdlc_stage_marker.py; test $rc -ne 0` | exit code 0, and FAIL output names `tools/sdlc_stage_marker.py:<line>` with no `Binary file` |
+| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13). Uses `ui/` (10 tracked `.py`, 0.8% of the 1231-file corpus), **not** `worker/` — see the launchd note below | `git mv ui ui_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q -n 0; rc=$?; git mv ui_zz ui; test $rc -ne 0` | exit code 0, FAIL message names the missing root `ui` |
 | V-18b | **Absence check fires when a tracked file leaves the working tree but stays in the index** — the case `git mv` cannot reach | `mv tools/doctor.py /tmp/zz_doc.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; mv /tmp/zz_doc.py tools/doctor.py; test $rc -ne 0` | exit code 0, FAIL is a `VacuousScanError` naming `tools/doctor.py` |
-| V-19 | **Fresh worktree agrees with the primary checkout** at the same commit (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1 |
-| V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7) | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/scripts/pytest-clean.sh "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q` | exit code 0, identical to the in-repo run |
+| V-19 | **Fresh worktree agrees with the primary checkout** at the same commit, on the **same pinned interpreter** (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && uv sync --all-extras && ./scripts/check-interpreter-pin.sh . && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1. `uv sync` must report the worktree venv on the `.python-version` pin (3.14 at `cefc07e7e`) |
+| V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7). Runs the interpreter **directly, not through `scripts/pytest-clean.sh`** — see the wrapper note below | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/.venv/bin/pytest "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q -n 0 -p no:cacheprovider` | exit code 0, identical to the in-repo run. **Pre-fix control:** measured from `/tmp` at `cefc07e7e`, A3 FAILS with `assert 2 == 1` and `grep: agent/memory_extraction.py: No such file or directory` while A2 passes vacuously — so the row is RED today and its green is attributable to the conversion |
 | V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "positive_control"` | exit code 0 |
-| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4) | `test "$(awk '/^\| # \| Site/,/^$/' docs/plans/overclaim-guard-greps-whole-worktree.md \| grep -c -e CONVERT -e 'ADD FLOOR' -e 'DOCUMENT AS SAFE')" -eq 13` | exit code 0 |
+| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4) | `test "$(/usr/bin/grep -c -e '\*\*CONVERT\*\*' -e '\*\*ADD FLOOR' -e '\*\*DOCUMENT AS SAFE\*\*' docs/plans/overclaim-guard-greps-whole-worktree.md)" -eq 13` | exit code 0 |
 | V-23 | Feature doc exists | `test -f docs/features/tracked-content-sweep-guards.md` | exit code 0 |
 | V-24 | Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
 | V-25 | No production code touched | `test -z "$(git diff --name-only main... -- ':!tests/' ':!docs/')"` | exit code 0 |
 | V-26 | Lint clean | `python -m ruff check .` | exit code 0 |
 | V-27 | Format clean | `python -m ruff format --check .` | exit code 0 |
+| V-28 | **The `repo_root=` seam is fenced:** exactly two tracked files pass it — the helper and its own tests. No guard reaches for it | `test "$(git grep -l 'repo_root=' -- 'tests/*.py' ; true)" = "$(printf 'tests/tracked_content.py\ntests/unit/test_tracked_content_helper.py')"` | exit code 0. A third file in the output means a guard is choosing its own corpus |
+| V-29 | **No helper unit test mutates the primary checkout.** Run the helper's own module and confirm the tree is untouched afterwards | `git status --porcelain > /tmp/zz_before.txt; ./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0; rc=$?; git status --porcelain > /tmp/zz_after.txt; diff /tmp/zz_before.txt /tmp/zz_after.txt; test $rc -eq 0 -a $? -eq 0` | exit code 0, and `diff` reports nothing. A non-empty diff means a scratch-repo case leaked into `~/src/ai` |
 
-> **On V-17 and V-18.** These are *mutation* rows: they deliberately break the
-> tree, observe a FAIL, and revert. Run them one at a time and confirm
-> `git status` is clean afterwards. Never run them concurrently with another
-> lane's suite on this machine, and never leave a mutation in place across an
-> await. V-18 uses `git mv` rather than `rm` so the revert is exact.
+> **On the mutation rows (V-17, V-18, V-18b).** These deliberately break the tree,
+> observe a FAIL, and revert. Run them one at a time from the lane's own worktree,
+> confirm `git status` is clean afterwards, and never run them concurrently with
+> another lane's suite on this machine or leave a mutation in place across an
+> await. V-17, V-18 and V-18b are the **only** places in this lane where the
+> working tree is mutated; helper unit tests use a `git init` scratch repo in
+> `tmp_path` instead (see task 1 and V-29).
+>
+> **No mutation row may rename a path a launchd service resolves.** This is the
+> reason V-18 uses `ui/` and not `worker/`. Verified at critique time on this
+> machine: `com.valor.worker` is loaded and running (pid 72972) with
+> `ProgramArguments` `/Users/tomcounsell/src/ai/.venv/bin/python -m worker` and
+> `WorkingDirectory` `/Users/tomcounsell/src/ai`, under launchd `KeepAlive`. For
+> the duration of a `git mv worker worker_zz` any lazy import in the running
+> process, any `KeepAlive` respawn, and any `worker-restart` resolve `-m worker`
+> against a directory that does not exist. `ui/` demonstrates exactly the same
+> property — it is a `SCAN_DIRS` root at **10** tracked `.py`, 0.8% of the
+> 1231-file corpus, an order of magnitude inside any percentage floor, so the
+> total floor stays green while the per-root assertion fires — and no plist under
+> `~/Library/LaunchAgents/com.valor.*` targets it (checked: the six loaded jobs
+> run `-m worker`, `-m reflections`, `scripts/log_rotate.py`,
+> `scripts/sdlc_reflection.py`, `scripts/remote-update.sh`, and
+> `monitoring/worker_watchdog.py`). Task 5's B13 mutation bullet carries the same
+> substitution. If a future author has a reason to rename `worker/` anyway, the
+> row must wrap it in `./scripts/valor-service.sh worker-disable` / `worker-enable`
+> with the re-enable in a `trap`, so an interrupted row cannot leave the service
+> down — but the simpler answer is to pick a root nothing runs.
+>
+> **`git mv` versus plain `mv` is load-bearing.** V-18 uses `git mv` so the revert
+> is exact and the index stays consistent. V-18b uses a plain `mv` precisely
+> *because* `git mv` updates the index and so would exercise only the case the
+> index-row count already catches.
 
 ## Critique Results
 
