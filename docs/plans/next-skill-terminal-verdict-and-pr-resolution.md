@@ -1027,10 +1027,10 @@ owns actually fixing it. The important property here is the direction: WS-A can 
 
 ## Race Conditions
 
-**No new race conditions identified.** All three shipped workstreams are synchronous,
-single-threaded, side-effect-free reads. The terminal guard is a pure dict read;
-`_lookup_pr` and `_gh_pr_search_issue_ref` are blocking `subprocess.run` calls with
-5-second timeouts that return a value and write nothing.
+**No new race conditions identified.** Both shipped workstreams are synchronous,
+single-threaded, side-effect-free reads. The terminal guard is a pure dict read; the new
+`gh issue view` in `_compute_meta` is a blocking `subprocess.run` with a timeout that
+returns a value and writes nothing, on a path that already makes two or more such calls.
 
 One **pre-existing** timing hazard is worth recording because this lane's design
 depends on its direction, not on fixing it:
@@ -1060,18 +1060,48 @@ resolves itself on the following tick.
   model here would swallow the lane.
 - **[SEPARATE-SLUG #2658]** Two-pole proofs for every verification row and guard
   (`docs/plans/gates-that-cannot-fire.md`, status Planning). This plan applies the
-  mutation-check discipline to its own four guards (Risk 5) without adopting the
+  mutation-check discipline to its own two guards (Risk 5) without adopting the
   program repo-wide.
-- The `docs_success_no_pr` terminal leg of `is_pipeline_complete` — **not deferred for
-  convenience**: it requires `pr_open`, which requires I/O in a router that must stay
-  pure and `tools/`-import-free. WS-A ships the `merge_success` leg only, and the
-  Verification table carries an anti-criterion asserting no I/O entered the router.
+- **[SEPARATE-SLUG #2869]** Lane-branch-first PR resolution (#2824) and the lane-slug
+  adoption gap that is its precondition. Cut from this lane at round-3 critique with its
+  design finished and its measurement intact — see *Resolved Questions* Q4.
+- **[SEPARATE-SLUG #2868]** Deterministic candidate ordering. Cut at round-2 critique
+  (*Resolved Questions* Q3).
+- **The `docs_success_no_pr` terminal leg of `is_pipeline_complete` — deferred because it
+  is unmeasured, not because it is impossible.**
 
-Everything else the three issues describe is in scope for this plan.
+  Earlier rounds of this plan justified the deferral architecturally: the leg needs
+  `pr_open`, `pr_open` needs I/O, and the router must stay pure and `tools/`-import-free.
+  **WS-A's own design falsifies that argument.** `issue_state` also needs I/O, and the whole
+  point of resolving it in `_compute_meta` is that a router-consumed fact requiring I/O
+  arrives as a plain value in `meta` — what this plan calls preserving purity "by
+  construction rather than by discipline". `pr_open` is available on identical terms, and
+  presenting a scope call as an impossibility means the next reader will not revisit it when
+  they should.
+
+  **The real reason is that nobody has measured it.** Nothing in this plan establishes how
+  many live ledgers are DOCS-completed with no open PR, or what those ledgers route to
+  today, and the whole discipline of this lane is that a workstream earns its place with a
+  measurement. WS-A ships the `merge_success` leg only, and the DOCS leg gets its own pass.
+
+  The mechanically-equivalent shape, recorded so nobody re-derives it: `_compute_meta` sets
+  `meta["pr_open"] = _check_pr_open(issue_number)` under the mirror-image gate
+  (`DOCS == "completed" and MERGE != "completed"`) and the guard passes it through.
+  `agent/pipeline_complete.py:88` already returns `None` on subprocess error, timeout, and
+  malformed output, landing on the predicate's existing conservative `pr_state_unavailable`
+  branch — the fail-open direction is identical to the `issue_state` gate's, and the same
+  `--repo` scoping obligation applies.
+
+  The Verification table's "no I/O in the router" anti-criterion still stands, because the
+  I/O belongs in `_compute_meta` either way. It pins where the I/O lives, not whether the
+  leg can exist.
+
+Everything else #2817 and #2825 describe is in scope for this plan. #2824 is scoped out in
+full and handed to #2869.
 
 ## Update System
 
-No update-system changes required. All three shipped workstreams are edits to existing Python
+No update-system changes required. Both shipped workstreams are edits to existing Python
 modules already shipped by the repo checkout; `/update`'s `git pull` + `uv sync` picks
 them up with no new dependency, config file, or migration step.
 
@@ -1180,6 +1210,13 @@ in-process.
 
 ## Success Criteria
 
+Every criterion below is about WS-A or WS-C. **There is no `_lookup_pr` criterion in this
+lane** — WS-B is deferred to [#2869](https://github.com/tomcounsell/ai/issues/2869) and PR
+resolution is byte-identical to `main`. A build that changes `_lookup_pr`'s ladder has
+exceeded scope, and the anti-criterion row in the Verification table catches it.
+
+**WS-A — the terminal guard**
+
 - [ ] A terminal ledger (`MERGE == completed` **and `issue_state == "CLOSED"`**) returns an
       explicit terminal verdict from `decide_next_dispatch` in **all eight** cells of
       spike-1's matrix **and in the ninth `PATCH`-unsettled cell** — no `/do-build`, no
@@ -1189,61 +1226,60 @@ in-process.
       `"CLOSED"` — parametrized over `{"OPEN", None, "", "closed", "CLOSED_STALE", 42}` —
       and `Blocked(guard_id="TERMINAL")` for `"CLOSED"` alone. This is the Risk 6 bar; a
       guard that fires on an unresolvable issue state fails it.
-- [ ] `_compute_meta` resolves `issue_state` **only** when `MERGE == "completed"`, and
-      degrades to `None` rather than raising when the `gh` call fails.
 - [ ] The terminal guard returns `None` (falls through), never `Blocked`, on a non-dict
       `stage_states` — asserted against the guard directly.
 - [ ] The four non-terminal `/do-merge` routes measured in spike-1 (`MERGE` not
       completed) are **unchanged** — the negative control.
 - [ ] `sdlc-tool next-skill` on a terminal pipeline emits a machine-distinguishable
       terminal shape, verified by invoking the real binary, not `decide()` in-process.
-- [ ] `_lookup_pr` with a recorded slug never calls the fuzzy search leg (asserted by
-      call count).
-- [ ] `_lookup_pr` with no recorded slug behaves byte-identically to today (asserted by
-      call count and result).
-- [ ] **WS-B's ladder diff meets Risk 2's bar — which is stated in Risk 2 and nowhere
-      else.** Round 1 stated two different bars in two places: this criterion demanded
-      "**zero** issues that resolve under the old order and fail under the new one" while
-      Risk 2's revised table classified exactly that shape as "expected cost… does not
-      block." The plan was **red today under the stricter reading** — the round-1 mechanism
-      measured 0 gains / 1 loss. Both are now superseded: the existence-checked mechanism
-      measures **0 gains / 0 losses / 11 unchanged**, and Risk 2 carries the single
-      authoritative bar (two blocking shapes, one expected-cost bucket with a stated ceiling
-      of 1). Do not restate a number here.
-- [ ] `_lookup_pr` asserts head-ref authority **only** when the recorded slug names a branch
-      that exists on origin; a recorded slug naming a nonexistent branch falls through to the
-      fuzzy leg (asserted by call count on both legs, both directions).
-- [ ] The two-pass lookup (`open` then `merged`) performs **one** branch-existence check,
-      not two.
-- [ ] `_review_artifact_posted(1785)` and `_review_artifact_posted(2073)` return
-      **False**; `_review_artifact_posted(2104)` returns **True** via merged PR 2109.
-- [ ] The #2539 control holds 5/5 live: #2860, #2831, #2716, #2734, #2741.
-- [ ] **KNOWN-UNCOVERED — the two live #2824 candidates stay broken, by design.**
-      #2494 and #2518 are the only OPEN reopened issues carrying a stale prior-lifecycle
-      PR, and `sdlc-tool stage-query` reports `slug: null, slug_source: "unresolved"` for
-      both. WS-B keys on a *recorded* slug **naming a branch that exists**, so **it does not
-      fix either of them** — a lane with no slug has no branch to check. This lane closes
-      #2824 as "the mechanism is correct going forward", not as "the two live instances are
-      repaired"; backfilling their ledgers to make the fix look complete is an explicit
-      Rabbit Hole.
-      **Round-2 addendum — the forward-looking claim is narrower than round 1 stated.**
-      "It fixes every future lane" was too strong: measured over every slugged ledger on this
-      machine, the existence-checked mechanism changes **zero** answers today (0 gains,
-      0 losses, 11 unchanged). It fixes every future lane *whose recorded slug names a branch
-      that exists*, and [#2869](https://github.com/tomcounsell/ai/issues/2869) is how that
-      population grows. WS-B's value in this PR is that it makes the reopened-issue path
-      correct while costing nothing measurable — not that it repairs something observable
-      today. Say exactly that in task 8's issue comment.
 - [ ] The terminal shape is consumed correctly end to end by **both** router consumers:
       `.claude/skills-global/do-sdlc/SKILL.md` **and** `.claude/skills/sdlc/SKILL.md` route
       `complete: true` to loop-exit-success, not to human escalation. Both edits land in the
       same commit as WS-A; neither is conditional.
 - [ ] `agent/sdlc_router.py` imports nothing from `tools/` (existing constraint test
       still green) and performs no I/O.
-- [ ] Demonstrated-red table in the PR body: each of WS-A/B/C reverted individually
+
+**WS-A — the `issue_state` gate that feeds the guard**
+
+- [ ] `_compute_meta` resolves `issue_state` **only** when `MERGE == "completed"`, and
+      degrades to `None` rather than raising when the `gh` call fails.
+- [ ] **The `gh issue view` argv carries `--repo <resolved_repo>` whenever a repo resolves**,
+      built exactly like its sibling at `tools/sdlc_stage_query.py:192`. Asserted **on the
+      argv**, because a wrong-repo lookup *succeeds* — no result assertion can catch it, and
+      the fail-soft-to-`None` contract does not cover a confident answer to the wrong
+      question. This is the round-3 blocker; the failure it prevents is a foreign CLOSED
+      issue terminating a live lane.
+- [ ] **`issue_state` is whitelisted to `{"OPEN", "CLOSED"}`**, with everything else — error
+      strings, empty output, future state names — becoming `None`. The `!= "CLOSED"`
+      polarity is fail-open only if a garbage value cannot be the literal `"CLOSED"`.
+
+**WS-C — the review-probe scope**
+
+- [ ] `_review_artifact_posted(1785)` and `_review_artifact_posted(2073)` return
+      **False**; `_review_artifact_posted(2104)` returns **True** via merged PR 2109.
+- [ ] The #2539 control holds 5/5 live: #2860, #2831, #2716, #2734, #2741.
+
+**Scope, coverage, and honesty**
+
+- [ ] **`_lookup_pr` and `_gh_pr_search_issue_ref` are byte-unchanged in the merged diff.**
+      Both WS-B (#2869) and WS-D (#2868) live in that code and neither ships here. This is
+      the scope-leak check, and it replaces every ladder-order criterion earlier rounds
+      carried.
+- [ ] **KNOWN-UNCOVERED — #2824 is not fixed by this lane, and #2494 / #2518 stay broken.**
+      They are the only OPEN reopened issues carrying a stale prior-lifecycle PR, and
+      `sdlc-tool stage-query` reports `slug: None, slug_source: "unresolved"` for both
+      (re-verified 2026-08-19). The mechanism that would fix them keys on a recorded lane
+      slug; they have none, and the eleven ledgers that do have one are all in-flight lanes,
+      so the slugged and reopened populations are **disjoint**. This lane therefore **does
+      not close #2824** — it refs it, and #2869 carries both the mechanism and the
+      slug-adoption gap that gives the mechanism a population. Task 8 says exactly this on
+      the issue rather than letting it go quiet. Backfilling those two ledgers to manufacture
+      a population is an explicit Rabbit Hole.
+- [ ] Demonstrated-red table in the PR body: each of WS-A and WS-C reverted individually
       re-reds at least one named test.
-- [ ] All three issues carry their measured post-fix shape as a comment before closing
-      — #2826's explicit request for #2817, applied to all three.
+- [ ] **#2817 and #2825 carry their measured post-fix shape as a comment before closing,
+      and #2824 carries its deferral disposition** — #2826's explicit request, applied to
+      every issue this lane touched.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
