@@ -77,6 +77,11 @@ from pathlib import Path
 # against git's forward-slash-separated paths from the repo root.
 EXEMPT_PREFIXES = ("docs/plans/",)
 
+# Ceiling on the local `git` reads below. Named rather than inline because this
+# script runs as a git hook in a bare environment and cannot import
+# ``config.settings``; the timeout guard's other remedy is unavailable here.
+GIT_READ_TIMEOUT_SECONDS = 10
+
 # GitHub's closing keywords. Matching GitHub's own set exactly means the gate
 # passes precisely when GitHub will actually auto-close on push.
 _CLOSING_RE = re.compile(
@@ -116,6 +121,25 @@ Bypass with `git commit --no-verify` if this gate is wrong for your case.
 Full rationale: docs/features/hotfix-issue-disposition.md
 """
 
+PLAN_CLOSING_MESSAGE = """
+COMMIT BLOCKED (#2890): this plan-only commit carries a GitHub closing keyword.
+
+Plan-document commits need no disposition, but GitHub still honours a closing
+keyword in the body and will close the issue on push to `main`. A plan that
+quotes the `Closes #N` its PR body must eventually carry hands that keyword to
+`main` months early, closing a live issue against code that never changed.
+
+Rewrite the keyword so it does not fire, e.g.:
+
+  the PR body carries a closing keyword for 123
+  Refs #123
+
+Leave the literal `Closes #123` only where it must fire: the PR body itself.
+
+Bypass with `git commit --no-verify` if this gate is wrong for your case.
+Full rationale: docs/features/hotfix-issue-disposition.md
+"""
+
 
 def _git(args: list[str], cwd: str | None = None) -> tuple[int, str]:
     """Run git; return ``(returncode, stdout)``. Never raises."""
@@ -125,7 +149,7 @@ def _git(args: list[str], cwd: str | None = None) -> tuple[int, str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_READ_TIMEOUT_SECONDS,
         )
         return proc.returncode, proc.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -185,7 +209,13 @@ def find_violation(
 
     scoped = in_scope_paths(paths)
     if not scoped:
-        # Plan-document-only commit (or an empty stage): exempt by design.
+        # Plan-document-only commit (or an empty stage): exempt from *declaring*
+        # a disposition, but not licensed to close an issue. Plan prose is
+        # summarised into the commit body, and plans routinely quote the literal
+        # `Closes #N` their PR body must eventually carry, so the keyword reaches
+        # `main` and GitHub honours it (#2890).
+        if _CLOSING_RE.search(message):
+            return PLAN_CLOSING_MESSAGE
         return None
 
     if has_disposition(message):
