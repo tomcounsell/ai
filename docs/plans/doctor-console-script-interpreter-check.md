@@ -173,25 +173,27 @@ already-handled shape.
   first line is `#!/bin/sh` and whose second line carries the real interpreter inside
   an `'''exec' <python> "$0" "$@"` construct that both `sh` and Python parse
   harmlessly. Source: [pypa/setuptools#494](https://github.com/pypa/setuptools/issues/494).
-  **Informs the plan:** a shebang reader that looks only at line 1 would classify
-  every such script as "interpreter `/bin/sh`, outside the venv" — a false accusation
-  on a healthy machine. The extractor must read line 2 when line 1 is a shell.
+  **Informs the plan:** a shebang reader that looks only at line 1 and *classifies* what
+  it finds would call every such script "interpreter `/bin/sh`, outside the venv" — a
+  false accusation on a healthy machine. The plan's answer is not to parse the construct
+  but to refuse to classify it: a shell on line 1 yields `unverified`. Same protection,
+  no parser.
 - **`uv venv --relocatable` emits that same two-line shape with a *relative*
   interpreter reference.** The flag persists a `relocatable` key in `pyvenv.cfg` and
   instructs the wheel installer to build entrypoints using the `exec` trick plus
   `dirname $0` on POSIX. Sources:
   [astral-sh/uv#5515](https://github.com/astral-sh/uv/pull/5515),
   [astral-sh/uv#13350](https://github.com/astral-sh/uv/issues/13350).
-  **Informs the plan:** the relocatable form has no absolute path to compare at all.
-  It must be resolved against the script's own directory before classification, or it
-  will read as missing.
+  **Informs the plan:** the relocatable form has no absolute path to compare at all, so
+  a naive reader would call it `missing`. It is caught by the same guard: line 1 is
+  `#!/bin/sh`, so the script is `unverified` and no finding is emitted.
 - **uv's default is an absolute shebang into the venv**, which is why the Docker
   volume-mount and directory-move cases break at all
   ([astral-sh/uv#13350](https://github.com/astral-sh/uv/issues/13350)). Confirmed on
   this machine: all 26 declared scripts carry
-  `#!/Users/tomcounsell/src/ai/.venv/bin/python3`. **Informs the plan:** the common
-  path is the simple one, and the polyglot handling is a correctness guard for
-  long-path worktrees and relocatable venvs rather than the primary case.
+  `#!/Users/tomcounsell/src/ai/.venv/bin/python3`. **Informs the plan:** the common path
+  is the simple one, so the extractor handles only that form and treats every other
+  shape as `unverified`.
 
 Both findings are saved to memory (`valor` project) for reuse.
 
@@ -208,11 +210,14 @@ Both findings are saved to memory (`valor` project) for reuse.
   and 14 files with no shebang at all (compiled binaries). No `/bin/sh` polyglot and
   no `env` form present.
 - **Confidence**: high
-- **Impact on plan**: the primary extraction path is a one-line read. The polyglot and
-  `env` forms are correctness guards (see Research), not the common case — so they
-  belong in the extractor with tests, but they do not shape the check's structure.
-  The 14 shebang-less binaries confirm the extractor must return "unverified" rather
-  than raising or failing on a file with no `#!`.
+- **Impact on plan**: the extraction path is a one-line read of a plain absolute path,
+  and that is the whole extractor. The polyglot, relocatable, and `env` forms occur
+  nowhere in this fleet, so writing three parsers for them on a Small-appetite plan
+  would add speculative surface to the exact thing this plan calls its bottleneck (the
+  false-positive surface). They are handled by classification refusal instead: anything
+  that is not a plain absolute path is `unverified`. The 14 shebang-less binaries
+  confirm the extractor must return `unverified` rather than raising or failing on a
+  file with no `#!`.
 
 ### spike-2: Can the pin comparison be done without spawning a subprocess?
 
@@ -281,12 +286,14 @@ Both findings are saved to memory (`valor` project) for reuse.
 3. **Resolution (unchanged)**: for each name, `shutil.which` (`:229`) plus the
    three-branch venv-membership test (`:238-247`) sorts it into resolved,
    `misresolved`, or `not_installed`.
-4. **Interpreter read (new)**: for each name that *resolved*, the winning file's
-   leading bytes are read and the shebang is extracted to a concrete interpreter path
-   (handling the plain, `env`, `/bin/sh` polyglot, and relocatable `dirname $0` forms).
-5. **Classification (new)**: the target is sorted into `ok`, `missing`, `off-pin`, or
+4. **Interpreter read (new)**: for each name that *resolved*, the winning file's leading
+   bytes are read and a plain absolute shebang target is extracted. Anything else — no
+   `#!`, a shell or `env` on line 1, a relative target, an unreadable file — yields
+   `None`.
+5. **Classification (new)**: a target is sorted into `ok`, `missing`, `off-pin`, or
    `outside`, using `_repo_venv_bin_dirs()` for venv membership, `venv_python_version`
-   for the version, and `repo_interpreter_pin(PROJECT_DIR)` for the reference.
+   for the version, and `repo_interpreter_pin(PROJECT_DIR)` for the reference. A `None`
+   target is `unverified` — neither a pass nor a finding, but counted.
 6. **Grouping (new)**: findings are keyed by `(reason, target)` so one bad interpreter
    shared by 26 scripts reports as one line with a count, not 26 lines.
 7. **Output**: a single `CheckResult`. On the failure path `message` and `fix` carry the
@@ -353,13 +360,14 @@ surface right, which is what the test matrix below is for.
 
 ### Key Elements
 
-- **Shebang extractor** — given a path, returns the concrete interpreter it will
-  actually execute under, or `None` when the file declares none. Understands the four
-  forms that exist in the wild: plain absolute, `env`-mediated, the `/bin/sh`
-  long-path polyglot, and uv's relocatable `dirname $0` variant.
-- **Interpreter classifier** — sorts a resolved interpreter into one of four states
+- **Shebang extractor** — given a path, returns the plain absolute interpreter path on
+  its `#!` line, or `None` for every other shape. Deliberately narrow: the plain
+  absolute form is the only one that occurs in this fleet (spike-1), and `None` is a
+  safe answer for the rest.
+- **Interpreter classifier** — sorts an extracted interpreter into one of four states
   (`ok`, `missing`, `off-pin`, `outside`) using the venv-bin-dir set the check already
-  computes and the `.python-version` pin the repo already publishes.
+  computes and the `.python-version` pin the repo already publishes. A `None` extraction
+  is `unverified` and produces no finding.
 - **Grouped finding reporter** — collapses findings sharing a `(reason, target)` into
   one line naming the target, the reason, the count, and a few example script names.
 - **Reason-specific remediation** — one fix sentence per reason, added alongside the
@@ -395,16 +403,28 @@ three example names → **fix** names the rebuild
   a `UnicodeDecodeError` in a health check is a bug, not a finding. Sequence:
 
   1. No leading `#!` → return `None` (unverified, **not** a failure — see below).
-  2. First line's program basename is a shell (`sh`, `bash`, `dash`) → parse line 2 for
-     the distlib/uv `'''exec'` construct and take the quoted interpreter. If that
-     reference is relative or contains `dirname`/`$0`, resolve it against the script's
-     own parent directory.
-  3. First line's program basename is `env` → take the next token and resolve it with
-     `shutil.which`. This form's interpreter genuinely depends on invocation-time PATH;
-     resolving it under the doctor's own PATH is the honest reading, and an
-     unresolvable token becomes `missing` rather than silently passing.
-  4. Otherwise → the first token after `#!`, with any trailing interpreter arguments
-     discarded.
+  2. Take the first token after `#!` and discard any trailing interpreter arguments
+     (`#!/path/python -E -s` yields `/path/python`).
+  3. Return `None` unless that token is an absolute path whose basename is not a shell
+     or `env`. Concretely: `if not prog.startswith("/") or Path(prog).name in {"sh",
+     "bash", "dash", "env"}: return None`.
+  4. Otherwise return it.
+
+- **Extract only the plain absolute form; refuse to classify anything else.** spike-1
+  measured this fleet and found no `/bin/sh` polyglot, no relocatable `dirname $0`
+  variant, and no `env` form anywhere in `.venv/bin` — every one of the 26 declared
+  scripts carries a plain absolute shebang into the venv. An earlier draft specified
+  three parsers for those absent forms plus three test cases to cover them. On an
+  `appetite: Small` plan whose own stated bottleneck is the false-positive surface, that
+  is speculative surface bought at the price of the thing being protected: a hand-rolled
+  `'''exec'` matcher and a `dirname $0` resolver are precisely the code most likely to
+  misfire on a shape nobody has a sample of.
+
+  The `unverified` state, which the plan already defines as neither pass nor fail,
+  covers all three at zero risk. A machine with a relocatable venv reports
+  `0 of 26 interpreter-verified` rather than a silent green — visibly degraded, not
+  falsely accused and not falsely reassured. The parsers can be added later against a
+  real sample, and the count in the pass message is what would prompt that.
 
 - **Classification order is existence, then membership, then pin** — spike-3 showed a
   retired interpreter still reports a healthy `version_info` in `pyvenv.cfg`, so a
@@ -604,9 +624,11 @@ three example names → **fix** names the rebuild
   multiplies output volume without adding a single actionable finding.
 - **Rewriting shebangs in place.** Doctor is detect-only; the whole file writes nothing.
   A "repair" mode is a separate design conversation with its own blast radius.
-- **Parsing arbitrary shell in the polyglot second line.** Match the specific
-  distlib/uv `'''exec'` construct and give up cleanly on anything else. A general shell
-  parser is a project, and "unverified" is a safe answer.
+- **Parsing shebang forms nobody has a sample of.** The `/bin/sh` polyglot, uv's
+  relocatable `dirname $0` variant, and the `env` form are all absent from this fleet
+  (spike-1). Writing parsers for them means shipping untestable-against-reality code on
+  the check whose whole risk is false accusation. `unverified` is the answer until a
+  real sample turns up, and the pass message's verified count is what will surface one.
 - **Merging with `_check_worktree_interpreters`.** They share helpers and answer
   different questions (which venvs drifted vs. what a console script binds to).
   Collapsing them would couple two independently-useful findings.
@@ -615,15 +637,24 @@ three example names → **fix** names the rebuild
 
 ### Risk 1: False accusation on a healthy machine
 
-**Impact:** The single worst outcome. Doctor is a trust instrument; a check that cries
-wolf on a correct setup gets ignored, taking the genuine findings with it. The
-concrete vectors are the `/bin/sh` polyglot (long worktree paths), uv's relocatable
+**Impact:** The single worst outcome, and its blast radius is wider than "operators stop
+trusting doctor". `_check_console_scripts_resolve` sits in the base check list, so it
+runs under `--quick` (`tools/doctor.py:1820-1852`), and `--quick` is what backs the
+pre-push hook that `python -m tools.doctor --install-hook` writes — a `set -e` script
+with an explicit `exit 1` on failure (`tools/doctor.py:1968-2003`). Where that hook is
+live, a false positive refuses **every push**. It is inert across this fleet because
+`/update` sets `core.hooksPath=.githooks`, which overrides `.git/hooks/`, but the
+appetite for false positives should be set against the machine where it is not.
+
+The concrete vectors are the `/bin/sh` polyglot (long worktree paths), uv's relocatable
 form, `env`-mediated shebangs, and shebang-less binaries.
-**Mitigation:** each vector has a named passing test (task 3, cases 6-9). The
-Verification table carries a live control row asserting
+**Mitigation:** none of those four vectors is parsed at all — each yields `unverified`,
+which produces no finding by construction rather than by a parser getting it right (see
+the extraction bullet in Technical Approach). Task 3 case 6 asserts all four pass
+without a finding. The Verification table carries a live control row asserting
 `_check_console_scripts_resolve().passed` is still `True` on this machine, where the
-baseline is green today and all 26 scripts are interpreter-verifiable. Unverifiable
-inputs are unverified, never failed.
+baseline is green today and all 26 scripts carry a plain absolute venv shebang.
+Unverifiable inputs are unverified, never failed.
 
 ### Risk 2: The fixture upgrade masks the new guard instead of exercising it
 
@@ -742,14 +773,20 @@ new finding inside an existing check that the agent already knows how to run and
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/local-doctor.md` — document the console-script interpreter
-      verification: the four shebang forms understood, the four classification states
-      (`ok` / `missing` / `off-pin` / `outside`), the fail-open scoping (unknown pin
-      disables only the off-pin comparison; no shebang is unverified, not failed), and
-      the hardlink remedy that needs `/update` rather than a venv rebuild.
-- [ ] Update the Local Doctor row in `docs/features/README.md` to mention interpreter
-      verification alongside the existing resolution check, so the index reflects what
-      the check now measures.
+- [ ] Update `docs/features/local-doctor.md` — document the **whole** console-script
+      check and its two-part contract, not just the new half. Today that file contains
+      zero occurrences of "console", "venv", "resolve", or "entry": #2665's resolution
+      check was never documented there, so writing up interpreter verification alone
+      would hand the reader the second half of a contract whose first half they have
+      never met. Cover: which names are checked and why bare-name invocation makes it
+      load-bearing; the three resolution states and their distinct remedies (#2665); the
+      interpreter read and its four classification states
+      (`ok` / `missing` / `off-pin` / `outside`); that only a plain absolute shebang is
+      classified and every other form is `unverified`; and the fail-open scoping
+      (unknown pin disables only the off-pin comparison; no shebang is unverified, not
+      failed).
+- [ ] Update the Local Doctor row in `docs/features/README.md` so the index names the
+      console-script check and both halves of what it measures.
 
 ### Inline Documentation
 
@@ -758,11 +795,20 @@ new finding inside an existing check that the agent already knows how to run and
       name is healthy when it resolves into a repo venv bin directory" — that sentence
       becomes false with this change and must state the two-part contract instead.
       Per the no-legacy-code rule, describe only the new status quo.
-- [ ] Docstring the extractor with the four shebang forms and cite the sources
-      (pypa/setuptools#494, astral-sh/uv#5515) so the polyglot handling does not read as
-      unmotivated defensiveness to a future reader.
+- [ ] Docstring the extractor with the forms it deliberately declines to classify and
+      why, citing the sources (pypa/setuptools#494, astral-sh/uv#5515) so a future reader
+      sees the narrowness as a measured choice with a known extension point rather than
+      an oversight.
 - [ ] Docstring the classifier with the existence-before-pin ordering and *why*
-      (spike-3: a retired interpreter still reports a healthy `version_info`).
+      (spike-3: a retired interpreter still reports a healthy `version_info`), and with
+      the rule that the interpreter target is never realpath-ed before classification —
+      only the parent directories are, on both sides of the comparison.
+- [ ] Correct `_same_file`'s docstring at `tools/doctor.py:141-143` and
+      `test_hardlinked_copy_outside_the_venv_is_accepted`'s at
+      `tests/unit/test_doctor_console_scripts.py:95`. Both assert that `/update`
+      hardlinks entry points into `~/.local/bin`; it hardlinks only `scripts/sdlc-tool`,
+      which is not a `[project.scripts]` name. State what the branch actually covers:
+      any hardlinked copy of the venv file is not automatically the wrong copy.
 
 ## Success Criteria
 
@@ -778,9 +824,9 @@ new finding inside an existing check that the agent already knows how to run and
 - [ ] Each of the three failure reasons emits a distinct fix sentence.
 - [ ] Findings sharing one `(reason, target)` report as a single line with a count and
       capped example names, not one line per script.
-- [ ] The `/bin/sh` long-path polyglot, uv's relocatable `dirname $0` form, an
-      `env`-mediated shebang resolving into the venv, and a shebang-less binary all pass
-      without a finding.
+- [ ] A `/bin/sh` polyglot, a relocatable `dirname $0` variant, an `env`-mediated
+      shebang, and a shebang-less binary all produce no finding and are counted as
+      unverified rather than verified.
 - [ ] An unresolvable `.python-version` suppresses only the off-pin comparison; a
       missing interpreter still fails.
 - [ ] The pass message discloses how many scripts were interpreter-verified, so an
@@ -849,18 +895,22 @@ new finding inside an existing check that the agent already knows how to run and
 - **Task ID**: build-check
 - **Depends On**: build-fixture
 - **Validates**: `tests/unit/test_doctor_console_scripts.py`
-- **Informed By**: spike-1 (four shebang forms; 14 shebang-less binaries in
-  `.venv/bin`), spike-2 (no subprocess needed — `venv_python_version` answers it),
-  spike-3 (existence must be tested before the pin)
+- **Informed By**: spike-1 (only the plain absolute form exists here; 14 shebang-less
+  binaries in `.venv/bin`), spike-2 (no subprocess needed — `venv_python_version`
+  answers it), spike-3 (existence must be tested before the pin)
 - **Assigned To**: `doctor-interpreter-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add a private shebang extractor handling the plain, `env`, `/bin/sh` polyglot, and
-  relocatable `dirname $0` forms. Binary-mode bounded read; `OSError` and decode errors
-  yield "unverified".
+- Add a private shebang extractor for the plain absolute form only. Binary-mode bounded
+  read; `OSError` and decode errors yield `unverified`. Return `None` for a missing
+  `#!`, a relative target, or a first token whose basename is `sh` / `bash` / `dash` /
+  `env`. Write no `'''exec'` parser, no `dirname $0` resolver, and no `shutil.which`
+  fallback.
 - Add a private classifier returning `ok` / `missing` / `off-pin` / `outside`, ordered
   existence → venv membership → pin, reusing `_repo_venv_bin_dirs()`,
-  `venv_python_version`, and `repo_interpreter_pin`.
+  `venv_python_version`, and `repo_interpreter_pin`. Compare membership by realpathing
+  **both sides of the parent directory** (mirroring `tools/doctor.py:242-243`); never
+  compute `Path(os.path.realpath(target)).parent`.
 - Call both only for names that passed the existing resolution test at
   `tools/doctor.py:238-247`.
 - Group findings by `(reason, target)`; cap example names and append `(+N more)`,
@@ -881,7 +931,8 @@ new finding inside an existing check that the agent already knows how to run and
 - **Task ID**: build-tests
 - **Depends On**: build-check
 - **Validates**: `tests/unit/test_doctor_console_scripts.py::TestWinningScriptInterpreter` (create)
-- **Informed By**: spike-1, spike-3, spike-4; Research (polyglot and relocatable forms)
+- **Informed By**: spike-1, spike-3, spike-4; Research (the forms deliberately left
+  unclassified)
 - **Assigned To**: `doctor-interpreter-builder`
 - **Agent Type**: builder
 - **Parallel**: false
@@ -894,23 +945,30 @@ new finding inside an existing check that the agent already knows how to run and
 - Case 5 — hardlink: a hardlinked copy outside the venv (built with `os.link`, as
   #2665's `test_hardlinked_copy_outside_the_venv_is_accepted` does) whose shebang is
   stale → flagged with the rebuild remedy, and `fix` does **not** contain `/update`.
-- Case 6 — polyglot: `#!/bin/sh` line 1 plus an `'''exec'` line 2 naming the venv python
-  → passes.
-- Case 7 — relocatable: the `dirname $0` variant → passes, resolved against the script's
-  own directory.
-- Case 8 — env form: `#!/usr/bin/env python3` with the fixture venv leading PATH →
-  passes.
-- Case 9 — no shebang: a shebang-less file → no finding; the pass message's verified
-  count excludes it.
-- Case 10 — no pin: `.python-version` absent → off-pin comparison suppressed, but a
+- Case 6 — unclassified forms, parameterized over all four: `#!/bin/sh` + `'''exec'`
+  polyglot, the relocatable `dirname $0` variant, `#!/usr/bin/env python3`, and a
+  shebang-less binary. Each → no finding, `passed is True`, and the pass message's
+  verified count **excludes** it. This is the false-accusation guard for every form the
+  extractor declines to classify, and asserting on the count is what stops "no finding"
+  from being satisfied by a check that silently claims verification.
+- Case 7 — realpath guard: the fixture's `.venv/bin/python3` is a **symlink** to a base
+  interpreter outside every repo venv (the live shape — `.venv/bin/python3` here
+  realpaths into `~/.local/share/uv/python/...`), and the shims point at that symlink →
+  `passed is True`, no `outside` finding. Breaking the both-sides realpath rule fails
+  exactly this test.
+- Case 8 — no pin: `.python-version` absent → off-pin comparison suppressed, but a
   broken-symlink target still fails. The fail-open scoping guard.
-- Case 11 — grouping: several scripts sharing one bad target → the target appears once
+- Case 9 — grouping: several scripts sharing one bad target → the target appears once
   with a count, and the finding line count is below the script count.
-- Case 12 — mixed: one misresolved name plus one bad-interpreter name → both clauses in
+- Case 10 — mixed: one misresolved name plus one bad-interpreter name → both clauses in
   `message`, both remedies in `fix`.
-- Case 13 — distinct remedies: the three reasons produce three different fix sentences.
-- Case 14 — degenerate inputs: zero-byte file, bare `#!`, `/bin/sh` with no usable line
-  2, shebang with trailing flags → no crash, correct unverified/extracted result.
+- Case 11 — distinct remedies: the three reasons produce three different fix sentences.
+- Case 12 — pass-message contract: the pass message still starts with today's
+  `N console scripts resolve into <venv bin>` text and names no venv path in the
+  appended clause (guards `test_main_checkout_venv_accepted_from_a_worktree`).
+- Case 13 — degenerate inputs: zero-byte file, bare `#!`, a `#!` line with only
+  whitespace, and a shebang with trailing flags (`#!/path/python -E -s` → `/path/python`)
+  → no crash, correct unverified/extracted result.
 
 ### 4. Mutation-check every guard
 
@@ -919,10 +977,12 @@ new finding inside an existing check that the agent already knows how to run and
 - **Assigned To**: `doctor-interpreter-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- For each guard independently — existence test, venv-membership test, pin comparison,
-  polyglot line-2 parse, relocatable resolution, `env` resolution, no-shebang skip,
-  grouping, `/update` hardlink sentence, per-reason fix distinctness — break it, run the
-  suite, and record **which named test** fails. Restore before the next mutation.
+- For each guard independently — existence test, venv-membership test (including the
+  both-sides realpath rule: swap it for `Path(os.path.realpath(target)).parent` and
+  confirm case 7 fails), pin comparison, the non-absolute / shell / `env` refusal, the
+  no-shebang skip, the trailing-argument strip, grouping, per-reason fix distinctness,
+  and the pass-message verified count — break it, run the suite, and record **which
+  named test** fails. Restore before the next mutation.
 - A mutation that leaves the suite green is a missing test, not an acceptable result:
   report it and route back to task 3.
 - Re-measure after any change to task 3's tests; a guard verified in an earlier round
