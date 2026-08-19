@@ -1470,6 +1470,22 @@ five false negatives and trading fifteen for four. Concretely it is what keeps
 remain defined in `agent/hooks/subagent_stop.py`"* — reported, which is correct: that
 sentence is a claim about the present and it is false.
 
+**Blast radius: `_is_documented_deletion` is on the write path too, and that is fine.**
+It has two call sites, not one: `:903` in the detector, and **`:679` inside
+`_make_stale_term_replacer` (`:648`)**, which `_apply_fixes_to_file` uses to decide
+whether a stale-term rewrite may be applied. Widening the hatch therefore also makes the
+**write** path more conservative: a stale term sitting in deletion narrative that today
+gets rewritten will instead be left alone and counted in `suppressed`.
+
+That is the right direction and it needs no separate ruling. #2782 added the
+migration-context hatch to the stale-term channel for exactly this reason — an auditor
+rewriting a sentence that is narrating history is the generator bug class this whole lane
+exists to gate — and declining to write is the outcome #2739 prefers by construction. The
+effect is fewer *applied* fixes, not more *withheld* ones: the suppression returns the
+original text rather than producing a rejected candidate, so `fixes_withheld` and Q5's
+escalation signal are untouched. State this in `_is_documented_deletion`'s docstring so
+the shared call site is not later mistaken for detector-only code.
+
 **Do not reach for `_has_migration_context` (`:439`).** #2834's comment describes the fix
 as "give `_detect_deleted_target_issues` the migration-context hatch that #2782 gave the
 other detectors", and that is right in spirit and wrong in mechanism.
@@ -1619,6 +1635,24 @@ returns nothing.
       propagation is still worth asserting; only the auto-merge framing at `:1224`
       ("that marker is what makes the PR auto-merge-ineligible") has to go.
 
+Q7 breaks existing tests in three places (re-derived on `f491306c5`):
+
+- [ ] `_open_issue_exists` has **19** references in `tests/unit/test_docs_auditor_substrate.py`,
+      concentrated in `TestCrossMachineDedup` (`:1689`) — UPDATE: rename every one to
+      `_issue_exists`, and update any assertion on the `gh` argv to expect
+      `--state all` and `--limit 100` rather than `--state open`. A test that asserts the
+      old argv is asserting the defect. **`tests/unit/test_reflections_memory.py:1177` is
+      a false hit** — `test_skips_filing_when_open_issue_exists_for_same_signal` is a test
+      *name* in a different module and must not be renamed.
+- [ ] `TestDeletedTargetFiltering` (`:1552`) — UPDATE: this class owns the deletion-narrative
+      suppression cases. Every case must still pass after Q7b's widening (the widening
+      only ever suppresses *more*), and the class gains the Q7b control cases. If a case
+      asserts that a specific non-suppressed input **is** reported and Q7b now suppresses
+      it, that is the over-suppression signal — investigate before relaxing the assertion.
+- [ ] `_is_placeholder_path` has **11** references in the same file — UPDATE: the `.md`
+      stem strip and the three new `_PLACEHOLDER_PATH_COMPONENTS` entries widen its
+      `True` set. Existing cases stay valid; add the `.md` cases.
+
 The auto-merge assertions Q2 invalidates, enumerated so none is missed:
 
 - [ ] `TestWithheldBlocksAutoMerge` (`:1109`) — RENAME and rescope. Its docstring
@@ -1710,6 +1744,66 @@ real git throughout — the filename keeps the `docs_auditor` keyword so
       stale PR is still closed.
 - [ ] Sweeper auto-merge absence (anti-criterion): assert no `gh pr merge` is ever
       dispatched for any input.
+Q7 coverage (#2834) — **home is `tests/unit/test_docs_auditor_substrate.py`, not the new
+real-git file**. Every one of these is a pure function over a string and a `tmp_path`
+tree; none of them touches git or `gh`, so putting them in the real-git file would slow
+that file down for no benefit and would misfile them relative to the substrate suite's
+existing detector classes:
+
+- [ ] **`.md` reporting path exists at all (Q7a).** A doc under `docs/` linking
+      `[x](./gone.md)` where `gone.md` does not exist produces exactly one finding with
+      `category == "broken-md-link"`. This is the direct regression test for #2834's
+      headline claim.
+- [ ] **Doc-relative frame (Q7a rule 4) — the #2725 regression.** In a `tmp_path` repo,
+      create `docs/features/a.md` linking `[x](target.md)` **and** create
+      `<root>/target.md` at the repo root. Assert the finding **is** produced: the target
+      exists at the repo root but not doc-relative, and doc-relative is the frame the
+      renderer uses. A build that validates the raw string against the repo root fails
+      this test. Add the mirror case — `docs/features/target.md` present — and assert **no**
+      finding.
+- [ ] **`..` and leading-`/` resolution.** `[x](../guides/y.md)` from
+      `docs/features/a.md` resolves to `docs/guides/y.md`; `[x](/docs/guides/y.md)`
+      resolves against the repo root. A target that normalizes outside the repo root
+      produces no finding and no exception.
+- [ ] **Anchors and queries are stripped** — `[x](./gone.md#section)` reports
+      `gone.md`, not `gone.md#section`, so the title stays stable and dedup works.
+- [ ] **URI schemes are skipped** — `http:`, `https:`, `mailto:`, and the real-corpus
+      `file:` case (spike-6) produce no findings, and neither does a bare `#anchor`.
+- [ ] **Inline code spans are skipped (Q7a rule 3).** `` `[Feature Name](filename.md)` ``
+      on a line produces no finding, while the same link outside backticks on the next
+      line does. This pins the deliberate asymmetry with the `.py` branch; a builder who
+      "harmonizes" the two branches fails this test.
+- [ ] **Scope rule (Q7a rule 7).** An identical broken link produces a finding from
+      `docs/features/a.md` and **no** finding from `docs/plans/completed/a.md`,
+      `docs/plans/done/a.md`, or `.claude/skills-global/x/SKILL_TEMPLATE.md`.
+- [ ] **Placeholder targets** — `[x](filename.md)` and `[x](foo/bar.md)` produce no
+      findings; `_is_placeholder_path("docs/foo.md")` returns `True` (the `.md` stem
+      strip).
+- [ ] **Deletion-narrative hatch controls (Q7b) — the three real sites, by content.**
+      Feed the actual prose from `docs/features/harness-abstraction.md:189`,
+      `docs/features/harness-adapter.md:19` and `:115` and assert **no** finding; feed the
+      `SessionType.GRANITE` table row from `docs/features/standardized-enums.md:19` and
+      assert a finding **is** produced. Inline the prose as fixtures rather than reading
+      the live docs, so the test does not go red when someone fixes those docs.
+- [ ] **Each widening is exercised on its own**, so a partial implementation cannot pass:
+      heading stem (`## Dead SDK Path Deletion`), heading stem (`## Hook Cleanup`),
+      word-level prose cue (`deleted (250 lines)`), ±2 window (cue two lines above), and
+      word-anchoring (a line containing only `removed_at` must **not** suppress).
+- [ ] **Live-claim veto (Q7b).** A line reading
+      *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a
+      `## Migration` heading still produces a finding. Without the veto the heading
+      suppresses it. Cover the other veto words too.
+- [ ] **Both shapes share one hatch.** A `.md` link under a `## Removed` heading is
+      suppressed, proving Q7a routes through the same `_is_documented_deletion` rather
+      than growing a second filter.
+- [ ] **Convergence (Q7c).** With a `gh` stub, assert `_issue_exists` sends
+      `--state all` and `--limit 100`, returns `True` for a **closed** issue whose title
+      matches exactly, and still returns `False` (fail open) on a non-zero `gh` exit.
+      Assert `_file_issue_if_new` does not file when `_issue_exists` is `True`. Assert
+      the symbol `_open_issue_exists` no longer exists in the module.
+- [ ] **Cap sharing.** A rotation pass whose findings are a mix of `deleted-target` and
+      `broken-md-link` still files at most `ISSUE_FILING_PER_RUN_CAP` issues in total —
+      Q7 must not get its own budget.
 - [ ] `agent/reflection_scheduler.py`: assert `mark_completed` receives
       `output_summary` equal to the reflection's returned `summary`. The exact home is
       `tests/unit/test_scheduler_result_forwarding.py` — it already asserts the
@@ -1978,6 +2072,38 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       dashboard `output_summary`, so #2743 is not later argued from a doc this plan
       left stale.
 
+### Reference Reporting (Q7, #2834)
+
+- [ ] `docs/features/docs-auditor.md` — the detector inventory must describe
+      `_detect_deleted_target_issues` as covering **two** reference shapes: backticked
+      `.py` paths and markdown-link `.md` targets. State the scope rule (`docs/` minus
+      `docs/plans/completed/` and `docs/plans/done/`) and the two finding categories
+      (`deleted-target`, `broken-md-link`) as the status quo. No "previously", no
+      "now also".
+- [ ] Same file — state the **frame rule** plainly, because it is the defect #2725 and
+      #2741 both recorded and it will be re-proposed otherwise: `.md` link targets resolve
+      **relative to the containing document's directory**, which is the frame markdown
+      renderers use. A target that exists at the repo root but not doc-relative is a real
+      break and is reported as one.
+- [ ] Same file — state the inline-code asymmetry: a bare backticked path **is** a
+      reference, a markdown link inside a code span **is not**. Name it as deliberate so
+      the next reader does not "fix" the inconsistency.
+- [ ] Same file — state that the auditor **reports** broken `.md` links and does not
+      repair them, and that the auto-repairing predecessor
+      (`_detect_readme_broken_entries`) was deleted by #2741 and is not coming back.
+- [ ] Same file — document the convergence rule: a finding is filed **once, ever**.
+      `_issue_exists` matches open **and closed** issues, so closing an issue without
+      changing the doc is a durable human ruling. Name the cost: a defect that is fixed,
+      closed, and later regresses identically stays silent.
+- [ ] `docs/features/reflections.md` — the `docs-auditor` registry row and the Caller B
+      filing note (`:147-152`) describe what the auditor files; update for the second
+      finding category and the once-ever dedup.
+- [ ] Inline: `_detect_deleted_target_issues`' docstring must name both branches, the
+      doc-relative frame, the inline-code asymmetry, and the scope rule.
+      `_is_documented_deletion`'s docstring must name the live-claim veto and why it
+      evaluates after the fence tier. `_issue_exists`' docstring must say why `--state all`
+      and why `--limit 100` is not decoration.
+
 ### Skill Documentation (the review gate itself)
 
 - [ ] `.claude/skills-global/do-docs/SKILL.md` Step 2d (`:220-221`) — replace the
@@ -2044,6 +2170,24 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       `unittest.mock.patch` over `subprocess.run` for the git surface.
 - [ ] `docs/features/docs-auditor.md` describes the new contract as the only status
       quo — no migration notes, no "previously" sections.
+- [ ] A broken markdown-link `.md` target in a doc under `docs/` produces a GitHub issue
+      naming the containing doc and the resolved target, and **no** doc is rewritten to
+      produce it (#2834 first half).
+- [ ] `.md` link targets are resolved **relative to the containing document's directory**;
+      a target that exists at the repo root but not doc-relative is still reported
+      (the #2725 / #2741 frame rule).
+- [ ] A `.py` path named by a document that is recording its deletion no longer files an
+      issue: the three real sites behind #2840 and #2841 are silent, and the true positive
+      behind #2839 is still reported (#2834 second half).
+- [ ] A finding a human closes without editing the doc is **not** re-filed:
+      `_issue_exists` matches closed issues, `_open_issue_exists` no longer exists, and
+      the `gh` query carries `--limit 100`.
+- [ ] Q7's findings share `ISSUE_FILING_PER_RUN_CAP` with the existing advisory loop —
+      no second budget — and the sizing spike re-run on the built code reports per-run
+      volume within range of the plan-time baseline (mean 0.29 for `.md`, combined mean
+      flat at 0.86).
+- [ ] No repair path for `.md` links exists anywhere in the module; the only effect of a
+      Q7 finding is a GitHub issue.
 - [ ] Tests pass (`/do-test`), run with `POPOTO_TEST_DB=13` via
       `scripts/pytest-clean.sh`.
 - [ ] Documentation updated (`/do-docs`).
@@ -2417,6 +2561,19 @@ post-build expectation that legitimately fails now.
 | Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_docs_auditor_git_surface.py` | > 0 | post-build |
 | No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_docs_auditor_git_surface.py` | exit code 1 | post-build |
 | Test count row is recomputed | `POPOTO_TEST_DB=13 .venv/bin/python -m pytest tests/unit/test_docs_auditor_substrate.py --collect-only -q \| tail -1` and compare against `grep -n 'test_docs_auditor_substrate' tests/README.md` | the number in `tests/README.md:272` equals the collected count | post-build (both read `130` today, and the count will move) |
+| `.md` reporting branch exists (Q7a) | `grep -c 'broken-md-link' reflections/docs_auditor.py` | > 0 | post-build (currently `0`) |
+| Old auto-repairing `.md` detector stays gone (Q7a) | `grep -c '_detect_readme_broken_entries' reflections/docs_auditor.py` | `0` | **holds now** (#2842) — anti-criterion: Q7a must add a *reporting* branch, never resurrect the repair |
+| `.md` targets resolve doc-relative, not repo-root (Q7a / #2725) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: a `tmp_path` repo with `docs/features/a.md` linking `[x](target.md)` **and** `<root>/target.md` present must still produce a `broken-md-link` finding; with `docs/features/target.md` present it must produce none | finding produced in the first case, none in the second | post-build. Deliberately behavioral: a grep cannot tell `doc_path.parent`-based resolution from `repo_root`-based resolution, and spike-3 showed the existence invariant is structurally blind to exactly this distinction |
+| Deletion-narrative hatch was widened, not replaced (Q7b) | `grep -c '_is_documented_deletion' reflections/docs_auditor.py` | `> 4` | post-build (currently **4**: docstring reference `:499`, write-path call site `:679` inside `_make_stale_term_replacer`, definition `:847`, detector call site `:903`). A count still at `4` after the build means the `.md` branch grew its own filter instead of sharing the widened one |
+| Heading matching is stem-based (Q7b) | `grep -c '_DELETION_HEADING_KEYWORDS' reflections/docs_auditor.py` and read the tuple | the tuple holds stems (`delet`, `remov`, `deprecat`, `migrat`, `cleanup`, `obsolete`, `retire`), not exact inflections | post-build (today the tuple is `(\"migration\", \"removed\", \"deleted\", \"deprecated\")`). Companion only — the behavioral controls below are the real gate |
+| Q7b controls: the two false positives go, the true positive stays | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: inline the prose from `docs/features/harness-abstraction.md:189` and `docs/features/harness-adapter.md:19`/`:115` and assert **no** finding; inline the `SessionType.GRANITE` row from `docs/features/standardized-enums.md:19` and assert a finding **is** produced | 3 suppressed, 1 reported | post-build. This is the single most important Q7 row: a widening that silences #2839 is wrong no matter how many false positives it removes |
+| Live-claim veto is present (Q7b) | **Behavioral**: a line reading *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a `## Migration` heading still produces a finding | finding produced | post-build. Without the veto the heading suppresses it; spike-7 measured the veto as the difference between 5 new false negatives and 0 |
+| Dedup converges (Q7c) | `grep -c '_open_issue_exists' reflections/docs_auditor.py` and `grep -c 'def _issue_exists' reflections/docs_auditor.py` | `0` and `1` respectively | post-build (currently `3` and `0`). No compatibility alias — Principle 1. Note `_issue_exists` is a substring of `_open_issue_exists`, so the bare symbol grep cannot tell them apart; anchor on `def ` |
+| Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c '\"all\"' reflections/docs_auditor.py` and `grep -c '\"100\"' reflections/docs_auditor.py` | `2` and `> 0` | post-build (currently `1` and `0`). The existing `\"all\"` at `:2146` is the **sweeper's** `gh pr list --state all` and is unrelated — the count must rise to 2, not merely be nonzero. `gh issue list` defaults to `--limit 30`; under `--state all` the exact title can fall off page one, which files a duplicate of an issue that already exists |
+| The stale non-convergence comment is deleted (Q7c) | `grep -c 'dedup gate only sees open issues' reflections/docs_auditor.py` | `0` | post-build (currently `1`, in `audit()` at `:1259-1265`). Describe only the new status quo |
+| Q7 shares the per-run cap, no second budget | **Behavioral**: a rotation pass whose findings mix `deleted-target` and `broken-md-link` files at most `ISSUE_FILING_PER_RUN_CAP` issues **in total** | total ≤ 5 | post-build |
+| Q7 adds no write path | `git diff origin/main -- reflections/docs_auditor.py` shows no new `write_text`, `open(..., "w")`, or `git`/`gh` mutation introduced by the Q7 commit | no new write | post-build. #2739's whole thesis; a `.md` *repair* is the one thing Q7 must not grow |
+| Sizing spike re-run on built code | Call `_detect_deleted_target_issues` directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` for a sample of `docs/features/*.md` primaries and record the counts in the PR body. **Never** `audit(..., apply_mode="apply")` | in range of the plan-time baseline: 19 distinct in-scope `.md` findings, per-run mean 0.29 / max 3; `.py` mean 0.86 → 0.57; combined mean flat at 0.86 | post-build |
 | Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
 
 ## Critique Results
