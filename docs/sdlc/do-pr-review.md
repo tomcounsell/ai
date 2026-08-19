@@ -69,9 +69,12 @@ inheritance, not a block: use the returned `run_id` and continue; only a foreign
 **Verification-table runner (§ 4.5):**
 
 ```bash
-python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t.malformed)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
-# A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it), not a
-# finding about the code. Write pipes in the table as `\|`. See #2570.
+python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
+# A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it, or a
+# pipe-block with rows but no Command column), not a finding about the code. Write
+# pipes in the table as `\|`. See #2570, #2836. A row in `t.skipped` is a non-check
+# table (a summary, a findings recap) -- named in the report but never counted toward
+# the exit code.
 ```
 
 **Plan-checkbox updater (post-review § 2.5).** Sync each rubric-judged criterion with:

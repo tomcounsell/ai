@@ -1,14 +1,20 @@
 """Unit tests for agent/verification_parser.py -- machine-readable verification checks."""
 
+from pathlib import Path
+
 from agent.verification_parser import (
     CheckResult,
     MalformedRow,
+    ParsedTable,
+    SkippedTable,
     VerificationCheck,
     evaluate_expectation,
     format_results,
     parse_verification_table,
     split_row_cells,
 )
+
+FIXTURES_DIR = Path(__file__).parents[1] / "fixtures" / "verification"
 
 # ---------------------------------------------------------------------------
 # parse_verification_table
@@ -485,7 +491,8 @@ class TestPipesInCommands:
 class TestMalformedRowReporting:
     def test_format_results_names_authoring_errors_separately(self):
         rows = [MalformedRow(line="| bad | row |", reason="expected 3 columns, got 2.")]
-        report = format_results([], rows)
+        table = ParsedTable(checks=[], malformed=rows, skipped=[])
+        report = format_results([], table)
         assert "Plan authoring errors (1)" in report
         assert "fix the plan, not the code" in report.lower()
         assert "| bad | row |" in report
@@ -494,7 +501,104 @@ class TestMalformedRowReporting:
         """A row nobody can execute is not a passing check."""
         check = VerificationCheck(name="ok", command="true", expected="exit code 0")
         results = [CheckResult(check=check, passed=True, exit_code=0, output="")]
-        assert "All checks passed." in format_results(results, [])
-        report = format_results(results, [MalformedRow(line="| x |", reason="r")])
+        clean_table = ParsedTable(checks=[check], malformed=[], skipped=[])
+        assert "All checks passed." in format_results(results, clean_table)
+        malformed_table = ParsedTable(
+            checks=[check], malformed=[MalformedRow(line="| x |", reason="r")], skipped=[]
+        )
+        report = format_results(results, malformed_table)
         assert "All checks passed." not in report
         assert "could not be parsed" in report
+
+
+# ---------------------------------------------------------------------------
+# Per-block table scoping (#2836)
+# ---------------------------------------------------------------------------
+
+
+class TestPerBlockTableScoping:
+    """Every pipe-block in `## Verification` is classified independently: a
+    check table (Command column among its first three) contributes checks, a
+    non-check table is skipped and non-failing, and a section whose tables
+    carry no Command column fails loudly with one MalformedRow per block."""
+
+    def test_summary_table_does_not_become_checks(self):
+        """The #2741 fixture: a real check table plus a `Row | Pre-change |
+        Meaning` summary table. Before per-block scoping this parsed to 27
+        checks (16 real + 11 summary-table junk rows, each a guaranteed FAIL).
+        """
+        text = (FIXTURES_DIR / "2741_pre_fix_verification.md").read_text()
+        table = parse_verification_table(text)
+        assert len(table.checks) == 16
+        assert len(table.malformed) == 0
+        assert len(table.skipped) == 1
+        assert "Pre-change" in table.skipped[0].header
+
+    def test_second_anti_criterion_table_is_parsed(self):
+        """spike-1: a genuine second check table (`Anti-criterion | Command |
+        Expected`) must still contribute its rows -- first-table-only scoping
+        would drop them, which is strictly worse than the bug being fixed."""
+        text = (FIXTURES_DIR / "two_check_tables.md").read_text()
+        table = parse_verification_table(text)
+        assert len(table.checks) == 4
+        assert len(table.malformed) == 0
+        assert len(table.skipped) == 0
+
+    def test_pipe_rows_with_no_command_column_are_malformed(self):
+        """A section whose only pipe-block has no Command column yields
+        exactly one MalformedRow whose `line` is that block's header, and
+        `format_results` reports the run as failed."""
+        text = (FIXTURES_DIR / "no_command_column.md").read_text()
+        table = parse_verification_table(text)
+        assert table.checks == []
+        assert len(table.malformed) == 1
+        assert table.malformed[0].line == "| # | Criterion | Check |"
+        assert table.skipped == []
+        report = format_results([], table)
+        assert "All checks passed." not in report
+
+    def test_no_command_column_yields_one_malformed_per_block(self):
+        """Two non-check pipe-blocks in one section yield exactly two
+        MalformedRows, regardless of how many data rows each block holds."""
+        md = (
+            "## Verification\n\n"
+            "| # | Criterion | Check |\n|--|--|--|\n"
+            "| 1 | one | manual |\n| 2 | two | manual |\n| 3 | three | manual |\n"
+            "\n"
+            "| Row | Pre-change | Meaning |\n|--|--|--|\n"
+            "| a | 1 | red |\n"
+        )
+        table = parse_verification_table(md)
+        assert table.checks == []
+        assert len(table.malformed) == 2
+        assert table.skipped == []
+
+    def test_skipped_table_does_not_fail_the_run(self):
+        """Checks all pass + one skipped block -> format_results reports all
+        passed. The skipped block's own status is never PASS/FAIL/SKIP."""
+        text = (FIXTURES_DIR / "check_plus_summary.md").read_text()
+        table = parse_verification_table(text)
+        assert len(table.checks) == 2
+        assert len(table.skipped) == 1
+        results = [
+            CheckResult(check=c, passed=True, exit_code=0, output="ok") for c in table.checks
+        ]
+        report = format_results(results, table)
+        assert "All checks passed." in report
+
+    def test_every_fixture_declares_the_verification_heading(self):
+        """Without a literal `## Verification` heading the section regex
+        matches nothing and every fixture-backed assertion above would pass
+        against an empty parse -- this test fails loudly instead."""
+        fixture_files = sorted(FIXTURES_DIR.glob("*.md"))
+        assert fixture_files, "no fixtures found under tests/fixtures/verification/"
+        for f in fixture_files:
+            assert f.read_text().lstrip().startswith("## Verification"), (
+                f"{f} does not start with a literal '## Verification' heading"
+            )
+
+    def test_skipped_table_is_importable(self):
+        assert SkippedTable(header="| a | b |", row_count=1, reason="r").header == "| a | b |"
+
+    def test_parsed_table_carries_skipped_field(self):
+        assert "skipped" in ParsedTable.__dataclass_fields__

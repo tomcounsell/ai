@@ -62,6 +62,34 @@ Each row defines:
 
 **Empty-stdout gate:** Both `output does not contain X` and `match count == 0` reject truly-empty stdout. An errored command or one that writes only to stderr produces empty stdout; without the gate, a trivially-absent substring or `all(...)` over an empty list would silently pass. A legitimately-clean `grep -c` returns a literal `0` (one byte of non-empty stdout), so the gate fires only when the command produced no output at all.
 
+### Table Scoping: One `## Verification` Section, Many Pipe-Blocks (#2836)
+
+A `## Verification` section can carry more than one markdown table -- a check
+table plus a red/green summary, or a second check table headed
+`Anti-criterion | Command | Expected`. The parser scopes to **pipe-blocks**:
+contiguous runs of `|`-prefixed lines, which is the GitHub Flavored Markdown
+definition of one table (a blank line, or a line that cannot be part of the
+table, ends it). Every pipe-block in the section is classified independently:
+
+- **Check table** -- at least three columns, one of the first three column
+  names is exactly `Command` (case-insensitive). Every data row contributes a
+  check, parsed exactly as a single-table section always was. A second check
+  table (e.g. an `Anti-criterion` table) is not special-cased away; both
+  contribute.
+- **Non-check table** -- a summary, a findings recap, anything without a
+  `Command` column. Reported as a `SkippedTable(header, row_count, reason)`:
+  named in both runners' output, **non-failing**. Before this, a second table's
+  header and separator row parsed as guaranteed-fail checks, so a clean build
+  could fail on rows the plan's author never intended as checks.
+- **Rows present, no check table anywhere in the section** -- a loud failure:
+  exactly one `MalformedRow` per pipe-block (never one per row). A section
+  whose author wrote table rows and produced zero executable checks is told so,
+  rather than silently gating on nothing. `skipped` stays empty in this branch
+  -- a block is either skipped or malformed, never both.
+
+`ParsedTable` therefore carries three fields: `checks`, `malformed`, and
+`skipped`.
+
 ## Anti-Criteria: Verifying No-Gos
 
 ### Concept
@@ -176,14 +204,22 @@ All four canonical `grep` shapes (bare `0`, whitespace `0`, `path:0`, multi-line
 
 ### Verification Parser (`agent/verification_parser.py`)
 
-Pure-function module with no external dependencies beyond subprocess:
+Pure-function module with no external dependencies beyond subprocess. This is
+the **sole** definition of what a `## Verification` table is and what an
+expectation means (#2836, #2843) -- `scripts/validate_build.py` imports from
+here and carries no table parser or evaluator of its own:
 
 - `VerificationCheck(name, command, expected)` -- dataclass for a single check
+- `MalformedRow(line, reason)` -- a row, or a whole non-check pipe-block, that
+  could not be read as the author wrote it
+- `SkippedTable(header, row_count, reason)` -- a non-check pipe-block, named
+  and reported but non-failing
 - `CheckResult(check, passed, exit_code, output, error)` -- result of running a check
-- `parse_verification_table(markdown)` -- extracts checks from a `## Verification` section
+- `ParsedTable(checks, malformed, skipped)` -- everything a section yielded
+- `parse_verification_table(markdown)` -- extracts a `ParsedTable` from a `## Verification` section, scoped per pipe-block (see "Table Scoping" above)
 - `evaluate_expectation(expected, exit_code, output)` -- determines pass/fail
 - `run_checks(checks, cwd, timeout)` -- executes all checks via subprocess
-- `format_results(results)` -- produces a human-readable report
+- `format_results(results, table)` -- produces a human-readable report; `table` is required (both parameters are), and reads `table.malformed` and `table.skipped` for their own report sections
 
 ### Hook Validator (`.claude/hooks/validators/validate_verification_section.py`)
 

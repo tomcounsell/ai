@@ -277,7 +277,8 @@ tests/
 | unit | `test_validate_documentation_section.py` | 41 | Documentation section validation, payload-targeted |
 | unit | `test_validate_verification_section.py` | 31 | Verification validation |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
-| unit | `test_verification_parser.py` | 20 | Verification section parsing |
+| unit | `test_verification_parser.py` | 58 | Verification section parsing (per-block table scoping, `SkippedTable`) |
+| unit | `test_validate_build.py` | 43 | `scripts/validate_build.py` execution loop (30s-timeout SKIP, cross-runner agreement with `agent.verification_parser` on parse-only fixtures) |
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
