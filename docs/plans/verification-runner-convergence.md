@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -7,6 +7,8 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2836
 also_closes: https://github.com/tomcounsell/ai/issues/2843
 last_comment_id: 5324500130
+revision_applied: true
+revision_applied_at: 2026-08-19T05:30:10Z
 ---
 
 # Verification-Runner Convergence: One Table Definition, One Expectation Evaluator
@@ -57,8 +59,7 @@ through to `expected.lower() in actual_output.lower() or actual_exit == 0`. Cons
 **Desired outcome.** The two runners agree on any input: one definition of what a table is,
 one definition of what an expectation means. A non-check table in `## Verification` is
 skipped with a named diagnostic instead of poisoning the gate. A `## Verification` section
-that contains table rows but no executable check table fails loudly instead of quietly
-gating on nothing.
+whose tables carry no `Command` column fails loudly instead of quietly gating on nothing.
 
 ## Freshness Check
 
@@ -120,19 +121,26 @@ one was, by a build gate failing a plan that is fine.
 
 ## Spike Results
 
+Every figure below is measured against the plan corpus at `main` @ `32f16f0f0` (590 documents
+under `docs/plans/**`, of which **505** carry a `## Verification` section; 28 of those are active
+plans in `docs/plans/*.md`). The corpus grows daily, so a re-measurement at a later SHA will
+report larger totals; T14 re-measures and writes the refreshed numbers back into this section as
+well as into the PR body.
+
 ### spike-1: Does per-block header-signature scoping preserve legitimate multi-table check layouts?
 
 - **Assumption:** #2836's own text — "first-table-only scoping ... breaks legitimate
   multi-table check layouts if any exist (**none known**)."
-- **Method:** code-read + simulation over all 500 plan documents carrying a `## Verification`
+- **Method:** code-read + simulation over all 505 plan documents carrying a `## Verification`
   section.
 - **Result: the assumption is FALSE.** Two plans carry a second, real check table headed
   `| Anti-criterion | Command | Expected |`:
   `docs/plans/completed/sdlc-lease-heartbeat-supervisor-lifetime.md` and
   `docs/plans/completed/sdlc-continuity-reensure-rebind.md`. First-table-only scoping drops
-  six genuine executable rows from each — a gate that silently cannot fire, strictly worse than
-  the defect being fixed. `docs/plans/completed/opus-skill-prompts-4-7.md` similarly carries a
-  real check row in a second pipe-block.
+  **four genuine executable data rows** from each (six lines counting the header and the
+  separator) — a gate that silently cannot fire, strictly worse than the defect being fixed.
+  `docs/plans/completed/opus-skill-prompts-4-7.md` similarly carries a real check row in a
+  second pipe-block.
 - **Confidence:** high (direct measurement).
 - **Impact:** decides the design. Header-signature scoping must be applied to **every**
   pipe-block in the section, not used to select a single one.
@@ -142,7 +150,8 @@ one was, by a build gate failing a plan that is fine.
 - **Assumption:** "Scoping the parser will change how existing plans parse."
 - **Method:** simulate the proposed parser against every plan with a `## Verification` section
   and diff check/malformed counts against the current parser.
-- **Result:** 500 plans examined. **0 active plans** (`docs/plans/*.md`) change their parse
+- **Result:** 505 plans carrying a `## Verification` section examined. **0 active plans**
+  (`docs/plans/*.md`) change their parse
   result. 8 completed plans change; every delta removes junk rows or `.worktrees`-fenced shell
   lines that currently parse as checks. Two completed plans
   (`delivery_guard_resume_epoch_scoping.md`, `redis-replication-sentinel-failover.md`) head
@@ -157,8 +166,9 @@ one was, by a build gate failing a plan that is fine.
 
 - **Assumption:** "`scripts/validate_build.py:106`'s loose test (`"command" in row.lower()`)
   and a strict test (a first-three column named exactly `Command`) will disagree on real plans."
-- **Method:** measure both over all pipe-blocks in all 500 plans.
-- **Result:** both match **489** blocks. **Zero disagreements.**
+- **Method:** measure both over every pipe-block in every `## Verification` section in the corpus.
+- **Result:** **502** pipe-blocks examined. Both tests classify the same **493** of them as check
+  tables. **Zero disagreements.**
 - **Confidence:** high.
 - **Impact:** use the strict cell-equality test. It costs nothing and it cannot be tripped by a
   summary table that happens to mention the word "command" in a data cell.
@@ -179,7 +189,7 @@ one was, by a build gate failing a plan that is fine.
 - **Assumption:** "Deleting `validate_build.py`'s evaluator removes working behavior."
 - **Method:** classify every Expected cell in every plan against both grammars.
 - **Result:** `validate_build.py`'s unique form is bare `output <exact-string>`. It is used in
-  **zero** active plans. Separately, **68** Expected cells across **11** active plans use
+  **zero** active plans. Separately, **68** Expected cells across **9** active plans use
   grammar *neither* evaluator recognizes (`prints \`0\``, `output == N`, `> 0`, `ok`,
   `exit 0`); all 68 already FAIL the canonical runner at `docs/sdlc/do-build.md:185` today.
 - **Confidence:** high.
@@ -262,16 +272,44 @@ three columns and one of its first three column names is exactly `Command` (case
 - **Non-check table** → one `SkippedTable(header, row_count, reason)`. Named, reported, and
   **non-failing**: a summary table is legitimate plan authoring, and failing the gate on it
   would reproduce #2836 with a friendlier message.
-- **Section has pipe-blocks but no check table** → every block becomes a `MalformedRow`. This
-  **fails**. An author who wrote table rows in `## Verification` and got zero executable checks
-  must be told, or the fix replaces guaranteed-fail junk with a gate that cannot fire.
-- **Section has no pipe-blocks** → empty `ParsedTable`, unchanged.
+- **Section has pipe-blocks but no check table** → **exactly one `MalformedRow` per pipe-block**,
+  never one per row. This **fails**. An author who wrote table rows in `## Verification` and got
+  zero executable checks must be told, or the fix replaces guaranteed-fail junk with a gate that
+  cannot fire. The row is constructed as:
+
+  ```python
+  MalformedRow(
+      line=block[0],
+      reason=(
+          f"table has {len(block)} row(s) but none of its first three column "
+          "names is Command; the ## Verification section yielded zero "
+          "executable checks"
+      ),
+  )
+  ```
+
+  `line=block[0]` is the block's header line, which keeps `MalformedRow.line: str` honest — the
+  dataclass models one row, not one block — and keeps the `- [MALFORMED] {m.line}` report line at
+  `agent/verification_parser.py:348` readable. One entry per block also makes `len(t.malformed)`
+  equal the pipe-block count, which is what makes the `malformed=1` assertion in this plan's own
+  `## Verification` table deterministic.
+- **Section has no pipe-blocks** → empty `ParsedTable`, unchanged. See `## No-Gos` — closing this
+  case is explicitly not in scope.
 
 `ParsedTable` gains `skipped: list[SkippedTable] = field(default_factory=list)`. Existing
 call sites reading `.checks` and `.malformed` keep working unchanged.
 
-`format_results` gains a `skipped` parameter and prints a "Non-check tables skipped" section
-that does not participate in the pass/fail verdict.
+`format_results`' signature becomes `format_results(results: list[CheckResult], table:
+ParsedTable) -> str`, reading `table.malformed` and `table.skipped` off the parse result. Both
+parameters are **required**: the only two production call sites in the repo
+(`docs/sdlc/do-build.md:185` and `docs/sdlc/do-pr-review.md:72` — measured, there are no others)
+are edited in this same PR, so an optional parameter would be a back-compat bridge with zero
+beneficiaries, and an optional diagnostic parameter is how a diagnostic stops reaching a reader.
+#2570's `malformed` parameter was added optionally and `docs/features/machine-readable-dod.md:186`
+still documents `format_results(results)` as a result; that is the failure being avoided here.
+
+The report gains a "Non-check tables skipped" section that names each `SkippedTable`'s header and
+row count and does not participate in the pass/fail verdict.
 
 ### 2. Evaluator delegation in `scripts/validate_build.py` (#2843, #2783)
 
@@ -330,8 +368,10 @@ Every failure path gets a test that fails against the current code first.
 |---|---|
 | Second non-check table merged into checks (#2836) | `test_summary_table_does_not_become_checks` — the #2741 fixture parses to 16/0/1. Fails today at 27 checks. |
 | Real second check table dropped (spike-1 regression) | `test_second_anti_criterion_table_is_parsed` — a fixture with `\| Check \| Command \| Expected \|` and `\| Anti-criterion \| Command \| Expected \|` yields both tables' rows. Guards against a future "first table wins" simplification. |
-| Rows present, no check table → silent zero-check gate | `test_pipe_rows_with_no_command_column_are_malformed` — a `\| # \| Criterion \| Check \|` table produces malformed entries, and `format_results` reports the run as failed. |
+| Rows present, no check table → silent zero-check gate | `test_pipe_rows_with_no_command_column_are_malformed` — a fixture whose single pipe-block is headed `\| # \| Criterion \| Check \|` produces **exactly one** `MalformedRow` whose `line` is that header, and `format_results` reports the run as failed. |
+| One malformed entry per block, not per row | `test_no_command_column_yields_one_malformed_per_block` — a fixture with two non-check pipe-blocks yields `len(malformed) == 2` regardless of how many data rows each block holds. |
 | Skipped table silently changing the verdict | `test_skipped_table_does_not_fail_the_run` — checks all pass + one skipped block → `format_results` says all passed, and `validate_build.main()` exits 0. |
+| Fixture missing its `## Verification` heading (vacuous green) | `test_every_fixture_declares_the_verification_heading` — every file in `tests/fixtures/verification/` starts with a literal `## Verification` line. Without it the section regex matches nothing and the fixture-backed assertions pass against an empty parse. |
 | `output > N` false FAIL (#2843) | `test_validate_build_output_gt_passes` — a row `output > 0` on a command printing `1` reports PASS. Fails today. |
 | `match count == 0` false FAIL (#2843) | `test_validate_build_match_count_zero_clean_passes` — `grep -c` on a clean file (prints `0`, exits 1) reports PASS. Fails today. |
 | `match count == 0` false PASS (#2783 Severity-1) | `test_validate_build_violated_anti_criterion_fails` — `grep -c` finding 24 matches (prints `24`, exits 0) reports FAIL. Fails today (reports PASS). |
@@ -364,8 +404,10 @@ Every failure path gets a test that fails against the current code first.
       UPDATE: its 4-column `| Check | Command | Expected | Notes |` header must still be
       recognized as a check table under the new signature test.
 - [ ] `tests/unit/test_verification_parser.py::TestMalformedRowReporting` — UPDATE:
-      `format_results` gains a `skipped` parameter; assert the malformed section is unchanged
-      and the skipped section does not alter the verdict.
+      `format_results` now takes a required `ParsedTable` as its second argument. Lines 488, 497
+      and 498 currently pass a bare `list[MalformedRow]` positionally and must construct a
+      `ParsedTable(checks=[], malformed=[...], skipped=[...])` instead. Assert the malformed
+      section is unchanged and the skipped section does not alter the verdict.
 - [ ] No xfail markers exist in either test file (searched: `pytest.mark.xfail`,
       `pytest.xfail(`). Nothing to convert.
 
@@ -386,7 +428,7 @@ Every failure path gets a test that fails against the current code first.
 ## Risks
 
 1. **A real check table gets classified as a summary table.** Mitigated by the strict
-   cell-equality signature measured against all 489 check-table blocks in the corpus (spike-3:
+   cell-equality signature measured against all 493 check-table blocks in the corpus (spike-3:
    zero disagreements with the loose test) and by the requirement that a section with rows but
    no check table fails loudly rather than skipping silently.
 2. **Skipped tables are non-failing, so a genuinely-mis-headered check table goes quiet.** One
@@ -395,19 +437,24 @@ Every failure path gets a test that fails against the current code first.
    both runners' reports. Accepted deliberately: failing on skipped tables would re-create
    #2836.
 3. **Convergence surfaces failures that `validate_build.py` used to hide.** Up to 68 rows across
-   11 active plans use grammar neither evaluator recognizes and will now FAIL under
+   9 active plans use grammar neither evaluator recognizes and will now FAIL under
    `validate_build.py`. All 68 already FAIL the canonical runner at `docs/sdlc/do-build.md:185`
    today, so no lane gains a blocker it did not already have. `validate_build.py` runs against
    one plan at a time — the lane's own — so the exposure is bounded to that lane.
 4. **Command-cell extraction changes in `validate_build.py`.** It currently takes the first
    backtick-delimited span; the canonical parser takes `cells[1].strip("\`")`. These differ for
-   **15 rows across 6 active plans**, all of which put prose in the Command cell (manual runbook
+   **21 rows across 4 active plans**, all of which put prose in the Command cell (manual runbook
    steps that were never executable under either runner). The canonical behavior wins; the delta
    is named in the PR body rather than discovered later.
-5. **`format_results`' signature change.** Both `docs/sdlc/do-build.md:185` and
-   `docs/sdlc/do-pr-review.md:72` embed a one-liner calling `format_results(r, t.malformed)`.
-   `skipped` is added as an optional third parameter so the old call still works, and both
-   one-liners are updated in the same PR so the diagnostic actually reaches a reader.
+5. **`format_results`' signature change is breaking, deliberately.** Both
+   `docs/sdlc/do-build.md:185` and `docs/sdlc/do-pr-review.md:72` embed a one-liner calling
+   `format_results(r, t.malformed)`; both become `format_results(r, t)` in this PR. These are the
+   only two production call sites in the repo — measured, not assumed. Making the second
+   parameter required rather than optional means a missed call site is an immediate `TypeError`
+   instead of a diagnostic that silently stops printing, which is exactly how
+   `docs/features/machine-readable-dod.md:186` came to still document `format_results(results)`
+   after #2570 added `malformed` optionally. Three tests in
+   `tests/unit/test_verification_parser.py` pass the old shape and are updated in the same PR.
 6. **Main moves under this lane.** Four PRs are open. None touches this file set (verified in
    the Freshness Check); rebase risk is confined to the plan document itself.
 
@@ -429,6 +476,13 @@ shared mutable state. No async, no cross-process handoff, no ordering hazard.
   rewrite.
 - Auto-repairing, reformatting, or linting plan documents from either runner.
 - Expanding into #2658's demonstrated-red proof obligations.
+- **Failing a `## Verification` section that contains no pipe-blocks at all.** A prose-only,
+  empty, or absent section yields an empty `ParsedTable`; `all([])` is `True`, so
+  `docs/sdlc/do-build.md:185` exits 0 and the gate passes on nothing. This lane closes only the
+  narrower case — a section whose tables carry no `Command` column. Closing the wider case would
+  block every plan in the repo that legitimately carries no verification table, which is a policy
+  change about what a plan must contain rather than a parser fix, and it belongs to its own
+  issue.
 
 ## Update System
 
@@ -459,13 +513,24 @@ path — the fix validates itself.
 ## Documentation
 
 - [ ] Update `docs/features/machine-readable-dod.md` — document the per-block table signature,
-      the `SkippedTable` diagnostic, `ParsedTable`'s third field, `format_results`' new
-      parameter, and state plainly that `scripts/validate_build.py` no longer carries its own
-      evaluator.
-- [ ] Update `docs/sdlc/do-build.md` — the `:185` one-liner passes `t.skipped` to
-      `format_results`; note next to `:182` that `validate_build.py` and the canonical runner
-      now share one table definition and one evaluator.
+      the `SkippedTable` diagnostic, `ParsedTable`'s third field, the one-`MalformedRow`-per-block
+      rule for a section with no check table, and state plainly that
+      `scripts/validate_build.py` no longer carries its own evaluator. Correct `:186`, which
+      still documents `format_results(results)`, to the current
+      `format_results(results, table)` signature.
+- [ ] Update `docs/sdlc/do-build.md` — the `:185` one-liner calls `format_results(r, t)`; note
+      next to `:182` that `validate_build.py` and the canonical runner now share one table
+      definition and one evaluator.
 - [ ] Update `docs/sdlc/do-pr-review.md` — same one-liner change at `:72`.
+- [ ] Comment on #2778 recording the canonical definitions the hook must import rather than
+      reimplement: a table is a contiguous run of pipe-prefixed lines
+      (`agent.verification_parser._iter_pipe_blocks`, per GFM); a check table is one with ≥3
+      columns where one of the first three column names equals `Command`, case-insensitively;
+      cell splitting is `agent.verification_parser.split_row_cells`. Registering
+      `.claude/hooks/validators/validate_verification_section.py` in
+      `.claude/hooks/manifest.toml` without importing those three gives the repo a write-time
+      gate that can reject a `## Verification` section both runners accept. This is the
+      carry-forward that #2570 did not leave, and its absence is why this lane exists.
 - [ ] Update `.claude/skills-global/do-plan/PLAN_TEMPLATE.md` — add to the `## Verification`
       guidance that a check table is identified by a `Command` column, that additional
       non-check tables in the section are skipped with a named diagnostic rather than executed,
@@ -485,7 +550,11 @@ path — the fix validates itself.
 - [ ] Every new test fails against the current parser/validator before the fix (#2836 AC 4,
       demonstrated-red).
 - [ ] A second `| Anti-criterion | Command | Expected |` table still yields executable checks.
-- [ ] `## Verification` containing table rows but no `Command`-column table fails loudly.
+- [ ] `## Verification` containing table rows but no `Command`-column table fails loudly, with
+      exactly one `MalformedRow` per pipe-block.
+- [ ] `format_results` takes two required parameters, `results` and `table`, and both production
+      call sites pass the `ParsedTable`.
+- [ ] Every file in `tests/fixtures/verification/` begins with a literal `## Verification` line.
 - [ ] `scripts/validate_build.py` reports PASS for `output > 0` on stdout `1` and for
       `match count == 0` on a clean `grep -c` (#2843).
 - [ ] `scripts/validate_build.py` reports FAIL for a violated `match count == 0` (#2783
@@ -501,32 +570,40 @@ path — the fix validates itself.
 
 Two agents, sequential — the second's work is defined by the first's return type.
 
+Every task T1–T20 is assigned to exactly one agent below. An unassigned task is an unbuilt task.
+
 ### 1. Parser scoping and fixtures
 - **Task ID**: parser-scoping
 - **Depends On**: none
 - **Agent Type**: builder
 - **Parallel**: false
+- **Owns**: T1, T2, T3, T4, T5, T6, T7, T8
 - `agent/verification_parser.py`: `_iter_pipe_blocks`, the header signature, `SkippedTable`,
-  `ParsedTable.skipped`, `format_results(skipped=...)`.
+  `ParsedTable.skipped`, `format_results(results, table)`.
 - `tests/fixtures/verification/` and the new cases in `tests/unit/test_verification_parser.py`.
 - Records the demonstrated-red output for each new test before implementing.
 
-### 2. Validator delegation and docs
+### 2. Validator delegation, cross-runner guard, and docs
 - **Task ID**: validator-delegation
 - **Depends On**: [parser-scoping]
 - **Agent Type**: builder
 - **Parallel**: false
+- **Owns**: T9, T10, T11, T12, T13, T15, T16, T17, T19, T20
 - Deletes `scripts/validate_build.py`'s parser and evaluator, wires the imports, rewrites
   `check_verification_table`, updates `tests/unit/test_validate_build.py`.
-- All four documentation targets.
+- Owns T13 — the cross-runner agreement test — because T13 *writes* a test file and the
+  validator agent below is read-and-run only.
+- All four documentation targets plus the #2778 carry-forward comment.
 
 ### 3. Final validation
 - **Task ID**: validate-all
 - **Depends On**: [parser-scoping, validator-delegation]
 - **Agent Type**: validator
 - **Parallel**: false
-- Runs this plan's `## Verification` table through the changed code, confirms the cross-runner
-  agreement test, and re-measures the 500-plan corpus to confirm zero active-plan drift.
+- **Owns**: T14, T18
+- Runs this plan's `## Verification` table through the changed code (T18), re-measures the
+  505-section corpus to confirm zero active-plan drift and writes the refreshed figures back into
+  `## Spike Results` (T14), and confirms the cross-runner agreement test written in T13 passes.
 
 ## Step by Step Tasks
 
@@ -540,6 +617,12 @@ Two agents, sequential — the second's work is defined by the first's return ty
       verbatim), `two_check_tables.md` (a `Check` table plus an `Anti-criterion` table),
       `no_command_column.md` (a `| # | Criterion | Check |` table), and
       `check_plus_summary.md` (one check table plus a prose summary table).
+      **Every fixture file starts with a literal `## Verification` heading line and carries no
+      second `^## ` heading before its tables.** `parse_verification_table` matches
+      `^## Verification\s*$` (`agent/verification_parser.py:129-135`) and terminates the section
+      at `(?=^## |\Z)`, so a body-only fixture parses to an empty `ParsedTable` and every
+      fixture-backed assertion in T3, T13 and the `## Verification` table below would pass
+      against nothing — this plan's own thesis reproduced inside its own test corpus.
 - [ ] **T3 — Add the failing tests** to `tests/unit/test_verification_parser.py` for every row
       of the Failure Path Test Strategy that targets the parser. Run them; each must fail.
       Paste the failures into the PR body.
@@ -549,12 +632,15 @@ Two agents, sequential — the second's work is defined by the first's return ty
       when it has ≥3 columns and one of its first three column names equals `Command`
       case-insensitively.
 - [ ] **T6 — Rewrite `parse_verification_table`** over blocks: parse every check table, skip
-      every non-check table, and emit `MalformedRow` for all blocks when the section has
-      pipe-blocks and no check table. Separator rows are skipped only when they match
-      `^\|[\s\-:|]+\|$`.
-- [ ] **T7 — Extend `format_results`** with an optional `skipped` parameter and a
-      "Non-check tables skipped" section that does not affect the verdict. Update the module
-      docstring to state the per-block rule and cite GFM.
+      every non-check table, and — when the section has pipe-blocks and no check table — emit
+      **exactly one** `MalformedRow` per pipe-block with `line=block[0]` and the reason string
+      given in Solution §1. One per block, never one per row. Separator rows are skipped only
+      when they match `^\|[\s\-:|]+\|$`.
+- [ ] **T7 — Change `format_results` to `format_results(results: list[CheckResult], table:
+      ParsedTable) -> str`**, reading `table.malformed` and `table.skipped`. Both parameters are
+      required; there is no optional-parameter shim. Add a "Non-check tables skipped" section
+      that prints each skipped block's header and row count and does not affect the verdict.
+      Update the module docstring to state the per-block rule and cite GFM.
 - [ ] **T8 — Confirm T3's tests now pass** and the whole of
       `tests/unit/test_verification_parser.py` is green.
 - [ ] **T9 — Add the failing validator tests** to `tests/unit/test_validate_build.py` for
@@ -574,12 +660,19 @@ Two agents, sequential — the second's work is defined by the first's return ty
 - [ ] **T13 — Add `test_both_runners_agree_on_fixture_corpus`**, parametrized over
       `tests/fixtures/verification/`, asserting per-row verdict equality between
       `validate_build`'s loop and `run_checks`. This is the guard against the next divergence.
+      Open the parametrized body with
+      `assert p.read_text().lstrip().startswith("## Verification")` so a heading-less fixture
+      fails loudly at the top of the test rather than passing vacuously against an empty parse.
 - [ ] **T14 — Re-run the corpus measurement.** Confirm zero active plans in `docs/plans/*.md`
-      change their parse result, and paste the number into the PR body.
+      change their parse result. Write the refreshed figures — corpus size, sections, pipe-blocks,
+      check tables, and the two Risks §3/§4 counts — **back into `## Spike Results` and `## Risks`
+      in this plan** as well as into the PR body, re-pinning the SHA in the `## Spike Results`
+      preamble. The plan and the PR must not be able to drift apart on these numbers.
 - [ ] **T15 — Update `docs/features/machine-readable-dod.md`** per the Documentation section.
 - [ ] **T16 — Update the `format_results` one-liners** in `docs/sdlc/do-build.md:185` and
-      `docs/sdlc/do-pr-review.md:72` to pass `t.skipped`, and add the shared-implementation note
-      beside `docs/sdlc/do-build.md:182`.
+      `docs/sdlc/do-pr-review.md:72` to `print(format_results(r, t))`. The exit guard stays
+      `sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)` so `skipped` never
+      reaches the exit code. Add the shared-implementation note beside `docs/sdlc/do-build.md:182`.
 - [ ] **T17 — Update `.claude/skills-global/do-plan/PLAN_TEMPLATE.md`** `## Verification`
       guidance with the `Command`-column signature, the skipped-table diagnostic, and the
       no-check-table failure.
@@ -590,6 +683,13 @@ Two agents, sequential — the second's work is defined by the first's return ty
       remains open** and that convergence makes its `prints N` rows fail under
       `validate_build.py` where they previously passed by accident. Include the red-state
       evidence from T1, T3, T9 and the corpus number from T14.
+- [ ] **T20 — Post the #2778 carry-forward comment.** `gh issue comment 2778` with the canonical
+      definitions listed in `## Documentation`: `_iter_pipe_blocks` as the table definition, the
+      `Command`-column signature, and `split_row_cells` as the cell splitter — plus the statement
+      that registering the hook means importing all three rather than reimplementing them. No
+      code change to `.claude/hooks/validators/validate_verification_section.py` in this lane;
+      the comment is the entire deliverable. This is the carry-forward #2570 did not leave, and
+      writing it is what keeps this plan from repeating one surface over the mistake it diagnoses.
 
 ## Verification
 
@@ -607,10 +707,11 @@ Two agents, sequential — the second's work is defined by the first's return ty
 | Per-block scoping present | `grep -c '_iter_pipe_blocks' agent/verification_parser.py` | output > 0 |
 | SkippedTable is importable | `python -c "from agent.verification_parser import SkippedTable; print('ok')"` | output contains ok |
 | ParsedTable carries skipped | `python -c "from agent.verification_parser import ParsedTable; print('skipped' in ParsedTable.__dataclass_fields__)"` | output contains True |
-| 2741 fixture parses to 16 checks, 0 malformed, 1 skipped | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/2741_pre_fix_verification.md').read()); print(f'{len(t.checks)}/{len(t.malformed)}/{len(t.skipped)}')"` | output contains 16/0/1 |
+| 2741 fixture parses to 16 checks, 0 malformed, 1 skipped | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/2741_pre_fix_verification.md').read()); print(f'checks={len(t.checks)} malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains checks=16 malformed=0 skipped=1 end |
 | Second anti-criterion check table still parsed | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/two_check_tables.md').read()); print(len(t.checks))"` | output > 3 |
-| Summary table skipped, not executed | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/check_plus_summary.md').read()); print(f'{len(t.malformed)}/{len(t.skipped)}')"` | output contains 0/1 |
-| Rows with no Command column fail loudly | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/no_command_column.md').read()); print(f'{len(t.checks)}/{len(t.malformed)}')"` | output contains 0/1 |
+| Summary table skipped, not executed | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/check_plus_summary.md').read()); print(f'malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains malformed=0 skipped=1 end |
+| Rows with no Command column yield one malformed per block | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/no_command_column.md').read()); print(f'checks={len(t.checks)} malformed={len(t.malformed)} end')"` | output contains checks=0 malformed=1 end |
+| Every fixture declares its section heading | `grep -L '^## Verification' tests/fixtures/verification/*.md \| wc -l` | match count == 0 |
 | Violated anti-criterion evaluates false (#2783) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if not e('match count == 0', exit_code=0, output='24') else 'BAD')"` | output contains ok |
 | Clean anti-criterion evaluates true (#2843) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if e('match count == 0', exit_code=1, output='0') else 'BAD')"` | output contains ok |
 | output > N evaluated numerically (#2843) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if e('output > 0', exit_code=0, output='1') else 'BAD')"` | output contains ok |
@@ -619,10 +720,13 @@ Two agents, sequential — the second's work is defined by the first's return ty
 | Fixture corpus committed | `ls tests/fixtures/verification/ \| wc -l` | output > 3 |
 | No stale call to the deleted validator parser | `grep -c 'validate_build.parse_verification_table' tests/unit/test_validate_build.py` | match count == 0 |
 | Feature doc records the skipped diagnostic | `grep -c 'skipped' docs/features/machine-readable-dod.md` | output > 0 |
-| do-build gate one-liner passes skipped | `grep -c 't.skipped' docs/sdlc/do-build.md` | output > 0 |
-| do-pr-review gate one-liner passes skipped | `grep -c 't.skipped' docs/sdlc/do-pr-review.md` | output > 0 |
+| format_results takes two required parameters | `python -c "import inspect; from agent.verification_parser import format_results as f; p=inspect.signature(f).parameters; print('ok' if list(p)==['results','table'] and all(v.default is v.empty for v in p.values()) else 'BAD')"` | output contains ok |
+| do-build gate one-liner passes the ParsedTable | `grep -c 'format_results(r, t))' docs/sdlc/do-build.md` | output > 0 |
+| do-pr-review gate one-liner passes the ParsedTable | `grep -c 'format_results(r, t))' docs/sdlc/do-pr-review.md` | output > 0 |
+| No stale malformed-only format_results call remains | `grep -c 'format_results(r, t.malformed)' docs/sdlc/do-build.md docs/sdlc/do-pr-review.md` | match count == 0 |
+| Feature doc records the current signature | `grep -c 'format_results(results, table)' docs/features/machine-readable-dod.md` | output > 0 |
 | Plan template documents non-check tables | `grep -ci 'non-check table' .claude/skills-global/do-plan/PLAN_TEMPLATE.md` | output > 0 |
-| This plan's own table reads clean through the fixed parser | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('docs/plans/verification-runner-convergence.md').read()); print(f'{len(t.malformed)}/{len(t.skipped)}')"` | output contains 0/0 |
+| This plan's own table reads clean through the fixed parser | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('docs/plans/verification-runner-convergence.md').read()); print(f'malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains malformed=0 skipped=0 end |
 
 ## Critique Results
 
@@ -633,31 +737,36 @@ conclusions reproduced exactly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Solution §1's "every block becomes a `MalformedRow`" has no defined `line` value: `MalformedRow` (`agent/verification_parser.py:84-93`) models one row, not one block. The three statements of this path disagree on count — Solution §1 says one per block, Failure Path Test Strategy says "malformed entries" (plural), Verification row 613 asserts `0/1`. | pending | Emit exactly one `MalformedRow(line=block[0], reason=f"table has {len(block)} row(s) but none of its first three column names is Command; the ## Verification section yielded zero executable checks")` per pipe-block. `block[0]` (the header) keeps `line: str` honest and keeps the `- [MALFORMED] {m.line}` report line at `:348` readable. `len(t.malformed)` then equals the pipe-block count, which is what makes row 613's `0/1` deterministic. |
-| CONCERN | Scope & Value | `format_results` gaining an *optional* `skipped` parameter is a back-compat bridge with zero beneficiaries: the only two production call sites (`docs/sdlc/do-build.md:185`, `docs/sdlc/do-pr-review.md:72` — measured, no others in the repo) are both edited in this PR. An optional diagnostic parameter is how a diagnostic stops reaching a reader; `docs/features/machine-readable-dod.md:186` still documents `format_results(results)`, never having absorbed #2570's `malformed` parameter added the same way. | pending | Signature becomes `def format_results(results: list[CheckResult], table: ParsedTable) -> str:`, reading `table.malformed` / `table.skipped`. Both one-liners become `print(format_results(r, t))`; the exit guard stays `sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)` so `skipped` never reaches the exit code. `tests/unit/test_verification_parser.py:488,497,498` pass bare lists positionally and must construct a `ParsedTable`. |
-| CONCERN | Risk & Robustness | T2 specifies the fixtures as "the `## Verification` section ... verbatim" without saying whether the heading line is included. `parse_verification_table` matches `^## Verification\s*$` (`:129-135`), so a body-only fixture parses to an empty `ParsedTable` and Verification rows 610-613 plus four new tests assert against nothing — the plan's own thesis reproduced inside its own test corpus. | pending | Every file in `tests/fixtures/verification/` must start with a literal `## Verification` line and carry no second `^## ` heading before its tables (the section regex terminates at `(?=^## \|\Z)`). Add `assert p.read_text().lstrip().startswith("## Verification")` as a precondition in the parametrized `test_both_runners_agree_on_fixture_corpus` so a heading-less fixture fails at collection rather than passing vacuously. |
-| CONCERN | Scope & Value | The Problem's desired outcome and Success Criteria promise that a `## Verification` section "that contains table rows but no executable check table fails loudly", but only that one instance closes. A section with no pipe-blocks at all (prose-only, empty, or absent) still yields an empty `ParsedTable`, and `all([])` is `True`, so `docs/sdlc/do-build.md:185` exits 0. Solution §1's fourth bullet makes this deliberate, but it is absent from `## No-Gos` where a reader checking scope will look. | pending | Docs-only, no code change. Reword the Problem sentence to "A `## Verification` section whose tables carry no `Command` column fails loudly instead of quietly gating on nothing", and add a `## No-Gos` bullet naming the exclusion with its reason: closing it would block every plan in the repo that carries no verification table, and belongs to its own issue. |
-| CONCERN | History & Consistency | The plan's own lesson — #2570 "converged the two runners on `split_row_cells` and stopped there" — is repeated one surface over. `.claude/hooks/validators/validate_verification_section.py` keeps its own divergent cell splitting and check-table concept because it is unregistered (confirmed: no entry in `.claude/hooks/manifest.toml`). That hook gates plan *writes*, so on the day #2778 registers it the repo gains a write-time gate that can reject a section both runners accept. | pending | Keep the code out of scope; make the carry-forward a deliverable. Add a step after T19: `gh issue comment 2778` recording that the canonical table definition is `agent.verification_parser._iter_pipe_blocks` (a contiguous run of pipe-prefixed lines, per GFM) plus the signature "≥3 columns and one of the first three column names equals `Command`, case-insensitively", that cell splitting is `split_row_cells`, and that registering the hook requires importing both rather than reimplementing them. Add a matching `## Documentation` line so the obligation appears in the plan's own checklist. |
-| NIT | History & Consistency | Five measured figures do not reproduce, though every conclusion survives: 493 plans carry a `## Verification` section, not 500; spike-3's "both match 489 blocks" conflates 489 total pipe-blocks with 480 matches (Risks §1 repeats it as "489 check-table blocks"); spike-1's "six genuine executable rows from each" is 4 data rows (6 lines including header and separator); Risks §3's 68 rows across 11 active plans measures 72 across 12; Risks §4's 15 rows across 6 measures 16 across 7. | pending | Pin the numbers: append "(measured at `main` @ `f491306c5`)" to the `## Spike Results` heading and correct the five figures. Have T14 write the refreshed corpus number back into the plan rather than only into the PR body, so the plan and the PR cannot drift apart. |
-| NIT | Risk & Robustness | Verification rows 610, 612 and 613 assert `output contains 16/0/1` and `output contains 0/1` against a slash-joined count triple. `output contains X` is a plain substring test (`agent/verification_parser.py:259-262`), so `0/1` also passes against `0/11` and `10/1` — a substring-weak self-check in a plan about expectations that pass without proving anything. | pending | Print `f"checks={len(t.checks)} malformed={len(t.malformed)} skipped={len(t.skipped)}"` and set Expected to `output contains checks=16 malformed=0 skipped=1`. `re.match(r"output contains (.+)")` keeps interior spaces, so a multi-word expectation needs no grammar change and stays inside the frozen-grammar No-Go. |
-| NIT | History & Consistency | Team Orchestration's three tasks carry no mapping onto T1-T19: T1, T18 and T19 belong to no named agent, and `validate-all` names no T at all. With two sequential builder agents, an unassigned task is an unbuilt task. | pending | `parser-scoping` → T1-T8; `validator-delegation` → T9-T12, T15-T17, T19; `validate-all` → T13, T14, T18. T13 writes a test file rather than only running one, so either grant the validator agent write access to `tests/unit/test_validate_build.py` or move T13 into `validator-delegation`. |
+| CONCERN | Risk & Robustness | Solution §1's "every block becomes a `MalformedRow`" has no defined `line` value: `MalformedRow` (`agent/verification_parser.py:84-93`) models one row, not one block. The three statements of this path disagree on count — Solution §1 says one per block, Failure Path Test Strategy says "malformed entries" (plural), Verification row 613 asserts `0/1`. | **Solution §1** (exact `MalformedRow` construction, one per pipe-block, `line=block[0]`); **T6**; **Failure Path Test Strategy** rows 3-4; **Success Criteria**; **Verification** row `Rows with no Command column yield one malformed per block` | Emit exactly one `MalformedRow(line=block[0], reason=f"table has {len(block)} row(s) but none of its first three column names is Command; the ## Verification section yielded zero executable checks")` per pipe-block. `block[0]` (the header) keeps `line: str` honest and keeps the `- [MALFORMED] {m.line}` report line at `:348` readable. `len(t.malformed)` then equals the pipe-block count, which is what makes row 613's `0/1` deterministic. |
+| CONCERN | Scope & Value | `format_results` gaining an *optional* `skipped` parameter is a back-compat bridge with zero beneficiaries: the only two production call sites (`docs/sdlc/do-build.md:185`, `docs/sdlc/do-pr-review.md:72` — measured, no others in the repo) are both edited in this PR. An optional diagnostic parameter is how a diagnostic stops reaching a reader; `docs/features/machine-readable-dod.md:186` still documents `format_results(results)`, never having absorbed #2570's `malformed` parameter added the same way. | **Solution §1** (required two-parameter signature, with the #2570 precedent named); **Risks §5** (rewritten: breaking on purpose); **T7**, **T16**; **Test Impact** (lines 488/497/498 construct a `ParsedTable`); **Documentation** (`:186` correction); **Success Criteria**; three new **Verification** rows | Signature becomes `def format_results(results: list[CheckResult], table: ParsedTable) -> str:`, reading `table.malformed` / `table.skipped`. Both one-liners become `print(format_results(r, t))`; the exit guard stays `sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)` so `skipped` never reaches the exit code. `tests/unit/test_verification_parser.py:488,497,498` pass bare lists positionally and must construct a `ParsedTable`. |
+| CONCERN | Risk & Robustness | T2 specifies the fixtures as "the `## Verification` section ... verbatim" without saying whether the heading line is included. `parse_verification_table` matches `^## Verification\s*$` (`:129-135`), so a body-only fixture parses to an empty `ParsedTable` and Verification rows 610-613 plus four new tests assert against nothing — the plan's own thesis reproduced inside its own test corpus. | **T2** (every fixture starts with a literal `## Verification` line, no second `^## ` heading before its tables); **T13** (`assert p.read_text().lstrip().startswith("## Verification")` as the first statement of the parametrized body); **Failure Path Test Strategy** row 6; **Success Criteria**; **Verification** row `Every fixture declares its section heading` | Every file in `tests/fixtures/verification/` must start with a literal `## Verification` line and carry no second `^## ` heading before its tables (the section regex terminates at `(?=^## \|\Z)`). Add `assert p.read_text().lstrip().startswith("## Verification")` as a precondition in the parametrized `test_both_runners_agree_on_fixture_corpus` so a heading-less fixture fails at collection rather than passing vacuously. |
+| CONCERN | Scope & Value | The Problem's desired outcome and Success Criteria promise that a `## Verification` section "that contains table rows but no executable check table fails loudly", but only that one instance closes. A section with no pipe-blocks at all (prose-only, empty, or absent) still yields an empty `ParsedTable`, and `all([])` is `True`, so `docs/sdlc/do-build.md:185` exits 0. Solution §1's fourth bullet makes this deliberate, but it is absent from `## No-Gos` where a reader checking scope will look. | **Problem** desired-outcome sentence reworded to the narrower true claim; new **No-Gos** bullet naming the no-pipe-blocks exclusion and its reason; **Solution §1** fourth bullet cross-references it. Docs-only, no code change. | Docs-only, no code change. Reword the Problem sentence to "A `## Verification` section whose tables carry no `Command` column fails loudly instead of quietly gating on nothing", and add a `## No-Gos` bullet naming the exclusion with its reason: closing it would block every plan in the repo that carries no verification table, and belongs to its own issue. |
+| CONCERN | History & Consistency | The plan's own lesson — #2570 "converged the two runners on `split_row_cells` and stopped there" — is repeated one surface over. `.claude/hooks/validators/validate_verification_section.py` keeps its own divergent cell splitting and check-table concept because it is unregistered (confirmed: no entry in `.claude/hooks/manifest.toml`). That hook gates plan *writes*, so on the day #2778 registers it the repo gains a write-time gate that can reject a section both runners accept. | **T20** (`gh issue comment 2778` carrying the three canonical definitions and the import-don't-reimplement instruction) plus a matching **Documentation** checklist line. Code stays out of scope; the **No-Gos** and **Rabbit Holes** entries for `validate_verification_section.py` are unchanged. | Keep the code out of scope; make the carry-forward a deliverable. Add a step after T19: `gh issue comment 2778` recording that the canonical table definition is `agent.verification_parser._iter_pipe_blocks` (a contiguous run of pipe-prefixed lines, per GFM) plus the signature "≥3 columns and one of the first three column names equals `Command`, case-insensitively", that cell splitting is `split_row_cells`, and that registering the hook requires importing both rather than reimplementing them. Add a matching `## Documentation` line so the obligation appears in the plan's own checklist. |
+| NIT | History & Consistency | Five measured figures do not reproduce, though every conclusion survives: 493 plans carry a `## Verification` section, not 500; spike-3's "both match 489 blocks" conflates 489 total pipe-blocks with 480 matches (Risks §1 repeats it as "489 check-table blocks"); spike-1's "six genuine executable rows from each" is 4 data rows (6 lines including header and separator); Risks §3's 68 rows across 11 active plans measures 72 across 12; Risks §4's 15 rows across 6 measures 16 across 7. | Re-measured independently at `main` @ `32f16f0f0` and pinned in a new **Spike Results** preamble. Corrected: 505 plans carry a `## Verification` section (of 590 docs); 502 pipe-blocks, both signature tests classify the same 493 as check tables, zero disagreements; spike-1's dropped rows are 4 data rows (6 lines with header and separator); Risks §3 is 68 rows across 9 active plans; Risks §4 is 21 rows across 4. Two of the critique's own replacement figures did not reproduce (Risks §3 as 72/12, Risks §4 as 16/7); the counts above come from applying a faithful model of `evaluate_expectation`'s six branches, and of the two command-cell extractions, to strict-signature check tables in `docs/plans/*.md` only. Every conclusion is unchanged either way. **T14** re-runs the measurement and writes refreshed figures back into the plan, not only the PR body. | Pin the numbers: append "(measured at `main` @ `f491306c5`)" to the `## Spike Results` heading and correct the five figures. Have T14 write the refreshed corpus number back into the plan rather than only into the PR body, so the plan and the PR cannot drift apart. |
+| NIT | Risk & Robustness | Verification rows 610, 612 and 613 assert `output contains 16/0/1` and `output contains 0/1` against a slash-joined count triple. `output contains X` is a plain substring test (`agent/verification_parser.py:259-262`), so `0/1` also passes against `0/11` and `10/1` — a substring-weak self-check in a plan about expectations that pass without proving anything. | All four count-triple rows now print `checks=N malformed=N skipped=N end` and assert `output contains checks=16 malformed=0 skipped=1 end`. The trailing `end` sentinel closes the remaining substring hole on the final field (`skipped=1` matching `skipped=11`), which named fields alone do not. No grammar change: `re.match(r"output contains (.+)")` keeps interior spaces. | Print `f"checks={len(t.checks)} malformed={len(t.malformed)} skipped={len(t.skipped)}"` and set Expected to `output contains checks=16 malformed=0 skipped=1`. `re.match(r"output contains (.+)")` keeps interior spaces, so a multi-word expectation needs no grammar change and stays inside the frozen-grammar No-Go. |
+| NIT | History & Consistency | Team Orchestration's three tasks carry no mapping onto T1-T19: T1, T18 and T19 belong to no named agent, and `validate-all` names no T at all. With two sequential builder agents, an unassigned task is an unbuilt task. | **Team Orchestration** now carries an explicit `Owns` line per agent covering T1-T20 with no gaps: `parser-scoping` → T1-T8; `validator-delegation` → T9-T13, T15-T17, T19-T20; `validate-all` → T14, T18. T13 moved to `validator-delegation` because it writes a test file and the validator agent is read-and-run only. | `parser-scoping` → T1-T8; `validator-delegation` → T9-T12, T15-T17, T19; `validate-all` → T13, T14, T18. T13 writes a test file rather than only running one, so either grant the validator agent write access to `tests/unit/test_validate_build.py` or move T13 into `validator-delegation`. |
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **Should the PR carry `Closes #2783`?** The plan's position is yes — #2783 and #2843 name
-   the same three lines (`scripts/validate_build.py:301-303`), and the deletion resolves both
-   directions of #2783 with no additional code. Confirm, or say to leave #2783 open and note the
-   overlap in a comment instead.
+Settled during the revision pass. None remains open; the build has no blocking question.
 
-2. **Should a skipped non-check table fail the gate?** The plan says no: a summary table is
-   legitimate plan authoring, and failing on it reproduces #2836 with a nicer message. The cost
-   is the one corpus case where a real check row was orphaned by a blank line and would go
-   quiet (a completed plan, `opus-skill-prompts-4-7.md`). The mitigation is a loud printed
-   diagnostic in both runners. Confirm, or ask for skipped tables to fail.
+1. **The PR carries `Closes #2783`.** #2783 and #2843 name the same three lines
+   (`scripts/validate_build.py:301-303`), and deleting the fallback in favour of
+   `evaluate_expectation` resolves both directions of #2783 with no additional code. The critique
+   independently confirmed that #2783's failure mode becomes structurally impossible under this
+   design. **T19** carries all three closing keywords, and states that #2791 stays open.
 
-3. **Is dropping `validate_build.py`'s bare `output <exact-string>` form acceptable?** Measured
-   usage in active plans: zero. It is the one form the losing evaluator supported that the
-   canonical one does not, and keeping it means adding grammar — which this plan lists as a
-   No-Go and assigns to #2791. Confirm the deletion.
+2. **A skipped non-check table does not fail the gate.** A summary table is legitimate plan
+   authoring, and failing on it would reproduce #2836 with a nicer message. The cost is the one
+   corpus case where a real check row was orphaned by a blank line
+   (`docs/plans/completed/opus-skill-prompts-4-7.md`, a completed plan) and would go quiet. The
+   mitigation is a loud printed diagnostic naming the skipped block's header and row count in both
+   runners' reports, plus the loud failure when a section's tables carry no `Command` column at all.
+   Recorded in **Risks §2** as a deliberate acceptance.
+
+3. **`validate_build.py`'s bare `output <exact-string>` form is dropped.** It is the one form the
+   losing evaluator supported that the canonical one does not, and measured usage in active plans
+   is zero (spike-5). Keeping it means adding grammar, which `## No-Gos` forbids and #2791 owns.
+   The one existing test that exercises it is retargeted at `output > N` per **Test Impact**.
