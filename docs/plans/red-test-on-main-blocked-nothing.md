@@ -94,16 +94,23 @@ No relevant external findings — this is entirely internal infrastructure (laun
 ### spike-2: Are the non-unit tiers healthy enough to widen into?
 - **Assumption**: "Non-unit tiers are so red that widening turns the detector into a noise cannon on night one."
 - **Method**: measurement — `./scripts/pytest-clean.sh tests/tools tests/performance -q --tb=no -p no:randomly -n 4` on `main` @ `57c8986e4`
-- **Finding**: **214 passed, 5 skipped, 0 failed, in 110s.** Fully green. `tests/integration` + `tests/e2e` could not be measured cleanly — see spike-3, which is why.
-- **Confidence**: high for tools/performance; **unmeasured for integration/e2e** (see Open Questions).
+- **Finding**: **214 passed, 5 skipped, 0 failed, in 110s.** Fully green. `tests/integration` + `tests/e2e` (1,202 tests) **could not be measured** — three attempts were defeated by test-DB slot exhaustion from concurrent lanes, which is spike-3's finding.
+- **Confidence**: high for tools/performance (219 tests, measured); **unmeasured for integration/e2e** (1,202 tests). This is a real gap in the evidence and is carried into Risks and Open Questions rather than papered over.
 - **Impact on plan**: Supports widening. Combined with the re-baseline task (Task D), a red tier is survivable regardless: the first widened run takes the `is_first_run` path (:630-632, :691-696) and seeds a baseline rather than dispatching.
 
 ### spike-3: Can a scheduled full-collection run silently report a clean night?
 - **Assumption**: "A pytest run that fails to execute will surface as a non-zero exit or a parse error, so the detector cannot mistake it for green."
 - **Method**: prototype — ran the proposed widened collection directly and inspected exit code and JSON summary shape
-- **Finding**: **False, and reproducibly so.** Two separate runs of `./scripts/pytest-clean.sh tests/integration tests/e2e tests/tools tests/performance` **exited 0 with zero tests executed** — output `5 warnings in 341.54s`, 45 × `node down: Not properly terminated` — because all 15 test-DB slots were held by concurrent lanes and the #2628 guard correctly refused to collide. `run_tests()` logs `returncode` at :200 but never inspects it, and applies no floor to `summary.total` (:211-222). The returned dict would be `{passed: 0, failed: 0, error: 0, skipped: 0, total: 0, failing_parallel: []}` — indistinguishable from a green suite, which then persists as the new baseline via `save_last_run()` (:745).
-- **Confidence**: high (reproduced twice)
+- **Finding**: **False, and reproducibly so.** `./scripts/pytest-clean.sh tests/integration tests/e2e tests/tools tests/performance` **exited 0 with zero tests executed** — output `5 warnings in 341.54s`, 45 × `node down: Not properly terminated` — because all 15 test-DB slots were held by concurrent lanes and the #2628 guard correctly refused to collide. `run_tests()` logs `returncode` at :200 but never inspects it, and applies no floor to `summary.total` (:211-222). The returned dict would be `{passed: 0, failed: 0, error: 0, skipped: 0, total: 0, failing_parallel: []}` — indistinguishable from a green suite, which then persists as the new baseline via `save_last_run()` (:745).
+- **Confidence**: high — **reproduced three times** across the recon window, at different times and with different worker counts (`-n auto` and `-n 6`), whenever sibling lanes held the slots. The base rate is not exotic: this machine had 5-8 concurrent pytest processes for most of the recon session, and the detector is scheduled for 03:00 while the worker and reflection services run 24/7.
 - **Impact on plan**: **This became the highest-value task in the plan (Task B).** It is not a hypothetical: the detector is scheduled for 03:00 local, the worker and reflection services run 24/7, and overnight lanes hold DB slots. Without a run-integrity guard, widening the collection increases the number of nights that silently report green. Fixing leg 3 without fixing leg 5 would make the problem worse, not better.
+
+### spike-7: Does `scripts/pytest-clean.sh` add protection a bare `python -m pytest` lacks?
+- **Assumption**: "Routing through the wrapper is hygiene, not a material safety difference — it could be deferred." (This was Open Question 4 before the evidence arrived.)
+- **Method**: measurement — a fourth attempt at `tests/integration` + `tests/e2e` via the wrapper, `-n 6`
+- **Finding**: **The wrapper's stall watchdog fired and killed the run: exit 143 (SIGTERM) at 637s.** The run was wedged at zero executed tests on DB-slot exhaustion. `PYTEST_STALL_LIMIT_S` defaults to 600s (`pytest-clean.sh:178`), and `watch_for_stall()` (:197-236) TERMed the controller and reaped its workers. **A bare `sys.executable -m pytest` — which is what the detector uses today at :182-199 — has no stall watchdog, and would have burned the full `PYTEST_TIMEOUT_SECONDS` before surfacing anything**, then hit the timeout path at :639-641 that returns 1 *before* any Telegram call.
+- **Confidence**: high (direct observation)
+- **Impact on plan**: **Task E is promoted from optional to load-bearing, and Open Question 4 is answered by evidence rather than judgment.** The wrapper turns a wedged nightly from a 30-minute silent burn into a bounded SIGTERM at 10 minutes — and paired with Task B's guard, exit 143 is exactly the kind of non-zero, non-clean result the integrity check must classify as infrastructure failure rather than green. Task B's trip conditions must therefore include a SIGTERM-shaped exit (negative or >128), not only pytest's own 2/3/4/5.
 
 ### spike-4: Is the reflections framework a viable carrier for a nightly suite run?
 - **Assumption**: "The existing reflections infrastructure is the cheap place to host this (issue question d)."
@@ -205,7 +212,7 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 
 - **Task D — collection-aware baseline.** Add a `collection` field to the state dict recording the paths that produced it. When the recorded collection differs from the current one, treat the run as a baseline seed: take the existing `is_first_run` path (:630-632, :691-696), seeding `dispatched_nodes` and dispatching nothing. This is what stops the widening from re-filing every pre-existing non-unit failure in one night and reopening #2429/#2430/#2462. Add `head_commit` (`git rev-parse HEAD`) in the same edit so a red night is attributable to a SHA — coordinating with #2334's plan, which proposes the same field.
 
-- **Task E — route through `scripts/pytest-clean.sh`.** Replace the bare `sys.executable -m pytest` argv at :182-199 (and the serial re-confirm at :242-258) with the wrapper. Unattended at 03:00 this buys orphan reaping via `trap cleanup EXIT INT TERM HUP PIPE`, the `check-interpreter-pin.sh` refusal, and the `PYTEST_STALL_LIMIT_S` watchdog. The recon run produced 45 `node down` events; without reaping, those workers reparent to PID 1 and accumulate nightly. `--json-report` passes through the wrapper unchanged since it is a pure argv pass-through.
+- **Task E — route through `scripts/pytest-clean.sh`.** Replace the bare `sys.executable -m pytest` argv at :182-199 (and the serial re-confirm at :242-258) with the wrapper. Unattended at 03:00 this buys orphan reaping via `trap cleanup EXIT INT TERM HUP PIPE`, the `check-interpreter-pin.sh` refusal, and the `PYTEST_STALL_LIMIT_S` watchdog. Spike-7 measured the watchdog doing exactly its job — SIGTERM at 637s on a wedged run that a bare invocation would have let burn for the full timeout. The recon runs also produced 45 `node down` events; without reaping, those workers reparent to PID 1 and accumulate nightly. `--json-report` passes through the wrapper unchanged since it is a pure argv pass-through.
 
 - **What this plan deliberately does not do**: add a CI workflow, or add a test leg to the merge predicate or any stage gate. See Rabbit Holes.
 
@@ -253,8 +260,8 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 ## Risks
 
 ### Risk 1: The widened collection re-files every pre-existing non-unit failure on night one
-**Impact:** A flood of duplicate issues, exactly the #2429/#2430/#2462 failure the `dispatched_nodes` set was built to stop. Worse in reputation terms than the gap being fixed, because it teaches the team to ignore the detector.
-**Mitigation:** Task D is a hard requirement, not an optimization. The state file records its collection identity, and a changed collection forces the existing `is_first_run` baseline path (:630-632, :691-696), which seeds `dispatched_nodes` and dispatches nothing. Verify by running once against a state file recording the old collection and asserting zero dispatches.
+**Impact:** A flood of duplicate issues, exactly the #2429/#2430/#2462 failure the `dispatched_nodes` set was built to stop. Worse in reputation terms than the gap being fixed, because it teaches the team to ignore the detector. **The magnitude is unmeasured**: spike-2 confirmed `tests/tools` + `tests/performance` (219 tests) fully green, but `tests/integration` + `tests/e2e` (1,202 tests) resisted three measurement attempts, so the number of pre-existing red non-unit nodes is unknown.
+**Mitigation:** Task D is a hard requirement, not an optimization, and it is designed to make the magnitude irrelevant. The state file records its collection identity, and a changed collection forces the existing `is_first_run` baseline path (:630-632, :691-696), which seeds `dispatched_nodes` and dispatches nothing — so night one files zero issues whether the non-unit tiers are clean or 200-red. Verify by running once against a state file recording the old collection and asserting zero dispatches. Build should also measure the integration tier once on a quiet machine and record the number, so night two's dispatch volume is a known quantity rather than a surprise.
 
 ### Risk 2: The widened run exceeds its timeout and goes silent
 **Impact:** On `TimeoutExpired` the script returns 1 at :640 **before** any Telegram call (the alerts at :720/:734/:740 are all downstream), so a timeout produces no notification at all — only a line in `logs/nightly_tests.log`, a file that does not currently exist on this machine. A too-tight timeout converts the fix into a differently-silent detector.
@@ -409,7 +416,7 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Assigned To**: detector-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `validate_run_integrity(report, returncode, prev) -> str | None`, tripping on exit code in `{2,3,4,5}`, `summary.total == 0`, `total < 0.9 * prev_total` when a prior run exists, or a collector error outcome.
+- Add `validate_run_integrity(report, returncode, prev) -> str | None`, tripping on exit code in `{2,3,4,5}`, **any exit code >128 or negative (signal death — spike-7 measured exit 143 from the wrapper's stall watchdog)**, `summary.total == 0`, `total < 0.9 * prev_total` when a prior run exists, or a collector error outcome.
 - Wire it immediately after the JSON parse in `run_tests()`'s caller, before `reconfirm_serial`.
 - On a trip: alert with the reason named, skip `save_last_run()`, skip dispatch, return non-zero — the same disposition as the existing timeout path.
 - Docstring must state why the returncode alone is insufficient and cite the measured exit-0 case.
@@ -527,4 +534,10 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 3. **What is the right floor for the run-integrity guard?** The plan proposes `total < 0.9 * prev_total` alongside the absolute `total == 0` check. The ratio catches a partial worker collapse that the absolute check misses, but risks a false trip when a legitimate PR deletes a large test file. Is 10% the right tolerance, or should the ratio check only warn while `total == 0` blocks?
 
-4. **Should Task E (routing through `scripts/pytest-clean.sh`) ship in this plan or separately?** It is the right thing for an unattended 03:00 run — orphan reaping, interpreter-pin refusal, stall watchdog — and the recon run produced 45 `node down` events that would otherwise accumulate nightly. But it is the one task that changes *how* the suite is invoked rather than *what* is collected, and it could be deferred without weakening the core fix.
+4. **How red is `tests/integration/`?** Four measurement attempts during recon were defeated by test-DB slot exhaustion from concurrent lanes, so the 1,202 integration + e2e tests remain unmeasured. Task D makes night one safe regardless (it re-baselines and dispatches nothing), so this does not block the plan — but someone should run the integration tier once on a quiet machine so night two's dispatch volume is a known number. Is there a window where the machine is free of lanes, or should build schedule that measurement itself?
+
+<!-- Open Question 4 in the first draft asked whether Task E could be deferred.
+     spike-7 answered it with evidence: the wrapper's stall watchdog fired at
+     637s on a wedged run that a bare invocation would have let burn for the
+     full timeout. Task E ships in this plan. -->
+
