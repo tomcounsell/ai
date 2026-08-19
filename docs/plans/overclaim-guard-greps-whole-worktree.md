@@ -955,7 +955,7 @@ deliberately not exposed to the agent.
 - **Assigned To**: guard-converter
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=())`.
+- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files)`. **No `allow=` parameter** — every exemption across all four call sites is path-shaped and belongs in a negative pathspec.
 - Define **two** exception classes: `TrackedScanError` (scan could not run) and
   `VacuousScanError` (scan examined too little). One class with two messages is
   not acceptable — it cannot be asserted apart except by string matching.
@@ -967,24 +967,56 @@ deliberately not exposed to the agent.
   pathspec both yield empty stdout (rc 128 vs 0), so counting first
   misclassifies a scan failure as vacuity and the Failure Path probe goes green
   for the wrong reason.
+- **Count files that can actually be read, and assert none is missing.** After
+  the returncode triage, filter `files` to those that exist on disk. Raise
+  `VacuousScanError` if **any** corpus path is absent from the working tree, and
+  separately if `len(present) < min_files`. Both are required: `git ls-files`
+  reports index rows while `git grep` reads working-tree content, and with one
+  file moved aside the present count is 265 of 266 — comfortably above A1's floor
+  of 170, so the floor alone stays green on a measured false clean (verified at
+  `7ba89ca5c`). See obligation 4.
+- Do **not** reach for `git grep --cached` to close that gap. `--cached` reads
+  content from the index, which would make V-17's unstaged
+  `printf … >> tools/sdlc_stage_marker.py` invisible and turn the
+  demonstrated-red proof green.
 - Implement three-way `git grep -n` exit triage: 0 → violation with `file:line`;
   1 → clean; anything else → `TrackedScanError` carrying the exit code and stderr.
 - Pass **no** regex flag. `git grep` defaults to POSIX BRE, matching `grep`'s
   own default, so A3's escaped patterns carry over byte-for-byte. Explicitly do
   not add `-F`, `-E`, or `-P`.
-- Do **not** pass `--untracked`. Document the tracked-only boundary in the
+- Do **not** pass `--untracked`. Document the tracked-files boundary in the
   docstring.
 - Reject an empty or whitespace-only pattern.
 - Docstring covers all four obligations, the BRE dialect sentence, the
-  fail-closed exit-128 behavior, the tracked-only boundary, and the rule that
-  `allow=` is for line-substring exemptions only while path-shaped exemptions
-  belong in negative pathspecs.
+  fail-closed exit-128 behavior, and the two-part corpus contract stated verbatim:
+  *"`git grep` resolves the file list from the index and reads each file's content
+  from the working tree; `--cached` would read content from the index instead.
+  This helper deliberately uses the working-tree form so an uncommitted
+  reintroduction is caught before it is staged."* Follow it with the boundary
+  sentence: a violation in an already-tracked file is caught immediately, staged
+  or not; a violation in a brand-new untracked file is invisible until the file is
+  added to the index. Do **not** describe the corpus as "index-scoped content" —
+  that is the error this round corrects, and the docstring is where it would
+  become doctrine.
 - Write `tests/unit/test_tracked_content_helper.py` covering: match, clean,
   `pytest.raises(TrackedScanError, match="128")` via `GIT_INDEX_FILE=/dev/null`,
   `pytest.raises(VacuousScanError)` via `'nosuchdir/*.py'` (the two asserted
-  **apart**, each against the input that produces it), empty pattern,
-  whitespace-only pattern, BRE metacharacter round-trip (`zzz\.never(` clean,
-  then tripping on a planted `zzz.never(`), and `allow=` line filtering.
+  **apart**, each against the input that produces it), a corpus with one tracked
+  file moved aside → `VacuousScanError` naming the absent path, empty pattern,
+  whitespace-only pattern, and the BRE metacharacter round-trip.
+- **Name the test functions so `-k` can select them unambiguously.** V-7 selects
+  on `scan_error`, V-8 on `vacuous`, V-21 on `positive_control`. Those substrings
+  must appear in exactly the intended test names.
+- **Write the BRE probe pattern as a raw string:** `PROBE = r"zzz\.never("`, so
+  the file carries the two-character sequence backslash-dot and the Python value
+  handed to `git grep` is `zzz\.never(`. This matters for V-12, which greps the
+  test file for that literal: a raw string puts **one** backslash in the file
+  bytes, and V-12's `'zzz\\.never('` matches it. Writing it non-raw as
+  `"zzz\\.never("` would put **two** backslashes in the file bytes and V-12 would
+  need four — measured both ways at `7ba89ca5c`. Raw is also the repo-normal way
+  to write a regex literal, so it removes the trap rather than documenting it.
+  The test asserts the pattern reports clean against the real corpus and trips on
+  a planted `zzz.never(`.
 
 ### 2. Convert the four vulnerable subprocess guards
 - **Task ID**: build-conversions
