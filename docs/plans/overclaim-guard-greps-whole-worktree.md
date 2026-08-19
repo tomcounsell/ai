@@ -1569,10 +1569,10 @@ a live production service down.
 **Round-4 process note.** The three critic lenses were executed by the critique
 driver in a single process rather than by three independently-spawned subagents:
 the Agent/Task tool was not available in this invocation context. The roster
-barrier was still satisfied on its own terms — three grounded result files under
-`.critique-runs/2807-1787134039685570000/`, each carrying the terminal completion
-fence, with `critique-roster-check --plan-path` reporting
-`{"complete": true, "missing": [], "ungrounded": []}`. Every finding above is
+barrier was still satisfied on its own terms — three grounded result files, each
+carrying the terminal completion fence, with `critique-roster-check --plan-path`
+reporting `{"complete": true, "missing": [], "ungrounded": [], "roster_count": 3,
+"completed_count": 3}` before aggregation ran. Every finding above is
 backed by a command run against `dbb8baaf5` and the output is quoted in the
 finding, so the evidence stands independently of how many processes produced it.
 
