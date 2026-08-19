@@ -5,14 +5,25 @@ appetite: Large
 owner: Valor Engels
 created: 2026-08-13
 tracking: https://github.com/tomcounsell/ai/issues/2739
+also_tracks: https://github.com/tomcounsell/ai/issues/2834
+closes: [2739, 2834]
 last_comment_id: none
+also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-18T04:18:16Z
+revision_applied_at: 2026-08-19T00:00:00Z
 ---
 
 # Docs Auditor Review Gate
 
+**Issues closed by this lane: #2739 and #2834.** The implementation PR carries
+`Closes #2739` and `Closes #2834`.
+
 ## Problem
+
+Two defects in one module, both about the docs auditor acting on its own judgment
+without a human in the path.
+
+### Defect 1 (#2739) — the auditor is its own committer
 
 An automated writer generates documentation rewrites and commits them itself, in the
 same function call, with nothing between generation and the permanent record.
@@ -51,25 +62,95 @@ the auditor makes, so the next generator bug takes exactly the same path.
   dirty-tree guard and skips. The auditor is permanently disabled until a human
   notices the dirt by hand.
 
+### Defect 2 (#2834) — the auditor cannot tell a live reference from an obituary
+
+The same module's *reporting* channel gets the reference question wrong in both
+directions at once, and the two errors share one root cause: nothing in
+`_detect_deleted_target_issues` (`:876`) asks whether a reference is a claim about the
+present or a record of the past.
+
+- **`.md` breaks reach nobody.** The detector matches only backticked `.py` paths
+  (`` re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`") ``, `:893`). Markdown-link `.md`
+  targets were handled by `_detect_readme_broken_entries`, which *auto-repaired* by
+  deleting the offending index line and never reported. #2741 / PR #2842 deleted that
+  detector — correctly, because an auditor deleting lines from a human's index file on
+  its own judgment is precisely the unreviewed-write class #2739 exists to gate. The
+  consequence is a silence: a broken `.md` link is now neither repaired nor reported.
+  Measured on the live corpus at plan time, **19 distinct broken `.md` link targets**
+  sit in `docs/` outside the archived plan directories and reach nobody (spike-6).
+- **`.py` deletion narrative files false issues.** The detector *does* carry a
+  deletion-narrative hatch (`_is_documented_deletion`, `:847`, from #1555), but its cue
+  lists are too literal to fire on real prose. On 2026-08-17 it filed three issues in one
+  run and two were false:
+
+  | Issue | Site | Why the hatch missed it |
+  |---|---|---|
+  | #2840 (closed, not-a-bug) | `docs/features/harness-abstraction.md:189` | heading is `## Hook Cleanup (Phase 5)`; `_DELETION_HEADING_KEYWORDS` has `deleted`, not `cleanup`. Line prose is "deleted (250 lines)" and "no longer needed"; `_DELETION_PROSE_CUES` wants the exact phrases "deleted module" / "no longer exists" |
+  | #2841 (closed, not-a-bug) | `docs/features/harness-adapter.md:19`, `:115` | `:115`'s heading is `## Dead SDK Path Deletion` — `"deleted" in "…deletion"` is `False`, so an inflection gap defeats it. `:19`'s cue sits two lines above the match and the window is ±1 |
+  | #2839 (**true positive**) | `docs/features/standardized-enums.md:19` | a live present-tense table row for `SessionType.GRANITE` citing `tools/granite_interactive_tui_poc/cli.py` |
+
+  Two of three filings in one night cost a human a triage pass each. The detector is not
+  merely noisy: it cannot distinguish a live pointer from an obituary.
+
+- **Neither channel converges.** `_open_issue_exists` (`:1003`) queries
+  `gh issue list --state open`, and `_file_issue_if_new`'s Redis dedup key expires at 30
+  days (`:1091` and `:1133`, `ex=86400 * 30`). A finding a human closes *without* editing the doc is
+  therefore re-filed a month later, forever. `audit()`'s own comment at `:1259-1265`
+  already names this and its only mitigation is scope: filing is gated to rotation so the
+  flood is metered, not stopped. Widening the detector without fixing dedup widens a
+  source that meters but never converges.
+
 **Desired outcome:**
 
 Every write the docs auditor makes passes a named review gate before it becomes a
 permanent record; the auditor never leaves the repository in a state it did not
-intend; and when it declines to do something, a human finds out through a channel
-somebody actually reads.
+intend; when it declines to do something, a human finds out through a channel
+somebody actually reads; and every reference it reports is a claim about the present,
+reported once, in the frame the document is actually read in.
 
 ## Freshness Check
 
-**Baseline commit:** `15e66d93127a8f28d51cc94713b0f6dd48d2259d` (main)
-**Issue filed at:** 2026-08-13T03:27:43Z
-**Re-verified at:** 2026-08-18 (refresh pass; the original check ran 2026-08-13 against
-`48feedf318a768f6f38d364dc998a67a69f16027`)
-**Disposition:** Minor drift — the plan's core work (Q1-Q5) is untouched and every
-defect it names is still live on `main`. What moved is Q6: the rename channel this plan
-proposed to delete was deleted upstream by #2741 / PR #2842 (merged `a9205b065`,
-2026-08-18). Item 2 of the issue is therefore already resolved and is no longer this
-lane's work. The spike evidence that justified the deletion is preserved below as the
-record of *why* it happened.
+**Baseline commit:** `f491306c5491c93b1481094ff602552c010521c7` (`origin/main`, 2026-08-19)
+**Issues filed at:** #2739 — 2026-08-13T03:27:43Z; #2834 — 2026-08-17, scope-widening
+comment `5324492042` 2026-08-18T06:31:48Z
+**Re-verified at:** 2026-08-19 (the #2834 fold-in pass; earlier passes ran 2026-08-13
+against `48feedf31` and 2026-08-18 against `15e66d931`)
+**Disposition:** Minor drift for Q1-Q5, plus a **scope addition**. `reflections/docs_auditor.py`
+is byte-identical between `15e66d931` and `f491306c5` (`git diff` over the file returns
+empty), so every anchor in the tables below still holds and the Q1-Q5 work is untouched.
+The addition is #2834, folded into this lane as **Q7**. Q6 remains a landed-fact record:
+the rename channel was deleted upstream by #2741 / PR #2842 (`a9205b065`, 2026-08-18).
+
+**#2834's own `file:line` citations are stale and are corrected here.** Both were written
+against a pre-#2842 tree:
+
+| #2834 says | Reality on `f491306c5` |
+|---|---|
+| `_detect_deleted_target_issues` at `:1056` | `:876`. The regex is at `:893` |
+| `_detect_readme_broken_entries` at `:478` | **Gone.** `git grep -c '_detect_readme_broken_entries' origin/main` returns nothing; PR #2842 deleted it. `:478` on today's file is inside `_detect_stale_term_fixes` |
+
+That second correction changes nothing about the issue's substance — the `.md`
+reporting gap is *caused* by the deletion — but any plan text or build step that expects
+to find and edit `_detect_readme_broken_entries` would be looking for a function that
+does not exist. There is nothing to modify; there is only a branch to add.
+
+**Anchors #2834's fold-in relies on, all read on `f491306c5`:**
+
+| Symbol | Line | Confirmed |
+|---|---|---|
+| `NEIGHBORHOOD_CAP = 20` | `:69` | Holds |
+| `_PLACEHOLDER_PATH_COMPONENTS` | `:773-775` | Holds; 9 stand-in names, `.py`-stem aware only |
+| `_DELETION_HEADING_KEYWORDS` | `:778` | Holds; `("migration", "removed", "deleted", "deprecated")` |
+| `_DELETION_PROSE_CUES` | `:781-789` | Holds; 5 exact phrases |
+| `_is_placeholder_path` | `:790` | Holds; strips a `.py` suffix on the final component only |
+| `_build_line_context` | `:815` | Holds; returns `(in_fence, heading_for_line)`, pure string scan |
+| `_is_documented_deletion` | `:847` | Holds; fence / heading-keyword / ±1-line prose cue |
+| `_detect_deleted_target_issues` | `:876`, regex `:893` | Holds |
+| `_open_issue_exists` `--state open` | `:1003`, state literal `:1025-1026` | Holds |
+| `_file_issue_if_new` 30-day dedup TTL | `:1064`, `:1091`, `:1133` | Holds |
+| `_resolve_neighborhood` doc-relative link resolution | `:259`, outbound loop `:286-298` | Holds — **this is the in-module precedent for frame-correct resolution** (`(full.parent / target).resolve()` then `relative_to(repo_root)`) |
+| Advisory detector call site | `:1267` | Holds; `scope_mode == "rotation"` only |
+| Non-convergence already documented in code | `:1259-1265` | Holds — the comment names the closed-without-fixing re-file explicitly |
 
 **File:line references re-anchored to current `main`.** The original table mapped issue
 claims onto the `origin/session/docs-auditor-rename-guard` branch (PR #2728). That branch
@@ -124,6 +205,15 @@ precondition is satisfied upstream rather than by this lane.
   describes no longer exist.
 - **#2711, #2713** — **CLOSED**; fixed by PR #2728, not by this work.
 - **#2743** (delete `_write_liveness`) — still **OPEN**. See the caveat under Q5.
+- **#2834** — **OPEN**, folded into this lane as Q7. Its `Refs #2741, #2739` footer is
+  what ties it here. Its two `file:line` citations are corrected in the table above.
+- **#2839** — **OPEN**, and it is a *true positive* the auditor filed:
+  `docs/features/standardized-enums.md:19` cites `tools/granite_interactive_tui_poc/cli.py`
+  in a live present-tense table row. Q7 must not silence it, and spike-7 asserts it does
+  not. Fixing that doc is not this lane's work.
+- **#2840, #2841** — **CLOSED as not-a-bug**. Both are the false-positive class Q7's
+  hatch-widening removes; both sites were re-read on `f491306c5` and the defective
+  classification reproduces exactly (spike-7).
 
 **Commits on main since the issue was filed** (touching `reflections/docs_auditor.py`,
 `agent/reflection_scheduler.py`, `.claude/skill-context/do-docs.md`,
@@ -135,6 +225,10 @@ precondition is satisfied upstream rather than by this lane.
 | `ffbae5b1d` (#2782) | migration-context hatch (#2744) + bare-name existence invariant (#2759) | Widens the withhold classes and threads `fixes_withheld` into the PR body, the Telegram message, and `_write_liveness`. Q5's framing is corrected accordingly |
 | `a9205b065` (#2842) | deleted the rename channel | Q6 is landed fact, not a decision this plan makes |
 
+**Nothing has touched `reflections/docs_auditor.py` since `a9205b065`.** `git log
+--oneline origin/main -- reflections/docs_auditor.py` still tops out at that commit, and
+`git diff 15e66d931..f491306c5 -- reflections/docs_auditor.py` is empty.
+
 **Active plans overlapping this area:** none. `docs/plans/docs-auditor-rename-guard.md`
 shipped as PR #2728 and the rename-channel deletion shipped as PR #2842; no open plan
 touches `reflections/docs_auditor.py`.
@@ -143,7 +237,19 @@ touches `reflections/docs_auditor.py`.
 commit and the defective code paths are all present and unchanged — the self-commit at
 `:1297`, the `git add -A` at `:1494`, the unchecked `finally` restore at `:1557`, the late
 guards at `:1476-1483`, and the auto-merge predicate at `:2005`. Item 2 is gone: the code
-it described no longer exists.
+it described no longer exists. **#2834's two defects both reproduce** on the baseline:
+the `.md` gap is structural (the detector's regex admits only `.py`), and the
+false-positive class was reproduced by executing the real
+`_is_documented_deletion` / `_detect_deleted_target_issues` pair against the three cited
+sites — #2840's and #2841's still classify as findings, #2839's still classifies as a
+finding and should (spike-7).
+
+**Portability correction applied in this pass.** Several Prerequisites and Verification
+rows hardcoded `/Users/valorengels/src/ai` as the shared main checkout. The lane can be
+built on any fleet machine and the home directory differs per host, so a hardcoded row
+fails for a reason that has nothing to do with the condition it tests. Every such row now
+uses `${AI_REPO_ROOT:-$HOME/src/ai}`, the idiom `docs/sdlc/do-plan.md` already uses. Still
+pipe-free and still POSIX `/bin/sh`.
 
 ## Prior Art
 
