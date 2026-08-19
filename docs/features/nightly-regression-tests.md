@@ -129,7 +129,57 @@ change of scope) is treated as a fresh baseline: the whole currently-failing
 population is seeded into `dispatched_nodes` and escalated as one umbrella
 triage session, so it is never re-filed node-by-node the next time the
 detector runs — the #2429/#2430/#2462 duplicate-filing trap this design
-protects against by construction.
+protects against by construction. Every node absorbed into the seed is
+permanently out of scope for this detector: it will not be filed until it
+stops failing and re-fails. *Repairing* the seeded population is a separate
+lane (the #2852 model, "get `main`'s unit suite to zero"); this detector's job
+is only ever to *book and escalate* it once, not to fix it.
+
+**Starvation presents as missing tests, never as errors** — Since #2628,
+`claim_test_db()` polls inside `tests/conftest.py::pytest_configure`, before
+collection and before any test item exists; a worker that cannot claim a slot
+aborts its whole session there and contributes zero test items and zero
+`error` outcomes — it dies as "node down: Not properly terminated" rather
+than failing individual tests. That is why the coverage floor, not the error
+ceiling, is what catches it: an error-keyed check would read a starved run as
+"nothing errored" and trust a report that silently ran a fraction of the
+suite.
+
+**`dispatched_nodes` is per-machine state, and cross-machine dedup is a
+convention, not an enforced invariant** — Each machine's `dispatched_nodes`
+lives in its own `data/nightly_tests_last_run.json`; two machines with the
+same red node both dispatch unless something else prevents it. The only thing
+that does is the literal issue title (`Nightly regression: <nodeid>`), which
+the detector emits verbatim and a triage session is instructed to search for
+before filing — nothing verifies that an issue was actually filed under that
+exact title, so a future change to the title format silently reopens
+#2429/#2430/#2462 across the fleet. `MAX_DISPATCH_NODES` (10) bounds the
+blast radius of any single run's dispatch, not the cross-machine duplication
+risk; a shared, Redis-backed dispatch set is the real fix and is deliberately
+deferred.
+
+**`NIGHTLY_XDIST_WORKERS` is env-overridable, not a pinned literal** —
+Default `6`, derived from this machine's 15 test-DB slots
+(`tests/db_claim.py`) with headroom left for sibling lanes. `-n 4` is the
+practical floor: below it the run cannot complete inside
+`PYTEST_TIMEOUT_SECONDS` (scaling the ~1260s unit-tier baseline by the ~1.1x
+collection-widening growth and inversely by worker count puts `-n 2` at
+~6900s and `-n 1` at ~13,900s, both well past the ceiling). A machine with a
+different core count or slot pressure overrides the env var; the code and its
+tests never pin the literal `"6"`.
+
+## Update-Time Staleness Warning
+
+`/update` warns — only on the leg where the service is confirmed
+`"installed"` — when `now - max(plist_mtime, run_at) >= 2 days`. `plist_mtime`
+is the mtime of `~/Library/LaunchAgents/com.valor.nightly-tests.plist`;
+`run_at` is read from `data/nightly_tests_last_run.json`, and an absent or
+malformed value falls back to the plist mtime rather than "unknown, warn" —
+so the very `/update` that installs the detector never warns about a run that
+hasn't happened yet. This is the only check in the system that observes the
+*absence* of a run: a booted-out plist, a machine asleep at 03:00, and the
+run lock's silent collision-exit are all otherwise indistinguishable from a
+clean night.
 
 ## Installation
 
