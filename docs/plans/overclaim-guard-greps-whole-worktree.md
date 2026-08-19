@@ -636,6 +636,39 @@ file**: write a temp file under `tmp_path` containing
 self-exemption and a matcher that flags nothing at all are indistinguishable —
 both present as a green meta-guard.
 
+**The meta-guard's own floor and the positive control collide unless root and
+floor are independent parameters.** The meta-guard needs a non-vacuity floor (it
+must not become the thing it guards against), but the control points the scanner
+at a `tmp_path` holding exactly one file. If the floor is baked into the scanner,
+the control's one-file root trips the floor *before* reaching the offender
+assertion, so the control passes for the wrong reason — reintroducing the exact
+failure it was added to rule out and leaving V-21 uninformative.
+
+Parameterize both:
+
+```python
+def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]:
+    """Return paths under *root* that invoke a bare recursive grep."""
+    scanned = sorted(root.rglob("*.py"))
+    if len(scanned) < min_files:
+        raise AssertionError(
+            f"scanned {len(scanned)} files under {root}, floor {min_files} — "
+            "the sweep would be vacuous"
+        )
+    ...
+```
+
+The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control
+calls `_scan_for_bare_grep(tmp_path, min_files=1)` and asserts the planted path
+is in the returned list.
+
+**`min_files=500`, not the 600 the critique proposed.** `tests/` holds 784
+tracked `.py` at `7ba89ca5c`, so 600 is 76.5% — above this plan's own 60-70%
+band (Risk 1) and exposed to ordinary churn. 500 sits at 63.8%.
+
+Never let the control pass a floor of `0`: a scanner that returned `[]`
+unconditionally would then satisfy both callers and both would stay green.
+
 **Out-of-scope-but-adjacent**, recorded so the next reader is not surprised:
 `scripts/checks/no_new_rebuild_callers.sh:46` has the same ambient-cwd hazard and
 is invoked by no test; `reflections/maintenance.py::run_legacy_code_scan` is
