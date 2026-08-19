@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2853
 last_comment_id: 5337658489
+companion_tracking: https://github.com/tomcounsell/ai/issues/2839
+companion_last_comment_id: 5324617995
 ---
 
 # Stale doc/prose references: wrong reflection name, deleted granite package
@@ -73,6 +75,7 @@ recorded as a `## Recon Summary` on both issues.
 | `docs/features/standardized-enums.md:19` | points at `tools/granite_interactive_tui_poc/cli.py` | **Holds.** `ls -d tools/granite*` → no match; no `valor-granite-loop` in `pyproject.toml`. |
 | `config/enums.py:20-25` | not cited | Correct historical framing; the model wording to copy. Its `"Removal is #1927's scope"` pointer is itself stale — see Task 3. |
 | `docs/features/bridge-worker-architecture.md:564` | not cited | Already correct ("the standalone CLI ... no longer exists"). No change. |
+| `models/agent_session.py:4` and `:102` | raised in #2839 comment `5324617995` | Already correct: `"granite" persists on historical records only`. Third in-repo wording precedent. No change. |
 
 **Cited sibling issues/PRs re-checked:**
 - PR **#2833** — MERGED 2026-08-18T02:57:37Z. Fixed only its own PR-introduced "daily"
@@ -219,8 +222,10 @@ historical value; its sole producer (the standalone `valor-granite-loop` CLI) wa
 deleted with the PTY substrate (plan #1924); nothing creates new sessions with it; it
 is retained so pre-cutover Redis records carrying `session_type="granite"` keep
 hydrating and rendering. No file path (none exists). No PTY-container sentence (the
-container is gone). This matches the wording precedent already in
-`docs/features/bridge-worker-architecture.md:564`.
+container is gone). Three in-repo precedents already say exactly this, and the new row
+must contradict none of them: `config/enums.py:20-25`,
+`docs/features/bridge-worker-architecture.md:564`, and `models/agent_session.py:4, 102`
+(`"granite" persists on historical records only`).
 
 Line 11's lead-in ("Discriminator for AgentSession: eng, teammate, or granite") is left
 as an accurate enumeration of the enum's members, matching `config/enums.py`.
@@ -505,3 +510,14 @@ None. Both issues' premises were re-verified against main `f491306c5` at plan ti
 one false premise (#2853's "actual cadence is worker startup only") was corrected and
 recorded as a `## Recon Summary` on the issue, and the site inventory was replaced with
 a repo-wide token sweep. No decision requires human input.
+
+**Issue comments synced.** #2853 comment `5337658489` (the supervisor's premise
+correction) is folded into the Freshness Check and the Technical Approach. #2839
+comments `5324500746` and `5324617995` are folded in as well: both ask "does
+`SessionType.GRANITE` still have live producers before you repoint the path?" and answer
+their own question — it does not, the member stays for historical-record hydration, and
+the fix is a one-row doc edit. `5324617995` also surfaced `models/agent_session.py:4, 102`
+as a third in-repo wording precedent, now cited in the Technical Approach. Its closing
+recommendation ("no plan needed, a direct commit on `main`") is superseded: #2839 is
+being carried through the pipeline as the companion of #2853 in one two-issue lane, so
+it lands via the lane's PR with `Closes #2839` rather than as a hotfix.
