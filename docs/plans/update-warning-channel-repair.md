@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2845
 last_comment_id: 5317246173
 revision_applied: true
-revision_applied_at: 2026-08-19T07:48:54Z
+revision_applied_at: 2026-08-19T08:13:23Z
 ---
 
 # /update Warning Channel Repair
@@ -630,6 +630,31 @@ Integration coverage: a test asserting the composed `message_text` (the exact st
 
 The three builders touch disjoint files — `bridge/update.py`; `scripts/update/verify.py` + `.env.example`; `scripts/update/run.py` + `scripts/update/warn_state.py` + `tools/doctor.py` — and can run in parallel in the single session worktree without interleaving commits. **This is now true as written:** an earlier revision put a `run.py` edit in Task 1 while Task 4 edited the same lines, which would have had two parallel builders writing one file. All `run.py` work, including every `_append_warning` conversion, belongs to `warn-state-builder`; `update-channel-builder` never opens it. Task 5 is the one cross-builder seam and it is handled by sequencing, not by sharing: `update-channel-builder` reopens `bridge/update.py` only after Task 4 has landed the `SUPPRESSED_PREFIX` constant, so the file still has exactly one writer and never two at once.
 
+### Build Handoff
+
+**This plan is cleared to build.** Critique round 11 returned READY TO BUILD with 0 blockers, 3 concerns and 1 nit; all four are embedded above and their `Addressed By` cells are closed. `revision_applied: true`, `revision_applied_at` postdates the round-11 verdict, and the `plan_revising` lock is cleared. Nothing here is awaiting a human answer — all three original open questions are settled in Resolved Questions, and scope is the whole of #2845.
+
+**Start these three concurrently** (each `Depends On: none`, `Parallel: true`, and their file sets are disjoint so they can share one worktree without interleaving):
+
+| Task | Owner | Files it may open |
+|------|-------|-------------------|
+| 1 — Warning parser and fix-session payload | `update-channel-builder` | `bridge/update.py`, `tests/unit/test_update_warning_extraction.py` (new), `tests/unit/test_bridge_update.py` |
+| 2 — env-completeness required/optional split | `env-completeness-builder` | `scripts/update/verify.py`, `.env.example`, `tests/unit/test_env_completeness.py` |
+| 4 — warn_state for human-gated warnings | `warn-state-builder` | `scripts/update/run.py`, `scripts/update/warn_state.py`, `tools/doctor.py`, `tests/unit/test_update_warn_state.py` |
+
+Everything after that is strictly serial: **3** (needs 2's 4-tuple) → **5** (needs 1 and 4, and reopens `bridge/update.py` under its *original* writer) → **6** review → **7** docs → **8** validation.
+
+**Facts a cold builder needs that no task body states:**
+
+- **`scripts/update/run.py` has exactly one writer, ever.** `update-channel-builder` never opens it, including for the `_append_warning` conversion. An earlier revision split that file across two parallel builders and it was wrong.
+- **Re-measure before trusting a count.** The 82 / 85 / 2 figures in the conversion gate, the 89 `.env.example` declarations, and every `file:line` in this plan were exact at `0d4eddf59`. They are re-verified, not eternal. `git log --oneline <sha>..HEAD -- bridge/update.py scripts/update/run.py scripts/update/verify.py scripts/update/warn_state.py .env.example` returning empty is the cheap check.
+- **The local `grep` is `ugrep` and `grep -c` exits 1 when the count is 0.** Every Verification row whose Expected is "count == 0" exits non-zero on success. Gate on the printed number, never `$?`. Full note under the Verification table.
+- **Two Verification rows can read green without proving anything, and both say so in-row.** The `@optional`-leak row prints `VACUOUS` when this machine's vault happens to hold every marked key — that is an unrun row, not a pass. The `extract_update_warnings` `awk` row reads 0 vacuously until Task 1 lands, and its flag-driven form must be re-mutated against the real file afterwards.
+- **Never derive the `@optional` set from `check_env_completeness` output on the build machine.** It is a per-machine measurement (27 keys where this plan was written, 64 here) and its wider form includes real credentials. The two-leg criterion plus the six-key floor is the authority.
+- **Do not follow `docs/features/env-completeness-validation.md:61`.** Its instruction to copy declarations into the vault `.env` writes empty values into a file every machine shares and breaks `Settings()` construction fleet-wide. Task 7 replaces that text; until then treat it as live hazard, not guidance.
+- Use `scripts/pytest-clean.sh`, never bare `pytest`. Run SDLC stage tools from the lane worktree — `find_plan_path` resolves plans from the checkout it runs in.
+- **Two deliverables land in the PR body, not in code**: the red-state output of `test_cron_summary_warnings_trigger_fix_session` against unmodified `bridge/update.py` (Task 1), and Task 8's steady-state warning residue measurement with a one-line disposition per surviving warning. Neither is a gate; both are evidence, and a PR missing them is incomplete.
+
 ## Step by Step Tasks
 
 ### 1. Warning parser and fix-session payload
@@ -647,7 +672,7 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - Add `test_fix_session_brief_is_legible`, a single composition test over the exact string handed to `enqueue_agent_session` (reach it via `bridge_update._queue_fix_session.await_args`, the idiom the existing tests already use). It asserts the three properties Success Criteria calls out and containment cannot: `message_text.index(last_warning) < message_text.index("[... ")` on a payload long enough to force truncation; the literal `characters elided` present on that cut, with every line of the emitted tail a whole line of the input; and the path from a `<<FILE:/path>>` input line present in `message_text`.
 - On a `(N warnings)` / `⚠️`-bullet-count mismatch, append one synthetic entry — `f"[update] WARN: summary declared {n} warning(s) but {len(warn_bullets)} were parsed"` — to the returned list. That is the named channel for the cross-check; do not invent a logger call or a second return value, both of which the plan rejects in Technical Approach → Defect 2.
 - **The denominator is a dedicated `warn_bullets` local, never `len()` of the returned list** (critique round 11 CONCERN). The return value also carries the failure-block `-` bullets and the four legacy-prefix lines, and `scripts/remote-update.sh` writes legacy-prefix lines (`[update] WARN:` at `:28`/`:40`/`:142`, `ERROR:` at `:150`, `RESTART FAILED:` at `:327`/`:369`/`:460`) into the very stdout `bridge/update.py:209-215` turns into `status_lines`. Counting them would report a producer/parser disagreement that does not exist, on the runs that most need a clean brief. Only `⚠️` bullets count, because `run.py:2486-2492` renders exactly one `⚠️` bullet per `result.warnings` entry and `N` is derived from that same list. Test the negative directly: `status_lines` holding `"[update] WARN: fetch/fast-forward failed or had conflicts — continuing with current code"` followed by `"up to date at abc1234 (2 warnings)"` and its two `⚠️` bullets returns exactly **three** entries and **no** synthetic mismatch entry.
-- **The cross-check fires only when a `(N warnings)` summary line was actually seen** (critique round 10 CONCERN). Task 4 makes the failure branch render `⚠️` bullets under an `update failed at <sha>` summary, which carries no count — so a bare `n != len(bullets)` comparison with `n` defaulting to 0 appends a spurious mismatch entry to every failed run with warnings. Track "a summary line was parsed" as its own condition and test the negative directly: bullets with no summary line yields exactly those bullets and no synthetic entry.
+- **The cross-check fires only when a `(N warnings)` summary line was actually seen** (critique round 10 CONCERN). Task 4 makes the failure branch render `⚠️` bullets under an `update failed at <sha>` summary, which carries no count — so a bare `n != len(warn_bullets)` comparison with `n` defaulting to 0 appends a spurious mismatch entry to every failed run with warnings. Track "a summary line was parsed" as its own condition and test the negative directly: bullets with no summary line yields exactly those bullets and no synthetic entry. This precondition and the round-11 denominator rule combine: fire only when a summary line was parsed **and** `n != len(warn_bullets)`.
 - Tests: green transcript with adversarial "error"/"warning" filenames yields `[]`; a well-formed `(0 warnings)` summary yields `[]`; 27-warning payload round-trips with the last warning present; a warning with an embedded newline survives complete; a README-shaped warning carrying the nine-line `_EXAMPLE_BLOCK` survives complete; a multi-line error bullet survives complete; empty input; failure-block bullets matched only inside the block; a count mismatch appends the synthetic entry, **asserted by content**.
 - **The `suppressed:`-inertness test here is shape-only, and the load-bearing version belongs to Task 5.** This task has `Depends On: none` and runs parallel to Task 4, which is what creates `SUPPRESSED_PREFIX` — so a test written here can only hardcode a guessed spelling, and if Task 4 lands a different one it asserts `[]` about a string that is not the trailer and passes forever. Assert here that *a line matching the trailer's shape* (no `⚠️`, none of the four legacy prefixes) extracts as `[]`; do not import or re-spell the constant. Task 5 pins the real trailer.
 
