@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
 last_comment_id: 5324622874
 revision_applied: true
-revision_applied_at: REVISION_APPLIED_AT_PLACEHOLDER
+revision_applied_at: 2026-08-19T05:45:10Z
 ---
 
 # Terminal Verdict and PR Resolution: the three stage-marker residuals left outside #2826's fence
@@ -173,7 +173,16 @@ is drawn from an ordering GitHub does not guarantee and the CLI cannot pin. The
 measurement in Spike Results found 6 abandoned PRs carrying review artifacts of
 which only 3 are currently selected; the other 3 are masked **by ordering luck that
 no code controls and no test pins**. Any fix that only narrows `state` leaves that
-non-determinism in place. This is why WS-D exists.
+non-determinism in place.
+
+**Amended at critique.** This finding was the original justification for WS-D, and it does
+not survive scrutiny: the "6 abandoned PRs" population is entirely **closed-unmerged**, and
+WS-C's `state="merged"` excludes that population by construction rather than by ordering.
+`state` threads into `gh pr list --state {state}`, so candidates in any single call share
+one state and a MERGED-first comparator can never separate them. The research finding
+remains true and remains useful — it just supports a **recency** tiebreak among same-state
+candidates, which is now [#2868](https://github.com/tomcounsell/ai/issues/2868) rather than
+WS-D of this lane. See *Resolved Questions* Q3.
 
 Sources: [gh pr list](https://cli.github.com/manual/gh_pr_list) · [cli/cli#10244](https://github.com/cli/cli/issues/10244) · [gh search prs](https://cli.github.com/manual/gh_search_prs)
 
@@ -316,7 +325,8 @@ No prototypes, no worktrees, no committed code.
 - **Confidence**: high on every number above; all are live calls, not reasoning.
 - **Impact on plan**: #2825 shrinks to a one-argument change with a measured control.
   #2824 grows a scope caveat that must be stated rather than papered over. And the
-  6-carrying-artifact / 3-selected gap is what motivates WS-D.
+  6-carrying-artifact / 3-selected gap motivated WS-D, which the critique then falsified
+  as a same-state comparator — it is now [#2868](https://github.com/tomcounsell/ai/issues/2868).
 
 ## Data Flow
 
@@ -377,9 +387,10 @@ arriving through a different row.
   importing from **`tools/`**. A verification row pins this so the constraint is not
   quietly widened.
 - **Interface changes**: `_lookup_pr`'s resolution *order* changes when a lane branch
-  is recorded (WS-B). Its signature does not. `_gh_pr_search_issue_ref` gains
-  deterministic candidate ordering (WS-D); its signature does not change either.
-  `decide()`'s JSON gains one terminal shape (WS-A); existing keys keep their meaning.
+  is recorded (WS-B). Its signature does not. `_gh_pr_search_issue_ref` is **untouched**
+  by this lane (WS-D deferred to #2868). `decide()`'s JSON gains one additive `complete`
+  key on the terminal shape (WS-A); existing keys keep their meaning. The one external
+  contract change is `.claude/skills-global/do-sdlc/SKILL.md`'s reading of that key.
 - **Coupling**: **decreases.** The router stops carrying an implicit, unstated
   definition of "not finished" (the absence of any MERGE-aware row) and starts
   consuming the explicit shared predicate. Two definitions of terminal collapse into one.
@@ -395,7 +406,7 @@ arriving through a different row.
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (the WS-D scope decision and the WS-B coverage caveat are the two alignment points)
+- PM check-ins: 0 remaining. Both former alignment points are settled in *Resolved Questions*: WS-D is deferred to #2868, and the WS-B coverage caveat is now a Success Criterion.
 - Review rounds: 2
 
 The measurement work that usually dominates an appetite like this is **already
@@ -586,10 +597,10 @@ patched.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/sdlc_stage_query.py::_gh_pr_search_issue_ref` — the `except Exception` at `:338-339` logs at debug and returns `None`. WS-D adds a client-side sort inside that block; add a test asserting a malformed/missing sort key still returns `None` (or degrades to unsorted) **and** emits the debug log, rather than raising into `_compute_meta`.
+- [ ] `tools/sdlc_stage_query.py::_gh_pr_search_issue_ref` — **not touched by this lane** (WS-D deferred to #2868). Its `except Exception` at `:338-339` keeps its current contract; no new test owed here.
 - [ ] `tools/sdlc_stage_query.py::_lookup_pr` — documented "never raises". WS-B adds a branch; add a test that a raising `lane_branch_name` still yields `None`.
 - [ ] `tools/sdlc_stage_marker.py::_review_artifact_posted` — all three artifact legs fail closed to `False` (`:330-335`). WS-C does not touch them; add one regression test that a `subprocess.run` raising on every call still returns `False` under the new `merged` scope.
-- [ ] `agent/sdlc_router.py` terminal guard — `decide_next_dispatch` wraps rule predicates in try/except (`:1944`) but guards are not equally protected. Assert the guard cannot raise on a malformed `stage_states` (missing key, non-dict, `None` value) and that a raise would not take down the whole decision.
+- [ ] `agent/sdlc_router.py` terminal guard — `decide_next_dispatch` wraps rule predicates in try/except (`:1944`) but guards are **not** protected at all: `evaluate_guards` (`:830-839`) calls each guard bare. Assert **the guard itself** returns `None` on a malformed `stage_states` (missing key, non-dict, `None` value) — scoped to the guard, because `decide_next_dispatch` as a whole already raises on a non-dict at G1 today and this lane does not fix that (see the note under the Verification table).
 
 ### Empty/Invalid Input Handling
 - [ ] Terminal guard against `{}`, `{"MERGE": None}`, `{"MERGE": ""}`, `{"MERGE": "in_progress"}`, `{"MERGE": "failed"}` — only the exact `"completed"` string terminates. Parametrize; a substring or truthiness check here would terminate a live lane.
@@ -605,8 +616,8 @@ patched.
 - [ ] `tests/unit/test_sdlc_router_oscillation.py` — **UPDATE**: any fixture whose ledger has `MERGE: "completed"` and asserts a non-terminal `row_id` now hits the terminal guard first. `test_terminal_merged_pipeline_routes_to_merge_not_build` is the one #2826 repaired; it deliberately does **not** set `MERGE: "completed"` (setting it would have made the fixture dead code), so it should survive untouched — **verify this rather than assume it**, and if it does change, that is a signal the guard is placed wrong.
 - [ ] `tests/unit/test_sdlc_router_oscillation.py` — **UPDATE**: G4 tests that drive `same_stage_dispatch_count` on a `MERGE`-completed ledger would now terminate before G4 fires. Re-key those fixtures onto a non-terminal ledger so they keep testing G4.
 - [ ] `tests/unit/test_sdlc_stage_query.py:270-400` — **UPDATE**: the D4 resolution-order tests (`_lookup_pr` issue-search primary + branch-head fallback) encode the old ladder order directly, several by `assert_called_once` / call-count on the search leg. WS-B inverts the order when a slug is present; these must be rewritten to assert the new contract, and a new case added for "slug present → fuzzy leg never called".
-- [ ] `tests/unit/test_sdlc_stage_query.py:364-399` — **UPDATE**: `_gh_pr_search_issue_ref` tests that assert "returns the first body-validating candidate" now must assert "returns the first candidate **in the deterministic order**". At least one existing case (`:371-384`, returning 20) likely depends on input order; re-express it against the new rule.
-- [ ] `tests/unit/test_sdlc_stage_query.py:1436-1520` — **UPDATE**: the #2757 two-pass block, including the comment at `:1517` documenting "returns the FIRST body-validating candidate". Both the assertions and the explanatory comments must move to the new rule; a stale comment here is what let the current behavior look intentional.
+- [ ] `tests/unit/test_sdlc_stage_query.py:364-399` — **NO CHANGE** (was UPDATE before WS-D was deferred). `_gh_pr_search_issue_ref`'s "first body-validating candidate" contract is unchanged by this lane; these tests keep asserting it. [#2868](https://github.com/tomcounsell/ai/issues/2868) owns rewriting them.
+- [ ] `tests/unit/test_sdlc_stage_query.py:1436-1520` — **REVIEW**: the #2757 two-pass block. WS-B changes the ladder *above* it, so re-run and confirm the two-pass cases still hold; the comment at `:1517` documenting "returns the FIRST body-validating candidate" stays accurate under this lane and needs only the #2868 pointer added by the Documentation task.
 - [ ] `tests/unit/test_sdlc_stage_marker.py:1086-1210` — **UPDATE**: several cases patch `_lookup_pr` and assert its call kwargs; `:1113` already pins `return_value=2538`. The `state="all"` kwarg assertion becomes `state="merged"`. **Add** a case pinning the scope by kwarg so a future widening re-reds.
 - [ ] `tests/unit/test_pipeline_complete_predicate.py` — **UPDATE (additive)**: add the router's exact call shape (`outcome="success"`, `pr_open=None`) as a pinned case, so a future change to the predicate's default behavior surfaces as a router-facing failure rather than a silent routing change.
 - [ ] `tests/unit/test_architectural_constraints.py` — **UPDATE**: extend the router import-boundary class with an explicit positive assertion that importing `agent.pipeline_complete` is allowed, so the new import is documented as intentional and a future blanket tightening does not silently forbid it.
@@ -620,7 +631,8 @@ No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` 
 - **Introducing a third `Complete` return type alongside `Dispatch` and `Blocked`.**
   Architecturally the right model, and it ripples into every consumer of
   `decide_next_dispatch`, the parity tests, and `decide()`'s documented JSON contract.
-  Resolve Open Question 2 before touching it; until then the additive-key approach ships.
+  **Settled (Resolved Question 2): the additive-key approach ships.** Revisit only if a
+  second terminal reason is ever added, at which point the key-count argument changes.
 - **Making `_body_references_issue` distinguish a declarative closing directive from a
   retrospective prose mention** (the PR 2542 finding). Genuinely interesting, genuinely
   a natural-language problem, and WS-B neutralizes the case that surfaced it because a
@@ -631,10 +643,12 @@ No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` 
 - **Extending the terminal guard to the `docs_success_no_pr` path.** It needs `pr_open`,
   which needs I/O, which breaks the router's purity and its no-`tools/` import
   constraint. Out of scope by design, not by omission.
-- **"Fixing" `gh pr list` ordering by adding `sort:` to the search string.** The
-  Research sources say the qualifier is supported, but it moves the ordering guarantee
-  back onto a remote service whose behavior we just established is not contractual.
-  Sort client-side; it is the only hard guarantee and it is three lines.
+- **Touching `_gh_pr_search_issue_ref` at all.** Client-side candidate ordering is
+  [#2868](https://github.com/tomcounsell/ai/issues/2868), not this lane. Two temptations
+  in particular: adding `sort:` to the search string (moves the guarantee back onto a
+  remote service whose behavior we just established is not contractual) and "while I'm
+  here" widening the `--json` field list (a diff on a shared function with no test in this
+  lane that needs it). A verification task checks this function is byte-unchanged.
 - **Rewriting `_compute_meta`'s two-pass structure now that WS-B changes the ladder.**
   The two-pass is #2826's, it is measured, and it is orthogonal. Leave it.
 
@@ -719,7 +733,7 @@ document. Direction of failure is fail-closed, which the WS3b recovery row alrea
 **Impact:** A green suite that proves nothing — the #2091 stale-fixture problem that
 `docs/sdlc/do-test.md` was widened to catch after #2826 found a router fixture rotting
 on `main`.
-**Mitigation:** Mutation-check each guard: revert each of WS-A/B/C/D individually and
+**Mitigation:** Mutation-check each guard: revert each of WS-A/B/C individually and
 record which tests re-red, in a demonstrated-red table in the PR body. A workstream
 with zero re-reds has no real coverage. Assert lookup ordering by **call count on the
 legs**, never by result equality, since both orders can return the same number for the
@@ -812,24 +826,39 @@ in-process.
 - [ ] Update `docs/features/README.md` index if any section title changes.
 
 ### Inline Documentation
-- [ ] Rewrite the `_gh_pr_search_issue_ref` docstring (`tools/sdlc_stage_query.py:284-306`).
-      It currently documents "returns the FIRST body-validating candidate with no
-      MERGED-over-CLOSED preference" as settled behavior, and cites the #2793 measurement.
-      Both change under WS-D. Cite the ordering finding — `gh pr list --search` is
-      best-match ranked with no guarantee ([cli/cli#10244](https://github.com/cli/cli/issues/10244)) —
-      so the next reader understands the client-side sort is load-bearing, not stylistic.
+- [ ] Annotate the `_gh_pr_search_issue_ref` docstring (`tools/sdlc_stage_query.py:284-306`).
+      It documents "returns the FIRST body-validating candidate with no MERGED-over-CLOSED
+      preference" as settled behavior. **WS-D is deferred, so that behavior does not change
+      here** — but the docstring must stop reading as a deliberate design choice and start
+      reading as a known gap: add a line noting the ordering is GitHub best-match with no
+      guarantee ([cli/cli#10244](https://github.com/cli/cli/issues/10244)) and pointing at
+      [#2868](https://github.com/tomcounsell/ai/issues/2868). A stale comment presenting a
+      gap as intent is what let these bugs survive this long.
 - [ ] Rewrite `_lookup_pr`'s "Resolution order (D4)" docstring (`:348-366`) for the
       lane-branch-authoritative order, including the explicit statement that a recorded
       slug suppresses the fuzzy leg and why.
-- [ ] Update the `state="all"` rationale comment at `tools/sdlc_stage_marker.py:238-250`
+- [ ] Update the `state="all"` rationale comment at **`tools/sdlc_stage_marker.py:259-262`**
       to the `merged` rationale, preserving the #2539 reference and adding the measured
       control. **Extend, do not parallel** — #2826's review flagged paralleling as the
-      failure mode here.
+      failure mode here. (Citation corrected at critique: the previously cited `:238-250`
+      is the `Args: pr:` docstring, not this comment. The comment is the second of the two
+      `state="all"` matches in the file, which is why the anti-criterion grep is scoped to
+      the call site.)
 - [ ] Docstring on the new guard naming its `is_pipeline_complete` delegation and the
       `outcome="success"` / `pr_open=None` call shape, so nobody re-derives a second
       terminal definition.
 
 ### SDLC Stage Addenda
+- [ ] **Update `.claude/skills-global/do-sdlc/SKILL.md:136` — the supervisor's `blocked`
+      contract.** It currently routes every non-`ISSUE_LOCKED` block to "**STOP the loop.**
+      Report the `reason` and `guard_id` to the human." Until it learns the terminal shape,
+      WS-A trades three wasted ticks for an immediate false escalation. Add the
+      `{"blocked": true, "complete": true, "guard_id": "TERMINAL", ...}` case → *exit the
+      loop reporting **success**, not escalation*. Keep the wording **generic** (it is a
+      global skill hardlinked to every machine by `scripts/update/hardlinks.py`, and the
+      body already documents `blocked`/`guard_id` generically); no
+      `.claude/skill-context/do-sdlc.md` is needed and none exists today.
+      **This is a blocking dependency of WS-A, not a follow-up.**
 - [ ] Update `docs/sdlc/do-merge.md` if the terminal verdict changes what a supervisor
       does after the MERGE marker lands.
 - [ ] Update `.claude/skills/sdlc/SKILL.md`'s row/guard table if the parity test
@@ -840,8 +869,11 @@ in-process.
 ## Success Criteria
 
 - [ ] A terminal ledger (`MERGE == completed`) returns an explicit terminal verdict
-      from `decide_next_dispatch` in **all eight** cells of spike-1's matrix — no
-      `/do-build`, no `/do-pr-review`, no `/do-merge`, no `NO_RULE`.
+      from `decide_next_dispatch` in **all eight** cells of spike-1's matrix **and in the
+      ninth `PATCH`-unsettled cell** — no `/do-build`, no `/do-pr-review`, no `/do-merge`,
+      no `NO_RULE`.
+- [ ] The terminal guard returns `None` (falls through), never `Blocked`, on a non-dict
+      `stage_states` — asserted against the guard directly.
 - [ ] The four non-terminal `/do-merge` routes measured in spike-1 (`MERGE` not
       completed) are **unchanged** — the negative control.
 - [ ] `sdlc-tool next-skill` on a terminal pipeline emits a machine-distinguishable
@@ -856,11 +888,20 @@ in-process.
 - [ ] `_review_artifact_posted(1785)` and `_review_artifact_posted(2073)` return
       **False**; `_review_artifact_posted(2104)` returns **True** via merged PR 2109.
 - [ ] The #2539 control holds 5/5 live: #2860, #2831, #2716, #2734, #2741.
-- [ ] `_gh_pr_search_issue_ref` selects the same candidate regardless of the order
-      `gh` returns them in (asserted by feeding the same candidate set shuffled).
+- [ ] **KNOWN-UNCOVERED — the two live #2824 candidates stay broken, by design.**
+      #2494 and #2518 are the only OPEN reopened issues carrying a stale prior-lifecycle
+      PR, and `sdlc-tool stage-query` reports `slug: null, slug_source: "unresolved"` for
+      both. WS-B keys on a *recorded* slug, so **it does not fix either of them.** It fixes
+      every future lane, because lanes now record their slug at lane start
+      (`docs/features/sdlc-lane-identity.md`). This lane closes #2824 as "the mechanism is
+      correct going forward", not as "the two live instances are repaired" — backfilling
+      their ledgers to make the fix look complete is an explicit Rabbit Hole. Stating this
+      here, at the completion bar, rather than only in task 8's issue comment.
+- [ ] The terminal shape is consumed correctly end to end: `.claude/skills-global/do-sdlc/SKILL.md`
+      routes `complete: true` to loop-exit-success, not to human escalation.
 - [ ] `agent/sdlc_router.py` imports nothing from `tools/` (existing constraint test
       still green) and performs no I/O.
-- [ ] Demonstrated-red table in the PR body: each of WS-A/B/C/D reverted individually
+- [ ] Demonstrated-red table in the PR body: each of WS-A/B/C reverted individually
       re-reds at least one named test.
 - [ ] All three issues carry their measured post-fix shape as a comment before closing
       — #2826's explicit request for #2817, applied to all three.
@@ -879,7 +920,7 @@ in-process.
 
 - **Builder (PR resolution)**
   - Name: `resolution-builder`
-  - Role: WS-B, WS-C, WS-D — the `_lookup_pr` ladder, the marker scope, and deterministic candidate selection
+  - Role: WS-B and WS-C — the `_lookup_pr` ladder and the marker scope. **Not** `_gh_pr_search_issue_ref`, which this lane leaves alone (#2868).
   - Agent Type: builder
   - Resume: true
 
@@ -891,7 +932,7 @@ in-process.
 
 - **Validator**
   - Name: `lane-validator`
-  - Role: independently re-run every live measurement and the whole Verification table; verify the ordering constraint WS-B ≤ WS-D actually held in the merged diff
+  - Role: independently re-run every live measurement and the whole Verification table; confirm `_gh_pr_search_issue_ref` is unmodified in the merged diff (WS-D scope leak check)
   - Agent Type: validator
   - Resume: true
 
@@ -925,6 +966,7 @@ in-process.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Write every assertion from Success Criteria against **unmodified** source and watch each one fail. Paste the real failure output into the PR body.
+- **Exempt from "watch it fail": every Verification row labelled GREEN TODAY** (the two router anti-criterion greps, the xfail row, the two lint/format rows, and WS-B's slugless negative control). They are anti-criteria and controls; they start green and must stay green. Do not record them as red-state evidence, and do not count them in the mutation table.
 - Every negative assertion must be paired with a positive one (`"error" not in result`) so a crash cannot go green — the #2826 discipline.
 - Assert lookup ordering by **call count on the legs**, never result equality.
 
@@ -936,23 +978,25 @@ in-process.
 - **Assigned To**: `router-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Add the guard delegating to `agent.pipeline_complete.is_pipeline_complete(stage_states, "success", pr_open=None)`; ship the `merge_success` leg only.
-- Insert it into `GUARDS` at the position Open Question 1 settles on, with the rationale in the docstring.
-- Map the terminal `guard_id` to its JSON shape in `tools/sdlc_next_skill.py::decide()`.
+- **Open the guard body with `if not isinstance(stage_states, dict): return None`** before delegating. `evaluate_guards` has no try/except and `is_pipeline_complete` calls `.get` on its first argument. Return `None`, never `Blocked` — an unreadable ledger falls through to the table.
+- Then delegate to `agent.pipeline_complete.is_pipeline_complete(stage_states, "success", pr_open=None)`; ship the `merge_success` leg only.
+- Insert it **first in `GUARDS`, ahead of G1** (Resolved Question 1), with the rationale in the docstring.
+- Map the terminal `guard_id` to its JSON shape in `tools/sdlc_next_skill.py::decide()` — an additive `complete: true` key alongside `blocked` (Resolved Question 2).
+- **Update `.claude/skills-global/do-sdlc/SKILL.md:136` in this same commit** so the supervisor exits the loop on `complete: true` instead of escalating. Shipping the router change without it is a regression in human noise.
 - Do **not** modify row 5, row 8e, or row 10 — the guard pre-empts them and they stay correct for non-terminal ledgers.
+- Do **not** harden G1 against non-dict ledgers here; that fragility predates this lane and is out of scope.
 
-### 4. WS-B + WS-D — lane-branch authority and deterministic ordering
+### 4. WS-B — lane-branch authority
 - **Task ID**: build-resolution-ladder
 - **Depends On**: red-tests
 - **Validates**: tests/unit/test_sdlc_stage_query.py
-- **Informed By**: spike-4 (a bare reorder is a measured no-op; the suppression clause is the fix), Research (best-match ordering has no guarantee)
+- **Informed By**: spike-4 (a bare reorder is a measured no-op; the suppression clause is the fix)
 - **Assigned To**: `resolution-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- **Land WS-B before or with WS-D in the same commit.** WS-D alone regresses reopened issues (Risk 3).
-- Gate the fuzzy-leg suppression on *slug recorded*, never on *head-ref returned None*.
-- Sort candidates client-side (MERGED first, then most-recent) before body validation; widen the `--json` fields to carry the sort key.
-- Run Risk 2's counterexample check over recent closed issues and attach the diff. Any regression blocks the change.
+- Gate the fuzzy-leg suppression on *slug recorded*, never on *head-ref returned None*. `lane_branch_name(None)` returns `None`, so conflating the two would suppress the fuzzy leg for every slugless lane.
+- **Do not build WS-D here.** Deterministic candidate ordering is deferred to [#2868](https://github.com/tomcounsell/ai/issues/2868); leave `_gh_pr_search_issue_ref`'s selection logic alone. Widening the `--json` field list is part of that deferred work, not this task.
+- Run Risk 2's counterexample check over the pinned corpus (`gh issue list --state closed --limit 50`) and attach the classified diff. Only a counterexample whose resolved PR head **is** `session/{slug}` blocks the change; head refs outside that shape are the expected, reported cost.
 
 ### 5. WS-C — review-probe scope
 - **Task ID**: build-marker-scope
@@ -971,8 +1015,8 @@ in-process.
 - **Assigned To**: `mutation-tester`
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Revert each of WS-A/B/C/D **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
-- Revert all four together and confirm the three original reported shapes return.
+- Revert each of WS-A/B/C **individually** and record which tests re-red. A workstream with zero re-reds has no coverage — go back and write the missing test.
+- Revert all three together and confirm the three original reported shapes return.
 - Produce the demonstrated-red table for the PR body.
 
 ### 7. Documentation
@@ -1000,7 +1044,7 @@ in-process.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the entire Verification table.
-- Confirm the WS-B ≤ WS-D ordering constraint actually held in the merged diff, not just in the task list.
+- Confirm `_gh_pr_search_issue_ref` is byte-unchanged in the merged diff — WS-D belongs to #2868 and must not have leaked in.
 - Confirm no `tools/` import and no I/O entered `agent/sdlc_router.py`.
 
 ## Verification
@@ -1064,46 +1108,78 @@ War room run 2026-08-19 against `main` @ `f491306c5`. Depth **FULL** (force-FULL
 touches the doctrine paths `agent/sdlc_router.py` and `.claude/skills/`). Roster 3/3 complete,
 0 ungrounded. **0 blockers, 8 concerns, 1 nit.**
 
+**Revision applied 2026-08-19T05:45:10Z.** All 9 findings are resolved below (the NIT too). Every critique claim was independently re-measured during the revision and all reproduce, including the two the critique itself had not measured: `MERGE=completed + PATCH=pending` → `/do-merge` row 10, and `AttributeError` on a non-dict ledger. One critique premise was found **understated** and is corrected in place: `decide_next_dispatch` already raises on a non-dict today at G1, so it does not currently return `Blocked(NO_RULE)` for that input — see the note under the Verification table. The material scope change is that **WS-D is cut from the lane and filed as #2868**.
+
 Every live claim in Spike Results was independently re-measured by the critique driver and
 **all reproduce**: the eight-cell matrix, `_lookup_pr(2494/2518, state="merged")` → 2516 / 2538,
 and `_review_artifact_posted(1785/2073/2104)` → True/True/True.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Task 3 specifies the guard as a bare delegation to `is_pipeline_complete(stage_states, "success", pr_open=None)`, but the Failure Path section demands a test proving the guard cannot raise on a non-dict `stage_states`. The delegation calls `psm_states.get("MERGE")` (`agent/pipeline_complete.py:69`) and raises `AttributeError` on a non-dict, so the requested test and the specified implementation contradict. | pending | `evaluate_guards` walks `GUARDS` with a bare `result = guard(stage_states, meta, ctx)` and **no** try/except — only rule predicates are wrapped, inside `decide_next_dispatch`. Placing the guard first in `GUARDS` makes it the most exposed callable in the router: a raise escapes `decide_next_dispatch` and surfaces as `decide()`'s `{"error": ...}` shape instead of today's `Blocked(NO_RULE)`. Open the guard body with `if not isinstance(stage_states, dict): return None` before delegating. Return `None`, never `Blocked` — an unreadable ledger must fall through to the table, not terminate a lane. |
-| CONCERN | Risk & Robustness | Risk 1's mitigation argues only from the write path and never from the guard's predicate. `is_pipeline_complete` returns `(True, "merge_success")` on `MERGE == "completed"` alone; DOCS/TEST/PATCH are not consulted. `_backfill_predecessors` settles on-spine predecessors but **explicitly exempts PATCH** ("PATCH, being off-spine, is excluded here and never force-completed"), so a terminal ledger with an unsettled PATCH is reachable and appears in neither the eight-cell matrix, Success Criterion 1, nor the negative control. | pending | Measured on `f491306c5`: `decide_next_dispatch({...all completed, PATCH:'pending'}, {'pr_number':555}, {})` → `Dispatch(skill='/do-merge', row_id='10')`. The repo already owns the vocabulary: `SETTLED_STATUSES = frozenset({"completed", "skipped"})` (`agent/pipeline_state.py:66`). Either add a matrix cell for `PATCH ∈ {pending, failed}` under `MERGE == completed` and state the guard deliberately settles it, or make Risk 1's verification task assert positively that `sm.complete_stage("MERGE")` leaves every `DISPLAY_STAGES` entry in `SETTLED_STATUSES`. Task 1's grep proves who writes the key, not what the rest of the ledger looks like when they do. |
-| CONCERN | Risk & Robustness | The terminal verdict ships as a `Blocked`, which today's supervisor treats as a human escalation, so until that consumer is updated WS-A converts "three wasted ticks then a misleading escalation" into "an immediate escalation". Agent Integration names the obligation but no Documentation checkbox and no task names the supervisor skill file. | pending | `decide()` serializes `Blocked` to exactly `{"blocked": True, "reason": ..., "guard_id": ...}`. `.claude/skills-global/do-sdlc/SKILL.md:136`: "`{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human." The Documentation section lists only `.claude/skills/sdlc/SKILL.md` and `docs/sdlc/do-merge.md`, leaving `do-sdlc` an orphan. It is a **global** skill hardlinked to every machine by `scripts/update/hardlinks.py`; per CLAUDE.md global bodies stay generic with repo specifics in `.claude/skill-context/`. The new checkbox must also decide whether `guard_id == "TERMINAL"` is a generic contract or repo-specific. |
-| CONCERN | Scope & Value | WS-D's headline rule "MERGED before anything else, then most-recent first" becomes unreachable at every live call site the moment WS-C lands, so Open Question 3 is decided on a premise WS-C removes. The only non-test caller passing `state="all"` is `tools/sdlc_stage_marker.py:263` (which WS-C changes to `merged`); `tools/sdlc_stage_query.py:596/598` pass `open` then `merged`. Under `open` all candidates are open; under `merged` all are merged. | pending | WS-D's justification ("6 abandoned PRs carry artifacts, only 3 selected"; "a GitHub-side ranking change could silently re-open #2825") is specifically about closed-unmerged candidates, which `state="merged"` excludes by construction. The surviving half is the recency tiebreak, which is real and is exactly spike-4's #2518 finding (fuzzy picks 2538, "the *first* of two lifecycles, not even the most recent"). Re-anchor WS-D on merged-vs-merged ambiguity. If MERGED-first is retained as defence against a future `all` caller, note the plan already carries an anti-criterion forbidding that caller — two mechanisms, one hole, only one testable. |
-| CONCERN | Scope & Value | Risk 2's counterexample check is the stated gate on WS-B, but its corpus is unspecified and its bar is zero-tolerance. WS-B's mechanism is *suppressing* the fuzzy leg when a slug is recorded, so any lane whose PR came off a branch other than `session/{slug}` is a guaranteed counterexample. As written the check either blocks the change outright or is settled by whoever picks the corpus. | pending | Pin the corpus as a runnable command (e.g. `gh issue list --state closed --limit 50 --json number`) and split the outcome: a counterexample whose resolved PR head is **not** `session/{slug}` is the expected, accepted cost of lane-branch authority — count and report it; only a counterexample whose PR head **is** `session/{slug}` (the head-ref leg should have found it and did not) invalidates the design. Without that split, Risk 2's gate is unfalsifiable. |
-| NIT | Scope & Value | WS-B has zero measurable effect on any currently-observable case and the plan says so honestly in prose, but no Success Criterion records the scope limit, so a reader of Success Criteria alone would conclude this lane closes #2824. Verified live: `stage-query` returns `slug: None, slug_source: unresolved` for both #2494 and #2518, and both issues are still OPEN. | pending | (NIT — exempt.) Promote the scope statement into Success Criteria as an explicit "known-uncovered" line so it is visible where the completion bar is read, rather than only in task 8's issue comment. |
-| CONCERN | History & Consistency | Two sections give instructions that cannot both be satisfied. Documentation says to extend the `state="all"` rationale comment "preserving the #2539 reference"; Verification requires `grep -c 'state="all"' tools/sdlc_stage_marker.py` == 0. That grep returns **2** today: `:263` is the call and `:259` is the rationale comment, which literally opens `# state="all": the artifact question is historical`. The cited range is also wrong — `:238-250` is the `Args: pr:` docstring; the comment is at `:259-262`. | pending | Scope the anti-criterion to the call site so it cannot match prose: `grep -c '_lookup_pr(.*state="all"' tools/sdlc_stage_marker.py` == 0, or `grep -c 'state="all")' tools/sdlc_stage_marker.py` == 0. Both are red today (the call at `:263` matches) and both stay green when the rationale comment names the old scope. Correct the Documentation citation to `tools/sdlc_stage_marker.py:259-262`. |
-| CONCERN | History & Consistency | The row named for the WS-B ≤ WS-D sequencing constraint cannot detect WS-D. It reads only `_lookup_pr` and asserts WS-B's head-ref leg precedes the fuzzy leg; WS-D lives inside `_gh_pr_search_issue_ref`, which the row never opens. If Open Question 3 is answered "defer WS-D", the row still passes — so it cannot enforce what the plan calls "a build-sequencing requirement, not advice." | pending | The assertion is genuinely red today (verified: `lane_branch_name` currently appears **after** `_gh_pr_search_issue_ref` in `_lookup_pr`), so it is a valid WS-B check under the wrong name. Express the implication — WS-D present implies WS-B present — e.g. assert `('sorted' in inspect.getsource(q._gh_pr_search_issue_ref)) <= ('lane_branch_name' in src.split('_gh_pr_search_issue_ref')[0])`, and rename the row. Better: drop the source-text shape (a WS-B helper wrapping `lane_branch_name` would fail it spuriously) and assert behaviour — with a slug recorded, patch `_gh_pr_search_issue_ref` and assert call count 0. |
-| CONCERN | History & Consistency | Four of the twenty Verification rows already pass on unmodified `main`, contradicting task 2's "watch each one fail" and Risk 5's own mutation discipline. Measured on `f491306c5`: the "dispatch reset" row passes because today's output is `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')`; both router anti-criterion greps already return 0; the xfail row already exits 1. Anti-criteria legitimately start green, but the plan does not distinguish them, so the red-state paper trail will contain four rows that prove nothing. | pending | The first Verification row already models the correct shape ("output contains `TERMINAL`" — red today, green after). Give the `dispatch reset` row the same treatment: assert `output contains 'TERMINAL'` **and** `output does not contain 'dispatch reset'`, so a guard returning the wrong reason string cannot pass vacuously. Label the three green-today rows explicitly as regression anti-criteria in the Expected column so Risk 5's mutation table does not count them as coverage for any workstream. |
+| CONCERN | Risk & Robustness | Task 3 specifies the guard as a bare delegation to `is_pipeline_complete(stage_states, "success", pr_open=None)`, but the Failure Path section demands a test proving the guard cannot raise on a non-dict `stage_states`. The delegation calls `psm_states.get("MERGE")` (`agent/pipeline_complete.py:69`) and raises `AttributeError` on a non-dict, so the requested test and the specified implementation contradict. | **RESOLVED** — Technical Approach WS-A now mandates `if not isinstance(stage_states, dict): return None` before delegating; task 3 carries it as its first bullet; Failure Path + Verification assert the guard in isolation. | `evaluate_guards` walks `GUARDS` with a bare `result = guard(stage_states, meta, ctx)` and **no** try/except — only rule predicates are wrapped, inside `decide_next_dispatch`. Placing the guard first in `GUARDS` makes it the most exposed callable in the router: a raise escapes `decide_next_dispatch` and surfaces as `decide()`'s `{"error": ...}` shape instead of today's `Blocked(NO_RULE)`. Open the guard body with `if not isinstance(stage_states, dict): return None` before delegating. Return `None`, never `Blocked` — an unreadable ledger must fall through to the table, not terminate a lane. |
+| CONCERN | Risk & Robustness | Risk 1's mitigation argues only from the write path and never from the guard's predicate. `is_pipeline_complete` returns `(True, "merge_success")` on `MERGE == "completed"` alone; DOCS/TEST/PATCH are not consulted. `_backfill_predecessors` settles on-spine predecessors but **explicitly exempts PATCH** ("PATCH, being off-spine, is excluded here and never force-completed"), so a terminal ledger with an unsettled PATCH is reachable and appears in neither the eight-cell matrix, Success Criterion 1, nor the negative control. | **RESOLVED** — spike-1 gains a ninth `PATCH`-unsettled matrix cell (measured), the guard is stated to settle it deliberately, Risk 1 gains a positive `SETTLED_STATUSES` assertion, and Verification gains the cell as a red-today row. | Measured on `f491306c5`: `decide_next_dispatch({...all completed, PATCH:'pending'}, {'pr_number':555}, {})` → `Dispatch(skill='/do-merge', row_id='10')`. The repo already owns the vocabulary: `SETTLED_STATUSES = frozenset({"completed", "skipped"})` (`agent/pipeline_state.py:66`). Either add a matrix cell for `PATCH ∈ {pending, failed}` under `MERGE == completed` and state the guard deliberately settles it, or make Risk 1's verification task assert positively that `sm.complete_stage("MERGE")` leaves every `DISPLAY_STAGES` entry in `SETTLED_STATUSES`. Task 1's grep proves who writes the key, not what the rest of the ledger looks like when they do. |
+| CONCERN | Risk & Robustness | The terminal verdict ships as a `Blocked`, which today's supervisor treats as a human escalation, so until that consumer is updated WS-A converts "three wasted ticks then a misleading escalation" into "an immediate escalation". Agent Integration names the obligation but no Documentation checkbox and no task names the supervisor skill file. | **RESOLVED** — new Documentation checkbox for `.claude/skills-global/do-sdlc/SKILL.md:136` (global body, generic wording, no skill-context file), added to task 3 as a same-commit obligation and to Success Criteria. | `decide()` serializes `Blocked` to exactly `{"blocked": True, "reason": ..., "guard_id": ...}`. `.claude/skills-global/do-sdlc/SKILL.md:136`: "`{"blocked": true, ...}` (other reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human." The Documentation section lists only `.claude/skills/sdlc/SKILL.md` and `docs/sdlc/do-merge.md`, leaving `do-sdlc` an orphan. It is a **global** skill hardlinked to every machine by `scripts/update/hardlinks.py`; per CLAUDE.md global bodies stay generic with repo specifics in `.claude/skill-context/`. The new checkbox must also decide whether `guard_id == "TERMINAL"` is a generic contract or repo-specific. |
+| CONCERN | Scope & Value | WS-D's headline rule "MERGED before anything else, then most-recent first" becomes unreachable at every live call site the moment WS-C lands, so Open Question 3 is decided on a premise WS-C removes. The only non-test caller passing `state="all"` is `tools/sdlc_stage_marker.py:263` (which WS-C changes to `merged`); `tools/sdlc_stage_query.py:596/598` pass `open` then `merged`. Under `open` all candidates are open; under `merged` all are merged. | **RESOLVED (scope cut)** — WS-D removed from the lane and filed as #2868 with the recency-only framing. Risk 3 retired; sequencing constraint moved to #2868. See Resolved Questions Q3. | WS-D's justification ("6 abandoned PRs carry artifacts, only 3 selected"; "a GitHub-side ranking change could silently re-open #2825") is specifically about closed-unmerged candidates, which `state="merged"` excludes by construction. The surviving half is the recency tiebreak, which is real and is exactly spike-4's #2518 finding (fuzzy picks 2538, "the *first* of two lifecycles, not even the most recent"). Re-anchor WS-D on merged-vs-merged ambiguity. If MERGED-first is retained as defence against a future `all` caller, note the plan already carries an anti-criterion forbidding that caller — two mechanisms, one hole, only one testable. |
+| CONCERN | Scope & Value | Risk 2's counterexample check is the stated gate on WS-B, but its corpus is unspecified and its bar is zero-tolerance. WS-B's mechanism is *suppressing* the fuzzy leg when a slug is recorded, so any lane whose PR came off a branch other than `session/{slug}` is a guaranteed counterexample. As written the check either blocks the change outright or is settled by whoever picks the corpus. | **RESOLVED** — Risk 2 now pins a runnable corpus and splits the bar: only a counterexample whose PR head **is** `session/{slug}` invalidates the design; other head refs are a counted, reported cost. | Pin the corpus as a runnable command (e.g. `gh issue list --state closed --limit 50 --json number`) and split the outcome: a counterexample whose resolved PR head is **not** `session/{slug}` is the expected, accepted cost of lane-branch authority — count and report it; only a counterexample whose PR head **is** `session/{slug}` (the head-ref leg should have found it and did not) invalidates the design. Without that split, Risk 2's gate is unfalsifiable. |
+| NIT | Scope & Value | WS-B has zero measurable effect on any currently-observable case and the plan says so honestly in prose, but no Success Criterion records the scope limit, so a reader of Success Criteria alone would conclude this lane closes #2824. Verified live: `stage-query` returns `slug: None, slug_source: unresolved` for both #2494 and #2518, and both issues are still OPEN. | **RESOLVED anyway** — promoted to an explicit KNOWN-UNCOVERED Success Criterion naming #2494 and #2518. | (NIT — exempt.) Promote the scope statement into Success Criteria as an explicit "known-uncovered" line so it is visible where the completion bar is read, rather than only in task 8's issue comment. |
+| CONCERN | History & Consistency | Two sections give instructions that cannot both be satisfied. Documentation says to extend the `state="all"` rationale comment "preserving the #2539 reference"; Verification requires `grep -c 'state="all"' tools/sdlc_stage_marker.py` == 0. That grep returns **2** today: `:263` is the call and `:259` is the rationale comment, which literally opens `# state="all": the artifact question is historical`. The cited range is also wrong — `:238-250` is the `Args: pr:` docstring; the comment is at `:259-262`. | **RESOLVED** — anti-criterion scoped to `grep -c 'state="all")'` (returns 1 today, 0 after; the prose comment cannot match). Documentation citation corrected to `:259-262`. | Scope the anti-criterion to the call site so it cannot match prose: `grep -c '_lookup_pr(.*state="all"' tools/sdlc_stage_marker.py` == 0, or `grep -c 'state="all")' tools/sdlc_stage_marker.py` == 0. Both are red today (the call at `:263` matches) and both stay green when the rationale comment names the old scope. Correct the Documentation citation to `tools/sdlc_stage_marker.py:259-262`. |
+| CONCERN | History & Consistency | The row named for the WS-B ≤ WS-D sequencing constraint cannot detect WS-D. It reads only `_lookup_pr` and asserts WS-B's head-ref leg precedes the fuzzy leg; WS-D lives inside `_gh_pr_search_issue_ref`, which the row never opens. If Open Question 3 is answered "defer WS-D", the row still passes — so it cannot enforce what the plan calls "a build-sequencing requirement, not advice." | **RESOLVED (row removed)** — the row is deleted with WS-D. WS-B is instead asserted **behaviourally** by two call-count rows (fuzzy_calls=0 with a slug, =1 without), verified red/green today, replacing the source-text shape the critique warned was spuriously fragile. | The assertion is genuinely red today (verified: `lane_branch_name` currently appears **after** `_gh_pr_search_issue_ref` in `_lookup_pr`), so it is a valid WS-B check under the wrong name. Express the implication — WS-D present implies WS-B present — e.g. assert `('sorted' in inspect.getsource(q._gh_pr_search_issue_ref)) <= ('lane_branch_name' in src.split('_gh_pr_search_issue_ref')[0])`, and rename the row. Better: drop the source-text shape (a WS-B helper wrapping `lane_branch_name` would fail it spuriously) and assert behaviour — with a slug recorded, patch `_gh_pr_search_issue_ref` and assert call count 0. |
+| CONCERN | History & Consistency | Four of the twenty Verification rows already pass on unmodified `main`, contradicting task 2's "watch each one fail" and Risk 5's own mutation discipline. Measured on `f491306c5`: the "dispatch reset" row passes because today's output is `Blocked(reason='no matching dispatch rule', guard_id='NO_RULE')`; both router anti-criterion greps already return 0; the xfail row already exits 1. Anti-criteria legitimately start green, but the plan does not distinguish them, so the red-state paper trail will contain four rows that prove nothing. | **RESOLVED** — the `dispatch reset` row now asserts both legs (`TERMINAL` present AND `dispatch reset` absent) so it cannot pass vacuously; all green-today rows are labelled **GREEN TODAY** in the Expected column, and task 2 plus a new subsection exempt them from "watch it fail" and from mutation-table credit. | The first Verification row already models the correct shape ("output contains `TERMINAL`" — red today, green after). Give the `dispatch reset` row the same treatment: assert `output contains 'TERMINAL'` **and** `output does not contain 'dispatch reset'`, so a guard returning the wrong reason string cannot pass vacuously. Label the three green-today rows explicitly as regression anti-criteria in the Expected column so Risk 5's mutation table does not count them as coverage for any workstream. |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Guard ordering — should the terminal guard precede G1, or sit after G4?**
-   The plan recommends **first**, because a completed pipeline needs no other guard's
-   opinion and G4's escalation gives actively wrong advice on it (`dispatch reset` is
-   not the remedy for "this is done"). The counter-argument is #1267's stated precedent
-   that escalation guards take priority over everything. I believe that precedent does
-   not reach this case — G4 exists to bound a loop, and terminating before the loop
-   begins is strictly better than capping it at three — but it is a deliberate departure
-   from a written convention and should be confirmed rather than assumed.
+All three are settled. Nothing is deferred into build.
 
-2. **Terminal return type — additive key on `Blocked`, or a third `Complete` dataclass?**
-   The plan ships `Blocked(guard_id="TERMINAL")` plus a distinct JSON shape from
-   `decide()`, because it breaks no consumer of `decide_next_dispatch`. A third
-   dataclass is the honest model — a finished pipeline is not blocked — but it ripples
-   into every consumer, the parity tests, and `decide()`'s documented contract. Worth
-   the larger change now, or is the additive key the right size?
+**Q1 — Guard ordering: should the terminal guard precede G1, or sit after G4?**
+**Resolved: first in `GUARDS`, ahead of G1.** A completed pipeline has nothing to gain
+from any other guard's opinion, and G4 specifically gives actively wrong advice on one
+(`dispatch reset` is not the remedy for "this is done"). The counter-argument was #1267's
+precedent that escalation guards take priority; it does not reach this case, because G4
+exists to bound a *loop* and terminating before the loop begins is strictly better than
+capping it at three. The departure from convention is deliberate and is recorded in the
+guard docstring and in `docs/features/sdlc-router-oscillation-guard.md`, so the next
+reader meets the reasoning rather than re-litigating it.
 
-3. **WS-D scope — is deterministic candidate ordering in this lane or the next?**
-   It is the actual root cause (Research: `gh pr list --search` gives no ordering
-   guarantee; measurement: 6 abandoned PRs carry artifacts, only 3 currently selected,
-   the rest masked by luck). Including it makes WS-C defense-in-depth rather than the
-   fix, and it is what keeps a GitHub-side ranking change from silently re-opening
-   #2825 with no commit here. It also enlarges the diff on a shared function and
-   creates the WS-B sequencing constraint. Include, or file and fix the two symptoms now?
+*One consequence to build against:* placing the guard first makes it the router's most
+exposed callable, since `evaluate_guards` wraps nothing. That is why the `isinstance`
+check is mandatory rather than defensive styling.
+
+**Q2 — Terminal return type: additive key on `Blocked`, or a third `Complete` dataclass?**
+**Resolved: additive key.** `Blocked(guard_id="TERMINAL")` plus a `complete: true` key in
+`decide()`'s JSON. A third dataclass is the more honest model — a finished pipeline is not
+blocked — but it ripples into every consumer of `decide_next_dispatch`, the parity tests,
+and `decide()`'s documented contract, and it buys nothing this lane needs: exactly one
+consumer (`do-sdlc`) has to change behavior, and it has to change either way. Ship the key,
+change the one consumer, keep the dataclass refactor available if a second terminal reason
+ever arrives. Recorded as a Rabbit Hole so the option stays visible.
+
+**Q3 — WS-D scope: is deterministic candidate ordering in this lane or the next?**
+**Resolved: the next. Filed as [#2868](https://github.com/tomcounsell/ai/issues/2868) and
+removed from this lane.**
+
+The critique falsified WS-D's headline rule and the falsification is decisive. WS-D was
+"**MERGED before anything else**, then most-recent first" — but `state` threads straight
+into `gh pr list --state {state}`, so every candidate in one call shares a state. The three
+production `_lookup_pr` call sites are exhaustive: `sdlc_stage_query.py:596` (`open`),
+`:598` (`merged`), and `sdlc_stage_marker.py:263` — the one **WS-C changes to `merged`**.
+After WS-C no caller passes `all`, so a MERGED-over-CLOSED comparator can never separate
+two candidates at any live call site.
+
+Its urgency argument goes with it. "6 abandoned PRs carry artifacts, only 3 selected; a
+ranking change could silently re-open #2825" describes **closed-unmerged** candidates,
+which `state="merged"` excludes by construction. WS-C is the fix, not a stopgap behind
+WS-D.
+
+The surviving half — a most-recent-first tiebreak among same-state candidates — is real
+(spike-4: `_lookup_pr(2518, "merged")` → 2538, the *first* of two lifecycles) but has no
+measured live fail-open, and it is not simply smaller: PR 2542 body-validates for #2518
+through a retrospective prose mention while declaring `Closes #2547`, so recency-first
+could select a **worse** match. That deserves its own measurement pass, which is exactly
+what should not be bolted onto this lane.
+
+Keeping a workstream whose stated justification had been disproved would have been the
+wrong call, and shrinking it in place would have left a diff on a shared function with no
+test in this lane needing it. #2868 carries the full reasoning, the sequencing constraint
+(it must not land before WS-B), and the 2542 caveat.
