@@ -35,6 +35,28 @@ bare ``|`` and meant it as part of the command -- is now reported as a
 a different command than the one on the page is the failure this module exists
 not to have.
 
+Table scoping (#2836)
+----------------------
+A ``## Verification`` section is scanned for pipe-blocks: contiguous runs of
+``|``-prefixed lines. That is the GitHub Flavored Markdown definition of one
+table (GFM spec section 4.10 -- a pipe table is a leaf block whose body
+consumes rows until a blank line or a line that cannot be part of the table).
+Every pipe-block in the section is classified on its own, independently:
+
+- A block is a **check table** when it has at least three columns and one of
+  its first three column names is exactly ``Command`` (case-insensitive).
+  Every data row in it is parsed as a check, exactly as before.
+- A block that is not a check table -- a red/green summary, a findings recap
+  -- becomes a :class:`SkippedTable`: named, reported, and non-failing. A
+  second markdown table in the section is legitimate plan authoring; treating
+  its header, separator, and data rows as guaranteed-fail checks (the pre-fix
+  behavior) is exactly the bug this module exists to not have.
+- When the section has pipe-blocks but **none** of them is a check table, the
+  section yielded zero executable checks and that is a loud failure: exactly
+  one :class:`MalformedRow` per pipe-block (never one per row), and no
+  :class:`SkippedTable` is produced in this branch -- a block is either
+  skipped or malformed, never both.
+
 The escape composes, which matters for basic-regex ``grep``: in a BRE,
 alternation is spelled ``\\|``, and to get that through the table you double
 the backslash. What lands in the shell is one level of unescaping::
@@ -50,7 +72,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Split on a `|` that is not backslash-escaped. A row's cells are the pieces
 # between these; `\|` inside a cell survives the split and is unescaped after.
@@ -94,11 +116,27 @@ class MalformedRow:
 
 
 @dataclass(frozen=True)
+class SkippedTable:
+    """A pipe-block in ``## Verification`` that is not a check table.
+
+    Named and reported in both runners, but non-failing: a summary table is
+    legitimate plan authoring, and failing the gate on it would reproduce
+    #2836 with a friendlier message (see the module docstring's "Table
+    scoping" section).
+    """
+
+    header: str
+    row_count: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class ParsedTable:
     """Everything a ``## Verification`` table yielded, including its rejects."""
 
     checks: list[VerificationCheck]
     malformed: list[MalformedRow]
+    skipped: list[SkippedTable] = field(default_factory=list)
 
 
 @dataclass
@@ -112,19 +150,68 @@ class CheckResult:
     error: str = ""
 
 
+_SEPARATOR_ROW_RE = re.compile(r"^\|[\s\-:|]+\|$")
+
+
+def _iter_pipe_blocks(section: str) -> list[list[str]]:
+    """Split a section into contiguous runs of ``|``-prefixed lines.
+
+    This is the GFM definition of one markdown table: a blank line, or any
+    line that cannot be part of the table, ends the table block (GFM spec
+    section 4.10). A second markdown table therefore never merges into the
+    first -- each contiguous run is returned as its own block.
+    """
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            current.append(stripped)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _is_check_table_header(header_cells: list[str]) -> bool:
+    """A block is a check table when it has >=3 columns and one of its first
+    three column names is exactly "Command" (case-insensitive)."""
+    if len(header_cells) < 3:
+        return False
+    return any(cell.strip().lower() == "command" for cell in header_cells[:3])
+
+
+def _block_data_rows(block: list[str]) -> list[str]:
+    """A block's rows after its header and (if present) its separator row."""
+    rows = block[1:]
+    if rows and _SEPARATOR_ROW_RE.match(rows[0]):
+        rows = rows[1:]
+    return rows
+
+
 def parse_verification_table(markdown: str) -> ParsedTable:
     """Extract verification checks from a ``## Verification`` markdown table.
 
     Returns an empty :class:`ParsedTable` when no ``## Verification`` section is
-    found or the table has no data rows.
+    found or the section has no pipe-blocks at all.
 
-    The expected column count comes from the header rather than being hardcoded
-    to 3, so a table that carries an extra annotation column is read correctly
-    instead of having every row rejected. Only the first three columns are used:
-    Check, Command, Expected.
+    The section is split into pipe-blocks (see :func:`_iter_pipe_blocks`) and
+    each is classified independently. A **check table** (header carries a
+    ``Command`` column among its first three) contributes its data rows as
+    checks; the expected column count comes from its own header, so a table
+    that carries an extra annotation column is read correctly instead of
+    having every row rejected. Only the first three columns of a check table
+    are used: Check, Command, Expected.
 
-    A row that does not yield that many cells lands in ``malformed`` with a
-    reason. It is never executed on a guess (#2570).
+    A non-check table becomes a non-failing :class:`SkippedTable`. When the
+    section has pipe-blocks but none of them is a check table, that is a loud
+    failure instead: exactly one :class:`MalformedRow` per pipe-block, never
+    one per row, and ``skipped`` stays empty in that branch.
+
+    A check-table row that does not yield the header's column count lands in
+    ``malformed`` with a reason. It is never executed on a guess (#2570).
     """
     section_match = re.search(
         r"^## Verification\s*$(.*?)(?=^## |\Z)",
@@ -132,53 +219,86 @@ def parse_verification_table(markdown: str) -> ParsedTable:
         re.MULTILINE | re.DOTALL,
     )
     if not section_match:
-        return ParsedTable(checks=[], malformed=[])
+        return ParsedTable(checks=[], malformed=[], skipped=[])
 
     section = section_match.group(1)
+    blocks = _iter_pipe_blocks(section)
+    if not blocks:
+        return ParsedTable(checks=[], malformed=[], skipped=[])
 
-    rows = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
-    if len(rows) < 2:
-        # Need at least header + separator (no data rows)
-        return ParsedTable(checks=[], malformed=[])
+    check_blocks: list[tuple[list[str], list[str]]] = []
+    non_check_blocks: list[list[str]] = []
+    for block in blocks:
+        header_cells = split_row_cells(block[0])
+        if _is_check_table_header(header_cells):
+            check_blocks.append((block, header_cells))
+        else:
+            non_check_blocks.append(block)
 
-    expected_columns = max(len(split_row_cells(rows[0])), 3)
+    if not check_blocks:
+        # Rows present but zero executable checks: a loud failure, one
+        # MalformedRow per pipe-block, never one per row. `skipped` stays
+        # empty -- a block is either skipped or malformed, never both.
+        malformed = [
+            MalformedRow(
+                line=block[0],
+                reason=(
+                    f"table has {len(block)} row(s) but none of its first three "
+                    "column names is Command; the ## Verification section "
+                    "yielded zero executable checks"
+                ),
+            )
+            for block in blocks
+        ]
+        return ParsedTable(checks=[], malformed=malformed, skipped=[])
 
     checks: list[VerificationCheck] = []
     malformed: list[MalformedRow] = []
+    skipped: list[SkippedTable] = [
+        SkippedTable(
+            header=block[0],
+            row_count=len(_block_data_rows(block)),
+            reason="not a check table: no column of the first three is named Command",
+        )
+        for block in non_check_blocks
+    ]
 
-    for row in rows[2:]:  # Skip header and separator
-        cells = split_row_cells(row)
+    for block, header_cells in check_blocks:
+        expected_columns = max(len(header_cells), 3)
 
-        if len(cells) != expected_columns:
-            malformed.append(
-                MalformedRow(
-                    line=row,
-                    reason=(
-                        f"expected {expected_columns} columns, got {len(cells)}. "
-                        "An unescaped `|` inside a cell splits the row. Write it "
-                        "as `\\|` (Markdown escape) and it reaches the shell as a "
-                        "literal pipe."
-                    ),
+        for row in _block_data_rows(block):
+            cells = split_row_cells(row)
+
+            if len(cells) != expected_columns:
+                malformed.append(
+                    MalformedRow(
+                        line=row,
+                        reason=(
+                            f"expected {expected_columns} columns, got {len(cells)}. "
+                            "An unescaped `|` inside a cell splits the row. Write it "
+                            "as `\\|` (Markdown escape) and it reaches the shell as a "
+                            "literal pipe."
+                        ),
+                    )
                 )
-            )
-            continue
+                continue
 
-        name = cells[0]
-        command = cells[1].strip("`")
-        expected = cells[2]
+            name = cells[0]
+            command = cells[1].strip("`")
+            expected = cells[2]
 
-        if not name or not command or not expected:
-            malformed.append(
-                MalformedRow(
-                    line=row,
-                    reason="Check, Command, and Expected must all be non-empty.",
+            if not name or not command or not expected:
+                malformed.append(
+                    MalformedRow(
+                        line=row,
+                        reason="Check, Command, and Expected must all be non-empty.",
+                    )
                 )
-            )
-            continue
+                continue
 
-        checks.append(VerificationCheck(name=name, command=command, expected=expected))
+            checks.append(VerificationCheck(name=name, command=command, expected=expected))
 
-    return ParsedTable(checks=checks, malformed=malformed)
+    return ParsedTable(checks=checks, malformed=malformed, skipped=skipped)
 
 
 def evaluate_expectation(expected: str, *, exit_code: int, output: str) -> bool:
@@ -326,16 +446,29 @@ def run_checks(
 
 def format_results(
     results: list[CheckResult],
-    malformed: list[MalformedRow] | None = None,
+    table: ParsedTable,
 ) -> str:
     """Format check results as a human-readable report.
+
+    ``table`` is required -- both production call sites
+    (``docs/sdlc/do-build.md`` and ``docs/sdlc/do-pr-review.md``) construct a
+    ``ParsedTable`` and are updated in the same change that added this
+    parameter, so an optional parameter would be a back-compat bridge with no
+    beneficiary and a silent way for the ``skipped`` diagnostic to stop
+    reaching a reader (#2570 added ``malformed`` optionally and a stale doc
+    still described the old signature; this parameter does not repeat that).
 
     Malformed rows are reported in their own section, above the checks and
     named as plan-authoring errors, so a row that could not be read is never
     mistaken for evidence about the code under test (#2570). They also make the
     run fail: a row nobody can execute is not a passing check.
+
+    Skipped (non-check) tables are reported in their own section and do not
+    participate in the pass/fail verdict (#2836): a summary table is
+    legitimate plan authoring.
     """
-    malformed = malformed or []
+    malformed = table.malformed
+    skipped = table.skipped
     lines: list[str] = ["## Verification Results", ""]
     all_passed = all(r.passed for r in results) and not malformed
 
@@ -347,6 +480,19 @@ def format_results(
         for m in malformed:
             lines.append(f"- [MALFORMED] {m.line}")
             lines.append(f"  Reason: {m.reason}")
+        lines.append("")
+
+    if skipped:
+        lines.append(f"### Non-check tables skipped ({len(skipped)})")
+        lines.append("")
+        lines.append(
+            "These pipe-blocks are not check tables (no Command column) and were "
+            "not executed. They do not affect the pass/fail verdict."
+        )
+        lines.append("")
+        for s in skipped:
+            lines.append(f"- [SKIPPED] {s.header} ({s.row_count} row(s))")
+            lines.append(f"  Reason: {s.reason}")
         lines.append("")
 
     for r in results:
