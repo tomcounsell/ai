@@ -45,17 +45,42 @@ An `/update` warning reliably reaches a human or an agent, in full, exactly once
 
 ## Freshness Check
 
-**Baseline commit:** `4d9118125`
+**Baseline commit (recon rounds 1–4):** `4d9118125`
+**Re-verified at:** `f491306c5` — 2026-08-19, 71 commits after the baseline
 **Issue filed at:** `2026-08-17T15:04:19Z`
 **Disposition:** Minor drift
 
-**File:line references re-verified:**
+**The repo surface this plan modifies is byte-identical to the baseline.**
 
-- `bridge/update.py:291` — `_warning_prefixes` / `has_warnings` — **still holds, verbatim**.
-- `bridge/update.py:120-121` — `stdout[:500]` / `stderr[:500]` in `_queue_fix_session` — **still holds, verbatim**.
-- `scripts/update/verify.py:1088-1134` — `check_env_completeness` flat set difference — **still holds**.
-- `scripts/update/run.py:1494` — Redis ACL drift warning — **drifted to 1480-1497**; the `result.warnings.append` is at 1494-1497. Claim holds.
-- `scripts/update/run.py:2275` — `warn_state` usage for `google-token` / `sms_reader` — **still holds** (the `human_gated_tools` loop at 2266-2290).
+```
+git log --oneline 4d9118125..f491306c5 -- \
+  bridge/update.py scripts/update/run.py scripts/update/verify.py \
+  scripts/update/warn_state.py .env.example
+```
+
+returns **empty**. None of the 71 intervening commits touched a file this plan
+changes, and `git diff --stat` across the same range for `.env.example` and
+`verify.py` is likewise empty. Every line number below is therefore re-confirmed
+**exact at `f491306c5`**, not merely "close enough".
+
+**File:line references re-verified at `f491306c5`:**
+
+- `bridge/update.py:291-292` — `_warning_prefixes` tuple and the `has_warnings` scan — **exact, verbatim**. The tuple is still `("[update] WARN", "WARNING:", "ERROR", "RESTART FAILED")` and the scan is still `any(line.strip().startswith(_warning_prefixes) for line in status_lines)`.
+- `bridge/update.py:120-121` — `stdout[:500]` / `stderr[:500]` in `_queue_fix_session` — **exact, verbatim**.
+- `bridge/update.py:214` — the `<<FILE:` marker parse site (currently used only to discard) — **exact**.
+- `scripts/update/run.py:2482-2494` — the `--cron` summary render — **exact**, and still a mutually-exclusive `if not result.success: / elif result.warnings: / else:`. `update failed at {sha}` + `  - {err}`; `{updated to|up to date at} {sha} ({N} warning{s})` + `  ⚠️ {warn}`; `update successful`.
+- `scripts/update/run.py:2519` — `print(f"<<FILE:{log_file}>>")` — **exact**.
+- `scripts/update/verify.py:1088-1134` — `check_env_completeness`, still a flat `declared_keys - present` set difference with no required/optional axis; `except OSError` at `1136-1141`. `_parse_env_example` at `1049`, still returning `list[tuple[str, str]]`. **All exact.**
+- `scripts/update/run.py:1029` — gws auth `result.warnings.append` — **exact**, and still bypasses `warn_state` (a second bare append sits at `1032`).
+- `scripts/update/run.py:1480-1497` — Redis ACL drift block; the `result.warnings.append` at `1494-1497` — **exact**, still bypassing `warn_state`, still calling `apply_redis_acl()` argument-free.
+- `scripts/update/run.py:2275` — `human_gated_tools = {"google-token", "sms_reader"}` — **exact**; the loop and its resolution branch run to `2291` with `should_emit` at `2280` and `2290`.
+- `scripts/update/run.py:2354` / `:2365` — the bespoke `calendar-config` `should_emit` wiring outside the `human_gated_tools` set — **exact, both lines**.
+- `scripts/update/warn_state.py` — 79 lines, exporting `_state_path`, `_load`, `_save`, `should_emit` and **nothing else**. No `active()`, no `_main()`, no reader surface of any kind. **Confirmed unchanged.**
+- `.env.example:197` `OLLAMA_URL`, `:201` `OLLAMA_VISION_MODEL`, `:446` `SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES` — **exact**, and all three still have zero readers (`git grep` outside `.env.example` and `docs/plans/` returns only the two doc lines this plan already corrects).
+- `docs/features/env-completeness-validation.md:61` (destructive remediation), `docs/features/headless-session-runner.md:165`, `docs/features/config-architecture.md:46` — **all three exact**.
+- `scripts/update/redis_acl.py:459` — `def _main()`, the pattern Task 4's `warn_state` CLI mirrors — **exact**.
+- Measured counts in `scripts/update/run.py`: `result.warnings.append` = **82**, `result.warnings.append(f` = **48**. **Both unchanged.**
+- Every test file named in Test Impact and Verification exists; `tests/unit/test_env_completeness.py` still holds **14** tests; #1898's regression test is at `tests/unit/test_bridge_update.py:186`. No test references `_warning_prefixes` or `has_warnings` by name, so the Test Impact row that hedged on a grep resolves to "none found".
 - `bridge/context_recall.py:48` — `CONTEXT_RECALL_HISTORY_DEPTH` default `"10"` — **still holds**.
 - `config/settings.py:978` — `SDLC_REVIEW_CROSS_VENDOR` — **drifted to 974**. Claim holds.
 - `config/settings.py:892` — `WORKER_SUPERVISOR_MAX_RESTARTS` — **drifted to 885**; the live read is `worker/__main__.py:90`, with the settings field a mirror. Claim holds.
@@ -70,11 +95,24 @@ An `/update` warning reliably reaches a human or an agent, in full, exactly once
 - **#2494** (durability plan) — merged; it is what deleted the `session_events` count-based trim, orphaning `SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES`.
 - **#2831** — the "documented env control with no reader" defect class; its guard (`tests/unit/test_review_judge_env_docs.py`) is scoped to `SDLC_REVIEW_*` only.
 
-**Commits on main since issue was filed (touching referenced files):** none. `git log --since=2026-08-17T15:04:19Z -- scripts/update/verify.py bridge/update.py scripts/update/run.py .env.example` returns empty; the repo is at the same SHA the issue cites.
+**Commits on main since issue was filed (touching referenced files):** none, across both windows. The original check ran at `4d9118125`; the re-verification at `f491306c5` covers 71 further commits and finds the same answer.
+
+**One material change, and it is environmental rather than committed: the `env-completeness` flagged count is per-machine, and 27 was never a repo fact.**
+
+`check_env_completeness` computes `declared_keys - present`, where `present` comes from the vault `.env` — a per-machine, un-versioned file. `.env.example` declares **89** keys and has not changed. On the machine where rounds 1–4 were written the difference was **27**. On the machine holding this lane's checkout it is **64** (77 keys present in that vault, 89 declared). Neither number is wrong; the *quantity itself* is not a property of the repository, and the plan previously read as though it were.
+
+This is not a cosmetic recount, because the wider set changes what the work means:
+
+- **The extra keys flagged here include genuine credentials** — `OP_SERVICE_ACCOUNT_TOKEN`, `SDLC_AGENT_GH_TOKEN`, `LINEAR_API_KEY`, `SENTRY_DSN`, `STRIPE_API_KEY`, `REDIS_URL`, `HEADSCALE_PREAUTH_KEY`. A builder who derives the `@optional` set by running the check on whatever machine they happen to be on would mark all of these optional. That is **Risk 1 realised on the first commit** — the check goes permanently quiet for exactly the secrets it exists to catch.
+- **The `@optional` set must therefore be derived from a criterion, not from a live set difference.** Rounds 1–4 established the criterion (a traced read site with an in-code default, and not a credential); they simply expressed its result as a number taken from one machine. The Technical Approach and Task 2 below now state the criterion and drop the machine-local counts. No design decision changes.
+- The plan's claim that `OLLAMA_URL` and `OLLAMA_VISION_MODEL` "are present in the vault `.env`, so the completeness check never flags them" was true on the authoring machine and is **false here** — both are flagged. The deletion of those two declarations never depended on that claim (they are deleted because nothing reads them), so the conclusion is unaffected and the reasoning is corrected in place.
+- The "11 of the 27 are declared with an empty value" hazard re-measures to **19 of the 64** here, and the hazard is unchanged and reconfirmed: `FEATURES__CRASH_AUTORESUME_MAX_ATTEMPTS` and its siblings are still declared empty, so the remediation at `docs/features/env-completeness-validation.md:61` still breaks `Settings()` construction fleet-wide if followed.
+
+**Suppressed-key state on this machine has grown from two keys to three:** `data/update_warn_state.json` now holds `calendar-config`, `google-token`, **and** `sms_reader`. This is the Prior Art evidence for Risk 4 getting stronger, not weaker, and it is exactly why Task 4's trailer test asserts *membership* rather than set equality.
 
 **Active plans in `docs/plans/` overlapping this area:** **one, and it claimed the same issue.** `docs/plans/update-warning-channel-integrity.md` (created by `76fd31e52`, ten seconds before this plan's `c60473fca`) carried the identical `tracking: .../issues/2845` with a materially different design. Because `tools/lane_identity.py::find_plan_path` returns the first alphabetical `tracking:` match and `"...integrity.md" < "...repair.md"`, every SDLC stage tool resolved to the sibling and this plan was unreachable to automation. That sibling has been **folded into this document and deleted** (revision round 1, critique BLOCKER 1); `find_plan_path(2845)` now returns this file. The original claim in this section — that no plan overlapped — was false when written and is corrected here rather than quietly edited away.
 
-**Notes:** All drift is line-number-only from unrelated edits; every claim in the issue survives re-verification. The corrected line numbers above are what the Technical Approach uses. Two claims were *strengthened* during re-verification: the empty-value hazard (Finding A, reproduced live) and the three dead declarations (Findings B/C), both recorded in issue comment 5317246173.
+**Notes:** Every claim in the issue survives re-verification, and at `f491306c5` the code claims survive it *exactly* — no line number in this plan needed correcting on the re-check. The only substantive correction is the machine-dependence of the `env-completeness` count, handled above and propagated into the Technical Approach, Task 2, Success Criteria, and the Verification table. Two claims were *strengthened* during earlier re-verification: the empty-value hazard (Finding A, reproduced live) and the three dead declarations (Findings B/C), both recorded in issue comment 5317246173.
 
 ## Prior Art
 
