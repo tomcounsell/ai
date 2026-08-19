@@ -2079,10 +2079,37 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 
 ## Step by Step Tasks
 
+### Lane status: tasks 1 and 2 are already committed on `session/sdlc-2739`
+
+The build branch exists and carries two of the four build commits. BUILD **verifies**
+these and does not reimplement them.
+
+| Task | Commit on `origin/session/sdlc-2739` | Covers |
+|---|---|---|
+| 1. `build-cascade` | `49574989e` — *refactor(#2739): cascade commit ownership moves to /do-docs (Q1)* | Q1 |
+| 2. `build-rotation` | `6261e2d2c` — *refactor(#2739): explicit staging + transactional rotation (Q3, Q4)* | Q3, Q4 |
+
+Branch head is `6261e2d2c`. Files touched across the two commits:
+`.claude/skill-context/do-docs.md`, `.claude/skills-global/do-docs/SKILL.md`,
+`reflections/docs_auditor.py`, `tests/unit/test_docs_auditor_substrate.py`.
+
+**Two obligations follow from this, and they are not optional.**
+
+1. **Rebase before anything else.** The branch is 30 commits behind `origin/main`. Every
+   `file:line` anchor in this plan is stated against `f491306c5`, so a build that reads
+   the plan's anchors against the pre-rebase tree will read the wrong lines. Rebase
+   `session/sdlc-2739` onto `origin/main` in the preflight task, resolve conflicts, and
+   re-run the substrate suite before starting task 3.
+2. **Verify, then move on.** For tasks 1 and 2 the acceptance evidence is the diff plus
+   the Verification rows those Q-groups own, run against the rebased branch. If a row that
+   should be green post-Q1/Q3/Q4 is red, that is a task-3-blocking repair, not a reason to
+   redo the commits.
+
 **Sequencing rule (C1).** The lane is not split, so the isolation comes from the commit
 boundaries: **each build task lands as its own commit** — task 1 = Q1, task 2 = Q3+Q4,
-task 3 = Q2+Q5 — so a reviewer reads one Q-group at a time and a bad group can be
-reverted without unpicking the others. Do not squash the build tasks together.
+task 3 = Q2+Q5, task 4 = Q7 — so a reviewer reads one Q-group at a time and a bad group
+can be reverted without unpicking the others. Do not squash the build tasks together.
+Tasks 1 and 2 already honor this rule; tasks 3 and 4 must too.
 
 **On N3 (parallelism).** Partially applied. `document-contract` is moved to depend on
 `preflight` and run in parallel, because every documentation decision is already fixed in
@@ -2100,18 +2127,25 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- **Rebase `session/sdlc-2739` onto `origin/main` first.** The branch is 30 commits
+  behind at plan time. Do this before reading any anchor: the plan's `file:line`
+  references are stated against `f491306c5`.
 - Confirm PR #2728 and PR #2842 are both `MERGED`, and that
   `grep -c '_git_log_follow_renames\|_detect_renamed' reflections/docs_auditor.py`
   returns `0`. If any of the three fails, stop and report — Q5 is unsound on a tree
-  where the rename channel is present (spike-2). Rebase this lane onto current `main`.
+  where the rename channel is present (spike-2).
 - Run every row of the Prerequisites table. In particular confirm
   `REDIS_RUNNING_KEY` is unset and `${AI_REPO_ROOT:-$HOME/src/ai}` is clean.
 - Re-run `--collect-only` on `tests/unit/test_docs_auditor_substrate.py` and re-grep
   every `file:line` in this plan before relying on it. The anchors are current as of
   the baseline commit and nothing more.
+- **Verify tasks 1 and 2 rather than redoing them.** `49574989e` and `6261e2d2c` are
+  already on the branch. Read their diffs, run the substrate suite on the rebased tree,
+  and run the Verification rows owned by Q1, Q3 and Q4. Report the row-by-row result;
+  start real work at task 3.
 - Do not enter any worktree other than `.worktrees/sdlc-2739`.
 
-### 1. Cascade commit ownership (Q1) — commit 1 of 3
+### 1. Cascade commit ownership (Q1) — commit 1 of 4 — ✅ LANDED as `49574989e`
 
 - **Task ID**: build-cascade
 - **Depends On**: preflight
@@ -2126,7 +2160,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   same commit — the contract change and its inline documentation belong together.
 - Land this as its own commit before touching the rotation path.
 
-### 2. Rotation git surface (Q3, Q4) — commit 2 of 3
+### 2. Rotation git surface (Q3, Q4) — commit 2 of 4 — ✅ LANDED as `6261e2d2c`
 
 - **Task ID**: build-rotation
 - **Depends On**: build-cascade
@@ -2172,7 +2206,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   permanently while reporting `skipped`. The `skipped` path stamps Redis and nothing
   else — it still performs no working-tree write and no git operation.
 
-### 3. Auto-merge deletion and escalation (Q2, Q5) — commit 3 of 3
+### 3. Auto-merge deletion and escalation (Q2, Q5) — commit 3 of 4
 
 - **Task ID**: build-escalation
 - **Depends On**: build-rotation
@@ -2234,10 +2268,71 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   beside the `{% if r.last_error %}` block at `:54-56`. Without the render the value
   reaches `dashboard.json` and nothing else.
 
-### 4. Real-git test surface
+### 4. Reference-shape parity (Q7, #2834) — commit 4 of 4
+
+- **Task ID**: build-reference-parity
+- **Depends On**: build-escalation
+- **Validates**: tests/unit/test_docs_auditor_substrate.py
+- **Informed By**: spike-6 (volume sized: 19 in-scope findings, 0.29/run), spike-7
+  (widened hatch fixes #2840/#2841 and keeps #2839), spike-8 (frame answer reused from
+  spike-3; `_resolve_neighborhood:286-298` is the in-module precedent)
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- **Domain**: detector / reporting semantics
+- Sequenced **after** task 3 for one concrete reason: task 3 hoists
+  `ISSUE_FILING_PER_RUN_CAP` to module level, and Q7's findings flow through that same
+  cap. Building Q7 first would either duplicate the constant or bind against a
+  function-local that task 3 then moves.
+- **Q7b first, because Q7a consumes it.** Widen `_is_documented_deletion` (`:847`):
+  heading **stems** (`delet`, `remov`, `deprecat`, `migrat`, `cleanup`, `obsolete`,
+  `retire`) replacing `_DELETION_HEADING_KEYWORDS`' exact inflections (`:778`);
+  `_DELETION_PROSE_CUES` (`:781-789`) replaced by a module-level word-anchored
+  alternation compiled once, in the shape of `_MIGRATION_CUE_WORD_RE` (`:403-410`);
+  adjacent-line window ±1 → **±2**. Then add the **live-claim veto**: a word-anchored
+  cue on the match's own line (`remain`, `remains`, `still`, `defined in`, `lives in`,
+  `currently`, `implemented in`) cancels the suppression. Evaluate the veto **after** the
+  fence tier and **before** the heading and prose tiers — a fenced block is illustrative
+  no matter what it says.
+- **Q7b controls are mandatory and are named.** After the widening, assert against the
+  three real sites: `docs/features/harness-abstraction.md:189` and
+  `docs/features/harness-adapter.md:19` / `:115` are **suppressed** (#2840, #2841), and
+  `docs/features/standardized-enums.md:19` is **still reported** (#2839). A widening that
+  silences #2839 is wrong regardless of how many false positives it removes.
+- **Q7a: add the `.md` link branch** to `_detect_deleted_target_issues` (`:876`), applying
+  Q7a's seven rules in order — match, skip anchors and URI schemes, skip inline code
+  spans, resolve doc-relative, apply the shared suppressions, skip placeholders, scope to
+  `docs/` minus `docs/plans/completed/` and `docs/plans/done/`. Follow
+  `_resolve_neighborhood:286-298` for the resolution idiom; do **not** borrow
+  `_absent_new_path_refs`, which spike-3 showed is structurally blind to the frame.
+- Q7a: extend `_is_placeholder_path` (`:790`) to strip `.md` as well as `.py` on the
+  final component, and add `filename`, `path`, `name` to `_PLACEHOLDER_PATH_COMPONENTS`
+  (`:773-775`).
+- Q7a: the new finding's `category` is `broken-md-link`; the title is
+  `Doc references missing link target: {target} (in {doc})` with `{target}` the
+  **resolved repo-relative path**. No age, date, count, or run id — the same
+  no-volatile-fields rule Q5 states, for the same reason.
+- **Q7c: rename `_open_issue_exists` (`:1003`) to `_issue_exists`, change `--state open`
+  (`:1025-1026`) to `--state all`, and add `--limit 100`.** No compatibility alias.
+  `--limit` is load-bearing: `gh issue list` defaults to 30, and under `--state all` the
+  exact title this function needs can fall off page one, which is a silent fail-open that
+  files a duplicate. Keep the fail-open-on-`gh`-error behavior exactly as it is.
+- Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
+  *"(and re-files any that were closed without fixing the doc, since the dedup gate only
+  sees open issues)"*. Delete it; do not annotate it.
+- **Re-run the sizing spike on the built code and record the number in the PR body.**
+  Call the detector directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`
+  for a sample of `docs/features/*.md` primaries. **Never** via `audit(..., apply_mode="apply")`,
+  which files real issues. Plan-time baseline to compare against: 19 distinct in-scope
+  `.md` findings, per-run mean 0.29 / max 3; `.py` channel drops from mean 0.86 to 0.57;
+  combined per-run mean flat at 0.86. A materially larger number means a rule was
+  dropped — find which before merging.
+- Do **not** add any repair path for `.md` links. Report only.
+
+### 5. Real-git test surface
 
 - **Task ID**: build-tests
-- **Depends On**: build-escalation
+- **Depends On**: build-reference-parity
 - **Validates**: tests/unit/reflections/test_docs_auditor_git_surface.py (create), tests/unit/test_docs_auditor_substrate.py
 - **Assigned To**: git-test-engineer
 - **Agent Type**: test-engineer
@@ -2261,7 +2356,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - Every run: `POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh <file> -q`. Never DB 15,
   never bare pytest.
 
-### 5. Contract documentation
+### 6. Contract documentation
 
 - **Task ID**: document-contract
 - **Depends On**: preflight
@@ -2274,7 +2369,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - Describe only the new status quo. No "previously", no migration notes.
 - Remember `.claude/skills-global/do-docs/SKILL.md` is a hardlink; edit it in the repo.
 
-### 6. Final validation
+### 7. Final validation
 
 - **Task ID**: validate-all
 - **Depends On**: build-tests, document-contract
