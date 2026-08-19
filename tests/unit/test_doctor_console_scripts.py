@@ -16,6 +16,8 @@ import stat
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tools.doctor import _check_console_scripts_resolve
 
 SCRIPTS = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
@@ -345,3 +347,319 @@ class TestRegisteredInDoctor:
         checks = get_checks()
         assert check in checks
         assert checks.index(check) < checks.index(_check_system_tools)
+
+
+class TestWinningScriptInterpreter:
+    """The interpreter-identity half of the check (#2748).
+
+    Resolving into the right *directory* (#2665, above) says nothing about
+    whether the winning file's shebang binds to a real interpreter. These
+    cases build shims whose shebang points at a nonexistent, off-pin, or
+    non-repo interpreter and assert the check reads and classifies it.
+    """
+
+    # --- Case 1 -----------------------------------------------------------
+
+    def test_case1_control_matching_pin_passes(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "3 of 3 interpreter-verified" in result.message
+
+    # --- Case 2: off-pin ----------------------------------------------------
+
+    def test_case2_off_pin_interpreter_fails_naming_target_and_both_versions(
+        self, tmp_path, monkeypatch
+    ):
+        root = _fake_checkout(tmp_path, venv_version="3.12", pin_version="3.14")
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        assert str(root / ".venv" / "bin" / "python3") in result.message
+        assert "3.12" in result.message
+        assert "3.14" in result.message
+
+    # --- Case 3: missing (ordering guard for spike-3) -----------------------
+
+    def test_case3_missing_interpreter_fails_naming_dangling_target(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path, broken_interpreter=True)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        python3 = root / ".venv" / "bin" / "python3"
+        dangling = os.path.realpath(python3)
+        assert str(python3) in result.message
+        assert dangling in result.message
+
+    # --- Case 4: outside -----------------------------------------------------
+
+    def test_case4_outside_repo_venv_fails(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path, shebang_body="#!/usr/bin/python3\n")
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        assert "outside every repo venv" in result.message
+        assert "/usr/bin/python3" in result.message
+
+    # --- Case 5: hardlink, os.link, trailer present, no /update -------------
+
+    def test_case5_hardlinked_copy_flagged_with_rebuild_and_trailer_no_update(
+        self, tmp_path, monkeypatch
+    ):
+        root = _fake_checkout(
+            tmp_path, names=("sdlc-push-guard",), venv_version="3.12", pin_version="3.14"
+        )
+        local_bin = tmp_path / "local" / "bin"
+        local_bin.mkdir(parents=True)
+        os.link(root / ".venv" / "bin" / "sdlc-push-guard", local_bin / "sdlc-push-guard")
+        result = _run(root, [local_bin, root / ".venv" / "bin"], monkeypatch)
+        assert result.passed is False
+        assert result.fix
+        assert "rm -rf .venv && uv sync --all-extras" in result.fix
+        assert "/update" not in result.fix
+        assert "Also remove the stale hardlinked copy at" in result.fix
+        assert str(local_bin / "sdlc-push-guard") in result.fix
+
+    # --- Case 6: unclassified forms, parameterized ---------------------------
+
+    @pytest.mark.parametrize(
+        "shebang_body",
+        [
+            "#!/bin/sh\n'''exec' /usr/bin/python3 \"$0\" \"$@\"\n'''\n",
+            # uv --relocatable's dirname $0 variant: line 1 is the same
+            # /bin/sh polyglot marker, only the exec target differs.
+            '#!/bin/sh\n\'\'\'exec\' "$(dirname "$0")"/python3 "$0" "$@"\n\'\'\'\n',
+            "#!/usr/bin/env python3\n",
+            "",
+        ],
+        ids=["sh_polyglot", "relocatable_dirname", "env_indirection", "no_shebang"],
+    )
+    def test_case6_unclassified_shebang_forms_produce_no_finding(
+        self, tmp_path, monkeypatch, shebang_body
+    ):
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names)
+        _executable(root / ".venv" / "bin" / "target-script", shebang_body)
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'target-script = "tools.target_script:main"\n'
+        )
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "3 of 4 interpreter-verified" in result.message
+
+    # --- Case 7: realpath guard -----------------------------------------------
+
+    def test_case7_symlinked_venv_python_is_not_realpathed(self, tmp_path, monkeypatch):
+        external = tmp_path / "external" / "python3.14"
+        external.parent.mkdir(parents=True)
+        _executable(external)
+        root = _fake_checkout(tmp_path, python3_symlink_target=external)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "outside" not in result.message
+
+    # --- Case 8: no pin --------------------------------------------------------
+
+    def test_case8_no_pin_disables_off_pin_but_missing_still_fails_with_disclosure(
+        self, tmp_path, monkeypatch
+    ):
+        root = _fake_checkout(tmp_path, broken_interpreter=True, pin_version=None)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        assert "pin unresolvable; off-pin comparison skipped" in result.message
+
+    def test_case8_no_pin_pass_path_discloses_skip(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path, pin_version=None)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "pin unresolvable; off-pin comparison skipped" in result.message
+
+    # --- Case 9: grouping --------------------------------------------------------
+
+    def test_case9_grouping_collapses_shared_bad_target_to_one_line(self, tmp_path, monkeypatch):
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names, venv_version="3.12", pin_version="3.14")
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        target = str(root / ".venv" / "bin" / "python3")
+        assert result.message.count(target) == 1
+        for n in names:
+            assert n in result.message
+
+    # --- Case 10: mixed --------------------------------------------------------
+
+    def test_case10_mixed_resolution_and_interpreter_failures_both_reported(
+        self, tmp_path, monkeypatch
+    ):
+        names = ("critique-roster-check", "critique-resume-probe")
+        root = _fake_checkout(tmp_path, names=names, venv_version="3.12", pin_version="3.14")
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'never-installed = "tools.never:main"\n'
+        )
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False
+        assert "not installed" in result.message
+        assert "3.12" in result.message and "3.14" in result.message
+        assert result.fix
+        assert "uv sync" in result.fix
+        assert "rm -rf .venv && uv sync --all-extras" in result.fix
+
+    # --- Case 11: distinct diagnostic prefixes, shared command -----------------
+
+    def test_case11_three_reasons_have_distinct_prefixes_and_shared_command(
+        self, tmp_path, monkeypatch
+    ):
+        root_m = _fake_checkout(tmp_path / "m", names=("sdlc-push-guard",), broken_interpreter=True)
+        r_m = _run(root_m, [root_m / ".venv" / "bin"], monkeypatch)
+
+        root_o = _fake_checkout(
+            tmp_path / "o", names=("sdlc-push-guard",), venv_version="3.12", pin_version="3.14"
+        )
+        r_o = _run(root_o, [root_o / ".venv" / "bin"], monkeypatch)
+
+        root_x = _fake_checkout(
+            tmp_path / "x", names=("sdlc-push-guard",), shebang_body="#!/usr/bin/python3\n"
+        )
+        r_x = _run(root_x, [root_x / ".venv" / "bin"], monkeypatch)
+
+        fixes = [r_m.fix, r_o.fix, r_x.fix]
+        assert all(f for f in fixes)
+        assert all("rm -rf .venv && uv sync --all-extras" in f for f in fixes)
+        diags = [f.split("In ", 1)[0].strip() for f in fixes]
+        assert len(set(diags)) == 3, diags
+
+    # --- Case 12: pass-message contract -----------------------------------------
+
+    def test_case12_pass_message_keeps_prefix_and_appends_no_venv_path(self, tmp_path, monkeypatch):
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert result.message.startswith(f"3 console scripts resolve into {root / '.venv' / 'bin'}")
+        assert result.message.endswith("3 of 3 interpreter-verified")
+
+    # --- Case 13: degenerate extractor inputs -----------------------------------
+
+    def test_case13_degenerate_shebang_inputs(self, tmp_path):
+        from tools.doctor import _shebang_interpreter
+
+        zero_byte = tmp_path / "zero"
+        zero_byte.write_bytes(b"")
+        assert _shebang_interpreter(zero_byte) is None
+
+        bare = tmp_path / "bare"
+        bare.write_text("#!\n")
+        assert _shebang_interpreter(bare) is None
+
+        whitespace_only = tmp_path / "ws"
+        whitespace_only.write_text("#!   \n")
+        assert _shebang_interpreter(whitespace_only) is None
+
+        with_flags = tmp_path / "flags"
+        with_flags.write_text("#!/path/python -E -s\n")
+        assert _shebang_interpreter(with_flags) == "/path/python"
+
+    # --- Case 14: every resolved script is read, not just the first ------------
+
+    def test_case14_default_fixture_reads_all_three(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path, names=("a", "b", "c"))
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "3 of 3 interpreter-verified" in result.message
+
+    def test_case14_only_second_script_alphabetically_has_bad_shebang(self, tmp_path, monkeypatch):
+        root = _fake_checkout(tmp_path, names=("a", "b", "c"))
+        missing_target = root / ".venv" / "bin" / "does-not-exist-python"
+        (root / ".venv" / "bin" / "b").write_text(f"#!{missing_target}\n")
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is False, (
+            "under the dedup-guard bug, only the first script sighted per bin dir "
+            "is ever read and this stays green"
+        )
+        assert "b" in result.message
+        assert str(missing_target) in result.message
+
+    # --- Case 15: two-entry venv_bins (the worktree topology) -------------------
+
+    def test_case15_each_shim_checked_against_the_venv_its_own_shebang_names(
+        self, tmp_path, monkeypatch
+    ):
+        main_root = _fake_checkout(tmp_path, names=(), venv_version="3.14", pin_version="3.14")
+        worktree = main_root / ".worktrees" / "lane-a"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {main_root / '.git' / 'worktrees' / 'lane-a'}\n")
+        (worktree / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n\n[project.scripts]\n'
+            'main-shim = "tools.main_shim:main"\n'
+            'wt-shim = "tools.wt_shim:main"\n'
+        )
+        wt_venv_bin = worktree / ".venv" / "bin"
+        wt_python3 = wt_venv_bin / "python3"
+        _executable(wt_python3)
+        (worktree / ".venv" / "pyvenv.cfg").write_text("version_info = 3.13\n")
+
+        main_python3 = main_root / ".venv" / "bin" / "python3"
+        _executable(wt_venv_bin / "main-shim", f"#!{main_python3}\n")
+        _executable(wt_venv_bin / "wt-shim", f"#!{wt_python3}\n")
+
+        result = _run(worktree, [wt_venv_bin], monkeypatch)
+        assert result.passed is False, result.message
+        # main-shim's target is the main venv, on the pin -> no finding.
+        assert "main-shim" not in result.message
+        # wt-shim's target is the worktree venv, off the pin -> flagged,
+        # naming the *worktree's* version (3.13), not the main venv's (3.14).
+        assert "wt-shim" in result.message
+        assert "3.13" in result.message
+        assert "pin is 3.14" in result.message
+        assert str(wt_python3) in result.message
+
+    # --- Case 16: divergent PATH spelling (hardlink-trailer guard) --------------
+
+    def test_case16_divergent_path_spelling_gets_no_hardlink_trailer(self, tmp_path, monkeypatch):
+        root = _fake_checkout(
+            tmp_path, names=("sdlc-push-guard",), venv_version="3.12", pin_version="3.14"
+        )
+        symlinked_root = tmp_path / "repo-symlink"
+        symlinked_root.symlink_to(root)
+        result = _run(root, [symlinked_root / ".venv" / "bin"], monkeypatch)
+        assert result.passed is False
+        assert result.fix
+        assert "Also remove the stale hardlinked copy at" not in result.fix
+
+    # --- Case 17: unresolvable venv version --------------------------------------
+
+    def test_case17_unresolvable_venv_version_excluded_from_ratio_no_none_leak(
+        self, tmp_path, monkeypatch
+    ):
+        root = _fake_checkout(tmp_path, names=("a", "b", "c"), write_pyvenv_cfg=False)
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "is Python None" not in result.message
+        assert ", 0 of 3 interpreter-verified" in result.message
+
+    # --- Case 18: symlinked on-PATH copy gets no trailer -------------------------
+
+    def test_case18_symlinked_on_path_copy_gets_no_trailer(self, tmp_path, monkeypatch):
+        root = _fake_checkout(
+            tmp_path, names=("sdlc-push-guard",), venv_version="3.12", pin_version="3.14"
+        )
+        local_bin = tmp_path / "local" / "bin"
+        local_bin.mkdir(parents=True)
+        os.symlink(root / ".venv" / "bin" / "sdlc-push-guard", local_bin / "sdlc-push-guard")
+        result = _run(root, [local_bin, root / ".venv" / "bin"], monkeypatch)
+        assert result.passed is False
+        assert result.fix
+        assert "Also remove the stale hardlinked copy at" not in result.fix
+
+    # --- Case 19: grouped trailer names every hardlinked path --------------------
+
+    def test_case19_grouped_trailer_names_every_hardlinked_path(self, tmp_path, monkeypatch):
+        names = ("critique-roster-check", "critique-resume-probe")
+        root = _fake_checkout(tmp_path, names=names, venv_version="3.12", pin_version="3.14")
+        local_bin = tmp_path / "local" / "bin"
+        local_bin.mkdir(parents=True)
+        for n in names:
+            os.link(root / ".venv" / "bin" / n, local_bin / n)
+        result = _run(root, [local_bin, root / ".venv" / "bin"], monkeypatch)
+        assert result.passed is False
+        assert result.fix
+        assert result.fix.count("Also remove the stale hardlinked cop") == 1
+        assert str(local_bin / "critique-roster-check") in result.fix
+        assert str(local_bin / "critique-resume-probe") in result.fix
