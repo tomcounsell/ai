@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T05:37:22Z
+revision_applied_at: 2026-08-19T06:04:33Z
 ---
 
 # Docs Auditor Review Gate
@@ -1127,9 +1127,33 @@ verification fixes the rest.
    `_apply_fixes_to_file` wrote, which converts the overlap from a silent discard into a
    named finding.
    If either scoped condition fails, `_push_branch_and_pr` signals failure and
-   `run_docs_auditor` returns `status="error"` and escalates via Q5's channel. It must
+   `run_docs_auditor` returns `status="error"`. It must
    not write liveness `"ok"`, must not stamp the rotation hash, and must not send a
    success Telegram.
+
+   **The escalation is a named call, not a gesture (R5-1).** Earlier revisions said the
+   error path "escalates via Q5's channel" while Q4 item 4's own table set Q5 issue
+   filing to **no** on the `error` column and Task 3's only filing bullet was gated on
+   `fixes_withheld > 0`. Nothing filed. That mattered because the return value is a plain
+   dict and `agent/reflection_scheduler.py:639-640` reads only `projects` — a
+   `status="error"` nobody files on is a value that reaches no reader at all.
+
+   So the error path calls `_file_issue_if_new` **before** it returns, with:
+
+   ```
+   title:    docs-auditor: rotation failed to produce a PR for {slug}
+   category: operational-failure
+   body:     the failing step, the `files_touched` list, whether the scoped restore
+             succeeded, and the remediation — inspect
+             `git -C ${AI_REPO_ROOT:-$HOME/src/ai} status --porcelain -- docs .claude`
+             and clean the auditor's paths before the next rotation.
+   ```
+
+   Slug-keyed and nothing else — no run id, no date, no count — per the
+   no-volatile-fields rule Q5 states, so a failure that repeats every run files **once**
+   rather than daily. The `operational-failure` category is what routes it through Q7c's
+   `states="open"` exemption; the next section says why that is required rather than
+   cosmetic.
 4. **Outcome routing in `run_docs_auditor`.** Because the guards moved,
    `pr_url is None` after `audit()` now unambiguously means failure, not "a guard
    fired". The three outcomes become distinct: `ok` (PR created), `skipped`
@@ -1145,10 +1169,15 @@ verification fixes the rest.
    | `_write_liveness` (`:1955`) | yes, `status="ok"` | **yes**, `status="skipped"` — see the ruling below | no |
    | Success Telegram (`:1947`) | yes | no | no |
    | Q5 withheld issue filing | when `fixes_withheld > 0` | no (`audit()` never ran) | no |
+   | **Failure issue filing (R5-1)** | no | no | **yes** — `docs-auditor: rotation failed to produce a PR for {slug}`, category `operational-failure`, filed before the return |
 
    `_update_rotation_hash` does **not** fire on `error`: a run that wrote and failed to
    produce a PR has not audited the doc, and re-picking it on the next run is correct
    there.
+
+   The last row is the one the prose in item 3 depends on. Table and prose are edited
+   together and must stay together: round 5 found them contradicting each other, with
+   the prose promising an escalation the table denied, and neither one built.
 
    **Ruling: the guard-fired `skipped` path DOES call `_write_liveness` (round-3 settle
    pass).** The terminal critique left this explicitly unspecified — either choice
@@ -1180,6 +1209,46 @@ verification fixes the rest.
    The only thing that stays forbidden is `_write_liveness(..., "ok", ...)` on any path
    that did not create a PR — the Failure Path Test Strategy row asserts exactly that, and
    `"skipped"` satisfies it.
+
+5. **The residual dirty checkout: the guard's label is corrected, and it deliberately
+   does not file (R5-1, second half).** A failed restore leaves the shared checkout
+   dirty, so every later run trips the dirty-tree guard (`:1858`), which today returns
+   `{"status": "ok", "summary": "docs-auditor skipped: dirty_tree"}`. Round 5 read that
+   as the tracking issue's own item 4 reappearing through this plan's new failure mode.
+   Two changes, one adopted and one argued down.
+
+   **Adopted: the guard returns `status="skipped"`, not `"ok"`.** It is exactly the
+   outcome the item-4 vocabulary above defines — a guard fired, nothing was written, no
+   git ran — and `_write_liveness` on that same line already writes `"skipped"`. Calling
+   the payload `"ok"` while liveness says `"skipped"` is drift inside a single return
+   statement. `tests/unit/test_docs_auditor_substrate.py:1497` pins the old string and is
+   updated with it (see **Test Impact**). Nothing keys off the value: the scheduler reads
+   only `result["projects"]` (`agent/reflection_scheduler.py:639-640`), and
+   `run_docs_auditor` has no other caller in the repo.
+
+   **Argued down: the guard must NOT file an issue.** The critic's proposed remedy was to
+   have the dirty-tree guard file `docs-auditor: shared checkout dirty, rotation halted`
+   and return `error`. In this repository that converts a fail-safe into a flood.
+   `_git_dirty(PROJECT_ROOT)` tests the **whole tree** of the shared main checkout, where
+   concurrent lanes routinely hold uncommitted work — this plan's own Q4 item 2 cites
+   three such files belonging to a different lane at writing time, and `docs/plans/`
+   edits land there by convention on every planning pass. A filing guard would therefore
+   mint an issue on essentially any day another agent has work in flight, blaming the
+   auditor for dirt it did not create, and `_file_issue_if_new`'s dedup would keep that
+   wrong issue open rather than making it self-clear. The guard cannot tell its own
+   residue from a peer's, and giving it a marker to tell them apart is a new mechanism
+   built to serve a state that item 3's filing already reports.
+
+   **What carries the signal instead.** The wedge is announced at the moment it is
+   created, by item 3's `operational-failure` issue, which names the slug, the
+   `files_touched` paths, and the cleanup command — and which stays open until a human
+   acts, because `_file_issue_if_new` suppresses a re-file against an open issue. The
+   subsequent `skipped: dirty_tree` runs are then not silent: there is a standing open
+   issue naming the failure that produced the dirt. This is a **documented residual**,
+   not an oversight: if the escalation filing itself fails (`gh` unavailable), the
+   auditor is quiet about its own wedge until someone looks. That is the module's
+   existing fail-open posture for `gh` (`_open_issue_exists` returns `False` on any `gh`
+   failure by design), and this plan does not change it.
 
 On the failure mode this replaces: today's plain `git checkout main` in the `finally`
 block (`:1557-1563`, no `check=`, return code discarded) fails when local
@@ -1223,6 +1292,39 @@ not build Q5 without it, which the Prerequisites table now checks.
    file **one issue per withheld entry**, not one per run. The body names the reason
    (`target-absent` or bare-name), the run, and the PR URL when there is one.
 
+   **`{old}` must be the term, not the regex source (R5-3). The plan picks the fix; the
+   builder does not choose.** The `withheld` dicts are built by `_apply_fixes_to_file`'s
+   inner `_reject`, whose only call site passes `pattern.pattern` (`:753`) — and the
+   pattern is `re.compile(rf"\b{re.escape(old_term)}\b")` (`:511`). So `w["old"]` is a
+   **regex source**, not a term. Three existing tests pin the shape
+   (`tests/unit/test_docs_auditor_substrate.py:811`, `:895`, `:1054`, each asserting
+   `"old": r"\breal\b"`). A literal reading of the template above mints
+   `docs-auditor: withheld fix in docs/features/x.md (\breal\b -> realistic)`, and that
+   string is the dedup key: it is passed verbatim to `gh issue list --search`
+   (`:1029-1031`), so the cross-machine gate would rest on GitHub full-text search
+   tolerating `\b`, parentheses, and `->`. A search miss fails open (`:1042-1050`) and
+   files a duplicate — the dedup defeat this whole item exists to prevent.
+
+   **Fix: unwrap in the withheld loop, leaving the record shape and its three tests
+   untouched.** Immediately before formatting the title:
+
+   ```python
+   term = re.sub(r"\\(.)", r"\1", w["old"].removeprefix(r"\b").removesuffix(r"\b"))
+   ```
+
+   The `removeprefix`/`removesuffix` pair strips the word anchors and the `re.sub` is the
+   exact inverse of `re.escape`, which only ever inserts a backslash before a single
+   non-alphanumeric character. On today's four `STALE_TERMS` keys (`SessionLog`,
+   `RedisJob`, `session_log`, `redis_job`) `re.escape` is a no-op and the `re.sub` does
+   nothing — it is there so a future term containing `.` or `-` does not silently put a
+   backslash into a dedup key. Title interpolation uses `term`, not `w["old"]`.
+
+   The alternative — changing `:753` to `_reject(old_term, ...)` by threading the term
+   through `_detect_stale_term_fixes`' return tuple — is **rejected**. It changes the
+   withheld record shape, breaks the three tests above, and also breaks the PR-body and
+   `findings` strings that render `w["old"]` on the landed branch, for a benefit the
+   two-line unwrap already delivers at the one place the value is used as a key.
+
    **No volatile component may appear in any title this module files** — no age, no
    date, no count, no run id. A title that changes between runs defeats dedup in the
    worst direction: it files a fresh issue every single run instead of suppressing one.
@@ -1255,9 +1357,34 @@ not build Q5 without it, which the Prerequisites table now checks.
    directly. That is the reuse this plan intends — one source of truth, so the two
    channels cannot drift — and it is still not the "separate new constant" forbidden
    above, which meant a second, independently-valued literal.
+
+   **`VAULT_DRIFT_ISSUE_CAP` is a different budget and must not be merged into it
+   (R5-2).** `reflections/docs_auditor.py:70` already defines `VAULT_DRIFT_ISSUE_CAP = 5`,
+   consumed by `_run_vault_drift_detection`'s own counter (`:1803-1810`), which runs
+   **before** `audit()` on every rotation. It sits five lines above `STALE_PR_AGE_DAYS`
+   (`:75`), which is exactly where this plan tells the builder to put
+   `ISSUE_FILING_PER_RUN_CAP` — so a builder reading "one source of truth; no second
+   literal" finds a second literal `5` in their peripheral vision at the insertion point
+   and may unify them. They are not the same budget: one bounds a vault↔site comparison
+   channel, the other bounds reference findings, and collapsing them would let a heavy
+   drift day starve the reference channel, or the reverse.
+
+   **The honest module-wide ceiling is three budgets, not one.** Hoisting a value shares a
+   literal, not a bound. After this lane a single rotation run can file up to **15**
+   `documentation` issues: 5 from `_run_vault_drift_detection` (`VAULT_DRIFT_ISSUE_CAP`),
+   5 from `audit()`'s advisory loop, and 5 from the withheld loop in `run_docs_auditor` —
+   plus at most one `operational-failure` issue on the error path, bounded at one per run
+   by construction. Q7 adds **no** fourth budget: its findings enter `audit()`'s existing
+   `issue_findings` list under the advisory cap it already has, which is the claim
+   spike-6 and spike-7 actually support. The Success Criteria name 15 rather than 5,
+   because a criterion claiming 5 is false on the tree it will be checked against, and a
+   builder who "repairs" it by merging the caps would be fixing the plan's arithmetic by
+   breaking the code.
+
    Note also that `_file_issue_if_new` hardcodes `--label documentation`
    (`:1115-1116`), so every issue this channel files carries that label and no other;
-   nothing here needs a new label.
+   nothing here needs a new label. That is the *filing* side; Q7c removes the same label
+   from the *dedup query* side, and states there why the two sides differ.
 2. **The sweeper never closes a PR carrying `WITHHELD_PR_MARKER`**, and it files its own
    escalation under a **distinct** title.
 
@@ -1567,8 +1694,9 @@ decides the doc is fine, and closes the issue gets the same issue back a month l
 forever. `audit()`'s comment at `:1259-1265` already documents this and its only answer
 is to meter the flood by gating filing to rotation.
 
-**Change `_open_issue_exists` to query `--state all` with `--limit 100`, and rename it
-`_issue_exists`.** No compatibility alias — Principle 1.
+**Change `_open_issue_exists` to query `--state all` with `--limit 100`, drop its
+`--label documentation` filter, and rename it `_issue_exists`.** No compatibility alias —
+Principle 1.
 
 - **Why `all` is right for the reference-shaped titles.** Each of those titles is a
   stable per-defect key over a **durable property of the tree**: the `.py` and `.md`
@@ -1593,10 +1721,12 @@ is to meter the flood by gating filing to rotation.
   path): `def _issue_exists(title: str, repo_root: Path, *, states: str = "all")`,
   splicing `"--state", states` into the argv. `_file_issue_if_new` selects it from the
   finding's own `category`, which vault-drift findings **already carry** at `:1757` and
-  `:1777` — no new key is needed, so this is three lines, not a data-model change:
+  `:1777` — no new key is needed, so this is a few lines, not a data-model change:
 
   ```python
-  states = "open" if finding.get("category") == "vault-drift" else "all"
+  _RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})
+  ...
+  states = "open" if finding.get("category") in _RECURRING_CONDITION_CATEGORIES else "all"
   if _issue_exists(title, repo_root, states=states):
   ```
 
@@ -1605,7 +1735,35 @@ is to meter the flood by gating filing to rotation.
   future category converges unless it deliberately opts out, and the opt-out list stays
   one line long and readable. State the rule in `_file_issue_if_new`'s docstring: *dedup
   matches closed issues for findings about durable tree state, and open issues only for
-  findings about a recurring comparison.*
+  findings about a recurring condition.*
+
+  **`operational-failure` joins the exemption, and the reason is the same one (R5-1).**
+  Q4 item 3's failed-restore filing is keyed on the slug and nothing else. Under the
+  default `"all"` a human who cleans the checkout and closes that issue would silence the
+  same failure for that slug **permanently** — the rotation could wedge on it again next
+  month and say nothing. Like vault-drift, its condition is not a durable property of the
+  tree: it is a run outcome that can recur after being genuinely fixed. Closing it means
+  *"I cleaned this up once"*, not *"this is not a defect"*. Under `"open"` it files once,
+  stays suppressed while open, and files again only after a human has closed it and the
+  failure has actually returned — which is the behavior Q4 item 5 leans on when it argues
+  the dirty-tree guard down. This extends R4-2's mechanism by one membership; it does not
+  reopen it.
+- **Why the `documentation` label filter goes with it (R5-4).** `_open_issue_exists`
+  filters on `"--label", "documentation"` (`:1026-1027`). Left in place, "file once,
+  ever" is silently conditional on the closed issue still *carrying that label* — and
+  `documentation` is not in this repo's documented triage label set (CLAUDE.md, "GitHub
+  Issue Labels"), while labels on this channel demonstrably get edited (#2839 carries
+  `documentation,plan`). A triager relabelling per the documented table drops
+  `documentation`, the closed issue becomes invisible to the gate, and the finding is
+  re-filed against a human who already ruled on it — the convergence criterion failing in
+  exactly the case it exists for. Removing the filter is **strictly safe**, and the
+  reason is structural rather than a judgment call: the authoritative match is the exact
+  normalized-title compare in Python at `:1051-1053` (`_normalize_title` is
+  `" ".join(title.split())`, `:983-985`), so widening the candidate set cannot manufacture
+  a false hit. It can only stop the filter hiding a real one. `--search title` still bounds
+  the candidate set, so this is not an unfiltered scan. The filter stays on the **filing**
+  side (`_file_issue_if_new`, `:1115-1116`) — new issues are still labelled
+  `documentation`; the plan only stops *depending* on the label surviving triage.
 - **Why `--limit 100` is not decoration.** `gh issue list` defaults to `--limit 30`.
   Under `--state open` the candidate set is small; under `--state all` a full-text search
   can easily return more than 30 issues, and the exact-title match this function needs
@@ -1666,7 +1824,13 @@ is to meter the flood by gating filing to rotation.
 
 - [ ] A rotation run that fails after writing must surface `status="error"` in the
       returned dict **and** through `output_summary` on the dashboard — assert the
-      scheduler passes it through.
+      scheduler passes it through — **and must file the `operational-failure` issue
+      before returning** (R5-1). The dict and the dashboard are both derived from a value
+      `agent/reflection_scheduler.py:639-640` does not read; the issue is the only surface
+      that survives the return.
+- [ ] The dirty-tree guard must return `status="skipped"`, not `"ok"`, and must **not**
+      file an issue — it fires on any lane's uncommitted work in the shared checkout, so
+      a filing guard would blame the auditor for dirt it did not create.
 - [ ] A run with `fixes_withheld > 0` must produce a GitHub issue; assert the issue
       body names the doc and the attempted rewrite.
 - [ ] Assert `_write_liveness` is **not** called with `status="ok"` on any path where
@@ -1729,16 +1893,27 @@ returns nothing.
       (`:1191`) — UPDATE: drop the patch target. The withhold→PR-body→Telegram→liveness
       propagation is still worth asserting; only the auto-merge framing at `:1224`
       ("that marker is what makes the PR auto-merge-ineligible") has to go.
+- [ ] `TestDirtyTreeGuard::test_dirty_tree_skips_rotation` (`:1492`, assertion at `:1497`)
+      — UPDATE (R5-1): the guard now returns `status="skipped"` rather than `"ok"`, so
+      `assert result["status"] == "ok"` becomes `== "skipped"`. Keep the
+      `"dirty" in result["summary"]` assertion as is, and **add** an assertion that
+      `_file_issue_if_new` was **not** called — the guard fires on a concurrent lane's
+      uncommitted work as readily as on the auditor's own residue, and a filing guard
+      would blame the auditor for a peer's dirt (Q4 item 5).
 
 Q7 breaks existing tests in three places (re-derived on `f491306c5`):
 
 - [ ] `_open_issue_exists` has **19** references in `tests/unit/test_docs_auditor_substrate.py`,
       concentrated in `TestCrossMachineDedup` (`:1689`) — UPDATE: rename every one to
       `_issue_exists`, and update any assertion on the `gh` argv to expect
-      `--state all` and `--limit 100` rather than `--state open` — **except** on a
-      `vault-drift` finding, which keeps `--state open` by the Q7c exemption. A test that
-      asserts the old argv on a reference finding is asserting the defect; a test that
-      asserts `--state all` on a drift finding is asserting the new one.
+      `--state all`, `--limit 100`, and **no `--label documentation`** (R5-4) rather than
+      `--state open --label documentation` — **except** on a `vault-drift` or
+      `operational-failure` finding, which keeps `--state open` by the Q7c exemption. A
+      test that asserts the old argv on a reference finding is asserting the defect; a
+      test that asserts `--state all` on a drift finding is asserting the new one. The
+      label assertion moves rather than disappearing: `_file_issue_if_new` still *files*
+      with `--label documentation`, so any argv assertion on the **creation** call keeps
+      it.
       **`tests/unit/test_reflections_memory.py:1177` is a false hit** —
       `test_skips_filing_when_open_issue_exists_for_same_signal` is a test *name* in a
       different module and must not be renamed.
@@ -1823,6 +1998,18 @@ bullets that genuinely remain; it is not an instruction to re-host the landed on
 
 Still owed by task 5 — nothing below is covered by `6261e2d2c`:
 
+- [ ] **The failed rotation files before it returns (R5-1).** Force `_push_branch_and_pr`
+      to return `None` after a write and assert `_file_issue_if_new` is called exactly
+      once, with a title matching
+      `docs-auditor: rotation failed to produce a PR for <slug>` carrying no date, run id
+      or count, with `"category": "operational-failure"`, and **before** the
+      `status="error"` return. Without this the escalation Q4 item 3 promises does not
+      exist: the return is a plain dict and `agent/reflection_scheduler.py:639-640` reads
+      only `projects`.
+- [ ] **Withheld titles carry the term, not the regex source (R5-3).** Drive a rotation
+      whose `withheld` entry is `{"old": r"\breal\b", "new": "realistic", ...}` and assert
+      the filed title contains `(real -> realistic)` and no backslash. The title is the
+      dedup key and is passed verbatim to `gh issue list --search`.
 - [ ] Early-return restore: force each failure (`git push` to a nonexistent remote,
       `gh pr create` returning non-zero, `git add --` on a missing path) and assert
       HEAD is back on the starting ref, the created branch is gone, and
@@ -1932,14 +2119,22 @@ existing detector classes:
       matches exactly, and still returns `False` (fail open) on a non-zero `gh` exit.
       Assert `_file_issue_if_new` does not file when `_issue_exists` is `True`. Assert
       the symbol `_open_issue_exists` no longer exists in the module.
-- [ ] **Vault-drift keeps the open-only gate (Q7c exemption).** Home is
-      `TestVaultSiteDrift` or `TestCrossMachineDedup`. With a `gh` stub, assert that
+- [ ] **The recurring-condition categories keep the open-only gate (Q7c exemption).** Home
+      is `TestVaultSiteDrift` or `TestCrossMachineDedup`. With a `gh` stub, assert that
       `_file_issue_if_new` on a finding carrying `"category": "vault-drift"` dispatches
-      `--state open`, while the same call on a `deleted-target` or `broken-md-link`
-      finding dispatches `--state all`. Then assert the behavioral consequence: a
-      **closed** drift issue for the same vault/site pair does **not** suppress a fresh
-      filing, and a closed `broken-md-link` issue does. A build that applies `all`
+      `--state open`, likewise `"category": "operational-failure"` (R5-1), while the same
+      call on a `deleted-target` or `broken-md-link` finding dispatches `--state all`.
+      Then assert the behavioral consequence: a **closed** drift issue for the same
+      vault/site pair does **not** suppress a fresh filing, and a closed
+      `broken-md-link` issue does. A build that applies `all`
       uniformly passes every other Q7c case and fails this one.
+- [ ] **A closed issue without the `documentation` label still suppresses (R5-4).** In
+      `TestCrossMachineDedup`: stub `gh issue list` to return one **closed** issue whose
+      title matches exactly and whose labels do **not** include `documentation`, and
+      assert `_issue_exists` returns `True` and `_file_issue_if_new` does not file. This
+      is the case the removed `--label` filter used to hide, and it is the case
+      convergence exists for — a human who read the finding, ruled on it, and let a
+      triager relabel the issue.
 - [ ] **Cap sharing.** A rotation pass whose findings are a mix of `deleted-target` and
       `broken-md-link` still files at most `ISSUE_FILING_PER_RUN_CAP` issues in total —
       Q7 must not get its own budget.
@@ -2086,23 +2281,37 @@ rather than left to be discovered. The alternative is the status quo, which re-l
 every human ruling on a 30-day timer and has already produced two flood incidents (#1555,
 #1716). If a specific finding needs re-raising, reopening the closed issue is one click and
 is the honest signal.
-**Scope bound — vault-drift is exempt and stays on `states="open"`.** Its condition is a
-recurring `vault_mtime > site_ts` comparison, not a durable property of the tree, so a
-closed issue there records one reconciliation rather than a standing ruling. Under `all`
-one human close would silence that vault/site pair forever and the channel would decay
-pair by pair with no signal. The `states` keyword in Q7c is what keeps that from
-happening; `docs/features/vault-drift-audit.md` records the exemption and its reason so a
-later reader does not "unify" the two dedup modes.
+**Scope bound — the recurring-condition categories are exempt and stay on
+`states="open"`.** Vault-drift's condition is a recurring `vault_mtime > site_ts`
+comparison, not a durable property of the tree, so a closed issue there records one
+reconciliation rather than a standing ruling. Under `all` one human close would silence
+that vault/site pair forever and the channel would decay pair by pair with no signal.
+`operational-failure` (Q4 item 3's failed-restore escalation) is in the same class for the
+same reason: closing it means the checkout was cleaned once, not that a future wedge is
+not a defect. Both sit in `_RECURRING_CONDITION_CATEGORIES` and the `states` keyword in
+Q7c is what keeps them there; `docs/features/vault-drift-audit.md` and
+`docs/features/docs-auditor.md` record the exemption and its reason so a later reader does
+not "unify" the two dedup modes.
+**Second-order note (R5-4):** convergence for the reference categories also requires the
+dedup query to *find* the closed issue, which is why Q7c drops the `--label documentation`
+filter. Keeping it would have made "file once, ever" conditional on a label surviving
+triage, and this repo's documented label set does not include `documentation`.
 
-### Risk 8: The `.md` branch reports the 19-finding backlog as a burst
+### Risk 8: The `.md` branch adds a 19-finding backlog
 
-**Impact:** the first several rotations after deploy spend their whole issue budget on
-pre-existing broken links, deferring `.py` findings.
-**Mitigation:** bounded and self-clearing. `ISSUE_FILING_PER_RUN_CAP = 5` and rotation is
-daily, so the backlog drains in about four runs, after which Q7c keeps it drained.
-spike-6 measured the steady-state rate at 0.29 findings per run. Note the rotation
-reflection is currently `enabled: false` on this machine (Open Question 3), so the burst
-does not begin until someone re-enables it deliberately.
+**Impact:** 19 pre-existing broken links exist in scope at plan time and each becomes an
+issue the first time rotation reaches its containing doc.
+**Mitigation:** the backlog surfaces gradually and never contends for the budget. Earlier
+revisions said it would "spend the whole issue budget" and "drain in about four runs";
+both were wrong and are corrected here (R5-5). Rotation sees one primary's
+`_resolve_neighborhood`, not the repository, so spike-6 measured the widening at a per-run
+mean of **0.29** findings and a max of 3, finding **nothing** in 28 of 35 sampled runs.
+The 19 findings therefore surface over roughly a full rotation cycle as rotation reaches
+each containing doc, at well under the per-run cap, after which Q7c keeps them from
+returning. The residual risk this row actually carries is the opposite of a burst: the
+backlog takes a cycle to be reported at all. Note the rotation reflection is currently
+`enabled: false` on this machine (Open Question 3), so none of it begins until someone
+re-enables it deliberately.
 
 ## Race Conditions
 
@@ -2282,6 +2491,20 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       surface. State that the durable surface is now the GitHub issue (Q5) and the
       dashboard `output_summary`, so #2743 is not later argued from a doc this plan
       left stale.
+- [ ] Document the **failure escalation and the dirty-tree label** (R5-1) in
+      `docs/features/docs-auditor.md`: a rotation that writes and produces no PR files
+      `docs-auditor: rotation failed to produce a PR for {slug}` under category
+      `operational-failure` before returning `status="error"`, and the dirty-tree guard
+      returns `status="skipped"` and deliberately files nothing because it cannot
+      distinguish the auditor's own residue from a concurrent lane's uncommitted work in
+      the shared checkout. Name the residual plainly: if the escalation filing itself
+      fails, the wedge is unreported until a human looks.
+- [ ] Document the module's **three per-run issue budgets** (R5-2) in the same file:
+      `VAULT_DRIFT_ISSUE_CAP` (vault↔site loop), `ISSUE_FILING_PER_RUN_CAP` shared by
+      `audit()`'s advisory loop and the withheld loop, and the resulting module-wide
+      ceiling of 15 issues per rotation run plus at most one `operational-failure`
+      filing. State that the two constants are deliberately separate so nobody merges
+      them for tidiness.
 
 ### Reference Reporting (Q7, #2834)
 
@@ -2303,15 +2526,19 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       repair them, and that the auto-repairing predecessor
       (`_detect_readme_broken_entries`) was deleted by #2741 and is not coming back.
 - [ ] Same file — document the convergence rule: a reference finding is filed **once,
-      ever**. `_issue_exists` matches open **and closed** issues by default, so closing an
-      issue without changing the doc is a durable human ruling. Name the cost: a defect
-      that is fixed, closed, and later regresses identically stays silent. Name the one
-      exemption in the same breath — vault-drift keeps the open-only gate.
+      ever**. `_issue_exists` matches open **and closed** issues by default and does
+      **not** filter on a label, so closing an issue without changing the doc is a durable
+      human ruling that survives a triager relabelling it (R5-4). Name the cost: a defect
+      that is fixed, closed, and later regresses identically stays silent. Name the
+      exemptions in the same breath — vault-drift and `operational-failure` keep the
+      open-only gate.
 - [ ] `docs/features/vault-drift-audit.md` — state that vault-drift findings dedup
-      against **open** issues only, unlike every other category the auditor files, and
+      against **open** issues only, unlike the reference categories, and
       why: the finding is a recurring `vault_mtime > site_ts` comparison, so a closed
       issue records one reconciliation rather than a standing ruling, and matching closed
-      issues would silence that vault/site pair permanently. Describe it as the status
+      issues would silence that vault/site pair permanently. Name
+      `_RECURRING_CONDITION_CATEGORIES` as the membership that carries it, and note that
+      `operational-failure` is in it for the same reason. Describe it as the status
       quo of the channel, not as a carve-out that was "added".
 - [ ] `docs/features/reflections.md` — the `docs-auditor` registry row and the Caller B
       filing note (`:147-152`) describe what the auditor files; update for the second
@@ -2377,7 +2604,14 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       only `files_touched`.
 - [ ] `_pr_is_auto_merge_eligible` is gone and the sweeper never runs `gh pr merge`.
 - [ ] A rotation run that returns early leaves the shared main checkout exactly as it
-      found it, and does not report `status="ok"` for a pass whose output it discarded.
+      found it, and does not report `status="ok"` for a pass whose output it discarded —
+      including the dirty-tree guard, which now returns `status="skipped"` to match its
+      own `_write_liveness` call and the plan's three-outcome vocabulary.
+- [ ] A rotation run that writes and fails to produce a PR **files a GitHub issue before
+      it returns** (R5-1): `docs-auditor: rotation failed to produce a PR for {slug}`,
+      category `operational-failure`, slug-keyed with no volatile field, naming the
+      `files_touched` paths and the cleanup command. `status="error"` alone is not an
+      escalation — `agent/reflection_scheduler.py:639-640` reads only `projects`.
 - [ ] A rotation run that a guard skips still advances the rotation pointer for the doc
       it picked, so no blocked slug — including one behind a withheld PR that is never
       closed — can pin the rotation on a single document.
@@ -2404,19 +2638,26 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       issue: the three real sites behind #2840 and #2841 are silent, and the true positive
       behind #2839 is still reported (#2834 second half).
 - [ ] A **reference** finding a human closes without editing the doc is **not** re-filed:
-      `_issue_exists` matches closed issues, `_open_issue_exists` no longer exists, and
-      the `gh` query carries `--limit 100`.
-- [ ] A **vault-drift** finding a human closes **is** re-filed when the pair drifts again:
-      `_file_issue_if_new` passes `states="open"` for that category, so one reconciliation
-      does not silence a vault/site pair permanently.
+      `_issue_exists` matches closed issues, `_open_issue_exists` no longer exists, the
+      `gh` query carries `--limit 100`, and it **no longer filters on
+      `--label documentation`** — so a relabelled-and-closed issue still suppresses
+      (R5-4). New issues are still *filed* with that label.
+- [ ] A **vault-drift** or **operational-failure** finding a human closes **is** re-filed
+      when the condition recurs: `_file_issue_if_new` passes `states="open"` for both
+      categories, so one reconciliation does not silence a vault/site pair — or one
+      checkout cleanup a wedged rotation — permanently.
 - [ ] The stale-term apply path is unchanged in behavior by Q7b's veto: a `STALE_TERMS`
       hit on a live-claim line under a deletion heading is still suppressed, because
       `_make_stale_term_replacer` never passes `live_claim_veto=True`. The auditor gains a
       report, not a rewrite.
-- [ ] Q7's findings share `ISSUE_FILING_PER_RUN_CAP` with the existing advisory loop —
-      no second budget — and the sizing spike re-run on the built code reports per-run
-      volume within range of the plan-time baseline (mean 0.29 for `.md`, combined mean
-      flat at 0.86).
+- [ ] Q7's findings share `audit()`'s advisory budget rather than adding one of their own,
+      and the sizing spike re-run on the built code reports per-run volume within range of
+      the plan-time baseline (mean 0.29 for `.md`, combined mean flat at 0.86).
+- [ ] The module's per-run issue budgets are named accurately, not collapsed (R5-2):
+      `VAULT_DRIFT_ISSUE_CAP` (5, pre-rotation vault↔site loop) stays a **separate**
+      constant from `ISSUE_FILING_PER_RUN_CAP` (5, shared by `audit()`'s advisory loop and
+      the withheld loop). The true module-wide ceiling for one rotation run is **15**
+      issues plus at most one `operational-failure` filing, and the docs say so.
 - [ ] No repair path for `.md` links exists anywhere in the module; the only effect of a
       Q7 finding is a GitHub issue.
 - [ ] Tests pass (`/do-test`), run with `POPOTO_TEST_DB=13` via
@@ -2470,11 +2711,18 @@ Branch head is `6261e2d2c`. Files touched across the two commits:
 
 **Three obligations follow from this, and they are not optional.**
 
-1. **Rebase before anything else, for currency — not for anchors.** The branch is 30
-   commits behind `origin/main`. Rebase `session/sdlc-2739` onto `origin/main` in the
-   preflight task, resolve conflicts, and re-run the substrate suite before starting
-   task 3. Rebasing is what puts the branch on current upstream code; it is **not** what
-   makes this plan's anchors read correctly, and obligation 2 is why.
+1. **Rebase before anything else, for currency — not for anchors.** Rebase
+   `session/sdlc-2739` onto `origin/main` in the preflight task, resolve conflicts, and
+   re-run the substrate suite before starting task 3. Rebasing is what puts the branch on
+   current upstream code; it is **not** what makes this plan's anchors read correctly, and
+   obligation 2 is why.
+
+   **No behind-count is stated here, deliberately (R5-6).** Earlier revisions wrote "30
+   commits behind"; by the round-5 critique it was 69, and by this revision 81. The figure
+   is stale before the plan is committed, and a builder who reads it as a precondition
+   will either doubt the plan or doubt the branch. Measure it at preflight if you want it:
+   `git rev-list --count origin/session/sdlc-2739..origin/main`. The obligation is
+   "rebase for currency", full stop — it does not depend on how far behind the branch is.
 2. **Every `file:line` in this plan is an `origin/main` anchor, and tasks 3-4 run on a
    tree that already carries `49574989e` + `6261e2d2c`.** Those two commits move
    `reflections/docs_auditor.py` by +150 net lines, so the task-3 anchors below —
@@ -2534,10 +2782,13 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Rebase `session/sdlc-2739` onto `origin/main` first.** The branch is 30 commits
-  behind at plan time. Rebase for currency, not for anchors — see obligation 2 in the
-  lane-status block: the two landed commits move the module by +150 net lines, so the
-  task-3 anchors are wrong on the build tree regardless of the rebase.
+- **Rebase `session/sdlc-2739` onto `origin/main` first.** Rebase for currency, not for
+  anchors — see obligation 2 in the lane-status block: the two landed commits move the
+  module by +150 net lines, so the task-3 anchors are wrong on the build tree regardless
+  of the rebase. Measure the behind-count here with
+  `git rev-list --count origin/session/sdlc-2739..origin/main` if you want it; the plan
+  deliberately does not quote one, because every figure it has quoted went stale within a
+  day (R5-6).
 - Confirm PR #2728 and PR #2842 are both `MERGED`, and that
   `grep -c '_git_log_follow_renames\|_detect_renamed' reflections/docs_auditor.py`
   returns `0`. If any of the three fails, stop and report — Q5 is unsound on a tree
@@ -2662,6 +2913,16 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   `docs-auditor: withheld fix in {doc} ({old} -> {new})`. The title is the dedup key
   (`:1075-1076`), so it must be per-defect and must contain **no** volatile component —
   no age, date, count, or run id.
+- Q5 (R5-3): **`w["old"]` is a regex source, not a term — unwrap it before formatting the
+  title.** `_reject` is called as `_reject(pattern.pattern, new, absent)` (`:753`) where
+  the pattern is `rf"\b{re.escape(old_term)}\b"` (`:511`), so a literal reading of the
+  template mints `... (\breal\b -> realistic)` and hands that to `gh issue list --search`
+  as the dedup key. In the withheld loop compute
+  `term = re.sub(r"\\(.)", r"\1", w["old"].removeprefix(r"\b").removesuffix(r"\b"))` and
+  interpolate `term`. Do **not** change `_reject`'s signature or the withheld record
+  shape: `tests/unit/test_docs_auditor_substrate.py:811`, `:895` and `:1054` pin
+  `"old": r"\breal\b"`, and the branch's PR-body and `findings` strings render the same
+  field.
 - Q5 (NEW-4 / R3-2): bound the withheld filing at the module's existing per-run cap of 5
   (`:1277-1289`), and log a suppression warning naming the remainder exactly as
   `:1281-1288` does. **The cap must be hoisted, not read in place.** `per_run_cap` is a
@@ -2671,6 +2932,34 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   derive `audit()`'s local from it
   (`per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3`), and break
   the withheld loop on the constant. One source of truth; no second literal.
+- Q5 (R5-2): **`VAULT_DRIFT_ISSUE_CAP = 5` at `:70` is a different budget. Do not merge
+  it.** It bounds `_run_vault_drift_detection`'s own counter (`:1803-1810`), which runs
+  before `audit()` on every rotation, and it sits five lines above the `:75` insertion
+  point for `ISSUE_FILING_PER_RUN_CAP` — close enough that "no second literal" reads as an
+  instruction to unify them. It is not. Leave `VAULT_DRIFT_ISSUE_CAP` untouched, including
+  its name and its four occurrences.
+- **Q4 / R5-1: the `pr_url is None` branch must file before it returns.** On the landed
+  branch that branch appends a finding and returns `{"status": "error", ...}` — a plain
+  dict that `agent/reflection_scheduler.py:639-640` never reads past `projects`, so the
+  wedge signal dies there. Before returning, call `_file_issue_if_new` with title
+  `docs-auditor: rotation failed to produce a PR for {slug}` and
+  `"category": "operational-failure"`. Slug-keyed only — no run id, no date, no count — so
+  a failure that repeats every run files once. The body names the failing step, the
+  `files_touched` paths, whether the scoped restore succeeded, and the cleanup command.
+  Q7c's `_RECURRING_CONDITION_CATEGORIES` (task 4) is what puts this category on
+  `states="open"` so a human close does not silence the slug forever; if task 4 has not
+  landed yet, file it anyway — the default `--state open` on today's `_open_issue_exists`
+  is already the behavior this category wants.
+- **Q4 / R5-1: the dirty-tree guard returns `status="skipped"`, and does NOT file.**
+  Change the guard's return (branch `:1960-1967`) from `"status": "ok"` to
+  `"status": "skipped"`, matching the `_write_liveness("(dirty)", "skipped", ...)` call on
+  the line above it and the three-outcome vocabulary in Q4 item 4.
+  `tests/unit/test_docs_auditor_substrate.py:1497` asserts the old string and is updated
+  with it. **Do not make this guard file an issue.** `_git_dirty` tests the whole shared
+  checkout, where concurrent lanes routinely hold uncommitted work, so a filing guard
+  would mint issues blaming the auditor for a peer's dirt. Q4 item 5 records the full
+  argument; the escalation belongs on the failure path above, which knows it caused the
+  dirt.
 - Q5 (NEW-2): add `body` to the sweeper's `gh pr list --json` field set at `:2147`
   (`number,state,createdAt` → `number,state,createdAt,body`). Deleting
   `_pr_is_auto_merge_eligible` removes the only place the sweeper ever fetched a PR body
@@ -2749,18 +3038,29 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   no-volatile-fields rule Q5 states, for the same reason.
 - **Q7c: rename `_open_issue_exists` (`:1003`) to `_issue_exists`, give it
   `*, states: str = "all"`, splice `"--state", states` into the argv in place of the
-  hardcoded `--state open` (`:1025-1026`), and add `--limit 100`.** No compatibility
-  alias. `--limit` is load-bearing: `gh issue list` defaults to 30, and under
-  `--state all` the exact title this function needs can fall off page one, which is a
-  silent fail-open that files a duplicate. Keep the fail-open-on-`gh`-error behavior
-  exactly as it is.
+  hardcoded `--state open` (`:1025-1026`), add `--limit 100`, and remove
+  `"--label", "documentation"` (`:1026-1027`).** No compatibility alias. `--limit` is
+  load-bearing: `gh issue list` defaults to 30, and under `--state all` the exact title
+  this function needs can fall off page one, which is a silent fail-open that files a
+  duplicate. The label removal is load-bearing for the same criterion (R5-4): a
+  relabelled-and-closed issue is invisible to a label-filtered gate, and `documentation`
+  is not in this repo's documented triage label set while labels on this channel
+  demonstrably get edited (#2839 is `documentation,plan`). Safe because the authoritative
+  match is the exact `_normalize_title` compare at `:1051-1053`, so a wider candidate set
+  cannot create a false hit. **Leave the `--label documentation` on the *filing* side
+  (`:1115-1116`) alone** — new issues keep the label; the plan only stops depending on it
+  surviving triage. Keep the fail-open-on-`gh`-error behavior exactly as it is.
 - **Q7c: `_file_issue_if_new` (`:1064`) selects the mode from the finding's `category`.**
-  `states = "open" if finding.get("category") == "vault-drift" else "all"`, passed
-  through. Vault-drift findings already carry that key (`:1757`, `:1777`), so no finding
-  shape changes. This is the one channel `all` must not cover: its condition is a
-  recurring `vault_mtime > site_ts` comparison, so under `all` a single human close would
-  silence that vault/site pair permanently. A parameter, not a second function — the
-  parallel path Principle 1 forbids.
+  Define `_RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})`
+  at module level and select
+  `states = "open" if finding.get("category") in _RECURRING_CONDITION_CATEGORIES else "all"`,
+  passed through. Vault-drift findings already carry that key (`:1757`, `:1777`) and task
+  3's failure filing sets `operational-failure`, so no finding shape changes. These are the
+  two channels `all` must not cover: vault-drift's condition is a recurring
+  `vault_mtime > site_ts` comparison and the failure filing's is a run outcome that can
+  recur after a genuine cleanup, so under `all` a single human close would silence either
+  one permanently. A parameter and a membership set, not a second function — the parallel
+  path Principle 1 forbids.
 - Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
   *"(and re-files any that were closed without fixing the doc, since the dedup gate only
   sees open issues)"*. Delete it; do not annotate it.
@@ -2886,7 +3186,12 @@ post-build expectation that legitimately fails now.
 | Live-claim veto is present (Q7b) | **Behavioral**: a line reading *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a `## Migration` heading still produces a finding | finding produced | post-build. Without the veto the heading suppresses it; spike-7 measured the veto as the difference between 5 new false negatives and 0 |
 | Dedup converges (Q7c) | `grep -c '_open_issue_exists' reflections/docs_auditor.py` and `grep -c 'def _issue_exists' reflections/docs_auditor.py` | `0` and `1` respectively | post-build (currently `3` and `0`). No compatibility alias — Principle 1. Note `_issue_exists` is a substring of `_open_issue_exists`, so the bare symbol grep cannot tell them apart; anchor on `def ` |
 | Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c '\"all\"' reflections/docs_auditor.py` and `grep -c '\"100\"' reflections/docs_auditor.py` | `2` and `> 0` | post-build (currently `1` and `0`). The existing `\"all\"` at `:2146` is the **sweeper's** `gh pr list --state all` and is unrelated — the count must rise to 2, not merely be nonzero. The second occurrence is `_issue_exists`' `states: str = \"all\"` default. `gh issue list` defaults to `--limit 30`; under `--state all` the exact title can fall off page one, which files a duplicate of an issue that already exists |
-| Vault-drift keeps the open-only gate (Q7c exemption / R4-2) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: with a `gh` stub, `_file_issue_if_new` on a `"category": "vault-drift"` finding dispatches `--state open`, and on a `deleted-target` or `broken-md-link` finding dispatches `--state all`; a **closed** drift issue for the same vault/site pair does not suppress a fresh filing, while a closed `broken-md-link` issue does. Companion structural check: `grep -c 'vault-drift' reflections/docs_auditor.py` | drift → `open`, references → `all`; grep `> 2` (the two finding-construction sites plus the selection in `_file_issue_if_new`) | post-build (grep currently `2`). Vault-drift's condition is a recurring `vault_mtime > site_ts` comparison, not a durable property of the tree, so `all` would let one human close silence that vault/site pair forever. A build that applies `all` uniformly passes every other Q7c row and fails only this one |
+| Dedup query no longer depends on a label surviving triage (Q7c / R5-4) | **Behavioral**, in `TestCrossMachineDedup`: a **closed** issue whose title matches exactly and which carries **no** `documentation` label still suppresses a fresh filing; the argv assertions in that class are updated for the removed label alongside `--state all` / `--limit 100`. Companion structural check: `grep -c '\"--label\"' reflections/docs_auditor.py` | closed unlabelled issue suppresses; grep `1` | post-build (grep currently `2` — `_open_issue_exists:1026` on the **query** side and `_file_issue_if_new:1115` on the **filing** side). Exactly one must survive, and it must be the filing one: new issues stay labelled `documentation`, while the gate stops depending on the label. A build that drops both loses the label on filed issues; a build that drops neither leaves "file once, ever" conditional on triage not touching the label |
+| Recurring-condition categories keep the open-only gate (Q7c exemption / R4-2, extended R5-1) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: with a `gh` stub, `_file_issue_if_new` on a `"category": "vault-drift"` finding dispatches `--state open`, likewise on `"category": "operational-failure"`, and on a `deleted-target` or `broken-md-link` finding dispatches `--state all`; a **closed** drift issue for the same vault/site pair does not suppress a fresh filing, while a closed `broken-md-link` issue does | drift → `open`, operational-failure → `open`, references → `all` | post-build. Vault-drift's condition is a recurring `vault_mtime > site_ts` comparison and the failure filing's is a recurring run outcome, neither a durable property of the tree, so `all` would let one human close silence either permanently. A build that applies `all` uniformly passes every other Q7c row and fails only this one. **The `grep -c 'vault-drift'` companion this row used to carry is deleted (R5-6):** it claimed "currently `2`" and expected `> 2`, while the real count today is **4** (`:1757`, `:1777`, `:1805`, `:1952`), so the row was green before any build work — the same defect class R3-3 caught on the `per_run_cap` row and R4-5 caught on the `_is_documented_deletion` row. The behavioral half is what actually gates this, and it now owns the check alone |
+| The two per-run budgets stay separate (R5-2) | `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` and `grep -c 'VAULT_DRIFT_ISSUE_CAP' reflections/docs_auditor.py` | `> 2` and **exactly `4`** | post-build (currently `0` and `4`). `VAULT_DRIFT_ISSUE_CAP` bounds a *different* channel (`_run_vault_drift_detection`, `:1803-1810`) and sits five lines above the `:75` insertion point for the new constant. A count below 4 means a builder read "one source of truth; no second literal" as an instruction to merge them, which would let a heavy drift day starve the reference channel |
+| Failed rotation escalates through a real channel (R5-1) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: force `_push_branch_and_pr` to return `None` after a write and assert (a) `_file_issue_if_new` is called exactly once, (b) with a title matching `docs-auditor: rotation failed to produce a PR for <slug>` carrying no date, run id or count, (c) with `"category": "operational-failure"`, and (d) the call happens **before** the `status="error"` return. Companion structural check: `grep -c 'rotation failed to produce a PR' reflections/docs_auditor.py` | one filing, slug-keyed, category set, then `status="error"`; grep `> 0` | post-build (currently `0`). `status="error"` alone reaches nobody: the return is a plain dict and `agent/reflection_scheduler.py:639-640` reads only `projects`. This row is the difference between the plan's claimed escalation and a built one |
+| Dirty-tree guard is honestly labelled and stays quiet (R5-1) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard`: with `_git_dirty` true, the run returns `status="skipped"` (not `"ok"`), the summary still names `dirty`, and `_file_issue_if_new` is **not** called | `"skipped"`, no filing | post-build (today `"ok"`, asserted at `tests/unit/test_docs_auditor_substrate.py:1497`). Both halves matter: `"ok"` contradicts the `_write_liveness(..., "skipped", ...)` on the line above, and a filing guard would mint issues for a concurrent lane's uncommitted work in the shared checkout |
+| Withheld titles carry the term, not the regex source (R5-3) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: drive a rotation whose `withheld` entry is `{"old": r"\breal\b", "new": "realistic", ...}` and assert the filed title contains `(real -> realistic)` and **no** backslash. Companion: `grep -c 'removeprefix' reflections/docs_auditor.py` | title has no `\b`; grep `> 0` | post-build. The title is passed verbatim to `gh issue list --search` (`:1029-1031`); a `\b` in the dedup key makes the cross-machine gate depend on GitHub full-text search tolerating regex punctuation, and a search miss fails open and files a duplicate |
 | The stale non-convergence comment is deleted (Q7c) | `grep -c 'dedup gate only sees open issues' reflections/docs_auditor.py` | `0` | post-build (currently `1`, in `audit()` at `:1259-1265`). Describe only the new status quo |
 | Q7 shares the per-run cap, no second budget | **Behavioral**: a rotation pass whose findings mix `deleted-target` and `broken-md-link` files at most `ISSUE_FILING_PER_RUN_CAP` issues **in total** | total ≤ 5 | post-build |
 | Q7 adds no write path | `git diff origin/main -- reflections/docs_auditor.py` shows no new `write_text`, `open(..., "w")`, or `git`/`gh` mutation introduced by the Q7 commit | no new write | post-build. #2739's whole thesis; a `.md` *repair* is the one thing Q7 must not grow |
@@ -2932,6 +3237,18 @@ off for the write call site.
 | R4-3 (CONCERN) | Adopted. The causal claim is corrected — rebasing is for currency, not anchors — and the +150-line drift is tabulated per symbol. Anchor re-derivation is now a named preflight **deliverable**, with the branch's 16 `auto-merge` hit lines recorded, and Q7's ≤ `:1064` anchors named byte-identical so preflight does not re-derive 20 stable references | Lane status (obligation 2), task 0 preflight, task 3 header |
 | R4-4 (CONCERN) | Adopted. Five "New coverage required" bullets are marked ✅ LANDED (`6261e2d2c`) with their test names and removed from the owed list; the remainder sits under an explicit "Still owed by task 5" heading. Task 5 is scoped to that list, settled mechanically by a preflight `--collect-only -k` whose output is a build-notes deliverable | Test Impact, task 0 preflight, task 5 |
 | R4-5 (NIT) | Adopted. The `grep -c '_is_documented_deletion'` row is demoted to an advisory companion at `>= 4`, and the behavioral "both reference shapes share one hatch" row now owns the intent. A shared filter loop leaving the count at exactly 4 no longer false-reds | Verification |
+
+**2026-08-19 — round-5 revision. Targeted; rounds 1-4 were not reopened, and the five
+round-4 adoptions round 5 verified as landed are untouched.**
+
+| Finding | Disposition | Where |
+|---|---|---|
+| R5-1 (BLOCKER) | **Adopted for the escalation; the dirty-tree half is argued down and recorded as a documented residual.** The `pr_url is None` path now files `docs-auditor: rotation failed to produce a PR for {slug}` (category `operational-failure`, slug-keyed) **before** returning `status="error"`, and the Q4 item-4 outcome table gains the matching row so table and prose cannot drift again. The dirty-tree guard's label is corrected `"ok"` → `"skipped"`, but it deliberately does **not** file: `_git_dirty` tests the whole shared checkout, where concurrent lanes routinely hold uncommitted work, so a filing guard would mint issues blaming the auditor for a peer's dirt. The wedge is announced at creation time by the failure filing, which stays open until a human acts | Q4 item 3, Q4 item 4 table, new Q4 item 5, Q7c (exemption), task 3, Success Criteria, Failure Path Test Strategy, Test Impact, Verification (2 new rows) |
+| R5-2 (CONCERN) | Adopted. Task 3 now names `VAULT_DRIFT_ISSUE_CAP = 5` (`:70`) as a **different** budget that must not be merged into `ISSUE_FILING_PER_RUN_CAP`, Q5 item 1 states the true module-wide ceiling of 15 issues per run, and the Success Criterion is reworded from the false "no second budget" to the accurate three-budget statement. A Verification row pins `VAULT_DRIFT_ISSUE_CAP` at exactly 4 occurrences so a merge is caught | Q5 item 1, task 3, Success Criteria, Documentation, Verification |
+| R5-3 (CONCERN) | Adopted, option (a) — the plan picks, the builder does not. `w["old"]` is a regex source (`_reject(pattern.pattern, …)` at `:753` over `rf"\b{re.escape(old_term)}\b"` at `:511`), so the withheld loop unwraps it with `re.sub(r"\\(.)", r"\1", w["old"].removeprefix(r"\b").removesuffix(r"\b"))` before formatting. Option (b) is rejected in writing: it changes the withheld record shape and breaks the three tests that pin it | Q5 item 1, task 3, Test Impact, Verification |
+| R5-4 (CONCERN) | Adopted. `_issue_exists` drops `"--label", "documentation"` alongside the `--state`/`--limit` change. Safe structurally, not by judgment: the authoritative match is the exact `_normalize_title` compare at `:1051-1053`, so a wider candidate set cannot create a false hit. The label stays on the **filing** side (`:1115-1116`) — new issues keep it; the plan stops depending on it surviving triage | Q7c, Risk 7, task 4, Documentation, Test Impact, Verification |
+| R5-5 (NIT) | Adopted. Risk 8 is restated at spike-6's measured 0.29/run with nothing found in 28 of 35 sampled runs; the "whole issue budget" and "about four runs" figures are removed. The residual is named as the opposite of a burst — the backlog takes a rotation cycle to be reported at all | Risk 8 |
+| R5-6 (NIT) | Adopted, both halves, and (a) more strongly than proposed. No behind-count is stated anywhere: 30 → 69 (round 5) → 81 (this revision) is the evidence that any figure goes stale before the plan is committed, so obligation 1 and task 0 say "rebase for currency" and give the command to measure it. The `grep -c 'vault-drift'` companion is **deleted** rather than re-thresholded, per the R4-5 precedent, leaving the behavioral row to own the check | Lane status obligation 1, task 0 preflight, Verification |
 
 ## Critique Results
 
@@ -3034,6 +3351,50 @@ Scope of this round: the round-4 revision itself. **All five round-4 disposition
 | CONCERN | History & Consistency | R5-4: Q7c's "file once, ever" is silently conditional on the closed issue keeping the `documentation` label. `_open_issue_exists` filters with `"--label", "documentation"` (`:1026-1027`) and Q7c changes only `--state` and `--limit`, leaving the filter. This repo's documented triage label set (CLAUDE.md "GitHub Issue Labels") does not contain `documentation`, and labels demonstrably get edited on this channel — #2839 already carries `documentation,plan`. A relabelled-and-closed issue is invisible to the gate, the finding is re-filed, and the convergence Success Criterion fails in exactly the case it exists for: a human who read the finding and ruled on it. Same class as the dedup-gate-misses-reality floods the plan cites (#1555, #1716). | Q7c / Risk 7 / Documentation / Test Impact | Remove `"--label", "documentation"` from `_issue_exists`' argv alongside the `--state`/`--limit` change. Safe because the authoritative match is the exact normalized-title compare at `:1051-1053` (`_normalize_title` is `" ".join(title.split())`, `:983-985`), so widening the candidate set cannot create a false hit — it only stops the label filter hiding issues. Add a `TestCrossMachineDedup` case: a **closed** issue with the exact title and **no** `documentation` label still suppresses a fresh filing. The argv assertions in that class must be updated for the removed label as well as `--state all` / `--limit 100`. |
 | NIT | Scope & Value | R5-5: Risk 8 contradicts the spike that sized it. It claims the first several rotations "spend their whole issue budget on pre-existing broken links" and that "the backlog drains in about four runs" at 5/run, but spike-6 measured the same widening at per-run mean 0.29, max 3, finding nothing in 28 of 35 sampled runs — because rotation sees one primary's `_resolve_neighborhood`, not the repo. At 0.29/run the 19 findings surface over roughly a full rotation cycle, and the budget is never saturated by this channel. | Risk 8 | Restate as "the 19 findings surface gradually as rotation reaches each containing doc, at spike-6's measured 0.29/run, so there is no burst and no budget contention", and drop the "about four runs" figure. |
 | NIT | History & Consistency | R5-6: two values written during the round-4 revision are already stale. (a) Obligation 1 and task 0 both say the branch "is 30 commits behind `origin/main`"; `git rev-list --count origin/session/sdlc-2739..origin/main` is **69**. (b) The vault-drift Verification row says "grep currently `2`" and expects `> 2`, but `grep -c 'vault-drift' reflections/docs_auditor.py` is **4** today (`:1757`, `:1777`, `:1805`, `:1952`), so the row is green before any build work — precisely the R3-3 defect class the plan caught and fixed for the `per_run_cap` row one round earlier. | Step by Step Tasks / Verification | Drop the behind-count (or correct it) and say "rebase for currency". Raise the vault-drift companion threshold to `> 4`, or delete it and let the adjacent behavioral row own the check, as R4-5 did for the `_is_documented_deletion` row. The behavioral half of that row is sound and is what actually gates R4-2. |
+
+**Round 5 revision applied — 2026-08-19. Five findings adopted; one blocker adopted in
+part, with its second half argued down and recorded as a documented residual.**
+
+Every claim was re-verified against the tree before acting on it, and all six hold.
+`VAULT_DRIFT_ISSUE_CAP = 5` is at `:70`, five lines above `STALE_PR_AGE_DAYS` at `:75`,
+with four occurrences module-wide (R5-2). `_reject` has exactly one call site and it
+passes `pattern.pattern` (`:753`), over `rf"\b{re.escape(old_term)}\b"` (`:511`) (R5-3).
+`"--label"` appears exactly twice — `:1027` on the dedup query and `:1115` on the filing
+call — and the authoritative match is the `_normalize_title` compare at `:1051-1053`
+(R5-4). `grep -c 'vault-drift'` reads `4`, not the `2` the plan claimed (R5-6b). The
+branch's `pr_url is None` path returns a plain dict with no filing call, and its
+dirty-tree guard returns `"status": "ok"` alongside a `_write_liveness(..., "skipped", …)`
+on the line above (R5-1).
+
+**One correction to the round's own evidence, in the direction that strengthens it.**
+R5-6a said the branch is 69 commits behind `origin/main`; at revision time it is **81**.
+Rather than write a third figure that will be stale by the next read, the plan now states
+none and gives the command instead. The count changing twice inside one critique cycle is
+the argument.
+
+**The blocker's disposition, stated plainly because it is a partial adoption.** R5-1's
+first half is a genuine unbuilt claim and is adopted exactly as proposed: the error path
+files before it returns, and the outcome table gains the row so the contradiction that
+produced this finding cannot recur. Its second half — make the dirty-tree guard file and
+return `error` — is **declined with reasons**, not deferred. `_git_dirty` tests the whole
+shared main checkout, where concurrent lanes hold uncommitted work as a matter of routine
+(this plan's own Q4 item 2 cites three such files, and every planning pass writes to
+`docs/plans/` there). A filing guard would therefore mint issues on ordinary days,
+attributing a peer's work to the auditor, and `_file_issue_if_new`'s dedup would keep that
+wrong issue standing rather than letting it self-clear. Telling the two apart needs a
+durable marker written at failure time and read at guard time — new mechanism serving a
+state the failure-path filing already reports at the moment it is created. What is adopted
+from that half is the honest label (`"skipped"`, matching the `_write_liveness` call it
+sits beside and the plan's own three-outcome vocabulary) and an explicit test assertion
+that the guard files nothing. The residual is named in Q4 item 5: if the escalation filing
+itself fails, the wedge goes unreported until a human looks, which is the module's
+existing fail-open posture for `gh` and is not changed here.
+
+**Convergence note.** This round produced no new mechanism beyond one issue-filing call
+and one membership in an existing frozenset. Three of the six findings (R5-3, R5-5, R5-6)
+were plan text contradicting measured evidence the plan already contained, and one (R5-4)
+was a two-word argv deletion. The plan's mechanism surface is the same size it was at the
+end of round 4.
 
 ---
 
