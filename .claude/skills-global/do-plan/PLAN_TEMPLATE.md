@@ -463,7 +463,16 @@ outcome from a No-Go cannot be detected in the PR. They are opt-in: only add an
 inverse row when you can write a command that mechanically detects the violation.
 When authoring an anti-criterion, demonstrate it FAILS against a deliberately-violating
 input first (red-state proof), then paste that FAIL output into the PR description as a
-paper trail. See `docs/features/machine-readable-dod.md` for a worked example.]
+paper trail. See `docs/features/machine-readable-dod.md` for a worked example.
+
+**One table definition per pipe-block.** A check table is identified by a `Command`
+column among its first three columns. If this section needs a second table -- a
+red/green summary, a findings recap -- keep it as its own contiguous markdown table;
+it is a **non-check table** and is skipped with a named diagnostic rather than
+executed as checks (the parser scopes to each pipe-block independently, per GFM's
+definition of a table). A `## Verification` section that has table rows but whose
+tables carry no `Command` column fails the gate loudly instead of silently passing on
+zero checks -- give at least one table a `Command` column, or drop the rows.]
 
 | Check | Command | Expected |
 |-------|---------|----------|
