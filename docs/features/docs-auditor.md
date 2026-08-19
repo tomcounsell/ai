@@ -19,31 +19,50 @@ Unified documentation hygiene substrate that consolidates five disjointed pieces
                           reflections/docs_auditor.py
                           ┌────────────────────────────┐
 docs-auditor (daily) ────►│ run_docs_auditor()         │──► docs-audit/{slug}-{ts} branch + PR
-                          │   ↓                        │
+                          │   ↓                        │   (requires a human merge)
                           │ audit(scope_mode='rotation')│
                           └────────────────────────────┘
 
                           ┌────────────────────────────┐
-/do-docs (SDLC stage) ───►│ audit(scope_mode=          │──► commit on current branch
-                          │   'pr-changed-files')      │
+/do-docs (SDLC stage) ───►│ audit(scope_mode=          │──► working tree written, left dirty
+                          │   'pr-changed-files')      │   (the skill owns the commit)
                           └────────────────────────────┘
 ```
+
+`audit()` **never commits.** It writes fixes to the working tree, fires the
+memory-refresh hook on what it wrote, and returns `files_touched`; every write
+it makes passes a named review gate before it becomes a permanent record. For
+Caller A that gate is the pull request `run_docs_auditor` opens, which a human
+merges via `/do-merge`. For Caller B that gate is the `/do-docs` skill's own
+Step 4 review of the diff before it commits.
 
 ### Caller A — `docs-auditor` daily rotation reflection
 
 Picks the least-recently-audited primary doc from a Redis hash, expands its
 neighborhood (≤20 files via outbound links + inbound refs), runs auto-fix
-detectors, applies them, opens a `docs-audit/{slug}-{ts}` branch, posts a
-non-draft PR, and notifies the `Dev: Valor` Telegram chat. Errors are
-swallowed; the auditor never crashes the worker.
+detectors, applies them, stages exactly `files_touched` (never a whole-tree
+`git add -A`), opens a `docs-audit/{slug}-{ts}` branch, posts a non-draft PR,
+and notifies the `Eng: Valor` Telegram chat that review is required. Errors
+are swallowed; the auditor never crashes the worker.
+
+A guard-skipped run (daily PR cap reached, or an open PR already exists for
+the picked doc's slug) performs no working-tree write and no git operation,
+but it still stamps the rotation hash for the doc it picked — exactly as a
+zero-diff pass does — so `_select_primary_doc` advances to a different doc on
+the next run instead of re-picking the same blocked one forever. Without that
+stamp, one long-lived withheld PR (which the sweeper never closes — see
+[Branch Sweeper](#branch-sweeper)) would pin the whole rotation on a single
+document indefinitely.
 
 ### Caller B — `/do-docs` SDLC stage
 
-The `/do-docs` skill (`.claude/skills/do-docs/SKILL.md`) calls the substrate
-with `scope_mode="pr-changed-files"` after sub-agents A–D finish discovery.
-The substrate applies auto-fixes to the working tree, commits to the **current
-branch** (no new branch), and fires the memory-refresh hook. The skill then
-writes the SDLC stage marker and updates the plan frontmatter.
+The `/do-docs` skill (`.claude/skills-global/do-docs/SKILL.md`) calls the
+substrate with `scope_mode="pr-changed-files"` after sub-agents A–D finish
+discovery. The substrate applies auto-fixes to the working tree and fires the
+memory-refresh hook on the applied set — it does **not** commit. The skill's
+own Step 4 reviews the diff (the `files_touched` return value merged with its
+own Step 2 task list) and commits it itself, then writes the SDLC stage
+marker and updates the plan frontmatter.
 
 ## Detectors
 
@@ -61,11 +80,14 @@ hatch (gate 1) below.
 
 ### Four gates guard every rewrite
 
-The auditor is an unreviewed autonomous committer: the rotation caller opens a
-PR the branch sweeper can auto-merge with nobody in between. That makes its two
-failure modes asymmetric. A stale term that survives is a cosmetic miss. A
-sentence the auditor falsifies is a corruption a human later trusts. Every gate
-below therefore errs toward **not** rewriting.
+Even with a human merge required on every rotation PR (see
+[Two Callers](#two-callers)), the auditor's proposed rewrites still need to be
+trustworthy before a reviewer ever sees them: an unreviewed writer that floods
+a human with plausible-looking wrong rewrites is only marginally safer than
+one that ships them outright. That makes its two failure modes asymmetric. A
+stale term that survives is a cosmetic miss. A sentence the auditor falsifies
+is a corruption a human later trusts. Every gate below therefore errs toward
+**not** rewriting.
 
 Four fail-closed gates sit between a proposed rewrite and the disk, in order:
 
@@ -304,84 +326,197 @@ Rejected fixes surface on the `audit()` result:
 | `fixes_withheld` | `int` | count of fixes rejected by the existence invariant |
 | `withheld` | `list[dict]` | one entry per rejection: `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"` |
 
-`old` is always the **regex source** of the withheld stale-term fix
-(`\bsession_log\b`, not `session_log`) — there is no other channel left to
-emit a literal string. A caller that echoes `old` verbatim —
+`old` in the `withheld` list is always the **regex source** of the withheld
+stale-term fix (`\bsession_log\b`, not `session_log`) — there is no other
+channel left to emit a literal string. A caller that echoes `old` verbatim —
 `.claude/skill-context/do-docs.md` does — will show the pattern, which is the
-accurate thing to show, since that is what was withheld.
+accurate thing to show, since that is what was withheld. The per-defect
+GitHub issue title (below) is the one place that does **not** echo the raw
+pattern: it unwraps the `\b...\b` anchors before formatting, because the
+title is also the cross-machine dedup key passed to `gh issue list --search`.
 
-The rotation caller (`run_docs_auditor`) is the one path with no human review —
-it opens a PR the branch sweeper can auto-merge — so it threads the withheld set
-into its `findings`, its `summary`, and its Telegram message, and stamps
-`WITHHELD_PR_MARKER` plus the rejection list into the PR body.
-`_pr_is_auto_merge_eligible` refuses any PR carrying that marker, so a run that
-withheld a fix always requires a human merge. It also passes the count to
-`_write_liveness` as a keyword `fixes_withheld`, emitted into the Redis summary
-only when non-zero. That last surface is the load-bearing one: the reflection
-scheduler consumes only `projects` from a function reflection's return, so
-`findings` and `summary` reach no human, and without the liveness field a
-withheld run would be byte-identical to a clean one in Redis.
+The rotation caller (`run_docs_auditor`) files **one issue per withheld
+entry**, titled `docs-auditor: withheld fix in {doc} ({old} -> {new})` with
+`{old}` unwrapped to the plain term — a per-defect title, so distinct
+withholds dedup independently rather than sharing one key. Filing is bounded
+by the module's shared per-run cap (`ISSUE_FILING_PER_RUN_CAP`, see
+[Two-tier dedup](#two-tier-dedup)); entries past the cap are logged and
+suppressed, not filed. It also threads the withheld set into its `findings`,
+`summary`, and Telegram message — which states plainly that review is
+required and that the PR is closed unmerged after `STALE_PR_AGE_DAYS` if
+nobody acts — and stamps `WITHHELD_PR_MARKER` plus the rejection list into the
+PR body. The branch sweeper reads that marker from its own `gh pr list` query
+and never closes or deletes the branch of a PR carrying it — instead it files
+a **separate**, PR-scoped escalation issue (`docs-auditor: withheld PR #{n}
+still unreviewed`), distinct from the per-defect titles above so the two
+filings never collide on the same dedup key. It also passes the touched-file
+count to `_write_liveness` as a keyword `fixes_withheld`, emitted into the
+Redis summary only when non-zero — a secondary signal now that the durable
+operator surface is the GitHub issue plus the reflection dashboard's rendered
+`output_summary` (see [Configuration](#configuration)), not a manual
+`redis-cli` read.
 
-Because the marker disqualification is permanent, a withheld PR nobody reviews
-reaches the sweeper's stale-close at `STALE_PR_AGE_DAYS` and is closed with
-`--delete-branch`, discarding the fixes that did pass the invariant; the next
-rotation onto that slug re-proposes and re-opens the same PR. This is strictly
-safer than auto-merging suspect output, and the escalation (exempt from
-stale-close, or notify before closing) is an open gap tracked by
-[#2729](https://github.com/tomcounsell/ai/issues/2729), not a shipped behavior.
+A rotation run that writes to the working tree and then fails to produce a PR
+— a `git`/`gh` step failing, or the scoped restore itself failing — files its
+own escalation issue, `docs-auditor: rotation failed to produce a PR for
+{slug}`, category `operational-failure`, **before** returning `status="error"`
+(`agent/reflection_scheduler.py` reads only `projects` from a function
+reflection's return, so the status field alone reaches nobody). The body
+names the slug, the `files_touched` paths, and the cleanup command
+(`git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude`);
+it deliberately does not name the failing step or assert whether the restore
+succeeded, since neither fact reaches that call site. The dirty-tree guard
+that can precede such a failure returns `status="skipped"` and stays silent —
+it tests the whole shared main checkout, where concurrent lanes routinely
+hold uncommitted work as a matter of routine, so a filing guard there would
+mint issues blaming the auditor for a peer's dirt. Its silence is safe only
+because the `operational-failure` filing above stays open until a human acts
+and re-files if the failure recurs (see
+[Two-tier dedup](#two-tier-dedup)) — if that gate is ever widened to match
+closed issues too, the dirty-tree guard's silence becomes a real blind spot.
 
-`status` stays `"ok"` — a withheld fix is not an error. That is precisely why a
-caller must branch on `fixes_withheld > 0` rather than treat `"ok"` as "output
-is correct"; `.claude/skill-context/do-docs.md` wires that branch for the
-cascade.
+`audit()`'s own `status` stays `"ok"` — a withheld fix is not an error. That
+is precisely why a caller must branch on `fixes_withheld > 0` rather than
+treat `"ok"` as "output is correct"; `.claude/skill-context/do-docs.md` wires
+that branch for the cascade.
+
+`run_docs_auditor`'s outcome vocabulary is separate and stricter: `"ok"`
+survives on exactly the one return that created a PR. Every other return that
+reached the lock — the lock-held return, the dirty-tree guard, no candidates
+found, and a zero-diff pass — reports `"skipped"`, matching each one's own
+`_write_liveness(..., "skipped", ...)` call, so the field means "a PR was
+opened" and nothing weaker. (`"disabled"`, returned when the auth probe fails
+before the lock is even acquired, is a pre-flight bail rather than a run
+outcome and sits outside this vocabulary.)
 
 ### File-as-issue (judgment required)
 
 | Detector | What it catches | Action |
 |----------|-----------------|--------|
-| Deleted target | `` `path.py` `` references to a target absent from the working tree, after placeholder / fenced-block / deletion-heading filtering | `gh issue create` (deduped) |
+| Deleted target (`.py`) | `` `path.py` `` references to a target absent from the working tree, after placeholder / fenced-block / deletion-heading filtering | `gh issue create` (deduped) |
+| Broken link target (`.md`) | `[label](target.md)` links whose target is absent, doc-relative, after the same filtering | `gh issue create` (deduped), **report only, never repaired** |
 | Stub doc | Docs with <5 content lines | `gh issue create` (deduped) |
 | Orphan plan | `docs/plans/*.md` lacking a tracking-issue link | `gh issue create` (deduped) |
 
-#### Deleted-target false-positive filtering
+`_detect_deleted_target_issues` covers both reference shapes, scoped
+differently: the `.py` branch runs over whatever neighborhood the caller
+already resolved, repo-wide; the `.md` branch is scoped to `docs/` minus
+`docs/plans/completed/` and `docs/plans/done/` (archived plans deliberately
+record history and are not a live surface a human reviews for broken links).
 
-The deleted-target detector runs three suppression passes before emitting a
-finding, so it never floods the tracker with illustrative or
+**The frame rule (#2725 / #2741).** `.md` link targets resolve **relative to
+the containing document's directory** — the frame markdown renderers actually
+use — not the repo root. A target that exists at the repo root but not
+doc-relative is still a real break and is reported as one. Anchors and
+queries are stripped before the target becomes the title (and the dedup key):
+`[x](./gone.md#section)` reports `gone.md`, not `gone.md#section`.
+
+**The inline-code asymmetry is deliberate.** A bare backticked `.py` path
+*is* a reference — that is how the `.py` branch's genuine matches are always
+written. A markdown link inside a code span is *not* a reference — it is a
+literal illustration of syntax. Do not "harmonize" the two branches; the
+asymmetry is the correct reading of each shape.
+
+**`.md` links are reported, never repaired.** No write path exists for this
+branch — the only effect of a finding is a GitHub issue. An auto-repairing
+predecessor existed at one point and was deleted (#2741): an auditor deleting
+lines from a human's index file on its own judgment is exactly the
+unreviewed-write class this module exists to gate, and it is not coming back.
+
+#### Deleted-target and broken-link false-positive filtering
+
+Both branches run the same three suppression passes before emitting a
+finding, so neither floods the tracker with illustrative or
 intentionally-documented paths:
 
 - **Placeholder / example paths** (`_is_placeholder_path`): a path is skipped if
-  any component (or the final file's stem) is a well-known stand-in — `foo`,
-  `bar`, `baz`, `qux`, `quux`, `example`, `your-module`, `mymodule`, `sample` —
-  or a single-letter directory. This suppresses paths like `foo/bar.py` and
-  `agent/docs_handler/foo.py`.
+  any component (or the final file's stem, `.py` or `.md`) is a well-known
+  stand-in — `foo`, `bar`, `baz`, `qux`, `quux`, `example`, `your-module`,
+  `mymodule`, `sample`, and the link-specific `filename`, `path`, `name` — or a
+  single-letter directory. This suppresses paths like `foo/bar.py`,
+  `agent/docs_handler/foo.py`, and links like `[x](filename.md)`.
 - **Fenced code blocks** (`_build_line_context`): a single line-scan over the
   doc tracks fenced ```` ``` ```` block state. Matches inside a fenced block are
   treated as illustrative and skipped. Inline single-backtick code is **not**
-  suppressed — that is the normal way genuine references are written.
+  suppressed for the `.py` branch — that is the normal way genuine references
+  are written; a markdown link inside a code span is skipped by the `.md`
+  branch's own separate check, above.
 - **Deletion headings & prose** (`_is_documented_deletion`): a match is skipped
-  if its nearest preceding heading names a deletion (`migration`, `removed`,
-  `deleted`, `deprecated`) or if its line / an adjacent line carries a deletion
-  cue (`deleted module`, `no longer in the codebase`, `no longer exists`,
-  `previously in`, `formerly`). This suppresses paths like `intent/__init__.py`
-  documented under a `## Migration ...` heading.
+  if its nearest preceding heading names a deletion by stem (`delet`, `remov`,
+  `deprecat`, `migrat`, `cleanup`, `obsolete`, `retire` — stems, not exact
+  inflections, so `"## Dead SDK Path Deletion"` and `"## Hook Cleanup"` both
+  match) or if a line within 2 lines carries a word-anchored deletion-prose cue
+  (`deleted`, `removed`, `no longer`, `previously`, `formerly`, `deprecated`).
+  This suppresses paths like `intent/__init__.py` documented under a
+  `## Migration ...` heading, and prose like `` `agent/gone.py` deleted (250
+  lines) `` under a `## Hook Cleanup` heading.
+
+  **The live-claim veto.** Both branches pass `live_claim_veto=True` to
+  `_is_documented_deletion` — the only caller that does. When the match's own
+  line carries a live-claim cue (`remain`, `remains`, `still`, `defined in`,
+  `lives in`, `currently`, `implemented in`), the heading/prose suppression is
+  cancelled and the finding is still reported — a line like *"`fail_stage()`
+  remains defined in `agent/hooks/gone.py`"* under a `## Migration` heading is
+  a live claim, not a deletion record, even though the heading alone would
+  otherwise suppress it. The veto is keyword-only and opt-in for a reason:
+  `_make_stale_term_replacer` (the write path's own caller of this predicate)
+  never sets it, and never will. This predicate's `True` means "suppress" at
+  both call sites, but a wrong suppression costs the *detector* a missed
+  report, while a wrong un-suppression would cost the *write path* an
+  unreviewed rewrite of narrative prose — the auditor editing history on every
+  PR, which is the exact defect class this module exists to gate.
 
 Every suppressed match is logged at DEBUG so an operator can audit exactly what
 the filter dropped.
 
-#### Two-tier dedup
+#### Two-tier dedup and convergence
 
 Issue filing uses a two-tier dedup gate:
 
 1. **Local-Redis fast-path** (`docs_audit:issues_filed:{hash}`, SHA-256 of the
    title, 30-day TTL): a per-machine cache. If the key exists, filing is skipped
-   without any GitHub call.
-2. **Live-tracker gate** (`_open_issue_exists`): the **authoritative**
-   cross-machine check. Before filing, it runs
-   `gh issue list --state open --label documentation --search "<title>"` and
-   confirms a hit with an exact normalized-title comparison (the title encodes
-   both the path and the doc, so it is a natural composite key). Local Redis
-   alone is insufficient because each machine keeps its own Redis, so the same
-   finding would otherwise be filed once per machine.
+   without any GitHub call — but only for a **once-ever** category (below);
+   the check is gated off entirely for a recurring-condition one.
+2. **Live-tracker gate** (`_issue_exists`): the **authoritative** cross-machine
+   check. Before filing, it runs `gh issue list --state <all|open> --limit 100
+   --search "<title>"` and confirms a hit with an exact normalized-title
+   comparison (the title encodes both the path and the doc, so it is a
+   natural composite key). Local Redis alone is insufficient because each
+   machine keeps its own Redis, so the same finding would otherwise be filed
+   once per machine. `--limit 100` is load-bearing, not decoration: `gh issue
+   list` defaults to 30, and under `--state all` a repo with more matching
+   issues than that could push the exact title off the first page — a silent
+   fail-open that files a duplicate. The query carries **no label filter**: a
+   human can relabel an issue during triage, and the authoritative match is
+   the exact title compare, not a label surviving that relabel. New issues are
+   still *filed* with the `documentation` label; only the dedup **query**
+   stopped depending on it.
+
+**A reference finding is filed once, ever.** `states` defaults to `"all"`, so
+a closed issue suppresses a fresh filing of the same finding just as an open
+one does — a human who read the finding, ruled on it, and closed it made a
+durable decision, and the cost is that a defect that is fixed, closed, and
+later regresses identically stays silent. Two categories are the exception and
+keep the old open-only semantics: `vault-drift` (a recurring `vault_mtime >
+site_ts` comparison — one closed issue would otherwise silence that
+vault/site pair forever) and `operational-failure` (a recurring run outcome
+that can return after a genuine cleanup). For these two, `_file_issue_if_new`
+selects `states="open"` and skips the Redis fast-path's `exists` read
+entirely, so a closed issue for the same recurring condition is re-filed
+inside the 30-day window rather than staying silenced by the per-machine
+cache. The two Redis `set()` writes stay unconditional either way — the key
+has exactly one reader, so a category that never reads it is unaffected by
+still writing it, and the key survives as a fail-open cap if `gh` starts
+erroring.
+
+**Three separate per-run issue budgets, not one.** `VAULT_DRIFT_ISSUE_CAP`
+(5) bounds only the vault↔site drift loop, which runs before rotation picks
+its primary doc. `ISSUE_FILING_PER_RUN_CAP` (5) is shared by `audit()`'s
+advisory loop (deleted-target and broken-md-link findings together — Q7 gets
+no budget of its own) and the withheld-fix filing loop. The true module-wide
+ceiling for one rotation run is **15** issues plus at most one
+`operational-failure` filing. The two constants are deliberately kept
+separate rather than merged into one "the module's issue cap" value.
 
 The tracker query **fails open**: on any `gh` failure, non-zero exit, or
 malformed output it logs a warning and degrades to Redis-only dedup rather than
@@ -430,10 +565,12 @@ does not have to wait out the TTL.
 ## Memory Refresh Hook
 
 `reflections.docs_auditor.refresh_docs_in_memory(touched_paths: list[str]) -> None`
-is a public no-op-by-default hook called after fixes are applied and committed,
-before PR creation (Caller A) or stage marker write (Caller B). Issue #1249
-will replace the body with a real implementation that re-ingests touched docs
-into the Memory substrate.
+is a public no-op-by-default hook called after fixes are **applied**, before
+any commit — the module never commits, so "after commit" is not a state this
+hook ever waits for. Caller A fires it after `_push_branch_and_pr` succeeds;
+Caller B fires it on the applied set directly, leaving the working tree dirty
+for `/do-docs`'s own review and commit. Issue #1249 will replace the body with
+a real implementation that re-ingests touched docs into the Memory substrate.
 
 The hook signature is **stable** — call sites in this module will not change
 when #1249 lands. The hook is always non-blocking and fire-and-forget;
@@ -444,12 +581,21 @@ failed.
 
 `run_docs_branch_sweeper()` runs daily and:
 - Deletes `docs-audit/*` remote branches with no PR ever opened, age >7 days
-- Closes (`gh pr close --delete-branch`) open `docs-audit/*` PRs older than 14 days
+- Closes (`gh pr close --delete-branch`) open `docs-audit/*` PRs older than 14
+  days — **except** a PR whose body carries `WITHHELD_PR_MARKER`, which it
+  neither closes nor deletes the branch of, since closing it would discard
+  fixes that already passed the existence invariant. Instead it files a
+  distinct escalation issue, `docs-auditor: withheld PR #{n} still
+  unreviewed`, naming the PR and its age, so the withheld PR stays visible
+  without becoming permanently unreachable.
 
 Scope is intentionally narrow — only branches under the `docs-audit/` prefix
 are touched. Branches with any review comment, non-bot authorship, or merged
 PR are left alone. This sweeper does NOT touch `session/*` branches; that
-remains `agent/session_revival.py`'s scope.
+remains `agent/session_revival.py`'s scope. It never runs `gh pr merge` —
+every `docs-audit/*` PR requires a human to merge it via `/do-merge`; the
+sweeper's only actions are delete-if-stale-and-unopened, close-if-unreviewed,
+and the withheld-PR escalation above.
 
 ## Vault↔Site/Docs Drift Detector
 
@@ -542,7 +688,9 @@ now runs for real (advisory/report-only, same as before). Verify with
 # Inspect rotation state
 redis-cli HGETALL docs_audit:last_run
 
-# Phase 2 liveness signal
+# Phase 2 liveness signal — a secondary, per-machine surface. The durable
+# operator surfaces are the GitHub issue tracker and the reflections
+# dashboard's rendered "last run summary" (sourced from output_summary).
 redis-cli GET docs_audit:last_completed_run_ts
 redis-cli GET docs_audit:last_completed_run_summary
 
@@ -578,7 +726,7 @@ index), `TestExistenceInvariant` (bare-name withhold, doc-relative resolution,
 ambiguous-but-present pass, no re-validation of pre-existing refs — every case
 is expressed as a prose-anchored regex fix whose *replacement*, not its match,
 carries the path-shaped string, so gate 3's path-token suppression cannot eat
-the case before the invariant runs), and `TestWithheldBlocksAutoMerge` (a
+the case before the invariant runs), and `TestWithheldBlocksStaleClose` (a
 bare-name withhold reaching the PR body, Telegram, and liveness).
 `TestWithheldRateNonRegression` self-baselines the narrow and widened
 `_PATH_REF_RE` arms in one run inside a disposable detached `git worktree`,
@@ -586,6 +734,24 @@ asserting the widening adds no withholds. `TestDeletedTargetFiltering::
 test_rename_destination_reference_is_reported` runs on a real git checkout
 (commit, `git mv`, delete) and asserts a reference to a former rename
 destination is now reported rather than suppressed.
+
+Q7's `.md` link branch and the widened deletion hatch (heading stems, the
+word-anchored prose-cue alternation, the ±2 window, and the live-claim veto)
+are covered by `TestBrokenMdLinkDetection` and the added cases in
+`TestDeletedTargetFiltering` — including the three real-corpus control cases
+(`docs/features/harness-abstraction.md`, `harness-adapter.md`,
+`standardized-enums.md`) that motivated the widening. `TestCrossMachineDedup`
+covers `_issue_exists`'s `states`/`--limit`/no-label argv contract and the
+recurring-condition open-only exemption. `TestIssueFilingCapSharing` asserts
+the `.py` and `.md` finding categories share one per-run budget.
+
+The git surface — staging, the scoped restore, the sweeper's close path, and
+the withheld-PR exemption — is real-git-only, in
+`tests/unit/reflections/test_docs_auditor_git_surface.py`: a real repository
+on disk with a real bare remote, and a synchronous `gh`-only dispatcher
+(`monkeypatch.setattr(docs_auditor.subprocess, "run", dispatcher)`) that
+delegates every non-`gh` command to the real `subprocess.run`. No blanket
+mock over `subprocess.run` is used anywhere in that file.
 
 ```bash
 pytest tests/unit/test_docs_auditor_substrate.py -v
@@ -596,7 +762,7 @@ pytest tests/unit/test_docs_auditor_substrate.py -v
 - [Reflections](reflections.md) — registry and scheduler design
 - [Vault↔Site/Docs Drift Audit](vault-drift-audit.md) — the curated
   `VAULT_SITE_MAPPING` drift detector, in full
-- `.claude/skills/do-docs/SKILL.md` — Caller B skill definition
+- `.claude/skills-global/do-docs/SKILL.md` — Caller B skill definition
 - `reflections/docs_auditor.py` — substrate source
 - Issue #1247 — design and rollout plan
 - Issue #1249 — memory refresh hook (forward-compat target)

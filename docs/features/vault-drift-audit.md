@@ -93,6 +93,20 @@ GitHub issues (label `documentation`) through the substrate's existing
 authoritative live-tracker query) every other docs-auditor detector uses.
 Nothing here invents a new filing or dedup path.
 
+**Vault-drift dedups against open issues only — unlike every other finding
+category, which dedups once, ever, against open and closed issues alike.**
+`_file_issue_if_new` selects `states="open"` specifically for the
+`vault-drift` category (and for `operational-failure`, a different channel —
+see [docs-auditor.md § Two-tier dedup and convergence](docs-auditor.md#two-tier-dedup-and-convergence)),
+via the module-level `_RECURRING_CONDITION_CATEGORIES` set. The reason is the
+finding's own shape: it is a recurring `vault_mtime > site_ts` comparison, not
+a durable property of the tree. A human closing one vault-drift issue records
+one reconciliation between the vault and the site at that moment — it is not
+a ruling that the pair can never drift again. Matching closed issues for this
+category would silence that vault/site pair permanently after the first
+close, which is exactly the flood this module's convergence design exists to
+prevent for every *other* category, inverted into a silence for this one.
+
 ## `secrets/` guard
 
 A single shared predicate, `_is_secrets_path(rel_path, vault_root)`, guards
@@ -173,7 +187,9 @@ from "vault unresolvable" (`vault_narratives_compared: 0` via
 `_resolve_vault_root` returning `None` before any file is read — same `0`
 value, but paired with the `docs_audit: vault root resolution failed` /
 `no knowledge_base mapping` warning in the logs). Inspect the current value
-with:
+with (a per-machine debugging aid; the durable operator surfaces are the
+GitHub issue tracker and the reflections dashboard's rendered
+`output_summary`):
 
 ```bash
 redis-cli GET docs_audit:last_completed_run_summary

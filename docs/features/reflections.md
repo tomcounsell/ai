@@ -170,11 +170,19 @@ ever rewrites the real per-machine copy produced by `install_reflection_worker.s
 `install_email_bridge.sh`, and `scripts/update/env_sync.py::sync_reflections_yaml`.
 
 > **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
-> files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
-> the daily reflection). The `/do-docs` SDLC stage (Caller B, `scope_mode="pr-changed-files"`)
-> runs `audit()` on every PR but performs auto-fixes only — it does **not** file issues, since a
-> deleted-target reference is unfixable and re-detecting it per-PR re-files duplicates. Combined
-> with `project_key`-gating, repo audits file issues from exactly one machine, on rotation only.
+> files advisory issues (deleted-target, broken-md-link, stub-doc) only under
+> `scope_mode="rotation"` (Caller A, the daily reflection). The `/do-docs` SDLC stage (Caller B,
+> `scope_mode="pr-changed-files"`) runs `audit()` on every PR but performs auto-fixes only — it
+> does **not** file issues, since a deleted-target or broken-link reference is unfixable and
+> re-detecting it per-PR re-files duplicates. Combined with `project_key`-gating, repo audits file
+> issues from exactly one machine, on rotation only.
+>
+> **A reference finding (deleted-target or broken-md-link) is filed once, ever.** `_issue_exists`
+> matches open *and* closed issues by default, so a human who closes one without editing the doc
+> has made a durable ruling that survives a triager relabelling the issue. Two categories are the
+> exception and keep the older open-only semantics: `vault-drift` and `operational-failure`, whose
+> underlying conditions can genuinely recur after a close. See
+> [Docs Auditor § Two-tier dedup and convergence](docs-auditor.md#two-tier-dedup-and-convergence).
 
 ### Registered Reflections
 
@@ -210,7 +218,7 @@ ever rewrites the real per-machine copy produced by `install_reflection_worker.s
 | Name | Callable | Description |
 |------|----------|-------------|
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
-| `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
+| `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d, except a withheld-marker PR, which it never closes and instead escalates via a distinct GitHub issue |
 | `skills-audit` | `reflections.audits.skills_audit.run` | Validate all SKILL.md files (see [Skills Audit](audit-skills.md)) |
 | `hooks-audit` | `reflections.audits.hooks_audit.run` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
 | `pr-review-audit` | `reflections.audits.pr_review_audit.run` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
