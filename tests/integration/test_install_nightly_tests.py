@@ -52,7 +52,7 @@ def test_installer_exists_and_executable():
 def test_worktree_refusal_precedes_role_gate(installer_src):
     """The worktree refusal must appear before has_worker_role() is defined
     or invoked, so a lane worktree never reaches the role gate at all."""
-    refusal_idx = installer_src.index("gitdir:.*/\\.git/worktrees/")
+    refusal_idx = installer_src.index("gitdir:.*/.git/worktrees/")
     role_gate_idx = installer_src.index("has_worker_role()")
     assert refusal_idx < role_gate_idx
 

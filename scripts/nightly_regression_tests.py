@@ -310,10 +310,13 @@ def run_tests() -> tuple[dict | None, dict | None, int]:
     - ``returncode`` — the subprocess exit code (or a signal-shaped value —
       negative or >128 — if the process group had to be killed).
 
-    Never raises on a missing/corrupt report or on timeout: both reach the
-    caller as a normal (``None``, ``None``, ``rc``) return so
-    :func:`validate_run_integrity` can classify them, rather than dying
-    silently in ``main()``.
+    Never raises on a missing/corrupt report: that case reaches the caller as
+    a normal (``None``, ``None``, ``rc``) return so
+    :func:`validate_run_integrity` can classify it, rather than dying
+    silently in ``main()``. A wedged run's ``subprocess.TimeoutExpired``
+    *does* propagate — ``main()`` catches it explicitly and routes it
+    through :func:`_fatal`, matching the timeout arm's original shape as an
+    exception rather than a sentinel.
     """
     log(
         f"Starting {PYTEST_CLEAN_SH.name} {' '.join(COLLECTION_PATHS)} "
@@ -344,12 +347,11 @@ def run_tests() -> tuple[dict | None, dict | None, int]:
     # collection and therefore before any per-item timer is armed.
     env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
 
-    try:
-        rc = _spawn_pytest(argv, timeout=PYTEST_TIMEOUT_SECONDS, env=env)
-        log(f"pytest exit code: {rc}")
-    except subprocess.TimeoutExpired:
-        log(f"ERROR: pytest timed out after {PYTEST_TIMEOUT_SECONDS}s (process group killed)")
-        return None, None, -1
+    # TimeoutExpired propagates to main(), which routes it through _fatal() —
+    # this function does not swallow it, so a wedged run pages an operator
+    # instead of silently returning a sentinel.
+    rc = _spawn_pytest(argv, env=env, timeout=PYTEST_TIMEOUT_SECONDS)
+    log(f"pytest exit code: {rc}")
 
     try:
         raw_report = json.loads(Path(PYTEST_JSON_TMP).read_text())
@@ -437,8 +439,7 @@ def validate_run_integrity(
 
     if error > max(50, 0.02 * total):
         return (
-            f"error rate too high: {error} errors out of {total} tests — "
-            "infrastructure, not a red suite",
+            f"{error} of {total} tests errored at setup — infrastructure, not a red suite",
             warnings,
         )
 
@@ -530,7 +531,7 @@ def reconfirm_serial(node_ids: list[str]) -> tuple[list[str], list[str], bool]:
     env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
 
     try:
-        rc = _spawn_pytest(argv, timeout=PYTEST_RECONFIRM_TIMEOUT_SECONDS, env=env)
+        rc = _spawn_pytest(argv, env=env, timeout=PYTEST_RECONFIRM_TIMEOUT_SECONDS)
         log(f"serial re-confirmation exit code: {rc}")
         report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError) as exc:
@@ -906,8 +907,17 @@ def main() -> int:
             "(see #2429/#2430/#2462) rather than filed individually."
         )
 
-    # Run the default collection through the sanctioned wrapper.
-    raw_report, current, rc = run_tests()
+    # Run the default collection through the sanctioned wrapper. A wedged run
+    # raises TimeoutExpired rather than returning a sentinel — route it
+    # through _fatal() the same way the pre-#2823 timeout arm did, just
+    # alerting instead of dying silently.
+    try:
+        raw_report, current, rc = run_tests()
+    except subprocess.TimeoutExpired:
+        return _fatal(
+            f"pytest timed out after {PYTEST_TIMEOUT_SECONDS}s (process group killed)",
+            args.dry_run,
+        )
     reason, integrity_warnings = validate_run_integrity(raw_report, rc, prev)
     if reason:
         return _fatal(reason, args.dry_run)

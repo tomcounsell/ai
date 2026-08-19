@@ -244,15 +244,16 @@ class TestRunTests:
         assert raw is None
         assert current is None
 
-    def test_timeout_returns_none_none_negative_rc(self, tmp_path: Path) -> None:
+    def test_timeout_propagates_rather_than_returning_sentinel(self, tmp_path: Path) -> None:
+        """run_tests() lets TimeoutExpired propagate -- main() catches it
+        explicitly and routes it through _fatal(), matching the original
+        exception-arm shape rather than a swallowed sentinel."""
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch.object(
             nrt, "_spawn_pytest", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)
         ):
-            raw, current, rc = nrt.run_tests()
-        assert raw is None
-        assert current is None
-        assert rc == -1
+            with pytest.raises(subprocess.TimeoutExpired):
+                nrt.run_tests()
 
     def test_healthy_report_yields_positive_total(self, tmp_path: Path) -> None:
         report_path = tmp_path / "report.json"
@@ -316,7 +317,7 @@ class TestValidateRunIntegrity:
         report = self._healthy(total=10000, error=9000, failed=0)
         reason, warnings = nrt.validate_run_integrity(report, 1, {})
         assert reason is not None
-        assert "error rate" in reason
+        assert "errored at setup" in reason
 
     def test_high_failed_count_alone_does_not_trip(self) -> None:
         """A very red suite (failed, not error) must never read as infra failure."""
@@ -1206,4 +1207,23 @@ class TestFatalPathIntegration:
             rc = nrt.main()
         assert rc == 1
         mock_send.assert_called_once()
+        assert nrt.LAST_RUN_FILE.read_text() == pre_existing
+
+    def test_run_tests_timeout_is_fatal(self, tmp_path: Path) -> None:
+        """main() catches the propagated TimeoutExpired explicitly and routes
+        it through _fatal(), rather than a bare uncaught exception."""
+        self._base_patches(tmp_path)
+        pre_existing = nrt.LAST_RUN_FILE.read_text()
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py"]),
+            patch.object(nrt, "load_env_or_die", return_value=(42, None)),
+            patch.object(
+                nrt, "run_tests", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)
+            ),
+            patch.object(nrt, "send_telegram") as mock_send,
+        ):
+            rc = nrt.main()
+        assert rc == 1
+        mock_send.assert_called_once()
+        assert "timed out" in mock_send.call_args.args[0]
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing

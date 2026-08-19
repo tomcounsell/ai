@@ -26,7 +26,7 @@ PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 # that `/do-build` cleanup deletes once the lane's PR merges. Refuse before the
 # role gate — a worktree's `.git` is a FILE containing `gitdir: <main-repo>/
 # .git/worktrees/<slug>`, never a directory.
-if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/\.git/worktrees/' "$PROJECT_DIR/.git" 2>/dev/null; then
+if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/.git/worktrees/' "$PROJECT_DIR/.git" 2>/dev/null; then
     echo "Skipping nightly-tests install: running from a worktree checkout ($PROJECT_DIR)"
     echo "The nightly detector must only be installed from a machine's main checkout."
     exit 0
