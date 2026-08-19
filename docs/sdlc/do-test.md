@@ -16,6 +16,17 @@ before merge (the nightly regression run is the post-merge backstop). So:
   (`docs/features/test-baseline-verification.md`): pre-existing failures are
   reported, PR-introduced failures block and route to `/do-patch`.
 
+**No code gates on a full-suite result, deliberately (#2376, #2823).** The
+TEST stage records only `{passed, failed}` — nothing tracks *what was
+collected*, so a targeted `-k one_test` run and a genuine full-suite run are
+indistinguishable downstream. That is intentional: a merge-time full-suite
+gate wedged routinely and was removed wholesale (`docs/sdlc/do-merge.md`).
+The compensating control is the nightly regression run
+(`docs/features/nightly-regression-tests.md`), which collects the default
+collection nightly on any worker-role machine and gates its own trust in the
+result via `validate_run_integrity()` before diffing or dispatching — it
+does not replace this stage's own full-suite requirement above.
+
 ## Baseline Comparability: Record the Checkout, Not Just the Count
 
 "Reproduce it on main" assumes the two runs differ only in the code. Two

@@ -270,7 +270,12 @@ seconds and cannot wedge. Test responsibility lives elsewhere:
   `docs/sdlc/do-test.md`) — `baseline-verifier` classifies pre-existing
   failures against main there, where the pipeline can iterate and patch.
 - The **nightly regression run** (`scripts/nightly_regression_tests.py`) is
-  the backstop for anything that slips through.
+  the backstop for anything that slips through. It collects the default
+  test collection (`tests/`, not just `tests/unit/`) through
+  `scripts/pytest-clean.sh`, validates that the run actually executed before
+  trusting its result, and installs on any machine that owns a project
+  (worker-role, not bridge-role) — see
+  `docs/features/nightly-regression-tests.md`.
 
 Do not add a pytest invocation to this gate stack. The previous merge-time
 full-suite gate (shape classifier, per-SHA verdict cache, categorised

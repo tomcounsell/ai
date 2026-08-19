@@ -29,11 +29,13 @@ PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 # reflections on worker-only (non-Telegram) machines — the #1379 over-narrow-gating
 # failure class (which gated calendar on session.slug and DROPPED all non-slug work).
 #
-# has_worker_role() is has_bridge_role() (install_nightly_tests.sh) MINUS the
-# Telegram-block check: it qualifies as soon as ANY project's `machine` matches this
-# host, regardless of whether that project has Telegram configured. Same fail-open
-# contract. (The bridge-role helper additionally required a Telegram block; that clause
-# is dropped here so worker-only machines still run reflections.)
+# has_worker_role() qualifies as soon as ANY project's `machine` matches this
+# host, regardless of whether that project has Telegram configured — unlike a
+# bridge-role gate, which additionally requires a Telegram block and would
+# strand a worker-only machine. Same fail-open contract as the bridge-role
+# gates elsewhere in this repo (e.g. scripts/install_email_bridge.sh's
+# has_email_role()). scripts/install_nightly_tests.sh carries an identical
+# has_worker_role() for the same reason (issue #2823).
 has_worker_role() {
     local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
     if [ ! -f "$config" ]; then
