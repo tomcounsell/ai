@@ -3396,6 +3396,57 @@ were plan text contradicting measured evidence the plan already contained, and o
 was a two-word argv deletion. The plan's mechanism surface is the same size it was at the
 end of round 4.
 
+**Round 6 — 2026-08-19, against commit `6f5628f8b` (the round-5 revision). Verdict:
+MAJOR REWORK (CRITIQUE INCOMPLETE: roster 0/3). NO FINDINGS — the war room never ran.**
+
+**This is a harness outcome, not a plan judgement. Do not revise the plan on the strength
+of it.** The critique driver executed the full structural pass and then could not dispatch
+a single war-room critic: no agent-spawn tool was present in its execution context, so the
+frozen roster (`Risk & Robustness`, `Scope & Value`, `History & Consistency`) reported
+0 of 3. `critique-roster-check` returned
+`{"complete": false, "completed_count": 0, "missing": [all three]}` and the run directory
+`.critique-runs/2739-1787119710594255000/` is preserved as the forensic record. Per the
+`MAX_CRITIC_REDISPATCH` rule the stage must emit a verdict rather than exit silently, and
+`MAJOR REWORK` is the only string that routes a non-completing round back for another
+pass — hence the label. **The correct next action is to re-run `/do-plan-critique 2739`
+from a context that can spawn subagents, not to open a round-6 revision.**
+
+What the round *did* establish, mechanically, before it stopped — all of it green, and all
+of it re-usable by the next round so it need not be re-derived:
+
+- `reflections/docs_auditor.py` is still byte-identical to the plan baseline `f491306c5`
+  (`git diff f491306c5 HEAD -- reflections/docs_auditor.py` is empty), so every anchor in
+  the Freshness Check remains live.
+- All 22 sampled `file:line` anchors in `reflections/docs_auditor.py` land on their claimed
+  symbol, including every anchor the round-5 revision newly introduced: `VAULT_DRIFT_ISSUE_CAP:70`,
+  `STALE_PR_AGE_DAYS:75`, the `re.escape` pattern `:511`, `_reject(pattern.pattern, …)` `:753`,
+  `_normalize_title:983`, the exact-title compare `:1051`, both `"--label"` sites (`:1027`
+  query, `:1115` filing), `per_run_cap:1278` and its filing gate `:1279`.
+- Every grep count the Verification table asserts as "currently N" is exactly N today:
+  `auto-merge`=16, `_is_documented_deletion`=4, `per_run_cap`=3, `vault-drift`=4,
+  `VAULT_DRIFT_ISSUE_CAP`=4, `"--label"`=2, `"all"`=1, `"100"`=0, and the six
+  post-build-only symbols (`ISSUE_FILING_PER_RUN_CAP`, `live_claim_veto`, `broken-md-link`,
+  `checkout", "HEAD"`, `removeprefix`, `number,state,createdAt,body`) all read 0.
+- The three R5-3 test anchors really do pin the regex-source shape:
+  `tests/unit/test_docs_auditor_substrate.py:811/:895/:1054` assert `"old": r"\breal\b"`,
+  `r"\brunner\b"`, `r"\bghost\b"`. The unwrap R5-3 mandates is therefore necessary, and
+  option (b) really would break them.
+- `agent/reflection_scheduler.py:639-640` and
+  `ui/templates/reflections/_partials/modal_content.html:54` are exactly as cited; no
+  template references `output_summary` or `last_run_summary` today, so C3's ruling still holds.
+- The substrate suite collects **130**, matching `tests/README.md:272`.
+- `origin/session/sdlc-2739` head is `6261e2d2c`, matching the lane-status block.
+- Prerequisites: **8 of 9 PASS**. The one FAIL is the `docs .claude` cleanliness row,
+  tripped by another lane's uncommitted `docs/plans/move-bridge-utc-to-utils.md` — the
+  stop-and-ask outcome that row's own note predicts, not a defect.
+
+One sub-anchor is off by one and is recorded here so the next round does not spend a
+finding on it: the plan cites the dirty-tree guard's `assert result["status"] == "ok"` at
+`tests/unit/test_docs_auditor_substrate.py:1497` (Test Impact, Q4 item 5, and one
+Verification row); it is at `:1498`, and `:1497` is the
+`result = docs_auditor.run_docs_auditor()` line above it. The test function anchor `:1492`
+is correct.
+
 ---
 
 ## Open Questions
