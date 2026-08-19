@@ -1212,6 +1212,24 @@ below.
 Rows are numbered for the traceability table above. Every row is runnable as
 written from the repo root unless a row states otherwise.
 
+Three conventions make that promise hold, each measured at `7ba89ca5c`:
+
+- **Single-node pytest rows pass `-n 0`.** `pyproject.toml`'s `addopts` carry
+  `-n auto`, which spawns ~50 xdist workers for a one-file run; observed here as
+  a 168-second run ending in `node down: Not properly terminated` and "no tests
+  ran". `-n 0` is `scripts/pytest-clean.sh`'s own documented remedy for running a
+  single node.
+- **A `-k` row cannot pass vacuously.** pytest 9.0.3 exits **5**
+  (`NO_TESTS_COLLECTED`) when `-k` deselects everything, and 0 only when at least
+  one selected test passed. So "expect exit 0" already forecloses a `-k` typo;
+  no separate selected-count assertion is needed. Task 1 pins the test names the
+  `-k` expressions rely on (`scan_error`, `vacuous`, `positive_control`).
+- **No row's command contains an unescaped `|`.** A `|` inside a table cell must
+  be written `\|`, which *renders* as a bare `|` — so a BRE alternation copied
+  from the rendered page silently becomes a literal pipe and matches nothing.
+  V-22 therefore uses repeated `-e` patterns instead of alternation. (Verified:
+  the alternation form returns count 0 where the `-e` form returns 13.)
+
 | # | Check | Command | Expected |
 |---|-------|---------|----------|
 | V-1 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q` | exit code 0 |
@@ -1220,22 +1238,23 @@ written from the repo root unless a row states otherwise.
 | V-4 | No converted guard shells out to `grep` | `git grep -n '"grep"' -- 'tests/unit/test_sdlc_review_finalize.py' 'tests/unit/test_anthropic_client_semaphore.py' 'tests/unit/test_memory_extraction.py' 'tests/unit/test_no_legacy_paths.py'` | exit code 1 |
 | V-5 | No bare recursive grep anywhere in `tests/` (meta-guard node) | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q` | exit code 0 |
 | V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q '2093\|pyc' -- "$f" \|\| { echo "MISSING: $f"; exit 1; }; done` | exit code 0, no output |
-| V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `GIT_INDEX_FILE=/dev/null python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a, TrackedScanError; ` `try: a('zzz','tools/*.py',min_files=1)` `except TrackedScanError as e: assert '128' in str(e); sys.exit(0)` `sys.exit(1)"` | exit code 0 |
-| V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a, VacuousScanError; ` `try: a('zzz','nosuchdir/*.py',min_files=1)` `except VacuousScanError: sys.exit(0)` `sys.exit(1)"` | exit code 0 |
-| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `git grep -nE '"-(F\|E\|P)"' -- tests/tracked_content.py` | exit code 1 |
+| V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "scan_error"` | exit code 0 |
+| V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "vacuous"` | exit code 0 |
+| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `test -f tests/tracked_content.py && { git grep -nE '"-[FEP]"' -- tests/tracked_content.py; test $? -eq 1; }` | exit code 0 |
 | V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q` | exit code 0 |
 | V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q` | exit code 0 |
-| V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -c 'zzz\\\\.never(' -- tests/unit/test_tracked_content_helper.py` | output > 0 |
+| V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -q 'zzz\\.never(' -- tests/unit/test_tracked_content_helper.py` | exit code 0 (exit 1 means the probe is missing or mis-escaped) |
 | V-13 | Helper exists and is index-scoped | `git grep -c 'git.*grep' -- tests/tracked_content.py` | output > 0 |
 | V-14 | Stranded-bytecode warning shipped, linking #2883 | `git grep -c '2883' -- docs/features/worktree-venv-isolation.md` | output > 0 |
 | V-15 | Concern-B follow-up issue is real and open | `gh issue view 2883 --json state -q .state` | output contains OPEN |
 | V-16 | **Demonstrated ignored-artifact.** Planted `__pycache__` file is not read (#2808 AC3, #2809 AC3) | `mkdir -p tools/__pycache__ && printf 'State NOT persisted\n' > tools/__pycache__/zz_probe.cpython-312.pyc && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; rm -f tools/__pycache__/zz_probe.cpython-312.pyc; exit $rc` | exit code 0 |
 | V-17 | **Demonstrated red, per guard, one at a time** (#2807 AC3, #2808 AC4). Repeat for each of the four converted guards against a file *that guard scans*; a single mutation tripping several proves nothing about the ones it did not reach. Shown for A1 | `printf '\n# State NOT persisted\n' >> tools/sdlc_stage_marker.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; git checkout -- tools/sdlc_stage_marker.py; test $rc -ne 0` | exit code 0, and FAIL output names `tools/sdlc_stage_marker.py:<line>` with no `Binary file` |
-| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13) | `git mv worker worker_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q; rc=$?; git mv worker_zz worker; test $rc -ne 0` | exit code 0, FAIL message names the missing root |
+| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13) | `git mv worker worker_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q -n 0; rc=$?; git mv worker_zz worker; test $rc -ne 0` | exit code 0, FAIL message names the missing root |
+| V-18b | **Absence check fires when a tracked file leaves the working tree but stays in the index** — the case `git mv` cannot reach | `mv tools/doctor.py /tmp/zz_doc.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; mv /tmp/zz_doc.py tools/doctor.py; test $rc -ne 0` | exit code 0, FAIL is a `VacuousScanError` naming `tools/doctor.py` |
 | V-19 | **Fresh worktree agrees with the primary checkout** at the same commit (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1 |
 | V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7) | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/scripts/pytest-clean.sh "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q` | exit code 0, identical to the in-repo run |
-| V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -k "positive_control or planted"` | exit code 0, at least 1 test selected |
-| V-22 | Sweep table arithmetic holds: 4 converted + 6 floored + 17 safe = 27 (#2809 AC4) | `awk '/^\| # \| Site/,/^$/' docs/plans/overclaim-guard-greps-whole-worktree.md \| grep -c 'CONVERT\|ADD FLOOR\|DOCUMENT AS SAFE'` | rows account for all 27 sites |
+| V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "positive_control"` | exit code 0 |
+| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4) | `test "$(awk '/^\| # \| Site/,/^$/' docs/plans/overclaim-guard-greps-whole-worktree.md \| grep -c -e CONVERT -e 'ADD FLOOR' -e 'DOCUMENT AS SAFE')" -eq 13` | exit code 0 |
 | V-23 | Feature doc exists | `test -f docs/features/tracked-content-sweep-guards.md` | exit code 0 |
 | V-24 | Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
 | V-25 | No production code touched | `test -z "$(git diff --name-only main... -- ':!tests/' ':!docs/')"` | exit code 0 |
