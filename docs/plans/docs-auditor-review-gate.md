@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T06:59:19Z
+revision_applied_at: 2026-08-19T07:26:17Z
 ---
 
 # Docs Auditor Review Gate
@@ -1213,8 +1213,12 @@ verification fixes the rest.
    them (`tests/unit/test_docs_auditor_substrate.py:218` in
    `test_concurrent_run_returns_skipped`, whose *name* already asserts what its body
    denies, `:241`, and `:1304`), all listed in **Test Impact**. No new mechanism, and the
-   three-outcome table below becomes literally true of the function rather than of one
-   branch of it.
+   three-outcome table below becomes literally true of **every return that reached the
+   lock**, rather than of one branch of it. The precision matters (R8-3): the function
+   also returns `"status": "disabled"` at `:1841`, but that sits above the lock
+   acquisition at `:1847` — it is a pre-flight bail on a disabled reflection, not the
+   outcome of a run — so the vocabulary is three outcomes over the runs that happen, and
+   `ok` still survives on exactly one return.
 
    **What fires on which outcome, exhaustively (NEW-1).**
 
@@ -1822,26 +1826,45 @@ Principle 1.
   if _issue_exists(title, repo_root, states=states):
   ```
 
-  **The `states` selection has to happen before the Redis fast-path, and the fast-path's
-  key writes have to sit behind the same condition (R7-1).** `_file_issue_if_new` is
-  two-tier: `:1078-1082` is `if redis_client.exists(dedup_key): return False` and
-  `:1085-1094` stamps that key with `ex=86400 * 30` on both the dedup-hit and the
-  successful-create paths. Selecting `states` only for the `gh` query would leave the
-  exemption inert for 30 days — the machine that filed the issue never reaches
-  `_issue_exists` again inside the window, so a human closing the issue and the failure
-  returning produces silence, which is exactly the behavior the exemption exists to
-  prevent. Both the `exists` read **and** the two `set` writes are therefore gated on
-  `states == "all"`; gating only the read would re-stamp the key on every suppressed run
-  and the window would never close. Recurring categories give up the local cache and pay
-  one `gh issue list` per filing attempt: bounded at ≤5 vault-drift plus ≤1
-  `operational-failure` per run, so at most six extra `gh` calls on a rotation.
+  **The `states` selection has to happen before the Redis fast-path, and the `exists`
+  read — that one line, and nothing else — is what gets gated (R7-1, narrowed by R8-1).**
+  `_file_issue_if_new` is two-tier: `:1078-1082` is
+  `if redis_client.exists(dedup_key): return False` and `:1085-1094` stamps that key with
+  `ex=86400 * 30` on both the dedup-hit and the successful-create paths. Selecting
+  `states` only for the `gh` query would leave the exemption inert for 30 days — the
+  machine that filed the issue never reaches `_issue_exists` again inside the window, so a
+  human closing the issue and the failure returning produces silence, which is exactly the
+  behavior the exemption exists to prevent. **Gating the read closes that loop on its
+  own.** `grep -rn 'REDIS_ISSUE_DEDUP_PREFIX\|dedup_key' reflections/` returns four hits in
+  this module — the prefix `:103`, the key construction `:1076`, one reader `:1081`, two
+  writers `:1091` and `:1133` — and nothing outside the module reads the
+  `docs_audit:issues_filed` prefix. Once the read is gated off for a category, the key is
+  never consulted for that category again, so the two `set` calls stay **unconditional**:
+  on the recurring path they cost two Redis writes nobody reads, and leaving them alone
+  keeps the change to a single `if`.
 
-  Vault-drift therefore keeps exactly today's semantics (open-only gate, 30-day Redis
-  fast-path), and every reference-shaped category converges. The default is `"all"` so a
-  future category converges unless it deliberately opts out, and the opt-out list stays
-  one line long and readable. State the rule in `_file_issue_if_new`'s docstring: *dedup
-  matches closed issues for findings about durable tree state, and open issues only for
-  findings about a recurring condition.*
+  **The local flood cap is spent by the exemption itself, and that is the honest
+  accounting (R8-1).** No gating shape preserves it, because the only thing that could
+  spend the key is the read the exemption turns off. The exposure is real and belongs to
+  the exemption rather than to this choice: `_issue_exists` fails open on any `gh`
+  non-zero exit, so during a partial outage where `gh issue list` fails while
+  `gh issue create` still succeeds, a daily rotation re-files every recurring-condition
+  finding every run — bounded at ≤5 vault-drift plus ≤1 `operational-failure`, so at most
+  six issues per run, where today's post-create key holds it to one round per 30 days.
+  That is the price of a channel that must re-fire when its condition returns; it is the
+  same fail-open posture `_open_issue_exists`' docstring already records (`:1013-1016`);
+  and `VAULT_DRIFT_ISSUE_CAP` and `ISSUE_FILING_PER_RUN_CAP` still bound each run on the
+  way out. Do not "fix" it by re-gating the writes — that changes nothing observable.
+
+  Vault-drift therefore keeps today's **`gh`-side** semantics exactly — the open-only
+  gate — and deliberately gives up the 30-day Redis fast-path, which is the entire point:
+  the fast-path *is* a 30-day suppression, and suppressing a recurring condition for 30
+  days is the defect R7-1 named. Recurring categories pay one `gh issue list` per filing
+  attempt, at most six extra `gh` calls on a rotation. Every reference-shaped category
+  converges. The default is `"all"` so a future category converges unless it deliberately
+  opts out, and the opt-out list stays one line long and readable. State the rule in
+  `_file_issue_if_new`'s docstring: *dedup matches closed issues for findings about
+  durable tree state, and open issues only for findings about a recurring condition.*
 
   **`operational-failure` joins the exemption, and the reason is the same one (R5-1).**
   Q4 item 3's failed-restore filing is keyed on the slug and nothing else. Under the
@@ -2250,7 +2273,9 @@ existing detector classes:
       uniformly passes every other Q7c case and fails this one.
       **Run that behavioral half with the Redis dedup key already set (R7-1)** — file once,
       let the key be written, close the issue, and file the same recurring-condition
-      finding again inside the 30-day window; a second `gh issue create` must fire. With
+      finding again inside the 30-day window; a second `gh issue create` must fire. The
+      key is seeded by the ordinary first filing and needs no hand-planting, because the
+      two `set` writes stay unconditional (R8-1) — only the `exists` read is gated. With
       the fast-path ungated this case is the only one that goes red, because the argv
       assertions above never reach `_issue_exists` on the second call. Assert the mirror
       too: a `broken-md-link` finding with the key set files nothing, so the fast-path is
@@ -2597,6 +2622,17 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       and `:599` — the real path is `.claude/skills-global/do-docs/SKILL.md`.
 - [ ] Update the `## Branch Sweeper` section (`:443-450`) to remove auto-merge and
       describe the withheld-PR exemption.
+- [ ] Same file — rewrite the **three auto-merge claims that sit outside the
+      `## Branch Sweeper` section** (R8-2), which none of the section-scoped bullets above
+      reaches: `:64-65` in the four-gates preamble ("the rotation caller opens a PR the
+      branch sweeper can auto-merge with nobody in between"), and `:314` and `:317` in the
+      withheld-set description — `:317` names `_pr_is_auto_merge_eligible`, which Q2
+      deletes, so it will describe a symbol that no longer exists. Rewrite each to the new
+      status quo: the rotation PR is announced to `Eng: Valor` at creation and merged only
+      by a human, and `WITHHELD_PR_MARKER` now exempts the PR from the sweeper's
+      stale-close rather than from auto-merge. **Rewrite the clause, do not delete the
+      section** — the asymmetry argument at `:64-70` stands on its own terms, since an
+      unreviewed *writer* is still why the four gates exist.
 - [ ] State plainly that a rotation PR is announced by Telegram to `Eng: Valor` at
       creation, is merged only by a human via `/do-merge`, and is **closed unmerged at
       14 days** if nobody acts. Frame that as the intended "nobody cared" outcome,
@@ -2758,7 +2794,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       `dashboard.json`.
 - [ ] No surviving string in the module, the skills, or the feature docs promises
       auto-merge — including the rotation Telegram message, which says
-      "PR is not auto-merge eligible" today.
+      "PR is not auto-merge eligible" today. **Instrumented by two Verification rows
+      (R8-2), because one cannot see both halves:** the module-scoped
+      `grep -c 'auto-merge' reflections/docs_auditor.py` → `0`, and the docs/skills-scoped
+      grep over the auditor's own five files → exit 1 (3 hits today, all in
+      `docs/features/docs-auditor.md`).
 - [ ] Real-git tests in a temp repo cover: the staging set, the early-return restore,
       the failed-restore error path, and the sweeper's close path. No new
       `unittest.mock.patch` over `subprocess.run` for the git surface.
@@ -2782,9 +2822,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       when the condition recurs: `_file_issue_if_new` passes `states="open"` for both
       categories, so one reconciliation does not silence a vault/site pair — or one
       checkout cleanup a wedged rotation — permanently. Demonstrated **with the 30-day
-      Redis dedup key already set** (R7-1), because the per-machine fast-path is gated on
-      `states == "all"` and so is its key write; an exemption that only changes the `gh`
-      argv would leave the same silence for 30 days.
+      Redis dedup key already set** (R7-1), because the per-machine fast-path's `exists`
+      read is gated on `states == "all"`; an exemption that only changes the `gh` argv
+      would leave the same silence for 30 days. The key's two `set` writes stay
+      unconditional (R8-1) — with the read gated off for these categories the key is never
+      consulted for them, so gating the writes too would change nothing observable.
 - [ ] The stale-term apply path is unchanged in behavior by Q7b's veto: a `STALE_TERMS`
       hit on a live-claim line under a deletion heading is still suppressed, because
       `_make_stale_term_replacer` never passes `live_claim_veto=True`. The auditor gains a
@@ -3223,14 +3265,15 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   recur after a genuine cleanup, so under `all` a single human close would silence either
   one permanently. A parameter and a membership set, not a second function — the parallel
   path Principle 1 forbids.
-  **Order matters (R7-1): compute `states` *above* the Redis fast-path at `:1078-1082` and
-  gate that block on it** — `if states == "all" and redis_client.exists(dedup_key): return
-  False` — and put the two `redis_client.set(dedup_key, "1", ex=86400 * 30)` writes
-  (`:1085-1094` and the post-create one) behind the same `states == "all"` condition. Leave
-  the fast-path ahead of the selection and the exemption is inert for 30 days on the
-  machine that filed; gate the read without gating the writes and the key is re-stamped on
-  every suppressed run so the window never closes. This is a reordering, not a new
-  mechanism.
+  **Order matters (R7-1, narrowed by R8-1): compute `states` *above* the Redis fast-path
+  at `:1078-1082` and gate that block on it** —
+  `if states == "all" and redis_client.exists(dedup_key): return False`. **Leave the two
+  `redis_client.set(dedup_key, "1", ex=86400 * 30)` writes (`:1091`, `:1133`)
+  unconditional.** Leave the fast-path ahead of the selection and the exemption is inert
+  for 30 days on the machine that filed. Gating the read is sufficient, and gating the
+  writes as well would be inert: `dedup_key` has exactly one reader (`:1081`), so once
+  that read is off for a category the key suppresses nothing for it either way. One `if`,
+  moved and extended. This is a reordering, not a new mechanism.
 - Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
   *"(and re-files any that were closed without fixing the doc, since the dedup gate only
   sees open issues)"*. Delete it; do not annotate it.
@@ -3331,6 +3374,7 @@ post-build expectation that legitimately fails now.
 | Auto-merge predicate gone | `grep -c '_pr_is_auto_merge_eligible' reflections/docs_auditor.py` | `0` | post-build (currently `3`) |
 | Sweeper never merges | `grep -c '"merge"' reflections/docs_auditor.py` | `0` | post-build (currently `1`, at `:2240`) |
 | No auto-merge concept survives anywhere in the module | `grep -c 'auto-merge' reflections/docs_auditor.py` | `0` | post-build (currently **16**: module comments `:79`, `:90-91`; `_push_branch_and_pr` docstring `:1470` and PR body text `:1527`; `run_docs_auditor` comments `:1894-1896`, Telegram `:1941`, findings `:1970`; the predicate `:2006`ff. All of them go with Q2 — this row is the reason Q2 is not just a function deletion) |
+| No auto-merge concept survives in the auditor's own docs and skills (R8-2) | `grep -rn 'auto-merge\|auto_merge' docs/features/docs-auditor.md docs/features/vault-drift-audit.md docs/features/reflections.md .claude/skill-context/do-docs.md .claude/skills-global/do-docs/SKILL.md` | exit code 1 | post-build (currently exit 0 with **3** hits, all in `docs/features/docs-auditor.md`: `:65`, `:314`, `:317`, the last naming `_pr_is_auto_merge_eligible`). This row is the missing instrument for the "no surviving string in the module, the skills, or the feature docs promises auto-merge" criterion — the module row above is scoped to `reflections/docs_auditor.py` and is structurally blind to these. **The file list is explicit on purpose, and must not be widened to `.claude/ docs/features/`:** that sweep reads **12** hits today, 9 of them about unrelated auto-merge mechanisms (`pm-sdlc-decision-rules.md:12`/`:21`, `autoexperiment.md:15`/`:108`, `bridge-workflow-gaps.md:50`, `remote-update.md:82`, `sdlc-repo-addenda.md:52`, `README.md:148`, `do-build/PR_AND_CLEANUP.md:131`), none of which this lane may touch — the row would be unpassable. Same discipline as the "Old contract instruction gone" row below |
 | Old contract instruction gone | `grep -rn 'commits itself\|commits them itself\|self-committed' .claude/ docs/features/` | exit code 1 | post-build (currently exit 0: `SKILL.md:221`, `skill-context/do-docs.md:166`, and `skill-context/do-docs.md:152` via the third alternative). **Scope is deliberately `.claude/` and `docs/features/` only** — this plan lives in `docs/plans/` and quotes the phrase, so widening the *path* scope makes the row fail on the plan itself. Do not widen the paths. The `self-committed` alternative was added in critique round 1 (C6): without it, `skill-context/do-docs.md:152` survives a green validator |
 | Rename channel stays gone | `grep -c '_git_log_follow_renames\|_detect_renamed' reflections/docs_auditor.py` | `0` | **holds now** (#2842) — regression guard only |
 | No whole-tree force restore | `grep -c 'checkout", "-f\|reset", "--hard\|"clean"' reflections/docs_auditor.py` | `0` | holds now — must still hold after Q4 |
@@ -3470,6 +3514,42 @@ row re-anchored and one demoted to advisory (R7-3, R7-4), and two wording correc
 (R7-5, R7-6). Test Impact gained four dispositions on **existing** tests and one extension
 of an **existing** case; no new test class. `revision_applied_at` is stamped and
 `plan_revising` is cleared; the next stage is BUILD.
+
+**2026-08-19 — round-8 revision. The final concern-settling pass. Round 8 returned READY
+TO BUILD (WITH CONCERNS) with 0 blockers, 2 concerns and 1 nit; prerequisites read 9/9
+PASS. The concern re-critique bound is spent — there is no round 9. No section, spike,
+task, or Q1-Q7 decision was reopened.**
+
+Every claim was re-measured against real bytes before acting on it.
+`grep -rn 'REDIS_ISSUE_DEDUP_PREFIX\|dedup_key' reflections/ tools/ scripts/ tests/` gives
+exactly four hits in `docs_auditor.py` — prefix `:103`, key construction `:1076`, one
+reader `:1081`, two writers `:1091` and `:1133` — and no reader anywhere else, so R8-1's
+premise about the key's single consumer holds (R8-1). `_open_issue_exists`' docstring at
+`:1013-1016` really does name the Redis fast-path as the fail-open backstop.
+`grep -rn 'auto-merge\|auto_merge' docs/features/docs-auditor.md docs/features/vault-drift-audit.md docs/features/reflections.md .claude/skill-context/do-docs.md .claude/skills-global/do-docs/SKILL.md`
+exits 0 with exactly **3** hits, all in `docs/features/docs-auditor.md` at `:65`, `:314`
+and `:317`, and the wider `.claude/ docs/features/` sweep reads **12**, so the instrument
+had to be file-scoped (R8-2). `run_docs_auditor` really returns `"status": "disabled"` at
+`:1841`, above the lock acquisition at `:1847` (R8-3).
+
+| Finding | Disposition | Where |
+|---|---|---|
+| R8-1 (CONCERN) | **Adopted — gate the read, leave both writes unconditional — with the stated rationale corrected on the way in.** The remedy is right and the code sketch at Q7c already showed it; the write-gating mandate lived only in the prose around it, and it is gone from all four sites that carried it. The justification R7-1 gave for it ("gating only the read would re-stamp the key on every suppressed run and the window would never close") is empirically empty: the key has one reader, so a window nothing looks through cannot be held open. **R8-1's own counter-rationale does not survive the same test either, and the plan now says so rather than adopting it silently.** "The key survives as the fail-open cap" is false under read-only gating for exactly the same reason: for a recurring category the read is skipped, so the surviving writes cap nothing. The flood exposure is real, belongs to the exemption rather than to the gating shape, and is now named in Q7c with its true bound — during a partial `gh` outage (`issue list` failing while `issue create` succeeds) a daily rotation re-files ≤5 vault-drift plus ≤1 `operational-failure` per run, against today's one round per 30 days — together with why it is accepted: it is the same fail-open posture `_open_issue_exists` already documents, `VAULT_DRIFT_ISSUE_CAP` and `ISSUE_FILING_PER_RUN_CAP` still bound each run, and the alternative is the 30-day silence R7-1 identified. Read-only gating was chosen anyway: it is one `if` instead of three, it matches the sketch verbatim, and the two unread writes cost two Redis `SET`s on the recurring path | Q7c prose (two paragraphs rewritten), task 4, Success Criteria, Test Impact |
+| R7-1 internal inconsistency (raised inside R8-1) | **Resolved, and not in the direction R8-1 predicted.** Consecutive paragraphs said recurring categories "give up the local cache" and that vault-drift "keeps exactly today's semantics (open-only gate, 30-day Redis fast-path)". R8-1 held that adopting read-only gating "makes `:1839-1840` true as written" — it does not, for the third time from the same root cause: with the read gated off, vault-drift does **not** keep the fast-path, whatever the writes do. The second paragraph is corrected instead of preserved. Vault-drift keeps today's `gh`-side semantics exactly (the open-only gate) and **deliberately** gives up the 30-day Redis fast-path, because the fast-path *is* a 30-day suppression and suppressing a recurring condition for 30 days is the defect R7-1 named. Both paragraphs now say the same thing | Q7c prose |
+| R8-2 (CONCERN) | **Adopted.** The "no auto-merge survives in the feature docs" criterion had no instrument and three live counterexamples. Added a Documentation checkbox naming `docs/features/docs-auditor.md:64-65`, `:314` and `:317` explicitly — all three sit outside the `## Branch Sweeper` section the existing bullets scope to, and `:317` names `_pr_is_auto_merge_eligible`, which Q2 deletes — with the instruction to rewrite the clauses rather than delete the four-gates section, whose asymmetry argument stands on the unreviewed *writer* and survives Q2. Added the matching Verification row: a grep over the auditor's own five doc/skill files, expected exit 1, measured at exit 0 with 3 hits today. The file list is pinned and the row says why widening it to `.claude/ docs/features/` would make it unpassable — 12 hits, 9 belonging to unrelated auto-merge mechanisms this lane may not touch — the same discipline the "Old contract instruction gone" row already carries. The Success Criterion now names both instruments, since neither grep can see the other's half | Documentation, Verification, Success Criteria |
+| R8-3 (NIT) | **Adopted, wording only.** Q4 item 4's three-outcome table is now "literally true of every return that reached the lock", with the fourth status named in the same breath: `"status": "disabled"` at `:1841` sits above the lock acquisition at `:1847` and is a pre-flight bail on a disabled reflection, not a run outcome. No code, no task, no Verification row; the "`ok` survives on exactly one return" criterion was already true as written | Q4 item 4 |
+
+**Two round-8 candidates stay killed by measurement and are not re-litigated:** R5-3's
+punctuation residual (empirically false) and the `TestNonMarkdownApplyGuard` "any red means
+the veto leaked" instruction (sound as written).
+
+**Convergence note.** This pass added no mechanism, no spike, no task, and no new
+behavioral test. Its whole surface is: one `if` narrowed in the Q7c code contract and the
+prose around it made consistent with itself (R8-1 plus the R7-1 inconsistency), one
+Documentation checkbox and one grep Verification row (R8-2), and one clause of precision
+(R8-3). The build contract for `_file_issue_if_new` is now strictly smaller than it was at
+the start of this pass. `revision_applied_at` is re-stamped and `plan_revising` is cleared;
+the next stage is BUILD, and this is the last planning pass in this lane.
 
 ## Critique Results
 
