@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2823
 last_comment_id: 5324618203
+revision_applied: true
+revision_applied_at: 2026-08-19T05:31:42Z
 ---
 
 # A Red Test on Main Should Block Something
@@ -204,32 +206,83 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 
 ### Technical Approach
 
-- **Task A — widen the collection.** Add `--paths` (nargs='+', default `["tests/"]`) to the argparse block at :610-612 and thread it into the argv at :187. Update the six unit-tier string sites spike-5 enumerated (:4, :174, :180, :187, :730, :738) plus the prose comment at :636 so remediation instructions match what actually ran. Raise `PYTEST_TIMEOUT_SECONDS` (:72) — the unit tier alone is already estimated at ~21 min against an 1800s ceiling (`pyproject.toml:188`), and the widening adds ~10% more tests that parallelize worse. Size it from the measured widened runtime rather than guessing, and leave a comment recording the measurement. Raise `PYTEST_RECONFIRM_TIMEOUT_SECONDS` (:76) too, or cap the re-confirm set, because its timeout fail-safe marks every input node confirmed (:261-263).
+- **Task A — widen the collection.** Add `--paths` (nargs='+', default `DEFAULT_PATHS = ["tests/"]`) to the argparse block at :610-612 and thread it into the argv at :187. Update the six unit-tier string sites spike-5 enumerated (:4, :174, :180, :187, :730, :738) plus the prose comment at :636 so remediation instructions match what actually ran.
 
-- **Task B — run-integrity guard.** Add `validate_run_integrity(report, returncode, prev) -> str | None` returning a human-readable reason when the run cannot be trusted, `None` otherwise. Trip on any of: pytest exit code in `{2, 3, 4, 5}` (interrupted / internal error / usage error / no tests collected); `summary.total == 0`; a previous run exists and `total < 0.9 * prev_total`; or the report's collectors contain an `error` outcome. On a trip, take the same disposition the existing timeout path already takes at :639-641 — **alert loudly, do not save state, do not dispatch, return non-zero** — so the next night still diffs against the last trustworthy baseline. Note that exit code alone is insufficient: the recon run exited **0** with zero tests executed, so the `total` floor is the load-bearing check, not the returncode.
+  Raise `PYTEST_TIMEOUT_SECONDS` (:72) — the unit tier alone is already estimated at ~21 min against an 1800s ceiling (`pyproject.toml:188`), and the widening adds ~10% more tests that parallelize worse. **The measurement may be unavailable, so the constant has a deterministic fallback and the comment must say which one it is.** Attempt one widened run. If it completes (exit in `{0, 1}` and `summary.total > 0`), size the constant from the observed wall time and comment it as a measurement with the date and total. If it does not complete, set `PYTEST_TIMEOUT_SECONDS = 5400` and comment it as **"bound, not measurement"**, deriving it as `~1260s unit-tier baseline (pyproject.toml:188) x 1.1 collection growth x 3.5 contention headroom`. Never land the constant with a comment asserting a measurement that was not taken — spike-2 and spike-7 record four defeated attempts on this machine, so the fallback is the expected path, not the exceptional one. Raise `PYTEST_RECONFIRM_TIMEOUT_SECONDS` (:76) on the same rule, or cap the re-confirm set, because its timeout fail-safe marks every input node confirmed (:261-263).
 
-- **Task C — role-correct install gate.** Replace `has_bridge_role()` in `scripts/install_nightly_tests.sh:30-74` with `has_worker_role()`, copied from `scripts/install_reflection_worker.sh:37-80` (the diff is one line: drop `if proj.get("telegram"):`). Independently, change `scripts/update/run.py:2038` so the installer is always invoked and the script's own gate is the single decision point, matching the pattern `run.py:2016-2023` argues for. Keep the fail-open contract on unreadable config, missing venv, and `scutil` error — `tests/unit/test_install_scripts_bootstrap.py` depends on it (its harness sets no `PROJECTS_CONFIG_PATH` and a fresh `$HOME`, so all four parametrized nightly cases reach bootstrap only via fail-open). Also make `/update` log the skip as a **warning** rather than INFO at `run.py:2045`, so a machine with no regression coverage is visible.
+  **`--paths` overrides never write state or dispatch.** Compute `paths_are_default = list(args.paths) == DEFAULT_PATHS` once in `main()`. When false, skip `save_last_run()` and skip `maybe_dispatch_triage_session()` entirely, logging `"--paths override: not persisting state (the baseline belongs to the default collection)"`. Without this, one ad-hoc narrow run overwrites `collection` in the shared state file, the next scheduled run sees a mismatch, re-baselines, and dispatches nothing — and alternating manual and scheduled runs leave the detector permanently in seed mode.
 
-- **Task D — collection-aware baseline.** Add a `collection` field to the state dict recording the paths that produced it. When the recorded collection differs from the current one, treat the run as a baseline seed: take the existing `is_first_run` path (:630-632, :691-696), seeding `dispatched_nodes` and dispatching nothing. This is what stops the widening from re-filing every pre-existing non-unit failure in one night and reopening #2429/#2430/#2462. Add `head_commit` (`git rev-parse HEAD`) in the same edit so a red night is attributable to a SHA — coordinating with #2334's plan, which proposes the same field.
+- **Task B — run-integrity guard, keyed on report freshness.** Add `validate_run_integrity(report, returncode, prev) -> str | None` returning a human-readable reason when the run cannot be trusted, `None` otherwise.
+
+  **The load-bearing check is that a fresh report exists, not the returncode.** `PYTEST_JSON_TMP` (:69) is a fixed `/tmp` path that nothing ever unlinks, so a run whose pytest never executed parses *last night's* report and inherits its healthy totals. Two changes make freshness structural:
+
+  1. In `run_tests()`, `Path(PYTEST_JSON_TMP).unlink(missing_ok=True)` immediately **before** the subprocess — and the same for `PYTEST_SERIAL_JSON_TMP` in `reconfirm_serial`.
+  2. Change `run_tests()` to return `(report_or_None, returncode)` rather than raising on a parse failure, so the missing-report case reaches the guard instead of `main()`'s silent `return 1` arm at :206-209.
+
+  Trip conditions, in order: `report is None` → `"pytest wrote no JSON report (exit {rc}) — the run did not happen"`; pytest exit code in `{2, 3, 4, 5}` (interrupted / internal error / usage error / no tests collected); an exit code that is negative or `> 128` (signal death — spike-7 measured 143 from the wrapper's stall watchdog); `summary.total == 0`; a report with no `summary` key at all; a previous run exists and `total < 0.9 * prev_total`; or the report's collectors contain an `error` outcome. **Exit code 1 is deliberately not a trip condition** — pytest's 1 means "tests failed", a legitimate red night, and trapping it would convert every real regression into an infrastructure alert.
+
+  On a trip: **alert loudly naming the reason, do not save state, do not dispatch, return non-zero** — so the next night still diffs against the last trustworthy baseline. The exit-code list alone would not have caught the recon failure, which exited **0** with zero tests executed; under Task E's wrapper it would not have caught the preflight refusal either, which exits **1** having never invoked pytest.
+
+- **Task B2 — one fatal path for every pre-alert exit.** `main()` returns 1 from two arms before any Telegram call is reachable: `except subprocess.TimeoutExpired` (:639-641) and `except (FileNotFoundError, json.JSONDecodeError)` (:642-644). Both go to `logs/nightly_tests.log` and nowhere else. Fixing only the timeout arm leaves the exact arm Task E makes more likely still silent, and makes Success Criterion 2 false for half its surface.
+
+  Collapse both into one helper:
+
+  ```python
+  def _fatal(reason: str, dry_run: bool) -> int:
+      log(f"FATAL: {reason}")
+      send_telegram(f"Nightly tests could not run: {reason}", dry_run=dry_run)
+      return 1
+  ```
+
+  called as `return _fatal(f"pytest timed out after {PYTEST_TIMEOUT_SECONDS}s", args.dry_run)` and `return _fatal(f"could not parse test results: {exc}", args.dry_run)`. Neither arm may reach `save_last_run()`. `send_telegram()` is documented never-fatal (`docs/features/nightly-regression-tests.md:76-78`), so no extra `try/except` wraps it. The integrity-guard trip in Task B routes through the same helper, giving one alert shape for every "the run did not happen" outcome.
+
+- **Task C — role-correct install gate, and a worktree refusal.** Replace `has_bridge_role()` in `scripts/install_nightly_tests.sh:30-74` with `has_worker_role()`, copied from `scripts/install_reflection_worker.sh:37-80` (the diff is one line: drop `if proj.get("telegram"):`). Independently, change `scripts/update/run.py:2038` so the installer is always invoked and the script's own gate is the single decision point, matching the pattern `run.py:2016-2023` argues for. Keep the fail-open contract on unreadable config, missing venv, and `scutil` error — `tests/unit/test_install_scripts_bootstrap.py` depends on it (its harness sets no `PROJECTS_CONFIG_PATH` and a fresh `$HOME`, so all four parametrized nightly cases reach bootstrap only via fail-open). Also make `/update` log the skip as a **warning** rather than INFO at `run.py:2045`, so a machine with no regression coverage is visible.
+
+  **The installer must refuse to run from a linked worktree.** It writes `$HOME/Library/LaunchAgents/com.valor.nightly-tests.plist`, a machine-global path, substituting `__PROJECT_DIR__` with `$PROJECT_DIR` derived from the script's own location (:7-8) and hardcoding it into `ProgramArguments`, `WorkingDirectory`, `PATH` and both log paths. A lane that runs the installer from `.worktrees/{slug}/` therefore points the fleet's 03:00 job at a directory that merge deletes, and the job fails silently every night thereafter. Add this above the role gate:
+
+  ```bash
+  if [ -f "$PROJECT_DIR/.git" ] && grep -q '^gitdir:.*/\.git/worktrees/' "$PROJECT_DIR/.git" 2>/dev/null; then
+      echo "Refusing to install nightly-tests from a worktree ($PROJECT_DIR)"
+      exit 0
+  fi
+  ```
+
+  In a linked worktree `.git` is a *file* containing `gitdir: …/.git/worktrees/<name>`; in the main checkout it is a directory, so `-f` alone discriminates (verified on this checkout and on `.worktrees/durability-m1-fence-canary` during revision). Pin it with a source-text assertion in the new `tests/integration/test_install_nightly_tests.py`.
+
+  **Fleet-wide dedup.** `dispatched_nodes` is per-machine local state in one checkout's `data/nightly_tests_last_run.json`. Turning the detector on across the fleet means every newly-covered machine dispatches the same confirmed-failing node on night two and files its own issue — #2429/#2430/#2462 reopened along a machine axis rather than a time axis. Give triage dispatch a machine-independent key: extend the prompt built in `maybe_dispatch_triage_session` (:503-563) to require the deterministic title `Nightly regression: <nodeid>` and to run an exact-title search before filing, so cross-machine dedup is a string match rather than a judgment call. A shared Redis-backed dispatch set is the thorough fix and is out of appetite; the title convention is what ships here, and the docs say so.
+
+- **Task D — collection-aware baseline.** Add a `collection` field to the state dict recording the paths that produced it. When the recorded collection differs from the current one, treat the run as a baseline seed: take the existing `is_first_run` path (:630-632, :691-696), seeding `dispatched_nodes` and dispatching nothing. This is what stops the widening from re-filing every pre-existing non-unit failure in one night and reopening #2429/#2430/#2462.
+
+  Make the re-baseline **visible**, since a silent seed reads exactly like a quiet night: `log(f"WARNING: collection changed {prev.get('collection')!r} -> {current_collection!r} — re-baselining, dispatching nothing (see #2429/#2430/#2462). Any regression landing tonight is absorbed into the seed and will not be filed until it stops failing and re-fails.")` The second sentence is not decoration — the seed genuinely swallows a same-night unit-tier regression for one commit window, and an operator reading the log should know the widening night is a seed rather than a verdict.
+
+  Add `head_commit` (`git rev-parse HEAD`) in the same edit so a red night is attributable to a SHA — coordinating with #2334's plan, which proposes the same field. It is captured once at run start, for attribution only; see Race 3.
 
 - **Task E — route through `scripts/pytest-clean.sh`.** Replace the bare `sys.executable -m pytest` argv at :182-199 (and the serial re-confirm at :242-258) with the wrapper. Unattended at 03:00 this buys orphan reaping via `trap cleanup EXIT INT TERM HUP PIPE`, the `check-interpreter-pin.sh` refusal, and the `PYTEST_STALL_LIMIT_S` watchdog. Spike-7 measured the watchdog doing exactly its job — SIGTERM at 637s on a wedged run that a bare invocation would have let burn for the full timeout. The recon runs also produced 45 `node down` events; without reaping, those workers reparent to PID 1 and accumulate nightly. `--json-report` passes through the wrapper unchanged since it is a pure argv pass-through.
+
+  **Task E is only safe on top of Task B's freshness checks.** The wrapper exits **1** from both preflight refusals — missing venv pytest (`pytest-clean.sh:142`) and the interpreter-pin refusal (:149-151) — *without invoking pytest at all*. With the fixed `/tmp` report path and no unlink, that is a direct route to parsing last night's healthy report under a returncode the guard must not trip on. Sequencing matters: the unlink and the `(report, rc)` return land with Task B, before the argv is switched.
 
 - **What this plan deliberately does not do**: add a CI workflow, or add a test leg to the merge predicate or any stage gate. See Rabbit Holes.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `run_tests()`'s `except (FileNotFoundError, json.JSONDecodeError)` at :206-209 re-raises after logging — verify the new integrity guard does not swallow it, and assert the log line is emitted.
+- [ ] `run_tests()` no longer raises on a parse failure — it returns `(None, returncode)`. Assert the log line is still emitted and that `None` reaches `validate_run_integrity` rather than `main()`'s exception arm.
+- [ ] **Stale-report regression test.** Write a healthy report to `PYTEST_JSON_TMP`, then run with a pytest stub that exits 1 without writing anything. Assert the pre-subprocess `unlink` removed it, that `run_tests()` returns `(None, 1)`, that the guard trips with a reason naming "no JSON report", and that no state is written. This is the Task E false-green in test form.
+- [ ] Both `_fatal()` arms alert. Assert `TimeoutExpired` and a corrupt-JSON path each call `send_telegram` with a reason string, each return non-zero, and neither reaches `save_last_run()`.
+- [ ] `send_telegram()` is documented as never fatal — assert that an integrity-failure alert *and* both `_fatal()` arms still return non-zero and still skip the state write when the send itself fails.
 - [ ] `reconfirm_serial`'s catch-all at :261-263 (`TimeoutExpired/FileNotFoundError/JSONDecodeError/OSError`) marks every input node confirmed. Add a test asserting that behavior is preserved under the widened collection, and that the resulting dispatch set is still bounded by `prior_dispatched`.
-- [ ] `send_telegram()` is documented as never fatal — assert that an integrity-failure alert whose Telegram send fails still returns non-zero and still skips the state write.
 - [ ] No `except Exception: pass` blocks exist in the touched scope of `nightly_regression_tests.py` — confirm during build and state so.
 
 ### Empty/Invalid Input Handling
 - [ ] `validate_run_integrity` with `summary.total == 0` → trips. **This is the spike-3 regression test and the single most important test in the plan.**
+- [ ] `validate_run_integrity` with `report is None` → trips with the "the run did not happen" reason. Second most important: it is the only guard against the fixed-`/tmp`-path staleness.
+- [ ] `validate_run_integrity` with `returncode == 1` and a healthy report → **does not trip.** Pytest's 1 is a legitimate red night; a guard that trapped it would convert every real regression into an infrastructure alert and re-hide the failures this plan exists to surface.
 - [ ] `validate_run_integrity` with `prev = {}` (no prior run) → the ratio check must not fire; only the absolute floor applies.
 - [ ] `validate_run_integrity` with a report missing `summary` entirely → trips rather than raising `KeyError`.
 - [ ] `--paths` with an empty list, and with a path that collects nothing → the collection-error path, not a clean night.
+- [ ] `--paths` set to a non-default value → asserts `save_last_run()` is **not** called and `maybe_dispatch_triage_session()` is **not** called, and that the override log line is emitted.
 - [ ] `has_worker_role()` against a `projects.json` with zero projects owned by this machine → skips install and removes any stale plist.
+- [ ] Installer worktree refusal: with `$PROJECT_DIR/.git` a file containing `gitdir: /x/.git/worktrees/y`, the script exits 0 having written no plist; with `.git` a directory it proceeds to the role gate.
 
 ### Error State Rendering
 - [ ] The integrity-failure Telegram message must name the reason (zero collection, bad exit code, total dropped below floor) — assert the reason string reaches the message body, so an operator reading the alert can tell "the suite could not run" from "the suite is red".
@@ -243,9 +296,13 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 - [ ] `tests/unit/test_nightly_regression_tests.py::TestReconfirmSerial` (:162-198) — UPDATE: fixtures use `tests/unit/...` node IDs; add non-unit node IDs to prove path-agnosticism.
 - [ ] `tests/unit/test_nightly_regression_tests.py::TestDeltaLogic` (:74-124) — REPLACE: `_compute_alert` (:77-90) reimplements main()'s alert logic inline using a **count delta**, which no longer matches the set-based `compute_new_failures` (:381-393). It is already drifted; rewrite it against the real function or delete it.
 - [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: coverage for `run_tests()`'s argv. **No existing test asserts on it** — `run_tests` is always mocked (:273, :520) — so line 187 is currently untested and the widening would otherwise land with zero coverage. Copy the argv-assertion pattern from `TestMaybeDispatchTriage::test_dispatch_once` (:438).
-- [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: a `TestValidateRunIntegrity` class covering every trip condition in Task B, including the spike-3 case (exit 0, total 0).
+- [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: a `TestValidateRunIntegrity` class covering every trip condition in Task B, including the spike-3 case (exit 0, total 0), the `report is None` case, and the exit-1-with-healthy-report **non**-trip.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: a stale-report test asserting `PYTEST_JSON_TMP` is unlinked before the subprocess, so a pytest that never runs cannot yield last night's totals.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: `Test_Fatal` covering both pre-alert arms — each alerts, each returns non-zero, neither writes state.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — ADD: a `--paths` override test asserting no state write and no dispatch.
+- [ ] `tests/unit/test_nightly_regression_tests.py` — UPDATE: any test that asserts `run_tests()` raises must move to the `(report, returncode)` tuple contract.
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` (:74-77, :59) — VERIFY, likely no change: the harness reaches bootstrap via the **fail-open** branch (no `PROJECTS_CONFIG_PATH`, fresh `$HOME`), so loosening the predicate keeps all four parametrized cases passing. Confirm empirically rather than by inspection; a change that made the gate fail closed would break `assert len(harness.bootstrap_calls()) == len(harness.labels)` at :261.
-- [ ] `tests/integration/test_install_nightly_tests.py` — CREATE: source-text assertions pinning the new gate, copying `tests/integration/test_install_reflection_worker.py:47-68` (`assert "has_worker_role" in installer_src`, `assert 'proj.get("telegram")' not in installer_src`, self-skip and stale-plist removal, fail-open on unreadable config). No test pins the nightly gate today.
+- [ ] `tests/integration/test_install_nightly_tests.py` — CREATE: source-text assertions pinning the new gate, copying `tests/integration/test_install_reflection_worker.py:47-68` (`assert "has_worker_role" in installer_src`, `assert 'proj.get("telegram")' not in installer_src`, self-skip and stale-plist removal, fail-open on unreadable config). Plus a **worktree-refusal** assertion pinning the `gitdir:.*/\.git/worktrees/` guard, and a behavioral case running the installer against a fixture directory whose `.git` is such a file, asserting exit 0 and no plist written. No test pins the nightly gate today.
 - [ ] `tests/README.md:417` — UPDATE: the row recording `test_nightly_regression_tests.py | 28` is already stale and will move further.
 
 ## Rabbit Holes
@@ -264,8 +321,16 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 **Mitigation:** Task D is a hard requirement, not an optimization, and it is designed to make the magnitude irrelevant. The state file records its collection identity, and a changed collection forces the existing `is_first_run` baseline path (:630-632, :691-696), which seeds `dispatched_nodes` and dispatches nothing — so night one files zero issues whether the non-unit tiers are clean or 200-red. Verify by running once against a state file recording the old collection and asserting zero dispatches. Build should also measure the integration tier once on a quiet machine and record the number, so night two's dispatch volume is a known quantity rather than a surprise.
 
 ### Risk 2: The widened run exceeds its timeout and goes silent
-**Impact:** On `TimeoutExpired` the script returns 1 at :640 **before** any Telegram call (the alerts at :720/:734/:740 are all downstream), so a timeout produces no notification at all — only a line in `logs/nightly_tests.log`, a file that does not currently exist on this machine. A too-tight timeout converts the fix into a differently-silent detector.
-**Mitigation:** Measure the widened runtime before choosing the constant, and record the measurement in a comment. Separately, move the timeout path's alert **above** the early return so a timeout pages someone — it is the same class as Task B and belongs with it.
+**Impact:** `main()` returns 1 from **both** of its pre-alert exception arms — `TimeoutExpired` at :639-641 and `(FileNotFoundError, json.JSONDecodeError)` at :642-644 — and every Telegram call (:720/:734/:740) is downstream of them. Either arm produces no notification at all, only a line in `logs/nightly_tests.log`, a file that does not currently exist on this machine. A too-tight timeout converts the fix into a differently-silent detector, and Task E makes the parse arm materially more likely by introducing a wrapper that can exit before writing a report.
+**Mitigation:** Task B2 collapses both arms into `_fatal()`, so every pre-alert exit alerts and none reaches `save_last_run()`. This covers the whole class, not the timeout half. On the constant itself, Task A carries a deterministic fallback: attempt the measurement once, and on a run that does not complete, land `5400` with a comment that says **"bound, not measurement"** and shows the derivation. The plan's own evidence (spike-2's three defeated attempts, spike-7's SIGTERM at 637s) says the fallback is the likely path on this machine, so the task is executable as written rather than blocking on a measurement that may never be takeable here. Task B2 is a hard prerequisite of the constant change: a wrong ceiling must page someone.
+
+### Risk 6: A lane installs the LaunchAgent from its worktree
+**Impact:** `scripts/install_nightly_tests.sh` writes a machine-global plist that hardcodes `$PROJECT_DIR` into `ProgramArguments`, `WorkingDirectory`, `PATH` and both log paths. Run from `.worktrees/{slug}/`, it aims the fleet's only regression detector at a directory that merge deletes — after which the 03:00 job fails silently every night, which is the precise failure mode this plan exists to eliminate. The exposure is not hypothetical: Success Criterion 6 asks a validator to confirm the service is installed, and Task 7 assigns that job to an agent working in the lane worktree.
+**Mitigation:** Closed in code, not prose — Task C adds a worktree refusal above the role gate, discriminating on `.git` being a file whose contents start `gitdir: …/.git/worktrees/`. Pinned by source-text assertion in `tests/integration/test_install_nightly_tests.py`. Success Criterion 6 and its Verification row are reworded to state they run from the main checkout after a real `/update`, so a lane validator marks the row N/A rather than satisfying it unsafely.
+
+### Risk 7: Fleet-wide install multiplies duplicate issue filing
+**Impact:** `dispatched_nodes` lives in one checkout's `data/nightly_tests_last_run.json`, so it dedups across nights on one machine and not at all across machines. Task C turns the detector on fleet-wide by design; on night two every newly-covered machine dispatches the same confirmed-failing node and files its own issue. That is #2429/#2430/#2462 reopened along a new axis, and the only remaining guard would be the soft prompt instruction to "search open issues first" — exactly the prompt-level dedup whose insufficiency motivated `dispatched_nodes` in #2559.
+**Mitigation:** Task C gives dispatch a deterministic title, `Nightly regression: <nodeid>`, and requires an exact-title search before filing, converting cross-machine dedup from a judgment call into a string match. The per-machine scope of `dispatched_nodes` and the role the title convention plays are recorded in `docs/features/nightly-regression-tests.md`. A shared Redis-backed dispatch set would be the complete fix and is out of appetite. This also revises Risk 5's claim that fleet reach does not affect the plan: it does not affect the plan's *value*, but the duplicate-filing exposure scales with it.
 
 ### Risk 3: Un-gating the install turns on a detector on machines that cannot run the suite
 **Impact:** A machine that owns projects but has a broken venv or no test DBs would alert nightly.
@@ -300,7 +365,7 @@ The work is bounded: one script, one installer, one `/update` call site, plus te
 **Trigger:** a merge lands between the parallel run and the serial re-confirm — a wider window under the widened collection.
 **Data prerequisite:** both runs must describe the same tree for "confirmed" to mean anything.
 **State prerequisite:** `HEAD` stable across the run.
-**Mitigation:** Task D's `head_commit` makes drift **detectable** — capture it before the parallel run and re-check after the serial one, treating a change as an integrity failure under Task B's guard. The script performs no git operations today and does not check its branch at all, so this is currently invisible.
+**Mitigation:** **Accepted, not guarded** — and named as accepted so no reader mistakes it for handled. `head_commit` is captured **once** at run start and persisted for attribution only; mid-run drift is tolerated. The reasoning: the confirmed set is re-derived from scratch every night, so a node mis-confirmed against a moved tree self-corrects within 24 hours, and the worst outcome is one spurious issue that Task C's deterministic title dedups. Guarding it properly would mean widening `validate_run_integrity` to take `head_before`/`head_after` and calling it a second time after `reconfirm_serial`, which buys a 24-hour correction the nightly cadence already provides. Task B's signature stays `validate_run_integrity(report, returncode, prev)` and its single call site stays immediately after the parallel parse.
 
 ## No-Gos (Out of Scope)
 
@@ -339,20 +404,30 @@ No new CLI entry point in `pyproject.toml`, no bridge import, no MCP surface.
 ### External Documentation Site
 Not applicable — this repo has no Sphinx/MkDocs site.
 
+- [ ] Record in `docs/features/nightly-regression-tests.md` that `dispatched_nodes` is **per-machine** state and that the `Nightly regression: <nodeid>` title convention is what makes dedup work across a fleet — a future change to the title format silently reopens #2429/#2430/#2462.
+- [ ] Record in the same doc that the installer refuses to run from a linked worktree, and why (the plist is machine-global and hardcodes an absolute project dir).
+- [ ] Record in the same doc that a collection change produces a **seed night**, not a verdict: any regression landing that night is absorbed into the baseline and will not be filed until it stops failing and re-fails.
+
 ### Inline Documentation
-- [ ] Docstring for `validate_run_integrity` stating each trip condition and, critically, **why exit code alone is insufficient** — cite the measured exit-0-with-zero-tests case so the next reader does not "simplify" it away.
-- [ ] Comment on the raised `PYTEST_TIMEOUT_SECONDS` recording the measured widened runtime it was derived from.
+- [ ] Docstring for `validate_run_integrity` stating each trip condition and, critically, **why the returncode alone is insufficient in both directions** — cite the measured exit-0-with-zero-tests case, and state that exit 1 is deliberately excluded because pytest's 1 is a legitimate red night.
+- [ ] Comment at the `unlink` call explaining that `PYTEST_JSON_TMP` is a fixed path and a stale report reads as a healthy run — the reason the unlink is not optional cleanup.
+- [ ] Comment on the raised `PYTEST_TIMEOUT_SECONDS` stating explicitly whether it is a measurement (with date and total) or a **bound** (with the derivation). Never a comment claiming a measurement that was not taken.
 - [ ] Comment on the `collection` state field explaining that a mismatch forces a re-baseline, and naming #2429/#2430/#2462 as what that prevents.
 
 ## Success Criteria
 
 - [ ] `scripts/nightly_regression_tests.py` collects the full default collection by default — the same set a bare `scripts/pytest-clean.sh` collects (14,899 tests), including `tests/integration/`.
-- [ ] A run that executes zero tests, or exits with pytest code 2/3/4/5, or whose total falls below the floor, produces an infrastructure-failure alert naming the reason, writes no state, dispatches nothing, and returns non-zero.
+- [ ] A run that executes zero tests, writes no report, exits with pytest code 2/3/4/5, dies to a signal, or whose total falls below the floor, produces an infrastructure-failure alert naming the reason, writes no state, dispatches nothing, and returns non-zero.
 - [ ] The spike-3 scenario is a passing regression test: a JSON report with `summary.total == 0` and returncode 0 must not be treated as a clean night.
+- [ ] The stale-report scenario is a passing regression test: a healthy report already at `PYTEST_JSON_TMP` plus a pytest that exits without running must trip the guard, not inherit last night's totals.
+- [ ] A returncode of 1 with a healthy report does **not** trip the guard — it is a red night and must alert as a regression, not as infrastructure failure.
+- [ ] Every `main()` path that returns non-zero before the normal alert block sends a Telegram alert naming the reason. `grep -n 'return 1' scripts/nightly_regression_tests.py` shows no arm that bypasses `_fatal()`.
+- [ ] A run invoked with non-default `--paths` writes no state and dispatches nothing.
 - [ ] `scripts/install_nightly_tests.sh` gates on `has_worker_role()`; `grep 'proj.get("telegram")' scripts/install_nightly_tests.sh` returns nothing.
+- [ ] `scripts/install_nightly_tests.sh` refuses to install from a linked worktree, pinned by a source-text assertion and a behavioral test.
 - [ ] `scripts/update/run.py` invokes the nightly-tests installer unconditionally, leaving the shell script as the single decision point, and warns rather than silently informs when the install is skipped.
-- [ ] `com.valor.nightly-tests` is present in `launchctl list` on this machine after `/update`.
-- [ ] A run whose recorded state carries a different collection re-baselines and dispatches zero triage sessions.
+- [ ] `com.valor.nightly-tests` is present in `launchctl list` **on the main checkout's machine, after a real `/update` run from the main checkout.** A validator working in a lane worktree marks this row N/A and records why — installing it from a worktree is the failure mode Risk 6 describes, not a way to satisfy this criterion.
+- [ ] A run whose recorded state carries a different collection re-baselines, dispatches zero triage sessions, and logs the re-baseline as a warning naming the absorbed-regression caveat.
 - [ ] The state file records `head_commit`.
 - [ ] `tests/integration/test_install_nightly_tests.py` exists and pins the gate by source-text assertion.
 - [ ] `run_tests()`'s argv has direct test coverage (it has none today).
