@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2807
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-19T08:38:58Z
+revision_applied_at: 2026-08-19T09:57:27Z
 ---
 
 # Working-tree sweep guards must scan tracked content
@@ -93,12 +93,31 @@ file:line references moved and one factual claim in #2808 is wrong.
 | `tools/doctor.py:442` | `worktree_interpreters` check, no bytecode dimension | **Confirmed.** `grep -c "pycache\|\.pyc\|bytecode" tools/doctor.py` → `0`. |
 
 **Factual correction to #2808.** #2808 states both `cwd=`-less siblings "go
-vacuously green". Only one does. Verified by execution from a foreign cwd:
+vacuously green". Only one does. Re-measured from `/tmp` at `cefc07e7e` by
+running each site's exact argv through `subprocess.run` (not through a shell,
+which glob-expands `--include=*.py` and changes the answer):
 
-| Site | rc from wrong cwd | Assertion | Outcome |
-|---|---|---|---|
-| `test_anthropic_client_semaphore.py:164` | 1, empty stdout | `assert not hits` | **passes vacuously** (false green) |
-| `test_memory_extraction.py:2563` | 2 | `assert returncode == 1` | **fails loudly** (false red) |
+| Site | rc from wrong cwd | stderr | Assertion | Reads rc? | Outcome |
+|---|---|---|---|---|---|
+| `test_anthropic_client_semaphore.py:164` | **1** | empty | `assert not hits` | **no** | **passes vacuously** (false green) |
+| `test_memory_extraction.py:2563` | **2** | `No such file or directory` | `assert returncode == 1` | yes | **fails loudly** (false red) |
+
+> **Round-3 critique nit rejected on measurement.** The round-3 critique
+> asserted both siblings return rc 2 from a foreign cwd and that the recorded
+> rc 1 was wrong. It is not. A2 passes `-r` with the *directory* operands
+> `agent/ bridge/ tools/`; BSD `grep` (`/usr/bin/grep`, the only `grep` on
+> `PATH` on this machine — `/opt/homebrew/bin/grep` is absent) returns **1**
+> with empty stderr when a recursive root does not exist. A3 passes a *file*
+> operand and gets the conventional rc 2 plus a diagnostic. Reproduced against
+> the resolved `PATH` binary and `/usr/bin/grep` explicitly; both give 1 for A2.
+> The two sites differ in *both* dimensions, and the returncode difference is
+> the less important one.
+
+The distinction that actually matters is the one in the "Reads rc?" column:
+A2 discards the returncode entirely, so an errored scan is indistinguishable
+from a clean one, while A3 asserts on it and is merely noisy. That is why
+obligation 3 (three-way triage) is mandatory rather than stylistic — a guard
+that never looks at the exit code cannot be rescued by any exit-code contract.
 
 These carry different remediation priorities and the plan treats them
 separately. A false-green guard has silently stopped guarding; a false-red one
@@ -245,8 +264,10 @@ lives:
 
 1. **Entry point**: pytest collects a guard test.
 2. **Scan**: the guard names a corpus. Today: a *directory tree on disk*
-   (`grep -r tools/`). After: *tracked content in the index*
-   (`git grep -- 'tools/*.py'`).
+   (`grep -r tools/`), which is why `__pycache__` is read. After: the *file list
+   comes from the index* and each file's *content is read from the working tree*
+   (`git grep -- 'tools/*.py'`). Those are two different sources and the
+   distinction matters at step 4 — see obligation 1.
 3. **Result**: an exit code plus stdout.
 4. **Triage**: today, a single `== 1` comparison that conflates no-match with
    several failure modes. After: an explicit three-way split — match / clean /
@@ -274,7 +295,11 @@ step 4. Fixing only step 2 (what all three issues propose) leaves step 4 open.
 
 **Size:** Medium
 
-**Team:** Solo dev, plus a validator and a documentarian.
+**Team:** Two builders — `guard-converter` (helper, conversions, meta-guard) and
+`walk-hardener` (the six `rglob` floors), run in parallel because task 3 has no
+dependency on the helper — plus a validator and a documentarian. This matches
+the four-member roster in Team Orchestration; the concurrency is declared here
+so it does not get quietly serialized at build time.
 
 **Interactions:**
 - PM check-ins: 1-2 (scope of the sweep; the concern-B split)
@@ -343,15 +368,68 @@ misreading, and its batched exit code is not portable between BSD and GNU xargs.
 **The helper's contract.**
 
 ```python
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 class TrackedScanError(RuntimeError):
     """The scan could not run (git failed). Never a pass."""
 
 class VacuousScanError(AssertionError):
     """The scan ran but examined too few files to mean anything."""
 
-def assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=()):
-    """Assert no tracked file matching *pathspecs* contains *pattern*."""
+def assert_absent_from_tracked(pattern, *pathspecs, min_files, repo_root=None):
+    """Assert no tracked file matching *pathspecs* contains *pattern*.
+
+    *repo_root* is a test-only seam. It defaults to ``None``, which resolves to
+    the module-level ``REPO_ROOT``. No guard passes it.
+    """
 ```
+
+There is deliberately **no `allow=` parameter**. Every exemption across all four
+call sites turned out to be path-shaped, so all of them belong in negative
+pathspecs — see "Exemptions go in the pathspec" below. Shipping an unused
+`allow=` would leave the substring hazard in the signature for a future author
+to reach for.
+
+**`repo_root=` is a test-only seam, and it is fenced so it cannot weaken a
+guard.** Without it, the only corpus the helper can ever scan is the live
+primary checkout, so the absent-from-working-tree unit test task 1 mandates
+would have to `mv` a real tracked source file out of `~/src/ai` during an
+ordinary suite run. That is unacceptable on this machine for three reasons, each
+measurable rather than hypothetical: `-n auto` is the default, so concurrent
+xdist workers in the same run that import the moved module fail spuriously; a
+sibling lane's suite on this shared checkout sees the file missing; and
+`--timeout-method=thread` in `pyproject.toml`'s `addopts` kills a worker via
+`os._exit` — stated verbatim in `scripts/pytest-clean.sh`'s own wedge-detector
+comment — so no `finally`, no fixture teardown, and no `pytest.raises` unwind
+ever restores it. The checkout is then left with a tracked source file silently
+absent, which is exactly the false-clean state obligation 4 exists to detect,
+for every other lane on the machine.
+
+The seam is fenced three ways so it cannot become a way to point a production
+guard at a corpus of the caller's choosing:
+
+1. **Keyword-only, defaulting to `None`.** A caller that omits it gets the real
+   repo root; there is no positional slot to fill by accident.
+2. **`None` resolves inside the helper, not at the call site.** The module-level
+   `REPO_ROOT` stays the single derivation of the real root, so a guard cannot
+   pass a root it computed itself.
+3. **No guard may pass it, and that is asserted.** V-28 requires that
+   `repo_root=` appears in exactly two tracked files — `tests/tracked_content.py`
+   (the definition) and `tests/unit/test_tracked_content_helper.py` (the scratch-
+   repo tests). Any converted or future guard that reaches for the seam fails
+   that row.
+
+The corpus the seam points at is a **scratch git repo built with `git init` in
+`tmp_path`**, following the 20+ in-repo precedents — closest is
+`tests/unit/test_plan_migration_invariant.py:54-65` (`_git(repo, "init", "-q",
+"-b", "main")`, local `user.email`/`user.name`, `add -A`, `commit`). Three
+committed files and `min_files=1` are enough, and the absence check is exercised
+by `mv`-ing one of *those*. Verified end-to-end in a scratch repo at
+`cefc07e7e`: with three tracked `.py` and one moved aside, `git ls-files` still
+reports **3** while only **2** are present, `git grep` for the moved file's
+content returns **rc 1 (false clean)**, and restoring the file leaves
+`git status` empty. That is the same false-clean shape as the 265-of-266
+measurement in the live checkout, reproduced with nothing at stake.
 
 Two **distinct** exception classes are mandatory, not stylistic. A single class
 with two messages cannot be asserted apart except by string matching, and the
@@ -363,9 +441,28 @@ and a separate `pytest.raises(VacuousScanError)` for `'nosuchdir/*.py'`.
 
 Four obligations, which the current call sites each get wrong in a different way:
 
-1. **Index-scoped corpus.** `git grep` with `cwd=REPO_ROOT` (always explicit —
-   never inherited from pytest's ambient cwd) and an **explicit pathspec, never
-   an implicit whole-repo default**. `*.py` for the source-code guards; `*` plus
+1. **Index-scoped file list, working-tree content.** This is a two-part contract
+   and getting it wrong in either direction breaks a different guarantee:
+
+   > `git grep` resolves the **file list** from the index and reads each file's
+   > **content from the working tree**. `--cached` would read content from the
+   > index instead. This helper deliberately uses the working-tree form so an
+   > uncommitted reintroduction is caught before it is staged.
+
+   Measured at `7ba89ca5c`: an unstaged append to `tools/doctor.py` is found by
+   `git grep` (rc=0) and **not** by `git grep --cached` (rc=1). So "index-scoped"
+   describes only *which files are opened*, never *what bytes are compared*.
+
+   Two consequences the rest of this plan depends on. First, `--cached` is not
+   an available fix for anything here: it would make V-17's unstaged
+   `printf … >> tools/sdlc_stage_marker.py` invisible and turn the
+   demonstrated-red proof green. Second, because content comes from the working
+   tree, a tracked file that is *absent* from the working tree is silently
+   skipped — which is obligation 4's problem, not a theoretical one.
+
+   Invoke with `cwd=REPO_ROOT` (always explicit — never inherited from pytest's
+   ambient cwd) and an **explicit pathspec, never an implicit whole-repo
+   default**. `*.py` for the source-code guards; `*` plus
    negative pathspecs for corpus-wide guards such as A7. The pathspec is
    explicit so the corpus is stated rather than inherited — it is *not*
    required to be Python-only. A7's corpus is deliberately every tracked file
@@ -394,7 +491,16 @@ Four obligations, which the current call sites each get wrong in a different way
    if ls.returncode != 0:
        raise TrackedScanError(f"git ls-files failed (rc={ls.returncode}): {ls.stderr.strip()}")
    files = [p for p in ls.stdout.splitlines() if p]
-   if len(files) < min_files:
+
+   # Count what the scan can actually READ, not what the index lists.
+   present = [p for p in files if (REPO_ROOT / p).exists()]
+   absent = sorted(set(files) - set(present))
+   if absent:
+       raise VacuousScanError(
+           f"{len(absent)} of {len(files)} tracked paths are absent from the "
+           f"working tree, so git grep skipped them silently: {absent[:5]}"
+       )
+   if len(present) < min_files:
        raise VacuousScanError(...)
    ```
 
@@ -404,12 +510,39 @@ Four obligations, which the current call sites each get wrong in a different way
    never read as clean. This is the obligation `test_no_legacy_paths.py`
    currently violates despite already using `git grep`.
 
-4. **Non-vacuity floor.** Assert the (returncode-checked) `git ls-files` result
-   holds at least `min_files` paths. Without this, spike-1 shows a renamed
-   directory turns the guard into a silent no-op. Modelled on the strongest
-   existing pattern in the repo,
-   `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored roots,
-   explicit required-anchor list, `len(found) > 250` floor).
+4. **Non-vacuity floor — over readable files, plus an exact absence check.**
+   The floor must count what `git grep` can actually open. Counting index rows
+   instead reintroduces the vacuous-green class *inside this plan's flagship
+   mitigation*: `git ls-files` reports index entries while `git grep` reads
+   working-tree content, so a tracked file missing from disk (plain `mv`/`rm`,
+   an interrupted checkout, a sparse checkout) leaves the index count intact
+   while `git grep` skips the file and returns 1 — clean.
+
+   Measured at `7ba89ca5c` with `tools/doctor.py` moved aside by a plain `mv`:
+
+   | Probe | Result |
+   |---|---|
+   | `git grep -l "worktree_interpreters" -- 'tools/*.py'` | rc=0 → **rc=1 (false clean)** |
+   | `git ls-files -- 'tools/*.py'` | still **180** |
+   | present-on-disk count for `'tools/*.py' 'agent/*.py'` | **265** of 266 |
+
+   **Two checks are required, and a `present`-count floor alone is not enough.**
+   With A1's floor at `min_files=170`, 265 present clears it comfortably, so the
+   floor stays green on exactly the failure that produced the false clean. Only
+   an exact absence check fires. Verified at `7ba89ca5c`: present-count floor
+   fires? **False**. Absent-set check fires? **True**.
+
+   So: raise `VacuousScanError` if **any** corpus path is absent from the working
+   tree, *and* separately raise it if `len(present) < min_files`. The two catch
+   different failures — a partially-materialized checkout versus a corpus-wide
+   collapse or a pathspec typo — and neither subsumes the other. This is the same
+   reasoning that makes B13 keep both a per-root check and a total floor.
+
+   Failing closed on a sparse or interrupted checkout is intended, not
+   collateral: per Risk 3 a guard that cannot see its whole corpus must say so
+   rather than report clean. Modelled on the strongest existing pattern in the
+   repo, `tests/unit/test_update_pull_fetch_head_race.py` (`__file__`-anchored
+   roots, explicit required-anchor list, `len(found) > 250` floor).
 
 **Regex dialect is pinned: POSIX basic regular expressions.** The four call
 sites disagree about what `pattern` is — A1 passes a literal, A3 at
@@ -428,35 +561,60 @@ Docstring line: *"`pattern` is a POSIX basic regular expression interpreted by
 `git grep` exactly as `grep` would; `(` is literal, `\.` is a literal dot."*
 A helper test must exercise the metacharacter path rather than assume it.
 
-**Exemptions go in the pathspec, not in `allow=`.** A single `allow=()` matched
-by substring over stdout cannot carry three incompatible semantics. A2 at
-`tests/unit/test_anthropic_client_semaphore.py:176-180` filters output *lines*
-by module-path substring; A7 at `tests/unit/test_no_legacy_paths.py:33-37`
-filters *file paths* two ways at once (exact membership in `ALLOWED_FILES` plus
-a prefix rule on `docs/plans/`). One substring-matched tuple over-exempts:
-`scripts/update/run.py` would also exempt a future
-`tools/scripts/update/run.py`, and any allowed fragment appearing in matched
-source *text* rather than in a path would exempt a real violation.
+**Exemptions go in the pathspec. Every one of them is path-shaped, so `allow=`
+has no call sites and is not built.** An earlier draft reserved `allow=` for A2
+on the belief that A2 filtered output *lines* by a genuinely line-scoped rule.
+It does not. Every member of `_ALLOWED_DIRECT_CONSTRUCTORS` at
+`tests/unit/test_anthropic_client_semaphore.py:149-158` is a **file path**, and
+the filter at `:180-181` (`not any(mod in line for mod in ...)`) drops whole
+output lines by path substring. That is whole-file exemption — semantically
+identical to a negative pathspec, just implemented less safely.
 
-Push every **path-shaped** exemption into git pathspec exclusions, which git
-applies to the corpus instead of to stdout. No new parameter is needed — the
-helper already takes `*pathspecs`. This is the idiom already at
+Worse, the substring is matched against the entire `path:lineno:content` line
+rather than against the path field. A line in an unapproved module that merely
+*mentions* `agent/llm/wrapper.py` in a comment while calling
+`anthropic.AsyncAnthropic(` is silently exempted. A7 at
+`tests/unit/test_no_legacy_paths.py:33-37` has the mirror-image problem, filtering
+*file paths* two ways at once (exact membership in `ALLOWED_FILES` plus a prefix
+rule on `docs/plans/`), and one substring-matched tuple over-exempts there too:
+`scripts/update/run.py` would also exempt a future `tools/scripts/update/run.py`.
+
+So `allow=` would ship the exact mechanism this plan rejects, with **zero**
+legitimate consumers. Leave it out of the signature entirely rather than
+documenting it as reserved — a reserved-but-unused parameter is the one thing
+that would send a future author back to substring filtering.
+
+Push every exemption into git pathspec exclusions, which git applies to the
+corpus instead of to stdout. No new parameter is needed — the helper already
+takes `*pathspecs`. This is the idiom already at
 `tests/unit/test_plan_migration_invariant.py:150`
-(`f":!{this_file.relative_to(REPO_ROOT)}"`). Reserve `allow=` for A2's genuine
-line-substring case and say so in the docstring.
+(`f":!{this_file.relative_to(REPO_ROOT)}"`).
 
-**Accepted boundary: the corpus is tracked content only.** Moving to `git grep`
-closes the build-artifact hole and opens a smaller one — without `--untracked`
-it does not see brand-new, never-committed source. **Do not add `--untracked`.**
-It implies `--exclude-standard`, so it would still skip gitignored
-`__pycache__` and buy nothing against the reported defect, while re-walking the
-working tree and reopening the mid-walk race that Race 1 credits `git grep` with
-closing. Record the boundary instead, in both
+Keep `_ALLOWED_DIRECT_CONSTRUCTORS` as a module-level constant that *feeds* the
+negative-pathspec list, so the six approved modules keep their
+`#1055`/`#1193`/`#1262`/`#1925` provenance comments rather than losing them to a
+literal inline list.
+
+**Accepted boundary: the corpus is tracked *files*, read from the working
+tree.** Moving to `git grep` closes the build-artifact hole and opens a smaller
+one — without `--untracked` it does not see brand-new, never-added source.
+**Do not add `--untracked`.** It implies `--exclude-standard`, so it would still
+skip gitignored `__pycache__` and buy nothing against the reported defect, while
+re-walking the working tree and reopening the mid-walk hazard that Race 1
+credits `git grep` with narrowing.
+
+State the boundary precisely — the earlier "caught on first commit" phrasing was
+wrong for the common case. Because content is read from the working tree, an
+edit to an **already-tracked** file is caught immediately, staged or not; only a
+brand-new **untracked** file is invisible, and only until it is `git add`ed
+(added to the index — not committed). Record this in both
 `docs/features/tracked-content-sweep-guards.md` and the helper docstring:
-*"The corpus is tracked content only. A violation in a new, unstaged file is
-caught on first commit, which is where CI and the nightly detector read.
-`--untracked` would close that window but reopens the #2093 mid-walk race, so it
-is deliberately not used."*
+
+> *"The corpus is every tracked file matching the pathspec, with content read
+> from the working tree. A violation in an already-tracked file is caught
+> immediately, staged or not. A violation in a brand-new untracked file is
+> invisible until the file is added to the index. `--untracked` would close that
+> window but reopens the #2093 mid-walk hazard, so it is deliberately not used."*
 
 **Sweep dispositions** (spike-4; 27 codebase-content assertion sites, all
 classified — this table *is* the #2809 enumeration deliverable):
@@ -548,6 +706,39 @@ file**: write a temp file under `tmp_path` containing
 self-exemption and a matcher that flags nothing at all are indistinguishable —
 both present as a green meta-guard.
 
+**The meta-guard's own floor and the positive control collide unless root and
+floor are independent parameters.** The meta-guard needs a non-vacuity floor (it
+must not become the thing it guards against), but the control points the scanner
+at a `tmp_path` holding exactly one file. If the floor is baked into the scanner,
+the control's one-file root trips the floor *before* reaching the offender
+assertion, so the control passes for the wrong reason — reintroducing the exact
+failure it was added to rule out and leaving V-21 uninformative.
+
+Parameterize both:
+
+```python
+def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]:
+    """Return paths under *root* that invoke a bare recursive grep."""
+    scanned = sorted(root.rglob("*.py"))
+    if len(scanned) < min_files:
+        raise AssertionError(
+            f"scanned {len(scanned)} files under {root}, floor {min_files} — "
+            "the sweep would be vacuous"
+        )
+    ...
+```
+
+The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control
+calls `_scan_for_bare_grep(tmp_path, min_files=1)` and asserts the planted path
+is in the returned list.
+
+**`min_files=500`, not the 600 the critique proposed.** `tests/` holds 784
+tracked `.py` at `7ba89ca5c`, so 600 is 76.5% — above this plan's own 60-70%
+band (Risk 1) and exposed to ordinary churn. 500 sits at 63.8%.
+
+Never let the control pass a floor of `0`: a scanner that returned `[]`
+unconditionally would then satisfy both callers and both would stay green.
+
 **Out-of-scope-but-adjacent**, recorded so the next reader is not surprised:
 `scripts/checks/no_new_rebuild_callers.sh:46` has the same ambient-cwd hazard and
 is invoked by no test; `reflections/maintenance.py::run_legacy_code_scan` is
@@ -583,9 +774,21 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 
 ### Regex Dialect Coverage
 - [ ] The metacharacter path is **exercised, not assumed**. A pattern such as
-      `zzz\.never(` must report clean against the real corpus, and must trip on
-      a planted `zzz.never(` in a tracked file. This is the test that would
-      catch a builder adding `-F` and silently neutering A3.
+      `zzz\.never(` must report clean against `'tools/*.py'`, and must trip on a
+      **committed** `zzz.never(` literal in
+      `tests/unit/test_tracked_content_helper.py`. This is the test that would
+      catch a builder adding `-F` and silently neutering A3. The fixture is
+      committed rather than planted at runtime so the case needs no mutation of
+      the working tree and cannot be left half-applied by an `os._exit`.
+
+### Scratch-Corpus Coverage
+- [ ] No test in `tests/unit/test_tracked_content_helper.py` moves, deletes, or
+      writes a file inside the primary checkout. Cases that need a mutable
+      corpus build one with `git init` in `tmp_path` and pass `repo_root=`.
+      Asserted by V-29.
+- [ ] `repo_root=` is passed by the helper's own tests and by nothing else.
+      Asserted by V-28. A converted guard that reaches for the seam is a
+      regression of the fence, not a convenience.
 
 ### Error State Rendering
 - [ ] A real violation must render `file:line` of the *tracked source*, not a
@@ -598,7 +801,7 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted` — **UPDATE**: route through the helper; add the `#2093`-style explanatory comment naming the `.pyc` hazard so it is not "simplified" back (required by #2809 AC2).
-- [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; preserve the `_ALLOWED_DIRECT_CONSTRUCTORS` exemption via the helper's `allow=` parameter.
+- [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; convert the six `_ALLOWED_DIRECT_CONSTRUCTORS` entries into negative pathspecs (they are all file paths, so the current whole-line substring filter is unsafe whole-file exemption). Keep the constant as the source of the exclusion list so its provenance comments survive. Post-exclusion corpus 304, `min_files=200`.
 - [ ] `tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary` — **UPDATE**: route through the helper. Single-file scope, so the floor is `min_files=1`.
 - [ ] `tests/unit/test_no_legacy_paths.py::test_no_legacy_claude_code_paths` — **UPDATE**: replace the `if rc == 0:` gate with three-way triage; move the `ALLOWED_FILES` and `docs/plans/` exemptions into negative pathspecs. Corpus stays **all tracked file types**, not `*.py`.
 - [ ] `tests/unit/test_template_filter_registry.py::test_no_hand_copied_filter_registration_in_tests` — **UPDATE**: add non-vacuity floor.
@@ -609,7 +812,7 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 - [ ] `tests/unit/test_harness_model_coverage.py` (`_agent_py_files`) — **UPDATE**: replace `if not agent_dir.is_dir(): return []` with a raise; add floor.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` — **NO CHANGE, verified**: its scanner only flags subprocess calls where `_argv_reaches_python(argv)` holds. `["git", "grep", …]` does not reach Python, so the new helper needs no `ALLOWLIST` entry. Confirmed by reading `_argv0_is_skipped`/`_argv_reaches_python` at `:216-260`.
 - [ ] `tests/unit/test_plan_migration_invariant.py` — **NO CHANGE**: already correct; it is the reference pattern this plan generalizes.
-- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, `TrackedScanError` on a broken index (128), `VacuousScanError` on a vacuous pathspec, the two asserted **apart**, empty pattern, whitespace-only pattern, BRE metacharacter round-trip, and `allow=` line filtering.
+- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, `TrackedScanError` on a broken index (128), `VacuousScanError` on a vacuous pathspec, the two asserted **apart**, `VacuousScanError` naming an absent-from-disk tracked path, empty pattern, whitespace-only pattern, and the BRE metacharacter round-trip (probe written as a raw string, `r"zzz\.never("`). No `allow=` coverage — the parameter is not built.
 - [ ] **NEW** meta-guard (in the same new file): no test under `tests/` invokes a bare recursive `grep` over a directory. Self-exempts by resolved path, carries its own non-vacuity floor, and ships with a `tmp_path` planted-offender positive control.
 
 ## Rabbit Holes
@@ -628,10 +831,15 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 - **Chasing the `scripts/` and `reflections/` occurrences of the same shape.**
   Real, noted in Technical Approach, but they are not tests, so they are outside
   #2809's acceptance criteria and outside this lane.
-- **Making the meta-guard clever.** An AST-based analyser that understands every
-  way to build a grep argv will spend more time on false positives than the
-  problem is worth. Match the literal shapes (`"-r"`/`"-rn"` with `"grep"` as
-  argv[0]) and allow an explicit opt-out comment.
+- **Making the meta-guard clever.** An analyser that understands every way to
+  build a grep argv — f-strings, list concatenation, argv assembled across
+  functions, `shell=True` command strings — will spend more time on false
+  positives than the problem is worth. The line is drawn at a **single `ast.List`
+  of string constants**: first element `grep`, a recursive flag among the
+  siblings. That is one `ast.walk` and it flags exactly the two real offenders
+  and none of the five textual near-misses (measured at `cefc07e7e`). Anything
+  requiring dataflow is out of scope; an explicit opt-out comment covers a
+  genuine future survivor.
 
 ## Risks
 
@@ -692,11 +900,23 @@ unconverted `grep -r` site)
 tree (`__pycache__`, `data/`, `logs/`) while `grep -r` is descending it.
 **Data prerequisite:** none.
 **State prerequisite:** the scanned corpus must be stable for the scan's duration.
-**Mitigation:** `git grep` reads an atomic index snapshot and never touches
-untracked runtime trees, so the corpus cannot shift underneath it. Verbatim from
-`test_plan_migration_invariant.py:136-145`: *"a directory vanishing mid-walk
-makes grep exit 2 and trips the returncode assertion below. `git grep` reads the
-index, so it is race-free and never scans untracked runtime artifacts (#2093)."*
+**Mitigation (narrowed, not eliminated):** `git grep` resolves its **file list**
+from an atomic index snapshot and never descends untracked runtime trees, so the
+*set of paths scanned* cannot shift underneath it and `__pycache__`, `data/` and
+`logs/` are never entered at all. That removes the reported failure mode.
+
+It does **not** make the scan wholly race-free, and the plan should not claim it
+does: content is read from the working tree file-by-file, so a sibling rewriting
+a tracked file mid-scan can still be observed at either version. What changes is
+the consequence — a shifting *corpus* silently changes what was guarded, whereas
+a shifting *file version* is a benign read of one file or the other, and a file
+that disappears outright is caught by obligation 4's absence check rather than
+being skipped in silence.
+
+`test_plan_migration_invariant.py:136-145` states it more strongly than is
+strictly true (*"`git grep` reads the index, so it is race-free"*). Task 7 should
+carry the narrowed wording into the new convention doc rather than copying that
+sentence forward, since this lane is the one that makes it doctrine.
 
 ## No-Gos (Out of Scope)
 
@@ -738,10 +958,12 @@ deliberately not exposed to the agent.
 
 ### Feature Documentation
 - [ ] Create `docs/features/tracked-content-sweep-guards.md` — the convention:
-      what a sweep guard is, why it must scan tracked content rather than the
-      working tree, the three obligations (index-scoped corpus, three-way exit
-      triage, non-vacuity floor), the `git grep`-over-`xargs` decision with the
-      rc=0 evidence from spike-3, and how to use `tests/tracked_content.py`.
+      what a sweep guard is, why it must scan *tracked files* rather than walk a
+      directory tree on disk, the **four** obligations (index-resolved file list
+      with working-tree content, returncode triage on every git call, three-way
+      exit triage, non-vacuity floor over readable files plus an exact absence
+      check), the `git grep`-over-`xargs` decision with the rc=0 evidence from
+      spike-3, and how to use `tests/tracked_content.py`.
 - [ ] Add the entry to the `docs/features/README.md` index table.
 
 ### Existing Documentation
@@ -770,10 +992,17 @@ deliberately not exposed to the agent.
 - [ ] **Demonstrated red:** reintroducing the banned string into a tracked `.py` under `tools/` or `agent/` fails the test, with the offending `file:line` in the message. (#2807 AC3, #2808 AC4)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan failed to run" — an errored scan does not read as a pass. (#2808 AC5)
 - [ ] Every converted guard distinguishes "scan found nothing" from "scan examined nothing" via a non-vacuity floor. (net-new, spike-1)
+- [ ] **The floor counts files the scan can actually read, and any tracked path absent from the working tree is an error.** `git ls-files` reports index rows while `git grep` reads working-tree content, so counting index rows leaves a false-clean hole inside the mitigation itself. A present-count floor alone does not close it (265 of 266 present clears a floor of 170), so the helper additionally raises on a non-empty absent set. Demonstrated by V-18b's plain-`mv` mutation, which `git mv` cannot reach. (net-new, critique round 2)
+- [ ] **No guard uses substring exemption.** `assert_absent_from_tracked` has no `allow=` parameter; all six A2 exemptions and all four A7 exemptions are negative pathspecs applied to the corpus, not filters over stdout. (net-new, critique round 2)
 - [ ] **Scan-failure and vacuity are separately assertable:** `TrackedScanError` and `VacuousScanError` are distinct classes, and `tests/unit/test_tracked_content_helper.py` asserts each against the input that produces it (broken index → `TrackedScanError`; `'nosuchdir/*.py'` → `VacuousScanError`). (net-new, critique — makes Criterion 6 verifiable rather than assumed)
 - [ ] **The six floored walks are covered:** each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count, and each floor is individually demonstrated-red by task 5's per-guard mutation. B13 and B14 additionally raise on a missing scan root rather than skipping it. (net-new, critique — 6 of the 10 touched files previously mapped to no criterion)
 - [ ] **The regex dialect is pinned and exercised:** no converted guard passes `-F`, `-E`, or `-P`, and a helper test proves a BRE metacharacter pattern (`zzz\.never(`) both reports clean and trips on a planted match. (net-new, critique — an `-F` would leave A3 permanently green)
-- [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. (net-new, critique)
+- [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. Its scanner takes root and floor as independent parameters, so the control's one-file root reaches the offender assertion instead of tripping the floor. (net-new, critique)
+- [ ] **The meta-guard's discriminator is structural and its false-positive set is enumerated:** it matches an `ast.List` of string constants whose first element is `grep` and which carries a recursive flag as a sibling element, flags exactly A1 and A2 at `cefc07e7e`, flags none of the five textual near-misses (including A6, the plan's own reference pattern), and is expected to flag **nothing** after conversion. The five innocents are named in the test's own comment. (net-new, critique round 3)
+- [ ] **The helper's corpus is injectable and the seam is fenced:** `repo_root=` is keyword-only, defaults to the module-level `REPO_ROOT`, and is passed by `tests/tracked_content.py` and `tests/unit/test_tracked_content_helper.py` and by nothing else (V-28). No helper unit test moves, deletes, or writes a file inside the primary checkout — mutable-corpus cases use a `git init` scratch repo in `tmp_path` with `min_files=1` (V-29). Live-tree mutation is confined to V-17, V-18 and V-18b under task 5's supervised one-at-a-time protocol. (net-new, critique round 3 blocker)
+- [ ] **No mutation row renames a path a launchd service resolves.** V-18 and task 5's B13 mutation use `ui/` (10 tracked `.py`, 0.8%), not `worker/`, because `com.valor.worker` runs `python -m worker` from this checkout under `KeepAlive`. (net-new, critique round 3)
+- [ ] **The cross-checkout comparison is controlled:** V-19 provisions the fresh worktree with `uv sync --all-extras` and asserts the pin with `scripts/check-interpreter-pin.sh` before running, so both halves of #2808 AC2 execute on the same interpreter. A bare worktree has no `.venv`, and both the wrapper's `PYTEST_BIN` resolution and the pin checker fail open in exactly that case. (net-new, critique round 3)
+- [ ] **No verification command contains a `|` character in any role**, so no row can be broken by markdown table-cell escaping in either regex dialect. (net-new, critique round 3)
 - [ ] `tests/` contains no remaining recursive-`grep`-over-a-directory assertion, enforced by the new meta-guard. (#2807 AC4)
 - [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each **converted, floored, or documented as safe (4 / 6 / 17)**. (#2809 AC4)
 - [ ] **Neither converted sibling reads the ambient cwd.** `assert_absent_from_tracked` derives `REPO_ROOT` from `Path(__file__).resolve().parents[N]` and passes it as `cwd=` on every git call. Verified by running both nodes from `/tmp` and observing the same verdict as from the repo root. Today the two diverge from a foreign cwd (A2 returns rc=1 with empty stdout and passes vacuously; A3 returns rc=2 and fails); after the fix both must match their in-repo run. (#2808 AC7)
@@ -822,7 +1051,24 @@ deliberately not exposed to the agent.
 - **Assigned To**: guard-converter
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, allow=())`.
+- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, repo_root=None)`. **No `allow=` parameter** — every exemption across all four call sites is path-shaped and belongs in a negative pathspec.
+- **`repo_root` is keyword-only and defaults to `None`, resolving inside the
+  helper to the module-level `REPO_ROOT`.** It exists so the helper's own unit
+  tests can scan a scratch repo instead of the live checkout. It is fenced, not
+  free: no guard may pass it, and V-28 asserts `repo_root=` appears in exactly
+  two tracked files (the helper and its own test module). Do not add a
+  positional root parameter, and do not let a guard compute its own root — the
+  module-level derivation stays the only one.
+- **No helper unit test may mutate the primary checkout.** Every test that needs
+  a file to move, disappear, or contain a planted match builds its own corpus
+  with `git init` in `tmp_path` (precedent: `tests/unit/test_plan_migration_invariant.py:54-65`)
+  and passes it as `repo_root=`, with `min_files=1`. Three committed files are
+  enough. Live-tree `mv` mutation is confined to **V-18b under task 5's
+  one-at-a-time validator protocol**, where a human-supervised revert is part of
+  the row. The reason is not tidiness: `--timeout-method=thread` kills a worker
+  via `os._exit`, so a `finally` or fixture teardown is not guaranteed to run,
+  and an interrupted in-suite `mv` leaves the shared checkout in the exact
+  false-clean state this plan exists to detect.
 - Define **two** exception classes: `TrackedScanError` (scan could not run) and
   `VacuousScanError` (scan examined too little). One class with two messages is
   not acceptable — it cannot be asserted apart except by string matching.
@@ -834,24 +1080,79 @@ deliberately not exposed to the agent.
   pathspec both yield empty stdout (rc 128 vs 0), so counting first
   misclassifies a scan failure as vacuity and the Failure Path probe goes green
   for the wrong reason.
+- **Count files that can actually be read, and assert none is missing.** After
+  the returncode triage, filter `files` to those that exist on disk. Raise
+  `VacuousScanError` if **any** corpus path is absent from the working tree, and
+  separately if `len(present) < min_files`. Both are required: `git ls-files`
+  reports index rows while `git grep` reads working-tree content, and with one
+  file moved aside the present count is 265 of 266 — comfortably above A1's floor
+  of 170, so the floor alone stays green on a measured false clean (verified at
+  `7ba89ca5c`). See obligation 4.
+- Do **not** reach for `git grep --cached` to close that gap. `--cached` reads
+  content from the index, which would make V-17's unstaged
+  `printf … >> tools/sdlc_stage_marker.py` invisible and turn the
+  demonstrated-red proof green.
 - Implement three-way `git grep -n` exit triage: 0 → violation with `file:line`;
   1 → clean; anything else → `TrackedScanError` carrying the exit code and stderr.
 - Pass **no** regex flag. `git grep` defaults to POSIX BRE, matching `grep`'s
   own default, so A3's escaped patterns carry over byte-for-byte. Explicitly do
   not add `-F`, `-E`, or `-P`.
-- Do **not** pass `--untracked`. Document the tracked-only boundary in the
+- Do **not** pass `--untracked`. Document the tracked-files boundary in the
   docstring.
 - Reject an empty or whitespace-only pattern.
 - Docstring covers all four obligations, the BRE dialect sentence, the
-  fail-closed exit-128 behavior, the tracked-only boundary, and the rule that
-  `allow=` is for line-substring exemptions only while path-shaped exemptions
-  belong in negative pathspecs.
-- Write `tests/unit/test_tracked_content_helper.py` covering: match, clean,
-  `pytest.raises(TrackedScanError, match="128")` via `GIT_INDEX_FILE=/dev/null`,
-  `pytest.raises(VacuousScanError)` via `'nosuchdir/*.py'` (the two asserted
-  **apart**, each against the input that produces it), empty pattern,
-  whitespace-only pattern, BRE metacharacter round-trip (`zzz\.never(` clean,
-  then tripping on a planted `zzz.never(`), and `allow=` line filtering.
+  fail-closed exit-128 behavior, and the two-part corpus contract stated verbatim:
+  *"`git grep` resolves the file list from the index and reads each file's content
+  from the working tree; `--cached` would read content from the index instead.
+  This helper deliberately uses the working-tree form so an uncommitted
+  reintroduction is caught before it is staged."* Follow it with the boundary
+  sentence: a violation in an already-tracked file is caught immediately, staged
+  or not; a violation in a brand-new untracked file is invisible until the file is
+  added to the index. Do **not** describe the corpus as "index-scoped content" —
+  that is the error this round corrects, and the docstring is where it would
+  become doctrine.
+- Write `tests/unit/test_tracked_content_helper.py` covering the cases below.
+  The **corpus** column is binding: anything marked *scratch* builds a
+  `git init` repo in `tmp_path` and passes it as `repo_root=`; nothing in this
+  file mutates `~/src/ai`.
+
+  | Case | Corpus | Expectation |
+  |---|---|---|
+  | match | scratch (a committed file holding the pattern) | `AssertionError` naming `file:line` |
+  | clean | live, `'tools/*.py' 'agent/*.py'` | returns |
+  | broken index | live, `GIT_INDEX_FILE=/dev/null` | `pytest.raises(TrackedScanError, match="128")` |
+  | vacuous pathspec | live, `'nosuchdir/*.py'` | `pytest.raises(VacuousScanError)` |
+  | tracked file absent from the working tree | **scratch**, `min_files=1`, one of its three files moved aside | `VacuousScanError` naming the absent path |
+  | empty pattern | scratch | rejected |
+  | whitespace-only pattern | scratch | rejected |
+  | BRE metacharacter round-trip | live (see below) | clean over `'tools/*.py'`; trips on the committed literal |
+
+  The broken-index and vacuous-pathspec cases stay on the live corpus because
+  neither writes anything — `GIT_INDEX_FILE=/dev/null` is a per-process env
+  override and `'nosuchdir/*.py'` touches nothing. They must still be asserted
+  **apart**, each against the input that produces it.
+- **The BRE round-trip needs no mutation and no scratch repo.** Commit a literal
+  `zzz.never(` line in `tests/unit/test_tracked_content_helper.py` itself (inside
+  a string constant, with a comment saying it is the round-trip fixture and must
+  not be "cleaned up"). The clean half then scans `'tools/*.py'` — which does not
+  contain the test file — and the trip half scans
+  `'tests/unit/test_tracked_content_helper.py'` with `min_files=1` and asserts
+  the match. An earlier draft planted the match at runtime; a committed literal
+  is strictly better, because a statically-present fixture cannot be left behind
+  by an `os._exit` and cannot go stale.
+- **Name the test functions so `-k` can select them unambiguously.** V-7 selects
+  on `scan_error`, V-8 on `vacuous`, V-21 on `positive_control`. Those substrings
+  must appear in exactly the intended test names.
+- **Write the BRE probe pattern as a raw string:** `PROBE = r"zzz\.never("`, so
+  the file carries the two-character sequence backslash-dot and the Python value
+  handed to `git grep` is `zzz\.never(`. This matters for V-12, which greps the
+  test file for that literal: a raw string puts **one** backslash in the file
+  bytes, and V-12's `'zzz\\.never('` matches it. Writing it non-raw as
+  `"zzz\\.never("` would put **two** backslashes in the file bytes and V-12 would
+  need four — measured both ways at `7ba89ca5c`. Raw is also the repo-normal way
+  to write a regex literal, so it removes the trap rather than documenting it.
+  The test asserts the pattern reports clean against the real corpus and trips on
+  a planted `zzz.never(`.
 
 ### 2. Convert the four vulnerable subprocess guards
 - **Task ID**: build-conversions
@@ -861,8 +1162,42 @@ deliberately not exposed to the agent.
 - **Assigned To**: guard-converter
 - **Agent Type**: builder
 - **Parallel**: false
-- A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`. Add the `#2093`-style comment naming the `.pyc` hazard.
-- A2 `test_anthropic_client_semaphore.py:164` — route through the helper; carry `_ALLOWED_DIRECT_CONSTRUCTORS` across as `allow=`. This is the **one** genuine line-substring exemption, since it filters matched output lines by module path rather than filtering the corpus. Note in the comment that this site was **vacuously green**, not merely unpinned.
+**Every conversion pins its own `min_files`.** All four are measured at
+`7ba89ca5c` and sit inside the 60-70% band Risk 1 mandates. Leaving any of them
+to the builder invites the `current - 1` floors Risk 1 forbids:
+
+Counts are the **post-exclusion** corpus — the same pathspec set the helper
+passes to `git ls-files`, so the floor is compared against what is actually
+scanned:
+
+| Site | Corpus | Tracked files | `min_files` | Share |
+|---|---|---|---|---|
+| A1 | `'tools/*.py' 'agent/*.py'` | 266 | **170** | 64% |
+| A2 | `'agent/*.py' 'bridge/*.py' 'tools/*.py'` minus 6 exclusions | 304 | **200** | 66% |
+| A3 | `'agent/memory_extraction.py'` | 1 | **1** | single file |
+| A7 | `'*'` minus 4 exclusions | 2065 | **1300** | 63% |
+
+Put the measured count and its commit in the **assertion message**, not a
+comment, per Risk 1 — the person who trips the floor must see the rationale at
+the same moment:
+`f"scanned {len(present)} tracked files, floor {min_files} (266 tracked at 7ba89ca5c; lower this only if the corpus really shrank)"`.
+
+- A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`, `min_files=170`. Add the `#2093`-style comment naming the `.pyc` hazard.
+- A2 `test_anthropic_client_semaphore.py:164` — route through the helper using **negative pathspecs, not `allow=`**. Every member of `_ALLOWED_DIRECT_CONSTRUCTORS` is a file path, so the existing `:180-181` line filter is whole-file exemption expressed unsafely (it substring-matches the whole `path:lineno:content` line, so a comment merely mentioning an approved module exempts a real violation). Keep `_ALLOWED_DIRECT_CONSTRUCTORS` as a module constant feeding the exclusion list so the six approved modules keep their `#1055`/`#1193`/`#1262`/`#1925` comments:
+  ```python
+  assert_absent_from_tracked(
+      "anthropic.AsyncAnthropic(",
+      "agent/*.py", "bridge/*.py", "tools/*.py",
+      ":!agent/anthropic_client.py",
+      ":!agent/memory_extraction.py",
+      ":!agent/session_completion.py",
+      ":!bridge/read_the_room.py",
+      ":!bridge/promise_gate.py",
+      ":!agent/llm/wrapper.py",
+      min_files=200,
+  )
+  ```
+  Note in the comment that this site was **vacuously green**, not merely unpinned.
 - A3 `test_memory_extraction.py:2563` — route through the helper over `'agent/memory_extraction.py'`, `min_files=1`. Keep both patterns exactly as written (`anthropic\.Anthropic(`, `anthropic\.AsyncAnthropic(`) — they are BRE and need no change. Note that this site was false-**red**, correcting #2808.
 - A7 `test_no_legacy_paths.py:25` — replace the `if rc == 0:` gate with three-way triage. Corpus stays **every tracked file type**, so the pathspec is `'*'` plus negative pathspecs, not `*.py`:
   ```python
@@ -876,14 +1211,16 @@ deliberately not exposed to the agent.
       min_files=1300,
   )
   ```
-  Verified at `40c4fe0a9`: this exact pathspec set returns rc=1 (clean) from
-  `git grep -l`, and `git ls-files` over it yields **2060** paths, so the
-  exemptions are a drop-in replacement for the `ALLOWED_FILES` / `docs/plans/`
-  stdout filtering and no `allow=` is needed here at all.
-  **`min_files` is 1300, not the 1800 the critique suggested.** 1800 is 87% of
-  the 2060-path corpus, which violates this plan's own 60-70% band (Risk 1) and
-  would be tripped by ordinary churn — `docs/plans/` alone is 591 tracked files
-  and is actively archived. 1300 sits at 63%.
+  Verified at `40c4fe0a9`, re-verified at `7ba89ca5c`, and re-measured at
+  `cefc07e7e`: this exact pathspec set returns rc=1 (clean) from `git grep -l`,
+  and `git ls-files` over it yields **2065** paths, so the exemptions are a
+  drop-in replacement for the `ALLOWED_FILES` / `docs/plans/` stdout filtering.
+  The corpus grew by 5 paths across those commits and will keep drifting, which
+  is why the figure is pinned to a commit and the floor is not set near it.
+  **`min_files` is 1300, not the 1800 an earlier critique suggested.** 1800 is
+  87% of the 2065-path corpus, which violates this plan's own 60-70% band
+  (Risk 1) and would be tripped by ordinary churn — `docs/plans/` alone is 591
+  tracked files and is actively archived. 1300 sits at 63%.
 - Do not delete or modify any `__pycache__` content.
 
 ### 3. Add non-vacuity floors to the six unfloored walks
@@ -914,10 +1251,56 @@ deliberately not exposed to the agent.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add a test asserting no test under `tests/` invokes a bare recursive `grep` over a directory (argv[0] `grep` with `-r`/`-rn`).
-- Match literal shapes only; provide an explicit opt-out comment for a justified survivor **elsewhere** in the suite.
-- **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so it flags itself otherwise — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
+- **The discriminator is pinned, and it is structural, not textual.** A naive
+  text matcher ("the file mentions `grep` and mentions `-r`") flags **7** files
+  under `tests/` at `cefc07e7e`, of which exactly **2** are real offenders. The
+  five innocents are hook-validator fixtures
+  (`test_validate_no_redis_flush.py`, `test_validate_no_raw_redis_delete.py`),
+  payload strings (`test_tool_call_delivery.py`, `test_verification_parser.py`),
+  and — most awkwardly — `tests/unit/test_plan_migration_invariant.py`, which is
+  A6, dispositioned `DOCUMENT AS SAFE` and cited throughout this plan as the
+  reference pattern; its `grep -r` occurrence is the explanatory comment #2093
+  added. Demanding an opt-out stamp on the plan's own exemplar is absurd, and the
+  builder's alternative — loosening the matcher until the false positives vanish —
+  is the exact weakening this task already forbids for the self-hit.
+
+  Parse with `ast` and flag only an `ast.List` whose elements are **all** string
+  constants, whose **first** element is `grep`, and which contains `-r`, `-rn`,
+  `-nr`, or `-R` as a **sibling list element**. Co-occurrence anywhere in the
+  file is never enough. Measured at `cefc07e7e`, that matcher flags exactly two
+  nodes across all of `tests/`:
+
+  | Flagged | Site |
+  |---|---|
+  | `tests/unit/test_anthropic_client_semaphore.py:165` | A2 |
+  | `tests/unit/test_sdlc_review_finalize.py:1093` | A1 |
+
+  Both are converted by task 2, so **the expected flagged set after this lane is
+  empty**. State that in the test's own message.
+- **Record the five known-innocent files in a comment in the test**, with one
+  line each saying why they are not offenders, so the next author can tell a real
+  regression from a re-litigated false positive. Run the matcher against all
+  seven textual candidates *before* wiring it into the assertion and confirm it
+  returns only A1 and A2 — a matcher validated against only the two offenders
+  proves nothing about the five it must not flag.
+- The explicit opt-out comment survives for a genuine future survivor
+  **elsewhere** in the suite, but stamping one on any of these five means the
+  matcher is wrong and must be fixed instead. It is never the instrument for the
+  meta-guard's own self-hit (see the resolved-path self-exemption below).
+- **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so a textual matcher flags it — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
+- **Keep the self-exemption even though the AST discriminator probably makes it
+  inert.** The positive control writes its offender as a *string* handed to
+  `write_text`, not as a live `ast.List`, so the structural matcher will most
+  likely not flag this file at all. Keep the resolved-path skip anyway: it costs
+  one line, it is correct under any future tightening of the matcher, and
+  removing it would make the file's behaviour depend on an implementation detail
+  of the parser. What it must **not** become is the reason the guard is green —
+  that is the positive control's job, and V-21 is what tells the two apart.
 - **Ship a planted-offender positive control in the same file:** write a temp file under `tmp_path` containing `subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at `tmp_path`, and assert it is flagged. Without it, a correct self-exemption and a matcher that flags nothing are indistinguishable.
-- Include a non-vacuity floor on the meta-guard's own scan — it must not become the thing it guards against.
+- **Take root and floor as independent parameters** so the floor and the positive control do not collide: `def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]`, raising `AssertionError` when `len(scanned) < min_files`. The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control calls `_scan_for_bare_grep(tmp_path, min_files=1)`. A floor baked into the scanner would be tripped by the control's one-file root *before* the offender assertion ran, so the control would pass for the wrong reason and V-21 would be uninformative.
+- `min_files=500` because `tests/` holds 784 tracked `.py` at `7ba89ca5c` (63.8%, inside Risk 1's 60-70% band). Not 600, which is 76.5% and outside it.
+- Never let the control pass `min_files=0` — a scanner returning `[]` unconditionally would satisfy both callers and both would stay green.
+- Name the control test so `-k "positive_control"` selects it (V-21).
 
 ### 5. Mutation-check every guard individually
 - **Task ID**: validate-mutations
@@ -928,8 +1311,9 @@ deliberately not exposed to the agent.
 - **Parallel**: false
 - For **each** of the four converted guards separately: introduce the banned pattern into a tracked source file **that guard actually scans**, run the node, capture the FAIL output, revert. A single mutation tripping several guards proves nothing about the ones it did not reach — this satisfies #2809 AC3/AC4 and #2808 AC3/AC4, which are per-guard obligations, never a blanket run.
 - For **each** of the six floored walks separately: force an empty scan (temporarily point the root at a nonexistent path), confirm the floor fails, revert.
-- For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: `worker/`, the 0.24% root) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check.
+- For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: **`ui/`**, 10 tracked `.py`, 0.8% of the 1231-file corpus) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check. **Do not use `worker/` for this**, even though its 0.24% share is smaller: `com.valor.worker` is a live launchd job running `python -m worker` from this checkout under `KeepAlive` (pid 72972 at plan time), so renaming the package breaks a production service for the duration of the mutation. `ui/` demonstrates the identical property and nothing runs it. See the launchd note under the Verification table.
 - Confirm the helper raises `TrackedScanError` (not `VacuousScanError`) when `GIT_INDEX_FILE=/dev/null`, and `VacuousScanError` (not `TrackedScanError`) for `'nosuchdir/*.py'`. Assert the classes apart, not merely "it failed".
+- **Absent-file mutation (net-new, round 2).** Move one tracked file out of A1's corpus with a plain `mv` — *not* `git mv`, which updates the index and so exercises only the case the index-row count already catches — then run A1 and confirm it raises `VacuousScanError` naming the absent path. Measured at `7ba89ca5c`: with `tools/doctor.py` moved aside, `git grep` returns rc=1 (false clean) while `git ls-files` still reports 180, and the present count is 265 of 266 — above the floor of 170, so **only** the absence check fires. Restore with `mv` and confirm `git status` is clean. This is V-18b.
 - Confirm the BRE metacharacter test both reports clean and trips on a planted match, so an added `-F` would be caught.
 - Confirm the meta-guard's `tmp_path` planted-offender control is flagged.
 - Plant a file under `tools/__pycache__/` containing the banned string; confirm A1 still passes.
@@ -945,8 +1329,24 @@ deliberately not exposed to the agent.
 - Run the primary node in the **primary checkout** with the stale `.pyc` present. It must pass.
 - Run the same node in a **fresh worktree**. It must pass.
 - Confirm the two agree at the same commit. A worktree-only green proves nothing (#2808).
+- **Provision the worktree's venv before running it, and assert the pin.** A bare
+  `git worktree add` produces a checkout with **no `.venv`**, and both guards that
+  would normally catch that are inert in exactly this case:
+  `scripts/pytest-clean.sh` falls through its `[ -x "$REPO_ROOT/.venv/bin/pytest" ]`
+  test and resolves a bare `pytest` from `PATH`, while
+  `scripts/check-interpreter-pin.sh` exits 0 without comparing anything because
+  `[ -f "$ROOT/.venv/pyvenv.cfg" ] || exit 0` is its documented "no venv yet"
+  no-op. The run then either aborts with "no usable pytest found" or silently
+  compares the pinned primary against whatever interpreter `PATH` resolved —
+  which makes an agreement uninformative and a disagreement unattributable. Run
+  `uv sync --all-extras` in the worktree (`.python-version` is committed, so this
+  lands on the pin by construction) and then `./scripts/check-interpreter-pin.sh .`
+  as an explicit assertion, not as a safety net. Verified at `cefc07e7e`: a fresh
+  `/tmp` worktree synced to `version_info = 3.14`, matching the pin, and the node
+  then ran in 3.8s.
 - Run the A2 and A3 nodes from `/tmp` (foreign ambient cwd) and confirm each returns the **same verdict** as from the repo root. This is the #2808 AC7 observable: today they diverge (A2 passes vacuously, A3 fails); after the fix both must match.
-- Use `scripts/pytest-clean.sh`; never bare `pytest`; never pattern-kill pytest processes.
+- **V-20 is the one row that does not go through `scripts/pytest-clean.sh`, and that is deliberate.** The wrapper normalizes the ambient cwd away before pytest ever starts: when the caller's cwd has no `pyproject.toml` carrying a `[tool.pytest` table it sets `REPO_ROOT="$SCRIPT_ROOT"` and `cd "$REPO_ROOT"` (lines 36-42), and pytest is not invoked until line 241 with no intervening `cd`. So `cd /tmp && …/scripts/pytest-clean.sh …` runs the nodes with cwd already at the repo root — it measures the wrapper, not the guards, and would report "same verdict" today, before any conversion exists. Invoke `.venv/bin/pytest` directly instead so `os.getcwd()` stays `/tmp`. This is a bounded exception to the repo's never-bare-`pytest` rule: the row passes `-n 0`, so there are no xdist workers to orphan and nothing for the reaper to do. Every other row in this lane uses the wrapper.
+- Never pattern-kill pytest processes.
 - Set `PYTHONPATH` explicitly when running in a worktree — the shared venv `.pth` can otherwise import the wrong checkout.
 
 ### 7. Documentation
@@ -956,7 +1356,10 @@ deliberately not exposed to the agent.
 - **Assigned To**: sweep-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section, including the BRE dialect rule and the tracked-only boundary paragraph (why `--untracked` is deliberately not used).
+- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section, including the BRE dialect rule and the tracked-files boundary paragraph (why `--untracked` is deliberately not used).
+- **State the two-part `git grep` contract correctly — this doc is where it becomes repo-wide doctrine.** `git grep` resolves the *file list* from the index and reads each file's *content from the working tree*; `--cached` would read content from the index instead. Do not write "the corpus is index-scoped content", and do not copy forward `test_plan_migration_invariant.py:136-145`'s stronger claim that `git grep` "is race-free" — the *file list* cannot shift mid-scan and no untracked runtime tree is descended, but content is still read per-file from the working tree. Measured at `7ba89ca5c`: an unstaged append is found by `git grep` (rc=0) and not by `git grep --cached` (rc=1).
+- Say plainly that a violation in an already-tracked file is caught immediately, staged or not, and that only a brand-new *untracked* file is invisible — until it is added to the index, not until it is committed.
+- Document that the non-vacuity floor counts files present on disk and that any absent tracked path is an error, with the 265-of-266 measurement as the worked example.
 - Add the entry to `docs/features/README.md`.
 - Update `docs/features/worktree-venv-isolation.md` with the stranded-bytecode warning, linking #2883.
 - Update `tests/README.md` with the sweep-guard convention.
@@ -997,71 +1400,181 @@ below.
 | #2809 AC4 | All filesystem-walking assertions enumerated, each dispositioned | 2, 3 | V-10, V-11, V-22 |
 | #2809 AC5 | Decision recorded on sweeping off-pin `.pyc` | 7 | V-14, V-15 |
 | net-new | Non-vacuity floor on every converted guard | 1 | V-8 |
+| net-new | Floor counts readable files; any absent tracked path is an error | 1, 5 | V-18b |
 | net-new | Per-root assertion on B13/B14 | 3 | V-18 |
 | net-new | Regex dialect pinned to BRE | 1 | V-9, V-12 |
 | net-new | Meta-guard self-exempts and is positively controlled | 4 | V-21 |
+| net-new | Meta-guard root and floor are independent parameters | 4 | V-5, V-21 |
+| net-new | No converted guard passes `allow=`; the parameter is not built | 1, 2 | V-10 |
+| net-new | The `repo_root=` seam is test-only and no guard passes it | 1, 2 | V-28 |
+| net-new | No helper unit test mutates the primary checkout | 1 | V-29 |
 
 ## Verification
 
 Rows are numbered for the traceability table above. Every row is runnable as
 written from the repo root unless a row states otherwise.
 
+Five conventions make that promise hold. Each is stated so a reader can *check*
+the table against it rather than take it on faith, because two rounds running
+the table has shipped rows that could never have run.
+
+- **Every row whose command names a specific test file or node carries `-n 0`.**
+  That is the checkable form of the rule: read the table, find a `pytest-clean.sh`
+  invocation, confirm `-n 0` is on it. `pyproject.toml`'s `addopts` carry
+  `-n auto`, which spawns ~50 xdist workers for a one-file run; observed at
+  `7ba89ca5c` as a 168-second run ending in `node down: Not properly terminated`
+  and "no tests ran", and again at `cefc07e7e` as an abort before collection with
+  "all 15 test-DB slots are held by live processes". Both are false REDs against a
+  correct implementation. `-n 0` is `scripts/pytest-clean.sh`'s own documented
+  remedy for a single node. Rows carrying it: V-1, V-5, V-7, V-8, V-10, V-11,
+  V-16, V-17, V-18, V-18b, V-19, V-20, V-21, V-29. (Round 3 found six rows —
+  including flagship V-1 — omitting it despite this bullet mandating it.)
+- **A `-k` row cannot pass vacuously.** pytest 9.0.3 exits **5**
+  (`NO_TESTS_COLLECTED`) when `-k` deselects everything, and 0 only when at least
+  one selected test passed. So "expect exit 0" already forecloses a `-k` typo;
+  no separate selected-count assertion is needed. Task 1 pins the test names the
+  `-k` expressions rely on (`scan_error`, `vacuous`, `positive_control`,
+  `scratch_repo`).
+- **No row's command contains a `|` character at all, in any role.** This is
+  stricter than "escape it correctly", deliberately, because the correct escape
+  depends on the regex dialect and the plan has now got it wrong in *both*
+  directions. A `|` inside a markdown table cell must be written `\|` in source,
+  which **renders** as a bare `|`. In BRE (`git grep`'s and `grep`'s default) a
+  bare `|` is a literal character, so a rendered alternation matches nothing;
+  measured at `cefc07e7e`, `git grep '2093|pyc'` exits 1 against a file that
+  `git grep '2093\|pyc'` matches. In ERE (`awk`, `grep -E`) a bare `|` **is**
+  alternation, so a pattern that wanted a literal pipe silently becomes an
+  alternation; measured at `cefc07e7e`, the round-2 V-22 command counted **13**
+  from source and **15** rendered. Round 2 fixed one instance and swept nothing;
+  round 3 fixed the other. The only durable rule is to keep `|` out entirely:
+  use repeated `-e` patterns instead of alternation, and pick anchors that need
+  no literal pipe instead of a shell pipeline. V-6 and V-22 are both written that
+  way now, and a reader can audit the whole table for the class in one pass by
+  searching it for `|` inside a backticked command.
+- **A row that greps a file this plan creates gates on the file being *tracked*,
+  not merely present.** `git grep` searches the index's file list, so a helper
+  written to disk but not yet `git add`ed is invisible to it and a bare
+  `test -f` gate lets the row pass while checking nothing. Measured at
+  `7ba89ca5c`: with `tests/tracked_content.py` untracked and containing `"-F"`,
+  the `test -f` form returned **exit 0 (false pass)**; gated on
+  `git ls-files --error-unmatch` it correctly fails. V-9 uses the tracked gate.
+  This is the plan's own central defect, reproduced inside its verification
+  table — the same shape spike-1 found and the same one V-18b exists to catch.
+- **A row that could be satisfied by something other than the change under test
+  states its pre-fix control.** A row is only evidence if it can go red. V-6 and
+  V-20 both carry an explicitly measured "RED today" observation, because both
+  would otherwise be indistinguishable from an environment artifact — V-6 from a
+  correctly-written comment it never actually looked at, V-20 from
+  `scripts/pytest-clean.sh` normalizing the cwd away before pytest starts.
+
 | # | Check | Command | Expected |
 |---|-------|---------|----------|
-| V-1 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q` | exit code 0 |
+| V-1 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0` | exit code 0 |
 | V-2 | Stale off-pin `.pyc` was NOT deleted (AC1 precondition still holds) | `test -n "$(find tools agent -name '*.pyc' -not -name '*cpython-314*' -print -quit)"` | exit code 0 |
 | V-3 | Tracked source is genuinely clean | `git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'; test $? -eq 1` | exit code 0 |
 | V-4 | No converted guard shells out to `grep` | `git grep -n '"grep"' -- 'tests/unit/test_sdlc_review_finalize.py' 'tests/unit/test_anthropic_client_semaphore.py' 'tests/unit/test_memory_extraction.py' 'tests/unit/test_no_legacy_paths.py'` | exit code 1 |
-| V-5 | No bare recursive grep anywhere in `tests/` (meta-guard node) | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q` | exit code 0 |
-| V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q '2093\|pyc' -- "$f" \|\| { echo "MISSING: $f"; exit 1; }; done` | exit code 0, no output |
-| V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `GIT_INDEX_FILE=/dev/null python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a, TrackedScanError; ` `try: a('zzz','tools/*.py',min_files=1)` `except TrackedScanError as e: assert '128' in str(e); sys.exit(0)` `sys.exit(1)"` | exit code 0 |
-| V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `python -c "import sys; sys.path.insert(0,'.'); from tests.tracked_content import assert_absent_from_tracked as a, VacuousScanError; ` `try: a('zzz','nosuchdir/*.py',min_files=1)` `except VacuousScanError: sys.exit(0)` `sys.exit(1)"` | exit code 0 |
-| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `git grep -nE '"-(F\|E\|P)"' -- tests/tracked_content.py` | exit code 1 |
-| V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q` | exit code 0 |
-| V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q` | exit code 0 |
-| V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -c 'zzz\\\\.never(' -- tests/unit/test_tracked_content_helper.py` | output > 0 |
+| V-5 | No bare recursive grep anywhere in `tests/` (meta-guard node) | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0` | exit code 0 |
+| V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q -e 2093 -e pyc -- "$f"; test $? -eq 0 && continue; echo "MISSING: $f"; exit 1; done` | exit code 0, no output. **Pre-fix control:** measured at `cefc07e7e` this loop prints `MISSING: tests/unit/test_sdlc_review_finalize.py` and exits 1, so the row is RED before task 2 adds the comments |
+| V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "scan_error"` | exit code 0 |
+| V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "vacuous"` | exit code 0 |
+| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `git ls-files --error-unmatch tests/tracked_content.py >/dev/null 2>&1 && test -f tests/tracked_content.py && { git grep -nE '"-[FEP]"' -- tests/tracked_content.py; test $? -eq 1; }` | exit code 0 |
+| V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q -n 0` | exit code 0 |
+| V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q -n 0` | exit code 0 |
+| V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -q 'zzz\\.never(' -- tests/unit/test_tracked_content_helper.py` | exit code 0 (exit 1 means the probe is missing or mis-escaped) |
 | V-13 | Helper exists and is index-scoped | `git grep -c 'git.*grep' -- tests/tracked_content.py` | output > 0 |
 | V-14 | Stranded-bytecode warning shipped, linking #2883 | `git grep -c '2883' -- docs/features/worktree-venv-isolation.md` | output > 0 |
 | V-15 | Concern-B follow-up issue is real and open | `gh issue view 2883 --json state -q .state` | output contains OPEN |
-| V-16 | **Demonstrated ignored-artifact.** Planted `__pycache__` file is not read (#2808 AC3, #2809 AC3) | `mkdir -p tools/__pycache__ && printf 'State NOT persisted\n' > tools/__pycache__/zz_probe.cpython-312.pyc && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; rm -f tools/__pycache__/zz_probe.cpython-312.pyc; exit $rc` | exit code 0 |
-| V-17 | **Demonstrated red, per guard, one at a time** (#2807 AC3, #2808 AC4). Repeat for each of the four converted guards against a file *that guard scans*; a single mutation tripping several proves nothing about the ones it did not reach. Shown for A1 | `printf '\n# State NOT persisted\n' >> tools/sdlc_stage_marker.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q; rc=$?; git checkout -- tools/sdlc_stage_marker.py; test $rc -ne 0` | exit code 0, and FAIL output names `tools/sdlc_stage_marker.py:<line>` with no `Binary file` |
-| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13) | `git mv worker worker_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q; rc=$?; git mv worker_zz worker; test $rc -ne 0` | exit code 0, FAIL message names the missing root |
-| V-19 | **Fresh worktree agrees with the primary checkout** at the same commit (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1 |
-| V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7) | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/scripts/pytest-clean.sh "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q` | exit code 0, identical to the in-repo run |
-| V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -k "positive_control or planted"` | exit code 0, at least 1 test selected |
-| V-22 | Sweep table arithmetic holds: 4 converted + 6 floored + 17 safe = 27 (#2809 AC4) | `awk '/^\| # \| Site/,/^$/' docs/plans/overclaim-guard-greps-whole-worktree.md \| grep -c 'CONVERT\|ADD FLOOR\|DOCUMENT AS SAFE'` | rows account for all 27 sites |
+| V-16 | **Demonstrated ignored-artifact.** Planted `__pycache__` file is not read (#2808 AC3, #2809 AC3) | `mkdir -p tools/__pycache__ && printf 'State NOT persisted\n' > tools/__pycache__/zz_probe.cpython-312.pyc && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; rm -f tools/__pycache__/zz_probe.cpython-312.pyc; exit $rc` | exit code 0 |
+| V-17 | **Demonstrated red, per guard, one at a time** (#2807 AC3, #2808 AC4). Repeat for each of the four converted guards against a file *that guard scans*; a single mutation tripping several proves nothing about the ones it did not reach. Shown for A1 | `printf '\n# State NOT persisted\n' >> tools/sdlc_stage_marker.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; git checkout -- tools/sdlc_stage_marker.py; test $rc -ne 0` | exit code 0, and FAIL output names `tools/sdlc_stage_marker.py:<line>` with no `Binary file` |
+| V-18 | **Per-root assertion fires on a vanished root** where the total floor stays green (B13). Uses `ui/` (10 tracked `.py`, 0.8% of the 1231-file corpus), **not** `worker/` — see the launchd note below | `git mv ui ui_zz && ./scripts/pytest-clean.sh tests/unit/test_no_positional_query_get.py -q -n 0; rc=$?; git mv ui_zz ui; test $rc -ne 0` | exit code 0, FAIL message names the missing root `ui` |
+| V-18b | **Absence check fires when a tracked file leaves the working tree but stays in the index** — the case `git mv` cannot reach | `mv tools/doctor.py /tmp/zz_doc.py && ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; mv /tmp/zz_doc.py tools/doctor.py; test $rc -ne 0` | exit code 0, FAIL is a `VacuousScanError` naming `tools/doctor.py` |
+| V-19 | **Fresh worktree agrees with the primary checkout** at the same commit, on the **same pinned interpreter** (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && uv sync --all-extras && ./scripts/check-interpreter-pin.sh . && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1. `uv sync` must report the worktree venv on the `.python-version` pin (3.14 at `cefc07e7e`) |
+| V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7). Runs the interpreter **directly, not through `scripts/pytest-clean.sh`** — see the wrapper note below | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/.venv/bin/pytest "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q -n 0 -p no:cacheprovider` | exit code 0, identical to the in-repo run. **Pre-fix control:** measured from `/tmp` at `cefc07e7e`, A3 FAILS with `assert 2 == 1` and `grep: agent/memory_extraction.py: No such file or directory` while A2 passes vacuously — so the row is RED today and its green is attributable to the conversion |
+| V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "positive_control"` | exit code 0 |
+| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4). Pipe-free: the leading `[[:punct:]]` stands in for the cell-opening pipe, so the marker must **open a table cell** and a prose mention of a disposition name cannot inflate the count | `test "$(/usr/bin/grep -c -e '[[:punct:]] \*\*CONVERT\*\*' -e '[[:punct:]] \*\*ADD FLOOR' -e '[[:punct:]] \*\*DOCUMENT AS SAFE\*\*' docs/plans/overclaim-guard-greps-whole-worktree.md)" -eq 13` | exit code 0 |
 | V-23 | Feature doc exists | `test -f docs/features/tracked-content-sweep-guards.md` | exit code 0 |
 | V-24 | Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
 | V-25 | No production code touched | `test -z "$(git diff --name-only main... -- ':!tests/' ':!docs/')"` | exit code 0 |
 | V-26 | Lint clean | `python -m ruff check .` | exit code 0 |
 | V-27 | Format clean | `python -m ruff format --check .` | exit code 0 |
+| V-28 | **The `repo_root=` seam is fenced:** exactly two tracked files pass it — the helper and its own tests. No guard reaches for it | `test "$(git grep -l 'repo_root=' -- 'tests/*.py' ; true)" = "$(printf 'tests/tracked_content.py\ntests/unit/test_tracked_content_helper.py')"` | exit code 0. A third file in the output means a guard is choosing its own corpus |
+| V-29 | **No helper unit test mutates the primary checkout.** Run the helper's own module and confirm the tree is untouched afterwards | `git status --porcelain > /tmp/zz_before.txt; ./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0; rc=$?; git status --porcelain > /tmp/zz_after.txt; diff /tmp/zz_before.txt /tmp/zz_after.txt; d=$?; test $rc -eq 0 -a $d -eq 0` | exit code 0, and `diff` reports nothing. A non-empty diff means a scratch-repo case leaked into `~/src/ai` |
 
-> **On V-17 and V-18.** These are *mutation* rows: they deliberately break the
-> tree, observe a FAIL, and revert. Run them one at a time and confirm
-> `git status` is clean afterwards. Never run them concurrently with another
-> lane's suite on this machine, and never leave a mutation in place across an
-> await. V-18 uses `git mv` rather than `rm` so the revert is exact.
+> **On the mutation rows (V-17, V-18, V-18b).** These deliberately break the tree,
+> observe a FAIL, and revert. Run them one at a time from the lane's own worktree,
+> confirm `git status` is clean afterwards, and never run them concurrently with
+> another lane's suite on this machine or leave a mutation in place across an
+> await. V-17, V-18 and V-18b are the **only** places in this lane where the
+> working tree is mutated; helper unit tests use a `git init` scratch repo in
+> `tmp_path` instead (see task 1 and V-29).
+>
+> **No mutation row may rename a path a launchd service resolves.** This is the
+> reason V-18 uses `ui/` and not `worker/`. Verified at critique time on this
+> machine: `com.valor.worker` is loaded and running (pid 72972) with
+> `ProgramArguments` `/Users/tomcounsell/src/ai/.venv/bin/python -m worker` and
+> `WorkingDirectory` `/Users/tomcounsell/src/ai`, under launchd `KeepAlive`. For
+> the duration of a `git mv worker worker_zz` any lazy import in the running
+> process, any `KeepAlive` respawn, and any `worker-restart` resolve `-m worker`
+> against a directory that does not exist. `ui/` demonstrates exactly the same
+> property — it is a `SCAN_DIRS` root at **10** tracked `.py`, 0.8% of the
+> 1231-file corpus, an order of magnitude inside any percentage floor, so the
+> total floor stays green while the per-root assertion fires — and no plist under
+> `~/Library/LaunchAgents/com.valor.*` targets it (checked: the six loaded jobs
+> run `-m worker`, `-m reflections`, `scripts/log_rotate.py`,
+> `scripts/sdlc_reflection.py`, `scripts/remote-update.sh`, and
+> `monitoring/worker_watchdog.py`). Task 5's B13 mutation bullet carries the same
+> substitution. If a future author has a reason to rename `worker/` anyway, the
+> row must wrap it in `./scripts/valor-service.sh worker-disable` / `worker-enable`
+> with the re-enable in a `trap`, so an interrupted row cannot leave the service
+> down — but the simpler answer is to pick a root nothing runs.
+>
+> **`git mv` versus plain `mv` is load-bearing.** V-18 uses `git mv` so the revert
+> is exact and the index stays consistent. V-18b uses a plain `mv` precisely
+> *because* `git mv` updates the index and so would exercise only the case the
+> index-row count already catches.
 
 ## Critique Results
 
-War room 2026-08-19 (round 2), FULL depth (Risk & Robustness, Scope & Value, History & Consistency).
-Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 7 concerns, 2 nits.
-All round-1 findings were re-verified as landed; every measured figure the round-1
-revision introduced (2060 / 2654 / 1363 / 591 / 1231 and the per-root distribution)
-reproduces exactly in the primary checkout. This round's findings are net-new.
+War room 2026-08-19 (round 4), FULL depth (Risk & Robustness, Scope & Value, History & Consistency).
+Verdict: **NEEDS REVISION** — 3 blockers, 2 concerns, 3 nits.
+
+Every round-3 finding was re-verified as landed before this round filed anything.
+All pinned figures reproduce at `dbb8baaf5`: A1 corpus 266, A2 post-exclusion 304
+and clean, A3 target clean, A7 corpus 2065 and clean with **0** tracked paths
+absent from the working tree, `tests/` 784, `worker/` 3, `ui/` 10, V-22 count
+exactly 13, all three prerequisites green including the stale
+`tools/__pycache__/sdlc_stage_marker.cpython-312.pyc`. Both round-3 conventions
+hold across all 30 rows: every pytest-node row carries `-n 0` (14 rows) and no
+command contains a pipe character in any role (0 of 30). Task 4's AST
+discriminator was re-implemented from its spec and flags exactly A1
+(`test_sdlc_review_finalize.py:1093`) and A2
+(`test_anthropic_client_semaphore.py:165`), as claimed. V-12's raw-string
+escaping was re-measured in a scratch repo and is correct as written.
+
+This round's findings are again concentrated in the Verification table: three rows
+cannot discharge the ACs the traceability table assigns them, and one of them takes
+a live production service down.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| CONCERN | Risk & Robustness | The non-vacuity floor counts *index entries* (`git ls-files`) while `git grep` reads *working-tree content* for those paths, so the counted corpus and the scanned corpus never reconcile. A working tree missing tracked files (plain `mv`/`rm`, interrupted checkout, sparse checkout) leaves the index count intact while `git grep` silently skips the absent files and returns 1, i.e. clean. Measured at `2bceee24b`: with `tools/doctor.py` moved aside, `git grep -l "worktree_interpreters" -- 'tools/*.py'` went rc=0 to **rc=1 (false clean)** while `git ls-files -- 'tools/*.py'` still reported **180**. The floor is blind to it, so the vacuous-green class survives inside the plan's flagship mitigation. | pending | Count files that can actually be read, not index rows. After the `git ls-files` returncode triage in task 1: `present = [p for p in files if (REPO_ROOT / p).exists()]` then `if len(present) < min_files: raise VacuousScanError(f"{len(present)} of {len(files)} tracked paths present on disk; absent: {sorted(set(files) - set(present))[:5]}")`. Do NOT switch to `git grep --cached` as the fix without also changing V-17: `--cached` reads content from the index, so V-17's unstaged `printf ... >> tools/sdlc_stage_marker.py` would no longer be seen and the demonstrated-red proof would go green. Add a second floor mutation beside V-18 using plain `mv worker worker_zz` rather than `git mv` — `git mv` updates the index, so V-18 exercises only the case the floor already catches. |
-| CONCERN | Risk & Robustness | The plan states an incorrect model of `git grep` in four places (Race 1, Data Flow step 2, obligation 1 "Index-scoped corpus", the Accepted-boundary paragraph) and then specifies that model be written into the helper docstring (task 1) and a new repo-wide convention doc (task 7), so the error ships as taught doctrine. `git grep` without `--cached` resolves the *file list* from the index but reads *content from the working tree*. Measured at `2bceee24b`: an unstaged append to `tools/doctor.py` was found by `git grep` (rc=0) and NOT by `git grep --cached` (rc=1). Race 1's "the corpus cannot shift underneath it" is therefore half true, and "A violation in a new, unstaged file is caught on first commit" is wrong for a modified *tracked* file, which is caught immediately. | pending | State the two-part contract once, in the docstring and the feature doc: "`git grep` resolves the file list from the index and reads each file's content from the working tree; `--cached` would read content from the index instead. This helper deliberately uses the working-tree form so an uncommitted reintroduction is caught before it is staged." Narrow the boundary claim to: "A violation in a brand-new *untracked* file is invisible until it is added to the index; a violation in an already-tracked file is caught immediately, staged or not." Correct Race 1 to "the *file list* cannot shift underneath it, and no untracked runtime tree is ever descended" — the content race is narrowed, not eliminated. |
-| CONCERN | Risk & Robustness | Task 4 requires two colliding things of the meta-guard: "Include a non-vacuity floor on the meta-guard's own scan" and a positive control that plants one offender under `tmp_path` and points the scanner at it. If the floor lives inside the scanner, the control's one-file root trips the floor instead of reaching the offender assertion, so the control passes for the wrong reason — exactly the failure it was added to rule out, leaving V-21 uninformative. | pending | Parameterize root and floor independently: `def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]`, raising `AssertionError` when `len(scanned) < min_files`. The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=600)` (784 tracked `.py` under `tests/` at `40c4fe0a9`, so 600 sits in the plan's own 60-70% band); the control calls `_scan_for_bare_grep(tmp_path, min_files=1)` and asserts the planted path is in the returned list. Never let the control pass a floor of 0 — a scanner returning `[]` unconditionally would then satisfy both callers. |
-| CONCERN | Scope & Value | A2 is not a line-substring exemption, so `allow=` is left with zero real call sites while still carrying the hazard the plan condemned for A7. Every member of `_ALLOWED_DIRECT_CONSTRUCTORS` at `tests/unit/test_anthropic_client_semaphore.py:149-158` is a **file path**, and the filter at `:180-181` (`not any(mod in line for mod in ...)`) drops whole output lines by path substring — whole-file exemption, identical in semantics to a negative pathspec. A line in an unapproved module that merely mentions `agent/llm/wrapper.py` in a comment while calling `anthropic.AsyncAnthropic(` is silently exempted, because the substring is matched against the whole `path:lineno:content` line rather than the path field. | pending | A2 becomes `assert_absent_from_tracked("anthropic.AsyncAnthropic(", "agent/*.py", "bridge/*.py", "tools/*.py", ":!agent/anthropic_client.py", ":!agent/memory_extraction.py", ":!agent/session_completion.py", ":!bridge/read_the_room.py", ":!bridge/promise_gate.py", ":!agent/llm/wrapper.py", min_files=200)`. No converted guard then passes `allow=`, so drop it from the signature rather than shipping an abstraction with no consumer. If it is kept, the docstring must read "currently unused; path-shaped exemptions belong in negative pathspecs" — the planned sentence reserving it for A2 is the one thing that would send a builder back to substring filtering. Keep `_ALLOWED_DIRECT_CONSTRUCTORS` as a module constant feeding the pathspec list so the six approved modules keep their #1055/#1193/#1262/#1925 comments. |
-| CONCERN | Scope & Value | `min_files` is a required keyword-only argument, but task 2 pins a value for only two of the four conversions: A3 gets `min_files=1` and A7 `min_files=1300`, while A1 and A2 get none. The builder must invent two floors for the one number this plan has already gotten wrong once (round 1 said 1800, the body corrects to 1300) and the one number Risk 1's whole mitigation is about choosing deliberately. Leaving two of four unspecified invites the `current - 1` floors Risk 1 forbids. | pending | Measured at `2bceee24b`: `git ls-files -- 'tools/*.py' 'agent/*.py' \| wc -l` is **266** and `git ls-files -- 'agent/*.py' 'bridge/*.py' 'tools/*.py' \| wc -l` is **310**. At the plan's own 60-70% band that gives A1 `min_files=170` (64%) and A2 `min_files=200` (65%). Put the measured count and its commit in the assertion message, not a comment, per Risk 1: `f"scanned {len(files)} tracked files, floor {min_files} (266 tracked at 2bceee24b; lower this only if the corpus really shrank)"`. |
-| CONCERN | History & Consistency | The Verification preamble promises "Every row is runnable as written from the repo root unless a row states otherwise", and V-7 and V-8 are not runnable. Both embed a `try:` compound statement after a `;` inside `python -c`, which Python rejects (verified: `SyntaxError: invalid syntax` at `try`). Both are additionally split into four backtick-quoted fragments inside the table cell (the V-7 row carries 12 backticks), so there is no single command to copy. These are the only runnable evidence for the round-1 flagship fix, for the Success Criterion "Scan-failure and vacuity are separately assertable", and for #2808 AC5 via the traceability table. | pending | V-7 becomes `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -k "scan_error"` and V-8 `... -k "vacuous"`, each expecting exit 0 **and at least one test selected**, so a `-k` typo that selects nothing cannot pass. If a standalone one-liner is wanted, a `;`-joined `try:` never parses — use a `python - <<'PY'` heredoc instead. `tests/__init__.py` already exists, so `from tests.tracked_content import ...` resolves from the repo root. |
-| CONCERN | History & Consistency | V-12 cannot pass as written, and it is the sole verification row behind the "regex dialect is pinned and exercised" criterion. The cell carries four literal backslashes in `zzz\\\\.never(`, which in POSIX BRE matches a backslash followed by any character, not the intended `zzz\.never(`. Verified against a file containing `x = "zzz\.never("`: the four-backslash pattern returned count 0 / rc 1; the two-backslash pattern returned count 1 / rc 0. The row therefore reports failure however correctly the helper is implemented, leaving the criterion that catches a builder adding `-F` unverified. | pending | Correct the cell to `git grep -c 'zzz\\.never(' -- tests/unit/test_tracked_content_helper.py` (two backslashes), Expected "exit code 0 and a count of at least 1". `git grep -c` prints nothing and exits 1 on no match, so an Expected of "output > 0" alone is ambiguous with a broken pathspec. The same double-escaping trap applies to the planted-match half of the test, so state in task 1 that the test file must carry the pattern as the two-character sequence backslash-dot, written in a normal (non-raw) Python string as `"zzz\\.never("`. |
-| NIT | History & Consistency | Two verification rows cannot fail. V-22's awk-plus-grep pipeline returns **13**, the sweep table's row count, not 27, because three rows cover multiple sites ("A4, A5" and "B1-B6, B9, B10, B15-B20"); its Expected cell reads "rows account for all 27 sites", which no output can confirm or refute. V-9 (`git grep -nE ... -- tests/tracked_content.py`, Expected exit 1) returns exit 1 **today**, before any work exists, because a pathspec matching no tracked file also exits 1 — the "cannot distinguish clean from scanned nothing" hazard from spike-1, reproduced in the plan's own verification table. | pending | Give V-22 a numeric expectation it can miss: wrap the existing pipeline in `test "$(...)" -eq 13`, Expected exit 0, and assert the 4/6/17 arithmetic separately in prose since it is not derivable from row count. Gate V-9 on the file existing: `test -f tests/tracked_content.py && { <existing git grep>; test $? -eq 1; }`, so a missing helper fails the row instead of satisfying it. |
-| NIT | Structural check | The round-1 Critique Results table's Implementation Note column still carries the superseded `min_files=1800` in two rows (the `allow=` row's A7 call, and the obligation-1 row's "about 1800"), which those same rows' Addressed By cells correct to 1300 and which task 2's code block pins at 1300. Every other structural check passes: all four repo-mandated sections present and substantive, task numbering 1-8 contiguous, all `Depends On` references resolve with no cycles, all three prerequisites currently green (including the stale `tools/__pycache__/sdlc_stage_marker.cpython-312.pyc` that AC1 depends on), and the only absent file paths are the three this plan creates. | pending | This round's table replaces the round-1 table wholesale, which removes the stale 1800 automatically. If any round-1 row is carried forward by hand, restate its Implementation Note with 1300 so the note column never contradicts task 2. |
----
+| BLOCKER | Risk & Robustness | V-28 can never pass. It asserts `git grep -l 'repo_root=' -- 'tests/*.py'` returns exactly the helper and its own test module, but `repo_root=` is an ordinary kwarg already used by **14 pre-existing test files** at `dbb8baaf5` — `test_doc_impact_finder_sdk.py:353` (`index_docs(repo_root=tmp_path)`), `test_off_pipeline_merge_path.py:219`, `test_pr_head_resolver.py`, `test_merge_predicate.py` and ten more. The row is unconditionally red no matter how correctly the fence is built, so the seam-fence that the round-3 blocker's whole remediation rests on has no working check. | pending | Scope the check to the helper's call sites instead of a token the suite already owns. Pipe-free form: `rc=0; for f in $(git grep -l 'assert_absent_from_tracked(' -- 'tests/*.py'); do case "$f" in tests/tracked_content.py) continue;; tests/unit/test_tracked_content_helper.py) continue;; esac; if git grep -q 'repo_root=' -- "$f"; then echo "SEAM LEAK: $f"; rc=1; fi; done; exit $rc`. The `rc=0` accumulator is load-bearing: with `git grep -q … && exit 1` the loop's final status is the *failed* grep from a clean file, so the row would exit 1 on a fully compliant tree. Restate task 1's third fence bullet as "no file that calls `assert_absent_from_tracked` may also pass `repo_root=`" — "appears in exactly two tracked files" is a property of the whole suite, not this lane's to assert. |
+| BLOCKER | Risk & Robustness | V-18's `git mv ui ui_zz` takes down a live production service. The round-3 revision chose `ui/` because "no plist under `~/Library/LaunchAgents/com.valor.*` targets it" — the launchd half is true and re-verified, but the conclusion is false. `ui/` is served **right now** by pid 45155, `/Users/tomcounsell/src/ai/.venv/bin/python -m ui.app`, cwd `/Users/tomcounsell/src/ai` (`lsof -a -p 45155 -d cwd`), started by `scripts/valor-service.sh:867` and restarted by `scripts/update/service.py:815`. `ui/app.py:165` builds `Jinja2Templates(directory=TEMPLATES_DIR)` and `:162` mounts `StaticFiles(directory=STATIC_DIR)`, both reading from disk per request, so for the row's duration every dashboard render raises `TemplateNotFound`. Worse than the `worker/` case it replaced: `com.valor.update` runs `scripts/remote-update.sh` on a schedule and restarts `-m ui.app`, so a badly-timed update leaves the dashboard down after the row reverts, with no `KeepAlive` to recover it. The probe that produced this substitution (enumerate launchd plists) was narrower than the claim it supports (nothing runs it). | pending | Run the rename where no live process resolves it — the lane worktree — rather than selecting a root by which service is under launchd. `test_no_positional_query_get.py` derives `REPO_ROOT` from `_find_repo_root()` → `Path(__file__).resolve().parents[2]`, so running the node from `.worktrees/{slug}/` makes `REPO_ROOT` the worktree and `git mv ui ui_zz` there is invisible to pid 45155 and to every other lane. State that on V-18 and on task 5's B13 bullet, and widen the invariant from "no launchd service resolves it" to "no process on this machine resolves it", checked with `ps -o command= -p $(pgrep -f "$HOME/src/ai/.venv/bin/python")` rather than by reading plists. If a future author insists on the primary checkout, note that **no** `SCAN_DIRS` root is safe there: `worker/` is launchd, `ui/` is the dashboard, and `agent/`, `models/`, `tools/`, `bridge/` are all imported by the running worker, reflection worker and watchdog. |
+| BLOCKER | Risk & Robustness | V-17, V-18 and V-18b report **PASS when the mutation itself fails**. Each ends in `test $rc -ne 0`, and `rc` captures an `A && B` list whose `A` is the mutation — so a failed mutation yields a non-zero `rc` for the wrong reason and the row goes green having never run the guard. Measured: `git mv NOSUCHDIR nosuch_zz && echo ran; rc=$?; test $rc -ne 0` exits **0**, and the `mv` form exits **0** likewise. V-18b is additionally destructive: if a run is interrupted after `mv tools/doctor.py /tmp/zz_doc.py`, the retry's `mv` fails, the row still reports PASS, and its restore copies a **stale** `tools/doctor.py` back over live source. These three rows discharge #2807 AC3, #2808 AC3/AC4 and #2809 AC3, so the plan's own Risk 2 ("green for the wrong reason is worse than the bug") is realised inside the proofs that Risk 2 was mitigated. | pending | Split the mutation off the `&&` chain and hard-fail it, so "the mutation could not be applied" (row RED) is separable from "the guard fired" (row GREEN). V-18b becomes: `test ! -e /tmp/zz_doc.py \|\| { echo "stale probe file from an interrupted run"; exit 1; }; mv tools/doctor.py /tmp/zz_doc.py \|\| exit 1; ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0; rc=$?; mv /tmp/zz_doc.py tools/doctor.py \|\| exit 1; test $rc -ne 0`. The `test ! -e` precondition is what stops a retry restoring a stale copy. Apply the same shape to V-17 (`printf … >> tools/sdlc_stage_marker.py \|\| exit 1`, `git checkout -- tools/sdlc_stage_marker.py \|\| exit 1`) and V-18. **V-16 needs no change** — its expected result is exit 0, so a failed plant already makes the row red. |
+| CONCERN | Scope & Value | Task 3 leaves all six `rglob` floors to the builder under exactly the reasoning task 2 declares unacceptable. Task 2 opens "**Every conversion pins its own `min_files`.**" and justifies it — "Leaving any of them to the builder invites the `current - 1` floors Risk 1 forbids" — then supplies a measured four-row table. Task 3 says only "Set each floor at roughly 60-70% of the current count" with no measurement for any of the six. Six of the ten touched files therefore get unpinned floors, and the Success Criterion "each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count" is satisfiable by any number. The asymmetry is unexplained. | pending | Give task 3 the same measured table. Measured at `dbb8baaf5` by importing each module and calling its own walk (not `git ls-files` — B7/B13 walk untracked files too and B11 scans `.md`): B7 `TESTS_DIR.rglob("*.py")` 784 → `min_files=500`; B8 `_SEARCH_ROOTS` (`agent`, `bridge`, `models`, `tools`, `worker`) 347 → 220; B11 `_iter_include_paths()` 48 → 30; B12 `bridge_dir.glob("*.py")` 44 → 28; B13 `_iter_python_files()` 1231 → 780; B14 `_agent_py_files()` 86 → 55. B7's 500 deliberately matches the meta-guard's `min_files=500` — both scan `tests/` with `rglob("*.py")`, so a divergent pair is a maintenance trap. Carry the measured count and its commit into each assertion message, the same form task 2 already mandates. |
+| CONCERN | History & Consistency | The plan says two incompatible things about where the mutation rows run, and its most heavily-reasoned safety argument only coheres under one of them. The Verification preamble promises "Every row is runnable as written from the repo root"; the note under the table says "Run them one at a time from the lane's own worktree"; and V-18's launchd paragraph reasons exclusively about the primary checkout (`com.valor.worker` pid 72972, `WorkingDirectory /Users/tomcounsell/src/ai`). If the rows run from a lane worktree that paragraph is moot and `worker/` was always fine; if they run from the repo root the reasoning applies but is incomplete (see the `ui.app` blocker). Neither reading is stated as the decision, so a builder can satisfy the letter of the plan while running a destructive rename in the shared primary checkout. | pending | Choose the lane worktree and say so in the **Expected** cell of V-17, V-18 and V-18b, not only in the prose note — this is already correct by construction, since both affected guards resolve their root from `__file__` (`_find_repo_root()` at B13, the helper's module-level `REPO_ROOT` at A1) and so follow the node into the worktree. Then amend the preamble's blanket sentence to carve out the exceptions explicitly: every row runs from the repo root **except** V-17/V-18/V-18b (lane worktree) and V-1/V-2/V-16 (primary checkout, because the stale off-pin `.pyc` AC1 depends on lives only there). Demote the launchd paragraph from primary mitigation to the reason the invariant exists. |
+| NIT | History & Consistency | Task 4's "five textual near-misses" is at least six. A naive textual matcher over `tests/` at `dbb8baaf5` returns **8** files: the two real offenders, the five the plan names, and `tests/unit/test_sdlc_takeover_regression.py`, which the round-3 critique named as a docstring case and the round-3 revision dropped along with the two files it correctly rejected. The AST discriminator is unaffected and verified exact (2 hits). | pending | Stop hardcoding the count: change "the five known-innocent files" to "every textual candidate the AST matcher does not flag", and "all seven textual candidates" to "every textual candidate the sweep returns". The number is a moving target (8 at `dbb8baaf5`, 7 at `cefc07e7e`, 10 by the round-3 critique's looser regex) and pinning it guarantees a stale figure. |
+| NIT | History & Consistency | V-13, V-14 and V-24 are the only rows whose Expected is not mechanically evaluable. `git grep -c <pat> -- <one file>` prints `path:N`, not `N` — measured: `git grep -c '2093' -- tests/unit/test_plan_migration_invariant.py` emits `tests/unit/test_plan_migration_invariant.py:1`, which cannot be compared to `0`. Their intent is unambiguous and each ran correctly (V-14 RED pre-fix at exit 1), so nothing is broken beyond the wording. | pending | Convert all three to the exit-code form the rest of the table uses: `git grep -q '2883' -- docs/features/worktree-venv-isolation.md`, Expected "exit code 0". That drops the output-shape question entirely and matches V-12's already-correct `-q` form. |
+| NIT | Scope & Value | "The B-series are `rglob("*.py")` walks" is inaccurate for two of the six. `test_sdlc_tool_wrapper.py::_iter_include_paths` walks `REPO_ROOT.glob(pattern)` over markdown globs such as `.claude/skills-global/**/sub-skills/**/*.md`, and `test_dm_recovery.py:426` uses non-recursive `bridge_dir.glob("*.py")`. The conclusion the sentence draws — not `.pyc`-vulnerable, floor is the only defect — holds for both, so no disposition changes. | pending | Reword to "The B-series are pure-Python directory walks (`rglob`/`glob` over `*.py`, and markdown globs at B11)" so a builder sizing B11's floor does not go looking for Python files that are not there. |
+
+**Round-4 process note.** The three critic lenses were executed by the critique
+driver in a single process rather than by three independently-spawned subagents:
+the Agent/Task tool was not available in this invocation context. The roster
+barrier was still satisfied on its own terms — three grounded result files, each
+carrying the terminal completion fence, with `critique-roster-check --plan-path`
+reporting `{"complete": true, "missing": [], "ungrounded": [], "roster_count": 3,
+"completed_count": 3}` before aggregation ran. Every finding above is
+backed by a command run against `dbb8baaf5` and the output is quoted in the
+finding, so the evidence stands independently of how many processes produced it.
 
 ## Resolved Questions
 

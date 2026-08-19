@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -113,7 +113,7 @@ Sources: [GitHub Flavored Markdown Spec](https://github.github.com/gfm/),
 | **#2570** (closed) — row splitting with no escaping | Forced the two runners to share `split_row_cells` so they "cannot disagree about what a row says." Established the convergence pattern this plan extends from *rows* to *tables* and *expectations*. `scripts/validate_build.py:25` already imports from `agent.verification_parser`; the import path is precedent, not new. |
 | **#1627** (closed) — anti-criteria as first-class | Added the `match count == 0`, `exit code != N`, `output does not contain X` grammar to `evaluate_expectation` with its empty-stdout gates. That grammar is the contract this plan makes authoritative; it is not changed. |
 | **#330** (closed) — machine-readable DoD | Created the `## Verification` table and both runners. `docs/features/machine-readable-dod.md` is its feature doc and must be updated here. |
-| **#2783** (open) | The *same three lines* as #2843, seen from the anti-criterion direction. See "Effect on #2783 and #2791" below. |
+| **#2783** (reopened — closed in error by `842212ac`) | The *same three lines* as #2843, seen from the anti-criterion direction. See "Effect on #2783 and #2791" below. |
 | **#2791** (open) | `prints N` grammar. Not fixed here. See below. |
 | **#2778** (open) | `.claude/hooks/validators/validate_verification_section.py` is a third reader of the table and is unregistered in `manifest.toml`, so it never runs. Deliberately out of scope. |
 | **#2658** (open) | `docs/plans/gates-that-cannot-fire.md`. Overlap, documented above. |
@@ -175,7 +175,8 @@ pipe-blocks, 493 check tables. T14 re-measures at build time and records the ref
   rows or `.worktrees`-fenced shell lines that currently parse as checks. Two completed plans
   (`delivery_guard_resume_epoch_scoping.md`, `redis-replication-sentinel-failover.md`) head
   their only table `| # | Criterion | Check |` with no Command column and would yield zero
-  checks.
+  checks plus one `MalformedRow` — a loud failure, not a silent pass. Both are completed plans
+  and are never re-gated.
 - **One active plan transited this state and is reported rather than rewritten.** During critique
   round 2, `docs/plans/doctor-console-script-interpreter-check.md` (#2748, active) carried two
   `| Check | Command | Expected |` tables in one `## Verification` section; the current parser read
@@ -321,7 +322,10 @@ three columns and one of its first three column names is exactly `Command` (case
   dataclass models one row, not one block — and keeps the `- [MALFORMED] {m.line}` report line at
   `agent/verification_parser.py:348` readable. One entry per block also makes `len(t.malformed)`
   equal the pipe-block count, which is what makes the `malformed=1` assertion in this plan's own
-  `## Verification` table deterministic.
+  `## Verification` table deterministic. **In this branch `skipped` stays empty** — a block is
+  either skipped or malformed, never both (round 3 critique NIT: without this, a builder emitting
+  both a `SkippedTable` and a `MalformedRow` for the same block would double-report it in
+  `format_results` and still pass the gate).
 - **Section has no pipe-blocks** → empty `ParsedTable`, unchanged. See `## No-Gos` — closing this
   case is explicitly not in scope.
 
@@ -379,8 +383,11 @@ reporting PASS because `grep -c` exits 0) and its Severity-2 case (a satisfied a
 reporting FAIL) are both produced by `scripts/validate_build.py:301-303` — the same lines #2843
 names. Deleting that fallback in favour of `evaluate_expectation` eliminates both directions.
 Verified: `evaluate_expectation("match count == 0", exit_code=0, output="24")` returns `False`,
-and with `output="0"` returns `True`. **Recommendation: the PR body carries `Closes #2783`
-alongside `Closes #2836` and `Closes #2843`.** No extra code — it is the same deletion.
+and with `output="0"` returns `True`. **Recommendation: the PR body carries a closing keyword
+for 2783 alongside 2836 and 2843** (see T19 for the exact literal form -- not repeated here;
+GitHub scans the whole commit message, and this issue was already closed in error once by a
+plan-revision commit quoting this kind of sentence verbatim). No extra code — it is the same
+deletion.
 
 **#2791 is NOT fixed and must stay open.** `prints N` is absent from `evaluate_expectation`'s
 grammar and stays absent. After convergence, `prints \`0\`` rows go from incidentally-PASS
@@ -596,30 +603,38 @@ path — the fix validates itself.
 
 ## Success Criteria
 
-- [ ] A non-check markdown table in `## Verification` produces zero executable checks and zero
+- [x] A non-check markdown table in `## Verification` produces zero executable checks and zero
       guaranteed-fail rows (#2836 AC 1).
-- [ ] A skipped table is named in both runners' reports with its header and row count
+- [x] A skipped table is named in both runners' reports with its header and row count
       (#2836 AC 2).
-- [ ] The #2741 pre-fix text parses to exactly 16 checks, 0 malformed, 1 skipped block
+- [x] The #2741 pre-fix text parses to exactly 16 checks, 0 malformed, 1 skipped block
       (#2836 AC 3).
-- [ ] Every new test fails against the current parser/validator before the fix (#2836 AC 4,
+- [x] Every new test fails against the current parser/validator before the fix (#2836 AC 4,
       demonstrated-red).
-- [ ] A second `| Anti-criterion | Command | Expected |` table still yields executable checks.
-- [ ] `## Verification` containing table rows but no `Command`-column table fails loudly, with
+- [x] A second `| Anti-criterion | Command | Expected |` table still yields executable checks.
+- [x] `## Verification` containing table rows but no `Command`-column table fails loudly, with
       exactly one `MalformedRow` per pipe-block.
-- [ ] `format_results` takes two required parameters, `results` and `table`, and both production
+- [x] `format_results` takes two required parameters, `results` and `table`, and both production
       call sites pass the `ParsedTable`.
-- [ ] Every file in `tests/fixtures/verification/` begins with a literal `## Verification` line.
-- [ ] `scripts/validate_build.py` reports PASS for `output > 0` on stdout `1` and for
+- [x] Every file in `tests/fixtures/verification/` begins with a literal `## Verification` line.
+- [x] `scripts/validate_build.py` reports PASS for `output > 0` on stdout `1` and for
       `match count == 0` on a clean `grep -c` (#2843).
-- [ ] `scripts/validate_build.py` reports FAIL for a violated `match count == 0` (#2783
+- [x] `scripts/validate_build.py` reports FAIL for a violated `match count == 0` (#2783
       Severity-1).
-- [ ] `scripts/validate_build.py` contains no `parse_verification_table` definition, no
+- [x] `scripts/validate_build.py` contains no `parse_verification_table` definition, no
       `expected.startswith` chain, and no `actual_exit == 0` fallback.
-- [ ] `python -m pytest tests/unit/test_verification_parser.py tests/unit/test_validate_build.py -q`
-      exits 0.
-- [ ] `python -m ruff check` and `python -m ruff format --check` clean on both changed files.
-- [ ] Both runners produce identical per-row verdicts over the execution fixture
+- [x] `scripts/pytest-clean.sh tests/unit/test_verification_parser.py tests/unit/test_validate_build.py -q`
+      exits 0. (Round 3 critique: a bare `python -m pytest` here would be the third of three bare
+      invocations this plan carries, against the repo's explicit prohibition on bare `pytest` --
+      see `CLAUDE.md`'s xdist-reaper note. `parse_success_criteria_commands` only admits commands
+      starting with `python`, `pytest`, `grep`, `test `, `ls `, `cat `, `ruff`, so a `scripts/…`
+      criterion additionally drops out of the duplicate 30s-bounded build-gate run entirely.)
+- [x] `python -m ruff check agent/verification_parser.py scripts/validate_build.py` and
+      `python -m ruff format --check agent/verification_parser.py scripts/validate_build.py` are
+      clean. (Round 3 critique: scoped to the two changed files so `parse_success_criteria_commands`'s
+      first-backtick-span-only extraction — see `## No-Gos` — does not turn this into a bare
+      repo-wide `ruff check` under the 30s-bounded build gate.)
+- [x] Both runners produce identical per-row verdicts over the execution fixture
       `runner_agreement.md`, and identical parses over the four parse-only fixtures. No test in
       this lane invokes `scripts/pytest-clean.sh` or `pytest` as a subprocess.
 
@@ -645,7 +660,7 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
 - **Depends On**: [parser-scoping]
 - **Agent Type**: builder
 - **Parallel**: false
-- **Owns**: T9, T10, T11, T12, T13, T15, T16, T17, T19, T20
+- **Owns**: T9, T10, T11, T12, T13, T15, T16, T17, T20
 - Deletes `scripts/validate_build.py`'s parser and evaluator, wires the imports, rewrites
   `check_verification_table`, updates `tests/unit/test_validate_build.py`.
 - Owns T13 — the cross-runner agreement test — because T13 *writes* a test file and the
@@ -657,7 +672,11 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
 - **Depends On**: [parser-scoping, validator-delegation]
 - **Agent Type**: validator
 - **Parallel**: false
-- **Owns**: T14, T18
+- **Owns**: T14, T18, T19
+- T19 moved here (round 3 critique): T19's "corpus number from T14" input has no writer while
+  T19 sat in `validator-delegation`, which finishes before `validate-all`'s T14 runs. T1/T3/T9's
+  captured red-state text is handed off via `.build-notes/red-state.md` on the lane branch (see
+  each task) rather than requiring T19's agent to have been present for their capture.
 - Runs this plan's `## Verification` table through the changed code (T18), re-measures the
   505-section corpus to confirm zero active-plan drift and records the refreshed figures **in the
   PR body only** — it edits no plan document, for the G7 reason given in T14 (T14) — and confirms
@@ -669,12 +688,17 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
       `parse_verification_table` on `61717ccb2^:docs/plans/docs-auditor-rename-detection.md`
       returning 27 checks; `validate_build.py`'s evaluator reporting FAIL for
       `output > 0`/`1` and for `match count == 0`/`0`; and reporting PASS for
-      `match count == 0`/`24`.
+      `match count == 0`/`24`. **Append this captured text to `.build-notes/red-state.md` on the
+      lane branch** (create the file if absent) -- T19, dispatched from a later agent in this
+      lane's roster, reads it back rather than requiring its own agent to have witnessed T1.
 - [ ] **T2 — Create the fixture directory `tests/fixtures/verification/`.** Add
       `tests/fixtures/verification/2741_pre_fix_verification.md` (the `## Verification` section
       from `61717ccb2^:docs/plans/docs-auditor-rename-detection.md`, verbatim),
       `tests/fixtures/verification/two_check_tables.md` (a `Check` table plus an `Anti-criterion`
-      table), `tests/fixtures/verification/no_command_column.md` (a `| # | Criterion | Check |`
+      table, **at least two data rows under each of the two headers — at least four executable
+      checks total**, so the guarding `## Verification` row's `output > 3` assertion is satisfied
+      by construction rather than by an under-specified builder choice — round 3 critique),
+      `tests/fixtures/verification/no_command_column.md` (a `| # | Criterion | Check |`
       table), `tests/fixtures/verification/check_plus_summary.md` (one check table plus a prose
       summary table), and `tests/fixtures/verification/runner_agreement.md` — the **execution**
       fixture specified in T13, the only fixture whose commands are ever run.
@@ -699,7 +723,8 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
       against nothing — this plan's own thesis reproduced inside its own test corpus.
 - [ ] **T3 — Add the failing tests** to `tests/unit/test_verification_parser.py` for every row
       of the Failure Path Test Strategy that targets the parser. Run them; each must fail.
-      Paste the failures into the PR body.
+      Paste the failures into the PR body, and append them to `.build-notes/red-state.md` on the
+      lane branch (see T1's handoff note).
 - [ ] **T4 — Add `SkippedTable` and extend `ParsedTable`** in `agent/verification_parser.py`.
       `skipped` gets `field(default_factory=list)` so existing constructions stay valid.
 - [ ] **T5 — Add `_iter_pipe_blocks` and the header-signature test.** A block is a check table
@@ -720,7 +745,8 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
 - [ ] **T9 — Add the failing validator tests** to `tests/unit/test_validate_build.py` for
       `output > N`, clean `match count == 0`, violated `match count == 0`, the skipped-table
       exit code, and the trailing-newline parity case. Run them; each must fail. Paste the
-      failures into the PR body.
+      failures into the PR body, and append them to `.build-notes/red-state.md` on the lane
+      branch (see T1's handoff note).
 - [ ] **T10 — Delete `scripts/validate_build.py::parse_verification_table`** (`:80-146`) and
       import `parse_verification_table` and `evaluate_expectation` from
       `agent.verification_parser`. Keep `extract_section` for `parse_success_criteria_commands`.
@@ -792,7 +818,9 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
       three deleted lines — see "Effect on #2783 and #2791"). State explicitly that **#2791
       remains open** and that convergence makes its `prints N` rows fail under
       `validate_build.py` where they previously passed by accident. Include the red-state
-      evidence from T1, T3, T9 and the corpus number from T14.
+      evidence from T1, T3, T9 (read back from `.build-notes/red-state.md` on the lane branch --
+      this task's agent did not witness their capture directly) and the corpus number and both
+      re-asserted universals from T14, which ran immediately before this task in the same agent.
 - [ ] **T20 — Post the #2778 carry-forward comment.** `gh issue comment 2778` with the canonical
       definitions listed in `## Documentation`: `_iter_pipe_blocks` as the table definition, the
       `Command`-column signature, and `split_row_cells` as the cell splitter — plus the statement
@@ -805,13 +833,19 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
       the file this lane converges. A successor needs the full list or it inherits the same
       partial-convergence failure. This is the carry-forward #2570 did not leave, and writing it
       is what keeps this plan from repeating one surface over the mistake it diagnoses.
+      **Also file a successor issue** (round 3 critique, Scope & Value): `gh issue create` naming
+      `parse_file_assertions` and `::parse_success_criteria_commands`'s two measured failure
+      shapes (repo-root path resolution turning a bare filename into a permanently-false `exists`
+      assertion; first-backtick-span-only reduction collapsing a two-command criterion to one),
+      labeled `bug,skills`, and reference the new issue number in the #2778 comment so it stays as
+      the cross-reference rather than the sole tracker. Filed during this build as #2870.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Parser tests pass | `python -m pytest tests/unit/test_verification_parser.py -q` | exit code 0 |
-| Validator tests pass | `python -m pytest tests/unit/test_validate_build.py -q` | exit code 0 |
+| Parser tests pass | `scripts/pytest-clean.sh tests/unit/test_verification_parser.py -q` | exit code 0 |
+| Validator tests pass | `scripts/pytest-clean.sh tests/unit/test_validate_build.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/verification_parser.py scripts/validate_build.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/verification_parser.py scripts/validate_build.py` | exit code 0 |
 | validate_build defines no table parser of its own | `grep -c '^def parse_verification_table' scripts/validate_build.py` | match count == 0 |
@@ -825,7 +859,7 @@ Every task T1–T20 is assigned to exactly one agent below; an unassigned task i
 | 2741 fixture parses to 16 checks, 0 malformed, 1 skipped | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/2741_pre_fix_verification.md').read()); print(f'checks={len(t.checks)} malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains checks=16 malformed=0 skipped=1 end |
 | Second anti-criterion check table still parsed | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/two_check_tables.md').read()); print(len(t.checks))"` | output > 3 |
 | Summary table skipped, not executed | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/check_plus_summary.md').read()); print(f'malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains malformed=0 skipped=1 end |
-| Rows with no Command column yield one malformed per block | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/no_command_column.md').read()); print(f'checks={len(t.checks)} malformed={len(t.malformed)} end')"` | output contains checks=0 malformed=1 end |
+| Rows with no Command column yield one malformed per block, and skipped stays empty | `python -c "from agent.verification_parser import parse_verification_table as p; t=p(open('tests/fixtures/verification/no_command_column.md').read()); print(f'checks={len(t.checks)} malformed={len(t.malformed)} skipped={len(t.skipped)} end')"` | output contains checks=0 malformed=1 skipped=0 end |
 | Every fixture declares its section heading | `grep -L '^## Verification' tests/fixtures/verification/*.md \| wc -l` | match count == 0 |
 | Violated anti-criterion evaluates false (#2783) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if not e('match count == 0', exit_code=0, output='24') else 'BAD')"` | output contains ok |
 | Clean anti-criterion evaluates true (#2843) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if e('match count == 0', exit_code=1, output='0') else 'BAD')"` | output contains ok |
@@ -873,14 +907,14 @@ non-load-bearing. Both retain full implementation notes below. The builder shoul
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | History & Consistency | **#2783 was closed in error by this lane's own plan-revision commit while the defect is live — REOPENED during this critique.** Measured: `gh issue view 2783` → `state: CLOSED`, `stateReason: COMPLETED`, `closedAt: 2026-08-19T05:33:58Z`, closed by `842212ac` — "Plan revision (verification-runner-convergence): address critique findings (Refs #2836)", a docs-only commit on `main` touching only this plan document. Its body carried "Open Questions resolved into Decisions; PR carries Closes #2783" and GitHub honoured the keyword. The code is untouched: `scripts/validate_build.py:303` still reads `passed = expected.lower() in actual_output.lower() or actual_exit == 0` at HEAD. So (1) `## Prior Art`'s "**#2783** (open)" is wrong; (2) Decision §1 and T19's closing keyword are a no-op on an already-closed issue, so the plan's stated remedy does not restore tracking; (3) if this lane stalls, a live Severity-1 false-PASS defect is permanently untracked. The mechanism will repeat: `## Decisions` §1 and T19 both carry the literal keyword string and every plan-revision commit summarises plan prose into a `main` commit body. #2836 and #2843 verified still OPEN, so only #2783 fired. | **(a) done in critique**; (b) and (c) pending | Three parts. **(a)** DONE — `gh issue reopen 2783` was executed during this critique with an explanatory comment; `gh issue view 2783` now returns `state: OPEN, stateReason: REOPENED`. The plan's `Closes` keyword is live again and the tracker no longer reports a Severity-1 defect as done. Nothing for the builder here. **(b)** Change `## Prior Art`'s row to "**#2783** (reopened — closed in error by `842212ac`)". **(c)** Everywhere the plan *discusses* the keyword in prose, write it non-firing (e.g. "the PR body carries a closing keyword for 2783"); leave the literal `Closes #2783` only inside T19's instruction for the **PR body**, which is where it must fire. GitHub scans the whole commit message, so the `.githooks/commit-msg` disposition trailer (`Refs #2836` was present) does not prevent this. |
-| CONCERN | Risk & Robustness | **T19 is owned by an agent that finishes before the agent owning T14 starts, so T14's only output channel has no writer.** (Re-scored from blocker: the affected artifact is PR-body prose, and the missing figure is the corpus number, settled as indicative and non-load-bearing. No gate reads it, so a green build cannot be sent to `/do-patch` by this. Still worth fixing — the note below is exact.) T19 ("Write the PR body … Include the red-state evidence from T1, T3, T9 and the corpus number from T14") sits in `## Team Orchestration` §2 `validator-delegation`'s `Owns` list; T14 sits in §3 `validate-all`'s, whose `Depends On` is `[parser-scoping, validator-delegation]`. Round 2's third blocker fix dropped T14's plan write-back and made the PR body its **only** home ("Write nothing back into this plan document"), so T14's refreshed figures and both re-asserted universals are now produced after the body that must carry them is written. Round 2's NIT asserted "every task T1–T20 is assigned to exactly one agent" — true, but the ordering was never checked. | pending | In `## Team Orchestration`, change §2's `Owns` to `T9, T10, T11, T12, T13, T15, T16, T17, T20` and §3's to `T14, T18, T19`, and move T19 after T18 in `## Step by Step Tasks`. T1/T3/T9's red-state output then needs an explicit handoff: add to each "append the captured failure text to `.build-notes/red-state.md` on the lane branch", and to T19 "read `.build-notes/red-state.md`". `gh pr create` runs after all three agents return (`docs/sdlc/do-build.md:96` records the PR number immediately after creation), so agent 3 can still author the body. Do **not** solve this by restoring T14's plan write-back — that is the G7 blocker round 2 closed. |
-| CONCERN | Risk & Robustness | **The plan runs bare `python -m pytest` three times, against an explicit repo prohibition.** `## Verification` rows 1-2 use `python -m pytest …`, and `## Success Criteria` bullet 12 feeds a third bare invocation into `scripts/validate_build.py::check_success_criteria` (30s timeout, exit 0 required). `CLAUDE.md`: "Use `scripts/pytest-clean.sh`, never bare `pytest`. The wrapper reaps xdist workers; interrupted bare runs leave orphan workers eating memory." `pyproject.toml:196` sets `addopts = "… -n auto --dist=loadfile …"`; measured, that command spawns 10 xdist workers claiming test dbs 1-10 and takes 8.7s idle. Under `check_verification_table`'s 30s ceiling on a loaded machine, `subprocess.TimeoutExpired` reaps only the direct child and leaves 10 workers holding claimed dbs. 21 of the 25 active plans already use `scripts/pytest-clean.sh`; this plan is one of the 3 that do not. | pending | Rewrite the two `## Verification` Command cells as `scripts/pytest-clean.sh tests/unit/test_verification_parser.py -q` and `scripts/pytest-clean.sh tests/unit/test_validate_build.py -q`, and bullet 12 the same way. This does **not** trip T13's anti-criterion: row "No test shells out to the pytest wrapper" greps `tests/unit/test_validate_build.py tests/unit/test_verification_parser.py` — the *test files*, never the plan. Bonus: `parse_success_criteria_commands` only admits commands starting with `python`, `pytest`, `grep`, `test `, `ls `, `cat `, `ruff` (`scripts/validate_build.py:166-177`), so a `scripts/…` criterion drops out of the duplicate 30s-bounded run entirely. |
-| CONCERN | Risk & Robustness | **The plan documents `parse_success_criteria_commands`' first-backtick-span reduction in `## No-Gos` and then walks into it.** Measured against the current plan text, that function returns exactly `['python -m pytest …', 'python -m ruff check']` — bullet 13 ("`python -m ruff check` and `python -m ruff format --check` clean on both changed files") is executed by the build gate as a bare **repo-wide** `python -m ruff check` with exit 0 required, under the worktree venv. A ruff newer than the pin turns an untouched file into a FAIL and `docs/sdlc/do-build.md:182` routes that into three futile `/do-patch` iterations — the outcome `## Problem` exists to eliminate. Repo-wide ruff currently exits 0 (ruff 0.15.9), so this is pre-emptive, not a present red. | pending | Reword bullet 13 so its **first** backtick span is already the scoped command: "- [ ] `python -m ruff check agent/verification_parser.py scripts/validate_build.py` and `python -m ruff format --check agent/verification_parser.py scripts/validate_build.py` are clean." The first span still starts with `python` (so it is still admitted and still runs) but is now scoped to the two changed files, matching `## Verification` rows 3-4 exactly. |
-| CONCERN | Scope & Value | **`two_check_tables.md` is under-specified relative to the assertion that guards it.** The `## Verification` row "Second anti-criterion check table still parsed" asserts `output > 3` — at least four checks — but T2 specifies that fixture only as "a `Check` table plus an `Anti-criterion` table" with no row count. A builder writing two data rows under the first header and one under the second produces 3 checks, and the plan's own gate reports FAIL for an otherwise-correct fixture, routing a green build to `/do-patch`. Same self-inflicted-gate class as round 2's three blockers. | pending | Add to T2: "`tests/fixtures/verification/two_check_tables.md` carries at least two data rows under each of its two headers (≥4 executable checks total), so the `output > 3` row is satisfied by construction." Tightening the row to a printed sentinel (`print(f'checks={len(t.checks)} end')` with `output contains checks=4 end`) would also catch the over-count direction; `output > 3` currently passes on any value above three. |
-| CONCERN | Scope & Value | **The carry-forward the plan says #2570 failed to leave is itself parked on someone else's issue.** `## No-Gos` names `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`) as a real third and fourth divergence inside the file this lane converges, and T20's entire remedy is a comment on #2778. But #2778 is about a *different* reader (the unregistered hook), it is open and unowned, and a comment on another issue is precisely the weak carrier the plan diagnoses #2570 as having used. No successor issue is filed, so the two divergences inside the converged file leave this lane with no tracker. Both failure shapes are measured on this plan today. | pending | Add to T20: `gh issue create --title "validate_build.py carries two more private plan-document grammars: parse_file_assertions and parse_success_criteria_commands" --label bug,skills` with the two line ranges, the two measured failure shapes (repo-root path resolution turning a bare filename into a permanently-false `exists` assertion; first-backtick-span-only reduction collapsing a two-command criterion to one), and a link back to this PR. Then reference the new issue number in the #2778 comment, which stays as the cross-reference. |
-| NIT | Risk & Robustness | **The no-check-table branch never says whether a block also produces a `SkippedTable`.** `## Solution` §1 specifies exactly one `MalformedRow` per pipe-block for a section with rows but no check table, and is silent on `skipped`. The guarding `## Verification` row asserts only `checks=0 malformed=1` and leaves `skipped` unconstrained, so a builder emitting both a `SkippedTable` and a `MalformedRow` for the same block would double-report it in `format_results` and still pass the gate. | pending | Add to `## Solution` §1: "In this branch `skipped` stays empty — a block is either skipped or malformed, never both." Extend the guarding row's command to print `skipped=` and expect `output contains checks=0 malformed=1 skipped=0 end`, matching the trailing-sentinel style of the other count-triple rows. |
-| NIT | History & Consistency | **spike-2's "would yield zero checks" predates the loud no-check-table rule and understates the new behaviour.** The two named completed plans (`delivery_guard_resume_epoch_scoping.md`, `redis-replication-sentinel-failover.md`) head their only table `\| # \| Criterion \| Check \|` (the second adds a `Type` column); under `## Solution` §1 as revised they now yield zero checks **and one `MalformedRow`, which fails the gate**. A reader checking blast radius would conclude they go quiet rather than red. Verified: both headers are exactly as spike-2 states, and both plans are completed, so nothing re-gates them. | pending | Replace "and would yield zero checks" with "and would yield zero checks plus one `MalformedRow` — a loud failure, not a silent pass. Both are completed plans and are never re-gated." No behaviour change. |
+| CONCERN | History & Consistency | **#2783 was closed in error by this lane's own plan-revision commit while the defect is live — REOPENED during this critique.** Measured: `gh issue view 2783` → `state: CLOSED`, `stateReason: COMPLETED`, `closedAt: 2026-08-19T05:33:58Z`, closed by `842212ac` — "Plan revision (verification-runner-convergence): address critique findings (Refs #2836)", a docs-only commit on `main` touching only this plan document. Its body carried "Open Questions resolved into Decisions; PR carries Closes #2783" and GitHub honoured the keyword. The code is untouched: `scripts/validate_build.py:303` still reads `passed = expected.lower() in actual_output.lower() or actual_exit == 0` at HEAD. So (1) `## Prior Art`'s "**#2783** (open)" is wrong; (2) Decision §1 and T19's closing keyword are a no-op on an already-closed issue, so the plan's stated remedy does not restore tracking; (3) if this lane stalls, a live Severity-1 false-PASS defect is permanently untracked. The mechanism will repeat: `## Decisions` §1 and T19 both carry the literal keyword string and every plan-revision commit summarises plan prose into a `main` commit body. #2836 and #2843 verified still OPEN, so only #2783 fired. | **(a), (b), (c) all done** | Three parts. **(a)** DONE — `gh issue reopen 2783` was executed during this critique with an explanatory comment; `gh issue view 2783` now returns `state: OPEN, stateReason: REOPENED`. The plan's `Closes` keyword is live again and the tracker no longer reports a Severity-1 defect as done. Nothing for the builder here. **(b)** Change `## Prior Art`'s row to "**#2783** (reopened — closed in error by `842212ac`)". **(c)** Everywhere the plan *discusses* the keyword in prose, write it non-firing (e.g. "the PR body carries a closing keyword for 2783"); leave the literal `Closes #2783` only inside T19's instruction for the **PR body**, which is where it must fire. GitHub scans the whole commit message, so the `.githooks/commit-msg` disposition trailer (`Refs #2836` was present) does not prevent this. |
+| CONCERN | Risk & Robustness | **T19 is owned by an agent that finishes before the agent owning T14 starts, so T14's only output channel has no writer.** (Re-scored from blocker: the affected artifact is PR-body prose, and the missing figure is the corpus number, settled as indicative and non-load-bearing. No gate reads it, so a green build cannot be sent to `/do-patch` by this. Still worth fixing — the note below is exact.) T19 ("Write the PR body … Include the red-state evidence from T1, T3, T9 and the corpus number from T14") sits in `## Team Orchestration` §2 `validator-delegation`'s `Owns` list; T14 sits in §3 `validate-all`'s, whose `Depends On` is `[parser-scoping, validator-delegation]`. Round 2's third blocker fix dropped T14's plan write-back and made the PR body its **only** home ("Write nothing back into this plan document"), so T14's refreshed figures and both re-asserted universals are now produced after the body that must carry them is written. Round 2's NIT asserted "every task T1–T20 is assigned to exactly one agent" — true, but the ordering was never checked. | done | In `## Team Orchestration`, change §2's `Owns` to `T9, T10, T11, T12, T13, T15, T16, T17, T20` and §3's to `T14, T18, T19`, and move T19 after T18 in `## Step by Step Tasks`. T1/T3/T9's red-state output then needs an explicit handoff: add to each "append the captured failure text to `.build-notes/red-state.md` on the lane branch", and to T19 "read `.build-notes/red-state.md`". `gh pr create` runs after all three agents return (`docs/sdlc/do-build.md:96` records the PR number immediately after creation), so agent 3 can still author the body. Do **not** solve this by restoring T14's plan write-back — that is the G7 blocker round 2 closed. |
+| CONCERN | Risk & Robustness | **The plan runs bare `python -m pytest` three times, against an explicit repo prohibition.** `## Verification` rows 1-2 use `python -m pytest …`, and `## Success Criteria` bullet 12 feeds a third bare invocation into `scripts/validate_build.py::check_success_criteria` (30s timeout, exit 0 required). `CLAUDE.md`: "Use `scripts/pytest-clean.sh`, never bare `pytest`. The wrapper reaps xdist workers; interrupted bare runs leave orphan workers eating memory." `pyproject.toml:196` sets `addopts = "… -n auto --dist=loadfile …"`; measured, that command spawns 10 xdist workers claiming test dbs 1-10 and takes 8.7s idle. Under `check_verification_table`'s 30s ceiling on a loaded machine, `subprocess.TimeoutExpired` reaps only the direct child and leaves 10 workers holding claimed dbs. 21 of the 25 active plans already use `scripts/pytest-clean.sh`; this plan is one of the 3 that do not. | done | Rewrite the two `## Verification` Command cells as `scripts/pytest-clean.sh tests/unit/test_verification_parser.py -q` and `scripts/pytest-clean.sh tests/unit/test_validate_build.py -q`, and bullet 12 the same way. This does **not** trip T13's anti-criterion: row "No test shells out to the pytest wrapper" greps `tests/unit/test_validate_build.py tests/unit/test_verification_parser.py` — the *test files*, never the plan. Bonus: `parse_success_criteria_commands` only admits commands starting with `python`, `pytest`, `grep`, `test `, `ls `, `cat `, `ruff` (`scripts/validate_build.py:166-177`), so a `scripts/…` criterion drops out of the duplicate 30s-bounded run entirely. |
+| CONCERN | Risk & Robustness | **The plan documents `parse_success_criteria_commands`' first-backtick-span reduction in `## No-Gos` and then walks into it.** Measured against the current plan text, that function returns exactly `['python -m pytest …', 'python -m ruff check']` — bullet 13 ("`python -m ruff check` and `python -m ruff format --check` clean on both changed files") is executed by the build gate as a bare **repo-wide** `python -m ruff check` with exit 0 required, under the worktree venv. A ruff newer than the pin turns an untouched file into a FAIL and `docs/sdlc/do-build.md:182` routes that into three futile `/do-patch` iterations — the outcome `## Problem` exists to eliminate. Repo-wide ruff currently exits 0 (ruff 0.15.9), so this is pre-emptive, not a present red. | done | Reword bullet 13 so its **first** backtick span is already the scoped command: "- [ ] `python -m ruff check agent/verification_parser.py scripts/validate_build.py` and `python -m ruff format --check agent/verification_parser.py scripts/validate_build.py` are clean." The first span still starts with `python` (so it is still admitted and still runs) but is now scoped to the two changed files, matching `## Verification` rows 3-4 exactly. |
+| CONCERN | Scope & Value | **`two_check_tables.md` is under-specified relative to the assertion that guards it.** The `## Verification` row "Second anti-criterion check table still parsed" asserts `output > 3` — at least four checks — but T2 specifies that fixture only as "a `Check` table plus an `Anti-criterion` table" with no row count. A builder writing two data rows under the first header and one under the second produces 3 checks, and the plan's own gate reports FAIL for an otherwise-correct fixture, routing a green build to `/do-patch`. Same self-inflicted-gate class as round 2's three blockers. | done | Add to T2: "`tests/fixtures/verification/two_check_tables.md` carries at least two data rows under each of its two headers (≥4 executable checks total), so the `output > 3` row is satisfied by construction." Tightening the row to a printed sentinel (`print(f'checks={len(t.checks)} end')` with `output contains checks=4 end`) would also catch the over-count direction; `output > 3` currently passes on any value above three. |
+| CONCERN | Scope & Value | **The carry-forward the plan says #2570 failed to leave is itself parked on someone else's issue.** `## No-Gos` names `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`) as a real third and fourth divergence inside the file this lane converges, and T20's entire remedy is a comment on #2778. But #2778 is about a *different* reader (the unregistered hook), it is open and unowned, and a comment on another issue is precisely the weak carrier the plan diagnoses #2570 as having used. No successor issue is filed, so the two divergences inside the converged file leave this lane with no tracker. Both failure shapes are measured on this plan today. | done — filed as #2870 | Add to T20: `gh issue create --title "validate_build.py carries two more private plan-document grammars: parse_file_assertions and parse_success_criteria_commands" --label bug,skills` with the two line ranges, the two measured failure shapes (repo-root path resolution turning a bare filename into a permanently-false `exists` assertion; first-backtick-span-only reduction collapsing a two-command criterion to one), and a link back to this PR. Then reference the new issue number in the #2778 comment, which stays as the cross-reference. |
+| NIT | Risk & Robustness | **The no-check-table branch never says whether a block also produces a `SkippedTable`.** `## Solution` §1 specifies exactly one `MalformedRow` per pipe-block for a section with rows but no check table, and is silent on `skipped`. The guarding `## Verification` row asserts only `checks=0 malformed=1` and leaves `skipped` unconstrained, so a builder emitting both a `SkippedTable` and a `MalformedRow` for the same block would double-report it in `format_results` and still pass the gate. | done | Add to `## Solution` §1: "In this branch `skipped` stays empty — a block is either skipped or malformed, never both." Extend the guarding row's command to print `skipped=` and expect `output contains checks=0 malformed=1 skipped=0 end`, matching the trailing-sentinel style of the other count-triple rows. |
+| NIT | History & Consistency | **spike-2's "would yield zero checks" predates the loud no-check-table rule and understates the new behaviour.** The two named completed plans (`delivery_guard_resume_epoch_scoping.md`, `redis-replication-sentinel-failover.md`) head their only table `\| # \| Criterion \| Check \|` (the second adds a `Type` column); under `## Solution` §1 as revised they now yield zero checks **and one `MalformedRow`, which fails the gate**. A reader checking blast radius would conclude they go quiet rather than red. Verified: both headers are exactly as spike-2 states, and both plans are completed, so nothing re-gates them. | done | Replace "and would yield zero checks" with "and would yield zero checks plus one `MalformedRow` — a loud failure, not a silent pass. Both are completed plans and are never re-gated." No behaviour change. |
 
 **Round 3 verification log (driver-executed, HEAD `b4e4afa64`).** Corpus: 590 documents under
 `docs/plans`, 505 matching `^## Verification\s*$`, 502 pipe-blocks, 493 check tables, 25 active
@@ -917,11 +951,12 @@ The literal keyword belongs in exactly one place: the **PR body** written by T19
 
 Settled during the revision pass. None remains open; the build has no blocking question.
 
-1. **The PR carries `Closes #2783`.** #2783 and #2843 name the same three lines
+1. **The PR carries a closing keyword for 2783.** 2783 and 2843 name the same three lines
    (`scripts/validate_build.py:301-303`), and deleting the fallback in favour of
-   `evaluate_expectation` resolves both directions of #2783 with no additional code. The critique
-   independently confirmed that #2783's failure mode becomes structurally impossible under this
-   design. **T19** carries all three closing keywords, and states that #2791 stays open.
+   `evaluate_expectation` resolves both directions of 2783 with no additional code. The critique
+   independently confirmed that 2783's failure mode becomes structurally impossible under this
+   design. **T19** carries all three closing keywords (the literal form belongs only there — see
+   the builder note above), and states that #2791 stays open.
 
 2. **A skipped non-check table does not fail the gate.** A summary table is legitimate plan
    authoring, and failing on it would reproduce #2836 with a nicer message. The cost is the one
