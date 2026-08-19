@@ -90,6 +90,8 @@ collapses to `None` rather than surviving as a falsy-but-truthy target.
 | `validate_verification_section.py` | A plan's `## Verification` section is present and non-empty. |
 | `validate_file_contains.py` | An arbitrary file (default scope `docs/plans/*.md`) contains a set of required strings, passed via repeated `--contains`. |
 
+`validate_verification_section.py` is ported and tested but carries no `manifest.toml` entry, so it does not currently run in the harness; see #2778.
+
 `validate_file_contains.py` additionally lost its `--max-age` flag along with
 the mtime-scanning helpers it fed: once the target comes from the payload
 instead of a directory scan, an age window has nothing left to bound. It keeps
