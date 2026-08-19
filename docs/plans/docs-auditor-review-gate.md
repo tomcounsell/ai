@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T06:04:33Z
+revision_applied_at: 2026-08-19T06:32:52Z
 ---
 
 # Docs Auditor Review Gate
@@ -1143,11 +1143,49 @@ verification fixes the rest.
    ```
    title:    docs-auditor: rotation failed to produce a PR for {slug}
    category: operational-failure
-   body:     the failing step, the `files_touched` list, whether the scoped restore
-             succeeded, and the remediation — inspect
+   body:     the slug, the `files_touched` list, and the remediation — inspect
              `git -C ${AI_REPO_ROOT:-$HOME/src/ai} status --porcelain -- docs .claude`
-             and clean the auditor's paths before the next rotation.
+             and clean the auditor's paths before the next rotation. The git or
+             `gh` step that failed is in the run's log, under the
+             `docs_auditor: branch/push/PR …` warning (`:1552`, `:1555`);
+             the body points at it rather than restating it.
    ```
+
+   **The body carries only what the filing site holds, and option (a) is rejected in
+   writing (R6-1).** `run_docs_auditor` sees `pr_url is None` and nothing more:
+   `_push_branch_and_pr`'s contract is `str | None` (`:1459-1461`) and no task in this
+   plan widens it. The failing step and the scoped restore's outcome are locals that
+   reach `logger.warning` and stop there (`:1552`, `:1555`). So the body must **not**
+   name a failing step and must **not** assert whether the restore succeeded. A body
+   reading "restore succeeded" on a run where it did not would tell the on-call human
+   the checkout is clean while it is wedged, defeating the exact visibility this
+   escalation exists to provide.
+
+   The rejected alternative, recorded on the R5-3 precedent that the plan picks rather
+   than deferring to the builder: widen the return to
+   `tuple[str | None, dict]` carrying `{"failing_step": str, "restore_ok": bool}`, set
+   `failing_step` at each step's own `except` site, and thread it into the body. Three
+   reasons against. (1) **The failing step is not a value that exists today.**
+   `:1474-1556` is a single `try` with two catch-alls; producing a per-step name means
+   splitting it into five separately guarded sites — new mechanism, in a task list that
+   already reworks nine `_push_branch_and_pr` references and two direct call sites
+   (`:1158`, `:1218`). (2) **Both fields are diagnostic, not actionable.** What the
+   operator does on receipt is run the `git status --porcelain -- docs .claude` the body
+   already carries, and that command reports the checkout's live state — strictly better
+   evidence than a boolean recorded one run earlier and possibly superseded since.
+   (3) **The step detail is already durable**, in the logged warning the body points at.
+
+   **The three-way ambiguity of `pr_url is None` is accepted, and the body does not
+   guess.** It is consistent with an unresolvable starting ref before any write, a
+   push/PR-create failure with a clean restore, and a restore failure regardless of PR
+   outcome. The two observations the body hands over settle it at read time: the scoped
+   `git status --porcelain` distinguishes wedged from clean, and the logged warning names
+   the step. Naming the slug and the paths — which the filing site does hold — is what
+   makes both observations runnable.
+
+   This also removes the last disagreement inside the plan about what the body says:
+   Q4 item 5 (`:1243-1244`) and the Success Criteria (`:2611-2613`) already describe it
+   as the slug, the `files_touched` paths, and the cleanup command.
 
    Slug-keyed and nothing else — no run id, no date, no count — per the
    no-volatile-fields rule Q5 states, so a failure that repeats every run files **once**
@@ -2944,8 +2982,16 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   wedge signal dies there. Before returning, call `_file_issue_if_new` with title
   `docs-auditor: rotation failed to produce a PR for {slug}` and
   `"category": "operational-failure"`. Slug-keyed only — no run id, no date, no count — so
-  a failure that repeats every run files once. The body names the failing step, the
-  `files_touched` paths, whether the scoped restore succeeded, and the cleanup command.
+  a failure that repeats every run files once. The body names the slug, the
+  `files_touched` paths, and the cleanup command
+  `git -C ${AI_REPO_ROOT:-$HOME/src/ai} status --porcelain -- docs .claude`, and points
+  at the `docs_auditor: branch/push/PR …` log warning (`:1552`, `:1555`) for the step
+  that failed. It must **not** name a failing step and must **not** assert whether the
+  scoped restore succeeded (R6-1): `_push_branch_and_pr` returns `str | None`
+  (`:1459-1461`) and this task does not widen that contract, so neither fact reaches the
+  filing site — and a body asserting a restore outcome it never observed is worse than
+  one that omits it. Q4 item 3 records why the alternative (widening the return to
+  `tuple[str | None, dict]`) was rejected; do not reintroduce it here.
   Q7c's `_RECURRING_CONDITION_CATEGORIES` (task 4) is what puts this category on
   `states="open"` so a human close does not silence the slug forever; if task 4 has not
   landed yet, file it anyway — the default `--state open` on today's `_open_issue_exists`
@@ -3249,6 +3295,19 @@ round-4 adoptions round 5 verified as landed are untouched.**
 | R5-4 (CONCERN) | Adopted. `_issue_exists` drops `"--label", "documentation"` alongside the `--state`/`--limit` change. Safe structurally, not by judgment: the authoritative match is the exact `_normalize_title` compare at `:1051-1053`, so a wider candidate set cannot create a false hit. The label stays on the **filing** side (`:1115-1116`) — new issues keep it; the plan stops depending on it surviving triage | Q7c, Risk 7, task 4, Documentation, Test Impact, Verification |
 | R5-5 (NIT) | Adopted. Risk 8 is restated at spike-6's measured 0.29/run with nothing found in 28 of 35 sampled runs; the "whole issue budget" and "about four runs" figures are removed. The residual is named as the opposite of a burst — the backlog takes a rotation cycle to be reported at all | Risk 8 |
 | R5-6 (NIT) | Adopted, both halves, and (a) more strongly than proposed. No behind-count is stated anywhere: 30 → 69 (round 5) → 81 (this revision) is the evidence that any figure goes stale before the plan is committed, so obligation 1 and task 0 say "rebase for currency" and give the command to measure it. The `grep -c 'vault-drift'` companion is **deleted** rather than re-thresholded, per the R4-5 precedent, leaving the behavioral row to own the check | Lane status obligation 1, task 0 preflight, Verification |
+
+**2026-08-19 — round-6 revision. A concern-settling pass, not a revision round: round 6
+returned READY TO BUILD (with concerns) with 0 blockers, and R6-1 is the only finding.
+Nothing else was reopened — no new section, no new spike, no new task.**
+
+| Finding | Disposition | Where |
+|---|---|---|
+| R6-1 (CONCERN) | **Adopted, option (b) — the plan picks, the builder does not.** The escalation body no longer mandates "the failing step" or "whether the scoped restore succeeded". Both are locals inside `_push_branch_and_pr` that reach `logger.warning` and stop (`:1552`, `:1555`); its contract is `str \| None` (`:1459-1461`) and this plan does not widen it, so at the `pr_url is None` branch neither fact exists. The body now names the slug, the `files_touched` paths, and the scoped `git status --porcelain -- docs .claude` cleanup command, and **points at** the `docs_auditor: branch/push/PR …` log warning for the step rather than restating it. Both sites are edited together so they cannot drift, and the change makes the spec agree with what Q4 item 5 and the Success Criteria already said. Option (a) — widening the return to `tuple[str \| None, dict]` carrying `{"failing_step", "restore_ok"}` — **is rejected in writing**: (1) the failing step is not a value that exists today, since `:1474-1556` is one `try` with two catch-alls, so producing it means splitting the block into five separately guarded sites — new mechanism in a task list already reworking nine references and two direct call sites; (2) both fields are diagnostic, not actionable, and the remediation command the body already carries reports the checkout's **live** state, which beats a boolean recorded one run earlier; (3) the step detail is already durable in the log. The critic's binding constraint is honored in the strong form: the body asserts no restore outcome it did not observe, and the three-way ambiguity of `pr_url is None` is accepted explicitly rather than papered over — the two observations the body hands the operator resolve it at read time | Q4 item 3 (body spec + the rejection recorded), task 3 |
+
+**Convergence note.** This pass added no mechanism at all. It removed two fields from a
+prose spec, added a pointer to a log line that already exists, and wrote down the rejected
+alternative. No task count, no test, no Verification row, and no code surface changed.
+`revision_applied_at` is stamped and `plan_revising` is cleared; the next stage is BUILD.
 
 ## Critique Results
 
