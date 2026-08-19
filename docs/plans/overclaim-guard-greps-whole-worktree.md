@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2807
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-19T09:18:16Z
+revision_applied_at: 2026-08-19T09:57:27Z
 ---
 
 # Working-tree sweep guards must scan tracked content
@@ -1258,7 +1258,7 @@ the same moment:
   (`test_validate_no_redis_flush.py`, `test_validate_no_raw_redis_delete.py`),
   payload strings (`test_tool_call_delivery.py`, `test_verification_parser.py`),
   and — most awkwardly — `tests/unit/test_plan_migration_invariant.py`, which is
-  A6, dispositioned **DOCUMENT AS SAFE** and cited throughout this plan as the
+  A6, dispositioned `DOCUMENT AS SAFE` and cited throughout this plan as the
   reference pattern; its `grep -r` occurrence is the explanatory comment #2093
   added. Demanding an opt-out stamp on the plan's own exemplar is absurd, and the
   builder's alternative — loosening the matcher until the false positives vanish —
@@ -1491,7 +1491,7 @@ the table has shipped rows that could never have run.
 | V-19 | **Fresh worktree agrees with the primary checkout** at the same commit, on the **same pinned interpreter** (#2808 AC2) | `git worktree add /tmp/zz-verify HEAD && (cd /tmp/zz-verify && uv sync --all-extras && ./scripts/check-interpreter-pin.sh . && PYTHONPATH=/tmp/zz-verify ./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q -n 0); rc=$?; git worktree remove --force /tmp/zz-verify; exit $rc` | exit code 0, matching V-1. `uv sync` must report the worktree venv on the `.python-version` pin (3.14 at `cefc07e7e`) |
 | V-20 | **Foreign ambient cwd yields the same verdict** for both converted siblings (#2808 AC7). Runs the interpreter **directly, not through `scripts/pytest-clean.sh`** — see the wrapper note below | `cd /tmp && PYTHONPATH=$HOME/src/ai $HOME/src/ai/.venv/bin/pytest "$HOME/src/ai/tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation" "$HOME/src/ai/tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary" -q -n 0 -p no:cacheprovider` | exit code 0, identical to the in-repo run. **Pre-fix control:** measured from `/tmp` at `cefc07e7e`, A3 FAILS with `assert 2 == 1` and `grep: agent/memory_extraction.py: No such file or directory` while A2 passes vacuously — so the row is RED today and its green is attributable to the conversion |
 | V-21 | **Meta-guard positive control:** a planted offender under `tmp_path` is flagged | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "positive_control"` | exit code 0 |
-| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4) | `test "$(/usr/bin/grep -c -e '\*\*CONVERT\*\*' -e '\*\*ADD FLOOR' -e '\*\*DOCUMENT AS SAFE\*\*' docs/plans/overclaim-guard-greps-whole-worktree.md)" -eq 13` | exit code 0 |
+| V-22 | Sweep table has exactly 13 disposition rows covering all 27 sites (#2809 AC4). Pipe-free: the leading `[[:punct:]]` stands in for the cell-opening pipe, so the marker must **open a table cell** and a prose mention of a disposition name cannot inflate the count | `test "$(/usr/bin/grep -c -e '[[:punct:]] \*\*CONVERT\*\*' -e '[[:punct:]] \*\*ADD FLOOR' -e '[[:punct:]] \*\*DOCUMENT AS SAFE\*\*' docs/plans/overclaim-guard-greps-whole-worktree.md)" -eq 13` | exit code 0 |
 | V-23 | Feature doc exists | `test -f docs/features/tracked-content-sweep-guards.md` | exit code 0 |
 | V-24 | Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
 | V-25 | No production code touched | `test -z "$(git diff --name-only main... -- ':!tests/' ':!docs/')"` | exit code 0 |
@@ -1576,7 +1576,7 @@ now takes a keyword-only `repo_root=None` resolving to the module-level
 `REPO_ROOT`, and the mutable-corpus cases build a `git init` repo in `tmp_path`
 with `min_files=1`. Prototyped end-to-end: three committed `.py`, one moved
 aside with a plain `mv` → `git ls-files` still reports **3**, only **2** are
-present, `git grep` for the moved file's content returns **rc 1 (false clean)`**,
+present, `git grep` for the moved file's content returns **rc 1 (false clean)**,
 and restoring leaves `git status` empty — the 265-of-266 shape reproduced with
 nothing at stake. The seam is fenced by V-28 (`repo_root=` may appear in exactly
 two tracked files) and V-29 (running the helper's module must leave
