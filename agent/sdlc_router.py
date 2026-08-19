@@ -820,6 +820,15 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     )
 
 
+# The non-conflicting mergeStateStatus values /do-pr-review's own preflight
+# treats as proceed-worthy (.claude/skills-global/do-pr-review/sub-skills/
+# checkout.md decision table) — anything outside this set (DIRTY, None,
+# UNKNOWN, or an unrecognized value) still reads as a live conflict to G9.
+_G9_NON_CONFLICTING_MERGE_STATES = frozenset(
+    {"CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND"}
+)
+
+
 def guard_g9_blocked_on_conflict(
     stage_states: dict, meta: dict, context: dict
 ) -> Dispatch | Blocked | None:
@@ -855,11 +864,20 @@ def guard_g9_blocked_on_conflict(
     Two step-asides keep a resolved conflict from wedging the lane, so this
     escalates on a LIVE conflict only:
 
-    - ``pr_merge_state == "CLEAN"`` — the live world says the PR is mergeable,
-      so the recorded verdict is describing a conflict that has since been
-      resolved. Any other value (including ``None``/``UNKNOWN``) still
-      escalates: fail-closed, since an unknown merge state is exactly the
-      condition preflight treats as conflicting.
+    - ``pr_merge_state`` is in the non-conflicting set ``/do-pr-review``'s own
+      preflight already treats as proceed-worthy (issue #2796 tech debt round
+      1): ``CLEAN``, ``HAS_HOOKS``, ``UNSTABLE``, ``BLOCKED`` (GitHub's status
+      for a missing required review/check — not a merge conflict), and
+      ``BEHIND`` (out of date, not conflicting). The live world says the PR is
+      mergeable or at least not blocked by conflicts, so the recorded verdict
+      is describing a conflict that has since been resolved. Any other value
+      (including ``None``/``UNKNOWN``/``DIRTY``) still escalates: fail-closed,
+      since ``DIRTY`` and an unresolved/unknown merge state are exactly what
+      preflight itself treats as conflicting. ``_fetch_pr_merge_state``
+      (``tools/sdlc_stage_query.py``) retries once on a transient ``UNKNOWN``
+      read before this guard ever sees the value, so a resolved-but-just-read
+      ``UNKNOWN`` settles to its real state instead of reaching this guard at
+      all.
     - ``_review_verdict_is_stale`` — a ``/do-patch`` was dispatched after the
       verdict was recorded, so the rebase may already have landed. Step aside
       and let row 8b re-review; if the conflict survives, the re-review
@@ -875,16 +893,23 @@ def guard_g9_blocked_on_conflict(
     verdict = normalize_verdict(_latest_review_verdict(stage_states, meta))
     if REVIEW_BLOCKED_ON_CONFLICT not in verdict:
         return None
-    if meta.get("pr_merge_state") == "CLEAN":
+    if meta.get("pr_merge_state") in _G9_NON_CONFLICTING_MERGE_STATES:
         return None
     if _review_verdict_is_stale(stage_states):
         return None
 
     pr_number = meta.get("pr_number")
     merge_state = meta.get("pr_merge_state")
+    if merge_state == "DIRTY":
+        state_clause = "has merge conflicts"
+    else:
+        # None/UNKNOWN/any other unrecognized value: mergeability could not be
+        # confirmed, not confirmed-conflicting — say so rather than asserting
+        # a conflict that may not exist (#2796 tech debt round 1).
+        state_clause = "has an unresolved or unconfirmed merge state"
     return Blocked(
         reason=(
-            f"G9: PR #{pr_number} has merge conflicts "
+            f"G9: PR #{pr_number} {state_clause} "
             f"(review recorded BLOCKED_ON_CONFLICT, merge state {merge_state!r}). "
             f"No code review was performed. Rebase the branch onto main and "
             f"resolve the conflicts, then re-run /do-pr-review. No SDLC skill "

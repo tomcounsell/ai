@@ -1258,19 +1258,62 @@ class TestG9BlockedOnConflict:
 
     def test_clean_merge_state_steps_aside(self):
         """Live world says mergeable → the recorded conflict is resolved; do
-        not wedge the lane on a verdict describing a conflict that is gone."""
+        not wedge the lane on a verdict describing a conflict that is gone.
+
+        Asserts the concrete step-aside result, not just "not G9" (#2796 tech
+        debt round 1, nit 2) — a future guard swallowing this path should be
+        visible as a test failure, not a silent pass because *some* guard
+        that isn't G9 fired."""
         states, meta = self._conflicted(pr_merge_state="CLEAN")
         result = decide_next_dispatch(states, meta)
-        assert not (isinstance(result, Blocked) and result.guard_id == "G9")
+        assert isinstance(result, Dispatch), f"expected /do-patch (row 8), got {result!r}"
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8"
+
+    def test_non_conflicting_merge_states_step_aside(self):
+        """Widened step-aside (#2796 tech debt round 1): G9 must not escalate
+        on a mergeStateStatus that /do-pr-review's own preflight already
+        treats as proceed-worthy. BEHIND (out of date, not conflicting) and
+        UNSTABLE (non-required check failed) were previously misreported as
+        "has merge conflicts" — reproduced directly against the pre-fix guard
+        on this branch. BLOCKED (missing required review/check — a GitHub
+        status, not a conflict) and HAS_HOOKS complete preflight's set."""
+        for state in ("CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND"):
+            states, meta = self._conflicted(pr_merge_state=state)
+            result = decide_next_dispatch(states, meta)
+            assert isinstance(result, Dispatch), (
+                f"merge_state={state!r} wrongly escalated: {result!r}"
+            )
+            assert result.skill == SKILL_DO_PATCH
+            assert result.row_id == "8"
 
     def test_unknown_merge_state_still_escalates(self):
-        """Fail-closed: an unresolvable merge state is exactly what preflight
-        treats as conflicting — it must not read as "probably fine"."""
-        for state in (None, "UNKNOWN", "DIRTY", "BLOCKED"):
+        """Fail-closed: DIRTY and an unresolvable merge state are exactly what
+        preflight treats as conflicting — neither reads as "probably fine",
+        and BLOCKED/HAS_HOOKS/UNSTABLE/BEHIND no longer belong in this list
+        now that they step aside (see test_non_conflicting_merge_states_step_aside,
+        #2796 tech debt round 1)."""
+        for state in (None, "UNKNOWN", "DIRTY", "some-unrecognized-value"):
             states, meta = self._conflicted(pr_merge_state=state)
             result = decide_next_dispatch(states, meta)
             assert isinstance(result, Blocked), f"merge_state={state!r} did not escalate"
             assert result.guard_id == "G9"
+
+    def test_reason_does_not_assert_conflict_for_unresolved_state(self):
+        """The escalation reason must not claim "has merge conflicts" for a
+        merge state that never confirmed a conflict — only DIRTY is an
+        actual conflict; None/UNKNOWN/unrecognized are unresolved (#2796 tech
+        debt round 1, tech debt 2 "at minimum" ask)."""
+        states, meta = self._conflicted(pr_merge_state="DIRTY")
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert "has merge conflicts" in result.reason
+
+        states, meta = self._conflicted(pr_merge_state=None)
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Blocked)
+        assert "has merge conflicts" not in result.reason
+        assert "unresolved or unconfirmed merge state" in result.reason
 
     def test_stale_conflict_verdict_steps_aside_for_rereview(self):
         """A /do-patch dispatched AFTER the verdict may have landed the rebase.
@@ -1286,10 +1329,14 @@ class TestG9BlockedOnConflict:
         assert result.row_id == "8b"
 
     def test_no_pr_is_inert(self):
+        """Asserts the concrete no-PR result (#2796 tech debt round 1, nit 2)
+        rather than just "not G9" — a future guard swallowing this path
+        should be visible as a test failure."""
         states, meta = self._conflicted()
         meta["pr_number"] = None
         result = decide_next_dispatch(states, meta)
-        assert not (isinstance(result, Blocked) and result.guard_id == "G9")
+        assert isinstance(result, Blocked), f"expected Blocked(NO_RULE), got {result!r}"
+        assert result.guard_id == "NO_RULE"
 
     def test_other_verdicts_unaffected(self):
         """G9 is scoped to the conflict token — normal verdicts route as before."""
