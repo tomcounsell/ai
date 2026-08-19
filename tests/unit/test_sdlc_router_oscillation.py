@@ -1,4 +1,4 @@
-"""Tests for the Legal Dispatch Guards (G1-G6) and the #1036/#1043 replays."""
+"""Tests for the Legal Dispatch Guards (G1-G9) and the #1036/#1043 replays."""
 
 from __future__ import annotations
 

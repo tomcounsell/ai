@@ -7,7 +7,7 @@ delegates to ``decide_next_dispatch()`` in this module.
 
 Two sources of truth in the pipeline:
 - **Dispatch decisions**: ``agent/sdlc_router.py`` — ``DISPATCH_RULES`` + guards
-  G1–G6. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
+  G1–G9. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
 - **State-machine bookkeeping**: ``agent/pipeline_graph.py`` — ``PIPELINE_EDGES``,
   ``get_next_stage()``. Used by ``PipelineStateMachine`` to mark the next stage
   'ready' when one completes. Never consulted for dispatch decisions.
@@ -17,7 +17,7 @@ The algorithm:
     decide_next_dispatch(stage_states, meta, context)
         -> Dispatch | Blocked
 
-    1. Evaluate guards (G1–G6). If any guard trips, return its decision.
+    1. Evaluate guards (G1–G9). If any guard trips, return its decision.
     2. Otherwise, walk the ``DISPATCH_RULES`` list in row order and return
        the first rule whose ``state_predicate`` accepts ``(stage_states, meta,
        context)``.
@@ -2005,7 +2005,7 @@ def decide_next_dispatch(
     """Decide which sub-skill the SDLC router should dispatch next.
 
     Algorithm:
-      1. Evaluate guards G1–G7. If any guard trips, return its decision.
+      1. Evaluate guards G1–G9. If any guard trips, return its decision.
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
          rule whose ``state_predicate`` returns True as the primary dispatch.
       3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.

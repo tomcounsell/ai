@@ -1080,7 +1080,7 @@ class TestG7Gate6FallthroughRequiresG5ShortCircuit:
         states, meta, context = self._repro()
         # G5 in isolation must defer (its short-circuit fires).
         assert guard_g5_artifact_hash_cache(states, meta, context) is None
-        # The full guard chain (G1-G8) must not dispatch /do-build either —
+        # The full guard chain (G1-G9) must not dispatch /do-build either —
         # confirming no other guard picks up the slack G5 just gave up.
         guard_result = evaluate_guards(states, meta, context)
         assert not (isinstance(guard_result, Dispatch) and guard_result.skill == SKILL_DO_BUILD)
