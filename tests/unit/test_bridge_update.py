@@ -111,9 +111,12 @@ async def test_stale_bridge_reports_failed_not_ok(update_env, tg_client, event, 
     assert "✅" not in message
     assert f"bridge STALE {STALE_SHA}" in message
     assert "worker restarted" in message
-    # The fix session is still spawned, marked failed.
+    # The fix session is still spawned, marked failed. `failed` is passed by
+    # keyword (#2845), so this assertion is order-independent regardless of
+    # whether a positional `warnings` argument sits before it.
     bridge_update._queue_fix_session.assert_awaited_once()
-    assert bridge_update._queue_fix_session.await_args.args[-1] is True
+    call = bridge_update._queue_fix_session.await_args
+    assert call.kwargs.get("failed", call.args[-1] if call.args else None) is True
 
 
 @pytest.mark.asyncio
