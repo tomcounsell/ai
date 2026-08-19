@@ -1849,6 +1849,19 @@ concurrently. Never bare `pytest`; `scripts/pytest-clean.sh` reaps xdist workers
 - **Fixing the `/do-docs` skill's Step 4 push-ancestry guard, the memory-refresh hook
   body (#1249), or the skill's `status: "ok"` handling.** All adjacent, all separate.
 - **Auditing every other `git add -A` in the repo.** In scope: `reflections/docs_auditor.py`.
+- **Fixing the 19 broken `.md` links Q7 will report.** They are the *evidence* the gap is
+  real, not this lane's work. Q7 ships the reporting path; the reports get triaged like
+  any other issue. Fixing them inside this lane would make the acceptance test vacuous —
+  there would be nothing left for the detector to find.
+- **Rebuilding an auto-repair for `.md` links.** #2842 deleted the repairing detector for
+  a stated reason and #2739 is the reason. If automated repair is ever wanted again it
+  belongs behind this plan's review gate, argued from scratch, in its own issue.
+- **Widening the `.py` detector's regex to bare filenames.** #2759 ruled on this at
+  `:887-892` and the ruling stands. Q7a adds a *link* branch, not a wider path branch.
+- **Extending the census beyond `docs/`.** `.claude/` skill bodies carry deliberately
+  unresolvable template links (spike-6), and `docs/plans/completed/` and
+  `docs/plans/done/` are archives. Reporting on them is a separate argument nobody has
+  made.
 
 ## Risks
 
@@ -1908,6 +1921,41 @@ model and renders it on the dashboard.
 **Mitigation:** guard with the same `isinstance(result, dict)` check that already
 protects `projects`, coerce to `str`, and truncate. The field is already nullable and
 already rendered for other producers, so the surface is not new.
+
+### Risk 6: The widened deletion hatch silences a real broken reference (Q7b)
+
+**Impact:** a doc asserting something about a file that no longer exists goes unreported
+because the surrounding prose mentions a deletion. spike-7 measured this: without the
+live-claim veto, five suppressions in `docs/features/` were wrong. With the veto, four
+remain — all of them "Tests:" rows in `docs/features/test-coverage-standards.md` that cite
+deleted test files on lines that also carry the word "removed".
+**Mitigation:** the live-claim veto is mandatory, not optional (Q7b), and the Verification
+table carries a behavioral row for it. The residual four are accepted: a false positive
+costs a human a triage pass, a false negative costs a stale line in a document that is
+already narrating its own history. The direction of error is chosen deliberately, given
+#2834's evidence of a 2-of-3 false-positive rate.
+**Escalation if it proves wrong:** narrow the prose-cue window back to ±1 and keep the
+heading stems, which alone fix #2841's `:115` case. That is a one-line change and the test
+suite tells you immediately which controls it breaks.
+
+### Risk 7: Once-ever dedup hides a genuine regression (Q7c)
+
+**Impact:** a doc is fixed, its issue closed, the doc later regresses in exactly the same
+way, and `_issue_exists` matches the closed issue so nothing is filed.
+**Mitigation:** accepted, and stated in the feature doc rather than left to be discovered.
+The alternative is the status quo, which re-litigates every human ruling on a 30-day timer
+and has already produced two flood incidents (#1555, #1716). If a specific finding needs
+re-raising, reopening the closed issue is one click and is the honest signal.
+
+### Risk 8: The `.md` branch reports the 19-finding backlog as a burst
+
+**Impact:** the first several rotations after deploy spend their whole issue budget on
+pre-existing broken links, deferring `.py` findings.
+**Mitigation:** bounded and self-clearing. `ISSUE_FILING_PER_RUN_CAP = 5` and rotation is
+daily, so the backlog drains in about four runs, after which Q7c keeps it drained.
+spike-6 measured the steady-state rate at 0.29 findings per run. Note the rotation
+reflection is currently `enabled: false` on this machine (Open Question 3), so the burst
+does not begin until someone re-enables it deliberately.
 
 ## Race Conditions
 
@@ -1994,6 +2042,15 @@ the exact structure this plan is removing.
 - [EXTERNAL] Manually clearing the shared main checkout if it is already wedged from a
   pre-change rotation. A human must inspect the dirt and decide whether it is
   auditor output or another lane's in-flight work before anything is discarded.
+- [DEFERRED] Fixing the 19 broken `.md` links and the ~842 `.py` deleted-target findings
+  the census counted. Q7 makes them reportable and bounded; triaging them is downstream
+  work on whatever issues the auditor files. The `.py` census number is dominated by
+  `docs/plans/completed/`, which rotation reaches only through neighborhood links, so it
+  is not a pending flood — spike-6 measured the actual per-run exposure at 0.57.
+- [SEPARATE-ISSUE #2839] `docs/features/standardized-enums.md:19` cites
+  `tools/granite_interactive_tui_poc/cli.py`, which does not exist, in a live present-tense
+  table row. That is a **true positive** the auditor already filed. This lane's obligation
+  is to keep reporting it, not to fix the doc.
 
 ## Update System
 
@@ -2015,9 +2072,16 @@ real-git file is
 deliberately **not** added to the update smoke test — it shells out to git and `gh`
 and is too slow for that path.
 
+Q7 adds no update-system surface of its own: no dependency, no config file, no binary. It
+does add substrate tests to the same `tests/unit/test_docs_auditor_substrate.py` the smoke
+test runs, so the "green before merge" obligation above covers it unchanged.
+
 Deployment behavior to state plainly: merging changes the code on disk; it does not
 change the running worker. The docs auditor keeps executing the old module until the
-next `./scripts/valor-service.sh restart` that `/update` performs.
+next `./scripts/valor-service.sh restart` that `/update` performs. For Q7 specifically
+that means the new reporting behavior — including the first drain of the 19-finding `.md`
+backlog — starts at the restart, not at the merge, and only if the rotation reflection is
+enabled (Open Question 3).
 
 ## Agent Integration
 
@@ -2576,6 +2640,34 @@ post-build expectation that legitimately fails now.
 | Sizing spike re-run on built code | Call `_detect_deleted_target_issues` directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` for a sample of `docs/features/*.md` primaries and record the counts in the PR body. **Never** `audit(..., apply_mode="apply")` | in range of the plan-time baseline: 19 distinct in-scope `.md` findings, per-run mean 0.29 / max 3; `.py` mean 0.86 → 0.57; combined mean flat at 0.86 | post-build |
 | Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
 
+## Revision Log
+
+**2026-08-19 — #2834 folded into this lane. No critique round; this is a scope addition
+after the terminal round.**
+
+The terminal critique (round 3) closed at READY TO BUILD (WITH CONCERNS), 0 blockers, and
+its four accepted residuals are settled in the body above. Nothing in this revision
+reopens them. What changed:
+
+| Area | Change |
+|---|---|
+| Frontmatter | `also_tracks: #2834`, `closes: [2739, 2834]`, `also_tracks_last_comment_id: 5324492042` |
+| Problem | Split into Defect 1 (#2739) and Defect 2 (#2834), with the three 2026-08-17 filings tabulated |
+| Freshness Check | Re-anchored to `f491306c5`; corrected both of #2834's own `file:line` citations; added the 13-row anchor table Q7 relies on; recorded that `reflections/docs_auditor.py` is unchanged since `a9205b065` |
+| Lane identity | Every `.worktrees/docs-auditor-review-gate` reference corrected to the recorded lane `sdlc-2739`; every hardcoded `/Users/valorengels/src/ai` replaced with `${AI_REPO_ROOT:-$HOME/src/ai}` |
+| Spikes | Added spike-6 (`.md` volume sized), spike-7 (hatch widening measured against the three real controls), spike-8 (frame question resolved by reusing spike-3, not re-run) |
+| Technical Approach | New **Q7** with three parts: Q7a `.md` reporting, Q7b hatch widening, Q7c convergence |
+| Step by Step Tasks | Tasks 1 and 2 recorded as already committed on `session/sdlc-2739`; rebase obligation stated; new task 4 `build-reference-parity`; downstream tasks renumbered |
+| Test Impact | 14 new Q7 cases in the substrate suite; 3 existing-test dispositions for the `_issue_exists` rename, `TestDeletedTargetFiltering`, and `_is_placeholder_path` |
+| Documentation / Success Criteria / Verification | Q7 sections and 13 new Verification rows, four of them behavioral because a grep cannot distinguish doc-relative from repo-root resolution |
+| Risks / Rabbit Holes / No-Gos | Risks 6-8 (over-suppression, once-ever dedup, backlog burst); four new rabbit holes; three new No-Gos |
+
+**One finding surfaced while re-anchoring, recorded here because it changes blast radius:**
+`_is_documented_deletion` has **two** call sites, not one — `:903` in the detector and
+`:679` inside `_make_stale_term_replacer`, on the **write** path. Q7b's widening therefore
+makes stale-term application more conservative as well. Ruled acceptable and argued in
+Q7b; the Verification row's expected count was corrected from `> 2` to `> 4` accordingly.
+
 ## Critique Results
 
 **Round 1 — 2026-08-18, against commit `81a0c6cf1` (the post-#2842 refresh). Verdict: NEEDS REVISION, 4 blockers / 7 concerns.**
@@ -2640,6 +2732,13 @@ Two further build-time notes from the terminal round, neither a finding:
 > `a9205b065`. The former Q5 ("accept README index line deletion?") is moot:
 > `_detect_readme_broken_entries` was deleted entirely by #2842 rather than kept with
 > its rename branch removed, so the behavior change it asked about cannot occur.
+>
+> **#2834 raised no new open question.** Its three constraints — report don't repair,
+> size the volume first, respect the doc-relative frame — are each settled in Q7 with a
+> stated decision and measured evidence, and its one genuinely open sub-claim (whether
+> ".py deletion narrative files false issues" is real) was resolved to **yes** by
+> reproducing all three 2026-08-17 filings against `f491306c5` (spike-7). Nothing about
+> #2834 needs a human before BUILD.
 
 1. **Q2 — confirm unreviewed auto-merge dies.** The predicate is inverted today
    (any review disqualifies), and repairing it yields "merge approved PRs", which
