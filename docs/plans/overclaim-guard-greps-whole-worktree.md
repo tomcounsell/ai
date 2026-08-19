@@ -1026,8 +1026,42 @@ deliberately not exposed to the agent.
 - **Assigned To**: guard-converter
 - **Agent Type**: builder
 - **Parallel**: false
-- A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`. Add the `#2093`-style comment naming the `.pyc` hazard.
-- A2 `test_anthropic_client_semaphore.py:164` — route through the helper; carry `_ALLOWED_DIRECT_CONSTRUCTORS` across as `allow=`. This is the **one** genuine line-substring exemption, since it filters matched output lines by module path rather than filtering the corpus. Note in the comment that this site was **vacuously green**, not merely unpinned.
+**Every conversion pins its own `min_files`.** All four are measured at
+`7ba89ca5c` and sit inside the 60-70% band Risk 1 mandates. Leaving any of them
+to the builder invites the `current - 1` floors Risk 1 forbids:
+
+Counts are the **post-exclusion** corpus — the same pathspec set the helper
+passes to `git ls-files`, so the floor is compared against what is actually
+scanned:
+
+| Site | Corpus | Tracked files | `min_files` | Share |
+|---|---|---|---|---|
+| A1 | `'tools/*.py' 'agent/*.py'` | 266 | **170** | 64% |
+| A2 | `'agent/*.py' 'bridge/*.py' 'tools/*.py'` minus 6 exclusions | 304 | **200** | 66% |
+| A3 | `'agent/memory_extraction.py'` | 1 | **1** | single file |
+| A7 | `'*'` minus 4 exclusions | 2060 | **1300** | 63% |
+
+Put the measured count and its commit in the **assertion message**, not a
+comment, per Risk 1 — the person who trips the floor must see the rationale at
+the same moment:
+`f"scanned {len(present)} tracked files, floor {min_files} (266 tracked at 7ba89ca5c; lower this only if the corpus really shrank)"`.
+
+- A1 `test_sdlc_review_finalize.py:1093` — route through the helper over `'tools/*.py'` and `'agent/*.py'`, `min_files=170`. Add the `#2093`-style comment naming the `.pyc` hazard.
+- A2 `test_anthropic_client_semaphore.py:164` — route through the helper using **negative pathspecs, not `allow=`**. Every member of `_ALLOWED_DIRECT_CONSTRUCTORS` is a file path, so the existing `:180-181` line filter is whole-file exemption expressed unsafely (it substring-matches the whole `path:lineno:content` line, so a comment merely mentioning an approved module exempts a real violation). Keep `_ALLOWED_DIRECT_CONSTRUCTORS` as a module constant feeding the exclusion list so the six approved modules keep their `#1055`/`#1193`/`#1262`/`#1925` comments:
+  ```python
+  assert_absent_from_tracked(
+      "anthropic.AsyncAnthropic(",
+      "agent/*.py", "bridge/*.py", "tools/*.py",
+      ":!agent/anthropic_client.py",
+      ":!agent/memory_extraction.py",
+      ":!agent/session_completion.py",
+      ":!bridge/read_the_room.py",
+      ":!bridge/promise_gate.py",
+      ":!agent/llm/wrapper.py",
+      min_files=200,
+  )
+  ```
+  Note in the comment that this site was **vacuously green**, not merely unpinned.
 - A3 `test_memory_extraction.py:2563` — route through the helper over `'agent/memory_extraction.py'`, `min_files=1`. Keep both patterns exactly as written (`anthropic\.Anthropic(`, `anthropic\.AsyncAnthropic(`) — they are BRE and need no change. Note that this site was false-**red**, correcting #2808.
 - A7 `test_no_legacy_paths.py:25` — replace the `if rc == 0:` gate with three-way triage. Corpus stays **every tracked file type**, so the pathspec is `'*'` plus negative pathspecs, not `*.py`:
   ```python
