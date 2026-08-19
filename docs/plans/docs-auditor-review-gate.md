@@ -1195,8 +1195,26 @@ verification fixes the rest.
 4. **Outcome routing in `run_docs_auditor`.** Because the guards moved,
    `pr_url is None` after `audit()` now unambiguously means failure, not "a guard
    fired". The three outcomes become distinct: `ok` (PR created), `skipped`
-   (guard fired; nothing written to the working tree, no git operation, **rotation hash
-   stamped**), `error` (write happened, PR did not).
+   (nothing written to the working tree, no git operation, no PR; on the guard path the
+   **rotation hash is stamped**), `error` (write happened, PR did not).
+
+   **The vocabulary is applied to every no-PR return in the function, not just the guard
+   path (R7-2).** `run_docs_auditor` has five `"status": "ok"` returns on `main` — `:1849`
+   lock held, `:1861` dirty tree, `:1876` no candidates, `:1921` zero-diff, `:1979` PR
+   created — and three of them sit one line below a `_write_liveness(..., "skipped", ...)`
+   call. R5-1's ruling that a payload saying `ok` while liveness says `skipped` is drift
+   inside a single return statement is a **class** rule, so all four no-PR returns become
+   `"status": "skipped"` and `ok` comes to mean exactly *a PR was created*. The summary
+   strings already say so on every one of them (`skipped: locked`, `skipped: dirty_tree`,
+   `skipped: no candidates`, `zero-diff`); only the status field disagreed. Nothing keys
+   off the value — the scheduler reads only `result["projects"]`
+   (`agent/reflection_scheduler.py:639-640`) and sets `last_status` from its own execution
+   outcome — so this is four string literals plus the three existing assertions that pin
+   them (`tests/unit/test_docs_auditor_substrate.py:218` in
+   `test_concurrent_run_returns_skipped`, whose *name* already asserts what its body
+   denies, `:241`, and `:1304`), all listed in **Test Impact**. No new mechanism, and the
+   three-outcome table below becomes literally true of the function rather than of one
+   branch of it.
 
    **What fires on which outcome, exhaustively (NEW-1).**
 
@@ -1264,6 +1282,16 @@ verification fixes the rest.
    only `result["projects"]` (`agent/reflection_scheduler.py:639-640`), and
    `run_docs_auditor` has no other caller in the repo.
 
+   **And the same correction lands on the three sibling returns, because the rule is a
+   class rule (R7-2).** The lock-held return (`:1849`), the no-candidates return (`:1876`)
+   and the zero-diff return (`:1921`) all report `"status": "ok"` for a run that produced
+   no PR, and the last two do it one line below their own
+   `_write_liveness(..., "skipped", ...)`. Fixing only the guard would leave the drift this
+   item names in two of the three places it occurs and leave item 4's vocabulary false on
+   the tree it is checked against. All four become `"skipped"` in the same task-3 edit; see
+   item 4 for the full accounting and **Test Impact** for the three assertions that move
+   with them.
+
    **Argued down: the guard must NOT file an issue.** The critic's proposed remedy was to
    have the dirty-tree guard file `docs-auditor: shared checkout dirty, rotation halted`
    and return `error`. In this repository that converts a fail-safe into a flood.
@@ -1287,6 +1315,17 @@ verification fixes the rest.
    auditor is quiet about its own wedge until someone looks. That is the module's
    existing fail-open posture for `gh` (`_open_issue_exists` returns `False` on any `gh`
    failure by design), and this plan does not change it.
+
+   **This argument is load-bearing on Q7c's fast-path gate, and the coupling is stated
+   here so a later reader does not sever it (R7-1, R7-6).** "Stays open until a human
+   acts, and files again if the failure returns after they close it" is only true because
+   Q7c gates `_file_issue_if_new`'s per-machine Redis fast-path on
+   `states == "all"`. Without that, the `operational-failure` filing is suppressed locally
+   for 30 days regardless of the issue's state, a second wedge inside that window is
+   announced by nothing, and the silent guard becomes the defect rather than the fail-safe.
+   The two changes ship in the same lane and `docs/features/docs-auditor.md` records the
+   dependency, so a future reader tempted to make the guard file an issue reads why the
+   silence was safe first.
 
 On the failure mode this replaces: today's plain `git checkout main` in the `finally`
 block (`:1557-1563`, no `check=`, return code discarded) fails when local
@@ -1765,8 +1804,26 @@ Principle 1.
   _RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})
   ...
   states = "open" if finding.get("category") in _RECURRING_CONDITION_CATEGORIES else "all"
+  # The Redis fast-path is itself a 30-day suppression, so it must not run ahead
+  # of a gate whose whole purpose is to re-fire when the condition recurs (R7-1).
+  if states == "all" and redis_client.exists(dedup_key):
+      return False
   if _issue_exists(title, repo_root, states=states):
   ```
+
+  **The `states` selection has to happen before the Redis fast-path, and the fast-path's
+  key writes have to sit behind the same condition (R7-1).** `_file_issue_if_new` is
+  two-tier: `:1078-1082` is `if redis_client.exists(dedup_key): return False` and
+  `:1085-1094` stamps that key with `ex=86400 * 30` on both the dedup-hit and the
+  successful-create paths. Selecting `states` only for the `gh` query would leave the
+  exemption inert for 30 days — the machine that filed the issue never reaches
+  `_issue_exists` again inside the window, so a human closing the issue and the failure
+  returning produces silence, which is exactly the behavior the exemption exists to
+  prevent. Both the `exists` read **and** the two `set` writes are therefore gated on
+  `states == "all"`; gating only the read would re-stamp the key on every suppressed run
+  and the window would never close. Recurring categories give up the local cache and pay
+  one `gh issue list` per filing attempt: bounded at ≤5 vault-drift plus ≤1
+  `operational-failure` per run, so at most six extra `gh` calls on a rotation.
 
   Vault-drift therefore keeps exactly today's semantics (open-only gate, 30-day Redis
   fast-path), and every reference-shaped category converges. The default is `"all"` so a
@@ -1784,8 +1841,8 @@ Principle 1.
   *"I cleaned this up once"*, not *"this is not a defect"*. Under `"open"` it files once,
   stays suppressed while open, and files again only after a human has closed it and the
   failure has actually returned — which is the behavior Q4 item 5 leans on when it argues
-  the dirty-tree guard down. This extends R4-2's mechanism by one membership; it does not
-  reopen it.
+  the dirty-tree guard down. This extends R4-2's mechanism by one membership and the
+  fast-path gate above; it does not reopen it.
 - **Why the `documentation` label filter goes with it (R5-4).** `_open_issue_exists`
   filters on `"--label", "documentation"` (`:1026-1027`). Left in place, "file once,
   ever" is silently conditional on the closed issue still *carrying that label* — and
@@ -1938,6 +1995,20 @@ returns nothing.
       `_file_issue_if_new` was **not** called — the guard fires on a concurrent lane's
       uncommitted work as readily as on the auditor's own residue, and a filing guard
       would blame the auditor for a peer's dirt (Q4 item 5).
+- [ ] `TestLockContention::test_concurrent_run_returns_skipped` (assertion at `:218`) —
+      UPDATE (R7-2): `assert result["status"] == "ok"` becomes `== "skipped"`. The test's
+      own name already asserts the outcome its body denied; the `"locked" in summary`
+      assertion beside it is unchanged.
+- [ ] `test_zero_diff_skips_pr_creation` (assertion at `:241`) and
+      `test_all_withheld_zero_diff_run_still_notifies` (assertion at `:1304`) — UPDATE
+      (R7-2): both become `== "skipped"`. Everything else in those tests — the "push was
+      not called" assertion, the withheld Telegram alert, the `"zero-diff" in summary`
+      check — is unchanged, because the zero-diff behavior itself is not being touched;
+      only the label on a return that produced no PR.
+- [ ] No test pins the **no-candidates** return: `grep -n 'no candidates\|no-candidates\|
+      NoCandidates' tests/unit/test_docs_auditor_substrate.py` returns nothing, so `:1876`
+      is a bare string edit with no test disposition. Recorded so a builder does not go
+      looking for one.
 
 Q7 breaks existing tests in three places (re-derived on `f491306c5`):
 
@@ -2166,6 +2237,13 @@ existing detector classes:
       vault/site pair does **not** suppress a fresh filing, and a closed
       `broken-md-link` issue does. A build that applies `all`
       uniformly passes every other Q7c case and fails this one.
+      **Run that behavioral half with the Redis dedup key already set (R7-1)** — file once,
+      let the key be written, close the issue, and file the same recurring-condition
+      finding again inside the 30-day window; a second `gh issue create` must fire. With
+      the fast-path ungated this case is the only one that goes red, because the argv
+      assertions above never reach `_issue_exists` on the second call. Assert the mirror
+      too: a `broken-md-link` finding with the key set files nothing, so the fast-path is
+      gated rather than deleted.
 - [ ] **A closed issue without the `documentation` label still suppresses (R5-4).** In
       `TestCrossMachineDedup`: stub `gh issue list` to return one **closed** issue whose
       title matches exactly and whose labels do **not** include `documentation`, and
@@ -2683,7 +2761,10 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - [ ] A **vault-drift** or **operational-failure** finding a human closes **is** re-filed
       when the condition recurs: `_file_issue_if_new` passes `states="open"` for both
       categories, so one reconciliation does not silence a vault/site pair — or one
-      checkout cleanup a wedged rotation — permanently.
+      checkout cleanup a wedged rotation — permanently. Demonstrated **with the 30-day
+      Redis dedup key already set** (R7-1), because the per-machine fast-path is gated on
+      `states == "all"` and so is its key write; an exemption that only changes the `gh`
+      argv would leave the same silence for 30 days.
 - [ ] The stale-term apply path is unchanged in behavior by Q7b's veto: a `STALE_TERMS`
       hit on a live-claim line under a deletion heading is still suppressed, because
       `_make_stale_term_replacer` never passes `live_claim_veto=True`. The auditor gains a
@@ -3006,6 +3087,19 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   would mint issues blaming the auditor for a peer's dirt. Q4 item 5 records the full
   argument; the escalation belongs on the failure path above, which knows it caused the
   dirt.
+- **Q4 / R7-2: the three sibling no-PR returns get the same label, in the same edit.**
+  `run_docs_auditor` has five `"status": "ok"` returns on `main` — `:1849` lock held,
+  `:1861` dirty tree, `:1876` no candidates, `:1921` zero-diff, `:1979` PR created. Change
+  the first four to `"status": "skipped"`, leaving `:1979` as the only `"ok"` in the
+  function, so the status field means what Q4 item 4's vocabulary says it means. Each is a
+  one-string edit; the summary strings on all four already read `skipped: locked`,
+  `skipped: dirty_tree`, `skipped: no candidates` and `zero-diff` and are unchanged.
+  Nothing consumes the value (`agent/reflection_scheduler.py:639-640` reads only
+  `projects`), so this is a labelling correction with no behavioral reach. Three existing
+  assertions move with it — `tests/unit/test_docs_auditor_substrate.py:218`, `:241`,
+  `:1304` — all listed in **Test Impact**. Re-derive the four anchors on the rebased branch
+  before editing; `grep -n '"status": "ok"' reflections/docs_auditor.py` reads **7** today,
+  the last two (`:2100`, `:2279`) being `run_docs_branch_sweeper`'s and **out of scope**.
 - Q5 (NEW-2): add `body` to the sweeper's `gh pr list --json` field set at `:2147`
   (`number,state,createdAt` → `number,state,createdAt,body`). Deleting
   `_pr_is_auto_merge_eligible` removes the only place the sweeper ever fetched a PR body
@@ -3107,6 +3201,14 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
   recur after a genuine cleanup, so under `all` a single human close would silence either
   one permanently. A parameter and a membership set, not a second function — the parallel
   path Principle 1 forbids.
+  **Order matters (R7-1): compute `states` *above* the Redis fast-path at `:1078-1082` and
+  gate that block on it** — `if states == "all" and redis_client.exists(dedup_key): return
+  False` — and put the two `redis_client.set(dedup_key, "1", ex=86400 * 30)` writes
+  (`:1085-1094` and the post-create one) behind the same `states == "all"` condition. Leave
+  the fast-path ahead of the selection and the exemption is inert for 30 days on the
+  machine that filed; gate the read without gating the writes and the key is re-stamped on
+  every suppressed run so the window never closes. This is a reordering, not a new
+  mechanism.
 - Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
   *"(and re-files any that were closed without fixing the doc, since the dedup gate only
   sees open issues)"*. Delete it; do not annotate it.

@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2748
 last_comment_id: 5280929435
 revision_applied: true
-revision_applied_at: 2026-08-19T06:37:21Z
+revision_applied_at: REVISION_APPLIED_AT_PLACEHOLDER
 ---
 
 # Doctor console-script check: verify the winning script's interpreter
@@ -359,9 +359,9 @@ so the answer does not depend on which directory happened to win.
 The code change is still small: one function extension and two private helpers in
 `tools/doctor.py`. The verification apparatus around it is what four critique rounds have
 grown, and the honest inventory is a three-way parameterized rewrite of `_fake_checkout`,
-17 numbered test cases of which five are themselves parameterized (case 6 over four
+19 numbered test cases of which five are themselves parameterized (case 6 over four
 shebang forms, case 11 over three reasons, case 13 over four degenerate inputs, case 14
-over two variants, case 15 over two venvs), a 15-row mutation table each row of which is a
+over two variants, case 15 over two venvs), a 19-row mutation table each row of which is a
 break-run-record-restore cycle, four docstring corrections, and a from-scratch
 `docs/features/local-doctor.md` that must also write up #2665's resolution half, which was
 never documented.
@@ -678,7 +678,7 @@ three example names → **fix** names the rebuild
     an interpreter failure can be true at once and the output must name both. When *only*
     interpreter findings exist, the check still fails, with a message that does not borrow
     the `X/N ... do not resolve` phrasing (they did resolve — that would be a lie).
-  - *Pass path* (`tools/doctor.py:313-318`): the message **changes**, and it has to. It
+  - *Pass path* (`tools/doctor.py:312-317`): the message **changes**, and it has to. It
     gains a trailing interpreter-verified count, so a run that verified nothing cannot
     read as a clean bill of health.
 
@@ -764,16 +764,41 @@ three example names → **fix** names the rebuild
   to delete it. Measured directly: with `venv_bins = [<root>/real/.venv/bin]` and
   `found_path = <root>/link/.venv/bin/foo` where `link` symlinks `real`, the dropped-leg
   predicate evaluates `True` and the three-leg form evaluates `False`. Case 16 pins this,
-  and it needs a fixture whose PATH and `PROJECT_DIR` spellings genuinely diverge — cases
-  1-15 all derive every path from one `tmp_path`, so none of them can catch it.
+  and it needs a fixture whose PATH and `PROJECT_DIR` spellings genuinely diverge — every
+  other case derives every path from one `tmp_path`, so none of them can catch it.
 
-  Append to whichever of the three sentences applies:
+  **The trailer is a group-level aggregate, because findings are grouped by
+  `(reason, target)` while `found_path` is per-script.** One group can hold several
+  scripts of which only some were accepted through the `_same_file` leg, and both of the
+  obvious per-script readings are wrong in a way this plan already names. Naming one
+  member's path arbitrarily leaves the other stale copies still winning `shutil.which`
+  after the rebuild, so the next doctor run reports *them* as resolution failures — the
+  "converts one finding shape into another" pattern from Why Previous Fixes Failed. One
+  trailer per script breaks the single-actionable-line guarantee that case 9 and the
+  grouping mutation row exist to protect. So:
+
+  1. While looping, append `found_path` to a `hardlinked_paths` list on the group entry
+     whenever `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`.
+  2. When rendering the group's fix sentence, emit the trailer only if that list is
+     non-empty, and render it over the **whole** list using the file's existing
+     truncation convention at `tools/doctor.py:260-263` (show at most 5, append
+     `(+N more)`).
+  3. At length 1 the wording stays singular, so case 5's assertion string is unchanged.
+
+  Singular form (length 1):
 
   `Also remove the stale hardlinked copy at {found_path}, which survives the rebuild with the old shebang.`
 
+  Plural form (length > 1), same convention as `:260-263`:
+
+  `Also remove the stale hardlinked copies at {p1}, {p2}(+N more), which survive the rebuild with the old shebang.`
+
   The shared `rm -rf .venv && uv sync --all-extras` command is unchanged, so Risk 5's
-  one-action mitigation still holds; only the diagnosis grows. Task 3 case 5 asserts this
-  trailer is present and that `/update` is still absent.
+  one-action mitigation still holds; only the diagnosis grows. Four task 3 cases pin the
+  trailer from four directions: case 5 asserts it is present for a single `os.link` copy
+  and that `/update` is still absent, case 16 asserts it is absent for a divergent PATH
+  spelling, case 18 asserts it is absent for a symlink, and case 19 asserts one grouped
+  line carries one aggregate trailer naming both hardlinked paths.
 
   An earlier draft added a fourth sentence naming `/update` for scripts accepted via the
   `_same_file` branch, on the premise that `/update` hardlinks entry points into
@@ -1126,6 +1151,13 @@ new finding inside an existing check that the agent already knows how to run and
 - [ ] A hardlinked copy accepted via `_same_file` whose shebang is stale is flagged; its
       fix prescribes the venv rebuild, does not mention `/update`, and additionally names
       the hardlinked path as something the rebuild will not clear.
+- [ ] A **symlinked** on-PATH copy of a stale venv script is flagged for its shebang
+      **without** the hardlink trailer — a symlink re-points at the rebuilt inode, so the
+      trailer's instruction and rationale are both false for it.
+- [ ] When one `(reason, target)` group holds several hardlink-accepted scripts, the group
+      emits **one** finding line carrying **one** trailer that names every hardlinked path
+      (truncated at 5 with `(+N more)`), so no stale copy is left winning `shutil.which`
+      after the rebuild.
 - [ ] Each of the three failure reasons emits a distinct fix sentence.
 - [ ] Findings sharing one `(reason, target)` report as a single line with a count and
       capped example names, not one line per script.
@@ -1310,15 +1342,28 @@ new finding inside an existing check that the agent already knows how to run and
   (`Also remove the stale hardlinked copy at {found_path}, ...`) when the finding's script
   was accepted via `_same_file`, since the rebuild alone leaves that copy winning PATH with
   the old shebang.
-- **Gate that trailer on the resolution step's full three-leg membership test**, not on a
-  restatement of two of its legs. Compute
+- **Gate that trailer on the resolution step's full three-leg membership test plus an
+  `is_symlink` exclusion**, not on a restatement of two of its legs. Compute
   `in_bin_dir = found_path.parent == match or os.path.realpath(found_path.parent) == os.path.realpath(match)`
-  inside the loop and gate on `not in_bin_dir and _same_file(found_path, match / name)`.
-  Writing `found_path.parent not in venv_bins and _same_file(...)` drops the realpath leg at
-  `tools/doctor.py:243`, so on any host whose PATH spells a venv bin dir differently from
-  `PROJECT_DIR` the trailer fires on the venv's own entry point and instructs its deletion
-  (measured; see the remediation bullet in Technical Approach). Case 16 pins this; the
-  task 4 mutation drops the realpath leg from the gate.
+  inside the loop and gate on
+  `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`.
+  Two ways to get this wrong, both measured:
+  - Writing `found_path.parent not in venv_bins and _same_file(...)` drops the realpath leg at
+    `tools/doctor.py:243`, so on any host whose PATH spells a venv bin dir differently from
+    `PROJECT_DIR` the trailer fires on the venv's own entry point and instructs its deletion.
+    Case 16 pins this; the task 4 mutation drops the realpath leg from the gate.
+  - Omitting `not found_path.is_symlink()` fires the trailer on a **symlinked** on-PATH
+    copy. `_same_file` calls `os.stat`, which follows symlinks, so it is `True` for a
+    symlink and a hardlink alike; only `is_symlink()` (an `lstat`, safe on a dangling
+    link) separates them. A symlink re-points at the rebuilt inode and reads the new
+    shebang, so both the trailer's instruction and its rationale are false there. Case 18
+    pins this; the task 4 mutation drops the `is_symlink` leg.
+- **Render the trailer as a group-level aggregate, never per script.** Groups are keyed by
+  `(reason, target)` while `found_path` is per-script, so carry a `hardlinked_paths` list on
+  each group entry, append to it under the gate above, and emit one trailer over the whole
+  list when it is non-empty — truncated at 5 with `(+N more)`, matching `:260-263`. Keep the
+  singular wording at length 1 so case 5's assertion string is unchanged. Case 19 pins the
+  plural shape.
 - Extend the pass message with the pinned clause
   `f", {verified} of {len(scripts)} interpreter-verified"`, keeping today's
   `N console scripts resolve into <venv bin>` prefix verbatim ahead of it. The ratio form
@@ -1422,8 +1467,31 @@ new finding inside an existing check that the agent already knows how to run and
   whose `pyvenv.cfg` has been deleted (or carries a malformed `version_info`), with the
   repo pin resolvable. Assert `passed is True`, no `off-pin` finding, and that the message
   never contains `is Python None`. Also assert the script is excluded from the verified
-  ratio, e.g. `"2 of 3 interpreter-verified" in result.message`, so "no finding" cannot be
-  satisfied by a check that silently claims to have verified something it never compared.
+  ratio, so "no finding" cannot be satisfied by a check that silently claims to have
+  verified something it never compared. **The ratio is `0 of 3`, not a mixed one.**
+  `_fake_checkout`'s three shims all shebang at the fixture's own `.venv/bin/python3`, so
+  deleting that one `.venv/pyvenv.cfg` makes `venv_python_version(parent.parent)` return
+  `None` for all three and the pinned clause is exactly `", 0 of 3 interpreter-verified"`.
+  Assert that string. A mixed ratio is available only by pointing one shim at a second venv
+  that still carries a valid `pyvenv.cfg`; the criterion is proved either way, so take the
+  single-venv form unless the mixed one reads better.
+
+- **Case 18 — symlinked on-PATH copy gets no trailer.** Build the venv copy with a bad
+  shebang and put a `os.symlink(root/'.venv'/'bin'/name, local_bin/name)` ahead of it on
+  PATH. Assert the interpreter finding fires **and** that
+  `"Also remove the stale hardlinked copy at"` is **absent** from `fix`. Case 5 keeps
+  `os.link` and keeps asserting the trailer is present, so the two cases pin opposite
+  directions of the same gate. Without case 18 the `is_symlink` leg is unreachable by any
+  test: `_same_file` is `True` for a symlink and a hardlink alike, so case 5 passes with
+  the leg present or absent.
+
+- **Case 19 — grouped trailer names every hardlinked path.** Two declared names, both
+  hardlinked out of one non-venv directory onto PATH, both venv copies carrying the same
+  bad shebang so they land in one `(reason, target)` group. Assert exactly one grouped
+  finding line, exactly one trailer sentence, and that the trailer names **both** paths.
+  Neither existing case forces this: case 5's fixture is single-name and case 9's grouped
+  fixture builds no hardlinks, so a per-script trailer and an arbitrary-single-member
+  trailer are both green without this case.
 
 ### 4. Mutation-check every guard
 
@@ -1452,11 +1520,18 @@ new finding inside an existing check that the agent already knows how to run and
   | Merged tail guard reverted to `if misresolved:` | case 10 |
   | Realpath leg dropped from the hardlink-trailer gate (`found_path.parent not in venv_bins and _same_file(...)`) | case 16 |
   | `v is None` guard removed from the pin comparison (`None` reaches the inequality) | case 17 |
+  | `is_symlink` leg dropped from the hardlink-trailer gate | case 18 |
+  | Trailer rendered from one arbitrary group member instead of the whole `hardlinked_paths` list | case 19 |
+  | Pin-unresolvable disclosure clause removed | case 8 |
+  | Interpreter read applied to misresolved names too (moved outside the `match is not None` branch) | `test_a_shadowed_name_still_reads_as_shadowed` |
 
   The realpath rule is verified **here**, by mutation, and not by a source scan: the
   whole-file regex row an earlier draft carried matched the prohibition written in prose and
   missed the two-step `resolved = os.path.realpath(target)` form, both measured. It has been
   deleted from the Verification table.
+  The last row's expected failure is a **pre-existing** test rather than a new case.
+  Recorded explicitly because a validator who has not been told to expect it reads that
+  failure as a fixture regression from task 1 and starts repairing the wrong thing.
 - A mutation that leaves the suite green is a missing test, not an acceptable result:
   report it and route back to task 3.
 - Re-measure after any change to task 3's tests; a guard verified in an earlier round
@@ -1576,11 +1651,11 @@ task 2 pins both names.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The hardlink trailer gate `not in_bin_dir and _same_file(found_path, match / name)` also fires for a **symlinked** on-PATH copy, because `Path.samefile` follows symlinks while `found_path.parent` is the symlink's own containing directory. For a symlink both the trailer's instruction and its stated rationale are false: a symlink does not survive a venv rebuild carrying the old shebang, it re-points at the new inode and picks up the new shebang automatically. Measured on this machine: with `venv_bins=[<tmp>/repo/.venv/bin]` and `found_path=<tmp>/local/bin/foo` symlinked to `<tmp>/repo/.venv/bin/foo`, `is_symlink()` is True, `_same_file` is True, `in_bin_dir` is False, so the trailer fires; after replacing the venv copy with a new inode the symlink reads the NEW shebang while the hardlinked control still reads the OLD one. This is the same class of defect as the `/update` sentence round 4 dropped: remediation text for a state it does not actually describe. | pending | Gate the trailer on `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`. `_same_file` cannot discriminate the two shapes (it calls `os.stat`, which follows symlinks, so it is True for both); `is_symlink()` is an `lstat` and is the only cheap discriminator, and it never raises on a dangling link. Add a task 3 case that builds `os.symlink(root/'.venv'/'bin'/name, local_bin/name)`, gives the venv copy a bad shebang, and asserts the interpreter finding fires while `"Also remove the stale hardlinked copy at"` is ABSENT from `fix`. Add the matching task 4 mutation row (drop the `is_symlink` leg from the gate → that case fails by name). Case 5 keeps `os.link` and keeps asserting the trailer is present, so the two cases pin opposite directions. |
-| CONCERN | Risk & Robustness | Findings are grouped by `(reason, target)` but the trailer template names a single per-script `{found_path}`, and the plan never specifies how the two compose when one group holds several members of which only some were accepted through the `_same_file` leg. Both available guesses are wrong in a way the plan itself already names: one trailer naming an arbitrary member leaves the other stale copies winning `shutil.which` after the rebuild, so the next doctor run reports them as *resolution* failures (the "converts one finding shape into another" root-cause pattern in Why Previous Fixes Failed); one trailer per script breaks the single-actionable-line guarantee that case 9 and the grouping mutation row exist to protect. No test forces the decision: case 5 uses a one-name fixture and case 9's grouped fixture builds no hardlinks. | pending | Make the trailer a group-level aggregate. While looping, record `hardlinked_paths.append(found_path)` on the group entry whenever `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`. When rendering the group's fix sentence, emit the trailer only if that list is non-empty and render it over the whole list using the file's existing truncation convention at `tools/doctor.py:260-263` (show at most 5, append `(+N more)`). Keep the singular wording when the list has exactly one entry so case 5's assertion string is unchanged. Add a task 3 case with two names hardlinked out of one directory onto PATH, both venv copies carrying the same bad shebang, asserting exactly one grouped finding line and one trailer sentence naming both paths. |
-| NIT | History & Consistency | Two guards that carry their own Success Criterion have no row in the 15-row task 4 mutation table. (a) The `(pin unresolvable; off-pin comparison skipped)` disclosure, asserted by case 8 on both paths. (b) Technical Approach's first rule, read the interpreter only for names that already passed resolution; violating it appends a `uv sync` remedy to a shadowed name and breaks `test_a_shadowed_name_still_reads_as_shadowed`, but that is incidental coverage rather than the named break-run-record-restore cycle the plan's own criterion demands. | pending | n/a (NIT) — add `Pin-unresolvable disclosure clause removed → case 8` and `Interpreter read applied to misresolved names too (moved outside the `match is not None` branch) → test_a_shadowed_name_still_reads_as_shadowed`. Recording the second explicitly matters because its expected failure is a pre-existing test, and a validator who has not been told to expect it will read the failure as a fixture regression. |
-| NIT | Scope & Value | Task 3 case 17 describes a single-venv fixture ("whose `pyvenv.cfg` has been deleted") but illustrates the ratio assertion as `"2 of 3 interpreter-verified"`. The fixture venv is the only venv the default three shims point at, so deleting its `pyvenv.cfg` makes all three classify `unverified` and the message reads `0 of 3`. A builder taking the example literally either writes a failing assertion or adds a second venv the case does not need. | pending | n/a (NIT) — with `_fake_checkout`'s three shims all shebanged at the fixture's own `.venv/bin/python3`, deleting `.venv/pyvenv.cfg` makes `venv_python_version(parent.parent)` return `None` for every one, so the pinned clause is `", 0 of 3 interpreter-verified"`. Assert that string, or point one shim at a second venv that still carries a valid `pyvenv.cfg` if a mixed ratio reads better. The criterion (excluded from the verified ratio) is proved either way. |
-| NIT | History & Consistency | The pass `CheckResult` is cited as `tools/doctor.py:313-318` in the Technical Approach composition bullet and as `:312-317` in Technical Approach step 4 and task 2. Measured on `main`: the `return CheckResult(` is line 312 and the closing paren is 317, with 318 blank. Every other cited reference re-verified clean this round (`:150`, `:228`, `:242/:243/:244`, `:253`, `:254`, `:259`, `:271/:273/:275`, `:300`, `:108`, `:138`, `:442`, `:485`, `:496-498`). | pending | n/a (NIT) — change `:313-318` to `:312-317` so the two citations agree. A plan whose verification posture is "measured, not remembered" should not carry two ranges for the same six lines. |
+| CONCERN | Risk & Robustness | The hardlink trailer gate `not in_bin_dir and _same_file(found_path, match / name)` also fires for a **symlinked** on-PATH copy, because `Path.samefile` follows symlinks while `found_path.parent` is the symlink's own containing directory. For a symlink both the trailer's instruction and its stated rationale are false: a symlink does not survive a venv rebuild carrying the old shebang, it re-points at the new inode and picks up the new shebang automatically. Measured on this machine: with `venv_bins=[<tmp>/repo/.venv/bin]` and `found_path=<tmp>/local/bin/foo` symlinked to `<tmp>/repo/.venv/bin/foo`, `is_symlink()` is True, `_same_file` is True, `in_bin_dir` is False, so the trailer fires; after replacing the venv copy with a new inode the symlink reads the NEW shebang while the hardlinked control still reads the OLD one. This is the same class of defect as the `/update` sentence round 4 dropped: remediation text for a state it does not actually describe. | Technical Approach remediation bullet (`is_symlink` leg, with the measurement); task 2 gate bullet; task 3 case 18; task 4 mutation row; Success Criteria | Gate the trailer on `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`. `_same_file` cannot discriminate the two shapes (it calls `os.stat`, which follows symlinks, so it is True for both); `is_symlink()` is an `lstat` and is the only cheap discriminator, and it never raises on a dangling link. Add a task 3 case that builds `os.symlink(root/'.venv'/'bin'/name, local_bin/name)`, gives the venv copy a bad shebang, and asserts the interpreter finding fires while `"Also remove the stale hardlinked copy at"` is ABSENT from `fix`. Add the matching task 4 mutation row (drop the `is_symlink` leg from the gate → that case fails by name). Case 5 keeps `os.link` and keeps asserting the trailer is present, so the two cases pin opposite directions. |
+| CONCERN | Risk & Robustness | Findings are grouped by `(reason, target)` but the trailer template names a single per-script `{found_path}`, and the plan never specifies how the two compose when one group holds several members of which only some were accepted through the `_same_file` leg. Both available guesses are wrong in a way the plan itself already names: one trailer naming an arbitrary member leaves the other stale copies winning `shutil.which` after the rebuild, so the next doctor run reports them as *resolution* failures (the "converts one finding shape into another" root-cause pattern in Why Previous Fixes Failed); one trailer per script breaks the single-actionable-line guarantee that case 9 and the grouping mutation row exist to protect. No test forces the decision: case 5 uses a one-name fixture and case 9's grouped fixture builds no hardlinks. | Technical Approach remediation bullet (group-level aggregate, singular + plural forms); task 2 render bullet; task 3 case 19; task 4 mutation row; Success Criteria | Make the trailer a group-level aggregate. While looping, record `hardlinked_paths.append(found_path)` on the group entry whenever `not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)`. When rendering the group's fix sentence, emit the trailer only if that list is non-empty and render it over the whole list using the file's existing truncation convention at `tools/doctor.py:260-263` (show at most 5, append `(+N more)`). Keep the singular wording when the list has exactly one entry so case 5's assertion string is unchanged. Add a task 3 case with two names hardlinked out of one directory onto PATH, both venv copies carrying the same bad shebang, asserting exactly one grouped finding line and one trailer sentence naming both paths. |
+| NIT | History & Consistency | Two guards that carry their own Success Criterion have no row in the 15-row task 4 mutation table. (a) The `(pin unresolvable; off-pin comparison skipped)` disclosure, asserted by case 8 on both paths. (b) Technical Approach's first rule, read the interpreter only for names that already passed resolution; violating it appends a `uv sync` remedy to a shadowed name and breaks `test_a_shadowed_name_still_reads_as_shadowed`, but that is incidental coverage rather than the named break-run-record-restore cycle the plan's own criterion demands. | Task 4 mutation table — two rows added, plus a note that the second row's expected failure is a pre-existing test | n/a (NIT) — add `Pin-unresolvable disclosure clause removed → case 8` and `Interpreter read applied to misresolved names too (moved outside the `match is not None` branch) → test_a_shadowed_name_still_reads_as_shadowed`. Recording the second explicitly matters because its expected failure is a pre-existing test, and a validator who has not been told to expect it will read the failure as a fixture regression. |
+| NIT | Scope & Value | Task 3 case 17 describes a single-venv fixture ("whose `pyvenv.cfg` has been deleted") but illustrates the ratio assertion as `"2 of 3 interpreter-verified"`. The fixture venv is the only venv the default three shims point at, so deleting its `pyvenv.cfg` makes all three classify `unverified` and the message reads `0 of 3`. A builder taking the example literally either writes a failing assertion or adds a second venv the case does not need. | Task 3 case 17 — the pinned string is now `", 0 of 3 interpreter-verified"`, with the mixed-ratio alternative named as optional | n/a (NIT) — with `_fake_checkout`'s three shims all shebanged at the fixture's own `.venv/bin/python3`, deleting `.venv/pyvenv.cfg` makes `venv_python_version(parent.parent)` return `None` for every one, so the pinned clause is `", 0 of 3 interpreter-verified"`. Assert that string, or point one shim at a second venv that still carries a valid `pyvenv.cfg` if a mixed ratio reads better. The criterion (excluded from the verified ratio) is proved either way. |
+| NIT | History & Consistency | The pass `CheckResult` is cited as `tools/doctor.py:313-318` in the Technical Approach composition bullet and as `:312-317` in Technical Approach step 4 and task 2. Measured on `main`: the `return CheckResult(` is line 312 and the closing paren is 317, with 318 blank. Every other cited reference re-verified clean this round (`:150`, `:228`, `:242/:243/:244`, `:253`, `:254`, `:259`, `:271/:273/:275`, `:300`, `:108`, `:138`, `:442`, `:485`, `:496-498`). | Technical Approach composition bullet — now `:312-317`, re-measured this round (`return CheckResult(` at 312, closing paren at 317, 318 blank) | n/a (NIT) — change `:313-318` to `:312-317` so the two citations agree. A plan whose verification posture is "measured, not remembered" should not carry two ranges for the same six lines. |
 
 ---
 
