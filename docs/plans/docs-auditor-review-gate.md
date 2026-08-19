@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T06:32:52Z
+revision_applied_at: 2026-08-19T06:59:19Z
 ---
 
 # Docs Auditor Review Gate
@@ -1644,10 +1644,21 @@ template files whose purpose is to hold placeholder links:
    headings, deletion prose — via the shared `_build_line_context` / `_is_documented_deletion`
    pair, using the Q7b-widened versions.
 6. **Skip placeholder targets.** `_is_placeholder_path` (`:790`) strips only a `.py`
-   suffix on the final component; extend it to strip `.md` as well, and add the
-   link-specific stand-ins spike-6 surfaced (`filename`, `path`, `name`) to
-   `_PLACEHOLDER_PATH_COMPONENTS`. Do **not** add `sub_file_a`-style names: those are
-   handled structurally by rule 7.
+   suffix on the final component; extend it to strip `.md` as well, and add the three
+   stand-ins spike-6 surfaced (`filename`, `path`, `name`) to
+   `_PLACEHOLDER_PATH_COMPONENTS` (`:773-775`). Do **not** add `sub_file_a`-style names:
+   those are handled structurally by rule 7.
+
+   **Both widenings apply to both branches, and that is intended (R7-5).**
+   `_PLACEHOLDER_PATH_COMPONENTS` has one consumer, `_is_placeholder_path`, which the
+   `.py` branch already calls at `:895` and the `.md` branch will call under this rule — so
+   the three names are not "link-specific" in effect, and the earlier wording that called
+   them that was wrong. Measured impact on the `.py` branch today is **zero**: no repo path
+   has a stem-stripped component `path`, `name`, or `filename`. The direction is safe in
+   any case — `_is_placeholder_path` feeds only the report path, never
+   `_absent_new_path_refs` and never a write — so the worst case is one fewer advisory
+   finding, not a suppressed rewrite. Sharing one predicate is the point; a second
+   link-only placeholder set would be the parallel path Principle 1 forbids.
 7. **Report only for containing docs under `docs/`, excluding the archived plan
    directories `docs/plans/completed/` and `docs/plans/done/`.** This is what takes the
    census from 41 to 19 (spike-6). Two justifications, both structural: `.claude/` holds
@@ -2615,6 +2626,13 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       distinguish the auditor's own residue from a concurrent lane's uncommitted work in
       the shared checkout. Name the residual plainly: if the escalation filing itself
       fails, the wedge is unreported until a human looks.
+      **Add the sentence that ties the guard's silence to the filing's liveness (R7-6):**
+      the guard is quiet only because the `operational-failure` issue stays open until a
+      human acts and re-files when the failure returns, which in turn holds only because
+      `_file_issue_if_new` gates its 30-day Redis fast-path on `states == "all"` (Q7c /
+      R7-1). Say so in one sentence, so a future reader who weakens that gate sees that the
+      dirty-tree guard's silence depends on it, and does not "fix" the resulting blind spot
+      by making the guard file — the flood this plan argued down.
 - [ ] Document the module's **three per-run issue budgets** (R5-2) in the same file:
       `VAULT_DRIFT_ISSUE_CAP` (vault↔site loop), `ISSUE_FILING_PER_RUN_CAP` shared by
       `audit()`'s advisory loop and the withheld loop, and the resulting module-wide
@@ -2720,9 +2738,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       only `files_touched`.
 - [ ] `_pr_is_auto_merge_eligible` is gone and the sweeper never runs `gh pr merge`.
 - [ ] A rotation run that returns early leaves the shared main checkout exactly as it
-      found it, and does not report `status="ok"` for a pass whose output it discarded —
-      including the dirty-tree guard, which now returns `status="skipped"` to match its
-      own `_write_liveness` call and the plan's three-outcome vocabulary.
+      found it, and does not report `status="ok"` for a pass whose output it discarded.
+      `"ok"` survives on exactly one return in `run_docs_auditor` — the one that created a
+      PR. The lock-held, dirty-tree, no-candidates and zero-diff returns all report
+      `status="skipped"`, matching their own `_write_liveness` calls, their own summary
+      strings, and the plan's three-outcome vocabulary (R7-2).
 - [ ] A rotation run that writes and fails to produce a PR **files a GitHub issue before
       it returns** (R5-1): `docs-auditor: rotation failed to produce a PR for {slug}`,
       category `operational-failure`, slug-keyed with no volatile field, naming the
@@ -2769,9 +2789,11 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
       hit on a live-claim line under a deletion heading is still suppressed, because
       `_make_stale_term_replacer` never passes `live_claim_veto=True`. The auditor gains a
       report, not a rewrite.
-- [ ] Q7's findings share `audit()`'s advisory budget rather than adding one of their own,
-      and the sizing spike re-run on the built code reports per-run volume within range of
-      the plan-time baseline (mean 0.29 for `.md`, combined mean flat at 0.86).
+- [ ] Q7's findings share `audit()`'s advisory budget rather than adding one of their own.
+      (The re-run sizing numbers are **recorded in the PR body, not asserted here** — R7-4:
+      a criterion phrased as "within range of the plan-time baseline" names no failing
+      value and cannot be marked unmet. Rule loss is caught by the per-rule behavioral
+      cases in **Test Impact**, each of which fails on its own.)
 - [ ] The module's per-run issue budgets are named accurately, not collapsed (R5-2):
       `VAULT_DRIFT_ISSUE_CAP` (5, pre-rotation vault↔site loop) stays a **separate**
       constant from `ISSUE_FILING_PER_RUN_CAP` (5, shared by `audit()`'s advisory loop and
@@ -3212,13 +3234,17 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - Q7c: delete the now-false parenthetical in `audit()`'s comment at `:1259-1265` —
   *"(and re-files any that were closed without fixing the doc, since the dedup gate only
   sees open issues)"*. Delete it; do not annotate it.
-- **Re-run the sizing spike on the built code and record the number in the PR body.**
+- **Re-run the sizing spike on the built code and record the numbers in the PR body.**
   Call the detector directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)`
   for a sample of `docs/features/*.md` primaries. **Never** via `audit(..., apply_mode="apply")`,
-  which files real issues. Plan-time baseline to compare against: 19 distinct in-scope
-  `.md` findings, per-run mean 0.29 / max 3; `.py` channel drops from mean 0.86 to 0.57;
-  combined per-run mean flat at 0.86. A materially larger number means a rule was
-  dropped — find which before merging.
+  which files real issues. This is **advisory, not a gate** (R7-4): report the numbers,
+  do not hold the merge on them. Plan-time reference figures are 19 distinct in-scope `.md`
+  findings, per-run mean 0.29 / max 3, and a `.py` channel dropping from 0.86 to 0.57, but
+  an independent re-measurement of the same census gives **21 pairs over 17 distinct
+  targets**, and the `.py` figure predates Q7a rule 6's placeholder widening, so the built
+  numbers are expected to differ. Whether a rule was dropped is answered by the per-rule
+  behavioral cases in **Test Impact**, which fail individually and by name; a count that
+  differs from these figures is a prompt to read those results, not a finding on its own.
 - Do **not** add any repair path for `.md` links. Report only.
 
 ### 5. Real-git test surface
@@ -3333,7 +3359,7 @@ post-build expectation that legitimately fails now.
 | Q7b controls: the two false positives go, the true positive stays | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: inline the prose from `docs/features/harness-abstraction.md:189` and `docs/features/harness-adapter.md:19`/`:115` and assert **no** finding; inline the `SessionType.GRANITE` row from `docs/features/standardized-enums.md:19` and assert a finding **is** produced | 3 suppressed, 1 reported | post-build. This is the single most important Q7 row: a widening that silences #2839 is wrong no matter how many false positives it removes |
 | Live-claim veto is present (Q7b) | **Behavioral**: a line reading *"`fail_stage()` remains defined in `agent/hooks/gone.py`"* under a `## Migration` heading still produces a finding | finding produced | post-build. Without the veto the heading suppresses it; spike-7 measured the veto as the difference between 5 new false negatives and 0 |
 | Dedup converges (Q7c) | `grep -c '_open_issue_exists' reflections/docs_auditor.py` and `grep -c 'def _issue_exists' reflections/docs_auditor.py` | `0` and `1` respectively | post-build (currently `3` and `0`). No compatibility alias — Principle 1. Note `_issue_exists` is a substring of `_open_issue_exists`, so the bare symbol grep cannot tell them apart; anchor on `def ` |
-| Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c '\"all\"' reflections/docs_auditor.py` and `grep -c '\"100\"' reflections/docs_auditor.py` | `2` and `> 0` | post-build (currently `1` and `0`). The existing `\"all\"` at `:2146` is the **sweeper's** `gh pr list --state all` and is unrelated — the count must rise to 2, not merely be nonzero. The second occurrence is `_issue_exists`' `states: str = \"all\"` default. `gh issue list` defaults to `--limit 30`; under `--state all` the exact title can fall off page one, which files a duplicate of an issue that already exists |
+| Dedup query asks for all states and is not silently paginated (Q7c) | `grep -c 'states: str = \"all\"' reflections/docs_auditor.py` and `grep -c '\"--limit\"' reflections/docs_auditor.py` | `1` and `> 0` | post-build (currently `0` and `0`). **Spelling-anchored on purpose (R7-3).** The bare `grep -c '\"all\"'` this row used to carry expected `2` and accounted for only two sites — the sweeper's `gh pr list --state all` at `:2146` and `_issue_exists`' default — but Q7c mandates a third literal, the `… else \"all\"` in `_file_issue_if_new`'s `states` selection, so a correct build reads `3` and the row false-reds. Measured baseline for the bare count today is `1`, not the `2` the row implied. Anchoring on the parameter default instead survives both that third literal and a builder hoisting the default into a constant, and `\"--limit\"` owns the pagination half: `gh issue list` defaults to `--limit 30`, so under `--state all` the exact title can fall off page one and file a duplicate of an issue that already exists. The semantic check belongs to the behavioral "recurring-condition categories" row below, per the R4-5 precedent |
 | Dedup query no longer depends on a label surviving triage (Q7c / R5-4) | **Behavioral**, in `TestCrossMachineDedup`: a **closed** issue whose title matches exactly and which carries **no** `documentation` label still suppresses a fresh filing; the argv assertions in that class are updated for the removed label alongside `--state all` / `--limit 100`. Companion structural check: `grep -c '\"--label\"' reflections/docs_auditor.py` | closed unlabelled issue suppresses; grep `1` | post-build (grep currently `2` — `_open_issue_exists:1026` on the **query** side and `_file_issue_if_new:1115` on the **filing** side). Exactly one must survive, and it must be the filing one: new issues stay labelled `documentation`, while the gate stops depending on the label. A build that drops both loses the label on filed issues; a build that drops neither leaves "file once, ever" conditional on triage not touching the label |
 | Recurring-condition categories keep the open-only gate (Q7c exemption / R4-2, extended R5-1) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: with a `gh` stub, `_file_issue_if_new` on a `"category": "vault-drift"` finding dispatches `--state open`, likewise on `"category": "operational-failure"`, and on a `deleted-target` or `broken-md-link` finding dispatches `--state all`; a **closed** drift issue for the same vault/site pair does not suppress a fresh filing, while a closed `broken-md-link` issue does | drift → `open`, operational-failure → `open`, references → `all` | post-build. Vault-drift's condition is a recurring `vault_mtime > site_ts` comparison and the failure filing's is a recurring run outcome, neither a durable property of the tree, so `all` would let one human close silence either permanently. A build that applies `all` uniformly passes every other Q7c row and fails only this one. **The `grep -c 'vault-drift'` companion this row used to carry is deleted (R5-6):** it claimed "currently `2`" and expected `> 2`, while the real count today is **4** (`:1757`, `:1777`, `:1805`, `:1952`), so the row was green before any build work — the same defect class R3-3 caught on the `per_run_cap` row and R4-5 caught on the `_is_documented_deletion` row. The behavioral half is what actually gates this, and it now owns the check alone |
 | The two per-run budgets stay separate (R5-2) | `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` and `grep -c 'VAULT_DRIFT_ISSUE_CAP' reflections/docs_auditor.py` | `> 2` and **exactly `4`** | post-build (currently `0` and `4`). `VAULT_DRIFT_ISSUE_CAP` bounds a *different* channel (`_run_vault_drift_detection`, `:1803-1810`) and sits five lines above the `:75` insertion point for the new constant. A count below 4 means a builder read "one source of truth; no second literal" as an instruction to merge them, which would let a heavy drift day starve the reference channel |
@@ -3343,7 +3369,7 @@ post-build expectation that legitimately fails now.
 | The stale non-convergence comment is deleted (Q7c) | `grep -c 'dedup gate only sees open issues' reflections/docs_auditor.py` | `0` | post-build (currently `1`, in `audit()` at `:1259-1265`). Describe only the new status quo |
 | Q7 shares the per-run cap, no second budget | **Behavioral**: a rotation pass whose findings mix `deleted-target` and `broken-md-link` files at most `ISSUE_FILING_PER_RUN_CAP` issues **in total** | total ≤ 5 | post-build |
 | Q7 adds no write path | `git diff origin/main -- reflections/docs_auditor.py` shows no new `write_text`, `open(..., "w")`, or `git`/`gh` mutation introduced by the Q7 commit | no new write | post-build. #2739's whole thesis; a `.md` *repair* is the one thing Q7 must not grow |
-| Sizing spike re-run on built code | Call `_detect_deleted_target_issues` directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` for a sample of `docs/features/*.md` primaries and record the counts in the PR body. **Never** `audit(..., apply_mode="apply")` | in range of the plan-time baseline: 19 distinct in-scope `.md` findings, per-run mean 0.29 / max 3; `.py` mean 0.86 → 0.57; combined mean flat at 0.86 | post-build |
+| Sizing spike re-run on built code (**advisory — record, do not gate**) | Call `_detect_deleted_target_issues` directly over `_resolve_neighborhood(primary, root, cap=NEIGHBORHOOD_CAP)` for a sample of `docs/features/*.md` primaries and **record the counts in the PR body**. **Never** `audit(..., apply_mode="apply")` | the numbers appear in the PR body | post-build. **Demoted from a gating row (R7-4):** its old expectation read "in range of the plan-time baseline" with no band and no failing value, so a validator could never mark it red. Rule loss is caught where it is falsifiable — the per-rule behavioral cases in **Test Impact** each fail on their own when a rule is dropped. Plan-time reference figures, for the reader rather than the gate: 19 distinct in-scope `.md` findings, per-run mean 0.29 / max 3; `.py` mean 0.86 → 0.57. Two reasons an equality would be wrong even as a band: an independent re-measurement of the (doc, target) census on `f491306c5` under Q7a rules 1-4 gives **21 pairs over 17 distinct targets**, bracketing rather than matching the 19; and spike-7's `.py` figure was measured over the three cue widenings plus the veto only, not over Q7a rule 6's placeholder widening, so the built `.py` number sits slightly **below** 0.57 by construction |
 | Shared checkout clean on the auditor's write surface after run (R3-1) | `test -z "$(git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- docs .claude)"` | exit code 0 | holds now — must still hold at the end. Scope matches the Prerequisites row exactly and is deliberate: the auditor's write surface is the primary doc's neighborhood (`_resolve_neighborhood:259`), which spans `docs/` and outbound-linked `.md` paths, **not** `docs/features/` alone — a `docs/features`-only check would pass over a wedge whose leftover dirt landed in `docs/plans/`, `docs/sdlc/`, or `.claude/`. Foreign dirt outside `docs/` and `.claude/` is preserved by design and is not asserted here |
 
 ## Revision Log
@@ -3410,6 +3436,40 @@ Nothing else was reopened — no new section, no new spike, no new task.**
 prose spec, added a pointer to a log line that already exists, and wrote down the rejected
 alternative. No task count, no test, no Verification row, and no code surface changed.
 `revision_applied_at` is stamped and `plan_revising` is cleared; the next stage is BUILD.
+
+**2026-08-19 — round-7 revision. A concern-settling pass, not a revision round: round 7
+returned READY TO BUILD (WITH CONCERNS) with 0 blockers, 3 concerns and 3 nits, all new.
+No section, spike, task, or Q1-Q7 decision was reopened. This is the last planning pass.**
+
+Every claim was re-verified against real bytes before acting on it, and all six hold.
+`_file_issue_if_new` really does short-circuit on `redis_client.exists(dedup_key)` at
+`:1078-1082`, *above* `_open_issue_exists`, and stamps that key `ex=86400 * 30` on both the
+dedup-hit and the create paths (R7-1). `run_docs_auditor` really has five `"status": "ok"`
+returns — `:1849`, `:1861`, `:1876`, `:1921`, `:1979` — three of them one line below a
+`_write_liveness(..., "skipped", ...)` call, and the module-wide count is 7 with the last
+two belonging to the sweeper (R7-2). `grep -c '"all"'` reads **1** today, not the 2 the
+Verification row implied, and `grep -c '"--limit"'` reads 0 (R7-3). Nothing consumes the
+returned `status`: `agent/reflection_scheduler.py` never reads that key and derives
+`last_status` from its own execution outcome, so R7-2's relabel is inert outside the three
+test assertions that pin it (`tests/unit/test_docs_auditor_substrate.py:218` in
+`test_concurrent_run_returns_skipped`, `:241`, `:1304`).
+
+| Finding | Disposition | Where |
+|---|---|---|
+| R7-1 (CONCERN) | **Adopted as specified.** `states` is now computed *above* the Redis fast-path, the `exists` read is gated on `states == "all"`, and — the half that is easy to drop — both `redis_client.set(dedup_key, ..., ex=86400 * 30)` writes sit behind the same condition, so a suppressed run cannot re-stamp the key and hold the window open forever. Without this the `operational-failure` exemption is inert for 30 days on the filing machine, which is precisely the window Q4 item 5's argument for a silent dirty-tree guard depends on. Recurring categories give up the local cache and pay at most six extra `gh issue list` calls per rotation (≤5 vault-drift, ≤1 `operational-failure`). Pinned behaviorally by extending the existing recurring-condition Test Impact case rather than adding a new one: file, let the key be written, close the issue, recur inside 30 days, assert a second `gh issue create` fires — plus the mirror, that a `broken-md-link` finding with the key set still files nothing, so the fast-path is gated rather than deleted | Q7c (code block + a new paragraph), Q4 item 5, task 4, Test Impact, Success Criteria |
+| R7-2 (CONCERN) | **Adopted in full — the class rule is applied to the whole class.** R5-1 ruled that a payload saying `ok` while liveness says `skipped` is drift inside a single return statement; the plan had applied it to one of the four no-PR returns. All four now become `"status": "skipped"` — lock held (`:1849`), dirty tree (`:1861`), no candidates (`:1876`), zero-diff (`:1921`) — leaving `:1979` as the only `"ok"` in `run_docs_auditor`, so Q4 item 4's three-outcome vocabulary is literally true of the function instead of one branch of it. Chosen over the cheaper "fix `:1876` only and argue `:1921` down" because the cost is four string literals with no behavioral reach and three one-line test-assertion updates, against leaving the named drift standing in two of the three places it occurs. `test_concurrent_run_returns_skipped` asserting `"ok"` is the tell. The four summary strings already read `skipped: locked` / `skipped: dirty_tree` / `skipped: no candidates` / `zero-diff` and are untouched | Q4 item 4 (new paragraph), Q4 item 5, task 3 (new bullet), Test Impact (3 dispositions + one explicit "no test pins this"), Success Criteria |
+| R7-3 (CONCERN) | **Adopted, the spelling-anchored option.** The row expected `grep -c '"all"'` → `2` while Q7c mandates a third literal (`… else "all"` in the `states` selection), so a correct build reads `3` and the row false-reds; the stated baseline was also wrong (`1`, not `2`). Replaced with `grep -c 'states: str = "all"'` → `1` and `grep -c '"--limit"'` → `> 0`, both measured at `0` today, and marked as owning only the structural half — the behavioral recurring-condition row already owns the semantics, per the R4-5 precedent. The new anchors survive a builder hoisting the default into a constant, which the bare count did not | Verification |
+| R7-4 (NIT) | **Adopted.** The sizing row's expectation ("in range of the plan-time baseline") named no failing value, so it could never be marked red. Demoted to advisory: record the numbers in the PR body, do not gate on them. Dropped from the Success Criteria, and task 4's "a materially larger number means a rule was dropped" is replaced by a pointer to the per-rule behavioral cases, which fail individually and by name. The critic's independent re-measurement (**21 pairs over 17 targets** against the plan's 19) and R7-5's second-order point (the `.py` 0.57 figure predates the placeholder widening) are both recorded as the reason an equality — or even a band — would be the wrong instrument | Verification, Success Criteria, task 4 |
+| R7-5 (NIT) | **Adopted.** Q7a rule 6 no longer calls `filename`, `path`, `name` "link-specific": `_PLACEHOLDER_PATH_COMPONENTS` has one consumer and both branches call it, so the widening reaches the `.py` branch too. Stated plainly along with the measured impact (zero today — no repo path has a stem-stripped component `path`, `name`, or `filename`) and the direction (`_is_placeholder_path` feeds only the report path, never a write), and with the reason not to scope them to `.md`: a second link-only placeholder set is the parallel path Principle 1 forbids. Wording only; no task changed | Q7a rule 6 |
+| R7-6 (NIT) | **Adopted.** The R7-1 ↔ Q4 item 5 coupling is now written down twice: in Q4 item 5 itself, which says the guard's silence is safe *only because* the fast-path is gated, and in the `docs/features/docs-auditor.md` Documentation checkbox, so a future reader who weakens the gate sees what depended on it and does not "compensate" by making the dirty-tree guard file — the flood this plan argued down | Q4 item 5, Documentation |
+
+**Convergence note.** This pass added no new mechanism, no spike, no task, and no new
+Verification row. Its whole surface is: one statement reordered inside an existing function
+(R7-1), four string literals and the three assertions pinning them (R7-2), one Verification
+row re-anchored and one demoted to advisory (R7-3, R7-4), and two wording corrections
+(R7-5, R7-6). Test Impact gained four dispositions on **existing** tests and one extension
+of an **existing** case; no new test class. `revision_applied_at` is stamped and
+`plan_revising` is cleared; the next stage is BUILD.
 
 ## Critique Results
 
