@@ -651,26 +651,62 @@ triggers the run-lease release (`_release_run_best_effort`, `:823-836`) on the
 understanding that nothing downstream still needs the lease, and
 `_pipeline_is_terminal` already makes `reestablish_run_id` decline to re-mint after it.
 The system already treats this marker as terminal in two other places; the router is
-the outlier. **Verification task:** confirm by grep that no other code path writes
-`MERGE = completed`, and add the exact-string parametrized test from the Failure Path
-section so `"in_progress"` / `"failed"` / `None` / `""` provably do not terminate.
+the outlier.
+
+**That argument is about the write path, and the write path is only half the risk.** The
+guard's *predicate* is what fires, and `is_pipeline_complete` consults `MERGE` alone —
+DOCS, TEST, and PATCH are never read. So "who writes the key" does not bound "what the
+rest of the ledger looks like when they do." The reachable gap is PATCH:
+`_backfill_predecessors` settles on-spine predecessors but **explicitly exempts PATCH**
+("PATCH, being off-spine, is excluded here and never force-completed"), so
+`MERGE=completed + PATCH=pending` is a real ledger. It is now measured and carried as the
+ninth matrix cell in spike-1, and the guard **deliberately settles it**.
+
+**Verification tasks (both required):**
+1. Confirm by grep that no code path other than `sm.complete_stage("MERGE")` writes
+   `MERGE = completed`.
+2. Assert **positively** that when `sm.complete_stage("MERGE")` returns, every
+   `DISPLAY_STAGES` entry that is *not* PATCH is in `SETTLED_STATUSES`
+   (`agent/pipeline_state.py:66`, `frozenset({"completed", "skipped"})`), and that PATCH
+   is documented as the intentional exemption the guard settles. This is the assertion
+   that bounds the ledger shape; task 1's grep only bounds the writer.
+3. Add the exact-string parametrized test from the Failure Path section so
+   `"in_progress"` / `"failed"` / `None` / `""` provably do not terminate.
 
 ### Risk 2: WS-B suppresses the fuzzy leg too aggressively and regresses PR resolution
 **Impact:** Lanes whose PR was opened from a branch not matching `session/{slug}` stop
 resolving their PR, disarming the PR-gated rows — the same class of failure as #2824
 itself, pointed the other way.
 **Mitigation:** Gate strictly on *slug recorded*, never on *head-ref returned None*.
-Then measure before merging: run both ladder orders across a corpus of recent closed
-issues with merged PRs and diff the resolutions. Any issue that resolves under the old
-order and not the new one is a counterexample that blocks the change. This is a named
-build task, not a review-time hope.
+Then measure before merging.
 
-### Risk 3: WS-D's MERGED-first ordering sharpens #2824 if it lands alone
-**Impact:** Reopened issues would resolve their prior lifecycle's merged PR *more*
-reliably than today.
-**Mitigation:** Hard sequencing — WS-B lands with or before WS-D, asserted by a
-verification row that fails if the deterministic sort exists without the lane-branch
-authority. Do not rely on task ordering alone.
+**The corpus is pinned and the bar is split, because a zero-tolerance bar here is
+unfalsifiable.** WS-B's entire mechanism is *suppressing* the fuzzy leg when a slug is
+recorded, so every lane whose PR came off a branch other than `session/{slug}` is a
+guaranteed counterexample. Stated as "any counterexample blocks the change", the gate
+either blocks WS-B outright or is settled by whoever picks the corpus. Neither is a test.
+
+Corpus (runnable, not described):
+
+```bash
+gh issue list --state closed --limit 50 --json number -q '.[].number'
+```
+
+For each issue, resolve the PR under both ladder orders and classify every difference:
+
+| Difference | Meaning | Disposition |
+|---|---|---|
+| Resolves old, not new; resolved PR's head ref is **not** `session/{slug}` | The fuzzy leg was doing work lane-branch authority deliberately gives up | **Expected cost.** Count it, report the count and the issue numbers in the PR body. Does not block. |
+| Resolves old, not new; resolved PR's head ref **is** `session/{slug}` | The head-ref leg should have found this and did not — the mechanism is broken | **Blocks the change.** This is the only invalidating shape. |
+| Resolves new, not old | Lane-branch authority recovered something fuzzy search missed | Report as a gain. |
+
+Without that split the gate is not falsifiable, which is the same as not having one.
+
+### Risk 3: *(retired)*
+Previously covered WS-D's MERGED-first ordering sharpening #2824 if it landed alone.
+**WS-D is deferred to [#2868](https://github.com/tomcounsell/ai/issues/2868)**, so
+neither the risk nor its sequencing mitigation applies to this lane. #2868 inherits the
+constraint: it must not land before WS-B.
 
 ### Risk 4: The `all` → `merged` change makes some review artifact unreachable
 **Impact:** REVIEW completion markers refused, `/do-pr-review` re-dispatched in a loop.
@@ -981,17 +1017,46 @@ in-process.
 | Terminal verdict, no `pr_number`, branch exists (the false rebuild) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{},{'branch_exists':True}))"` | output does not contain `/do-build` |
 | Terminal verdict, `pr_number` present | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{'branch_exists':True}))"` | output does not contain `/do-merge` |
 | Negative control — non-terminal still routes to merge | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{'branch_exists':False}))"` | output contains `/do-merge` |
-| Terminal reason does not give G4's wrong remedy | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{},{}))"` | output does not contain `dispatch reset` |
+| Terminal verdict, `PATCH` unsettled (ninth cell) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','MERGE']}; s['PATCH']='pending'; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{}))"` | output contains `TERMINAL` (red today: returns `/do-merge` row 10) |
+| Terminal guard survives a non-dict ledger | `./.venv/bin/python -c "from agent.sdlc_router import guard_terminal_pipeline as g; print(all(g(b,{},{}) is None for b in [None,'x',42,[]]))"` | output contains `True`. Asserts **the new guard alone**, not `evaluate_guards` — see the note under the table. |
+| Terminal reason does not give G4's wrong remedy | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; r=str(d(s,{},{})); print('TERMINAL' in r and 'dispatch reset' not in r)"` | output contains `True` — **both legs**: `TERMINAL` present AND `dispatch reset` absent. Asserting only the absence passes vacuously today (`Blocked(NO_RULE)` contains neither), which is what the critique caught. |
 | #2825 fail-open closed (1785) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(1785,'tomcounsell/ai'))"` | output contains `False` |
 | #2825 fail-open closed (2073) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(m._review_artifact_posted(2073,'tomcounsell/ai'))"` | output contains `False` |
 | #2539 control preserved (5 live issues) | `./.venv/bin/python -c "import tools.sdlc_stage_marker as m; print(all(m._review_artifact_posted(n,'tomcounsell/ai') for n in [2860,2831,2716,2734,2741]))"` | output contains `True` |
-| Anti-criterion — no `tools/` import in the router | `grep -c '^from tools\|^import tools\|from tools\.' agent/sdlc_router.py` | match count == 0 |
-| Anti-criterion — no I/O in the router (No-Go: DOCS-terminal leg) | `grep -cE 'subprocess\.|requests\.|urllib' agent/sdlc_router.py` | match count == 0 |
-| Anti-criterion — `state="all"` gone from the marker | `grep -c 'state="all"' tools/sdlc_stage_marker.py` | match count == 0 |
-| Anti-criterion — WS-D did not land without WS-B | `./.venv/bin/python -c "import inspect,tools.sdlc_stage_query as q; src=inspect.getsource(q._lookup_pr); assert 'lane_branch_name' in src.split('_gh_pr_search_issue_ref')[0], 'WS-D without WS-B'; print('ordered')"` | output contains `ordered` |
-| No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Anti-criterion — no `tools/` import in the router | `grep -c '^from tools\|^import tools\|from tools\.' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Proves nothing about any workstream; counts as coverage for none of them in Risk 5's mutation table. |
+| Anti-criterion — no I/O in the router (No-Go: DOCS-terminal leg) | `grep -cE 'subprocess\.\|requests\.\|urllib' agent/sdlc_router.py` | match count == 0. **GREEN TODAY (regression anti-criterion).** Same disposition. |
+| WS-B — recorded slug never calls the fuzzy leg | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); l=patch.object(q,'_gh_pr_list',return_value=None).start(); q._lookup_pr(2494, slug='sdlc-2494', repo='tomcounsell/ai'); print(f'fuzzy_calls={f.call_count} head_calls={l.call_count}')"` | output contains `fuzzy_calls=0 head_calls=1`. **Verified red today**: returns `fuzzy_calls=1 head_calls=1`. |
+| WS-B — no recorded slug still calls the fuzzy leg | `./.venv/bin/python -c "from unittest.mock import patch; import tools.sdlc_stage_query as q; f=patch.object(q,'_gh_pr_search_issue_ref',return_value=None).start(); q._lookup_pr(2494, slug=None, repo='tomcounsell/ai'); print(f'fuzzy_calls={f.call_count}')"` | output contains `fuzzy_calls=1`. **GREEN TODAY by design** (verified): WS-B's negative control, whose job is to *stay* green. Counts as coverage for no workstream in the mutation table. |
+| Anti-criterion — `state="all"` gone from the **call site** | `grep -c 'state="all")' tools/sdlc_stage_marker.py` | match count == 0. Scoped to the call so it cannot match prose: today this returns **1** (the call at `:263`), while the unscoped `grep -c 'state="all"'` returns **2** because the rationale comment at `:259` literally opens `# state="all": ...`. The unscoped form is unsatisfiable alongside the Documentation task that keeps that comment. |
+| No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1. **GREEN TODAY (regression anti-criterion).** Counts as coverage for no workstream. |
+| Lint clean | `python -m ruff check .` | exit code 0. **GREEN TODAY (hygiene row).** Not workstream coverage. |
+| Format clean | `python -m ruff format --check .` | exit code 0. **GREEN TODAY (hygiene row).** Not workstream coverage. |
+
+### Which rows can go red, and which cannot
+
+Task 2 says "watch each one fail." That instruction applies **only to rows not labelled
+GREEN TODAY**. The labelled rows are anti-criteria, negative controls, and hygiene checks:
+they start green, their job is to *stay* green, and Risk 5's mutation table must not count
+any of them as coverage for any workstream. Recording them in the red-state paper trail as
+if they had failed would manufacture four rows of false evidence — which is precisely the
+#2091 stale-fixture problem this plan is trying not to repeat.
+
+### Note: the non-dict ledger is a pre-existing router-wide fragility, not one this lane creates
+
+The critique's concern said a raising terminal guard would surface as `decide()`'s
+`{"error": ...}` shape "instead of today's `Blocked(NO_RULE)`". **Measured, that premise is
+wrong in the plan's favour and worth stating precisely:** `decide_next_dispatch` *already*
+raises on a non-dict `stage_states` today, at **G1** — `_latest_critique_verdict`
+(`agent/sdlc_router.py:276`) calls `stage_states.get("_verdicts")` with no type check.
+Verified on `f491306c5`: `None`, `42`, and `[]` each raise `AttributeError` before any
+guard this lane touches runs.
+
+So the `isinstance` check in WS-A's guard is still **required** — placed first, the guard
+must not become a *new* raise site, and it must fall through rather than terminate a lane
+it cannot read. But it does **not** make the router non-dict-safe, and this plan must not
+claim it does. Hardening G1 is a separate concern on a rule this lane has no reason to
+touch. The verification row above therefore asserts the new guard in isolation, which is
+exactly the scope of what WS-A controls.
 
 ## Critique Results
 
