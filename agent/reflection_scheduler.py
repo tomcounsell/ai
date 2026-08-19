@@ -637,7 +637,12 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
         # return None (or non-dict). Guard with isinstance to keep legacy
         # callables fully backward-compatible.
         projects_list = result.get("projects") if isinstance(result, dict) else None
-        state.mark_completed(duration, projects=projects_list)
+        summary_str = result.get("summary") if isinstance(result, dict) else None
+        state.mark_completed(
+            duration,
+            projects=projects_list,
+            output_summary=str(summary_str)[:500] if summary_str else None,
+        )
         logger.info(
             "[reflection] Completed: %s (%.1fs)",
             entry.name,
