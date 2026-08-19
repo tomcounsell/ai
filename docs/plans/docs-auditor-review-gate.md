@@ -10,7 +10,7 @@ closes: [2739, 2834]
 last_comment_id: none
 also_tracks_last_comment_id: 5324492042
 revision_applied: true
-revision_applied_at: 2026-08-19T00:00:00Z
+revision_applied_at: 2026-08-19T05:16:12Z
 ---
 
 # Docs Auditor Review Gate
@@ -2263,7 +2263,7 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 
 - **Builder (substrate git surface)**
   - Name: `substrate-builder`
-  - Role: the `reflections/docs_auditor.py` changes for Q1-Q5
+  - Role: the `reflections/docs_auditor.py` changes for Q1-Q5 and Q7
   - Agent Type: builder
   - Resume: true
 
