@@ -1,13 +1,13 @@
 ---
 status: Ready
 type: bug
-appetite: Medium
+appetite: Large
 owner: Valor Engels
 created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2823
-last_comment_id: 5324618203
+last_comment_id: 5339213644
 revision_applied: true
-revision_applied_at: 2026-08-19T08:44:33Z
+revision_applied_at: 2026-08-19T08:56:03Z
 ---
 
 # A Red Test on Main Should Block Something
@@ -177,7 +177,7 @@ No relevant external findings — this is entirely internal infrastructure (laun
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large
 
 **Team:** Solo dev, PM
 
@@ -185,7 +185,9 @@ No relevant external findings — this is entirely internal infrastructure (laun
 - PM check-ins: 1-2 (the e2e-inclusion question, and confirming fleet reach)
 - Review rounds: 1
 
-The work is bounded: one script, one installer, one `/update` call site, plus tests and docs. The thinking was front-loaded into recon; the build is mostly mechanical. What earns Medium rather than Small is Task B, which needs a real design (what counts as "the run did not happen") and careful tests, and Task D, whose failure mode is a one-night flood of duplicate issues.
+The work is bounded by file count: one script, one installer, one `/update` call site, plus tests and docs. The thinking was front-loaded into recon; the build is mostly mechanical. Task B needs a real design (what counts as "the run did not happen") and careful tests, and Task D's failure mode is a one-night flood of duplicate issues.
+
+**This field read `Medium` through round 7 and was corrected to `Large` on 2026-08-19.** The correction is bookkeeping, not a scope change: nothing was added to or removed from the build. Seven critique rounds settled 11 build steps and 37 verification rows across pytest internals, xdist worker lifecycle, launchd install gating, the `/update` warning channel, process-group signal handling, and cross-machine issue dedup. That is a Large by this repo's own sizing, and calling it Medium made every round's blocker count look like a convergence failure when it was an under-declared appetite. Sizing it honestly is the fix; splitting the lane is not, for the reason recorded in Resolved Question 5.
 
 ## Prerequisites
 
@@ -952,6 +954,17 @@ The four rows added in round 5 were mutation-checked the same way, against the w
 
 The two `_fatal` delegation rows are stated **positively** for the same reason. An earlier revision carried `! grep -nE '^\s+return 1\s*$'`, which can never pass once `_fatal()` lands: the helper's own body ends with a four-space-indented `return 1`, which the pattern matches, so grep exits 0 and the negation exits 1 — FAIL on the correct end state. Confirmed by running the pattern against a stub during this revision. Both delegation rows are **smoke checks only**: each `-A3` pattern matches two sites in the file (one inside `run_tests`, one inside `main`), and the pipe succeeds if either contains `_fatal(`. `Test_Fatal` in the unit suite is the real proof that both `main()` arms alert; the greps exist so a validator gets a fast signal without reading the diff.
 
+## Issue Comment Sync — 2026-08-19
+
+`last_comment_id` advanced from `5324618203` to `5339213644`. Both comments on #2823 were read and dispositioned; neither changed the build.
+
+| Comment | Author / date | Disposition |
+|---------|---------------|-------------|
+| [5324618203](https://github.com/tomcounsell/ai/issues/2823#issuecomment-5324618203) — "Reframe: the test is already fixed; what's open is the detection gap" | valorengels, 2026-08-18 | **Already reflected — no edit needed.** Every point it makes is load-bearing text the plan already carries. "The failure itself is repaired (PR #2826, merged 2026-08-17). This plan is about the gap that let it sit" is Problem :19. "That gap is a class, not an instance. The same batch produced #2822, #2846, #2847 and #2852 — roughly 30 more failing nodes on `main`, none of which blocked anything either" is Problem :21, and those four issues are re-checked individually in the Freshness Check. "The fix is a gate, not a test" is the plan's title and its whole Solution: five legs of detection, zero test repairs, with *repairing* the red population explicitly a No-Go on the #2852 model. The suggested retitle is the one part not adopted, and deliberately: the plan document's filename is derived from the GitHub issue title and the lane's identity is recorded on `PipelineLedger.slug`, so renaming mid-lane costs churn across the ledger, the task list and the branch for no change in content. |
+| [5339213644](https://github.com/tomcounsell/ai/issues/2823#issuecomment-5339213644) — supervised-run stop report recommending a three-lane split | tomcounsell, 2026-08-19 | **Split rejected on the merits; appetite correction adopted.** Full reasoning in Resolved Question 5. In short: A, B and C are the minimum chain that reaches the Desired Outcome, so no single lane closes #2823; the flat per-round blocker count is a sampling artifact of adversarial critique rather than a scope measurement, and round 7's two blockers were both incomplete adoption of round-6 remedies. The report's appetite objection was correct and is fixed directly — `appetite` is now `Large`. |
+
+Critique is closed at round 7 by supervisor decision. This sync requested no round 8 and made no change to the Solution, the Step by Step Tasks, or the Verification table.
+
 ## Critique Results
 
 Round 7 — **the final critique round; the plan is Ready and no round 8 will be requested.** Two
@@ -1349,6 +1362,14 @@ The plan is settled. Each question the draft raised now carries a decision the b
 3. **The deep shrink blocks; only the shallow band warns. Round 6 reversed this, and the reversal is the point.** This question originally ruled `total < 0.9 * prev_total` a warning, because a legitimate PR deleting a large test file would trip it and suppress a real night. Round 6 established that the disposition rested on a wrong failure model: test-DB starvation was believed to produce per-test `error` outcomes catchable by the error ceiling, and since #2628 it produces **no outcomes at all** (`tests/conftest.py::pytest_configure` aborts the session at `:287`). The shrink comparison is therefore not a redundant nicety — it is the *only* check that can see partial starvation. So `total < 0.9 * prev_total` within the same collection now **blocks**, as does `total < 0.9 * (prev["min_expected_collected"] or MIN_EXPECTED_COLLECTED)` before a same-collection baseline exists — with the honest caveat that when the widening probe is defeated and no prior run persisted the field, that night has no floor at all. The two failure directions are not symmetric: a deletion costs one loud night with a one-command remedy, while a silently truncated night has no remedy because nobody knows it happened. The shallower band `prev_total > total >= 0.9 * prev_total` keeps the warning, and keeps its round-2 job — a trusted truncated night silently strips already-filed nodes out of `dispatched_nodes` via `carry_dispatched_nodes`, so the warning switches `main()` to a union-preserving state write. Blocking is done by `report is None`, `total == 0`, the exit-code list, the coverage floor, and the fixture-error ceiling.
 
 4. **Build does not schedule an integration-tier failure-count measurement, but it must complete one widened run.** Four recon attempts at counting the tier's red nodes were defeated by test-DB slot exhaustion, and Task D makes night one safe regardless — the collection mismatch forces a baseline seed that dispatches no *per-node* triage whether the tier is clean or 200-red, and exactly one umbrella session regardless. Measured on `main` during the round-7 revision the population is **three** nodes (Freshness Check), so the realistic magnitude is small — but the design does not depend on that. **The count arrives on night ONE, not night two.** An earlier revision claimed night two's first dispatch set would reveal it; that is false by construction. The seed path sets `just_dispatched = list(confirmed_failing)` and persists the whole confirmed set as both `dispatched_nodes` and `failing_tests`, so night two has `compute_dispatch_set` subtract the entire seed and `compute_new_failures` subtract it again — the dispatch set is empty. The number is visible in night one's own baseline Telegram (`main()` already sends "baseline established: N tests, M confirmed failures") and in the `Confirmed serial failures:` log line. Distinct from that: the build **does** have to get the widened collection to execute once with `summary.total > 0`, at whatever worker count achieves it, because a detector that has never run is not a shipped detector. The timeout constant still has its deterministic fallback bound for the case where the completing run is not a representative one.
+
+5. **The three-lane split was proposed on the merits and is rejected. This lane ships whole.** A supervised run's stop report ([comment 5339213644](https://github.com/tomcounsell/ai/issues/2823#issuecomment-5339213644), 2026-08-19) recommended breaking the work into (A) detector correctness — the integrity guard and fatal-path coverage; (B) collection widening plus re-baseline; (C) fleet install plumbing. Its argument had two parts, and both were weighed.
+
+   **On scope: A, B and C are the minimum chain that closes #2823.** The Desired Outcome is "a test that becomes red on `main` under default collection produces a filed issue within 24 hours, on whatever machine owns a checkout." Ship **A alone** and the collection is still `tests/unit/`, so #2823's own integration test — the specific node this issue is named for — remains outside the detector entirely; the guard would faithfully protect a run that was never going to look at the failure. Ship **A + B** and the detector is correct and wide but installed nowhere: the doubled bridge-role gate requires a truthy `telegram` key and zero of 20 projects have one, so the shipped artifact is a script no machine runs. Ship **C alone or first** and a detector that hardcodes `tests/unit/` and cannot tell a starved night from a green one gets installed fleet-wide, which is worse than not installing it. Each lane in isolation leaves the outcome unachieved, and the three-lane sequencing pays three lane setups, three critiques and three merges to arrive at the same diff. The parts are separable on paper because they touch different functions; they are not separable in value.
+
+   **On the convergence signal: a flat blocker count across rounds is a sampling artifact of adversarial critique, not a scope measurement.** The report read "exactly one blocker per round, six rounds running, no decay" as evidence the plan was too large to converge. A critique instructed to find problems in a long document will generally find at least one; the count floors at one for reasons that have nothing to do with whether the plan is converging. The content of the findings is the better signal, and it decayed. Round 7 — run after that report was written — produced two blockers, and **both were incomplete adoption of already-agreed round-6 remedies**, not newly discovered scope. That is what convergence looks like from the inside: the reviewer has stopped finding new subsystems and started checking whether the last round's fixes actually landed.
+
+   **What the report got right was the appetite, and that is fixed directly.** The `appetite` field read `Medium` against 11 build steps and 37 verification rows; it now reads `Large` (see Appetite). Correcting the declared size removes the mismatch the report detected without paying for it in a broken delivery chain. Critique is closed at round 7 by supervisor decision.
 
 <!-- The first draft's Open Question 4 asked whether Task E could be deferred.
      spike-7 answered it with evidence: the wrapper's stall watchdog fired at
