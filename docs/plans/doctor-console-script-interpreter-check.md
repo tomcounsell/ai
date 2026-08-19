@@ -298,11 +298,21 @@ Both findings are saved to memory (`valor` project) for reuse.
    target is `unverified` — neither a pass nor a finding, but counted.
 6. **Grouping (new)**: findings are keyed by `(reason, target)` so one bad interpreter
    shared by 26 scripts reports as one line with a count, not 26 lines.
-7. **Output**: a single `CheckResult`. On the failure path `message` and `fix` carry the
-   existing resolution clause and PATH/`uv sync` advice unchanged, with an interpreter
-   clause and a reason-specific remedy appended. On the pass path `message` gains a
-   trailing interpreter-verified count. The doctor CLI renders it in the Environment
-   category.
+7. **Output**: a single `CheckResult`, with **three** possible outcomes rather than two.
+   The findings are collected during step 3's loop and composed in one merged tail
+   guarded by `if misresolved or interpreter_findings:` (see the control-flow bullet in
+   Technical Approach):
+   - *Resolution failure only* — today's `X/N ... do not resolve` message, `path_note`,
+     and PATH / `uv sync` fixes, byte for byte.
+   - *Interpreter failure only* — a standalone message that does **not** reuse the
+     `X/N ... do not resolve` phrasing, since those names did resolve, plus the
+     reason-specific remedy.
+   - *Both at once* — both clauses in `message`, both remedies in `fix`.
+
+   On the pass path (both lists empty) `message` gains a trailing interpreter-verified
+   count. On every path, an unresolvable pin appends
+   `(pin unresolvable; off-pin comparison skipped)`. The doctor CLI renders the result
+   in the Environment category.
 
 ## Why Previous Fixes Failed
 
@@ -399,6 +409,31 @@ three example names → **fix** names the rebuild
   message assertions. This keeps the two concerns composable and leaves the
   three-state `path_note` logic at `tools/doctor.py:269-277` byte-identical.
 
+- **Control-flow position: collect inside the resolution loop, compose in a merged
+  tail.** The merged code returns early — `if misresolved:` builds its message and
+  returns at `tools/doctor.py:300-310`, and the pass `CheckResult` follows at
+  `:312-317`. An interpreter read added *after* that block is reachable only when
+  `misresolved` is empty, which makes a simultaneous resolution failure and interpreter
+  failure impossible to report and leaves task 3 case 10 unreachable by construction.
+  The required shape:
+
+  1. Inside the existing `for name in sorted(scripts):` loop at `:228-255`, on the
+     `match is not None` branch (the `elif` at `:254`), extract and classify the winning
+     path and append any non-`ok`, non-`unverified` result to a new
+     `interpreter_findings` list. Increment `verified` / `unverified` counters here too.
+  2. Replace the `if misresolved:` guard at `:259` with
+     `if misresolved or interpreter_findings:`.
+  3. Inside that merged block, compute `path_note` and the PATH / `uv sync` fixes
+     **only when `misresolved` is non-empty**, and append the interpreter clause and its
+     remedies **only when `interpreter_findings` is non-empty**. Both conditions true
+     yields both clauses in `message` and both remedies in `fix`.
+  4. The pass `CheckResult` at `:312-317` is reached only when both lists are empty, and
+     gains the interpreter-verified count.
+
+  Three outcomes exist, not two: resolution-only failure (today's strings, byte for
+  byte), interpreter-only failure (a standalone message that does **not** borrow the
+  `X/N ... do not resolve` phrasing, because they did resolve), and both at once.
+
 - **Extraction reads bounded bytes in binary mode.** Open the file, read at most the
   first two lines with a per-line cap, and decode leniently. Binary mode matters:
   `.venv/bin` legitimately contains files that are not UTF-8 (14 on this machine), and
@@ -463,14 +498,69 @@ three example names → **fix** names the rebuild
   directories* on both sides of the comparison and nothing else. Recorded as an
   anti-criterion in the Verification table.
 
-- **Fail open only where the evidence is genuinely absent, and scope it narrowly.**
-  An unresolvable `repo_interpreter_pin` disables the **off-pin comparison alone**;
-  `missing` and `outside` need no pin and keep firing. A file with no shebang is
-  unverified, not failed. Both degradations must be *visible*: the pass message states
-  how many scripts were actually interpreter-verified, so "verified" is never claimed
-  for a set the check did not read. This mirrors the house rule from #2536 — runtime
-  fails open on uncertainty, doctor fails loud — while refusing to let silence read as
-  health.
+- **Fail open only where the evidence is genuinely absent, scope it narrowly, and
+  disclose it.** An unresolvable `repo_interpreter_pin` disables the **off-pin
+  comparison alone**; `missing` and `outside` need no pin and keep firing. A file with
+  no shebang is unverified, not failed. Both degradations must be *visible*, and the
+  plan's own rule is that "verified" is never claimed for a set the check did not read
+  — so both get a disclosure, not just the extraction one:
+
+  - *Unreadable files / unclassifiable shebang forms* → the pass message's
+    interpreter-verified count is lower than the script count. Already covered.
+  - *Unresolvable pin* → the count alone does not disclose this, because every script
+    still gets read and classified; only the pin leg of the classification silently
+    disappears. Guard the **message construction**, not the classifier: when
+    `repo_interpreter_pin(PROJECT_DIR)` returns `None`, append
+    `(pin unresolvable; off-pin comparison skipped)` to the interpreter clause on both
+    the pass and the failure path. Task 3 case 8 asserts that substring is present.
+
+  `repo_interpreter_pin` (`agent/worktree_manager.py:1076-1096`) returns `None` only
+  when neither this working tree's `.python-version` nor the main checkout's is
+  readable, and it is the classifier's only pin source. That same state already makes
+  `_check_worktree_interpreters` fail outright at `tools/doctor.py:484-491` with "no
+  interpreter pin resolvable", in the same run and the same category — so the operator
+  is not relying on this clause alone to learn the pin is gone. The clause exists so
+  *this* check's own output cannot be misread as a full verification.
+
+  This mirrors the house rule from #2536 — runtime fails open on uncertainty, doctor
+  fails loud — while refusing to let silence read as health.
+
+- **`off-pin` is kept, and its redundancy is stated rather than discovered later.**
+  Measured on this machine: `_repo_venv_bin_dirs()` returns exactly **one** directory
+  (`/Users/tomcounsell/src/ai/.venv/bin`), because `main_checkout_venv(PROJECT_DIR)`
+  resolves to the same venv and is deduped at `tools/doctor.py:125-134`. So in the
+  standard topology `off-pin` can only ever fire on a venv that
+  `_check_worktree_interpreters` already measures against the same pin from the same
+  `pyvenv.cfg`, in the same base check list, under `--quick` too. It is red right now
+  for an unrelated reason: `pin is Python 3.14 (from .python-version), 4 venv(s) are
+  not: sdlc-2138 on 3.13, ...`. `off-pin` detects nothing new there.
+
+  It is kept for two reasons, in order of weight:
+
+  1. **The issue asks for it.** #2748's Desired Outcome names three fail conditions —
+     "missing, off the `.python-version` pin, or outside the repo venv". Dropping one
+     of the three is a scope cut against the issue text, and the appetite pressure here
+     is not severe enough to make that call without the human. The cost is also smaller
+     than it looks once the fixture is counted honestly: two extra lines in
+     `_fake_checkout` (a `pyvenv.cfg` `version_info` and a `.python-version`), two test
+     cases, and one mutation check.
+  2. **One shape is genuinely uncovered by `_check_worktree_interpreters`.**
+     `PROJECT_DIR` is `Path(__file__).resolve().parent.parent` (`tools/doctor.py:32`),
+     so the check follows the *importing* checkout. A **linked git worktree living
+     outside both `checkout/.worktrees/` and `checkout/.claude/worktrees/`** is visible
+     to `_repo_venv_bin_dirs()` via `PROJECT_DIR / ".venv" / "bin"` but invisible to
+     `_check_worktree_interpreters`, whose glob at `:496-498` only walks those two
+     roots. Two such worktrees exist on this machine today (under the session
+     scratchpad); neither carries a `.venv`, so the shape is reachable but is not one
+     the house tooling creates.
+
+  What this plan does **not** do is chase that shape properly. Widening
+  `_check_worktree_interpreters`'s glob is the honest home for the pin question — it is
+  that check's documented promise, and CLAUDE.md's claim that `python -m tools.doctor`
+  "names every one on the machine" is already false for foreign worktrees. That is a
+  separate issue against a separate check, listed under No-Gos. `off-pin` here is a
+  per-script echo, not a substitute for it, and the plan should not be read as having
+  closed the worktree-scan gap.
 
 - **Group findings by `(reason, target)`.** The issue thread asked for the offending
   location to be reported once rather than N times. Re-aimed at the target rather than
@@ -503,12 +593,22 @@ three example names → **fix** names the rebuild
     `str(worktree / ".venv" / "bin") not in result.message`, so the appended clause must
     be a count and must name no venv path of its own.
 
-- **Remediation text, per reason — one remedy, no `/update` clause.** `missing` and
-  `off-pin` both point at `rm -rf .venv && uv sync --all-extras` in the affected
-  checkout, which is the same remedy `_check_worktree_interpreters` already prescribes
-  at `:520-523` — consistency matters more than novelty. `outside` points at the same
-  rebuild, because a shebang pointing out of the venv means the scripts were generated
-  by a foreign installer.
+- **Remediation text, per reason — three distinct sentences over one shared command,
+  and no `/update` clause.** "Distinct" means the **diagnostic clause differs while the
+  rebuild command is shared**. The shared command is deliberate: it is what
+  `_check_worktree_interpreters` prescribes at `:520-523`, and one action clearing both
+  findings is Risk 5's whole mitigation. The distinct diagnosis is what makes the fix
+  line actionable rather than generic. Write these three shapes:
+
+  | Reason | Fix sentence |
+  |--------|--------------|
+  | `missing` | `Console script shebang target {t} does not exist. In {checkout}: rm -rf .venv && uv sync --all-extras` |
+  | `off-pin` | `Console script shebang target {t} is Python {v}, pin is {p}. In {checkout}: rm -rf .venv && uv sync --all-extras` |
+  | `outside` | `Console script shebang target {t} is outside every repo venv, so it carries no editable install of this repo. In {checkout}: rm -rf .venv && uv sync --all-extras` |
+
+  Task 3 case 11 therefore asserts that the three **diagnostic prefixes** differ (the
+  text up to the `In {checkout}:` clause), not that the commands differ. Asserting the
+  commands differ would be asserting the opposite of Risk 5's mitigation.
 
   An earlier draft added a fourth sentence naming `/update` for scripts accepted via the
   `_same_file` branch, on the premise that `/update` hardlinks entry points into
@@ -697,15 +797,24 @@ are corrected in this change (Documentation section) so the premise stops propag
 `_same_file` itself is kept and still exercised: it is general hardlink tolerance, and
 #2665's test builds its hardlink with a bare `os.link`.
 
-### Risk 5: A pin file that disagrees with an on-disk venv produces a confusing double report
+### Risk 5: `off-pin` double-reports what `_check_worktree_interpreters` already says
 
-**Impact:** If `.python-version` says 3.14 and the venv is 3.12, both
-`_check_worktree_interpreters` and this check fire, and an operator may read two
-findings as two problems.
+**Impact:** In the standard topology this is not a risk of *confusion* so much as a
+known redundancy. `_repo_venv_bin_dirs()` resolves to a single directory on this
+machine, so `off-pin` can only fire on a venv `_check_worktree_interpreters` already
+measures against the same pin from the same `pyvenv.cfg`, in the same base check list.
+If `.python-version` says 3.14 and that venv is 3.12, both checks fire and an operator
+may read two findings as two problems.
 **Mitigation:** the interpreter finding names the shebang target and both versions
 explicitly, and prescribes the same `rm -rf .venv && uv sync --all-extras` remedy the
-worktree check already gives. One action clears both. Verified by reading both
-messages together during task 5.
+worktree check already gives — deliberately identical, so one action clears both. That
+is why task 3 case 11 asserts the three *diagnostic clauses* differ rather than the
+commands. Verified by reading both messages together during task 5.
+**Accepted, not eliminated:** the state is kept because #2748's Desired Outcome names
+it and because one shape — a linked worktree outside both worktree roots — is invisible
+to `_check_worktree_interpreters`'s glob at `:496-498` while visible to
+`_repo_venv_bin_dirs()`. See the `off-pin` bullet in Technical Approach for the measured
+basis and for what this plan explicitly does *not* fix.
 
 ## Race Conditions
 
@@ -737,6 +846,13 @@ read-only, and shares no mutable state with any other check.
 - [SEPARATE-SLUG #2749] Making SDLC gate callers (`critique-roster-check`,
   `critique-resume-probe`, `sdlc-push-guard`) distinguish exit 127 from a real non-zero
   gate verdict. Named as deliberately separate in the issue body.
+- [NEW-ISSUE] Widening `_check_worktree_interpreters`'s scan (`tools/doctor.py:496-498`)
+  to reach linked worktrees outside `checkout/.worktrees/` and
+  `checkout/.claude/worktrees/`. That glob is where the pin question belongs, and
+  CLAUDE.md's claim that `python -m tools.doctor` "names every one on the machine" is
+  already false for such worktrees — independently of this issue. This plan's `off-pin`
+  state is a per-script echo, not a substitute; do not read it as having closed that
+  gap. File separately after this lands.
 - [EXTERNAL] Verifying the fix against the `valorengels` host, which carries the
   63-shadowed-executable state reported in the thread. Only a human with access to that
   machine can run doctor there. The two cases this plan closes are reproduced
