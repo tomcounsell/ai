@@ -43,7 +43,7 @@ neither reads the other's code. Each still reverts alone.
 The two halves are **near-file-disjoint** — WS-A touches nothing WS-B/C touch, and vice versa
 — so a reviewer reads two independent diffs rather than one entangled one, and each
 workstream reverts alone (the mutation table in Risk 5 enforces that each has its own
-coverage). Splitting file-disjoint halves into two PRs would buy the reviewer nothing and
+coverage). Splitting these halves into two PRs would buy the reviewer nothing and
 cost a second lane's worth of pipeline machinery. One PR, closing all three issues.
 
 ## Problem
@@ -413,7 +413,9 @@ arriving through a different row.
   definition of "not finished" (the absence of any MERGE-aware row) and starts
   consuming the explicit shared predicate. Two definitions of terminal collapse into one.
 - **Data ownership**: unchanged. No new persisted state, no ledger fields, no Popoto
-  models, therefore **no migration**.
+  models, therefore **no migration**. `issue_state` is a *computed* meta key resolved fresh
+  each tick, never stored — deliberately, since a persisted copy would go stale on reopen
+  and reintroduce Risk 6 through the cache instead of the ledger.
 - **Reversibility**: high. Each workstream is a small, independently revertible diff,
   and the demonstrated-red table below names exactly which tests re-red on each revert.
 
@@ -987,7 +989,7 @@ covers it alone.
 
 ## Race Conditions
 
-**No new race conditions identified.** All four workstreams are synchronous,
+**No new race conditions identified.** All three shipped workstreams are synchronous,
 single-threaded, side-effect-free reads. The terminal guard is a pure dict read;
 `_lookup_pr` and `_gh_pr_search_issue_ref` are blocking `subprocess.run` calls with
 5-second timeouts that return a value and write nothing.
@@ -1031,7 +1033,7 @@ Everything else the three issues describe is in scope for this plan.
 
 ## Update System
 
-No update-system changes required. All four workstreams are edits to existing Python
+No update-system changes required. All three shipped workstreams are edits to existing Python
 modules already shipped by the repo checkout; `/update`'s `git pull` + `uv sync` picks
 them up with no new dependency, config file, or migration step.
 
@@ -1256,7 +1258,7 @@ in-process.
 - Confirm no code path other than `sm.complete_stage("MERGE")` writes `MERGE = completed` (Risk 1's verification task).
 - Record everything as the red-state paper trail for the PR body.
 
-### 2. Write the failing tests first (all four workstreams)
+### 2. Write the failing tests first (all three workstreams)
 - **Task ID**: red-tests
 - **Depends On**: measure-baseline
 - **Validates**: tests/unit/test_sdlc_router_oscillation.py, tests/unit/test_sdlc_stage_query.py, tests/unit/test_sdlc_stage_marker.py, tests/unit/test_pipeline_complete_predicate.py, tests/integration/test_sdlc_next_skill_terminal.py (create)
