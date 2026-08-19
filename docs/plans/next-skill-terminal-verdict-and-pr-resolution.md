@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
-last_comment_id: none
+last_comment_id: 5324622874
 ---
 
 # Terminal Verdict and PR Resolution: the three stage-marker residuals left outside #2826's fence
@@ -197,6 +197,14 @@ No prototypes, no worktrees, no committed code.
   three wasted `/do-merge` ticks and then a human escalation whose suggested remedy
   (`sdlc-tool dispatch reset`) is the wrong advice for a finished pipeline. Confirms
   the severity is "wasted cycles + a misleading escalation", not "infinite loop".
+- **Corroboration from the issue thread** (#2817 comment `5311386590`, 2026-08-17):
+  each of those three ticks is a **no-op** rather than a destructive re-merge, because
+  `/do-merge` fails closed on `state != "OPEN"`
+  (`.claude/skills-global/do-merge/SKILL.md:99`). That comment also records the live
+  confirmation `--issue-number 2755` → `{"skill": "/do-merge", "row_id": "10",
+  "dispatched": true}`. Independent of this plan's synthetic matrix and in agreement
+  with it — which is why the severity here is wasted cycles and a misleading
+  escalation rather than data loss.
 
 ### spike-3: Is there already a terminal predicate in this codebase?
 - **Assumption**: "#2817 needs a new terminal predicate designed from scratch."
