@@ -44,8 +44,9 @@ Three trade-offs, deliberate:
   way. `.yaml`/`.yml` themselves currently match no tracked hits --
   `config/reflections.yaml` is gitignored -- so the reflection registry's
   own name and cadence contract is actually pinned by
-  `tests/integration/test_reflections_redis.py:185,197`, not by anything in
-  this file. No live occurrence exists outside `docs/plans/` today and every
+  `tests/integration/test_reflections_redis.py`, which asserts both the
+  registered name and the 86400s interval, not by anything in this file.
+  No live occurrence exists outside `docs/plans/` today and every
   realistic reintroduction path is Python, Markdown, or YAML/TOML, so this
   suffix list is intentionally not widened here.
 
