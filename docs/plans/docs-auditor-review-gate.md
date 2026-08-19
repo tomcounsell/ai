@@ -265,7 +265,19 @@ pipe-free and still POSIX `/bin/sh`.
   frame-mismatch noise, and it is why `_write_liveness` is no longer as inert as
   spike-4 found it.
 - **PR #2842** (merged `a9205b065`, issue #2741): deleted the rename channel
-  outright. Q6 below is the record of the reasoning; the work is done.
+  outright. Q6 below is the record of the reasoning; the work is done. It is also the
+  direct cause of #2834's first half — deleting `_detect_readme_broken_entries` removed
+  the only code that looked at `.md` link targets at all.
+- **`eb340e23d`** ("Fix docs-auditor deleted-target flood: filtering + live-tracker
+  dedup", #1555): the origin of `_is_placeholder_path`, `_build_line_context`, and
+  `_is_documented_deletion`. Directly relevant to Q7: the deletion-narrative hatch
+  #2834's comment asks for **already exists** — this lane widens it rather than inventing
+  it, and the prior attempt's cue lists are the evidence for *how* it under-fires.
+- **`208f08a69`** ("add per-run issue-filing cap to prevent flood"): the `per_run_cap = 5`
+  bound Q5 hoists to `ISSUE_FILING_PER_RUN_CAP` and Q7 reuses unchanged.
+- **#2839 / #2840 / #2841**: one true positive and two false positives filed by
+  `_detect_deleted_target_issues` in a single run on 2026-08-17. The measured evidence for
+  Q7's second half, and the control set spike-7 tests against.
 - **#2726 / #2725 / #2729**: the three consolidated issues, all closed as duplicates
   of #2739. Filed separately during #2728's scoping precisely because each needed an
   owner ruling rather than a mechanical fix. #2726 and #2729 are this plan's
@@ -478,6 +490,124 @@ results below.
 - **Confidence:** high.
 - **Impact on plan:** Q3 is a mechanical, zero-risk narrowing.
 
+### spike-6: How much volume does the `.md` widening actually add? (#2834)
+
+- **Assumption (#2834's own constraint):** *"Volume must be sized before it ships."*
+  Widening `_detect_deleted_target_issues` to markdown-link `.md` targets might flood the
+  5-per-run issue cap.
+- **Method:** prototype, **read-only and issue-free by construction**. Called
+  `_resolve_neighborhood`, `_build_line_context`, `_is_documented_deletion`,
+  `_is_placeholder_path` and `_detect_deleted_target_issues` **directly** against the live
+  checkout at `f491306c5`. `audit()` was never invoked, so `apply_mode` never existed in
+  the run and no `gh issue create` could fire. Two measurements: a repo-wide census over
+  all 1,076 `.md` files under `docs/` and `.claude/`, and a per-run distribution over 35
+  rotation primaries sampled from the 274 candidates in `docs/features/`, each expanded
+  through `_resolve_neighborhood(..., cap=NEIGHBORHOOD_CAP)`.
+- **Finding: the widening is small, and the naive version has two distinct
+  false-positive classes that the strict rule set removes.**
+
+  | Rule set | Distinct findings repo-wide | Per-run mean | Per-run max |
+  |---|---|---|---|
+  | Naive (link regex + doc-relative resolution only) | 50 | 0.29 | 3 |
+  | Strict (adds inline-code, URI-scheme, placeholder, archived-dir rules) | 41 | — | — |
+  | Strict **and** scoped to `docs/` minus archived plan dirs | **19** | **0.29** | **3** |
+
+  In 28 of 35 sampled runs the widening finds **nothing**, and it never approaches the
+  per-run cap of 5 on its own. The 19 in-scope findings are a one-time backlog that drains
+  at ≤5 per run and then stays drained, provided the dedup fix in Q7c lands.
+
+  The two false-positive classes, both real and both cheap to exclude:
+
+  - **Links displayed as syntax, not followed.** `docs/features/features-readme-sort-check.md:26`
+    explains the index format with `` `[Feature Name](filename.md)` `` — inside a
+    single-backtick code span. `.claude/skills-global/new-skill/SKILL_TEMPLATE.md`
+    contributes three more (`SUB_FILE_A.md`…). A markdown link inside inline code is being
+    *shown*, not followed.
+  - **Non-path targets.** `docs/plans/completed/sdlc-1136.md` links a
+    `file:/Users/…` URL; others carry mangled `blob/main/…` GitHub URLs. Any target
+    carrying a URI scheme is out of the filesystem frame entirely.
+
+  A representative sample of what survives, and it is real: `docs/features/observer-agent.md`
+  is linked from three live feature docs and does not exist;
+  `docs/features/compaction-hardening.md` links `docs/plans/compaction-hardening.md`,
+  archived long ago.
+- **Confidence:** high — executed against the real corpus with the real helpers, both
+  measurements reproducible from the rule set stated in Q7a.
+- **Impact on plan:** Q7a ships. The strict rule set is mandated in Q7a rather than left
+  to the builder, because the naive version's 50 findings include a class
+  (`SKILL_TEMPLATE.md`) that would file issues against files whose whole purpose is to
+  contain placeholder links.
+
+### spike-7: Does widening the deletion-narrative hatch fix the false positives without silencing the true one? (#2834)
+
+- **Assumption:** the `.py` over-report is fixable by widening `_is_documented_deletion`,
+  and the widening will not suppress genuine live references.
+- **Method:** prototype — reimplemented `_detect_deleted_target_issues`'s filter chain
+  with three widenings (heading **stems** rather than exact inflections, **word-anchored**
+  prose cues rather than exact phrases, window ±2 rather than ±1), plus a **live-claim
+  veto**, and ran it over `docs/features/` and the whole `docs/`+`.claude/` corpus.
+  Controls: the three issues the detector filed on 2026-08-17.
+- **Finding: it fixes both false positives, keeps the true positive, and the residual
+  cost is measured rather than assumed.**
+
+  All three controls behave correctly:
+
+  | Control | Site | Wanted | Result |
+  |---|---|---|---|
+  | #2840 | `harness-abstraction.md:189` | suppress | **suppressed** (heading stem `cleanup`) |
+  | #2841 | `harness-adapter.md:19` | suppress | **suppressed** (prose cue `deleted` at −2) |
+  | #2841 | `harness-adapter.md:115` | suppress | **suppressed** (heading stem `delet` matches "Deletion") |
+  | #2839 | `standardized-enums.md:19` | **keep** | **kept** — no cue within ±2, heading `### SessionType` |
+
+  Volume, over `docs/features/` (rotation's primary corpus), findings not already
+  suppressed by today's hatch:
+
+  | Variant | Newly suppressed | Still reported |
+  |---|---|---|
+  | Widened cues, no veto | 20 | 37 |
+  | Widened cues **+ live-claim veto** | **15** | **42** |
+
+  Per rotation run over the same 35 sampled neighborhoods, the widened hatch drops the
+  `.py` channel from mean 0.86 to 0.57 findings — almost exactly offsetting the 0.29 the
+  `.md` branch adds. **Net per-run volume is unchanged** (0.86 → 0.86, max 8 in both,
+  driven by one outlier neighborhood that already exceeds the cap today).
+
+  **The residual, stated rather than claimed away.** Without the veto, five suppressions
+  were wrong: `sdlc-stage-tracking.md:48` says two symbols *"remain defined in"* a file
+  that no longer exists, and `structured-logging-telemetry.md:89` and
+  `enforce-review-docs-stages.md:13` are similar. All five are recovered by the veto — a
+  cue on the match's own line asserting presence (`remain`, `still`, `defined in`,
+  `lives in`, `currently`, `implemented in`) cancels the suppression. What the veto does
+  *not* recover is `test-coverage-standards.md:59/63/123/124`, whose "Tests:" rows cite
+  deleted test files on lines that also carry the word "removed". Those four stay silent.
+  That is the accepted direction of error and it is deliberate: a false positive costs a
+  human a triage pass, a false negative costs a stale line in a doc that is already
+  narrating its own history.
+- **Confidence:** high for the controls (executed against the real sites); medium for the
+  corpus-wide counts, which depend on the exact cue lists and must be re-measured at build
+  time if the builder changes them.
+- **Impact on plan:** Q7b ships **with the live-claim veto included**, not as an optional
+  refinement. Without it the widening trades two known false positives for five new false
+  negatives, which is not obviously a win; with it the trade is 15-for-4 in the direction
+  the issue asks for.
+
+### spike-8 (not run): does the `.md` branch need its own frame study?
+
+- **Assumption:** the doc-relative vs repo-root frame question (#2725 / #2741) needs
+  fresh investigation for the `.md` branch.
+- **Method:** none — **deliberately reused spike-3's finding instead of re-running it.**
+- **Finding:** spike-3 already settled the frame question and its conclusion transfers
+  directly: `_absent_new_path_refs` is *structurally* blind to the resolution frame, so
+  nothing in the existing invariant machinery can be leaned on for `.md` targets. What
+  spike-3 did not have, and what closes the question, is that **the module already
+  contains a frame-correct resolver**: `_resolve_neighborhood:286-298` resolves outbound
+  `.md` links as `(full.parent / target).resolve()` and then `relative_to(repo_root)`.
+  Q7a follows that idiom rather than inventing one, which is why Q7a's resolution rule is
+  three lines and not a design problem.
+- **Confidence:** high.
+- **Impact on plan:** no spike budget spent; Q7a's resolution rule cites the in-module
+  precedent.
+
 ## Data Flow
 
 **Caller B (cascade) — after this change:**
@@ -655,8 +785,8 @@ issue → human.
 
 ### Technical Approach
 
-The six open questions from the issue's Solution sketch, resolved. **Q6 is a record of
-work that landed upstream; Q1-Q5 are this lane's work.**
+The six open questions from #2739's Solution sketch, resolved, plus **Q7 for #2834**.
+**Q6 is a record of work that landed upstream; Q1-Q5 and Q7 are this lane's work.**
 
 ---
 
@@ -1177,7 +1307,7 @@ frame-correct re-relativization — which is a feature, not a bug fix. The capab
 not silently lost: `_detect_deleted_target_issues` (`:876`) still reports broken
 references to a human as an issue.
 
-**What this means for this lane.** Two things, both already reflected above:
+**What this means for this lane.** Three things:
 
 - Q5's escalation signal is trustworthy, because the permanent withheld generator is
   gone. That is spike-2's conclusion, satisfied upstream instead of by a task here.
@@ -1185,6 +1315,161 @@ references to a human as an issue.
   substrate git surface. The only obligation Q6 leaves behind is the Prerequisites row
   asserting the channel really is absent on the tree the build runs against, so this
   lane cannot be built on a revert.
+- The deletion left a hole in the *reporting* surface. Q6's closing line — *"the
+  capability was not silently lost: `_detect_deleted_target_issues` still reports broken
+  references to a human"* — was true only for `.py` paths. **Q7 is the repair of that
+  overstatement**, and it is why #2834 belongs in this lane rather than a fresh one.
+
+---
+
+**Q7 — Reference-shape parity (#2834). One question, asked once, for both path shapes:
+is this reference a claim about the present or a record of the past?**
+
+`_detect_deleted_target_issues` (`:876`) is the module's only surviving reference
+reporter, and it gets the question wrong in both directions: it never asks it of `.md`
+targets (so a broken link reaches nobody) and it asks it too literally of `.py` targets
+(so deletion narrative files issues). Both are fixed inside that one function and its
+filter chain. **This is a reporting change only — no new automated write, no auto-repair,
+no resurrection of `_detect_readme_broken_entries`.** The whole point of #2739 is that an
+auditor rewriting a human's document on its own judgment needs a review gate; adding a
+`.md` *repair* here would reintroduce exactly what #2842 removed.
+
+**Q7a — `.md` targets get a reporting path, resolved in the frame the document is read
+in.**
+
+Add a second `finditer` branch to `_detect_deleted_target_issues` over markdown links.
+The rule set is mandated, because spike-6 showed the naive version files issues against
+template files whose purpose is to hold placeholder links:
+
+1. **Match** `[label](target.md)`, tolerating an optional `<…>` wrapper, surrounding
+   whitespace, and a trailing `#anchor` or `?query` which is stripped before resolution.
+2. **Skip** a target that begins with `#` (same-document anchor) or matches a URI scheme
+   `^[A-Za-z][A-Za-z0-9+.-]*:` (covers `http:`, `https:`, `mailto:`, and the real
+   `file:` case spike-6 found). A scheme means the target is not a repository path.
+3. **Skip** a match that sits inside an **inline single-backtick code span** — count the
+   backticks between the start of the match's line and the match; an odd count means the
+   match is inside a span. This is a deliberate asymmetry with the `.py` branch, whose
+   docstring says *"Inline single-backtick code is NOT suppressed — that is how genuine
+   references are written."* That is true for a bare path and false for a link: a
+   markdown link written inside a code span is displaying syntax, not linking. State the
+   asymmetry in the code comment so nobody "harmonizes" the two branches later.
+4. **Resolve doc-relative**, following the in-module precedent at
+   `_resolve_neighborhood:286-298`: a target beginning with `/` resolves against the repo
+   root, everything else against `doc_path.parent`. Normalize `..` segments, then require
+   the result to stay inside the repo root; a target that escapes is out of scope and is
+   skipped, not reported.
+
+   **This is the #2725 / #2741 frame bug and spike-3's finding is the reason the rule is
+   stated this way.** A target that exists at the repo root but not doc-relative is
+   **still broken**, because doc-relative is the frame GitHub and every markdown renderer
+   actually use — so a repo-root-spelled link in a nested doc is a true finding, not a
+   false positive. Reuse spike-3's conclusion rather than re-deriving it: the existence
+   invariant `_absent_new_path_refs` is structurally blind to the frame and must not be
+   borrowed for this check.
+5. **Apply the same suppressions as the `.py` branch** — fenced code blocks, deletion
+   headings, deletion prose — via the shared `_build_line_context` / `_is_documented_deletion`
+   pair, using the Q7b-widened versions.
+6. **Skip placeholder targets.** `_is_placeholder_path` (`:790`) strips only a `.py`
+   suffix on the final component; extend it to strip `.md` as well, and add the
+   link-specific stand-ins spike-6 surfaced (`filename`, `path`, `name`) to
+   `_PLACEHOLDER_PATH_COMPONENTS`. Do **not** add `sub_file_a`-style names: those are
+   handled structurally by rule 7.
+7. **Report only for containing docs under `docs/`, excluding the archived plan
+   directories `docs/plans/completed/` and `docs/plans/done/`.** This is what takes the
+   census from 41 to 19 (spike-6). Two justifications, both structural: `.claude/` holds
+   skill *templates* whose links are deliberately unresolvable, and an archived plan is a
+   historical record whose links describe the repo as it was. The scope applies to the
+   `.md` branch only — the `.py` branch's scope is unchanged, so this is not a silent
+   narrowing of existing behavior.
+
+Finding shape, following the existing `.py` branch exactly:
+
+```
+title: "Doc references missing link target: {target} (in {doc})"
+body:  "`{doc}` links to `{target}`, which does not exist. The link was resolved
+        relative to `{doc.parent}`, the frame markdown renderers use."
+category: "broken-md-link"
+```
+
+`{target}` is the **resolved repo-relative path**, not the raw link text, so the title is
+stable under equivalent spellings of the same link. The title carries no age, date, count,
+or run id — the same no-volatile-fields rule Q5 states, for the same reason: the title is
+the dedup key.
+
+**Q7b — the `.py` branch gets a deletion-narrative hatch that fires on real prose.**
+
+The hatch already exists (`_is_documented_deletion`, `:847`, from #1555). It under-fires
+for three independent reasons, each measured in spike-7. Fix all three plus add a veto:
+
+| Today | Fails on | Change |
+|---|---|---|
+| `_DELETION_HEADING_KEYWORDS` are exact inflections: `migration`, `removed`, `deleted`, `deprecated` | `## Dead SDK Path Deletion` (`"deleted" in "deletion"` is `False`), `## Hook Cleanup (Phase 5)` | Match **stems**: `delet`, `remov`, `deprecat`, `migrat`, `cleanup`, `obsolete`, `retire` |
+| `_DELETION_PROSE_CUES` are exact phrases: `deleted module`, `no longer exists`, … | "deleted (250 lines)", "no longer needed", "was removed as part of" | **Word-anchored** alternation over `deleted\|deletes\|deletion\|removed\|removes\|removal\|obsolete\|retired\|dropped\|gone\|no longer\|superseded\|formerly\|previously`, compiled once at module level like `_MIGRATION_CUE_WORD_RE` (`:408`). Word anchoring is load-bearing for the same reason #2782 gives at `:403-407`: a docs corpus is dense with snake_case identifiers, so an unanchored test fires inside `removed_at`, `dropped_frames`, and `deletion_marker`, which turns the tier into "the page mentions code" |
+| Adjacent-line window is ±1 | `harness-adapter.md:19`, whose cue sits two lines above a wrapped sentence | Widen to **±2** |
+
+Then add the guard that keeps the widening from over-suppressing:
+
+**The live-claim veto.** A cue on the match's **own line** asserting that the target is
+present — `remain`, `remains`, `still`, `defined in`, `lives in`, `currently`,
+`implemented in`, word-anchored — **cancels** the suppression. Checked before the heading
+and prose tiers, after the fence tier (a fenced block is illustrative regardless of what
+it says). spike-7 measured this as the difference between trading two false positives for
+five false negatives and trading fifteen for four. Concretely it is what keeps
+`docs/features/sdlc-stage-tracking.md:48` — *"`classify_outcome()` and `fail_stage()`
+remain defined in `agent/hooks/subagent_stop.py`"* — reported, which is correct: that
+sentence is a claim about the present and it is false.
+
+**Do not reach for `_has_migration_context` (`:439`).** #2834's comment describes the fix
+as "give `_detect_deleted_target_issues` the migration-context hatch that #2782 gave the
+other detectors", and that is right in spirit and wrong in mechanism.
+`_has_migration_context` is parameterized on an `(old_term, new_term)` pair drawn from
+`STALE_TERMS`; a deleted path has no successor term, so both of its tiers are undefined
+here. The correct reading is that `_detect_deleted_target_issues` needs *its own* hatch to
+work as well as the stale-term one does, and it already has one — this widens it.
+
+**Q7c — the convergence answer: file once, ever.**
+
+Widening a source that never converges makes the non-convergence worse, so it is fixed in
+the same lane. Today `_open_issue_exists` (`:1003`) queries `--state open` (`:1025-1026`)
+and the Redis fast-path expires at 30 days (`:1091`, `:1133`). A human who reads a finding,
+decides the doc is fine, and closes the issue gets the same issue back a month later,
+forever. `audit()`'s comment at `:1259-1265` already documents this and its only answer
+is to meter the flood by gating filing to rotation.
+
+**Change `_open_issue_exists` to query `--state all` with `--limit 100`, and rename it
+`_issue_exists`.** No compatibility alias — Principle 1.
+
+- **Why `all` is right for every title this module files, not just Q7's.** Each title is a
+  stable per-defect key: the `.py` and `.md` findings key on (doc, target); the stub-doc
+  and orphan-plan findings key on the doc; Q5's withheld findings key on (doc, old, new);
+  Q5's sweeper finding keys on the PR number. A **closed** issue on any of those keys is a
+  human's ruling on that exact defect. Re-asking is not diligence, it is not listening.
+- **Why `--limit 100` is not decoration.** `gh issue list` defaults to `--limit 30`.
+  Under `--state open` the candidate set is small; under `--state all` a full-text search
+  can easily return more than 30 issues, and the exact-title match this function needs
+  could fall off page one — a silent fail-open that would file a duplicate of an issue
+  that already exists. This is the same defect class as the `gh pr list --limit 200`
+  correction the round-3 settle pass applied to Prerequisites row 6.
+- **The cost, stated plainly.** If a doc is fixed, its issue closed, and the doc later
+  regresses in exactly the same way, the auditor stays silent about it. That is accepted.
+  The auditor is not the only surface a regression has, and the alternative — a channel
+  that re-litigates every human ruling on a 30-day timer — is the thing that made
+  `documentation`-labelled issues a flood twice already (#1555, #1716).
+- The fail-open-on-`gh`-error behavior is **unchanged** and must stay: a `gh` failure
+  still returns `False` so a genuine finding is never silently dropped.
+- Update the `audit()` comment at `:1259-1265`: the parenthetical *"(and re-files any that
+  were closed without fixing the doc, since the dedup gate only sees open issues)"* is no
+  longer true and must be deleted, not annotated.
+
+**What Q7 explicitly does not do.**
+
+- No repair of any `.md` link. Report only.
+- No change to the `.py` branch's regex. #2759 ruled that `_PATH_REF_RE`'s `*` widening
+  stays out of the detector (`:887-892`), and that ruling stands — Q7a adds a *link*
+  branch, not a wider bare-path branch.
+- No change to the per-run cap. Q7's findings enter the same `issue_findings` list and are
+  bounded by the same `ISSUE_FILING_PER_RUN_CAP` Q5 hoists. spike-6 and spike-7 together
+  show net per-run volume is flat, so no new bound is needed.
 
 ## Failure Path Test Strategy
 
