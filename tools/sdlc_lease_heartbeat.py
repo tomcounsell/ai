@@ -34,12 +34,24 @@ whatever run_id it carries) and:
 This is deliberately an OWNERSHIP check, never a pid-liveness one (issue
 #2537 review): the payload's ``pid`` is stamped by the short-lived
 ``sdlc-tool session-ensure`` CLI at acquire time and is dead before this
-detached heartbeat's first tick, so the peek's pid-keyed ``orphaned_lock``
-signal reads every locally-minted lease as orphaned and must not gate the
+detached heartbeat's first tick, so a pid-keyed ``orphaned_lock`` signal
+would read every locally-minted lease as orphaned and must not gate the
 renew. The shape mirrors ``touch_issue_lock``'s own "no run_id supplied:
 never mutates" special case at the caller layer: the heartbeat can only ever
 EXTEND a lease it already owns, never mint on a free key nor steal one from a
 successor.
+
+**``renewer_pid`` is the exception, and it is the whole point of issue
+#2648.** That claim about the payload's ``pid`` holds for ``pid`` alone. This
+heartbeat is one of exactly two DURABLE renewers -- processes that live as
+long as the run does -- so its renewals also stamp ``renewer_pid`` +
+``renewer_create_time``, which name a process that is ALIVE for as long as the
+lease deserves to be. That is what makes the lease's pid evidence checkable at
+all, and it is why ``_lock_owner_is_live`` can treat a fresh renewal stamp as
+corroborating rather than conclusive: a run that renewed once and then died no
+longer reads live for the full freshness window. The distinction is load-
+bearing in both directions -- gating the renew on ``pid`` would be the #2620
+regression, while never stamping ``renewer_pid`` would leave #2648 unfixed.
 
 **Run liveness is the SUPERVISOR's liveness (issue #2714).** The heartbeat's
 own existence proves nothing about the run: a supervisor killed mid-stage
@@ -253,6 +265,55 @@ def _log_exit(reason: str, issue_number: int, run_id: str, detail: str = "") -> 
     return 0
 
 
+def _clear_renewer_identity_at_exit(issue_number: int, run_id: str, session_id: str = "") -> None:
+    """Drop this heartbeat's recorded renewer identity from the lease payload.
+
+    Called at the two deadline exits that deliberately do NOT release (issue
+    #2648, spike-5 shape (a)). Those exits already reason in prose that
+    failing to resolve a supervisor is not positive proof the run is dead --
+    this applies that same judgement to the payload. A retiring renewer that
+    left its pid behind would otherwise be read as a DEAD run once the grace
+    window lapsed, and the orphan reaper has no idle-time gate on the
+    payload-present path, so a live lane would be reaped mid-stage. With the
+    group cleared the payload falls back to the untouched renewal-freshness
+    short-circuit and the verdict is exactly what it is today.
+
+    Bounded to TWO attempts. The write is a compare-and-set against the bytes
+    just read, so a benign same-run_id CLI renewal landing inside the window
+    makes attempt one a no-op -- and unlike the tick loop, which notices a
+    lost CAS via EXIT_LEASE_LOST, nothing downstream would notice this one.
+    A genuine successor carries a different run_id and fails both attempts,
+    which is the guarantee the CAS exists for. Best-effort throughout: every
+    failure is swallowed and the exit proceeds, with the lease TTL as backstop.
+    """
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        for _attempt in range(2):
+            result = touch_issue_lock(
+                issue_number,
+                run_id,
+                session_id=session_id,
+                drop_renewer_identity=True,
+            )
+            if result.acquired:
+                return
+    except Exception as e:  # noqa: BLE001 - best-effort; the lease TTL is the backstop
+        logger.info(
+            "sdlc_lease_heartbeat: renewer-identity clear failed for issue #%s (%s: %s) "
+            "-- lease TTL is the backstop",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return
+    logger.info(
+        "sdlc_lease_heartbeat: renewer-identity clear for issue #%s did not land in 2 "
+        "attempts -- the lease is no longer ours, or a writer keeps racing it",
+        issue_number,
+    )
+
+
 def run_heartbeat(
     issue_number: int,
     run_id: str,
@@ -349,6 +410,13 @@ def run_heartbeat(
 
     while True:
         if _monotonic() >= deadline:
+            # Both deadline exits below leave the lease alone on purpose, so
+            # the payload outlives this process -- including the renewer
+            # identity it stamped on every tick. Retract that identity first
+            # (issue #2648): a renewer retiring on its own clock says nothing
+            # about whether the RUN is alive, and leaving a dead pid behind
+            # would let the liveness predicate read it as proof of death.
+            _clear_renewer_identity_at_exit(issue_number, run_id, session_id)
             if unsupervised_bound:
                 # Risk 1: this shortened bound applies ONLY when the supervisor
                 # was unresolvable. Deliberately NO release -- failing to
@@ -426,12 +494,25 @@ def run_heartbeat(
                 # undone by it. Without it the extend re-minted the lease the
                 # supervisor had just given up and renewed it to the max-lifetime
                 # ceiling with nothing behind it.
+                # `stamp_renewer_identity` (issue #2648) records THIS
+                # process's pid on the payload. It is the one pid on that
+                # payload worth checking: the acquire-time `pid` belongs to
+                # the ephemeral `session-ensure` CLI and is dead by tick one,
+                # while this loop lives as long as the run does. Recording it
+                # is what lets the liveness predicate stop treating a renewal
+                # stamp as conclusive proof that the stamp's writer is still
+                # alive. The module token is passed EXPLICITLY because this
+                # file runs as `python -m tools.sdlc_lease_heartbeat`, where
+                # `__name__` is "__main__" and any introspective allowlist
+                # check would silently never match.
                 extended = touch_issue_lock(
                     issue_number,
                     run_id,
                     session_id=session_id,
                     ttl=ISSUE_LOCK_TTL_SECONDS,
                     renew_only=True,
+                    stamp_renewer_identity=True,
+                    renewer_module="tools.sdlc_lease_heartbeat",
                 )
                 if not extended.acquired:
                     # The CAS lost (a release landed inside the peek/extend

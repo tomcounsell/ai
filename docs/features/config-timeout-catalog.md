@@ -90,6 +90,28 @@ at every site that shares them:
   compare-and-delete in `finalize_session`) on run completion and graceful
   failure, so the happy path frees immediately; a genuinely dead owner is
   reclaimed within ≤ TTL by the `orphaned_lock` self-heal.
+- `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` (default **`2 * (ISSUE_LOCK_TTL_SECONDS // 3)`**
+  = 1200s, env-overridable via the `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` env
+  var, not `TIMEOUTS__*`) — `models/session_lifecycle.py`. How recently the
+  lease must have been renewed for `_lock_owner_is_live` to read the owner as
+  alive. **Provisional/tunable.** Derived from the TTL rather than set flat, so
+  it tracks a raised or lowered TTL automatically: both durable renewers tick
+  well inside it (the detached heartbeat every `TTL // 3`, the worker every
+  60s), which leaves two missed ticks of slack before a lease reads stale.
+- `ISSUE_LOCK_RENEWER_GRACE_SECONDS` (default **180s**, env-overridable under
+  that same name as a plain env var, not `TIMEOUTS__*`) —
+  `models/session_lifecycle.py`. How long a **dead durable-renewer pid** is
+  tolerated while the lease's renewal stamp is still fresh, before
+  `_lock_owner_is_live` reports the owner dead. **Provisional/tunable**, and
+  its ceiling rests on a single incident observation. Deliberately
+  **TTL-INDEPENDENT** — a flat literal, unlike the freshness window above:
+  what it measures is process restart time (its floor is three of the worker's
+  60s renewal ticks, comfortably above a `./scripts/valor-service.sh restart`),
+  and that does not move when the lease TTL moves. The cost of that
+  independence is that an operator who lowers `ISSUE_LOCK_TTL_SECONDS` far
+  enough for the derived freshness window to approach 180s should **lower this
+  constant by hand in the same change**; left alone it simply narrows toward
+  inert, which fails toward reporting owners live rather than dead.
 
 `bridge/dedup.py`'s `_LAST_EVENT_TTL_SECONDS` (2592000s) is a freeform
 observability TTL, not a Popoto model TTL, and is left as its existing named

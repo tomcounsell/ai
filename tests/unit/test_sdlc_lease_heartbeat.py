@@ -34,7 +34,9 @@ class TestPeekFirstRenewOnly:
 
         calls = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             calls.append((run_id, peek))
             # Peek on an absent key reports no owner.
             return _peek_result(None)
@@ -62,7 +64,9 @@ class TestPeekFirstRenewOnly:
 
         calls = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             calls.append((run_id, peek))
             return _peek_result("successor-run")
 
@@ -86,8 +90,10 @@ class TestPeekFirstRenewOnly:
 
         calls = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
-            calls.append((run_id, peek, renew_only))
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
+            calls.append((run_id, peek, renew_only, kwargs))
             if peek:
                 return _peek_result("mine")  # self still owns
             return MagicMock()  # renew result (unused)
@@ -108,12 +114,144 @@ class TestPeekFirstRenewOnly:
         assert rc == 0
         # Each iteration: one peek then one mutating renew (run_id="mine").
         peeks = [c for c in calls if c[1] is True]
-        renews = [c for c in calls if c[1] is False]
+        # The deadline exit's renewer-identity clear (issue #2648) is also a
+        # mutating call, but it is not a renewal -- it is a compare-and-set
+        # key-removal that returns early on an absent key, so it is excluded
+        # here rather than weakening the renew-only assertion below.
+        renews = [c for c in calls if c[1] is False and not c[3].get("drop_renewer_identity")]
         assert len(peeks) >= 1
         assert len(renews) >= 1
-        assert all(run_id == "mine" for run_id, _peek, _renew_only in renews)
+        assert all(run_id == "mine" for run_id, _peek, _renew_only, _kw in renews)
         # Issue #2714 L0: the extend is renew-only -- it can never mint.
-        assert all(renew_only is True for _run_id, _peek, renew_only in renews)
+        assert all(renew_only is True for _run_id, _peek, renew_only, _kw in renews)
+
+    def test_unsupervised_deadline_exit_clears_the_renewer_identity(self):
+        """spike-5 shape (a), EXIT_UNSUPERVISED_MAX_LIFETIME: the exit leaves
+        the lease alone on purpose, so it must retract the renewer identity it
+        stamped -- otherwise a live-but-quiet run reads DEAD once the grace
+        lapses and `--kill-orphans` reaps its anchor mid-stage."""
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        calls = []
+
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
+            calls.append(kwargs)
+            return _peek_result("mine") if peek else MagicMock()
+
+        # deadline calc consumes one tick; then one renewing tick, then the exit.
+        ticks = iter([0.0, 1.0, 999_999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch.object(logging.getLogger("tools.sdlc_lease_heartbeat"), "info") as info,
+        ):
+            rc = run_heartbeat(
+                issue_number=2648,
+                run_id="mine",
+                interval=1,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert [c for c in calls if c.get("drop_renewer_identity")]
+        logged = " ".join(str(c.args) for c in info.call_args_list)
+        assert "unsupervised_max_lifetime" in logged
+
+    def test_max_lifetime_exit_clears_the_renewer_identity(self):
+        """The same clear at the other non-releasing exit, EXIT_MAX_LIFETIME."""
+        import logging
+
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        calls = []
+
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
+            calls.append(kwargs)
+            return _peek_result("mine") if peek else MagicMock()
+
+        ticks = iter([0.0, 1.0, 999.0])
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch),
+            patch.object(logging.getLogger("tools.sdlc_lease_heartbeat"), "info") as info,
+        ):
+            rc = run_heartbeat(
+                issue_number=2648,
+                run_id="mine",
+                interval=1,
+                max_lifetime=5,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert [c for c in calls if c.get("drop_renewer_identity")]
+        logged = " ".join(str(c.args) for c in info.call_args_list)
+        assert "max_lifetime" in logged
+        assert "unsupervised_max_lifetime" not in logged
+
+    def test_clear_that_loses_its_cas_is_retried(self):
+        """Race 6 mode 1: a benign same-run_id CLI renewal can land between the
+        clear's read and its write. Nothing downstream notices a lost clear, so
+        the write is retried once inside a 2-attempt budget."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        drops = []
+
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
+            if kwargs.get("drop_renewer_identity"):
+                drops.append(kwargs)
+                result = MagicMock()
+                result.acquired = len(drops) > 1  # attempt one loses the CAS
+                return result
+            return _peek_result("mine") if peek else MagicMock()
+
+        ticks = iter([0.0, 1.0, 999.0])
+        with patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch):
+            rc = run_heartbeat(
+                issue_number=2648,
+                run_id="mine",
+                interval=1,
+                max_lifetime=5,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
+        assert len(drops) == 2  # retried once, then stopped -- never unbounded
+
+    def test_raising_clear_never_blocks_the_exit(self):
+        """Best-effort, matching the supervisor-death release: a failure to
+        clear can never keep the heartbeat alive. The lease TTL is the
+        backstop."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
+            if kwargs.get("drop_renewer_identity"):
+                raise RuntimeError("redis is down")
+            return _peek_result("mine") if peek else MagicMock()
+
+        ticks = iter([0.0, 1.0, 999.0])
+        with patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch):
+            rc = run_heartbeat(
+                issue_number=2648,
+                run_id="mine",
+                interval=1,
+                max_lifetime=5,
+                _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
+            )
+
+        assert rc == 0
 
     def test_renews_when_self_owned_payload_pid_is_dead(self):
         """#2537 review regression (PR #2615): the lease payload's pid is
@@ -192,7 +330,9 @@ class TestPeekFirstRenewOnly:
 
         calls = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             calls.append((run_id, peek, renew_only))
             return _peek_result("mine") if peek else MagicMock()
 
@@ -318,7 +458,9 @@ class TestPeekFirstRenewOnly:
 
         state = {"n": 0}
 
-        def flaky_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def flaky_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             state["n"] += 1
             if state["n"] == 1 and peek:
                 raise RuntimeError("redis down")
@@ -355,7 +497,9 @@ class TestSupervisedRunSignalRenewal:
         """The renewing tick refreshes the signal under the same identity."""
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             if peek:
                 return _peek_result("mine")  # self still owns
             return MagicMock()
@@ -399,7 +543,9 @@ class TestSupervisedRunSignalRenewal:
         """
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             return _peek_result("successor-run")
 
         with (
@@ -422,7 +568,9 @@ class TestSupervisedRunSignalRenewal:
         lease we no longer hold (the signal must never outlive the lock)."""
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             return _peek_result(None)
 
         with (
@@ -447,7 +595,9 @@ class TestSupervisedRunSignalRenewal:
 
         renews = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             if peek:
                 return _peek_result("mine")
             renews.append(run_id)
@@ -778,7 +928,7 @@ def _alive_proc(create_time):
 def _self_owned_touch():
     """A touch_issue_lock double that always reports self-ownership."""
 
-    def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+    def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs):
         if peek:
             return _peek_result(run_id)
         return MagicMock()
@@ -833,7 +983,9 @@ class TestSupervisorLiveness:
 
         renews = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             if peek:
                 return _peek_result("mine")
             renews.append(run_id)
@@ -992,7 +1144,9 @@ class TestSupervisorLiveness:
 
         renews = []
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False, renew_only=False):
+        def fake_touch(
+            issue, run_id, session_id="", ttl=None, peek=False, renew_only=False, **kwargs
+        ):
             if peek:
                 return _peek_result("mine")
             renews.append(run_id)
@@ -1254,3 +1408,75 @@ class TestHeartbeatObservability:
         from tools import sdlc_lease_heartbeat as hb
 
         assert "max-lifetime is the death backstop" not in (hb.__doc__ or "")
+
+
+class TestDurableRenewerIdentityStamp:
+    """The heartbeat records its own pid as the lease's durable renewer
+    (issue #2648), and does so under the invocation shape it actually runs in.
+    """
+
+    def test_stamps_renewer_identity_under_dash_m_invocation(self):
+        """SC5b. This file is launched as ``python -m tools.sdlc_lease_heartbeat``
+        (``tools/sdlc_session_ensure.py`` builds that argv), so every frame in
+        it resolves ``__name__`` to ``"__main__"``. Any allowlist that derived
+        the caller's identity by introspection would therefore fail on EVERY
+        real heartbeat call, stamp nothing, and do it silently -- while a test
+        that reached the heartbeat through a plain ``import`` still passed.
+        Driving it via ``runpy.run_module(..., run_name="__main__")`` is what
+        makes that class of defect visible, so this must not be relaxed into an
+        import-based test.
+        """
+        import os
+        import runpy
+        import sys
+        import time
+
+        import pytest
+
+        stored = json.dumps(
+            {
+                "run_id": "mine",
+                "session_id": "sdlc-local-2648",
+                "pid": 424242,  # the ephemeral session-ensure CLI, long dead
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - 5,
+                "target_repo": "owner/repo",
+            }
+        )
+        argv = [
+            "tools.sdlc_lease_heartbeat",
+            "--issue-number",
+            "2648",
+            "--run-id",
+            "mine",
+            "--interval",
+            "1",
+            "--max-lifetime",
+            "1",
+        ]
+
+        with (
+            patch.object(sys, "argv", argv),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("agent.supervised_run.write_supervised_run_signal"),
+        ):
+            mock_redis.get.return_value = stored
+            mock_redis.eval.return_value = 1
+            mock_redis.pttl.return_value = 900_000
+            with pytest.raises(SystemExit) as exc:
+                runpy.run_module("tools.sdlc_lease_heartbeat", run_name="__main__")
+
+        assert exc.value.code == 0
+        renewals = [
+            json.loads(call.args[4])
+            for call in mock_redis.eval.call_args_list
+            if len(call.args) > 4
+        ]
+        stamped = [p for p in renewals if "renewer_pid" in p]
+        assert stamped, "the -m heartbeat never stamped a durable renewer identity"
+        assert stamped[0]["renewer_pid"] == os.getpid()
+        assert stamped[0]["renewer_create_time"] is not None
+        # And the deadline exit retracts it again (shape (a)).
+        assert renewals[-1].get("renewer_pid") is None

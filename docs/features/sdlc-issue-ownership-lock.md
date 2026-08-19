@@ -76,10 +76,12 @@ Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc
 **Stored payload** (JSON):
 
 ```json
-{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "machine_id": "A1B2C3D4-...", "hostname": "worker-1", "create_time": 1754500000.0, "renewed_at": 1754501200.0, "target_repo": "owner/repo"}
+{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "machine_id": "A1B2C3D4-...", "hostname": "worker-1", "create_time": 1754500000.0, "renewed_at": 1754501200.0, "renewer_pid": 42901, "renewer_create_time": 1754500180.0, "target_repo": "owner/repo"}
 ```
 
 Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `pid`/`machine_id`/`create_time`/`renewed_at` feed the owner-liveness predicate `_lock_owner_is_live` (below); `session_id` and `hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
+
+`renewer_pid` and `renewer_create_time` (issue #2648) are the **exactly two** keys recording the identity of the process that performed the most recent renewal. They are present if and only if that renewal came from a **durable renewer** -- `tools/sdlc_lease_heartbeat.py` (the detached per-run heartbeat) or `agent/session_executor.py` (the worker's 60s tick), the only two renewers that live as long as the run does. Every other renewal is a short-lived `sdlc-tool` CLI whose pid is dead within seconds, and such a renewal **strips** the group rather than carrying it forward, so a stale identity can never be re-asserted by a later CLI write. A durable renewer that retires on its own deadline clears the group on the way out (see the deadline exits in `tools/sdlc_lease_heartbeat.py`), which returns the lease to the identity-less shape below. The renewer is always on the owner's machine -- renewal requires a `run_id` match and run_ids are minted on exactly one machine -- so no separate machine field is recorded; the tightened branch gates on the payload's existing `machine_id` via `_payload_from_same_machine`. Both keys are written or neither: a pid without a `create_time` is no identity.
 
 ### The `target_repo` Field (issue #2012)
 
@@ -118,6 +120,8 @@ Stale-owner takeover keeps the existing TTL semantics: an expired lock is claima
 ### TTL
 
 `ISSUE_LOCK_TTL_SECONDS` (env-overridable via `ISSUE_LOCK_TTL_SECONDS`, default `1800`, marked provisional/tunable at its definition) lives next to `RUN_CLAIM_TTL_SECONDS` in `models/session_lifecycle.py`. The worker-driven path keeps this alive via the in-process 60s `_tick_issue_lock_renewal` tick (below); the pure-local `/do-sdlc` supervisor has no equivalent in-process renewer, so it relies on the detached lease-heartbeat described in [SDLC Run Self-Recognition](sdlc-run-self-recognition.md#local-supervisor-lease-heartbeat) to keep its lease alive across a long stage.
+
+`ISSUE_LOCK_RENEWER_GRACE_SECONDS` (env-overridable under that name, default `180`, marked provisional/tunable at its definition beside its two siblings) bounds how long a **dead durable-renewer pid** is tolerated while `renewed_at` is still fresh. It is deliberately **TTL-independent**, unlike `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` (`2 * (TTL // 3)`): the quantity it measures is process restart time, which does not move when the lease TTL moves. Its floor is three of the worker's 60s renewal ticks, comfortably above a `./scripts/valor-service.sh restart`, so a renewer merely between incarnations is never mistaken for a dead run; its ceiling is the age at which the #2648 incident lease happened to be inspected, which is a single observation rather than a distribution. An operator who lowers `ISSUE_LOCK_TTL_SECONDS` far should lower this by hand too.
 
 ### Peek mode and `orphaned_lock`
 
@@ -212,25 +216,30 @@ instead of inferring liveness from `AgentSession.status`:
   the TTL backstop.
 - **Legacy or malformed payload** (missing `create_time`, absent, or not a
   dict): indeterminate -- fails **toward True**, same backstop reasoning.
-- **Renewal freshness short-circuit** (issue #2620, evaluated *before* all of
-  the above): a `renewed_at` stamp newer than
-  `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` is positive proof of life -- live,
-  full stop. See the next section for why this, not the pid, is the signal
-  that tracks a locally-minted lease.
+- **Renewal freshness** (issue #2620, evaluated *before* all of the above): a
+  `renewed_at` stamp newer than `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` is the
+  signal that tracks a locally-minted lease. Its weight depends on whether the
+  payload carries anything that could contradict it. With **no durable renewer
+  identity** on the payload it is **conclusive**: live, full stop, no pid check
+  reached. With a complete, same-machine `renewer_pid` + `renewer_create_time`
+  group it is only **corroborating** -- a live renewer pid confirms it, and a
+  renewer pid that is dead or recycled overrides it once the lease has been
+  quiet longer than `ISSUE_LOCK_RENEWER_GRACE_SECONDS`. See the next section.
 
-**Renewal freshness, not pid liveness, is what proves a locally-minted lease
-is alive (issue #2620).** The payload's `pid` is stamped by the short-lived
-`sdlc-tool session-ensure` CLI at acquire time -- that process exits within
-seconds, and renewal never re-stamps the field -- so pid inference alone read
-**every** locally-minted lease as orphaned. That inverted the router's
-contract (`.claude/skills/sdlc/SKILL.md`): `orphaned_lock: true` means "the
-owning run died, wait out the TTL" while `false` is the unconditional stop, so
-a rival meeting a genuinely LIVE local owner was told to wait instead of stop.
-PR #2615 had already removed the heartbeat's dependence on the signal; #2620
-fixes the signal itself, at its single source (`_lock_owner_is_live`), so every
-consumer -- `sdlc-tool next-skill`, `session-ensure`'s blocked-dispatch peek,
-`check_run_ownership`, `resolve_ledger_lease`, and the `--kill-orphans` reaper
--- inherits the correction with no call-site changes.
+**Renewal freshness is corroborating when a durable renewer identity is
+present, and conclusive otherwise (issues #2620, #2648).** The payload's `pid`
+is stamped by the short-lived `sdlc-tool session-ensure` CLI at acquire time --
+that process exits within seconds, and renewal never re-stamps the field -- so
+pid inference alone reads **every** locally-minted lease as orphaned. That
+inverts the router's contract (`.claude/skills/sdlc/SKILL.md`), where
+`orphaned_lock: true` means "the owning run died, wait out the TTL" while
+`false` is the unconditional stop: a rival meeting a genuinely LIVE local owner
+would be told to wait instead of stop. Freshness is therefore the signal that
+tracks a locally-minted lease, and it is evaluated at the predicate's single
+source (`_lock_owner_is_live`), so every consumer -- `sdlc-tool next-skill`,
+`session-ensure`'s blocked-dispatch peek, `check_run_ownership`,
+`resolve_ledger_lease`, `reflections/utilities.py::_lock_says_live`, and the
+`--kill-orphans` reaper -- shares one rule with no call-site logic.
 
 The payload therefore carries `renewed_at`, stamped at acquire and
 **overwritten on every same-owner renewal** (unlike the immutable identity
@@ -240,14 +249,41 @@ well inside the freshness window: `tools/sdlc_lease_heartbeat.py` every
 `_tick_issue_lock_renewal` every 60s. `_lock_renewal_is_fresh(payload)` returns
 True (renewed within `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS`, default
 `2 * (TTL // 3)` = 1200s, env-overridable and provisional), False (renewals
-stopped), or None (no usable stamp: pre-#2620 or malformed). Only True
-short-circuits: stale-or-absent is no proof of *death*, so the pid checks still
-decide, which leaves a pre-#2620 payload behaving exactly as it does today
-until its next renewal self-heals the field in. A stamp in the future (clock
-skew) reads fresh -- fail toward live, the posture every other indeterminate
-branch takes. The residual conservatism is bounded and safe: a run that dies
-immediately after acquire reads live for up to the freshness window before
-flipping to orphaned, and the TTL frees the lease one tick later regardless.
+stopped), or None (no usable stamp: legacy or malformed). Only True can
+short-circuit: stale-or-absent is no proof of *death*, so the pid checks still
+decide, which leaves a payload carrying no `renewed_at` behaving on pid
+evidence alone until its next renewal self-heals the field in. A stamp in the
+future (clock skew) reads fresh -- fail toward live, the posture every other
+indeterminate branch takes.
+
+A stamp outlives its writer, which is why True is not the end of the story
+(issue #2648). Where the payload carries a **complete, same-machine durable
+renewer identity**, that identity is checkable pid evidence and freshness
+becomes corroborating rather than conclusive:
+
+- Renewer pid resolves alive with a matching `create_time` -> **live**, and the
+  grace clock is never consulted. This is the ordinary shape of a live local
+  lane, however quiet.
+- Renewer pid is gone, or the OS recycled it to an unrelated process, and the
+  lease was renewed within `ISSUE_LOCK_RENEWER_GRACE_SECONDS` -> **live**. A
+  renewer between incarnations (a worker restart) is not a dead run.
+- Renewer pid is gone or recycled and the lease has been silent longer than the
+  grace -> **dead**, logged at `warning` naming the renewer pid, the age of
+  `renewed_at`, and the grace value. This is the only path that overrides a
+  fresh stamp, and it is the one an operator investigating an unexplained rival
+  lane or a reaped `sdlc-local-{N}` anchor should look for.
+
+Every other shape fails **toward live**, because a false-dead is the expensive
+direction: an incomplete identity (a pid without its `create_time`), a
+cross-machine payload whose pid cannot be checked from here, a psutil raise, or
+no identity at all. The clock in the third case is the **age of `renewed_at`**,
+not the duration of the renewer's death -- the payload carries no such state --
+and every renewal including the ephemeral CLI ones resets it, so the override
+can only fire during a stretch of total silence. A run that dies immediately
+after acquire and never had a durable renewer still reads live for up to the
+freshness window before flipping to orphaned, with the TTL freeing the lease
+one tick later regardless; where a durable renewer did stamp, that blind window
+collapses to the grace.
 
 **Same-machine detection keys on `machine_id`, not `hostname` (issue
 #2537).** `hostname` is a mutable label: renaming the Mac made every
@@ -283,6 +319,24 @@ idle-time window (`_last_activity_at`, still `updated_at` → `started_at` →
 `created_at`) used when no lock payload can be resolved at all (no
 `issue_number`, expired key, or malformed value), since an absent payload is
 not by itself proof of death.
+
+**The reaper's exemption for a live-but-quiet local run survives the renewer
+identity check, and does so by construction.** The exposed shape here is an
+`sdlc-local-{N}` anchor with `last_heartbeat_at = None`, for which renewal
+freshness is the only life signal -- and there is no idle-time conjunct on the
+payload-present path, so a dead verdict reaps immediately, mid-stage. The
+tightened branch cannot produce that verdict against such a run, because it
+fires **only** on evidence that a live durable renewer produces and a live one
+contradicts: the anchor is kept alive by the detached heartbeat, whose first
+action after spawn is a renewal, so the payload carries a `renewer_pid` that
+resolves ALIVE and the predicate returns live without consulting the grace
+clock. A run whose heartbeat never spawned carries no identity at all and falls
+to the unconditional freshness short-circuit. A heartbeat that retires on its
+own deadline clears the group before exiting, returning its run to that same
+short-circuit rather than leaving a dead identity behind to be read as proof of
+death. `tests/unit/test_sdlc_session_ensure.py::TestKillOrphans` holds both
+directions at this layer -- live renewer exempt, dead renewer past the grace
+reaped -- rather than inferring them from the predicate's own tests.
 
 One shared predicate, one source of truth (the lock payload) -- no dual
 storage on `AgentSession`, no per-`session-ensure` re-stamp race, no

@@ -860,6 +860,35 @@ ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS = int(
     os.environ.get("ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS", str(2 * (ISSUE_LOCK_TTL_SECONDS // 3)))
 )
 
+# How long a DEAD durable-renewer pid is tolerated while `renewed_at` is still
+# fresh (issue #2648). Once a durable renewer has stamped its own identity onto
+# the payload the pid evidence becomes checkable, and freshness stops being
+# conclusive -- but a renewer can also be legitimately BETWEEN incarnations (a
+# `./scripts/valor-service.sh restart` leaves the old worker pid dead until the
+# new one's next 60s tick), so a dead renewer pid alone is not proof of death.
+# This window is the bound on that gap. Deliberately TTL-INDEPENDENT, unlike
+# ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS above: it measures process restart time,
+# which does not move when the lease TTL moves. An operator who lowers the TTL
+# far should lower this by hand too.
+# GRAIN OF SALT: 180s is PROVISIONAL/TUNABLE and its ceiling rests on n=1.
+# Floor: three worker renewal ticks (3 x 60s), comfortably above a restart.
+# Ceiling: the 210s age at which the #2648 incident lease happened to be
+# inspected -- one observation, not a distribution, so the next incident
+# observation should re-derive it. Override via
+# ISSUE_LOCK_RENEWER_GRACE_SECONDS.
+ISSUE_LOCK_RENEWER_GRACE_SECONDS = int(os.environ.get("ISSUE_LOCK_RENEWER_GRACE_SECONDS", "180"))
+
+# Modules whose renewals may record a DURABLE renewer identity on the payload
+# (issue #2648). Membership is checked against an explicit `renewer_module`
+# token the caller passes -- NEVER derived by walking the call stack or
+# reading a module name off a frame: the detached heartbeat runs as
+# `python -m tools.sdlc_lease_heartbeat`, so every such route resolves to
+# "__main__" there. A check built that way would silently never stamp in
+# production while passing every import-based unit test. Everything else that renews this lease is a
+# short-lived `sdlc-tool` CLI whose pid is dead within seconds; recording one of
+# those as the renewer would report every lease orphaned after the grace.
+_DURABLE_RENEWER_MODULES = {"tools.sdlc_lease_heartbeat", "agent.session_executor"}
+
 # Compare-and-delete release (issue #2003, cycle-2 CONCERN 2): delete the
 # lock key only if its value is still byte-identical to the payload we read
 # (which carries our run_id). The standard Lua release pattern -- a raw DEL
@@ -1026,11 +1055,85 @@ def _lock_owner_is_live(payload: dict | None) -> bool:
     renewal is positive proof of life and short-circuits to True; a stale or
     absent stamp is no proof of death on its own, so the pid checks below
     still decide.
+
+    Issue #2648 makes that short-circuit CORROBORATING rather than CONCLUSIVE,
+    but ONLY where the payload carries evidence that can contradict it. A
+    stamp outlives its writer: a run that acquires the lease, renews once and
+    then dies used to read live for the full freshness window (1200s at the
+    default TTL), because no pid on the payload was worth checking. The two
+    durable renewers now record their own ``renewer_pid`` +
+    ``renewer_create_time``, and only when that group is COMPLETE and the
+    payload is same-machine may a dead renewer override a fresh stamp -- and
+    then only after ``ISSUE_LOCK_RENEWER_GRACE_SECONDS`` of silence, so a
+    renewer merely between incarnations (a worker restart) is not mistaken
+    for a dead run. Absent, partial, or cross-machine identity leaves #2620's
+    behavior byte-for-byte intact, which is what keeps #2703's ``--kill-orphans``
+    exemption for a live-but-quiet local run.
     """
     if not payload or not isinstance(payload, dict):
         return True
 
     if _lock_renewal_is_fresh(payload) is True:
+        renewer_pid = payload.get("renewer_pid")
+        renewer_create_time = payload.get("renewer_create_time")
+        if renewer_pid and renewer_create_time is not None and _payload_from_same_machine(payload):
+            # Every early return in this branch is True and only the full
+            # conjunction returns False: `reflections/utilities.py::
+            # _lock_says_live`'s callers `continue` on True and on None but
+            # ACT on False, so a false-dead here starts an autonomous rival
+            # SDLC lane with no operator in the loop.
+            try:
+                # Function-body import, mirroring the one below. Do NOT hoist
+                # it to module scope: the lock-liveness tests patch
+                # `agent.session_health._psutil_process_for_pid`, and a
+                # module-level name here would give them a second, silently
+                # ineffective target.
+                from agent.session_health import _psutil_process_for_pid
+
+                proc = _psutil_process_for_pid(renewer_pid)
+                if (
+                    proc is not None
+                    and abs(proc.create_time() - float(renewer_create_time)) <= 1e-3
+                ):
+                    logger.debug(
+                        "[session-lifecycle] durable renewer pid=%s is alive -- owner live",
+                        renewer_pid,
+                    )
+                    return True
+                # Dead, or the OS recycled the pid to an unrelated process
+                # (create_time mismatch). The clock is the AGE OF THE LAST
+                # RENEWAL, not the duration of the renewer's death -- the
+                # payload carries no such state, and any renewal (including
+                # the ephemeral CLI ones) resets it, so this branch can only
+                # fire during a stretch of total silence.
+                renewed_age = time.time() - float(payload["renewed_at"])
+                if renewed_age <= ISSUE_LOCK_RENEWER_GRACE_SECONDS:
+                    logger.debug(
+                        "[session-lifecycle] durable renewer pid=%s is gone but the lease "
+                        "was renewed %.0fs ago (grace %ss) -- assuming live",
+                        renewer_pid,
+                        renewed_age,
+                        ISSUE_LOCK_RENEWER_GRACE_SECONDS,
+                    )
+                    return True
+            except Exception as e:
+                logger.debug(
+                    "[session-lifecycle] durable-renewer liveness check for pid=%s failed "
+                    "(%s: %s) -- assuming live",
+                    renewer_pid,
+                    type(e).__name__,
+                    e,
+                )
+                return True
+            logger.warning(
+                "[session-lifecycle] durable renewer pid=%s is dead and the lease has "
+                "been quiet for %.0fs (grace %ss) -- reporting the owner DEAD despite a "
+                "fresh renewal stamp (issue #2648)",
+                renewer_pid,
+                renewed_age,
+                ISSUE_LOCK_RENEWER_GRACE_SECONDS,
+            )
+            return False
         return True
 
     pid = payload.get("pid")
@@ -1081,7 +1184,13 @@ def _current_process_create_time() -> float | None:
         return None
 
 
-def _healed_renewal_payload(payload: dict, target_repo: str | None) -> dict:
+def _healed_renewal_payload(
+    payload: dict,
+    target_repo: str | None,
+    *,
+    stamp_renewer_identity: bool = False,
+    renewer_module: str | None = None,
+) -> dict:
     """Build the payload a same-owner renewal writes back.
 
     Self-healing renewal (BLOCKER round-2, issue #2012): a bare
@@ -1108,9 +1217,42 @@ def _healed_renewal_payload(payload: dict, target_repo: str | None) -> dict:
       the liveness signal, since the payload's pid (the ephemeral
       ``session-ensure`` CLI) is dead by the first tick. This also
       self-heals a pre-#2620 payload.
+    - ``renewer_pid`` / ``renewer_create_time`` (issue #2648): the identity of
+      the process performing THIS renewal, written only when the caller is one
+      of the two durable renewers and STRIPPED on every other renewal. The
+      invariant is a biconditional -- the group is on the payload if and only
+      if the most recent renewal was durable -- which is what lets
+      ``_lock_owner_is_live`` treat a fresh ``renewed_at`` as corroborating
+      rather than conclusive. The renewer is always on the owner's machine
+      (renewal requires a run_id match and run_ids are minted on exactly one
+      machine), so no separate machine field is recorded. Write rule: both
+      keys or neither -- a pid without a create_time is no identity.
     """
     healed_target_repo = target_repo if target_repo is not None else payload.get("target_repo")
     new_payload = {**payload, "target_repo": healed_target_repo}
+    # Deliberate, NARROW exception to the "spread the EXISTING payload, never
+    # reconstruct a subset" rule above (issue #2648, Key Element 0): the
+    # renewer_* group is the one field group that must NOT survive a renewal
+    # performed by someone else. The default same-owner branch is a bare
+    # non-CAS `_R.set` of this payload, so without the strip an ephemeral CLI
+    # renewal would re-carry an identity it read before a durable renewer's
+    # deadline-exit clear and silently undo it. Everything else still spreads.
+    new_payload.pop("renewer_pid", None)
+    new_payload.pop("renewer_create_time", None)
+    if stamp_renewer_identity:
+        if renewer_module not in _DURABLE_RENEWER_MODULES:
+            # Dropped, never raised: nothing on this path may be allowed to
+            # break lock acquisition itself.
+            logger.warning(
+                "[session-lifecycle] renewer identity stamp requested by "
+                "non-durable module %r -- dropping the stamp (issue #2648)",
+                renewer_module,
+            )
+        else:
+            renewer_create_time = _current_process_create_time()
+            if renewer_create_time is not None:
+                new_payload["renewer_pid"] = os.getpid()
+                new_payload["renewer_create_time"] = renewer_create_time
     if not new_payload.get("machine_id"):
         local_machine_id = _local_machine_id()
         if local_machine_id:
@@ -1128,6 +1270,9 @@ def touch_issue_lock(
     target_repo: str | None = None,
     *,
     renew_only: bool = False,
+    stamp_renewer_identity: bool = False,
+    renewer_module: str | None = None,
+    drop_renewer_identity: bool = False,
 ) -> IssueLockResult:
     """Acquire, renew, or peek the per-issue SDLC ownership lock.
 
@@ -1206,6 +1351,36 @@ def touch_issue_lock(
             ``SET NX`` its way back into ownership of a lease nobody held,
             then renew it to the max-lifetime ceiling with no supervisor
             behind it.
+        stamp_renewer_identity: Keyword-only (issue #2648). True records THIS
+            process's pid + psutil create_time on the renewed payload, which
+            is what makes the lease's pid evidence checkable and lets
+            ``_lock_owner_is_live`` stop treating a fresh ``renewed_at`` as
+            conclusive. Exactly TWO callers may pass it, and both must also
+            pass ``renewer_module``: ``tools/sdlc_lease_heartbeat.py`` (the
+            detached per-run heartbeat) and ``agent/session_executor.py`` (the
+            worker's 60s tick). They are the only renewers that live as long
+            as the run does. Every other renewal call site is a short-lived
+            ``sdlc-tool`` CLI that is dead within seconds of writing, so
+            recording one of those as the renewer would make the predicate
+            report every lease orphaned once the grace window lapsed --
+            strictly worse than the bug this exists to fix. A renewal that
+            does NOT set this flag STRIPS any existing renewer identity (see
+            ``_healed_renewal_payload``).
+        renewer_module: Keyword-only. The caller's own dotted module path,
+            checked against ``_DURABLE_RENEWER_MODULES``. Passed explicitly
+            and never introspected -- the heartbeat runs under ``-m``, where
+            every introspective route resolves to ``"__main__"``. A token
+            outside the allowlist drops the stamp with one warning.
+        drop_renewer_identity: Keyword-only (issue #2648, spike-5 shape (a)).
+            True performs a same-owner compare-and-set write of the payload
+            with the ``renewer_*`` group REMOVED and nothing else changed --
+            ``renewed_at`` is preserved and the key keeps its REMAINING
+            lifetime, so the clear is a pure key-removal that neither extends
+            the lease nor refreshes the liveness clock. Called by the
+            heartbeat at its two non-releasing deadline exits: a renewer that
+            retired on its own clock must stop asserting an identity whose
+            death would otherwise be read as proof the run died, which is the
+            same judgement those exits' comments already make in prose.
 
     Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
     ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
@@ -1267,6 +1442,62 @@ def touch_issue_lock(
                 target_repo=payload.get("target_repo"),
             )
 
+        if drop_renewer_identity:
+            # Deadline-exit clear (issue #2648, spike-5 shape (a)). A PURE
+            # key-removal, deliberately NOT routed through
+            # `_healed_renewal_payload`: that helper re-stamps `renewed_at`
+            # unconditionally, and the CAS below would then take the default
+            # 1800s TTL. Either would hand a run that is genuinely dead at its
+            # deadline exit extra false-live AND extra lease lifetime versus
+            # doing nothing at all -- widening the very window this issue
+            # narrows, on the one path where the tightening is already given
+            # up. So: build the payload inline (a second, narrower exception
+            # to the "spread the EXISTING payload" rule), leave `renewed_at`
+            # alone, and re-use the key's REMAINING lifetime.
+            raw = _R.get(key)
+            if raw is None:
+                return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return IssueLockResult(acquired=False, owner_session_id=None)
+            if payload.get("run_id") != run_id:
+                # A successor owns the lease; its identity is none of our
+                # business (Race 5).
+                return IssueLockResult(
+                    acquired=False,
+                    owner_session_id=payload.get("session_id"),
+                    owner_run_id=payload.get("run_id"),
+                    target_repo=payload.get("target_repo"),
+                )
+            remaining_ms = _R.pttl(key)
+            remaining = int(remaining_ms) // 1000 if remaining_ms is not None else -1
+            if remaining <= 0:
+                # `pttl` sentinels: -1 (key has no expiry) and -2 (key is
+                # gone), plus sub-second remainders. None of them is a
+                # lifetime, and inventing one here is how a clear turns into
+                # an extension. Stand down; the TTL is the backstop.
+                return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+            cleared_payload = {
+                k: v for k, v in payload.items() if k not in ("renewer_pid", "renewer_create_time")
+            }
+            cleared = _R.eval(
+                _RENEW_IF_VALUE_MATCHES_LUA,
+                1,
+                key,
+                raw,
+                json.dumps(cleared_payload),
+                remaining,
+            )
+            if not cleared:
+                return IssueLockResult(acquired=False, owner_session_id=None, owner_run_id=None)
+            return IssueLockResult(
+                acquired=True,
+                owner_session_id=payload.get("session_id"),
+                owner_run_id=run_id,
+                target_repo=payload.get("target_repo"),
+            )
+
         if renew_only:
             # Renewal, never minting (issue #2714 L0). Deliberately reached
             # BEFORE the `SET NX` below: that statement acquires on an absent
@@ -1293,7 +1524,12 @@ def touch_issue_lock(
                     owner_run_id=payload.get("run_id"),
                     target_repo=payload.get("target_repo"),
                 )
-            new_payload = _healed_renewal_payload(payload, target_repo)
+            new_payload = _healed_renewal_payload(
+                payload,
+                target_repo,
+                stamp_renewer_identity=stamp_renewer_identity,
+                renewer_module=renewer_module,
+            )
             # Compare-and-set against the exact bytes just read. A release
             # landing inside this window makes the script a no-op rather than
             # recreating the key.
@@ -1375,7 +1611,12 @@ def touch_issue_lock(
             # read-compare-write happens within one function invocation with no
             # intervening peek, so this closes the stale-peek TOCTOU race
             # without any additional locking machinery.
-            new_payload = _healed_renewal_payload(payload, target_repo)
+            new_payload = _healed_renewal_payload(
+                payload,
+                target_repo,
+                stamp_renewer_identity=stamp_renewer_identity,
+                renewer_module=renewer_module,
+            )
             _R.set(key, json.dumps(new_payload), ex=ttl)
             return IssueLockResult(
                 acquired=True,
@@ -1391,7 +1632,7 @@ def touch_issue_lock(
             target_repo=payload.get("target_repo"),
         )
     except Exception as e:
-        if renew_only:
+        if renew_only or drop_renewer_identity:
             # A renewer fails CLOSED (issue #2714 L0). This handler wraps the
             # ENTIRE function, including the CAS EVAL above, so the default
             # fail-open below would hand a renewer `acquired=True` on a
@@ -1400,7 +1641,10 @@ def touch_issue_lock(
             # heartbeat keep renewing (and keep publishing a supervised-run
             # signal for) a lease its supervisor already released. Reporting
             # the loss costs the caller one cheap re-peek; claiming ownership
-            # it cannot verify costs a wedged issue.
+            # it cannot verify costs a wedged issue. The deadline-exit clear
+            # (issue #2648) fails closed for the same reason: reporting a
+            # write that never landed as successful would end its bounded
+            # retry on a lie.
             logger.warning(
                 "[session-lifecycle] issue-lock renewal failed for issue=%s "
                 "(failing closed; error class %s): %s",

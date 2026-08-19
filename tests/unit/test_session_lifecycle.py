@@ -1338,6 +1338,428 @@ class TestLockRenewalFreshness:
         assert written["create_time"] == 1000.0
 
 
+# Quiet periods are literals, not derived from ISSUE_LOCK_RENEWER_GRACE_SECONDS,
+# so these cases express a BEHAVIOUR rather than the constant's own arithmetic:
+# 800s is comfortably past the 180s grace and still well inside the 1200s
+# renewal-freshness window, so the payload reads "freshly renewed" throughout.
+# 30s is comfortably inside the grace (a worker restart is ~3 x 60s ticks).
+_PAST_GRACE_QUIET = 800.0
+_INSIDE_GRACE_QUIET = 30.0
+
+
+def _renewer_payload(renewed_age: float, **extra) -> dict:
+    """A locally-minted lease payload whose stamped ``pid`` is long dead.
+
+    ``renewed_age`` is how many seconds ago the last renewal landed. Callers
+    layer the ``renewer_*`` group (or deliberately omit it) via ``extra``.
+    """
+    payload = {
+        "run_id": "run-a",
+        "session_id": "sdlc-local-2648",
+        "pid": 424242,  # the ephemeral session-ensure CLI, dead in seconds
+        "hostname": "this-host",
+        "machine_id": "hw-uuid-1",
+        "create_time": 1000.0,
+        "renewed_at": time.time() - renewed_age,
+    }
+    payload.update(extra)
+    return payload
+
+
+class TestRenewerIdentityLiveness:
+    """Freshness is CORROBORATING, not conclusive, once a durable renewer
+    stamped its own identity onto the lease (issue #2648).
+
+    A process that acquires the lease, writes one renewal stamp and then dies
+    used to read LIVE for the full ``ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS``
+    window (1200s), because the fresh-renewal short-circuit ran before any pid
+    check. The two durable renewers (the detached heartbeat and the worker
+    tick) now record ``renewer_pid`` + ``renewer_create_time``, which makes the
+    pid evidence checkable -- and ONLY then may freshness be overridden.
+
+    Every gate fails TOWARD live: incomplete identity, cross-machine, inside
+    the grace window, or a psutil raise all return True. Only the full
+    conjunction returns False, because ``reflections/utilities.py::
+    _lock_says_live``'s callers ACT on False.
+
+    PATCH TARGET: ``_lock_owner_is_live`` imports the pid helper lazily inside
+    its own function body, so ``agent.session_health._psutil_process_for_pid``
+    is the only target that works -- patching the name on
+    ``models.session_lifecycle`` raises AttributeError.
+    """
+
+    def test_dead_renewer_past_grace_is_not_live(self):
+        """The #2648 incident: durable renewer stamped, then died, and the
+        lease has been quiet longer than the grace window -> DEAD, even though
+        ``renewed_at`` is still well inside the freshness window."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is False
+
+    def test_live_renewer_is_live(self):
+        """The renewer pid resolves alive with a matching create_time: the run
+        is alive and the grace clock is never consulted (#2703 exemption)."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 2000.0
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_dead_renewer_inside_grace_is_live(self):
+        """A restarting renewer (worker restart, ~3 ticks) is not a dead run:
+        inside the grace window a dead renewer pid still reads LIVE."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(
+            _INSIDE_GRACE_QUIET,
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_no_renewer_identity_keeps_the_2620_short_circuit(self):
+        """Half (b) of the demonstrated-red pair -- GREEN before AND after the
+        fix. A payload carrying no durable renewer identity (a legacy lease, or
+        one only ever touched by the ephemeral CLI renewers) must keep #2620's
+        byte-for-byte behavior: fresh renewal -> LIVE, dead stamped pid
+        notwithstanding. This is the #2703 defect-1 fallback the tightening
+        must not eat."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(_PAST_GRACE_QUIET)
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_partial_identity_is_treated_as_no_identity(self):
+        """A pid without its create_time is no identity (the
+        ``_resolved_supervisor`` rule): fail toward live."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            renewer_pid=999001,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_cross_machine_renewer_fails_toward_live(self):
+        """A foreign-machine pid cannot be checked locally -- unchanged
+        fail-toward-live posture, gated by ``_payload_from_same_machine``."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            machine_id="hw-uuid-other",
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_recycled_renewer_pid_past_grace_is_not_live(self):
+        """The OS handed the dead renewer's pid to an unrelated process: the
+        create_time mismatch means the renewer is gone, so past the grace the
+        verdict is DEAD (Race 4)."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 9000.0  # an unrelated later process
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            assert _lock_owner_is_live(payload) is False
+
+    def test_psutil_raise_fails_toward_live(self):
+        """The branch carries its OWN ``except Exception -> True``: a psutil
+        raise must never escape ``_lock_owner_is_live`` (the peek path does not
+        catch it and would fail closed on a lease the caller owns)."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(
+            _PAST_GRACE_QUIET,
+            renewer_pid=999001,
+            renewer_create_time=2000.0,
+        )
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                side_effect=RuntimeError("psutil exploded"),
+            ),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+    def test_grace_constant_is_named_and_provisional(self):
+        """The grace window is a named, env-overridable module constant beside
+        its two ``ISSUE_LOCK_*`` siblings, defaulting to 180s (three worker
+        ticks below; the 210s incident-observation age above)."""
+        from models.session_lifecycle import ISSUE_LOCK_RENEWER_GRACE_SECONDS
+
+        assert ISSUE_LOCK_RENEWER_GRACE_SECONDS == 180
+        assert _INSIDE_GRACE_QUIET < ISSUE_LOCK_RENEWER_GRACE_SECONDS < _PAST_GRACE_QUIET
+
+
+class TestRenewerIdentityStamping:
+    """The renewer_* group is present on the payload IF AND ONLY IF the most
+    recent renewal was performed by a durable renewer (Key Element 0)."""
+
+    def test_ephemeral_renewal_strips_renewer_identity(self):
+        """Race 6 mode 2: the default same-owner branch is a bare non-CAS
+        ``_R.set`` of a spread payload, so an ephemeral CLI renewal landing
+        after a clear would otherwise re-carry the stale identity and silently
+        undo it. A renewal that does not opt in STRIPS the group."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2648",
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - 10,
+                "renewer_pid": 999001,
+                "renewer_create_time": 2000.0,
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False  # key exists -> renewal branch
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(2648, "run-a", session_id="sdlc-local-2648")
+
+        assert result.acquired is True
+        written = json.loads(mock_redis.set.call_args_list[-1][0][1])
+        assert "renewer_pid" not in written
+        assert "renewer_create_time" not in written
+
+    def test_disallowed_module_stamp_is_dropped(self):
+        """Risk 6: a caller passing the opt-in with a token absent from
+        ``_DURABLE_RENEWER_MODULES`` gets the stamp silently dropped -- never
+        an exception, because nothing on this path may break lock
+        acquisition."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2648",
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - 10,
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(
+                2648,
+                "run-a",
+                session_id="sdlc-local-2648",
+                stamp_renewer_identity=True,
+                renewer_module="tools.sdlc_session_ensure",
+            )
+
+        assert result.acquired is True
+        written = json.loads(mock_redis.set.call_args_list[-1][0][1])
+        assert "renewer_pid" not in written
+        assert "renewer_create_time" not in written
+
+    def test_durable_renewal_stamps_renewer_identity(self):
+        """The positive half: an allowlisted durable renewer records its own
+        pid + create_time, which is what makes the pid evidence checkable."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2648",
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - 10,
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            mock_redis.eval.return_value = 1
+            result = touch_issue_lock(
+                2648,
+                "run-a",
+                session_id="sdlc-local-2648",
+                renew_only=True,
+                stamp_renewer_identity=True,
+                renewer_module="tools.sdlc_lease_heartbeat",
+            )
+
+        assert result.acquired is True
+        written = json.loads(mock_redis.eval.call_args.args[4])
+        assert written["renewer_pid"] == os.getpid()
+        assert written["renewer_create_time"] is not None
+
+
+class TestDropRenewerIdentity:
+    """The heartbeat's deadline-exit clear (spike-5 shape (a)) is a PURE
+    key-removal: it must not refresh ``renewed_at`` and must not extend the
+    lease, or a run that is genuinely dead at its deadline exit gains extra
+    false-live AND extra lease lifetime versus ``main``."""
+
+    def _stored(self, renewed_at: float) -> str:
+        return json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2648",
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": renewed_at,
+                "renewer_pid": 999001,
+                "renewer_create_time": 2000.0,
+                "target_repo": "owner/repo",
+            }
+        )
+
+    def test_drop_renewer_identity_preserves_renewed_at(self):
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        renewed_at = time.time() - 400
+        stored = self._stored(renewed_at)
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            mock_redis.pttl.return_value = 900_000  # 900s of lease left
+            mock_redis.eval.return_value = 1
+            result = touch_issue_lock(
+                2648,
+                "run-a",
+                session_id="sdlc-local-2648",
+                drop_renewer_identity=True,
+            )
+
+        assert result.acquired is True
+        eval_args = mock_redis.eval.call_args.args
+        assert eval_args[3] == stored  # ARGV[1]: CAS against the exact bytes read
+        written = json.loads(eval_args[4])
+        assert "renewer_pid" not in written
+        assert "renewer_create_time" not in written
+        assert written["renewed_at"] == renewed_at  # decay clock untouched
+        assert written["target_repo"] == "owner/repo"
+        # ARGV[3]: the key's REMAINING lifetime, never a fresh full TTL.
+        assert int(eval_args[5]) == 900
+        assert int(eval_args[5]) != ISSUE_LOCK_TTL_SECONDS
+
+    def test_drop_renewer_identity_lost_cas_reports_not_acquired(self):
+        """A successor already owns the lease -> the CAS no-ops and the caller
+        is told so, which is what lets the heartbeat bound its retry."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = self._stored(time.time() - 400)
+            mock_redis.pttl.return_value = 900_000
+            mock_redis.eval.return_value = 0
+            result = touch_issue_lock(
+                2648, "run-a", session_id="sdlc-local-2648", drop_renewer_identity=True
+            )
+
+        assert result.acquired is False
+
+    def test_drop_renewer_identity_ignores_foreign_owner(self):
+        """Race 5: a successor's payload never matches, and the clear never
+        even reaches the CAS."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = json.dumps({"run_id": "successor-run"})
+            result = touch_issue_lock(
+                2648, "run-a", session_id="sdlc-local-2648", drop_renewer_identity=True
+            )
+
+        assert result.acquired is False
+        mock_redis.eval.assert_not_called()
+
+    def test_drop_renewer_identity_pttl_sentinel_does_not_invent_a_ttl(self):
+        """``pttl`` returns -1 (no expiry) / -2 (missing key). Neither is a
+        lifetime, so the clear stands down rather than inventing one."""
+        from models.session_lifecycle import touch_issue_lock
+
+        for sentinel in (-1, -2):
+            with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+                mock_redis.get.return_value = self._stored(time.time() - 400)
+                mock_redis.pttl.return_value = sentinel
+                result = touch_issue_lock(
+                    2648, "run-a", session_id="sdlc-local-2648", drop_renewer_identity=True
+                )
+
+            assert result.acquired is False
+            mock_redis.eval.assert_not_called()
+
+    def test_cleared_payload_reads_live_at_800s_of_quiet(self):
+        """spike-5 row Ia: once the group is cleared the payload falls back to
+        the untouched #2620 short-circuit, so the verdict at 800s of quiet is
+        byte-identical to today's."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        payload = _renewer_payload(_PAST_GRACE_QUIET)
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            assert _lock_owner_is_live(payload) is True
+
+
 class TestTouchIssueLockTargetRepoPinning:
     """Tests for target_repo pinning on the issue lock payload (issue #2012).
 
