@@ -31,11 +31,16 @@ What remains is three workstreams landing as **one PR**:
 
 | | Files touched | Rough size |
 |---|---|---|
-| **WS-A** (#2817) | `agent/sdlc_router.py`, `tools/sdlc_next_skill.py` | one guard + one JSON shape |
-| **WS-B** (#2824) | `tools/sdlc_stage_query.py` | ~10 lines in `_lookup_pr` |
+| **WS-A** (#2817) | `agent/sdlc_router.py`, `tools/sdlc_next_skill.py`, `tools/sdlc_stage_query.py` (`issue_state` key only) | one guard + one meta key + one JSON shape |
+| **WS-B** (#2824) | `tools/sdlc_stage_query.py`, `tools/lane_identity.py` | ~10 lines in `_lookup_pr` + one helper |
 | **WS-C** (#2825) | `tools/sdlc_stage_marker.py` | one argument |
 
-The two halves are **file-disjoint** — WS-A touches nothing WS-B/C touch, and vice versa
+WS-A's `issue_state` key (round-2 blocker fix) puts one small WS-A edit into
+`tools/sdlc_stage_query.py`, so the halves are no longer strictly file-disjoint. They remain
+**function-disjoint**: WS-A adds a key inside `_compute_meta`, WS-B edits `_lookup_pr`, and
+neither reads the other's code. Each still reverts alone.
+
+The two halves are **near-file-disjoint** — WS-A touches nothing WS-B/C touch, and vice versa
 — so a reviewer reads two independent diffs rather than one entangled one, and each
 workstream reverts alone (the mutation table in Risk 5 enforces that each has its own
 coverage). Splitting file-disjoint halves into two PRs would buy the reviewer nothing and
@@ -428,10 +433,12 @@ bounded diffs plus their tests.
 
 - **WS-A — Terminal guard (#2817).** Give the router the terminal fact it already
   computes elsewhere, by consulting `agent/pipeline_complete.py::is_pipeline_complete`
-  rather than inventing a second definition of "finished".
-- **WS-B — Lane-branch authority (#2824).** When a lane branch is recorded, the exact
-  head-ref match is authoritative: it answers, or the lookup answers `None`. The fuzzy
-  body search runs only when there is no recorded branch to disambiguate with.
+  rather than inventing a second definition of "finished" — **gated on the tracking issue
+  being CLOSED**, so a re-entered issue is not latched shut forever.
+- **WS-B — Lane-branch authority (#2824).** When a lane branch is recorded **and exists on
+  origin**, the exact head-ref match is authoritative: it answers, or the lookup answers
+  `None`. The fuzzy body search runs when there is no recorded branch, or when the recorded
+  slug names a branch that does not exist.
 - **WS-C — Review-probe scope (#2825).** `state="all"` → `state="merged"` at the one
   call site, preserving #2539.
 - **WS-D — Deterministic candidate selection.** **Deferred to
@@ -504,6 +511,69 @@ if not isinstance(stage_states, dict):
 not terminate a lane. This resolves the contradiction the critique found between task 3's
 bare-delegation spec and the Failure Path section's "guard cannot raise" test.
 
+*It must not latch a re-entered issue shut. (Round-2 blocker.)*
+
+`MERGE == "completed"` is **durable ledger state with no un-write path**, and
+`PipelineLedger.get_or_create(target_repo, issue_number)` returns the *same* ledger for a
+second lifecycle. A guard keyed on that key alone therefore terminates a reopened issue on
+every tick, forever, and **nothing downstream can clear it**:
+
+| Candidate remedy | Why it does not reach |
+|---|---|
+| `sdlc-tool stage-marker --status ...` | `choices=["in_progress", "completed", "skipped"]` (`tools/sdlc_stage_marker.py:957`, verified). No status moves a stage backwards. |
+| `sdlc-tool dispatch reset` | Clears `_sdlc_dispatches` only (`tools/sdlc_dispatch.py:296`, `_cli_reset`). Never touches `stages`. |
+| Hand-zeroing `stage_states_json` | Documented as a clobber: `docs/features/sdlc-issue-keyed-stage-ledger.md:324` calls that exact reset "silently wiping a live, populated" ledger. |
+
+That is **strictly worse than the bug being fixed**. Today the same reopened ledger
+recovers on its own — measured on `f491306c5` with `{ISSUE,PLAN,CRITIQUE: completed,
+BUILD: in_progress}`: `branch_exists=True, pr_number=None` → `/do-build` row 5, and a
+resolved `pr_number` → row 7 / row 10. A permanent latch replaces a self-healing wrong
+answer with an unrecoverable dead lane. Reachability is not theoretical: spike-4 counted
+**17 reopened issues, 8 carrying a merged PR that merged before the reopen**, and **16 of
+36 live `PipelineLedger` rows carry `MERGE == "completed"` today**.
+
+**Resolution: the guard requires positive evidence that the issue is CLOSED.**
+`_compute_meta` (`tools/sdlc_stage_query.py:515`) already shells out to `gh` — it calls
+`_lookup_pr` and `_fetch_pr_merge_state` on every enriched query — so it gains one
+`issue_state` key, and the guard opens with:
+
+```python
+if not isinstance(stage_states, dict):
+    return None
+if (meta or {}).get("issue_state") != "CLOSED":
+    return None
+```
+
+**The polarity is `!= "CLOSED"`, not the critique's suggested `== "OPEN"`, and the
+difference is the whole safety argument.** Under `== "OPEN"`, an *unresolvable* issue
+state (`None` — a `gh` outage, a rate limit, an unset `GH_REPO`) is not `"OPEN"`, so the
+guard fires and terminates. A transient network failure would then permanently latch a
+live lane, which is the exact failure this fix exists to prevent, re-entered through the
+fix itself. Under `!= "CLOSED"`, an unresolvable state falls through to the dispatch table
+— i.e. to **today's behavior**, the well-understood baseline this plan is improving on.
+This is the same fail-closed discipline #1642 established after a soft-failing lookup
+silently disarmed G6, pointed at the guard's own input.
+
+**Coverage is not sacrificed by the stricter polarity — measured, not assumed.** All
+**16 of 16** terminal ledgers on this machine resolve `gh issue view N --json state` to
+`CLOSED` (issues 2475, 2566, 2628, 2637, 2638, 2640, 2644, 2645, 2655, 2659, 2663, 2679,
+2682, 2694, 2697, 2711; zero OPEN, zero unresolved). The guard fires on the entire measured
+terminal population and stands down on exactly the re-entered case.
+
+It is also the semantically right reading, not merely the safe one. A merged pipeline whose
+issue is still open is a pipeline someone deliberately did not finish — a `Refs #N` PR, or
+one issue of a multi-issue lane. "Terminal" should mean the tracker agrees, and requiring
+`CLOSED` makes the router's terminal fact and the tracker's fact the same fact.
+
+**Cost containment for the extra `gh` call.** Resolve `issue_state` **only when
+`stage_states["MERGE"] == "completed"`**. Every non-terminal ledger — the overwhelming
+majority of ticks — pays nothing, and a terminal ledger pays one `gh issue view N --json
+state` on a path that already makes two or more `gh` calls. Resolve it once per
+`_compute_meta` invocation, inside the existing `cached_target_repo_resolution()` scope, and
+degrade to `None` on any failure rather than raising — `_compute_meta`'s own contract
+(`:505-512`) is that "a corrupt value must degrade rather than raise", since "an exception
+here would take the entire `stage-query` projection down and blind the router."
+
 *Guard ordering — resolved.* **First in `GUARDS`, ahead of G1.** A completed pipeline has
 nothing to gain from any other guard's opinion, and G4 in particular gives actively wrong
 advice on it ("clear it with `sdlc-tool dispatch reset`"). The competing argument was
@@ -534,24 +604,94 @@ a Documentation checkbox and a build task, not left to review.
 cells in spike-1's matrix become terminal. No change to row 5 itself is needed —
 and none should be made, because row 5 is correct for every non-terminal ledger.
 
-**WS-B — lane-branch authority.**
+**WS-B — lane-branch authority, gated on the branch actually existing.**
 
-In `_lookup_pr`, when `lane_branch_name(slug)` yields a branch, run the head-ref leg
-first and **return its result directly, including `None`**, without falling through
-to the fuzzy search. When there is no recorded branch, behavior is byte-identical to
-today. The suppression clause is the load-bearing half; a bare reorder is measurably
-a no-op (spike-4).
+**The round-1 shape of WS-B was falsified on live data and has been replaced.** The
+original spec was: when `lane_branch_name(slug)` yields a branch, run the head-ref leg and
+return its result directly, *including `None`*, suppressing the fuzzy search. Measured over
+every `PipelineLedger` on this machine with the real `_body_references_issue` validator,
+that shape scores **0 gains and 1 loss** — it never once recovered a PR the fuzzy leg
+missed, and it destroyed a currently-correct resolution.
 
-The guard condition must key on **the slug being recorded**, not on the head-ref
-lookup returning `None`. `lane_branch_name(None)` returns `None`
-(`tools/lane_identity.py:95-103`), so "no slug" and "slug present, no PR on that
-branch" are otherwise indistinguishable at the call site, and conflating them would
+**The measurement (2026-08-19, 36 ledgers, 11 with a recorded slug):**
+
+| Shape | Gains | Losses | Unchanged |
+|---|---|---|---|
+| Round-1 (unconditional head-ref authority) | **0** | **1** (#2694) | 10 |
+| Round-2 (authority only if the branch exists on origin) | **0** | **0** | 11 |
+
+Critique round 2 measured 0 gains / **2** losses. One of the two has healed since: #2738's
+slug was `sdlc-2738` when the critique ran and is `hook-validator-target-resolution` today
+(`slug_source: recorded`), which matches PR 2746's actual head ref, so it moved from LOST to
+correctly-covered. The remaining loss is **#2694** — slug `sdlc-2694`, PR 2695's real head
+is `session/dev-41a59eee`, and `git ls-remote --heads origin refs/heads/session/sdlc-2694`
+returns empty. The critique's direction was right and its count was right at the time; the
+live number today is 1.
+
+**Root cause: two slug vocabularies, and adoption is partial rather than absent.**
+`tools/lane_identity.py` records a lane's slug two ways. `adopt_lane_slug` takes a branch
+name the caller **already knows** and records it verbatim; `resolve_lane_slug`'s discovery
+ladder probes only the issue-derived name and, on a miss, mints `sdlc-{N}`. `adopt_lane_slug`'s
+own docstring names the resulting divergence as "the defect this module closes."
+#2738 shows adoption working end to end; #2694 shows a site that knew the branch and did not
+record it. **That coverage gap is a real, separate bug and is now
+[#2869](https://github.com/tomcounsell/ai/issues/2869)** — it is not fixed here, and WS-B is
+correct whether or not it is ever fixed. (If #2869 lands, more recorded slugs name real
+branches, which makes WS-B resolve *more* answers authoritatively, never fewer.)
+
+**The revised mechanism.** Assert head-ref authority only when the branch is real:
+
+```python
+branch = lane_branch_name(slug)
+if branch and lane_branch_exists_on_remote(branch):
+    return _gh_pr_list(["--head", branch, "--state", state], repo=repo)
+# otherwise fall through to the existing fuzzy ladder, unchanged
+```
+
+**This keeps the round-1 rule that must not be broken.** The gate is still never *"the
+head-ref lookup returned `None`"* — conflating "no PR on this branch" with "no branch" would
 suppress the fuzzy leg for every slugless lane and regress resolution across the board.
+Branch **existence** is a categorically different signal from lookup **result**: it is
+evidence about whether the slug names anything real, which is precisely the failure mode
+#2869 describes. A slug that names a nonexistent branch has no authority to assert, so the
+lookup falls back to fuzzy search and loses nothing.
 
-**State honestly what this does not cover.** Both live candidates (#2494, #2518)
-carry `slug: null / slug_source: "unresolved"`, so WS-B does not fix them. It fixes
-every *future* lane, because current lanes record their slug at lane start
-(`docs/features/sdlc-lane-identity.md`). Claiming otherwise would be false.
+**Why the existence check costs nothing in the scenario WS-B exists to fix.** #2824's harm
+is: reopened issue, this lifecycle's lane branch pushed, no PR on it yet, fuzzy search
+returns the *prior* lifecycle's merged PR. The premise of that scenario is **that the branch
+exists** — so the existence check is satisfied exactly when the fix needs to fire. Measured
+on `f491306c5` with `{ISSUE,PLAN,CRITIQUE: completed, BUILD: in_progress}`,
+`branch_exists=True`:
+
+| `pr_number` | Route |
+|---|---|
+| `2516` (stale, prior lifecycle) | `Dispatch(/do-pr-review, row 7)` — review a finished PR |
+| `None` (what WS-B returns) | `Dispatch(/do-build, row 5)` — **create the PR this lifecycle needs** |
+
+**Why this workstream stays in the lane rather than being cut.** Its measured effect on live
+data is **zero, not negative** — 0 gains, 0 losses, 11 identical resolutions — so the "do not
+ship a net-negative workstream" bar is cleared. But zero measured gain is a weak reason to
+ship on its own, and the real reason is an interaction with BLOCKER 1's fix: **the terminal
+guard now deliberately stands down on an OPEN issue**, which hands every reopened ledger
+straight back to the fuzzy-resolution path. WS-A no longer fences the reopened case (by
+design — that is what stops the permanent latch), so WS-B is the **only** remaining
+protection for it. Cutting WS-B would leave the reopened-issue harm unguarded on both sides
+of the lane at once.
+
+**Implementation note — where the helper lives.** `_check_branch_pushed`
+(`tools/sdlc_next_skill.py:157`) is exactly this check and is already battle-tested, but
+`sdlc_next_skill` imports `sdlc_stage_query`, so importing it back would be circular. Add
+`lane_branch_exists_on_remote(branch)` to `tools/lane_identity.py` instead — it is already
+the sole owner of the `session/` prefix, it already runs `git ls-remote --heads origin`
+(`:211`), and `sdlc_stage_query` already imports from it (`:60-61`) with no reverse edge
+(verified). Give it the same disposition as `_check_branch_pushed`: return `False` on
+non-zero exit or timeout, never raise. Memoize per `_lookup_pr` call chain so the two-pass
+lookup (`open` then `merged`) pays **one** `ls-remote`, not two.
+
+**State honestly what this does not cover.** Both live #2824 candidates (#2494, #2518)
+carry `slug: null / slug_source: "unresolved"`, so WS-B does not fix them, and the existence
+check does not change that — a lane with no slug has no branch to check. Claiming otherwise
+would be false.
 
 **WS-C — review-probe scope.**
 
