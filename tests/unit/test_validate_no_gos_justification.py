@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Hook scripts live in .claude/hooks/validators/ and import from .claude/hooks/hook_utils/
@@ -152,6 +154,7 @@ def run_hook(payload: dict | str | None, cwd: Path) -> int:
         text=True,
         cwd=str(cwd),
         timeout=30,
+        env=subprocess_env(),
     )
     return proc.returncode
 
@@ -257,6 +260,7 @@ class TestTargetIsTheFileTheWriteNamed:
             text=True,
             cwd=str(lane_b),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 2
         assert str(deficient) in proc.stderr, "the refusal must cite lane A's plan, not lane B's"
@@ -314,6 +318,7 @@ class TestTargetIsTheFileTheWriteNamed:
             text=True,
             cwd=str(tmp_path),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 2
         assert str(outside) in proc.stderr

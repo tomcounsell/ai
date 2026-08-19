@@ -32,6 +32,8 @@ from hook_utils.hook_target import (  # noqa: E402
     target_from_hook_input,
 )
 
+from tests.db_claim import subprocess_env  # noqa: E402
+
 PORTED_VALIDATORS = [
     "validate_no_gos_justification.py",
     "validate_documentation_section.py",
@@ -159,6 +161,7 @@ class TestNoValidatorRaisesOnAHostilePayload:
             text=True,
             cwd=str(tmp_path),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 0, proc.stderr
         assert "Traceback" not in proc.stderr
@@ -173,6 +176,7 @@ class TestNoValidatorRaisesOnAHostilePayload:
             text=True,
             cwd=str(tmp_path),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 0, proc.stderr
         assert "Traceback" not in proc.stderr

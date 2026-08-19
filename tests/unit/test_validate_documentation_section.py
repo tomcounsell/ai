@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 # Hook scripts live in .claude/hooks/validators/ and import from .claude/hooks/hook_utils/
 HOOKS_DIR = Path(__file__).resolve().parent.parent.parent / ".claude" / "hooks"
 VALIDATORS_DIR = HOOKS_DIR / "validators"
@@ -189,6 +191,7 @@ def run_hook(payload: dict | str | None, cwd: Path) -> subprocess.CompletedProce
         text=True,
         cwd=str(cwd),
         timeout=30,
+        env=subprocess_env(),
     )
 
 
@@ -267,6 +270,7 @@ class TestTargetIsTheFileTheHookNamed:
             text=True,
             cwd=str(tmp_path),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 2
         assert "does not exist" in proc.stderr
@@ -305,6 +309,7 @@ class TestTargetIsTheFileTheHookNamed:
             text=True,
             cwd=str(tmp_path),
             timeout=30,
+            env=subprocess_env(),
         )
         assert proc.returncode == 2
         assert str(outside) in proc.stderr
