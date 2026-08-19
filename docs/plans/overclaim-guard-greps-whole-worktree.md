@@ -998,6 +998,11 @@ deliberately not exposed to the agent.
 - [ ] **The six floored walks are covered:** each of B7, B8, B11, B12, B13, B14 asserts a minimum scanned-file count, and each floor is individually demonstrated-red by task 5's per-guard mutation. B13 and B14 additionally raise on a missing scan root rather than skipping it. (net-new, critique — 6 of the 10 touched files previously mapped to no criterion)
 - [ ] **The regex dialect is pinned and exercised:** no converted guard passes `-F`, `-E`, or `-P`, and a helper test proves a BRE metacharacter pattern (`zzz\.never(`) both reports clean and trips on a planted match. (net-new, critique — an `-F` would leave A3 permanently green)
 - [ ] **The meta-guard is proven to catch, not merely to pass:** it self-exempts by resolved path (not filename substring) and a `tmp_path` planted-offender positive control is flagged. Its scanner takes root and floor as independent parameters, so the control's one-file root reaches the offender assertion instead of tripping the floor. (net-new, critique)
+- [ ] **The meta-guard's discriminator is structural and its false-positive set is enumerated:** it matches an `ast.List` of string constants whose first element is `grep` and which carries a recursive flag as a sibling element, flags exactly A1 and A2 at `cefc07e7e`, flags none of the five textual near-misses (including A6, the plan's own reference pattern), and is expected to flag **nothing** after conversion. The five innocents are named in the test's own comment. (net-new, critique round 3)
+- [ ] **The helper's corpus is injectable and the seam is fenced:** `repo_root=` is keyword-only, defaults to the module-level `REPO_ROOT`, and is passed by `tests/tracked_content.py` and `tests/unit/test_tracked_content_helper.py` and by nothing else (V-28). No helper unit test moves, deletes, or writes a file inside the primary checkout — mutable-corpus cases use a `git init` scratch repo in `tmp_path` with `min_files=1` (V-29). Live-tree mutation is confined to V-17, V-18 and V-18b under task 5's supervised one-at-a-time protocol. (net-new, critique round 3 blocker)
+- [ ] **No mutation row renames a path a launchd service resolves.** V-18 and task 5's B13 mutation use `ui/` (10 tracked `.py`, 0.8%), not `worker/`, because `com.valor.worker` runs `python -m worker` from this checkout under `KeepAlive`. (net-new, critique round 3)
+- [ ] **The cross-checkout comparison is controlled:** V-19 provisions the fresh worktree with `uv sync --all-extras` and asserts the pin with `scripts/check-interpreter-pin.sh` before running, so both halves of #2808 AC2 execute on the same interpreter. A bare worktree has no `.venv`, and both the wrapper's `PYTEST_BIN` resolution and the pin checker fail open in exactly that case. (net-new, critique round 3)
+- [ ] **No verification command contains a `|` character in any role**, so no row can be broken by markdown table-cell escaping in either regex dialect. (net-new, critique round 3)
 - [ ] `tests/` contains no remaining recursive-`grep`-over-a-directory assertion, enforced by the new meta-guard. (#2807 AC4)
 - [ ] All 27 filesystem-walking absence assertions are enumerated with a disposition, each **converted, floored, or documented as safe (4 / 6 / 17)**. (#2809 AC4)
 - [ ] **Neither converted sibling reads the ambient cwd.** `assert_absent_from_tracked` derives `REPO_ROOT` from `Path(__file__).resolve().parents[N]` and passes it as `cwd=` on every git call. Verified by running both nodes from `/tmp` and observing the same verdict as from the repo root. Today the two diverge from a foreign cwd (A2 returns rc=1 with empty stdout and passes vacuously; A3 returns rc=2 and fails); after the fix both must match their in-repo run. (#2808 AC7)
@@ -1170,7 +1175,7 @@ scanned:
 | A1 | `'tools/*.py' 'agent/*.py'` | 266 | **170** | 64% |
 | A2 | `'agent/*.py' 'bridge/*.py' 'tools/*.py'` minus 6 exclusions | 304 | **200** | 66% |
 | A3 | `'agent/memory_extraction.py'` | 1 | **1** | single file |
-| A7 | `'*'` minus 4 exclusions | 2060 | **1300** | 63% |
+| A7 | `'*'` minus 4 exclusions | 2065 | **1300** | 63% |
 
 Put the measured count and its commit in the **assertion message**, not a
 comment, per Risk 1 — the person who trips the floor must see the rationale at
@@ -1206,14 +1211,16 @@ the same moment:
       min_files=1300,
   )
   ```
-  Verified at `40c4fe0a9` and re-verified at `7ba89ca5c`: this exact pathspec set
-  returns rc=1 (clean) from `git grep -l`, and `git ls-files` over it yields
-  **2060** paths, so the exemptions are a drop-in replacement for the
-  `ALLOWED_FILES` / `docs/plans/` stdout filtering.
-  **`min_files` is 1300, not the 1800 the critique suggested.** 1800 is 87% of
-  the 2060-path corpus, which violates this plan's own 60-70% band (Risk 1) and
-  would be tripped by ordinary churn — `docs/plans/` alone is 591 tracked files
-  and is actively archived. 1300 sits at 63%.
+  Verified at `40c4fe0a9`, re-verified at `7ba89ca5c`, and re-measured at
+  `cefc07e7e`: this exact pathspec set returns rc=1 (clean) from `git grep -l`,
+  and `git ls-files` over it yields **2065** paths, so the exemptions are a
+  drop-in replacement for the `ALLOWED_FILES` / `docs/plans/` stdout filtering.
+  The corpus grew by 5 paths across those commits and will keep drifting, which
+  is why the figure is pinned to a commit and the floor is not set near it.
+  **`min_files` is 1300, not the 1800 an earlier critique suggested.** 1800 is
+  87% of the 2065-path corpus, which violates this plan's own 60-70% band
+  (Risk 1) and would be tripped by ordinary churn — `docs/plans/` alone is 591
+  tracked files and is actively archived. 1300 sits at 63%.
 - Do not delete or modify any `__pycache__` content.
 
 ### 3. Add non-vacuity floors to the six unfloored walks
@@ -1399,6 +1406,8 @@ below.
 | net-new | Meta-guard self-exempts and is positively controlled | 4 | V-21 |
 | net-new | Meta-guard root and floor are independent parameters | 4 | V-5, V-21 |
 | net-new | No converted guard passes `allow=`; the parameter is not built | 1, 2 | V-10 |
+| net-new | The `repo_root=` seam is test-only and no guard passes it | 1, 2 | V-28 |
+| net-new | No helper unit test mutates the primary checkout | 1 | V-29 |
 
 ## Verification
 
