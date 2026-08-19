@@ -146,7 +146,12 @@ class TestConsoleScriptsResolve:
         assert "not found" in result.message
 
     def test_hardlinked_copy_outside_the_venv_is_accepted(self, tmp_path, monkeypatch):
-        """`/update` hardlinks entry points into ~/.local/bin — not a wrong copy."""
+        """A hardlinked copy of the venv file is not automatically the wrong copy.
+
+        `_same_file` is general hardlink tolerance, not an artifact of any
+        particular tool -- `/update` itself hardlinks exactly one script
+        (`scripts/sdlc-tool`), which is not a `[project.scripts]` name.
+        """
         root = _fake_checkout(tmp_path, names=("sdlc-push-guard",))
         local_bin = tmp_path / "local" / "bin"
         local_bin.mkdir(parents=True)
