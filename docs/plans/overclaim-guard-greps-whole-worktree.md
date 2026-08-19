@@ -719,7 +719,7 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted` — **UPDATE**: route through the helper; add the `#2093`-style explanatory comment naming the `.pyc` hazard so it is not "simplified" back (required by #2809 AC2).
-- [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; preserve the `_ALLOWED_DIRECT_CONSTRUCTORS` exemption via the helper's `allow=` parameter.
+- [ ] `tests/unit/test_anthropic_client_semaphore.py::TestSharedModuleIsTheOnlyConstructor::test_no_unguarded_async_anthropic_instantiation` — **UPDATE**: route through the helper; convert the six `_ALLOWED_DIRECT_CONSTRUCTORS` entries into negative pathspecs (they are all file paths, so the current whole-line substring filter is unsafe whole-file exemption). Keep the constant as the source of the exclusion list so its provenance comments survive. Post-exclusion corpus 304, `min_files=200`.
 - [ ] `tests/unit/test_memory_extraction.py::TestEventLoopSafety::test_no_direct_anthropic_client_grep_canary` — **UPDATE**: route through the helper. Single-file scope, so the floor is `min_files=1`.
 - [ ] `tests/unit/test_no_legacy_paths.py::test_no_legacy_claude_code_paths` — **UPDATE**: replace the `if rc == 0:` gate with three-way triage; move the `ALLOWED_FILES` and `docs/plans/` exemptions into negative pathspecs. Corpus stays **all tracked file types**, not `*.py`.
 - [ ] `tests/unit/test_template_filter_registry.py::test_no_hand_copied_filter_registration_in_tests` — **UPDATE**: add non-vacuity floor.
@@ -730,7 +730,7 @@ rather than a pass. Neither is a test, so neither is in scope for #2809's AC.
 - [ ] `tests/unit/test_harness_model_coverage.py` (`_agent_py_files`) — **UPDATE**: replace `if not agent_dir.is_dir(): return []` with a raise; add floor.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` — **NO CHANGE, verified**: its scanner only flags subprocess calls where `_argv_reaches_python(argv)` holds. `["git", "grep", …]` does not reach Python, so the new helper needs no `ALLOWLIST` entry. Confirmed by reading `_argv0_is_skipped`/`_argv_reaches_python` at `:216-260`.
 - [ ] `tests/unit/test_plan_migration_invariant.py` — **NO CHANGE**: already correct; it is the reference pattern this plan generalizes.
-- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, `TrackedScanError` on a broken index (128), `VacuousScanError` on a vacuous pathspec, the two asserted **apart**, empty pattern, whitespace-only pattern, BRE metacharacter round-trip, and `allow=` line filtering.
+- [ ] **NEW** `tests/unit/test_tracked_content_helper.py` — unit tests for the helper itself: match, clean, `TrackedScanError` on a broken index (128), `VacuousScanError` on a vacuous pathspec, the two asserted **apart**, `VacuousScanError` naming an absent-from-disk tracked path, empty pattern, whitespace-only pattern, and the BRE metacharacter round-trip (probe written as a raw string, `r"zzz\.never("`). No `allow=` coverage — the parameter is not built.
 - [ ] **NEW** meta-guard (in the same new file): no test under `tests/` invokes a bare recursive `grep` over a directory. Self-exempts by resolved path, carries its own non-vacuity floor, and ships with a `tmp_path` planted-offender positive control.
 
 ## Rabbit Holes
@@ -1116,7 +1116,10 @@ the same moment:
 - Match literal shapes only; provide an explicit opt-out comment for a justified survivor **elsewhere** in the suite.
 - **Self-exempt by resolved path**, never by filename substring, using the idiom at `tests/unit/test_template_filter_registry.py:128-131`: `self_path = Path(__file__).resolve()` then `if py_file.resolve() == self_path: continue`. The meta-guard must contain the literals it matches, so it flags itself otherwise — and the opt-out comment is the wrong instrument for the one guard that must never carry one.
 - **Ship a planted-offender positive control in the same file:** write a temp file under `tmp_path` containing `subprocess.run(["grep", "-rn", "x", "tools/"])`, point the scanner at `tmp_path`, and assert it is flagged. Without it, a correct self-exemption and a matcher that flags nothing are indistinguishable.
-- Include a non-vacuity floor on the meta-guard's own scan — it must not become the thing it guards against.
+- **Take root and floor as independent parameters** so the floor and the positive control do not collide: `def _scan_for_bare_grep(root: Path, *, min_files: int) -> list[str]`, raising `AssertionError` when `len(scanned) < min_files`. The real guard calls `_scan_for_bare_grep(TESTS_DIR, min_files=500)`; the control calls `_scan_for_bare_grep(tmp_path, min_files=1)`. A floor baked into the scanner would be tripped by the control's one-file root *before* the offender assertion ran, so the control would pass for the wrong reason and V-21 would be uninformative.
+- `min_files=500` because `tests/` holds 784 tracked `.py` at `7ba89ca5c` (63.8%, inside Risk 1's 60-70% band). Not 600, which is 76.5% and outside it.
+- Never let the control pass `min_files=0` — a scanner returning `[]` unconditionally would satisfy both callers and both would stay green.
+- Name the control test so `-k "positive_control"` selects it (V-21).
 
 ### 5. Mutation-check every guard individually
 - **Task ID**: validate-mutations
@@ -1129,6 +1132,7 @@ the same moment:
 - For **each** of the six floored walks separately: force an empty scan (temporarily point the root at a nonexistent path), confirm the floor fails, revert.
 - For B13 and B14 specifically, run a **second, distinct** mutation: remove one scan root only (B13: `worker/`, the 0.24% root) and confirm the *per-root* assertion fires. The total floor will still be green, which is the whole point of the separate check.
 - Confirm the helper raises `TrackedScanError` (not `VacuousScanError`) when `GIT_INDEX_FILE=/dev/null`, and `VacuousScanError` (not `TrackedScanError`) for `'nosuchdir/*.py'`. Assert the classes apart, not merely "it failed".
+- **Absent-file mutation (net-new, round 2).** Move one tracked file out of A1's corpus with a plain `mv` — *not* `git mv`, which updates the index and so exercises only the case the index-row count already catches — then run A1 and confirm it raises `VacuousScanError` naming the absent path. Measured at `7ba89ca5c`: with `tools/doctor.py` moved aside, `git grep` returns rc=1 (false clean) while `git ls-files` still reports 180, and the present count is 265 of 266 — above the floor of 170, so **only** the absence check fires. Restore with `mv` and confirm `git status` is clean. This is V-18b.
 - Confirm the BRE metacharacter test both reports clean and trips on a planted match, so an added `-F` would be caught.
 - Confirm the meta-guard's `tmp_path` planted-offender control is flagged.
 - Plant a file under `tools/__pycache__/` containing the banned string; confirm A1 still passes.
@@ -1155,7 +1159,10 @@ the same moment:
 - **Assigned To**: sweep-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section, including the BRE dialect rule and the tracked-only boundary paragraph (why `--untracked` is deliberately not used).
+- Create `docs/features/tracked-content-sweep-guards.md` per the Documentation section, including the BRE dialect rule and the tracked-files boundary paragraph (why `--untracked` is deliberately not used).
+- **State the two-part `git grep` contract correctly — this doc is where it becomes repo-wide doctrine.** `git grep` resolves the *file list* from the index and reads each file's *content from the working tree*; `--cached` would read content from the index instead. Do not write "the corpus is index-scoped content", and do not copy forward `test_plan_migration_invariant.py:136-145`'s stronger claim that `git grep` "is race-free" — the *file list* cannot shift mid-scan and no untracked runtime tree is descended, but content is still read per-file from the working tree. Measured at `7ba89ca5c`: an unstaged append is found by `git grep` (rc=0) and not by `git grep --cached` (rc=1).
+- Say plainly that a violation in an already-tracked file is caught immediately, staged or not, and that only a brand-new *untracked* file is invisible — until it is added to the index, not until it is committed.
+- Document that the non-vacuity floor counts files present on disk and that any absent tracked path is an error, with the 265-of-266 measurement as the worked example.
 - Add the entry to `docs/features/README.md`.
 - Update `docs/features/worktree-venv-isolation.md` with the stranded-bytecode warning, linking #2883.
 - Update `tests/README.md` with the sweep-guard convention.
