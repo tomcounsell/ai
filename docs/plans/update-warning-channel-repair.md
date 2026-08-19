@@ -149,7 +149,7 @@ No merged PR search results for `warn_state env-completeness` — the `gh pr lis
 
 **Size:** Medium
 
-**Team:** Six agents over seven tasks — three builders on disjoint files, a code reviewer, a documentarian, and a validator (see Team Orchestration). The three builders are parallel; everything after them is sequential. This is larger than the "solo dev" the first draft assumed, because folding the suppression-visibility work in added a third build surface (`warn_state` retrieval + the summary trailer) and a cross-cutting reviewer to cover the seam between builders 1 and 3. The appetite stays **Medium**: the roster is wider, not longer, and no task grew.
+**Team:** Six agents over eight tasks — three builders on disjoint files, a code reviewer, a documentarian, and a validator (see Team Orchestration). The three builders are parallel; everything after them is sequential, including Task 5, where `update-channel-builder` returns to `bridge/update.py` once `warn_state` exports the shared trailer constant. This is larger than the "solo dev" the first draft assumed, because folding the suppression-visibility work in added a third build surface (`warn_state` retrieval + the summary trailer) and a cross-cutting reviewer to cover the seam between builders 1 and 3. The appetite stays **Medium**: the roster is wider, not longer, and no task grew.
 
 **Interactions:**
 - PM check-ins: 3 — one per Open Question below (scope confirmation, the `@optional` sigil convention, and whether any key the criterion marks optional is genuinely required somewhere). Each is a decision only a human can make, so they are check-ins rather than spikes.
@@ -292,6 +292,8 @@ Pull-only is the right answer on the unattended path, and not merely the availab
 ### Error State Rendering
 - [ ] The `(N warnings)` count and the number of extracted bullets must agree; a test covers the mismatch path and asserts the discrepancy is surfaced rather than swallowed.
 - [ ] A test asserts the fix-session `message_text` contains the *last* warning of a 27-warning list — the specific regression from the issue, where only warning #1 partially survived.
+- [ ] `test_fix_session_brief_is_legible` asserts the three *shape* properties containment cannot reach: warning list before the tail (index comparison), an explicit `characters elided` marker on a cut whose every emitted line is a whole input line, and the `<<FILE:>>`-derived path present. Containment alone passes on a brief that buries the warnings under 4,000 characters of npm output, which is the legibility half of the original defect.
+- [ ] `test_suppressed_trailer_reaches_telegram_on_clean_run` asserts that a run with no warnings and a non-empty `active()` still puts the trailer in the string passed to `tg_client.send_message`. The both-present case passes either way and proves nothing.
 - [ ] **`(0 warnings)` must NOT trigger a fix session.** A summary line that is well-formed but reports zero is the inverse case, and it is the one a count-blind parser gets wrong while passing everything else here.
 - [ ] The `suppressed:` trailer must NOT be extracted as a warning — fed through `extract_update_warnings`, a transcript containing it yields `[]`.
 - [ ] A warning whose source text contains an embedded newline survives extraction **complete**, not truncated at the first physical line.
@@ -392,7 +394,7 @@ Integration coverage: a test asserting the composed `message_text` (the exact st
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/update-warning-channel.md` — the warning grammar `run.py` emits, the detection contract `extract_update_warnings` implements against it, the fix-session payload shape, and the suppression/retrieval model (`warn_state`, `active()`, the `suppressed:` line). None of this is documented anywhere today, and it is now a contract between two modules and two test files rather than an implementation detail.
+- [ ] Create `docs/features/update-warning-channel.md` — the warning grammar `run.py` emits, the detection contract `extract_update_warnings` implements against it, the fix-session payload shape, and the suppression/retrieval model (`warn_state`, `active()`, the `suppressed:` line). It must carry the push/pull surface table from Technical Approach → Defect 4 verbatim in substance — which path pushes, which is pull-only, and why — and pin `SUPPRESSED_PREFIX`'s exact bytes as the shared producer/consumer contract. None of this is documented anywhere today, and it is now a contract between two modules and two test files rather than an implementation detail.
 - [ ] Add the new feature doc to the `docs/features/README.md` index table.
 - [ ] Update `.claude/skills/update/SKILL.md` — it is the operator-facing description of what `/update` reports, and this plan changes those semantics: warnings are detected from the cron summary, a `suppressed:` line appears, and the fix-session brief leads with the full warning list.
 - [ ] Update `docs/features/env-completeness-validation.md` — document the `@optional` marker, the required-by-default rule, the first-comment-line description rule (currently documented as last), the inline-key cap, and **replace the remediation section at line 61**, whose current instruction to copy declarations into the vault `.env` is the destructive path proven in Finding A.
@@ -416,7 +418,8 @@ Integration coverage: a test asserting the composed `message_text` (the exact st
 - [ ] `gws auth` and Redis ACL drift emit once per state transition, and re-emit when the drift content changes or resolves.
 - [ ] A well-formed `(0 warnings)` summary line queues **no** fix session.
 - [ ] Every suppressed key is retrievable: `python -m scripts.update.warn_state` prints all of them with their signatures, and a run with a non-empty `active()` emits the `suppressed:` line in both the verbose log and the `--cron` summary — while that line itself extracts as zero warnings.
-- [ ] The fix-session brief is *legible*, not merely complete: the full warning list appears **before** any raw stdout/stderr tail, the tail is cut on a line boundary with an explicit elision marker, and the `<<FILE:>>`-derived log path is present when the producer emitted one. This closes the Problem statement's actual loop — that a human or agent reliably *learns* what `/update` found — which no unit-level criterion above tests.
+- [ ] On the interactive path the suppression state arrives without being asked for: a clean run (empty `result.warnings`, non-empty `active()`) puts the trailer into the string passed to `tg_client.send_message` — pinned by `test_suppressed_trailer_reaches_telegram_on_clean_run` in `tests/unit/test_bridge_update.py`. A second test, `test_suppressed_prefix_constant_is_shared`, asserts `bridge/update.py` matches on the `SUPPRESSED_PREFIX` imported from `scripts.update.warn_state` rather than on a locally-spelled literal.
+- [ ] The fix-session brief is *legible*, not merely complete. All three properties are asserted directly by `test_fix_session_brief_is_legible` in `tests/unit/test_update_warning_extraction.py`, against the exact string handed to `enqueue_agent_session`: (a) **ordering** — `message_text.index(last_warning) < message_text.index("[... ")` on a payload long enough to force truncation; (b) **marked, line-boundary cut** — the literal substring `characters elided` is present when the tail exceeds the raised cap, and every line of the emitted tail is a whole line of the input; (c) **log pointer** — the path captured from a `<<FILE:/path>>` input line appears in `message_text`. This closes the Problem statement's actual loop — that a human or agent reliably *learns* what `/update` found — and it is now falsifiable property by property rather than by containment alone.
 - [ ] The red-state output for `test_cron_summary_warnings_trigger_fix_session` against unmodified `bridge/update.py` is captured in the PR body.
 - [ ] `python scripts/update/run.py --verify` on the build machine names **no `@optional` declaration** in its env-completeness warning (they are classified, not suppressed — the check may still name genuinely-missing required keys, and on a machine with an incomplete vault it should), and emits the Redis ACL drift warning **at most once** across consecutive runs — the first run has no stored signature, so `should_emit` returns True and it warns by design; the second identical run is silent. Stating this as "0 warnings" would contradict the plan's own `warn_state` semantics. The drift stays visible on demand via `python -m tools.doctor` and in the `suppressed:` line thereafter.
 - [ ] Tests pass (`/do-test`)
@@ -452,7 +455,7 @@ Integration coverage: a test asserting the composed `message_text` (the exact st
 
 - **Code reviewer**
   - Name: `update-channel-reviewer`
-  - Role: cross-cutting review before documentation, since the three builders' files interlock through the warning grammar. Specifically checks: (1) every key any `should_emit` call site can write appears in `active()`'s output and therefore in the `suppressed:` line — no unreachable suppressed state; (2) the detector cannot over-fire on the `suppressed:` trailer or on a `(0 warnings)` summary; (3) `redis_acl.apply_redis_acl()` is still called with no arguments (#2645 Risk 8 regression); (4) **every `# @optional` marker added to `.env.example` clears both legs of the Defect 3 criterion, and no credential — token, key, password, DSN, connection URL, account id — carries one.** This is the check that catches a builder who derived the set from `check_env_completeness` on their own machine, which on this checkout's machine would mark `OP_SERVICE_ACCOUNT_TOKEN`, `SDLC_AGENT_GH_TOKEN`, `LINEAR_API_KEY`, `SENTRY_DSN`, `STRIPE_API_KEY`, and `REDIS_URL` optional; (5) no `Co-Authored-By` trailers and no commented-out legacy code (Development Principle 1).
+  - Role: cross-cutting review before documentation, since the three builders' files interlock through the warning grammar. Specifically checks: (1) every key any `should_emit` call site can write appears in `active()`'s output and therefore in the `suppressed:` line — no unreachable suppressed state; (2) the detector cannot over-fire on the `suppressed:` trailer or on a `(0 warnings)` summary; (3) `redis_acl.apply_redis_acl()` is still called with no arguments (#2645 Risk 8 regression); (4) **every `# @optional` marker added to `.env.example` clears both legs of the Defect 3 criterion, and no credential — token, key, password, DSN, connection URL, account id — carries one.** This is the check that catches a builder who derived the set from `check_env_completeness` on their own machine, which on this checkout's machine would mark `OP_SERVICE_ACCOUNT_TOKEN`, `SDLC_AGENT_GH_TOKEN`, `LINEAR_API_KEY`, `SENTRY_DSN`, `STRIPE_API_KEY`, and `REDIS_URL` optional; (5) the `suppressed:` trailer is matched on both sides through the single `SUPPRESSED_PREFIX` constant exported by `scripts/update/warn_state.py`, never a locally-spelled literal, and both its composition in `run.py` and its forwarding in `bridge/update.py` sit **outside** their respective conditional branches — the two places a passing test on the both-present case would hide a hole on the clean-except-suppressed path; (6) no `Co-Authored-By` trailers and no commented-out legacy code (Development Principle 1).
   - Agent Type: code-reviewer
   - Resume: true
 
@@ -462,7 +465,7 @@ Integration coverage: a test asserting the composed `message_text` (the exact st
   - Agent Type: validator
   - Resume: true
 
-The three builders touch disjoint files — `bridge/update.py`; `scripts/update/verify.py` + `.env.example`; `scripts/update/run.py` — and can run in parallel in the single session worktree without interleaving commits. **This is now true as written:** an earlier revision put a `run.py` edit in Task 1 while Task 4 edited the same lines, which would have had two parallel builders writing one file. All `run.py` work, including every `_append_warning` conversion, belongs to `warn-state-builder`; `update-channel-builder` never opens it.
+The three builders touch disjoint files — `bridge/update.py`; `scripts/update/verify.py` + `.env.example`; `scripts/update/run.py` — and can run in parallel in the single session worktree without interleaving commits. **This is now true as written:** an earlier revision put a `run.py` edit in Task 1 while Task 4 edited the same lines, which would have had two parallel builders writing one file. All `run.py` work, including every `_append_warning` conversion, belongs to `warn-state-builder`; `update-channel-builder` never opens it. Task 5 is the one cross-builder seam and it is handled by sequencing, not by sharing: `update-channel-builder` reopens `bridge/update.py` only after Task 4 has landed the `SUPPRESSED_PREFIX` constant, so the file still has exactly one writer and never two at once.
 
 ## Step by Step Tasks
 
@@ -477,6 +480,7 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - Replace `has_warnings` with `bool(extract_update_warnings(status_lines))`; leave the `failed` short-circuit alone.
 - Rewrite `_queue_fix_session` to take the warning list as a parameter, lead with it uncapped, and append a line-boundary-truncated stdout/stderr tail carrying an explicit `[... N characters elided ...]` marker, plus the log path parsed from the `<<FILE:...>>` marker.
 - **Write `test_cron_summary_warnings_trigger_fix_session` FIRST and capture its failure against unmodified `bridge/update.py`.** This is the plan's central defect and the red-state output goes in the PR body — a green-only test here proves nothing about whether detection was actually broken.
+- Add `test_fix_session_brief_is_legible`, a single composition test over the exact string handed to `enqueue_agent_session` (reach it via `bridge_update._queue_fix_session.await_args`, the idiom the existing tests already use). It asserts the three properties Success Criteria calls out and containment cannot: `message_text.index(last_warning) < message_text.index("[... ")` on a payload long enough to force truncation; the literal `characters elided` present on that cut, with every line of the emitted tail a whole line of the input; and the path from a `<<FILE:/path>>` input line present in `message_text`.
 - Tests: green transcript with adversarial "error"/"warning" filenames yields `[]`; a well-formed `(0 warnings)` summary yields `[]`; the `suppressed:` trailer yields `[]`; 27-warning payload round-trips with the last warning present; a warning with an embedded newline survives complete; empty input; failure-block bullets matched only inside the block.
 
 ### 2. env-completeness required/optional split
@@ -519,9 +523,21 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - Keep the `apply_redis_acl()` call literally argument-free; keep both sites inside their existing `except Exception` guards.
 - Tests: first run emits, second identical run stays silent, changed drift re-emits, resolution emits one note and clears state, a raising `should_emit` leaves the run successful, `active()` returns `{}` on a corrupt state file, and a run suppressing two keys names **both** in the trailer.
 
-### 5. Cross-cutting review
+### 5. Suppression trailer reaches the Telegram reply
+- **Task ID**: route-suppressed-trailer
+- **Depends On**: build-update-channel, build-warn-state
+- **Validates**: `tests/unit/test_bridge_update.py` (extend)
+- **Assigned To**: `update-channel-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Sequenced after both because it consumes `SUPPRESSED_PREFIX` from Task 4's `warn_state` and edits the `bridge/update.py` Task 1 owns. Same builder as Task 1, so `bridge/update.py` still has exactly one writer and no two builders hold it at once.
+- In `handle_update_command`, select the trailer out of the already-computed `status_lines` (`bridge/update.py:211-215`) and append it to `status` **outside** the `if failed or has_warnings:` branch at `:293`, before the `send_message` at `:297`. Match on `SUPPRESSED_PREFIX` imported from `scripts.update.warn_state` — never a literal spelled locally, which is the producer/consumer drift that caused Defect 2.
+- Add `test_suppressed_trailer_reaches_telegram_on_clean_run`: empty `result.warnings`, non-empty `active()`, assert the trailer is in the string passed to `tg_client.send_message`. Add `test_suppressed_prefix_constant_is_shared`: the bridge-side match resolves through the imported constant.
+- Do **not** add any push on the unattended cron path. It has no chat context (`scripts/remote-update.sh:429` needs `UPDATE_REPORT_CHAT_ID`, set only at `bridge/update.py:192`), and the surface table in Technical Approach → Defect 4 states why `logs/update.log` plus the CLI is the deliberate answer there.
+
+### 6. Cross-cutting review
 - **Task ID**: review-channel
-- **Depends On**: build-update-channel, build-env-completeness, build-dead-key-guard, build-warn-state
+- **Depends On**: build-update-channel, build-env-completeness, build-dead-key-guard, build-warn-state, route-suppressed-trailer
 - **Validates**: the four checks named in the `update-channel-reviewer` role
 - **Assigned To**: `update-channel-reviewer`
 - **Agent Type**: code-reviewer
@@ -529,7 +545,7 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - The three builders touch disjoint files but interlock through the warning grammar: builder 3 adds a line to the same stdout builder 1 parses. Nobody else in this team reads both sides.
 - Run the four role checks; any failure routes back to the owning builder before documentation starts.
 
-### 6. Documentation
+### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: review-channel
 - **Validates**: `grep -c 'edit `~/Desktop/Valor/.env` directly' docs/features/env-completeness-validation.md` == 0, plus the new feature doc existing and being indexed
@@ -539,7 +555,7 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - Every item in the Documentation section, including creating `docs/features/update-warning-channel.md`, indexing it, updating `.claude/skills/update/SKILL.md`, and replacing the destructive remediation text in `docs/features/env-completeness-validation.md`.
 - CLAUDE.md § Secrets: the required/optional distinction.
 
-### 7. Final validation
+### 8. Final validation
 - **Task ID**: validate-all
 - **Depends On**: all previous
 - **Validates**: the full Verification table below, plus every Success Criterion
@@ -571,6 +587,11 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 | #1898 regression + bridge update behaviour intact | `scripts/pytest-clean.sh tests/unit/test_bridge_update.py -q` | exit code 0 |
 | Cron summary format contract intact | `scripts/pytest-clean.sh tests/unit/test_update_cron_summary.py -q` | exit code 0 |
 | gws auth contract intact | `scripts/pytest-clean.sh tests/unit/test_gws_auth.py -q` | exit code 0 |
+| Trailer prefix is one shared constant, not two literals (anti-criterion for the Defect 2 drift class) | `grep -c 'SUPPRESSED_PREFIX' bridge/update.py scripts/update/run.py scripts/update/warn_state.py` | match count > 0 in all three files |
+| Telegram forwarding is not gated on a warning being present | `scripts/pytest-clean.sh tests/unit/test_bridge_update.py -q -k "suppressed_trailer or suppressed_prefix"` | exit code 0, 2 tests pass |
+| Fix-session brief legibility is asserted, not assumed | `scripts/pytest-clean.sh tests/unit/test_update_warning_extraction.py -q -k legible` | exit code 0, 1 test passes |
+
+**Builder note on `grep` in this table (from the round-5 critique's live dry-run).** The local `grep` is **`ugrep`**. It supports `\|` alternation and `\b`, so the patterns above run as written — but `grep -c` **exits 1 when the count is 0**. Every row whose Expected is "match count == 0" therefore *exits non-zero on success*, and a runner that gates on the exit code alone will read a passing row as a failure. Gate those rows on the printed count, not on `$?` (e.g. `[ "$(grep -c ... || true)" = 0 ]`). One further wrinkle: the `awk`-range row for `extract_update_warnings` yields an empty range until Task 1 lands, so it reads 0 vacuously before the function exists and only becomes meaningful afterwards.
 
 **Two notes on the anti-criterion rows.** The Risk 2 row is scoped to `extract_update_warnings`'s body, not the whole file: a whole-file grep returns **2** on unmodified `bridge/update.py` (`:250` `any("Worker restarted" in line ...)` and `:490` `if any(k in line for k in [...])`), both pre-existing and load-bearing, so the row as originally written could only pass by deleting working code (critique BLOCKER 2). Second, these rows grep *source*, so a docstring or comment quoting the forbidden pattern trips the gate as surely as real code — describe the constraint in prose rather than quoting the token.
 
