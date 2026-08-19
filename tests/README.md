@@ -270,12 +270,16 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_docs_auditor_substrate.py` | 130 | Documentation reference validation |
+| unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
+| unit | `test_validate_no_gos_justification.py` | 77 | No-Gos section justification validation |
+| unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |
+| unit | `test_validate_test_impact.py` | 42 | Test impact section validation |
+| unit | `test_validate_documentation_section.py` | 41 | Documentation section validation, payload-targeted |
+| unit | `test_validate_verification_section.py` | 31 | Verification validation |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
 | unit | `test_verification_parser.py` | 20 | Verification section parsing |
-| unit | `test_validate_test_impact.py` | 20 | Test impact section validation |
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
-| unit | `test_validate_verification_section.py` | 9 | Verification validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
 | unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |
 
@@ -438,6 +442,7 @@ enforces this in CI, not just in this note.
 | `isolate_catchup_kill_switch` | autouse | `conftest.py` | Repoints the operator catchup kill-switch flag at a per-test tmp path (issue #2552) |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
+| `cross_lane_repo` | function | `tests/unit/conftest.py` | Factory building the #2689 cross-lane reproducer repo (tracked anchor + another lane's untracked plan) shared by the hook-validator target-resolution tests |
 | `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
 | `make_telegram_event` | function | `tests/e2e/conftest.py` | Telegram event factory |
 | `mock_agent_response` | function | `tests/e2e/conftest.py` | Canned agent response |

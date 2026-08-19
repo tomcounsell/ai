@@ -1,7 +1,8 @@
-"""Unit tests for validate_test_impact_section.py hook validator.
+"""Unit tests for validate_documentation_section.py hook validator.
 
-Two families: the pure section parser, and targeting — the validator must judge
-the file the hook payload named and no other (#2689).
+Two families: the pure section parser (``extract_documentation_section`` /
+``is_section_complete``), and targeting — the validator must judge the file the
+hook payload named and no other (#2689).
 """
 
 import json
@@ -24,13 +25,13 @@ if str(VALIDATORS_DIR) not in sys.path:
 
 def import_validator():
     """Import the validator module."""
-    import validate_test_impact_section
+    import validate_documentation_section
 
-    return validate_test_impact_section
+    return validate_documentation_section
 
 
-class TestExtractTestImpactSection:
-    """Tests for extracting the ## Test Impact section."""
+class TestExtractDocumentationSection:
+    """Tests for extracting the ## Documentation section."""
 
     def test_extracts_section(self):
         mod = import_validator()
@@ -39,230 +40,100 @@ class TestExtractTestImpactSection:
 
 Something.
 
-## Test Impact
+## Documentation
 
-- [ ] `tests/unit/test_foo.py::test_bar` — UPDATE: new assertion
+- [ ] Write docs/features/thing.md
+- [ ] Add the README index row
 
-## Rabbit Holes
+## Verification
 
 None.
 """
-        section = mod.extract_test_impact_section(content)
+        section = mod.extract_documentation_section(content)
         assert section is not None
-        assert "UPDATE" in section
+        assert "docs/features/thing.md" in section
+        assert "Verification" not in section
+
+    def test_extracts_trailing_section_at_end_of_file(self):
+        """``\\Z`` closes the match when Documentation is the last section."""
+        mod = import_validator()
+        content = "## Problem\n\nSomething.\n\n## Documentation\n\n- [ ] a\n- [ ] b\n"
+        section = mod.extract_documentation_section(content)
+        assert section == "- [ ] a\n- [ ] b"
 
     def test_returns_none_when_missing(self):
         mod = import_validator()
-        content = """\
-## Problem
+        assert mod.extract_documentation_section("## Problem\n\nSomething.\n") is None
 
-Something.
-
-## Rabbit Holes
-
-None.
-"""
-        section = mod.extract_test_impact_section(content)
-        assert section is None
-
-    def test_extracts_section_at_end_of_file(self):
+    def test_subsection_headings_stay_inside(self):
         mod = import_validator()
-        content = """\
-## Problem
-
-Something.
-
-## Test Impact
-
-No existing tests affected — this is greenfield with no prior coverage.
-"""
-        section = mod.extract_test_impact_section(content)
-        assert section is not None
-        assert "greenfield" in section
+        content = "## Documentation\n\n### Feature Documentation\n\n- [ ] a\n- [ ] b\n"
+        section = mod.extract_documentation_section(content)
+        assert "### Feature Documentation" in section
 
 
 class TestIsSectionComplete:
     """Tests for checking section completeness."""
 
-    def test_accepts_checklist_with_dispositions(self):
-        mod = import_validator()
-        content = (
-            "- [ ] `tests/unit/test_foo.py::test_bar` — UPDATE: new return value\n"
-            "- [ ] `tests/unit/test_baz.py::test_qux` — DELETE: removed feature"
-        )
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-        assert "disposition" in reason.lower()
-
-    def test_accepts_single_disposition(self):
-        mod = import_validator()
-        content = "- [ ] `tests/unit/test_foo.py::test_bar` — REPLACE: rewrite for new API contract"
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-
-    def test_accepts_no_tests_affected_with_justification(self):
-        mod = import_validator()
-        content = (
-            "No existing tests affected — this is a greenfield feature with no prior test coverage."
-        )
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-        assert "no existing tests affected" in reason.lower()
-
-    def test_rejects_no_tests_affected_without_justification(self):
-        mod = import_validator()
-        content = "No existing tests affected"
-        is_complete, reason = mod.is_section_complete(content)
-        assert not is_complete
-        assert "too brief" in reason.lower()
-
-    def test_rejects_empty_section(self):
+    def test_empty_section(self):
         mod = import_validator()
         is_complete, reason = mod.is_section_complete("")
-        assert not is_complete
+        assert is_complete is False
         assert "empty" in reason.lower()
 
-    def test_rejects_placeholder_tbd(self):
+    def test_two_checklist_items_pass(self):
         mod = import_validator()
-        is_complete, reason = mod.is_section_complete("TBD")
-        assert not is_complete
-        assert "placeholder" in reason.lower()
+        is_complete, reason = mod.is_section_complete("- [ ] a\n- [ ] b")
+        assert is_complete is True
+        assert "2" in reason
 
-    def test_rejects_placeholder_dots(self):
+    def test_single_checklist_item_is_not_enough(self):
         mod = import_validator()
-        is_complete, reason = mod.is_section_complete("...")
-        assert not is_complete
-        assert "placeholder" in reason.lower()
+        section = "- [ ] Write the one doc that this change needs, and nothing else at all."
+        is_complete, _reason = mod.is_section_complete(section)
+        assert is_complete is False
 
-    def test_rejects_placeholder_bracket(self):
+    def test_explicit_no_docs_needed_with_explanation_passes(self):
         mod = import_validator()
-        is_complete, reason = mod.is_section_complete("[Fill in later]")
-        assert not is_complete
-        assert "placeholder" in reason.lower()
-
-    def test_rejects_too_brief_content(self):
-        mod = import_validator()
-        is_complete, reason = mod.is_section_complete("Some short text.")
-        assert not is_complete
-        assert "too brief" in reason.lower()
-
-    def test_accepts_checklists_without_dispositions_if_substantive(self):
-        mod = import_validator()
-        content = (
-            "- [ ] `tests/unit/test_foo.py` needs to be updated for the new interface changes\n"
-            "- [ ] `tests/integration/test_bar.py` should be modified to use new endpoint"
+        section = (
+            "No documentation changes needed: this is an internal refactor of a "
+            "private helper with no user-visible surface."
         )
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-        assert "checklist" in reason.lower() or "items" in reason.lower()
+        is_complete, reason = mod.is_section_complete(section)
+        assert is_complete is True
+        assert "no documentation needed" in reason.lower()
 
-    def test_case_insensitive_dispositions(self):
+    def test_bare_no_docs_needed_without_explanation_fails(self):
+        """The exemption requires an explanation, not just the magic phrase."""
         mod = import_validator()
-        content = (
-            "- [ ] `tests/unit/test_foo.py::test_bar`"
-            " — update: new assertion value for changed output"
+        is_complete, _reason = mod.is_section_complete("No documentation needed.")
+        assert is_complete is False
+
+    @pytest.mark.parametrize("placeholder", ["[TODO]", "TBD", "TODO", "...", "[fill this in]"])
+    def test_placeholder_text_fails(self, placeholder):
+        mod = import_validator()
+        is_complete, _reason = mod.is_section_complete(placeholder)
+        assert is_complete is False
+
+    def test_long_prose_without_checklists_fails(self):
+        mod = import_validator()
+        section = (
+            "We will document this properly at some point, in a way that is "
+            "definitely longer than fifty characters but names no actual task."
         )
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-
-    def test_checked_items_accepted(self):
-        mod = import_validator()
-        content = (
-            "- [x] `tests/unit/test_foo.py::test_bar`"
-            " — UPDATE: new assertion value for changed output"
-        )
-        is_complete, reason = mod.is_section_complete(content)
-        assert is_complete
-
-
-class TestValidateTestImpactSection:
-    """Tests for the full validation function."""
-
-    def test_passes_valid_plan(self, tmp_path):
-        mod = import_validator()
-        plan = tmp_path / "plan.md"
-        plan.write_text("""\
-## Problem
-
-Something.
-
-## Test Impact
-
-- [ ] `tests/unit/test_foo.py::test_bar` — UPDATE: assert new return value
-
-## Rabbit Holes
-
-None.
-""")
-        success, message = mod.validate_test_impact_section(str(plan))
-        assert success
-
-    def test_fails_missing_section(self, tmp_path):
-        mod = import_validator()
-        plan = tmp_path / "plan.md"
-        plan.write_text("""\
-## Problem
-
-Something.
-
-## Rabbit Holes
-
-None.
-""")
-        success, message = mod.validate_test_impact_section(str(plan))
-        assert not success
-        assert "missing" in message.lower()
-
-    def test_fails_empty_section(self, tmp_path):
-        mod = import_validator()
-        plan = tmp_path / "plan.md"
-        plan.write_text("""\
-## Problem
-
-Something.
-
-## Test Impact
-
-## Rabbit Holes
-
-None.
-""")
-        success, message = mod.validate_test_impact_section(str(plan))
-        assert not success
-
-    def test_fails_nonexistent_file(self):
-        mod = import_validator()
-        success, message = mod.validate_test_impact_section("/nonexistent/path.md")
-        assert not success
-        assert "failed to read" in message.lower()
-
-    def test_passes_exemption_plan(self, tmp_path):
-        mod = import_validator()
-        plan = tmp_path / "plan.md"
-        plan.write_text("""\
-## Problem
-
-Something.
-
-## Test Impact
-
-No existing tests affected — this is a greenfield feature with no prior test coverage.
-
-## Rabbit Holes
-
-None.
-""")
-        success, message = mod.validate_test_impact_section(str(plan))
-        assert success
+        is_complete, reason = mod.is_section_complete(section)
+        assert is_complete is False
+        assert "checklist" in reason.lower()
 
 
 GOOD_PLAN = """\
 # A plan
 
-## Test Impact
+## Documentation
 
-- [ ] tests/unit/test_thing.py — UPDATE: add the targeting class
-- [ ] tests/unit/test_other.py — DELETE: the behavior it pins is gone
+### Feature Documentation
+- [ ] Create `docs/features/thing.md`
+- [ ] Add the `docs/features/README.md` index row
 """
 
 BAD_PLAN = """\
@@ -270,10 +141,44 @@ BAD_PLAN = """\
 
 ## Problem
 
-Something, with no Test Impact section anywhere in it.
+Something, with no Documentation section anywhere in it.
 """
 
-VALIDATOR = VALIDATORS_DIR / "validate_test_impact_section.py"
+
+class TestValidateDocumentationSection:
+    """The file-level validation function."""
+
+    def test_valid_plan(self, tmp_path):
+        mod = import_validator()
+        plan = tmp_path / "plan.md"
+        plan.write_text(GOOD_PLAN)
+        success, msg = mod.validate_documentation_section(str(plan))
+        assert success is True, msg
+
+    def test_missing_section(self, tmp_path):
+        mod = import_validator()
+        plan = tmp_path / "plan.md"
+        plan.write_text(BAD_PLAN)
+        success, msg = mod.validate_documentation_section(str(plan))
+        assert success is False
+        assert "missing a ## Documentation section" in msg
+
+    def test_incomplete_section(self, tmp_path):
+        mod = import_validator()
+        plan = tmp_path / "plan.md"
+        plan.write_text("# A plan\n\n## Documentation\n\nTBD\n")
+        success, msg = mod.validate_documentation_section(str(plan))
+        assert success is False
+        assert "incomplete" in msg.lower()
+
+    def test_unreadable_file_is_reported_not_raised(self, tmp_path):
+        mod = import_validator()
+        success, msg = mod.validate_documentation_section(str(tmp_path / "nope.md"))
+        assert success is False
+        assert "Failed to read file" in msg
+
+
+VALIDATOR = VALIDATORS_DIR / "validate_documentation_section.py"
 
 
 def run_hook(payload: dict | str | None, cwd: Path) -> subprocess.CompletedProcess:
@@ -324,7 +229,7 @@ class TestTargetIsTheFileTheHookNamed:
     def test_your_own_deficient_plan_is_still_blocked(self, cross_lane, tmp_path):
         """Fail-closed direction: the fix must not disarm the guard."""
         (tmp_path / "docs" / "plans" / "mine.md").write_text(BAD_PLAN)
-        payload = {"tool_input": {"file_path": "docs/plans/mine.md"}}
+        payload = {"tool_name": "Write", "tool_input": {"file_path": "docs/plans/mine.md"}}
         proc = run_hook(payload, cwd=tmp_path)
         assert proc.returncode == 2
         assert "docs/plans/mine.md" in proc.stderr
@@ -332,13 +237,15 @@ class TestTargetIsTheFileTheHookNamed:
 
     def test_your_own_compliant_plan_passes(self, cross_lane, tmp_path):
         (tmp_path / "docs" / "plans" / "mine.md").write_text(GOOD_PLAN)
-        proc = run_hook({"tool_input": {"file_path": "docs/plans/mine.md"}}, cwd=tmp_path)
+        payload = {"tool_name": "Write", "tool_input": {"file_path": "docs/plans/mine.md"}}
+        proc = run_hook(payload, cwd=tmp_path)
         assert proc.returncode == 0, proc.stderr
 
     def test_absolute_payload_path_is_enforced(self, cross_lane, tmp_path):
         plan = tmp_path / "docs" / "plans" / "mine.md"
         plan.write_text(BAD_PLAN)
-        assert run_hook({"tool_input": {"file_path": str(plan)}}, cwd=tmp_path).returncode == 2
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(plan)}}
+        assert run_hook(payload, cwd=tmp_path).returncode == 2
 
     @pytest.mark.parametrize("payload", [None, "", "not json", "{}", {"tool_input": {}}])
     def test_absent_or_malformed_input_passes_through(self, payload, cross_lane, tmp_path):

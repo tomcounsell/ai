@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-Validate that a file contains required content strings.
+Validate that the file a Write just targeted contains required content strings.
+
+The target is the path the hook payload names, and nothing else — taken as
+given, never rewritten against a cwd. ``--directory`` and ``--extension`` are
+the scope filter they have always effectively been: a write outside them passes
+through untouched.
 
 Checks:
-1. Find the most recently created file in the directory
-2. Verify the file contains all required strings
+1. Resolve the written file from the hook payload (or an explicit CLI path)
+2. Verify that file contains all required strings
 
 Exit codes:
-- 0: Validation passed (file contains all required content)
+- 0: Validation passed (file contains all required content, or out of scope)
 - 2: Validation failed, blocks agent (missing content)
 
 Usage:
   uv run validate_file_contains.py -d docs/plans -e .md --contains "## Problem"
-  uv run validate_file_contains.py --directory specs --extension .md --contains "## Obj"
+  uv run validate_file_contains.py docs/plans/my-plan.md --contains "## Problem"
 
 Frontmatter example:
   hooks:
-    Stop:
+    PostToolUse:
       - hooks:
           - type: command
             command: >-
@@ -28,19 +33,16 @@ Frontmatter example:
 
 import argparse
 import json
-import subprocess
 import sys
-import time
 from pathlib import Path
+
+# Standalone script — sys.path mutation is safe (never imported as library).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from hook_utils.hook_target import in_scope, read_hook_input, target_from_hook_input  # noqa: E402
 
 DEFAULT_DIRECTORY = "docs/plans"
 DEFAULT_EXTENSION = ".md"
-DEFAULT_MAX_AGE_MINUTES = 480
-
-NO_FILE_ERROR = (
-    "VALIDATION FAILED: No file found matching {pattern}.\n\n"
-    "ACTION REQUIRED: Create a file in {directory}/ before validation can pass."
-)
 
 MISSING_CONTENT_ERROR = (
     "VALIDATION FAILED: File '{file}' is missing {count} required section(s).\n\n"
@@ -48,130 +50,6 @@ MISSING_CONTENT_ERROR = (
     "ACTION REQUIRED: Add the missing sections to '{file}'. "
     "Do not stop until all required sections are present."
 )
-
-
-def get_git_new_files(directory: str, extension: str) -> list[str]:
-    """Get new/untracked files from git."""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", f"{directory}/"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return []
-
-        files = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            status = line[:2]
-            filepath = line[3:].strip()
-            if status in ("??", "A ", " A", "AM") and filepath.endswith(extension):
-                files.append(filepath)
-        return files
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-        return []
-
-
-def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
-    """Get recently modified files."""
-    target_dir = Path(directory)
-    if not target_dir.exists():
-        return []
-
-    recent = []
-    now = time.time()
-    max_age_seconds = max_age_minutes * 60
-    ext = extension if extension.startswith(".") else f".{extension}"
-
-    for filepath in target_dir.glob(f"*{ext}"):
-        try:
-            if now - filepath.stat().st_mtime <= max_age_seconds:
-                recent.append(str(filepath))
-        except OSError:
-            continue
-    return recent
-
-
-def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
-    """Check git log for recently committed files (even if later deleted/migrated)."""
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "log",
-                f"--since={max_age_minutes} minutes ago",
-                "--diff-filter=A",
-                "--name-only",
-                "--pretty=format:",
-                "--",
-                f"{directory}/*{extension}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return []
-        return [f for f in result.stdout.strip().split("\n") if f.strip()]
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-        return []
-
-
-def get_committed_file_content(filepath: str) -> str | None:
-    """Get file content from the commit where it was last present."""
-    try:
-        # Find the last commit that had this file
-        result = subprocess.run(
-            ["git", "log", "-1", "--pretty=format:%H", "--", filepath],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return None
-        commit = result.stdout.strip()
-        # Get the file content at that commit
-        result = subprocess.run(
-            ["git", "show", f"{commit}:{filepath}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-        return None
-
-
-def find_newest_file(directory: str, extension: str, max_age_minutes: int) -> str | None:
-    """Find the most recently modified file."""
-    all_files = list(
-        set(
-            get_git_new_files(directory, extension)
-            + get_recent_files(directory, extension, max_age_minutes)
-        )
-    )
-
-    if not all_files:
-        return None
-
-    newest = None
-    newest_mtime = 0
-    for filepath in all_files:
-        try:
-            path = Path(filepath)
-            if path.exists():
-                mtime = path.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = str(path)
-        except OSError:
-            continue
-    return newest
 
 
 def check_contains(filepath: str, required: list[str]) -> tuple[bool, list[str], list[str]]:
@@ -191,60 +69,29 @@ def check_contains(filepath: str, required: list[str]) -> tuple[bool, list[str],
     return len(missing) == 0, found, missing
 
 
-def validate(
-    directory: str,
-    extension: str,
-    max_age_minutes: int,
-    required_strings: list[str],
-) -> tuple[bool, str]:
-    """Validate file exists and contains required content."""
-    pattern = f"{directory}/*{extension}"
-
-    newest = find_newest_file(directory, extension, max_age_minutes)
-    if not newest:
-        # Check if a file was committed and later migrated/deleted
-        committed = get_git_committed_files(directory, extension, max_age_minutes)
-        if committed:
-            # Validate content from git history for the most recent committed file
-            for cfile in committed:
-                content = get_committed_file_content(cfile)
-                if content and required_strings:
-                    content_lower = content.lower()
-                    missing = [r for r in required_strings if r.lower() not in content_lower]
-                    if not missing:
-                        return (
-                            True,
-                            f"File '{cfile}' was committed with all "
-                            f"required sections (since migrated)",
-                        )
-            return (
-                True,
-                f"File(s) committed in recent history (since migrated): {', '.join(committed)}",
-            )
-        return False, NO_FILE_ERROR.format(pattern=pattern, directory=directory)
-
+def validate(filepath: str, required_strings: list[str]) -> tuple[bool, str]:
+    """Validate that the named file contains every required string."""
     if not required_strings:
-        return True, f"File found: {newest} (no content checks specified)"
+        return True, f"File found: {filepath} (no content checks specified)"
 
-    all_found, found, missing = check_contains(newest, required_strings)
-
+    all_found, _found, missing = check_contains(filepath, required_strings)
     if all_found:
         return (
             True,
-            f"File '{newest}' contains all {len(required_strings)} required sections",
+            f"File '{filepath}' contains all {len(required_strings)} required sections",
         )
 
     missing_list = "\n".join(f"  - {m}" for m in missing)
     return False, MISSING_CONTENT_ERROR.format(
-        file=newest, count=len(missing), missing_list=missing_list
+        file=filepath, count=len(missing), missing_list=missing_list
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Validate file contains required content")
+    parser.add_argument("target_file", nargs="?", help="Path to check (defaults to hook payload)")
     parser.add_argument("-d", "--directory", default=DEFAULT_DIRECTORY)
     parser.add_argument("-e", "--extension", default=DEFAULT_EXTENSION)
-    parser.add_argument("--max-age", type=int, default=DEFAULT_MAX_AGE_MINUTES)
     parser.add_argument(
         "--contains",
         action="append",
@@ -255,29 +102,37 @@ def main():
     )
     args = parser.parse_args()
 
-    # Read stdin — PostToolUse hooks receive tool context as JSON.
-    # If this fires on a Write that didn't target <directory>/*<extension>,
-    # pass through silently: the caller isn't writing a plan doc.
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        payload = None
+    # An explicit path (CLI / tests) wins and bypasses the scope filter: it was
+    # named on purpose. Otherwise take the path the hook's own tool input names.
+    # Never guess: selecting by mtime or git status meant one lane's write got
+    # judged against another lane's file (#2682, #2689).
+    if args.target_file:
+        target = args.target_file
+        if not Path(target).exists():
+            # An explicit CLI argument that names nothing is a user error worth
+            # reporting. A hook-derived path we cannot resolve is not: there is
+            # no content to judge, so there is no finding to make.
+            print(f"ERROR: File does not exist: {target}", file=sys.stderr)
+            sys.exit(2)
+    else:
+        target = target_from_hook_input(read_hook_input())
+        if not target:
+            sys.exit(0)
 
-    if isinstance(payload, dict) and payload.get("hook_event_name") == "PostToolUse":
-        tool_input = payload.get("tool_input") or {}
-        target = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if target:
-            ext = args.extension if args.extension.startswith(".") else f".{args.extension}"
-            directory_norm = args.directory.rstrip("/") + "/"
-            # Normalize to relative path against cwd when absolute
-            rel_target = target
-            cwd = payload.get("cwd") or ""
-            if cwd and target.startswith(cwd + "/"):
-                rel_target = target[len(cwd) + 1 :]
-            if not (rel_target.startswith(directory_norm) and rel_target.endswith(ext)):
-                sys.exit(0)
+        # The payload's path is judged as given. Rewriting it relative to a cwd
+        # would put process state back into target selection: with no `cwd` key
+        # the absolute path would fall out of scope and silently pass, and once
+        # reduced to a relative path the read would resolve against whichever
+        # checkout the hook process started in.
+        #
+        # Scope filter runs before any filesystem access, so a write this hook
+        # has no business judging is never even statted.
+        if not in_scope(target, args.directory, args.extension):
+            sys.exit(0)
+        if not Path(target).exists():
+            sys.exit(0)
 
-    success, message = validate(args.directory, args.extension, args.max_age, args.required_strings)
+    success, message = validate(target, args.required_strings)
 
     if success:
         print(json.dumps({"result": "continue", "message": message}))

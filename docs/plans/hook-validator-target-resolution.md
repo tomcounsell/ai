@@ -419,7 +419,7 @@ Final validation (Task 6) is performed by the code reviewer named in the Appetit
 | Lint clean | `python -m ruff check .claude/hooks/ tests/unit/` | exit code 0 |
 | Format clean | `python -m ruff format --check .claude/hooks/ tests/unit/` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_hook_target.py tests/unit/test_validate_documentation_section.py tests/unit/test_validate_file_contains.py` | exit code 1 |
-| PR #2686 files untouched | `git diff --name-only main... -- .claude/hooks/validators/validate_no_raw_redis_delete.py .claude/hooks/dispatch/pre_tool_use_bash.py tests/unit/test_validate_no_raw_redis_delete.py` | output does not contain .py |
+| PR #2686 files untouched | `git diff --name-only origin/main...HEAD -- .claude/hooks/validators/validate_no_raw_redis_delete.py .claude/hooks/dispatch/pre_tool_use_bash.py tests/unit/test_validate_no_raw_redis_delete.py \| wc -l` | match count == 0 |
 | Anti-criterion: no git target selection | `grep -rl 'porcelain.*directory' .claude/hooks/validators/ \| wc -l` | match count == 0 |
 | Non-dict payload never raises | `printf 'null' \| .venv/bin/python .claude/hooks/validators/validate_documentation_section.py` | exit code 0 |
 | Sync manifest regenerated and clean | `python scripts/sync_claude_to_opencode.py && git diff --exit-code .opencode/SYNC_MANIFEST.json` | exit code 0 |
