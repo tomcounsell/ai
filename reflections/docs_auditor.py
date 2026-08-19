@@ -75,12 +75,12 @@ STALE_BRANCH_AGE_DAYS = 7
 STALE_PR_AGE_DAYS = 14
 
 # Per-run cap shared by audit()'s advisory issue-filing loop and the rotation
-# withheld-fix filing loop. A separate budget from VAULT_DRIFT_ISSUE_CAP, which
-# bounds only _run_vault_drift_detection's own pre-rotation loop — the two are
-# deliberately never merged (R5-2), so the true module-wide ceiling for one
-# rotation run is ISSUE_FILING_PER_RUN_CAP (advisory) + VAULT_DRIFT_ISSUE_CAP
-# (vault-drift) + ISSUE_FILING_PER_RUN_CAP (withheld) = 15 issues, plus at most
-# one operational-failure filing.
+# withheld-fix filing loop. A separate budget from the vault-drift cap defined
+# just above, which bounds only _run_vault_drift_detection's own pre-rotation
+# loop — the two are deliberately never merged (R5-2), so the true
+# module-wide ceiling for one rotation run is this cap (advisory) + the
+# vault-drift cap + this cap again (withheld) = 15 issues, plus at most one
+# operational-failure filing.
 ISSUE_FILING_PER_RUN_CAP = 5
 
 # Finding categories whose underlying condition can recur after a human closes
