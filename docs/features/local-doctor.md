@@ -28,7 +28,7 @@ python -m tools.doctor --install-hook  # Install git pre-push hook
 | Category | Checks | Source |
 |----------|--------|--------|
 | Environment | Python version, system tools, Python deps, dev tools | `scripts/update/verify.py` |
-| Services | Redis connectivity, bridge running, worker running | `monitoring/health.py`, `scripts/update/service.py` |
+| Services | Redis connectivity, bridge running, worker running, Redis ACL drift (report-only), Google Workspace CLI (`gws`) auth state | `monitoring/health.py`, `scripts/update/service.py`, `scripts/update/redis_acl.py`, `scripts/update/gws_auth.py` |
 | Auth | Telegram session, API keys, SDK auth | `scripts/update/verify.py`, `monitoring/health.py` |
 | Resources | Disk space | `monitoring/health.py` |
 | Quality | Ruff lint, ruff format, pytest (opt-in via `--quality`) | subprocess |
@@ -37,7 +37,7 @@ python -m tools.doctor --install-hook  # Install git pre-push hook
 
 | Flag | Behavior |
 |------|----------|
-| `--quick` | Skips slow checks: Telegram session auth probe and `verify_models()` |
+| `--quick` | Skips slow checks: Telegram session auth probe, `verify_models()`, and `gws` auth (#2845 — `gws`'s condition clears only through a human completing browser OAuth consent, and `--quick` backs the opt-in pre-push hook, which must never block an unauthenticated machine's pushes) |
 | `--quality` | Adds code quality checks: ruff lint, ruff format --check, pytest |
 | `--json` | Outputs structured JSON instead of the text report |
 | `--install-hook` | Writes a `.git/hooks/pre-push` script that runs `python -m tools.doctor --quick` |

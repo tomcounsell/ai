@@ -237,6 +237,12 @@ Python process outside every discovered venv).
   arguments and fails the check (with a pointer to this doc) when the current ACL state drifts from
   the target rule set. It cannot fix drift; the runbook above is the only path to that.
 
+`/update`'s own drift warning emits once per state transition rather than every 30-minute cycle
+(`warn_state`, #2845): the signature is a digest of the planned commands, so a *changed* drift
+re-warns, and a resolution clears the suppression and emits one resolved note. `python -m
+tools.doctor` (a full run, not `--quick`) remains the unconditional on-demand check regardless of
+suppression state — see [`update-warning-channel.md`](update-warning-channel.md).
+
 ## See also
 
 - [`docs/features/test-db-ownership.md`](test-db-ownership.md) (#2628): the companion guard on the
