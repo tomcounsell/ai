@@ -22,7 +22,7 @@ Three assertions, all scoped to tracked content:
    reach it. It was found only by scoping this exact anti-criterion to the
    four files during plan revision.
 
-Two trade-offs, deliberate:
+Three trade-offs, deliberate:
 
 - Enumeration walks `git ls-files`, never `os.walk`/`rglob`. An untracked
   file is not repo content, and this machine routinely grows untracked
@@ -36,6 +36,18 @@ Two trade-offs, deliberate:
   to use it there (a nightly digest in the email bridge is the obvious case)
   should read this docstring and extend or narrow `_NIGHTLY_SCOPED`
   knowingly, rather than deleting or muting the assertion.
+- Enumeration is further scoped by suffix to `.py`/`.md`/`.yaml`/`.yml`/
+  `.toml`, so a stale token sitting in a tracked file of any other suffix --
+  shell scripts, JSON, HTML, plist, or plain text, 146 tracked files outside
+  `docs/plans/` in this repo today -- is invisible to every assertion here;
+  a stale token in a tracked `.sh` file was confirmed to slip through this
+  way. `.yaml`/`.yml` themselves currently match no tracked hits --
+  `config/reflections.yaml` is gitignored -- so the reflection registry's
+  own name and cadence contract is actually pinned by
+  `tests/integration/test_reflections_redis.py:185,197`, not by anything in
+  this file. No live occurrence exists outside `docs/plans/` today and every
+  realistic reintroduction path is Python, Markdown, or YAML/TOML, so this
+  suffix list is intentionally not widened here.
 
 This file itself is excluded from every enumeration below (belt) in addition
 to containing zero literal occurrences of the tokens it asserts against
