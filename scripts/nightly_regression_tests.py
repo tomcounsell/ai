@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
 """Nightly regression test runner.
 
-Runs pytest tests/unit/ -n auto with JSON report, compares against prior run,
-and sends a Telegram alert only when new failures appear. Clean runs are silent.
+Runs the default pytest collection (``COLLECTION_PATHS`` — the same set a bare
+``scripts/pytest-clean.sh`` collects) with a JSON report, compares against a
+prior run, and sends a Telegram alert only when new failures appear. Clean
+runs are silent.
+
+Widened collection and run-integrity guard (issue #2823)
+----------------------------------------------------------
+The detector used to collect only ``tests/unit/``, so a test living in
+``tests/integration/`` (or ``tests/e2e/``, ``tests/tools/``,
+``tests/performance/``) was invisible to it by construction — the class of bug
+this widening exists to close. ``COLLECTION_PATHS`` now matches
+``pyproject.toml``'s ``testpaths``, so "the default collection is red" and "the
+detector is red" mean the same thing.
+
+Widening alone is not enough: a run that could not actually execute (all
+test-DB slots held by concurrent lanes, a wedged xdist controller, an
+unreadable vault) must never be mistaken for a clean night.
+:func:`validate_run_integrity` is the guard — it trips on a missing/corrupt
+report, a signal-death or usage-error exit code, a fixture-error storm, or
+(the case that matters most) a **coverage floor**: partial test-DB starvation
+produces zero ``error`` outcomes and a legal exit code, so only a floor on
+``total`` catches it. A tripped guard alerts loudly, writes no state, and
+dispatches nothing.
 
 Serial re-confirmation gate (issue #2180)
 -----------------------------------------
-`-n auto` is pytest-xdist parallel execution. The classic xdist failure mode —
-tests that pass serially but collide under parallel workers on shared state
-(Redis keys, temp files, fixture ordering) — produces a *shifting set* of
-failures a count-based detector cannot distinguish from a real regression.
+`-n auto`-shaped parallel execution. The classic xdist failure mode — tests
+that pass serially but collide under parallel workers on shared state (Redis
+keys, temp files, fixture ordering) — produces a *shifting set* of failures a
+count-based detector cannot distinguish from a real regression.
 
 To disambiguate, after the parallel run we re-run **only the failing node IDs**
 serially (`-n0`). Tests that fail in parallel but pass serially are classified as
@@ -19,6 +40,11 @@ count), so a regression alert fires only for *newly-confirmed* serial failures.
 Artifacts are logged but never alerted, killing the parallel-execution alert
 noise. The serial re-run targets only the already-failing node IDs, so it stays
 fast and never re-runs the whole suite.
+
+The serial pass also reports whether it can be *trusted*: a report that does
+not cover every input node (a starved serial worker, a wedge) must not be read
+as "these all passed" — that is the false green :func:`reconfirm_serial`'s
+``serial_trusted`` return value exists to prevent.
 
 Triage dispatch is deduped per node (issue #2559)
 -------------------------------------------------
@@ -31,6 +57,16 @@ one failure was new, which is how #2429, #2430 and #2462 each filed an issue
 over the same dead watchdog node. A node stays suppressed while it keeps
 failing and drops out of the set once it passes, so a genuine re-regression is
 dispatchable again and a renamed node retires itself.
+
+Collection-aware baseline (issue #2823)
+----------------------------------------
+The persisted state records which ``collection`` produced it. When the
+recorded collection differs from ``COLLECTION_PATHS`` (the widening night, or
+any future change of scope), the run takes the existing first-run baseline
+path: it seeds ``dispatched_nodes`` with the whole currently-failing
+population and dispatches **one** umbrella triage session, rather than filing
+every one of those nodes individually — reopening the #2429/#2430/#2462 churn
+the dedup set exists to prevent.
 
 A post-run TTFT gate (issue #1227) reports cold-start latency regressions as
 Telegram alerts without changing the exit code.
@@ -49,8 +85,10 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -66,14 +104,59 @@ LOCK_FILE = DATA_DIR / "nightly_tests.lock"
 LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
 TELEGRAM_CHAT = "Eng: Valor"
 TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
+PYTEST_CLEAN_SH = PROJECT_DIR / "scripts" / "pytest-clean.sh"
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 PYTEST_SERIAL_JSON_TMP = "/tmp/nightly_pytest_serial_report.json"
 
-PYTEST_TIMEOUT_SECONDS = 1800  # 30 minutes max
-# Serial re-confirmation only re-runs the already-failing node IDs, so it is far
-# cheaper than the full parallel run. Grain-of-salt: provisional, env-tunable if
-# the confirmed failing set ever grows large enough to matter.
-PYTEST_RECONFIRM_TIMEOUT_SECONDS = 900  # 15 minutes max
+# The default collection — matches what a bare `scripts/pytest-clean.sh`
+# collects (pyproject.toml's `testpaths`). "The default collection is red" and
+# "the detector is red" mean the same thing now (issue #2823). No CLI flag:
+# the plist is the only production caller and stays flag-free.
+COLLECTION_PATHS = ["tests/"]
+
+# Provisional/tunable. 6 is derived from this machine: 15 test-DB slots
+# (tests/db_claim.py's TEST_DB_POOL_MAX) with nine left for sibling lanes.
+# `-n 4` is the practical floor below which the scaled wall-clock estimate
+# (~1260s unit-tier baseline x ~1.1 collection growth, inversely by worker
+# count) no longer fits inside PYTEST_TIMEOUT_SECONDS. `-n auto` on a 10-core
+# box demands ~10-14 of 15 slots by itself, which is what turns an unattended
+# 03:00 run into a nightly "the run did not happen" alert.
+NIGHTLY_XDIST_WORKERS = os.environ.get("NIGHTLY_XDIST_WORKERS", "6")
+
+# The pre-baseline coverage floor (see validate_run_integrity). This is a
+# source literal — a run cannot rewrite it — so it can only be seeded by an
+# edit (e.g. from a completed widening-night probe's summary.total). Left at
+# 0 (no floor) until that edit lands; from night two onward the persisted
+# state's own `min_expected_collected` field supplies the floor instead.
+MIN_EXPECTED_COLLECTED = int(os.environ.get("NIGHTLY_MIN_EXPECTED_COLLECTED", "0"))
+
+# Bound, not measurement: the widened collection could not be measured to
+# completion on this machine during recon (spike-2, spike-3, spike-7 each
+# recorded slot exhaustion or a stall-watchdog kill). Derived as
+# ~1260s unit-tier baseline (pyproject.toml) x 1.1 collection growth x 3.5
+# contention headroom. Update this comment to "measurement" with the date and
+# observed total the first time a widened run completes end to end.
+PYTEST_TIMEOUT_SECONDS = 5400
+
+# Serial re-confirmation only re-runs the already-failing node IDs, bounded
+# further by MAX_RECONFIRM_NODES, so it is far cheaper than the full parallel
+# run even at the widened collection's scale. Bound, not measurement, on the
+# same rule as PYTEST_TIMEOUT_SECONDS above.
+PYTEST_RECONFIRM_TIMEOUT_SECONDS = 1800  # 30 minutes max
+
+# If a serial re-confirmation would have to re-run more than this many nodes,
+# skip the serial pass entirely rather than spawn a subprocess that will
+# almost certainly exhaust its own timeout. Returns every input node as
+# confirmed (never an empty set) with serial_trusted=True — the same
+# practical result the timeout fail-safe already produces, reached
+# immediately instead of after a multi-minute wait.
+MAX_RECONFIRM_NODES = 200
+
+# Cap on how many not-yet-triaged nodes a single run will hand to
+# maybe_dispatch_triage_session in one shot. Truncated nodes are logged and
+# retried on a later run rather than lost — only the dispatched slice is
+# recorded in dispatched_nodes.
+MAX_DISPATCH_NODES = 10
 
 # TTFT regression gate (issue #1227).
 # Plan target: production 90s, nightly CI 120s (allowing slack for run-to-run noise).
@@ -171,101 +254,302 @@ def extract_failing_node_ids(report: dict) -> list[str]:
     return sorted(failing)
 
 
-def run_tests() -> dict:
-    """Run pytest tests/unit/ -n auto with --json-report.
+def _spawn_pytest(argv: list[str], timeout: int, env: dict | None = None) -> int:
+    """Run a pytest(-wrapper) subprocess in its own process group; return its exit code.
 
-    Returns a summary dict including ``failing_parallel`` — the list of node IDs
-    that failed under parallel execution — which the caller re-confirms serially.
+    ``start_new_session=True`` puts the subprocess (and, through the wrapper,
+    pytest and every xdist worker it spawns) into a new process group that
+    this function owns. On ``TimeoutExpired``, ``subprocess.run``-style
+    ``process.kill()`` only ever reaches the *direct* child — under the
+    wrapper that is bash, and SIGKILL runs no trap, so
+    ``scripts/pytest-clean.sh``'s ``trap cleanup EXIT INT TERM HUP PIPE``
+    never fires and the controller (deliberately not `exec`'d) survives with
+    its xdist workers, still holding test-DB slots. Killing the whole process
+    *group* — SIGTERM, a grace window, then SIGKILL — reaches the wrapper,
+    pytest, and every worker in one shot, and can never touch a sibling
+    lane's run because each invocation gets its own group. This is the
+    orphan-reaping guarantee Task E (wrapper routing) is supposed to buy;
+    without owning the group here, a timeout would defeat it.
     """
-    log("Starting pytest tests/unit/ -n auto --json-report ...")
+    proc = subprocess.Popen(
+        argv,
+        cwd=PROJECT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "tests/unit/",
-                "-n",
-                "auto",
-                "--tb=no",
-                "-q",
-                "--json-report",
-                f"--json-report-file={PYTEST_JSON_TMP}",
-            ],
-            cwd=PROJECT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=PYTEST_TIMEOUT_SECONDS,
-        )
-        log(f"pytest exit code: {result.returncode}")
+        proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        log(f"ERROR: pytest timed out after {PYTEST_TIMEOUT_SECONDS}s")
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            time.sleep(10)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
         raise
+    return proc.returncode
 
-    # Parse JSON report
+
+def run_tests() -> tuple[dict | None, dict | None, int]:
+    """Run the default collection (``COLLECTION_PATHS``) via the sanctioned wrapper.
+
+    Returns ``(raw_report, summary_or_None, returncode)``:
+
+    - ``raw_report`` — the parsed JSON report, or ``None`` if pytest never
+      wrote a fresh one (the run did not happen). This is what
+      :func:`validate_run_integrity` needs, since one of its trip conditions
+      is a report with no ``summary`` key at all.
+    - ``summary_or_None`` — the compact dict ``{passed, failed, error,
+      skipped, total, failing_parallel, run_at}`` that ``main()`` consumes as
+      ``current``, built only when ``raw_report`` parsed.
+    - ``returncode`` — the subprocess exit code (or a signal-shaped value —
+      negative or >128 — if the process group had to be killed).
+
+    Never raises on a missing/corrupt report or on timeout: both reach the
+    caller as a normal (``None``, ``None``, ``rc``) return so
+    :func:`validate_run_integrity` can classify them, rather than dying
+    silently in ``main()``.
+    """
+    log(
+        f"Starting {PYTEST_CLEAN_SH.name} {' '.join(COLLECTION_PATHS)} "
+        f"-n {NIGHTLY_XDIST_WORKERS} --json-report ..."
+    )
+
+    # The report path is fixed and nothing else unlinks it -- without this, a
+    # pytest that never runs (wrapper preflight refusal, wedge, crash) would
+    # silently inherit last night's healthy report and read as a clean run.
+    Path(PYTEST_JSON_TMP).unlink(missing_ok=True)
+
+    argv = [
+        str(PYTEST_CLEAN_SH),
+        *COLLECTION_PATHS,
+        "-n",
+        NIGHTLY_XDIST_WORKERS,
+        "--tb=no",
+        "-q",
+        "--json-report",
+        f"--json-report-file={PYTEST_JSON_TMP}",
+    ]
+    # A patient claim window for the unattended 03:00 run: the interactive
+    # 30s default (tests/db_claim.py) is tuned for a human at the keyboard, not
+    # a scheduled job with five minutes to spare. 300s is bounded by
+    # scripts/pytest-clean.sh's PYTEST_STALL_LIMIT_S (600s low-CPU window on
+    # the controller), not by pyproject.toml's --timeout=420: since #2628
+    # claim_test_db() polls inside tests/conftest.py::pytest_configure, before
+    # collection and therefore before any per-item timer is armed.
+    env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
+
     try:
-        report = json.loads(Path(PYTEST_JSON_TMP).read_text())
+        rc = _spawn_pytest(argv, timeout=PYTEST_TIMEOUT_SECONDS, env=env)
+        log(f"pytest exit code: {rc}")
+    except subprocess.TimeoutExpired:
+        log(f"ERROR: pytest timed out after {PYTEST_TIMEOUT_SECONDS}s (process group killed)")
+        return None, None, -1
+
+    try:
+        raw_report = json.loads(Path(PYTEST_JSON_TMP).read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         log(f"ERROR: Failed to parse JSON report: {exc}")
-        raise
+        return None, None, rc
 
-    summary = report.get("summary", {})
-    return {
+    summary = raw_report.get("summary", {})
+    current = {
         "passed": summary.get("passed", 0),
         "failed": summary.get("failed", 0),
         "error": summary.get("error", 0),
         "skipped": summary.get("skipped", 0),
         "total": summary.get("total", 0),
-        "failing_parallel": extract_failing_node_ids(report),
+        "failing_parallel": extract_failing_node_ids(raw_report),
         "run_at": datetime.now(UTC).isoformat(),
     }
+    return raw_report, current, rc
 
 
-def reconfirm_serial(node_ids: list[str]) -> tuple[list[str], list[str]]:
+def validate_run_integrity(
+    report: dict | None, returncode: int, prev: dict
+) -> tuple[str | None, list[str]]:
+    """Classify a completed (or not) pytest invocation as trustworthy or not.
+
+    Returns ``(trip_reason_or_None, warnings)``. A non-``None`` reason is
+    fatal: the caller must alert, skip ``save_last_run()``, skip dispatch, and
+    exit non-zero. ``warnings`` never blocks anything but changes how the
+    caller persists ``dispatched_nodes`` (see the shallow-shrink case below).
+
+    The returncode alone is insufficient in **both** directions. A run that
+    could not execute at all (all test-DB slots held by concurrent lanes) was
+    measured, reproducibly, to exit **0** with zero tests collected — plain
+    exit-code checking calls that a clean night. Conversely, pytest's exit
+    code **1** ("tests failed") is deliberately *not* a trip condition: it is
+    a legitimate red night, and reporting it as an infrastructure failure
+    would convert every real regression into a false "the run did not
+    happen" alert.
+
+    There is deliberately no "collectors contain an error outcome" leg:
+    pytest-json-report only ever writes ``passed``/``failed``/``skipped`` for
+    a collector, so that condition could never fire, and widening it to
+    "!= passed" would route a single broken import — a genuine red-on-main
+    regression — through this fatal path every night with no baseline ever
+    written. A collection failure is reported through ``main()``'s existing
+    collection-error alert branch instead.
+
+    The coverage floor is the load-bearing check. Test-DB starvation does
+    **not** produce per-test ``error`` outcomes: since #2628 the claim runs in
+    ``pytest_configure``, before collection, and aborts the whole session —
+    a starved worker dies as "node down", contributing zero test items. Total
+    starvation gives ``total == 0`` (caught below); *partial* starvation
+    gives a merely-reduced ``total`` with ``error == 0`` and exit 0 — every
+    other check here passes it, which is exactly the false-green shape this
+    plan exists to close. The floor is read from persisted state first
+    (``prev["min_expected_collected"]``, set by the collection-aware baseline
+    on a re-baseline night) and only then from the module constant
+    ``MIN_EXPECTED_COLLECTED``; with both unset, the widening night runs
+    floorless rather than fabricating a floor with no measurement behind it.
+    """
+    warnings: list[str] = []
+
+    if report is None:
+        return f"pytest wrote no JSON report (exit {returncode}) — the run did not happen", warnings
+
+    if returncode in (2, 3, 4, 5):
+        return (
+            f"pytest exited {returncode} "
+            "(interrupted/internal error/usage error/no tests collected)",
+            warnings,
+        )
+
+    if returncode < 0 or returncode > 128:
+        return f"pytest died to a signal (exit {returncode}) — the run did not complete", warnings
+
+    if "summary" not in report:
+        return "pytest report has no 'summary' key — the run did not happen", warnings
+
+    summary = report["summary"]
+    total = summary.get("total", 0)
+    error = summary.get("error", 0)
+
+    if total == 0:
+        return "pytest collected and ran zero tests — the run did not happen", warnings
+
+    if error > max(50, 0.02 * total):
+        return (
+            f"error rate too high: {error} errors out of {total} tests — "
+            "infrastructure, not a red suite",
+            warnings,
+        )
+
+    same_collection = prev.get("collection") == COLLECTION_PATHS
+    prev_total = prev.get("total") if same_collection else None
+
+    floor = None
+    if same_collection and prev_total:
+        floor = 0.9 * prev_total
+    else:
+        floor_base = prev.get("min_expected_collected") or MIN_EXPECTED_COLLECTED
+        if floor_base:
+            floor = 0.9 * floor_base
+
+    if floor is not None and total < floor:
+        return (
+            f"only {total} tests ran against a floor of {floor:.0f} — "
+            "the run was truncated, not green",
+            warnings,
+        )
+
+    # Shallow shrink (95%-100% of the same-collection baseline) is a warning,
+    # not a trip: a few percent of routine test churn (a deleted or skipped
+    # file) should not page anyone, but it does need to change how
+    # dispatched_nodes is carried forward — see main()'s use of this warning.
+    if same_collection and prev_total and prev_total > total >= 0.9 * prev_total:
+        warnings.append(
+            f"total shrank from {prev_total} to {total} ({total / prev_total:.0%} of baseline) — "
+            "within the routine-churn band, not blocked, but dispatched_nodes carry-forward "
+            "uses the union form this run to avoid dropping an already-filed node the shrink "
+            "did not reach"
+        )
+
+    return None, warnings
+
+
+def reconfirm_serial(node_ids: list[str]) -> tuple[list[str], list[str], bool]:
     """Re-run the given node IDs serially (`-n0`) to disambiguate xdist noise.
 
-    Returns ``(confirmed, artifacts)``:
+    Returns ``(confirmed, artifacts, serial_trusted)``:
       - ``confirmed`` — node IDs that failed again serially (real regressions).
       - ``artifacts`` — node IDs that passed serially (xdist-parallelism
         collisions on shared state).
+      - ``serial_trusted`` — whether the serial report's coverage can be
+        trusted. ``False`` only for a *parsed* report that does not cover
+        every input node (a starved or partially-run serial pass) — never for
+        a timeout or the ``MAX_RECONFIRM_NODES`` bail, both of which are an
+        absence of information rather than positive (and incomplete)
+        evidence, and untrusting them would deadlock the detector into never
+        writing a baseline on a machine whose re-confirm reliably exhausts
+        its budget.
 
-    Fail-safe: if the serial re-run cannot be executed or parsed, every input
-    node ID is treated as *confirmed* so a genuine regression is never silently
-    hidden behind an infrastructure hiccup.
+    Trust is keyed on **coverage**, not on the ``error`` count: a serial
+    process that cannot claim a test-DB slot aborts the whole session at
+    ``pytest_configure`` with zero test entries and zero errors — an
+    error-keyed check would call that "trusted" and read a starved pass as
+    "everything passed", reclassifying every genuinely-red node as an xdist
+    artifact. That is #2823's own failure mode rebuilt inside its fix.
+
+    Fail-safe on a timeout or an unparseable report: every input node ID is
+    treated as confirmed (never emptied), so a genuine regression is never
+    silently hidden behind an infrastructure hiccup.
     """
     if not node_ids:
-        return [], []
+        return [], [], True
 
     ordered = sorted(set(node_ids))
-    log(f"Serial re-confirmation of {len(ordered)} failing node ID(s) with -n0 ...")
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                *ordered,
-                "-n0",
-                "--tb=no",
-                "-q",
-                "--json-report",
-                f"--json-report-file={PYTEST_SERIAL_JSON_TMP}",
-            ],
-            cwd=PROJECT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=PYTEST_RECONFIRM_TIMEOUT_SECONDS,
+
+    if len(ordered) > MAX_RECONFIRM_NODES:
+        log(
+            f"Serial re-confirmation skipped: {len(ordered)} failing node(s) exceeds "
+            f"MAX_RECONFIRM_NODES={MAX_RECONFIRM_NODES}; treating all as confirmed"
         )
-        log(f"serial re-confirmation exit code: {result.returncode}")
+        return ordered, [], True
+
+    log(f"Serial re-confirmation of {len(ordered)} failing node ID(s) with -n0 ...")
+
+    Path(PYTEST_SERIAL_JSON_TMP).unlink(missing_ok=True)
+
+    argv = [
+        str(PYTEST_CLEAN_SH),
+        *ordered,
+        "-n0",
+        "--tb=no",
+        "-q",
+        "--json-report",
+        f"--json-report-file={PYTEST_SERIAL_JSON_TMP}",
+    ]
+    env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
+
+    try:
+        rc = _spawn_pytest(argv, timeout=PYTEST_RECONFIRM_TIMEOUT_SECONDS, env=env)
+        log(f"serial re-confirmation exit code: {rc}")
         report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         log(f"WARNING: serial re-confirmation failed ({exc}); treating all as confirmed")
-        return ordered, []
+        return ordered, [], True
+
+    seen = {t.get("nodeid") for t in report.get("tests", [])}
+    serial_trusted = all(n in seen for n in ordered)
+    if not serial_trusted:
+        log(
+            "WARNING: serial re-confirmation report does not cover every input node "
+            "(starved or partially-run pass) — treating as untrusted"
+        )
+        return [], [], False
 
     serial_failing = set(extract_failing_node_ids(report))
     confirmed = [n for n in ordered if n in serial_failing]
     artifacts = [n for n in ordered if n not in serial_failing]
-    return confirmed, artifacts
+    return confirmed, artifacts, True
 
 
 def send_telegram(msg: str, dry_run: bool = False) -> None:
@@ -298,84 +582,19 @@ def send_telegram(msg: str, dry_run: bool = False) -> None:
         log(f"WARNING: Failed to send Telegram: {exc}")
 
 
-def _invoke_check_ttft(
-    *,
-    log_file: Path,
-    session_type: str,
-    last: int,
-    threshold: float,
-) -> tuple[int, str]:
-    """Invoke ``scripts/check_ttft.py`` as a subprocess and return (rc, stdout).
+def _fatal(reason: str, dry_run: bool) -> int:
+    """Report a pre-alert failure loudly and return the exit code for ``main()``.
 
-    Subprocess invocation (not direct import) keeps the nightly runner
-    decoupled from the gate's internal API and matches the plan's wording
-    "post-run call to ``python scripts/check_ttft.py ...``".
+    Every arm that used to exit 1 silently (a timeout, a corrupt report, an
+    env-load refusal, an integrity-guard trip) now routes through here so it
+    pages an operator instead of a nightly job that fails quietly forever.
+    No arm reaches ``save_last_run()`` — a failed run must never overwrite a
+    good baseline. ``send_telegram`` is documented never-fatal, so no
+    try/except is needed around it.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(PROJECT_DIR / "scripts" / "check_ttft.py"),
-            "--session-type",
-            session_type,
-            "--last",
-            str(last),
-            "--threshold",
-            str(threshold),
-            "--log-file",
-            str(log_file),
-        ],
-        cwd=PROJECT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=60,  # timeout-guard: allow
-    )
-    return result.returncode, (result.stdout or "").strip()
-
-
-def run_ttft_gate(
-    *,
-    log_file: Path,
-    session_type: str,
-    last: int,
-    threshold: float,
-) -> str | None:
-    """Run the TTFT regression gate as a post-test check.
-
-    Returns:
-        ``None`` on PASS or when no data is available yet (first deploy /
-        no PM sessions logged); a Telegram-ready alert string on FAIL.
-        Per the plan, a TTFT regression is reported as a regression
-        (Telegram alert), not a test failure — the caller does not change
-        its return code based on this gate.
-
-    All exceptions are swallowed: the TTFT gate must never crash the
-    nightly run.
-    """
-    if not log_file.exists():
-        log(f"TTFT gate skipped: {log_file} not present (no data yet)")
-        return None
-
-    try:
-        rc, stdout = _invoke_check_ttft(
-            log_file=log_file,
-            session_type=session_type,
-            last=last,
-            threshold=threshold,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log(f"TTFT gate error (non-fatal): {exc}")
-        return None
-
-    log(f"TTFT gate result: rc={rc} stdout={stdout!r}")
-    if rc == 0:
-        return None
-
-    # Failure path — surface as a regression alert, not a test failure.
-    detail = stdout if stdout else "no detail"
-    return (
-        f"TTFT regression (issue #1227): {detail} "
-        f"[session_type={session_type} last={last} threshold={threshold:g}s]"
-    )
+    log(f"FATAL: {reason}")
+    send_telegram(f"Nightly tests could not run: {reason}", dry_run=dry_run)
+    return 1
 
 
 def compute_new_failures(prev: dict, confirmed_failing: list[str]) -> list[str]:
@@ -500,14 +719,48 @@ def summarize_failures(node_ids: list[str], report: dict) -> str:
         return _raw_failure_preview(node_ids)
 
 
-def maybe_dispatch_triage_session(dispatch_nodes: list[str]) -> str | None:
+def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
+    """Build the default per-node triage prompt with literal, computed titles.
+
+    Titles are computed in Python — ``f"Nightly regression: {n}"`` — rather
+    than left for the agent to derive, so the same failing node produces a
+    byte-identical title on every machine and the prompt itself pins the
+    dedup contract (#2559): the agent must search for the exact title before
+    opening a new issue.
+    """
+    titles = [f"Nightly regression: {n}" for n in dispatch_nodes]
+    lines = [
+        "Nightly regression detector found confirmed test failures that have not "
+        "been triaged before. For EACH node below, search open issues for the "
+        "EXACT title given. If found, comment on it with any new information. If "
+        "not found, open a new issue with EXACTLY that title, describing the "
+        "failure, its likely cause, and suggested next steps. Do NOT attempt an "
+        "auto-hotfix — this is an investigation-and-file-an-issue task only.\n",
+    ]
+    for node, title in zip(dispatch_nodes, titles, strict=True):
+        lines.append(f'- Title: "{title}"\n  Node: {node}')
+    return "\n".join(lines)
+
+
+def maybe_dispatch_triage_session(
+    dispatch_nodes: list[str],
+    *,
+    prompt: str | None = None,
+    slug_suffix: str | None = None,
+) -> str | None:
     """Dispatch one triage Eng session for node IDs that have never been filed.
 
-    ``dispatch_nodes`` comes from :func:`compute_dispatch_set`, so every entry is
-    a node no previous run handed to triage. That per-node suppression is the
-    whole dedup mechanism: a node with an issue already open against it cannot
-    reach this function a second time, which is what ends the duplicate-issue
-    churn of #2429 / #2430 / #2462 (issue #2559).
+    ``dispatch_nodes`` normally comes from :func:`compute_dispatch_set`, so
+    every entry is a node no previous run handed to triage. That per-node
+    suppression is the whole dedup mechanism: a node with an issue already
+    open against it cannot reach this function a second time, which is what
+    ends the duplicate-issue churn of #2429 / #2430 / #2462 (issue #2559).
+
+    ``prompt`` overrides the default per-node title-search prompt — used by
+    the collection-aware baseline (issue #2823) to dispatch a single umbrella
+    triage session for a re-baseline seed instead of one issue per node.
+    ``slug_suffix`` overrides the sha256-derived slug, so a retried seed
+    dispatch reuses one slug instead of hashing a synthetic node ID.
 
     Returns the dispatched session ID, or ``None`` when there is nothing to
     dispatch or the dispatch subprocess failed. The caller records which nodes
@@ -517,17 +770,13 @@ def maybe_dispatch_triage_session(dispatch_nodes: list[str]) -> str | None:
     if not dispatch_nodes:
         return None
 
-    slug_hash = hashlib.sha256(",".join(sorted(set(dispatch_nodes))).encode()).hexdigest()[:8]
-    slug = f"nightly-triage-{slug_hash}"
-    prompt = (
-        "Nightly regression detector found confirmed test failures that have not "
-        "been triaged before. Investigate the root cause of the following failing "
-        "tests and file a /do-issue-quality GitHub issue describing the failure, "
-        "its likely cause, and suggested next steps. Search open issues first and "
-        "comment on an existing one rather than opening a duplicate. Do NOT attempt "
-        "an auto-hotfix — this is an investigation-and-file-an-issue task only.\n\n"
-        "Not-yet-triaged failing node IDs:\n" + "\n".join(f"- {n}" for n in dispatch_nodes)
-    )
+    if slug_suffix is not None:
+        slug = f"nightly-triage-{slug_suffix}"
+    else:
+        slug_hash = hashlib.sha256(",".join(sorted(set(dispatch_nodes))).encode()).hexdigest()[:8]
+        slug = f"nightly-triage-{slug_hash}"
+
+    message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes)
 
     try:
         result = subprocess.run(
@@ -542,7 +791,7 @@ def maybe_dispatch_triage_session(dispatch_nodes: list[str]) -> str | None:
                 slug,
                 "--json",
                 "--message",
-                prompt,
+                message,
             ],
             cwd=PROJECT_DIR,
             capture_output=True,
@@ -563,8 +812,8 @@ def maybe_dispatch_triage_session(dispatch_nodes: list[str]) -> str | None:
     return session_id
 
 
-def load_env_or_die() -> int:
-    """Load the .env vault into os.environ, or exit loudly (issue #2327).
+def load_env_or_die() -> tuple[int, str | None]:
+    """Load the .env vault into os.environ, or return a refusal reason (issue #2327).
 
     Replaces the plist's ``/bin/bash -c "set -a; source .env; ..."`` wrapper,
     which silently EPERM'd every night because ``/bin/bash`` lacks the macOS
@@ -572,20 +821,25 @@ def load_env_or_die() -> int:
     the actual defect — is now a loud non-zero exit, never a quiet degraded run.
 
     Non-clobbering: an already-set var (a caller's shell, or a future plist
-    injection) wins over the file. Returns the count of keys applied. Raises
-    ``SystemExit(1)`` on an unreadable file or a suspiciously short load.
+    injection) wins over the file.
+
+    Returns ``(applied, reason)``. On success, ``reason`` is ``None`` and
+    ``applied`` is the count of keys applied. On either refusal path,
+    ``reason`` is a human-readable string for the caller to route through
+    :func:`_fatal` — this function never raises ``SystemExit`` itself, so a
+    refusal here is no longer indistinguishable from any other silent exit(1).
     """
     from dotenv import dotenv_values
 
     try:
         values = dotenv_values(ENV_FILE)
     except OSError as exc:
-        log(
-            f"FATAL: could not read {ENV_FILE} (resolves to {os.path.realpath(ENV_FILE)}): "
+        reason = (
+            f"could not read {ENV_FILE} (resolves to {os.path.realpath(ENV_FILE)}): "
             f"{exc}. Under launchd this means the executing binary lacks the macOS "
             "Desktop-folder TCC grant — see issue #2327. Refusing to run with no environment."
         )
-        raise SystemExit(1) from exc
+        return 0, reason
 
     applied = 0
     for key, value in values.items():
@@ -595,15 +849,15 @@ def load_env_or_die() -> int:
         applied += 1
 
     if applied < MIN_ENV_KEYS:
-        log(
-            f"FATAL: loaded only {applied} env vars from {ENV_FILE} (expected >= "
+        reason = (
+            f"loaded only {applied} env vars from {ENV_FILE} (expected >= "
             f"{MIN_ENV_KEYS}). Refusing to run the nightly suite with a near-empty "
             "environment — see issue #2327."
         )
-        raise SystemExit(1)
+        return applied, reason
 
     log(f"Loaded {applied} env vars from {ENV_FILE}")
-    return applied
+    return applied, None
 
 
 def main() -> int:
@@ -615,8 +869,13 @@ def main() -> int:
 
     # Load the .env vault into os.environ before any subprocess spawns, and fail
     # loudly if it cannot be read (issue #2327). This is the FIRST substantive
-    # step: the pytest/valor-telegram children inherit these vars.
-    load_env_or_die()
+    # step: the pytest/valor-telegram children inherit these vars. This runs
+    # BEFORE the run lock: an env refusal must never be confused with a lock
+    # collision (which correctly returns 0 silently), and neither path writes
+    # state.
+    _applied, env_err = load_env_or_die()
+    if env_err:
+        return _fatal(env_err, args.dry_run)
 
     # Acquire the run lock first, before any other work -- a concurrent
     # nightly run holding the lock means this invocation is a collision and
@@ -633,25 +892,42 @@ def main() -> int:
     else:
         log(f"Prior run: failed={prev.get('failed', 0)}, run_at={prev.get('run_at', 'unknown')}")
 
-    # Run unit tests
-    try:
-        current = run_tests()
-    except subprocess.TimeoutExpired:
-        log("FATAL: pytest timeout — not saving state, exiting 1")
-        return 1
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        log(f"FATAL: Could not parse test results: {exc}")
-        return 1
+    # Collection-aware baseline (issue #2823): a run whose recorded collection
+    # differs from the current one is treated as a fresh baseline, same as
+    # the true first run — otherwise every node absorbed by a widened
+    # collection reads as a brand-new failure and reopens #2429/#2430/#2462.
+    is_reseed = bool(prev) and prev.get("collection") != COLLECTION_PATHS
+    is_seed_run = is_first_run or is_reseed
+    if is_reseed:
+        log(
+            f"WARNING: recorded collection {prev.get('collection')!r} differs from "
+            f"current {COLLECTION_PATHS!r} — re-baselining. Every currently-failing "
+            "node is absorbed into the seed and escalated as a single umbrella issue "
+            "(see #2429/#2430/#2462) rather than filed individually."
+        )
+
+    # Run the default collection through the sanctioned wrapper.
+    raw_report, current, rc = run_tests()
+    reason, integrity_warnings = validate_run_integrity(raw_report, rc, prev)
+    if reason:
+        return _fatal(reason, args.dry_run)
+    for w in integrity_warnings:
+        log(f"WARNING: {w}")
 
     parallel_failing = current.get("failing_parallel", [])
     log(
-        f"Results (parallel -n auto): passed={current['passed']}, "
+        f"Results (parallel -n {NIGHTLY_XDIST_WORKERS}): passed={current['passed']}, "
         f"failed={current['failed']}, error={current['error']}, total={current['total']}"
     )
 
     # Serial re-confirmation gate (issue #2180): re-run only the failing node IDs
     # serially to separate real regressions from xdist-parallelism artifacts.
-    confirmed_failing, artifacts = reconfirm_serial(parallel_failing)
+    confirmed_failing, artifacts, serial_trusted = reconfirm_serial(parallel_failing)
+    if not serial_trusted:
+        return _fatal(
+            "serial re-confirmation returned no result for every node — the run did not happen",
+            args.dry_run,
+        )
     if parallel_failing:
         log(
             f"Re-confirmation: {len(confirmed_failing)} confirmed, "
@@ -676,6 +952,8 @@ def main() -> int:
     current.pop("failing_parallel", None)
 
     current["dispatched_session_id"] = prev.get("dispatched_session_id")
+    current["collection"] = COLLECTION_PATHS
+    current["head_commit"] = _get_head_commit()
 
     new_failures = compute_new_failures(prev, confirmed_failing)
     new_errors = current.get("error", 0)
@@ -684,37 +962,79 @@ def main() -> int:
         f"confirmed total: {current['failed']}; collection errors: {new_errors}"
     )
 
-    # Triage dispatch is decided independently of the alert. The alert asks
-    # "is this a regression since last night"; dispatch asks "does this node
-    # already have an issue against it". Conflating the two is what re-filed the
-    # standing set every time any one failure was new (#2559).
-    if is_first_run:
+    triage_session_id: str | None = None
+    if is_seed_run:
         # The baseline is a declaration of the known-failing state, not a
-        # finding. Seed it as already-accounted-for so the next run does not
-        # dispatch the entire suite's standing failures as fresh discoveries.
-        dispatch_nodes: list[str] = []
+        # finding. Seed dispatched_nodes with the WHOLE confirmed set so the
+        # next run does not dispatch the entire suite's standing failures as
+        # fresh discoveries, and escalate it as exactly ONE umbrella triage
+        # session rather than reusing the per-node reassignment below (which
+        # would wipe the seed to []).
         just_dispatched = list(confirmed_failing)
+        dispatch_nodes: list[str] = []
+        if confirmed_failing:
+            seed_prompt = (
+                "Nightly regression detector re-baselined its test collection "
+                f"(old={prev.get('collection')!r}, new={COLLECTION_PATHS!r}). "
+                f"The following {len(confirmed_failing)} node(s) were already failing "
+                "at the moment of the re-baseline and have been absorbed into the "
+                "seed — they are NOT individually filed. Open ONE umbrella issue "
+                "titled 'Nightly regression baseline: pre-existing failures after "
+                "collection widening' summarizing the population, its size, and "
+                "pointing at the persisted state file for the full node list. Do "
+                "NOT file per-node issues for these. Do NOT attempt an auto-hotfix.\n\n"
+                "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in confirmed_failing)
+            )
+            triage_session_id = maybe_dispatch_triage_session(
+                [f"seed:{len(confirmed_failing)}"],
+                prompt=seed_prompt,
+                slug_suffix="baseline",
+            )
+            if triage_session_id is not None:
+                current["dispatched_session_id"] = triage_session_id
+            current["seed_collection"] = COLLECTION_PATHS
+            current["seed_size"] = len(confirmed_failing)
+            current["seeded_nodes"] = list(confirmed_failing)
+            current["min_expected_collected"] = current["total"]
     else:
         dispatch_nodes = compute_dispatch_set(prev, confirmed_failing)
+        if len(dispatch_nodes) > MAX_DISPATCH_NODES:
+            log(
+                f"Truncating dispatch: {len(dispatch_nodes)} not-yet-triaged node(s) "
+                f"exceeds MAX_DISPATCH_NODES={MAX_DISPATCH_NODES}; dispatching first "
+                f"{MAX_DISPATCH_NODES}, retrying the rest on a later run"
+            )
+            dispatch_nodes = dispatch_nodes[:MAX_DISPATCH_NODES]
         just_dispatched = []
-    if dispatch_nodes:
-        log(f"Not yet triaged: {len(dispatch_nodes)} node(s): " + ", ".join(dispatch_nodes))
-    suppressed = len(confirmed_failing) - len(dispatch_nodes) - len(just_dispatched)
-    if suppressed > 0:
-        log(f"Triage dispatch suppressed for {suppressed} already-filed node(s)")
+        if dispatch_nodes:
+            log(f"Not yet triaged: {len(dispatch_nodes)} node(s): " + ", ".join(dispatch_nodes))
+        suppressed = len(confirmed_failing) - len(dispatch_nodes) - len(just_dispatched)
+        if suppressed > 0:
+            log(f"Triage dispatch suppressed for {suppressed} already-filed node(s)")
 
-    triage_session_id = maybe_dispatch_triage_session(dispatch_nodes)
-    if triage_session_id is not None:
-        # Record only what actually went out. A failed dispatch leaves its nodes
-        # unfiled, so the next run picks them up again instead of losing them.
-        just_dispatched = dispatch_nodes
-        current["dispatched_session_id"] = triage_session_id
-    current["dispatched_nodes"] = carry_dispatched_nodes(prev, confirmed_failing, just_dispatched)
+        triage_session_id = maybe_dispatch_triage_session(dispatch_nodes)
+        if triage_session_id is not None:
+            # Record only what actually went out. A failed dispatch leaves its nodes
+            # unfiled, so the next run picks them up again instead of losing them.
+            just_dispatched = dispatch_nodes
+            current["dispatched_session_id"] = triage_session_id
+
+    # The shallow-shrink warning changes how dispatched_nodes carries forward:
+    # carry_dispatched_nodes()'s prior_dispatched(prev) & confirmed_failing
+    # intersection silently drops any already-filed node a truncated run did
+    # not reach, so on a shrink warning we union instead of intersect.
+    if any("total shrank" in w for w in integrity_warnings):
+        current["dispatched_nodes"] = sorted(prior_dispatched(prev) | set(just_dispatched))
+    else:
+        current["dispatched_nodes"] = carry_dispatched_nodes(
+            prev, confirmed_failing, just_dispatched
+        )
 
     # Alert logic — regression fires only on newly-confirmed serial failures.
-    if is_first_run:
+    if is_seed_run:
+        seed_note = " (re-baseline: prior population absorbed)" if is_reseed else ""
         msg = (
-            f"Nightly regression baseline established: "
+            f"Nightly regression baseline established{seed_note}: "
             f"{current['total']} tests, {current['failed']} confirmed failures."
         )
         send_telegram(msg, dry_run=args.dry_run)
@@ -727,7 +1047,7 @@ def main() -> int:
         msg = (
             f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
             f"({current['failed']} confirmed total): {summary_text}. "
-            f"Run: pytest tests/unit/ -n0"
+            f"Run: pytest {' '.join(COLLECTION_PATHS)} -n0"
         )
         if triage_session_id:
             msg += f" [triage session: {triage_session_id}]"
@@ -735,7 +1055,7 @@ def main() -> int:
     elif new_errors > 0:
         msg = (
             f"Nightly tests: collection error ({new_errors} errors). "
-            f"Run: pytest tests/unit/ -n auto"
+            f"Run: pytest {' '.join(COLLECTION_PATHS)} -n {NIGHTLY_XDIST_WORKERS}"
         )
         send_telegram(msg, dry_run=args.dry_run)
     else:
@@ -761,6 +1081,107 @@ def main() -> int:
 
     log("=== Nightly regression test run complete ===")
     return 0
+
+
+def _invoke_check_ttft(
+    *,
+    log_file: Path,
+    session_type: str,
+    last: int,
+    threshold: float,
+) -> tuple[int, str]:
+    """Invoke ``scripts/check_ttft.py`` as a subprocess and return (rc, stdout).
+
+    Subprocess invocation (not direct import) keeps the nightly runner
+    decoupled from the gate's internal API and matches the plan's wording
+    "post-run call to ``python scripts/check_ttft.py ...``".
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_DIR / "scripts" / "check_ttft.py"),
+            "--session-type",
+            session_type,
+            "--last",
+            str(last),
+            "--threshold",
+            str(threshold),
+            "--log-file",
+            str(log_file),
+        ],
+        cwd=PROJECT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=60,  # timeout-guard: allow
+    )
+    return result.returncode, (result.stdout or "").strip()
+
+
+def run_ttft_gate(
+    *,
+    log_file: Path,
+    session_type: str,
+    last: int,
+    threshold: float,
+) -> str | None:
+    """Run the TTFT regression gate as a post-test check.
+
+    Returns:
+        ``None`` on PASS or when no data is available yet (first deploy /
+        no PM sessions logged); a Telegram-ready alert string on FAIL.
+        Per the plan, a TTFT regression is reported as a regression
+        (Telegram alert), not a test failure — the caller does not change
+        its return code based on this gate.
+
+    All exceptions are swallowed: the TTFT gate must never crash the
+    nightly run.
+    """
+    if not log_file.exists():
+        log(f"TTFT gate skipped: {log_file} not present (no data yet)")
+        return None
+
+    try:
+        rc, stdout = _invoke_check_ttft(
+            log_file=log_file,
+            session_type=session_type,
+            last=last,
+            threshold=threshold,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"TTFT gate error (non-fatal): {exc}")
+        return None
+
+    log(f"TTFT gate result: rc={rc} stdout={stdout!r}")
+    if rc == 0:
+        return None
+
+    # Failure path — surface as a regression alert, not a test failure.
+    detail = stdout if stdout else "no detail"
+    return (
+        f"TTFT regression (issue #1227): {detail} "
+        f"[session_type={session_type} last={last} threshold={threshold:g}s]"
+    )
+
+
+def _get_head_commit() -> str | None:
+    """Return ``git rev-parse HEAD`` at run start, for attribution only.
+
+    Best-effort: never crashes the run. Captured once per run rather than
+    per-write, since the working tree does not change mid-run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=10,  # timeout-guard: allow
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 if __name__ == "__main__":
