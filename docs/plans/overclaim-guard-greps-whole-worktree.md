@@ -368,14 +368,20 @@ misreading, and its batched exit code is not portable between BSD and GNU xargs.
 **The helper's contract.**
 
 ```python
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 class TrackedScanError(RuntimeError):
     """The scan could not run (git failed). Never a pass."""
 
 class VacuousScanError(AssertionError):
     """The scan ran but examined too few files to mean anything."""
 
-def assert_absent_from_tracked(pattern, *pathspecs, min_files):
-    """Assert no tracked file matching *pathspecs* contains *pattern*."""
+def assert_absent_from_tracked(pattern, *pathspecs, min_files, repo_root=None):
+    """Assert no tracked file matching *pathspecs* contains *pattern*.
+
+    *repo_root* is a test-only seam. It defaults to ``None``, which resolves to
+    the module-level ``REPO_ROOT``. No guard passes it.
+    """
 ```
 
 There is deliberately **no `allow=` parameter**. Every exemption across all four
@@ -383,6 +389,47 @@ call sites turned out to be path-shaped, so all of them belong in negative
 pathspecs — see "Exemptions go in the pathspec" below. Shipping an unused
 `allow=` would leave the substring hazard in the signature for a future author
 to reach for.
+
+**`repo_root=` is a test-only seam, and it is fenced so it cannot weaken a
+guard.** Without it, the only corpus the helper can ever scan is the live
+primary checkout, so the absent-from-working-tree unit test task 1 mandates
+would have to `mv` a real tracked source file out of `~/src/ai` during an
+ordinary suite run. That is unacceptable on this machine for three reasons, each
+measurable rather than hypothetical: `-n auto` is the default, so concurrent
+xdist workers in the same run that import the moved module fail spuriously; a
+sibling lane's suite on this shared checkout sees the file missing; and
+`--timeout-method=thread` in `pyproject.toml`'s `addopts` kills a worker via
+`os._exit` — stated verbatim in `scripts/pytest-clean.sh`'s own wedge-detector
+comment — so no `finally`, no fixture teardown, and no `pytest.raises` unwind
+ever restores it. The checkout is then left with a tracked source file silently
+absent, which is exactly the false-clean state obligation 4 exists to detect,
+for every other lane on the machine.
+
+The seam is fenced three ways so it cannot become a way to point a production
+guard at a corpus of the caller's choosing:
+
+1. **Keyword-only, defaulting to `None`.** A caller that omits it gets the real
+   repo root; there is no positional slot to fill by accident.
+2. **`None` resolves inside the helper, not at the call site.** The module-level
+   `REPO_ROOT` stays the single derivation of the real root, so a guard cannot
+   pass a root it computed itself.
+3. **No guard may pass it, and that is asserted.** V-28 requires that
+   `repo_root=` appears in exactly two tracked files — `tests/tracked_content.py`
+   (the definition) and `tests/unit/test_tracked_content_helper.py` (the scratch-
+   repo tests). Any converted or future guard that reaches for the seam fails
+   that row.
+
+The corpus the seam points at is a **scratch git repo built with `git init` in
+`tmp_path`**, following the 20+ in-repo precedents — closest is
+`tests/unit/test_plan_migration_invariant.py:54-65` (`_git(repo, "init", "-q",
+"-b", "main")`, local `user.email`/`user.name`, `add -A`, `commit`). Three
+committed files and `min_files=1` are enough, and the absence check is exercised
+by `mv`-ing one of *those*. Verified end-to-end in a scratch repo at
+`cefc07e7e`: with three tracked `.py` and one moved aside, `git ls-files` still
+reports **3** while only **2** are present, `git grep` for the moved file's
+content returns **rc 1 (false clean)**, and restoring the file leaves
+`git status` empty. That is the same false-clean shape as the 265-of-266
+measurement in the live checkout, reproduced with nothing at stake.
 
 Two **distinct** exception classes are mandatory, not stylistic. A single class
 with two messages cannot be asserted apart except by string matching, and the
@@ -994,7 +1041,24 @@ deliberately not exposed to the agent.
 - **Assigned To**: guard-converter
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files)`. **No `allow=` parameter** — every exemption across all four call sites is path-shaped and belongs in a negative pathspec.
+- Create `tests/tracked_content.py` with `assert_absent_from_tracked(pattern, *pathspecs, min_files, repo_root=None)`. **No `allow=` parameter** — every exemption across all four call sites is path-shaped and belongs in a negative pathspec.
+- **`repo_root` is keyword-only and defaults to `None`, resolving inside the
+  helper to the module-level `REPO_ROOT`.** It exists so the helper's own unit
+  tests can scan a scratch repo instead of the live checkout. It is fenced, not
+  free: no guard may pass it, and V-28 asserts `repo_root=` appears in exactly
+  two tracked files (the helper and its own test module). Do not add a
+  positional root parameter, and do not let a guard compute its own root — the
+  module-level derivation stays the only one.
+- **No helper unit test may mutate the primary checkout.** Every test that needs
+  a file to move, disappear, or contain a planted match builds its own corpus
+  with `git init` in `tmp_path` (precedent: `tests/unit/test_plan_migration_invariant.py:54-65`)
+  and passes it as `repo_root=`, with `min_files=1`. Three committed files are
+  enough. Live-tree `mv` mutation is confined to **V-18b under task 5's
+  one-at-a-time validator protocol**, where a human-supervised revert is part of
+  the row. The reason is not tidiness: `--timeout-method=thread` kills a worker
+  via `os._exit`, so a `finally` or fixture teardown is not guaranteed to run,
+  and an interrupted in-suite `mv` leaves the shared checkout in the exact
+  false-clean state this plan exists to detect.
 - Define **two** exception classes: `TrackedScanError` (scan could not run) and
   `VacuousScanError` (scan examined too little). One class with two messages is
   not acceptable — it cannot be asserted apart except by string matching.
@@ -1037,12 +1101,35 @@ deliberately not exposed to the agent.
   added to the index. Do **not** describe the corpus as "index-scoped content" —
   that is the error this round corrects, and the docstring is where it would
   become doctrine.
-- Write `tests/unit/test_tracked_content_helper.py` covering: match, clean,
-  `pytest.raises(TrackedScanError, match="128")` via `GIT_INDEX_FILE=/dev/null`,
-  `pytest.raises(VacuousScanError)` via `'nosuchdir/*.py'` (the two asserted
-  **apart**, each against the input that produces it), a corpus with one tracked
-  file moved aside → `VacuousScanError` naming the absent path, empty pattern,
-  whitespace-only pattern, and the BRE metacharacter round-trip.
+- Write `tests/unit/test_tracked_content_helper.py` covering the cases below.
+  The **corpus** column is binding: anything marked *scratch* builds a
+  `git init` repo in `tmp_path` and passes it as `repo_root=`; nothing in this
+  file mutates `~/src/ai`.
+
+  | Case | Corpus | Expectation |
+  |---|---|---|
+  | match | scratch (a committed file holding the pattern) | `AssertionError` naming `file:line` |
+  | clean | live, `'tools/*.py' 'agent/*.py'` | returns |
+  | broken index | live, `GIT_INDEX_FILE=/dev/null` | `pytest.raises(TrackedScanError, match="128")` |
+  | vacuous pathspec | live, `'nosuchdir/*.py'` | `pytest.raises(VacuousScanError)` |
+  | tracked file absent from the working tree | **scratch**, `min_files=1`, one of its three files moved aside | `VacuousScanError` naming the absent path |
+  | empty pattern | scratch | rejected |
+  | whitespace-only pattern | scratch | rejected |
+  | BRE metacharacter round-trip | live (see below) | clean over `'tools/*.py'`; trips on the committed literal |
+
+  The broken-index and vacuous-pathspec cases stay on the live corpus because
+  neither writes anything — `GIT_INDEX_FILE=/dev/null` is a per-process env
+  override and `'nosuchdir/*.py'` touches nothing. They must still be asserted
+  **apart**, each against the input that produces it.
+- **The BRE round-trip needs no mutation and no scratch repo.** Commit a literal
+  `zzz.never(` line in `tests/unit/test_tracked_content_helper.py` itself (inside
+  a string constant, with a comment saying it is the round-trip fixture and must
+  not be "cleaned up"). The clean half then scans `'tools/*.py'` — which does not
+  contain the test file — and the trip half scans
+  `'tests/unit/test_tracked_content_helper.py'` with `min_files=1` and asserts
+  the match. An earlier draft planted the match at runtime; a committed literal
+  is strictly better, because a statically-present fixture cannot be left behind
+  by an `os._exit` and cannot go stale.
 - **Name the test functions so `-k` can select them unambiguously.** V-7 selects
   on `scan_error`, V-8 on `vacuous`, V-21 on `positive_control`. Those substrings
   must appear in exactly the intended test names.
