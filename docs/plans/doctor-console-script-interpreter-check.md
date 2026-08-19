@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2748
 last_comment_id: 5280929435
 revision_applied: true
-revision_applied_at: REVISION_APPLIED_AT_PLACEHOLDER
+revision_applied_at: 2026-08-19T06:57:15Z
 ---
 
 # Doctor console-script check: verify the winning script's interpreter
