@@ -555,80 +555,37 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 
 ## Critique Results
 
-**Critique round 4, 2026-08-18.** Run against plan commit `f8e59ff8e` (plan hash
-`sha256:5072ee40`). War room depth: **FULL** — force-FULL, because the plan edits
+**Critique round 5, 2026-08-19.** Run against plan commit `f1fe21f70` (plan hash
+`sha256:9a7d6dc3`). War room depth: **FULL** — force-FULL, because the plan edits
 `.claude/skills/update/SKILL.md`, a doctrine path. Roster gate: **3/3 complete, 3/3 grounded**.
-Findings: **0 total (0 blockers, 0 concerns, 0 nits)**.
+Findings: **3 total (1 blocker, 2 concerns, 0 nits)**.
 
-No findings from the war room.
+| Severity | Critic(s) | Finding | Addressed By | Implementation Note |
+|----------|-----------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness (corroborated by driver) | The `suppressed:` trailer is specified as a **push** surface that makes a suppressed condition "visible in every single run's output", but on the one path Risk 4 exists to cover — everything green except a suppressed key — it reaches neither a human nor an agent. Verified live: `bridge/update.py::handle_update_command` composes its Telegram message entirely from `sha`, `reload_states`, `stale_details`, and `running_count` (`bridge/update.py:270-297`) and never quotes `run.py`'s stdout, so the trailer is dropped on the Telegram path. On the launchd path `com.valor.update` runs `scripts/remote-update.sh` directly with `StandardOutPath` = `logs/update.log`, never entering `bridge/update.py` at all. And because the plan deliberately makes the trailer inert to `extract_update_warnings` (correct in isolation), `has_warnings` is False on the clean-except-suppressed path, so `_queue_fix_session` never fires and no agent ever sees `data/update.txt` either. The push surface therefore reaches an agent only when an unsuppressed warning is ALSO present, which is exactly when it is not needed. | pending | Route the trailer to the Telegram-bound `status` **outside** the `if failed or has_warnings:` branch at `bridge/update.py:293`. After the `status_lines` computation at `bridge/update.py:211-219` add `suppressed_line = next((l for l in status_lines if l.strip().startswith(SUPPRESSED_PREFIX)), None)` and append it to `status` when non-None, before the `send_message` at `:297`. `SUPPRESSED_PREFIX` must be one named constant shared by the `run.py` composer and the `bridge/update.py` reader (or pinned byte-for-byte in `docs/features/update-warning-channel.md`), never an inferred string on each side — an inferred prefix is the same drift that produced Defect 2. The pinning test is: clean run, empty `result.warnings`, non-empty `active()` — assert the trailer text appears in the string passed to `tg_client.send_message`, not merely in stdout. Note the launchd path has no chat context (`scripts/remote-update.sh:428`), so `logs/update.log` remains its only sink; state that limit explicitly rather than letting Risk 4's mitigation imply otherwise. |
+| CONCERN | Scope & Value | Success Criterion at plan line 398 is the one the plan itself calls the closer of "the Problem statement's actual loop", yet it is the only criterion in the list pinned to no test or command. It asserts three properties — the warning list appears **before** the raw tail, the tail is cut on a line boundary with an explicit elision marker, and the `<<FILE:>>`-derived log path is present — and Task 1's test list plus the Failure Path Test Strategy assert only *containment* of warning text in `message_text`. The criterion is unfalsifiable as written. | pending | Add to Task 1's test list a single `_queue_fix_session` composition test that asserts all three directly: `message_text.index(last_warning) < message_text.index("[... ")` for a payload long enough to force truncation; the literal substring `characters elided` present when the tail exceeds the raised cap; and the path captured from a `<<FILE:/path>>` input line present in `message_text`. Assert on the exact string handed to `enqueue_agent_session` (the existing tests reach it via `bridge_update._queue_fix_session.await_args`), since that string is the whole interface between `/update` and the agent that fixes it. |
+| CONCERN | Risk & Robustness (Skeptic), driver-verified | The Rabbit Holes entry "Rewriting the `/update` summary into JSON" rests on the stated fact that "the summary is read by humans in Telegram far more often than by code". That premise is false. `handle_update_command` builds its own status string and never forwards `run.py`'s rendered summary to Telegram, and the cron path writes stdout to `logs/update.log`. No human reads the summary in Telegram on either path. The No-Go's conclusion still holds on its other stated ground (only two consumers parse the format, and the text is read by a human in `data/update.txt`), but a plan whose Freshness Check states "nothing here is inferred" should not carry a verified-false premise as the load-bearing justification for a design decision. | pending | Rewrite the Rabbit Holes justification to the true reason: the summary is read by a human in `data/update.txt` and `logs/update.log`, and by exactly two code consumers (`bridge/update.py`, `tests/unit/test_update_cron_summary.py`), so structuring it buys one regex at the cost of the log a human actually opens. Do not weaken the No-Go itself. While correcting it, note that the Data Flow section's step 6 ("Output: an Eng session wakes with the brief, plus a Telegram message to the originating chat") should say the Telegram message carries the bridge's own status, not the warning text. |
 
-**Round 3's blocker and two concerns were independently re-verified as fixed, against the
-document and the code rather than the table's word:**
-
-- The `run.py` bullet is gone from Task 1; all `run.py` work, including every `_append_warning`
-  conversion, sits in Task 4 under `warn-state-builder`, and Team Orchestration states outright
-  that `update-channel-builder` never opens the file. The disjoint-files premise that justifies
-  `Parallel: true` on Tasks 1 and 4 is now true as written.
-- `_append_warning` is scoped to **all 82** call sites, with the reason the narrower round-2 scope
-  was wrong recorded in the Technical Approach: `run.py:2486-2492` sets `w_count =
-  len(result.warnings)` and emits exactly one bullet per entry, so the `(N warnings)`-vs-bullet
-  cross-check agrees even when an entry embeds a newline — the gap was invisible by construction.
-  The render-time guard test asserting no entry contains a newline is specified in both the
-  Technical Approach and Task 4.
-- The measured **82** figure now appears at the root-cause paragraph and at the Rabbit Holes
-  No-Go justification. The Technical Approach sentence that previously quoted the stale
-  approximations verbatim was reworded, so a zero-match grep gate on those tokens is achievable;
-  the only surviving occurrences are inside this section, which is the critics' own finding text.
-
-Driver re-verification against live code: `grep -c 'result.warnings.append' scripts/update/run.py`
-= 82, `...append(f` = 48; the summary render at `run.py:2482-2494` is a mutually-exclusive
-`if/elif/else`; `find_plan_path(2845)` resolves to this document.
-
-**Convergence:** 8 findings / 3 blockers → 7 / 0 → 3 / 1 → **0 / 0**. Each round's findings were
-consequences of the prior round's adoption, and that chain has now terminated. Nothing cosmetic
-was raised to keep the loop open.
-
-### Staleness re-verification, 2026-08-19 (`f491306c5`)
-
-The round-4 clearance was recorded against `4d9118125`. Main advanced 71 commits before this
-plan was picked up for build, so the recon was re-run rather than trusted. **The critique
-verdict stands; no design decision was reopened.**
-
-*Code claims:* every one survives, and survives *exactly* — `git log 4d9118125..f491306c5` over
-`bridge/update.py`, `scripts/update/run.py`, `scripts/update/verify.py`,
-`scripts/update/warn_state.py`, and `.env.example` is empty, so not a single cited line number
-needed correcting. The `stdout[:500]`/`stderr[:500]` slice, the `_warning_prefixes` tuple and
-`has_warnings` scan, the `--cron` summary block and its mutually-exclusive `if/elif/else`, the
-flat `declared_keys - present` difference, `warn_state`'s four exports with no reader surface,
-and both `warn_state`-bypassing call sites are all verbatim at the recorded lines. The measured
-82 / 48 append counts are unchanged.
-
-*One substantive correction, environmental rather than committed:* the `env-completeness` flagged
-count is a per-machine measurement, not a repo fact — 27 where the plan was authored, **64** on
-the machine holding this lane's checkout. The wider set includes real credentials, so the
-document's habit of naming the `@optional` set by its cardinality was a live Risk 1 hazard for
-any builder who reproduced the measurement locally. Rounds 1–4 had already established the right
-criterion; this pass replaces the counts with that criterion, adds the not-a-credential leg
-explicitly, adds a reviewer check and two Verification rows against it, and restates the two
-acceptance items that assumed a complete vault. The `OLLAMA_*` parenthetical that rested on the
-old measurement was removed; those deletions never depended on it.
-
-*Also refreshed:* suppressed keys on this machine grew from two to three (`sms_reader` joined),
-which strengthens Risk 4 and is why the trailer test asserts membership rather than equality; the
-prose uses of "optional" in `.env.example` re-count to seven, one of them directly above the
-`SDLC_AGENT_GH_TOKEN` credential — the sharpest available argument for the `@optional` sigil.
-
-**Structural check results (driver, run at `f8e59ff8e`):**
+**Structural check results (driver, run live at `3d53eef2b`):**
 
 | Check | Status | Detail |
 |-------|--------|--------|
-| Required sections | PASS | Documentation (8 checkboxes, 5 `docs/features/` paths), Update System, Agent Integration, Test Impact all present and substantive. |
-| Task numbering | PASS | Tasks 1-7 contiguous, no gaps. Every task carries `Validates`. |
+| Required sections | PASS | Documentation (8 checkboxes, 5 `docs/features/` paths), Update System, Agent Integration, Test Impact all present and substantive with dispositions. |
+| Task numbering | PASS | Tasks 1-7 contiguous. Every task carries `Validates`, `Assigned To`, and `Parallel`. |
 | Dependencies valid | PASS | Every `Depends On` resolves to a real Task ID; no cycles. |
-| File paths exist | PASS | All cited source, test, and doc paths exist except the 3 this plan creates. |
-| Prerequisites met | PASS | Vault `.env` readable; `redis-cli` at `/opt/homebrew/bin/redis-cli`; venv on the `3.14` pin. |
-| Cross-references | PASS | Round 3's Team-Orchestration-vs-Task-1 contradiction is resolved. No No-Go contradicts the Solution; every Success Criterion maps to a task. |
-| Cited claims re-verified | PASS | 82/48 append counts, the mutually-exclusive render block, `find_plan_path(2845)` — all confirmed live. |
+| File paths exist | PASS | Every cited source, test, and doc path exists except the three this plan creates (`tests/unit/test_env_declaration_readers.py`, `tests/unit/test_update_warning_extraction.py`, `docs/features/update-warning-channel.md`). |
+| Prerequisites met | PASS | Vault `.env` readable; `redis-cli` at `/opt/homebrew/bin/redis-cli`; `.venv` on the `3.14` pin. |
+| Cross-references | PASS | No No-Go contradicts the Solution. Every Success Criterion maps to a task; criterion 398 maps to Task 1 but with no assertion (concern 2). |
+| Cited claims re-verified | PASS | 82/48 append counts, 89 declared keys, 7 prose "optional" comment lines, 14 tests in `test_env_completeness.py`, zero test references to `_warning_prefixes`/`has_warnings`, `find_plan_path(2845)` — all confirmed live. Every cited line number in `bridge/update.py`, `scripts/update/run.py`, `scripts/update/verify.py`, and `scripts/update/warn_state.py` is exact. |
+| Verification-row dry-run | PASS | All 15 rows executed against unmodified code. Note for the builder: the local `grep` is `ugrep` (supports `\|` and `\b`), and `grep -c` exits **1** when the count is 0, so every row whose Expected is "match count == 0" exits non-zero on success. The `extract_update_warnings` awk-range row yields an empty range today (the function does not exist), so it reads 0 vacuously until Task 1 lands. |
+
+**Convergence:** 8 findings / 3 blockers → 7 / 0 → 3 / 1 → 0 / 0 → **3 / 1**. Round 4's zero was recorded
+against `4d9118125`; the four revision passes since then (including the `f491306c5` staleness
+re-verification that reopened the machine-dependent `env-completeness` count) are what this round
+critiques. The blocker is not a regression introduced by those revisions — it is a gap the suppression
+work carried from the start, and it became reachable only once the `suppressed:` trailer was promoted
+from a follow-up to a hard requirement of this plan.
+
 
 ---
 
