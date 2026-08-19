@@ -736,7 +736,7 @@ deliberately not exposed to the agent.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Primary node passes with stale `.pyc` present | `./scripts/pytest-clean.sh "tests/unit/test_sdlc_review_finalize.py::test_no_module_in_tools_or_agent_claims_state_not_persisted" -q` | exit code 0 |
-| Stale off-pin `.pyc` was NOT deleted (AC1 precondition still holds) | `find tools agent -name '*.pyc' -not -name '*cpython-314*' \| wc -l` | output > 0 |
+| Stale off-pin `.pyc` was NOT deleted (AC1 precondition still holds) | `find tools agent -name '*.pyc' -not -name '*cpython-314*' -print -quit; test -n "$(find tools agent -name '*.pyc' -not -name '*cpython-314*' -print -quit)"` | exit code 0 |
 | Tracked source is genuinely clean | `git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'; test $? -eq 1` | exit code 0 |
 | No converted guard shells out to `grep` | `git grep -n '"grep"' -- 'tests/unit/test_sdlc_review_finalize.py' 'tests/unit/test_anthropic_client_semaphore.py' 'tests/unit/test_memory_extraction.py' 'tests/unit/test_no_legacy_paths.py'` | exit code 1 |
 | No bare recursive grep anywhere in tests/ | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q` | exit code 0 |
@@ -749,7 +749,7 @@ deliberately not exposed to the agent.
 | Feature doc is indexed | `git grep -c 'tracked-content-sweep-guards' -- docs/features/README.md` | output > 0 |
 | Stranded-bytecode warning shipped, linking #2883 | `git grep -c '2883' -- docs/features/worktree-venv-isolation.md` | output > 0 |
 | Concern-B follow-up issue is real and open | `gh issue view 2883 --json state -q .state` | output contains OPEN |
-| No production code touched | `git diff --name-only main... \| grep -Ev '^(tests/\|docs/)' \| wc -l` | output contains 0 |
+| No production code touched | `test -z "$(git diff --name-only main... -- ':!tests/' ':!docs/')"` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
