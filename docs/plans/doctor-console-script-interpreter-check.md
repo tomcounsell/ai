@@ -139,7 +139,7 @@ already-handled shape.
 - **PR #2665** — "Doctor: flag console scripts that resolve outside the repo venv",
   merged at `2560a191c`. Created `_check_console_scripts_resolve`,
   `_repo_venv_bin_dirs`, `_same_file`, and `tests/unit/test_doctor_console_scripts.py`
-  (20 tests). Succeeded at what it scoped: three-state resolution attribution with
+  (18 tests). Succeeded at what it scoped: three-state resolution attribution with
   state-specific remedies. Explicitly measured location, not interpreter — the
   docstring says so. This plan extends it; it does not revisit it.
 - **Issue #2566** — CLOSED. `critique-*` shims crashing with
@@ -290,10 +290,10 @@ Both findings are saved to memory (`valor` project) for reuse.
    for the version, and `repo_interpreter_pin(PROJECT_DIR)` for the reference.
 6. **Grouping (new)**: findings are keyed by `(reason, target)` so one bad interpreter
    shared by 26 scripts reports as one line with a count, not 26 lines.
-7. **Output**: a single `CheckResult`. `message` carries the existing resolution
-   clause (byte-identical when there are no interpreter findings) plus a new
-   interpreter clause; `fix` carries the existing PATH/`uv sync` advice plus a
-   reason-specific interpreter remedy. The doctor CLI renders it in the Environment
+7. **Output**: a single `CheckResult`. On the failure path `message` and `fix` carry the
+   existing resolution clause and PATH/`uv sync` advice unchanged, with an interpreter
+   clause and a reason-specific remedy appended. On the pass path `message` gains a
+   trailing interpreter-verified count. The doctor CLI renders it in the Environment
    category.
 
 ## Why Previous Fixes Failed
@@ -441,13 +441,28 @@ re-link
   shown and signal the omission with a `(+N more)` suffix, matching the existing
   truncation convention at `:260-263` and `:288-293`.
 
-- **Compose the message and fix additively.** When there are no interpreter findings
-  the emitted strings are unchanged, byte for byte. When there are, append a
-  `; `-joined interpreter clause to `message` and a reason-specific sentence to the
-  `fixes` list. Both a resolution failure and an interpreter failure can be true at
-  once and the output must name both. When *only* interpreter findings exist, the
-  check still fails, with a message that does not borrow the resolution clause's
-  `X/N ... do not resolve` phrasing (they did resolve — that would be a lie).
+- **Compose the message and fix additively, and scope the byte-identical guarantee to
+  the failure path.** The two paths get different contracts, because only one of them
+  can afford to stay frozen:
+
+  - *Failure path* (`tools/doctor.py:300-311`): the existing `X/N ... do not resolve`
+    clause, the three-state `path_note`, and the PATH / `uv sync` fixes are emitted byte
+    for byte as they are today. The interpreter clause is appended with `; ` and the
+    reason-specific remedy is appended to the `fixes` list. Both a resolution failure and
+    an interpreter failure can be true at once and the output must name both. When *only*
+    interpreter findings exist, the check still fails, with a message that does not borrow
+    the `X/N ... do not resolve` phrasing (they did resolve — that would be a lie).
+  - *Pass path* (`tools/doctor.py:313-318`): the message **changes**, and it has to. It
+    gains a trailing interpreter-verified count, so a run that verified nothing cannot
+    read as a clean bill of health. Today's measured pass message is
+    `26 console scripts resolve into /Users/tomcounsell/src/ai/.venv/bin`; the new shape
+    appends a clause, e.g. `..., 26 interpreter-verified`. This is safe against the suite
+    because the three `passed is True` tests assert substrings, never equality:
+    `test_passes_when_venv_bin_leads_path` asserts `"3 console scripts" in result.message`
+    and `str(root / ".venv" / "bin") in result.message`;
+    `test_main_checkout_venv_accepted_from_a_worktree` additionally asserts
+    `str(worktree / ".venv" / "bin") not in result.message`, so the appended clause must
+    be a count and must name no venv path of its own.
 
 - **Remediation text, per reason.** `missing` and `off-pin` both point at
   `rm -rf .venv && uv sync --all-extras` in the affected checkout, which is the same
@@ -578,7 +593,7 @@ inputs are unverified, never failed.
 ### Risk 2: The fixture upgrade masks the new guard instead of exercising it
 
 **Impact:** The subtle one. If the build takes the easy route and lets an unresolvable
-pin skip the interpreter check, all 20 existing tests stay green while the new code is
+pin skip the interpreter check, all 18 existing tests stay green while the new code is
 never reached by any of them — a green suite proving nothing.
 **Mitigation:** fail-open is scoped to the off-pin comparison alone; `missing` and
 `outside` fire with no pin. The fixture is upgraded to a real venv so the existing
@@ -587,12 +602,14 @@ check: break each guard individually, confirm a *specific* named test fails, res
 
 ### Risk 3: Perturbing #2665's merged message and fix strings
 
-**Impact:** 20 existing tests assert exact substrings (`"2/3"`, `"not on PATH"`,
+**Impact:** 18 existing tests assert exact substrings (`"2/3"`, `"not on PATH"`,
 `"shadowed"`, `"uv sync" not in fix`). Restructuring the message would break them and
 invite "fixing" the assertions, quietly undoing shipped attribution work.
-**Mitigation:** the interpreter clause is strictly *appended*. When there are no
-interpreter findings the output is byte-identical. Task 2 requires re-running the full
-existing file before any new test is written, so a regression is attributed to the
+**Mitigation:** the interpreter clause is strictly *appended*, on both paths. The
+failure strings stay byte-identical (see the composition bullet in Technical Approach);
+the pass string gains a trailing count, which every `passed is True` test survives
+because all three assert substrings rather than equality. Task 2 requires re-running the
+full existing file before any new test is written, so a regression is attributed to the
 right change.
 
 ### Risk 4: The hardlink remedy is incomplete and reads as complete
@@ -718,9 +735,14 @@ new finding inside an existing check that the agent already knows how to run and
       missing interpreter still fails.
 - [ ] The pass message discloses how many scripts were interpreter-verified, so an
       all-unverified run does not read as verified.
-- [ ] With no interpreter findings, `message` and `fix` are byte-identical to today's.
-- [ ] All 20 pre-existing tests in `tests/unit/test_doctor_console_scripts.py` pass
-      unchanged in their assertions.
+- [ ] On the **failure** path, the existing resolution clause, `path_note`, and PATH /
+      `uv sync` fixes are byte-identical to today's; the interpreter clause and remedy
+      are appended.
+- [ ] On the **pass** path, the message keeps today's
+      `N console scripts resolve into <venv bin>` prefix verbatim and appends an
+      interpreter-verified count clause that names no venv path of its own.
+- [ ] All 18 pre-existing tests in `tests/unit/test_doctor_console_scripts.py` pass
+      with their assertions unchanged.
 - [ ] Each new guard is individually mutation-checked: breaking it fails a specific
       named test.
 - [ ] Tests pass (`/do-test`)
@@ -740,7 +762,7 @@ new finding inside an existing check that the agent already knows how to run and
 - **Validator (doctor-check)**
   - Name: `doctor-interpreter-validator`
   - Role: Verify every success criterion, run the mutation checks, confirm the
-    pre-existing 20 tests are green with unmodified assertions, and confirm the live
+    pre-existing 18 tests are green with unmodified assertions, and confirm the live
     control still passes
   - Agent Type: validator
   - Resume: true
@@ -751,7 +773,7 @@ new finding inside an existing check that the agent already knows how to run and
 
 - **Task ID**: build-fixture
 - **Depends On**: none
-- **Validates**: `tests/unit/test_doctor_console_scripts.py` (all 20 existing tests)
+- **Validates**: `tests/unit/test_doctor_console_scripts.py` (all 18 existing tests)
 - **Informed By**: spike-4 (the current fixture has no `pyvenv.cfg`, no `.python-version`,
   and `#!/bin/sh` shims, so a naive implementation flips 7 passing assertions)
 - **Assigned To**: `doctor-interpreter-builder`
@@ -766,8 +788,11 @@ new finding inside an existing check that the agent already knows how to run and
 - Parameterize the fixture so a test can request an off-pin `version_info`, a broken
   `bin/python3` symlink, or a custom shebang body — the new matrix needs all three.
 - Leave `_stale_shim_dir` alone; its shims fail resolution and never reach the read.
-- Run the full existing file and confirm 20/20 green **before** any production change,
-  so a later failure is attributable.
+- Gate on a self-measured count, not a remembered literal: run
+  `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q` and confirm it
+  reports `18 passed` **before** any production change, so a later failure is
+  attributable. If the collected count is not 18, reconcile the plan against the file
+  before proceeding rather than assuming the plan is right.
 
 ### 2. Implement the interpreter read inside the console-script check
 
@@ -849,7 +874,9 @@ new finding inside an existing check that the agent already knows how to run and
   report it and route back to task 3.
 - Re-measure after any change to task 3's tests; a guard verified in an earlier round
   does not stay verified.
-- Confirm all 20 pre-existing tests pass with assertions unmodified from `main`
+- Confirm `scripts/pytest-clean.sh tests/unit/test_doctor_console_scripts.py -q` reports
+  the 18 pre-existing tests passing plus the new `TestWinningScriptInterpreter` cases,
+  with the pre-existing assertions unmodified from `main`
   (`git diff main -- tests/unit/test_doctor_console_scripts.py` must show only fixture
   changes and additions, no edits to existing `assert` lines).
 
