@@ -1229,6 +1229,15 @@ Three conventions make that promise hold, each measured at `7ba89ca5c`:
   from the rendered page silently becomes a literal pipe and matches nothing.
   V-22 therefore uses repeated `-e` patterns instead of alternation. (Verified:
   the alternation form returns count 0 where the `-e` form returns 13.)
+- **A row that greps a file this plan creates gates on the file being *tracked*,
+  not merely present.** `git grep` searches the index's file list, so a helper
+  written to disk but not yet `git add`ed is invisible to it and a bare
+  `test -f` gate lets the row pass while checking nothing. Measured: with
+  `tests/tracked_content.py` untracked and containing `"-F"`, the `test -f` form
+  returned **exit 0 (false pass)**; gated on
+  `git ls-files --error-unmatch` it correctly fails. V-9 uses the tracked gate.
+  This is the plan's own central defect, reproduced inside its verification
+  table — the same shape spike-1 found and the same one V-18b exists to catch.
 
 | # | Check | Command | Expected |
 |---|-------|---------|----------|
@@ -1240,7 +1249,7 @@ Three conventions make that promise hold, each measured at `7ba89ca5c`:
 | V-6 | Each converted guard carries the `.pyc`-hazard comment (#2809 AC2) | `for f in tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py; do git grep -q '2093\|pyc' -- "$f" \|\| { echo "MISSING: $f"; exit 1; }; done` | exit code 0, no output |
 | V-7 | Helper raises `TrackedScanError` (**not** `VacuousScanError`) on a broken index | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "scan_error"` | exit code 0 |
 | V-8 | Helper raises `VacuousScanError` (**not** `TrackedScanError`) on a vacuous pathspec | `./scripts/pytest-clean.sh tests/unit/test_tracked_content_helper.py -q -n 0 -k "vacuous"` | exit code 0 |
-| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `test -f tests/tracked_content.py && { git grep -nE '"-[FEP]"' -- tests/tracked_content.py; test $? -eq 1; }` | exit code 0 |
+| V-9 | No regex-dialect flag was added (an `-F` would leave A3 permanently green) | `git ls-files --error-unmatch tests/tracked_content.py >/dev/null 2>&1 && test -f tests/tracked_content.py && { git grep -nE '"-[FEP]"' -- tests/tracked_content.py; test $? -eq 1; }` | exit code 0 |
 | V-10 | All four converted guards pass | `./scripts/pytest-clean.sh tests/unit/test_sdlc_review_finalize.py tests/unit/test_anthropic_client_semaphore.py tests/unit/test_memory_extraction.py tests/unit/test_no_legacy_paths.py -q` | exit code 0 |
 | V-11 | All six floored walks pass | `./scripts/pytest-clean.sh tests/unit/test_template_filter_registry.py tests/unit/test_sdlc_lease_helper_binding.py tests/unit/test_sdlc_tool_wrapper.py tests/unit/test_no_positional_query_get.py tests/unit/test_harness_model_coverage.py tests/integration/test_dm_recovery.py -q` | exit code 0 |
 | V-12 | The BRE metacharacter path is exercised, not assumed | `git grep -q 'zzz\\.never(' -- tests/unit/test_tracked_content_helper.py` | exit code 0 (exit 1 means the probe is missing or mis-escaped) |
