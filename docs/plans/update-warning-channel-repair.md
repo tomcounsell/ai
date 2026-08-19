@@ -7,7 +7,7 @@ created: 2026-08-17
 tracking: https://github.com/tomcounsell/ai/issues/2845
 last_comment_id: 5317246173
 revision_applied: true
-revision_applied_at: 2026-08-18T04:45:00Z
+revision_applied_at: 2026-08-19T04:56:01Z
 ---
 
 # /update Warning Channel Repair
@@ -140,7 +140,7 @@ No merged PR search results for `warn_state env-completeness` — the `gh pr lis
 ## Architectural Impact
 
 - **New dependencies**: none. `warn_state`, `redis_acl`, and `verify` are all existing first-party modules.
-- **Interface changes**: `_parse_env_example` gains a third tuple element (or returns a small record) carrying the optional flag — an internal helper with two callers, both in `verify.py` and its tests. `bridge/update.py` gains one pure module-level helper, `extract_update_warnings(status_lines) -> list[str]`, exported for tests.
+- **Interface changes**: `_parse_env_example` returns `list[tuple[str, str, bool]]` — `(key, description, optional)` — instead of today's `list[tuple[str, str]]`. The 3-tuple, not a record type: Task 2 and Test Impact already specify "the 3-element return", and two Verification rows unpack it positionally, so the shape is pinned rather than left to builder choice. It is an internal helper with two callers, both in `verify.py` (`:1108`) and its tests (`tests/unit/test_env_completeness.py:149`). `bridge/update.py` gains one pure module-level helper, `extract_update_warnings(status_lines) -> list[str]`, exported for tests.
 - **Coupling**: decreases slightly. Today `bridge/update.py` knows an ad-hoc prefix tuple that duplicates knowledge of `run.py`'s output format implicitly; after this, the two summary formats are named and parsed in one place with a test that pins them against `run.py`'s actual emission.
 - **Data ownership**: unchanged. `warn_state`'s JSON state file (`data/`, gitignored) gains two more keys.
 - **Reversibility**: high. Every change is additive or a marker convention; reverting the `# @optional` annotations restores the old (noisy) behaviour with no data migration.
@@ -465,7 +465,7 @@ The three builders touch disjoint files — `bridge/update.py`; `scripts/update/
 - **Assigned To**: `env-completeness-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Teach `_parse_env_example` the `@optional` marker; exclude the marker line from description candidates; switch the description to the first non-empty comment line.
+- Teach `_parse_env_example` the `@optional` marker; exclude the marker line from description candidates; switch the description to the first non-empty comment line. Widening the return to a 3-tuple breaks two positional unpack sites inside `check_env_completeness` that must change with it — `verify.py:1118` (`declared_keys = {k for k, _ in declared}`) and `:1128` (`desc_map = dict(declared)`, which silently produces a `{key: (desc, optional)}` mapping instead of erroring). Verified live: feeding a 3-tuple to today's `check_env_completeness` raises `ValueError: too many values to unpack (expected 2, got 3)` at `:1118`, so the first site fails loudly and the second does not. `:1128` is the one to watch.
 - Filter optional keys out of the missing set in `check_env_completeness`, but surface the residual as a count in `version`: `all N required vars present (M optional unset)`. Cap the inline key list at 5 with a `(+N more)` suffix, and cap each individual description with an ellipsis.
 - Annotate the verified-optional declarations in `.env.example` and add the convention to its header block. **Derive the set from the two-leg criterion in Technical Approach → Defect 3 part 3 (traced read site with an in-code default, AND not a credential), never from `check_env_completeness`'s output on the build machine.** That output is a per-machine measurement — 27 keys where this plan was written, 64 on this checkout's machine, and the wider set includes `OP_SERVICE_ACCOUNT_TOKEN`, `SDLC_AGENT_GH_TOKEN`, `LINEAR_API_KEY`, `SENTRY_DSN`, `STRIPE_API_KEY`, and `REDIS_URL`. Marking any of those is Risk 1 firing on the first commit. Record each marker's justifying `file:line` and default in the PR body.
 - Delete `SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES`, `OLLAMA_URL`, `OLLAMA_VISION_MODEL` declarations.
@@ -587,6 +587,36 @@ Driver re-verification against live code: `grep -c 'result.warnings.append' scri
 **Convergence:** 8 findings / 3 blockers → 7 / 0 → 3 / 1 → **0 / 0**. Each round's findings were
 consequences of the prior round's adoption, and that chain has now terminated. Nothing cosmetic
 was raised to keep the loop open.
+
+### Staleness re-verification, 2026-08-19 (`f491306c5`)
+
+The round-4 clearance was recorded against `4d9118125`. Main advanced 71 commits before this
+plan was picked up for build, so the recon was re-run rather than trusted. **The critique
+verdict stands; no design decision was reopened.**
+
+*Code claims:* every one survives, and survives *exactly* — `git log 4d9118125..f491306c5` over
+`bridge/update.py`, `scripts/update/run.py`, `scripts/update/verify.py`,
+`scripts/update/warn_state.py`, and `.env.example` is empty, so not a single cited line number
+needed correcting. The `stdout[:500]`/`stderr[:500]` slice, the `_warning_prefixes` tuple and
+`has_warnings` scan, the `--cron` summary block and its mutually-exclusive `if/elif/else`, the
+flat `declared_keys - present` difference, `warn_state`'s four exports with no reader surface,
+and both `warn_state`-bypassing call sites are all verbatim at the recorded lines. The measured
+82 / 48 append counts are unchanged.
+
+*One substantive correction, environmental rather than committed:* the `env-completeness` flagged
+count is a per-machine measurement, not a repo fact — 27 where the plan was authored, **64** on
+the machine holding this lane's checkout. The wider set includes real credentials, so the
+document's habit of naming the `@optional` set by its cardinality was a live Risk 1 hazard for
+any builder who reproduced the measurement locally. Rounds 1–4 had already established the right
+criterion; this pass replaces the counts with that criterion, adds the not-a-credential leg
+explicitly, adds a reviewer check and two Verification rows against it, and restates the two
+acceptance items that assumed a complete vault. The `OLLAMA_*` parenthetical that rested on the
+old measurement was removed; those deletions never depended on it.
+
+*Also refreshed:* suppressed keys on this machine grew from two to three (`sms_reader` joined),
+which strengthens Risk 4 and is why the trailer test asserts membership rather than equality; the
+prose uses of "optional" in `.env.example` re-count to seven, one of them directly above the
+`SDLC_AGENT_GH_TOKEN` credential — the sharpest available argument for the `@optional` sigil.
 
 **Structural check results (driver, run at `f8e59ff8e`):**
 
