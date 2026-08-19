@@ -1033,6 +1033,72 @@ def _check_redis_acl() -> CheckResult:
     )
 
 
+def _check_gws_auth() -> CheckResult:
+    """Report Google Workspace CLI (`gws`) auth state (#2845).
+
+    This is the retrieval half of the `gws-auth` warn_state suppression: an
+    unauthenticated `gws` warns once via `/update`'s `warn_state` routing
+    and then goes silent (Risk 4). `python -m tools.doctor` (full run) is
+    the on-demand answer for "is it still unauthenticated?". Mirrors
+    ``_check_redis_acl`` shape for shape. Imports
+    ``scripts.update.gws_auth`` lazily: a machine without the module
+    degrades to a passing skip, never a crash. ``configure_gws_auth`` is
+    already cron-safe -- it runs `gws auth status` and reports, never
+    initiating OAuth.
+    """
+    name = "gws"
+    category = "Services"
+    try:
+        from scripts.update.gws_auth import configure_gws_auth
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"gws_auth module not available yet: {e}",
+        )
+
+    try:
+        result = configure_gws_auth()
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"gws auth check could not run: {e}",
+        )
+
+    if result.action == "needs_auth":
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=result.detail or "gws needs authentication",
+            fix="gws auth setup --login   (or: gws auth setup && gws auth login)",
+        )
+    if result.action == "already_ok":
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=result.detail or "gws authenticated",
+        )
+    if result.action == "skipped":
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"gws check skipped: {result.detail}",
+        )
+    # result.success is False on any other path.
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message=f"gws auth check did not complete: {result.error}",
+    )
+
+
 def _check_session_archive_freshness() -> CheckResult:
     """Check the AgentSession SQLite secondary store (data/session_archive.db).
 
@@ -1858,6 +1924,18 @@ def get_checks(
         # push -- stronger than #2473's WARN intent. Full runs (including
         # --json) keep the check, slotted with the other Services checks.
         checks.insert(checks.index(_check_worker) + 1, _check_catchup_kill_switch)
+        # gws auth is registered here, not in the unconditional list above,
+        # for the identical reason (#2845): this repo has no WARN tier
+        # (CheckResult.passed is binary, rendered [FAIL]), so `passed=False`
+        # plus exclusion from `--quick` IS this repo's WARN idiom. `--quick`
+        # backs the opt-in pre-push hook, and gws's condition clears only
+        # through a human completing browser OAuth consent -- registering it
+        # unconditionally would give an unauthenticated machine a
+        # permanently blocked `git push`. Anchor on `_check_redis_acl`
+        # (a member of the unconditional list above), never on
+        # `_check_catchup_kill_switch` (itself inserted by this same block,
+        # which would make the insert order-dependent).
+        checks.insert(checks.index(_check_redis_acl) + 1, _check_gws_auth)
 
     if quality:
         checks.extend(
