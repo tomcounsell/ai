@@ -1,19 +1,45 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
 last_comment_id: 5324622874
+revision_applied: true
+revision_applied_at: REVISION_APPLIED_AT_PLACEHOLDER
 ---
 
 # Terminal Verdict and PR Resolution: the three stage-marker residuals left outside #2826's fence
 
-Covers **#2817**, **#2824**, and **#2825** as one lane. They share four files —
-`tools/sdlc_stage_query.py`, `tools/sdlc_stage_marker.py`, `tools/sdlc_next_skill.py`,
-`agent/sdlc_router.py` — and, more importantly, they share a single root cause that
-none of them names on its own (see **Why Previous Fixes Failed**).
+Covers **#2817**, **#2824**, and **#2825** as one lane in **one PR**. They share four
+files — `tools/sdlc_stage_query.py`, `tools/sdlc_stage_marker.py`,
+`tools/sdlc_next_skill.py`, `agent/sdlc_router.py` — and, more importantly, they share a
+single root cause that none of them names on its own (see **Why Previous Fixes Failed**).
+
+## Lane Size and the One-PR Decision
+
+The critique asked whether four workstreams across three issues is too much for one PR.
+It was, and the answer was to **cut a workstream, not to split the PR**.
+
+**WS-D (deterministic candidate ordering) is deferred to [#2868](https://github.com/tomcounsell/ai/issues/2868)**
+— its headline rule was falsified by the critique (detail in *Resolved Questions* Q3).
+That removes the largest and least-grounded diff, the WS-B ≤ WS-D sequencing constraint,
+and the whole of Risk 3.
+
+What remains is three workstreams landing as **one PR**:
+
+| | Files touched | Rough size |
+|---|---|---|
+| **WS-A** (#2817) | `agent/sdlc_router.py`, `tools/sdlc_next_skill.py` | one guard + one JSON shape |
+| **WS-B** (#2824) | `tools/sdlc_stage_query.py` | ~10 lines in `_lookup_pr` |
+| **WS-C** (#2825) | `tools/sdlc_stage_marker.py` | one argument |
+
+The two halves are **file-disjoint** — WS-A touches nothing WS-B/C touch, and vice versa
+— so a reviewer reads two independent diffs rather than one entangled one, and each
+workstream reverts alone (the mutation table in Risk 5 enforces that each has its own
+coverage). Splitting file-disjoint halves into two PRs would buy the reviewer nothing and
+cost a second lane's worth of pipeline machinery. One PR, closing all three issues.
 
 ## Problem
 
@@ -171,6 +197,25 @@ No prototypes, no worktrees, no committed code.
   | 555 | False | no | `/do-pr-review` row 8e |
   | 555 | True | yes | `/do-merge` row 10 |
   | 555 | True | no | `/do-pr-review` row 8e |
+
+  **Ninth cell — an unsettled PATCH under a completed MERGE** (added at critique; the
+  eight cells above all hold `PATCH = completed` and so never exercised it). `MERGE`
+  completion does not force PATCH to settle: `_backfill_predecessors` settles on-spine
+  predecessors but **explicitly exempts PATCH** as off-spine, so this ledger is reachable.
+  Measured on `f491306c5`:
+
+  | ledger | result |
+  |---|---|
+  | all completed except `PATCH='pending'`, `pr_number=555`, APPROVED verdict | `/do-merge` row 10 |
+  | all completed except `PATCH='pending'`, `pr_number=555`, no verdict | `/do-pr-review` row 8e |
+  | all completed except `PATCH='failed'`, `pr_number=555`, no verdict | `/do-pr-review` row 8e |
+
+  The guard **deliberately terminates all three.** `is_pipeline_complete` keys on
+  `MERGE == "completed"` alone — measured: `is_pipeline_complete({...PATCH:'pending'},
+  "success", pr_open=None)` → `(True, "merge_success")`. That is the correct reading: once
+  the merge landed, a pending off-spine PATCH is a residual field, not outstanding work.
+  This is a deliberate settling decision, not an oversight, and Risk 1 carries the
+  assertion that pins it.
 
   Three corrections to the record: (a) `Blocked(NO_RULE)` **survives #2826 unchanged**
   whenever `pr_number` is genuinely unrecoverable, so #2817 is not obsolete;
@@ -378,9 +423,10 @@ bounded diffs plus their tests.
   body search runs only when there is no recorded branch to disambiguate with.
 - **WS-C — Review-probe scope (#2825).** `state="all"` → `state="merged"` at the one
   call site, preserving #2539.
-- **WS-D — Deterministic candidate selection (root cause).** Order candidates
-  client-side before validating, so "the first body-validating candidate" stops
-  depending on GitHub's unguaranteed best-match ranking.
+- **WS-D — Deterministic candidate selection.** **Deferred to
+  [#2868](https://github.com/tomcounsell/ai/issues/2868).** Its headline rule (MERGED
+  before anything else) is unreachable once WS-C lands, and the surviving recency half has
+  no measured live failure. See *Resolved Questions* Q3.
 
 ### Flow
 
@@ -426,21 +472,51 @@ path return `(False, "pr_state_unavailable")` and fall through to the table
 unchanged. That is deliberately conservative: **WS-A ships only the
 `merge_success` leg**, and the DOCS-terminal leg is a No-Go.
 
-*Guard ordering.* Recommended position: **first in `GUARDS`, ahead of G1.** A
-completed pipeline has nothing to gain from any other guard's opinion, and G4 in
-particular gives actively wrong advice on it ("clear it with `sdlc-tool dispatch
-reset`"). The competing argument is #1267's precedent that escalation guards take
-priority. It does not apply here: G4 exists to bound a *loop*, and a guard that
-terminates before the loop starts is strictly better than one that caps it at three.
-This is Open Question 1.
+*It must type-check its input before delegating.* `evaluate_guards` (`:830-839`) walks
+`GUARDS` with a bare `result = guard(stage_states, meta, ctx)` and **no** try/except —
+only *rule* predicates are wrapped, and that wrapping lives inside `decide_next_dispatch`,
+not here. Placing this guard first makes it the most exposed callable in the router.
+`is_pipeline_complete` opens with `psm_states.get("MERGE")` (`agent/pipeline_complete.py:69`),
+which raises on a non-dict — measured: `None`, `"x"`, `42`, and `[]` each raise
+`AttributeError: ... has no attribute 'get'`. A raise there escapes
+`decide_next_dispatch` entirely and surfaces as `decide()`'s `{"error": ...}` shape,
+which is strictly worse than today's `Blocked(NO_RULE)`.
 
-*Return type.* Return `Blocked(reason=..., guard_id="TERMINAL")` and have
-`tools/sdlc_next_skill.py::decide()` map that `guard_id` to a distinct JSON shape
-carrying an explicit completion signal alongside the existing `blocked` key. Keeping
-the dataclass means no consumer of `decide_next_dispatch` breaks; adding the key
-means a supervisor can distinguish "finished" from "escalate". Introducing a third
-`Complete` dataclass is the cleaner model and the larger blast radius — Open Question 2,
-and a Rabbit Hole until answered.
+So the guard body **opens with a type check and returns `None`**:
+
+```python
+if not isinstance(stage_states, dict):
+    return None
+```
+
+`None`, never `Blocked` — an unreadable ledger must fall through to the dispatch table,
+not terminate a lane. This resolves the contradiction the critique found between task 3's
+bare-delegation spec and the Failure Path section's "guard cannot raise" test.
+
+*Guard ordering — resolved.* **First in `GUARDS`, ahead of G1.** A completed pipeline has
+nothing to gain from any other guard's opinion, and G4 in particular gives actively wrong
+advice on it ("clear it with `sdlc-tool dispatch reset`"). The competing argument was
+#1267's precedent that escalation guards take priority; it does not reach this case,
+because G4 exists to bound a *loop* and terminating before the loop begins is strictly
+better than capping it at three. See *Resolved Questions* Q1.
+
+*Return type — resolved.* Return `Blocked(reason=..., guard_id="TERMINAL")` and have
+`tools/sdlc_next_skill.py::decide()` map that `guard_id` to a JSON shape carrying an
+explicit `complete: true` key alongside the existing `blocked` key. No consumer of
+`decide_next_dispatch` breaks, and a supervisor can distinguish "finished" from
+"escalate" on one key. The third-`Complete`-dataclass alternative stays a Rabbit Hole.
+See *Resolved Questions* Q2.
+
+*The supervisor must learn the new shape in the same PR.* Today
+`.claude/skills-global/do-sdlc/SKILL.md:136` reads: "`{"blocked": true, ...}` (other
+reasons) → **STOP the loop.** Report the `reason` and `guard_id` to the human." Until
+that line learns `complete: true`, WS-A converts "three wasted `/do-merge` ticks then a
+misleading escalation" into "an immediate escalation" — a regression in human-noise terms
+even though the routing is correct. `do-sdlc` is a **global** skill hardlinked to every
+machine by `scripts/update/hardlinks.py`, and its body already documents the `blocked` /
+`guard_id` contract generically, so the terminal shape belongs in the **global body**
+too — no `.claude/skill-context/do-sdlc.md` is needed, and none exists today. Carried as
+a Documentation checkbox and a build task, not left to review.
 
 *The false rebuild is fixed as a consequence.* With the guard first, the
 `pr_number`-absent / `branch_exists=True` cells never reach row 5. Both `/do-build`
@@ -473,26 +549,39 @@ argument. Measured: closes both live fail-opens, keeps #2104 correct via the rig
 PR, and holds #2539's property 5/5. Leave the `pr or ...` short-circuit alone so
 `verdict finalize --pr` callers are untouched.
 
-**WS-D — deterministic candidate selection.**
+**WS-D — deterministic candidate selection. Deferred to
+[#2868](https://github.com/tomcounsell/ai/issues/2868); do not build it here.**
 
-Inside `_gh_pr_search_issue_ref`, sort the candidate list client-side before applying
-`_body_references_issue`, rather than trusting `gh`'s best-match order. Ordering rule:
-**MERGED before anything else, then most-recent first.** This requires widening the
-`--json` field list to carry the state/merge field the sort needs.
+The critique falsified its headline rule, and the falsification is worth recording so
+nobody re-derives it. WS-D was specified as "**MERGED before anything else**, then
+most-recent first." That comparator **can never separate two candidates at any production
+call site.** `state` threads straight into `gh pr list --state {state}`
+(`tools/sdlc_stage_query.py:310`), so every candidate returned by a single call already
+shares one state. The three production `_lookup_pr` call sites are exhaustive and
+verified: `sdlc_stage_query.py:596` (default `open`), `:598` (`merged`), and
+`sdlc_stage_marker.py:263` — the one **WS-C changes to `merged`**. After WS-C there is no
+`all` caller left, and under `open` every candidate is open while under `merged` every
+candidate is merged.
 
-Two things make this necessary rather than nice-to-have. First, the Research finding:
-`gh pr list --search` gives no ordering guarantee and `gh pr list` has no `--sort`, so
-"first candidate" is unpinned by construction. Second, the measurement: 6 abandoned
-PRs carry review artifacts and only 3 are selected — the other 3 are masked by ordering
-luck that no code controls and no test pins, so WS-C alone leaves a latent regression
-that a GitHub-side ranking change could surface with no commit here.
+Its urgency argument dies with it. "6 abandoned PRs carry review artifacts and only 3 are
+selected; a GitHub-side ranking change could silently re-open #2825" is a statement about
+**closed-unmerged** candidates — precisely the population `state="merged"` excludes by
+construction. WS-C is not defense-in-depth behind WS-D; WS-C is the fix, and it closes
+that hole without WS-D's help.
 
-**WS-D interacts with WS-B and the interaction is the reason this is one lane.**
-MERGED-first ordering makes the *stale* merged PR in the reopened-issue case **more**
-reliably selected, not less — it sharpens #2824's edge. WS-B is what neutralizes that,
-by making the recorded lane branch authoritative before the fuzzy leg ever runs.
-**WS-B must land with or before WS-D.** Landing WS-D alone would be a regression for
-reopened issues. This ordering constraint is a build-sequencing requirement, not advice.
+The surviving half is real but not urgent: a **most-recent-first tiebreak among
+same-state candidates**, grounded in spike-4's finding that `_lookup_pr(2518,
+state="merged")` returns 2538, the *first* of two lifecycles rather than the most recent.
+That is a latent determinism gap with no measured live fail-open, and #2868 carries it,
+including the interaction that makes it non-trivial: PR 2542 body-validates for #2518 via
+a retrospective prose mention while actually declaring `Closes #2547`, so recency-first
+could select a **worse** match there. That needs its own measurement pass, which is
+exactly the wrong thing to bolt onto this lane.
+
+Consequences of the deferral, all of which simplify this plan: **Risk 3 is retired**, the
+WS-B ≤ WS-D sequencing constraint disappears, and the verification row that claimed to
+enforce it (and could not — it only ever read `_lookup_pr`) is removed rather than
+patched.
 
 ## Failure Path Test Strategy
 
