@@ -491,35 +491,60 @@ Docstring line: *"`pattern` is a POSIX basic regular expression interpreted by
 `git grep` exactly as `grep` would; `(` is literal, `\.` is a literal dot."*
 A helper test must exercise the metacharacter path rather than assume it.
 
-**Exemptions go in the pathspec, not in `allow=`.** A single `allow=()` matched
-by substring over stdout cannot carry three incompatible semantics. A2 at
-`tests/unit/test_anthropic_client_semaphore.py:176-180` filters output *lines*
-by module-path substring; A7 at `tests/unit/test_no_legacy_paths.py:33-37`
-filters *file paths* two ways at once (exact membership in `ALLOWED_FILES` plus
-a prefix rule on `docs/plans/`). One substring-matched tuple over-exempts:
-`scripts/update/run.py` would also exempt a future
-`tools/scripts/update/run.py`, and any allowed fragment appearing in matched
-source *text* rather than in a path would exempt a real violation.
+**Exemptions go in the pathspec. Every one of them is path-shaped, so `allow=`
+has no call sites and is not built.** An earlier draft reserved `allow=` for A2
+on the belief that A2 filtered output *lines* by a genuinely line-scoped rule.
+It does not. Every member of `_ALLOWED_DIRECT_CONSTRUCTORS` at
+`tests/unit/test_anthropic_client_semaphore.py:149-158` is a **file path**, and
+the filter at `:180-181` (`not any(mod in line for mod in ...)`) drops whole
+output lines by path substring. That is whole-file exemption — semantically
+identical to a negative pathspec, just implemented less safely.
 
-Push every **path-shaped** exemption into git pathspec exclusions, which git
-applies to the corpus instead of to stdout. No new parameter is needed — the
-helper already takes `*pathspecs`. This is the idiom already at
+Worse, the substring is matched against the entire `path:lineno:content` line
+rather than against the path field. A line in an unapproved module that merely
+*mentions* `agent/llm/wrapper.py` in a comment while calling
+`anthropic.AsyncAnthropic(` is silently exempted. A7 at
+`tests/unit/test_no_legacy_paths.py:33-37` has the mirror-image problem, filtering
+*file paths* two ways at once (exact membership in `ALLOWED_FILES` plus a prefix
+rule on `docs/plans/`), and one substring-matched tuple over-exempts there too:
+`scripts/update/run.py` would also exempt a future `tools/scripts/update/run.py`.
+
+So `allow=` would ship the exact mechanism this plan rejects, with **zero**
+legitimate consumers. Leave it out of the signature entirely rather than
+documenting it as reserved — a reserved-but-unused parameter is the one thing
+that would send a future author back to substring filtering.
+
+Push every exemption into git pathspec exclusions, which git applies to the
+corpus instead of to stdout. No new parameter is needed — the helper already
+takes `*pathspecs`. This is the idiom already at
 `tests/unit/test_plan_migration_invariant.py:150`
-(`f":!{this_file.relative_to(REPO_ROOT)}"`). Reserve `allow=` for A2's genuine
-line-substring case and say so in the docstring.
+(`f":!{this_file.relative_to(REPO_ROOT)}"`).
 
-**Accepted boundary: the corpus is tracked content only.** Moving to `git grep`
-closes the build-artifact hole and opens a smaller one — without `--untracked`
-it does not see brand-new, never-committed source. **Do not add `--untracked`.**
-It implies `--exclude-standard`, so it would still skip gitignored
-`__pycache__` and buy nothing against the reported defect, while re-walking the
-working tree and reopening the mid-walk race that Race 1 credits `git grep` with
-closing. Record the boundary instead, in both
+Keep `_ALLOWED_DIRECT_CONSTRUCTORS` as a module-level constant that *feeds* the
+negative-pathspec list, so the six approved modules keep their
+`#1055`/`#1193`/`#1262`/`#1925` provenance comments rather than losing them to a
+literal inline list.
+
+**Accepted boundary: the corpus is tracked *files*, read from the working
+tree.** Moving to `git grep` closes the build-artifact hole and opens a smaller
+one — without `--untracked` it does not see brand-new, never-added source.
+**Do not add `--untracked`.** It implies `--exclude-standard`, so it would still
+skip gitignored `__pycache__` and buy nothing against the reported defect, while
+re-walking the working tree and reopening the mid-walk hazard that Race 1
+credits `git grep` with narrowing.
+
+State the boundary precisely — the earlier "caught on first commit" phrasing was
+wrong for the common case. Because content is read from the working tree, an
+edit to an **already-tracked** file is caught immediately, staged or not; only a
+brand-new **untracked** file is invisible, and only until it is `git add`ed
+(added to the index — not committed). Record this in both
 `docs/features/tracked-content-sweep-guards.md` and the helper docstring:
-*"The corpus is tracked content only. A violation in a new, unstaged file is
-caught on first commit, which is where CI and the nightly detector read.
-`--untracked` would close that window but reopens the #2093 mid-walk race, so it
-is deliberately not used."*
+
+> *"The corpus is every tracked file matching the pathspec, with content read
+> from the working tree. A violation in an already-tracked file is caught
+> immediately, staged or not. A violation in a brand-new untracked file is
+> invisible until the file is added to the index. `--untracked` would close that
+> window but reopens the #2093 mid-walk hazard, so it is deliberately not used."*
 
 **Sweep dispositions** (spike-4; 27 codebase-content assertion sites, all
 classified — this table *is* the #2809 enumeration deliverable):
@@ -755,11 +780,23 @@ unconverted `grep -r` site)
 tree (`__pycache__`, `data/`, `logs/`) while `grep -r` is descending it.
 **Data prerequisite:** none.
 **State prerequisite:** the scanned corpus must be stable for the scan's duration.
-**Mitigation:** `git grep` reads an atomic index snapshot and never touches
-untracked runtime trees, so the corpus cannot shift underneath it. Verbatim from
-`test_plan_migration_invariant.py:136-145`: *"a directory vanishing mid-walk
-makes grep exit 2 and trips the returncode assertion below. `git grep` reads the
-index, so it is race-free and never scans untracked runtime artifacts (#2093)."*
+**Mitigation (narrowed, not eliminated):** `git grep` resolves its **file list**
+from an atomic index snapshot and never descends untracked runtime trees, so the
+*set of paths scanned* cannot shift underneath it and `__pycache__`, `data/` and
+`logs/` are never entered at all. That removes the reported failure mode.
+
+It does **not** make the scan wholly race-free, and the plan should not claim it
+does: content is read from the working tree file-by-file, so a sibling rewriting
+a tracked file mid-scan can still be observed at either version. What changes is
+the consequence — a shifting *corpus* silently changes what was guarded, whereas
+a shifting *file version* is a benign read of one file or the other, and a file
+that disappears outright is caught by obligation 4's absence check rather than
+being skipped in silence.
+
+`test_plan_migration_invariant.py:136-145` states it more strongly than is
+strictly true (*"`git grep` reads the index, so it is race-free"*). Task 7 should
+carry the narrowed wording into the new convention doc rather than copying that
+sentence forward, since this lane is the one that makes it doctrine.
 
 ## No-Gos (Out of Scope)
 
