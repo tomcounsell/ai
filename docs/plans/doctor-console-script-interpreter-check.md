@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2748
 last_comment_id: 5280929435
 revision_applied: true
-revision_applied_at: 2026-08-19T05:30:40Z
+revision_applied_at: 2026-08-19T05:52:15Z
 ---
 
 # Doctor console-script check: verify the winning script's interpreter
@@ -946,7 +946,15 @@ new finding inside an existing check that the agent already knows how to run and
       shebang, and a shebang-less binary all produce no finding and are counted as
       unverified rather than verified.
 - [ ] An unresolvable `.python-version` suppresses only the off-pin comparison; a
-      missing interpreter still fails.
+      missing interpreter still fails, **and** the message discloses the skip with
+      `(pin unresolvable; off-pin comparison skipped)` on both the pass and failure
+      paths.
+- [ ] A simultaneous resolution failure and interpreter failure reports both clauses in
+      `message` and both remedies in `fix` — proving the interpreter read runs inside
+      the resolution loop rather than after the early return at `tools/doctor.py:300-310`.
+- [ ] The two helpers are named `_shebang_interpreter` and `_classify_interpreter`, and
+      the three token anti-criteria scan the union of their bodies with
+      `_check_console_scripts_resolve`'s.
 - [ ] The pass message discloses how many scripts were interpreter-verified, so an
       all-unverified run does not read as verified.
 - [ ] On the **failure** path, the existing resolution clause, `path_note`, and PATH /
@@ -1019,23 +1027,45 @@ new finding inside an existing check that the agent already knows how to run and
 - **Assigned To**: `doctor-interpreter-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add a private shebang extractor for the plain absolute form only. Binary-mode bounded
-  read; `OSError` and decode errors yield `unverified`. Return `None` for a missing
-  `#!`, a relative target, or a first token whose basename is `sh` / `bash` / `dash` /
-  `env`. Write no `'''exec'` parser, no `dirname $0` resolver, and no `shutil.which`
-  fallback.
-- Add a private classifier returning `ok` / `missing` / `off-pin` / `outside`, ordered
-  existence → venv membership → pin, reusing `_repo_venv_bin_dirs()`,
-  `venv_python_version`, and `repo_interpreter_pin`. Compare membership by realpathing
-  **both sides of the parent directory** (mirroring `tools/doctor.py:242-243`); never
-  compute `Path(os.path.realpath(target)).parent`.
-- Call both only for names that passed the existing resolution test at
-  `tools/doctor.py:238-247`.
+- **Name the two helpers exactly `_shebang_interpreter` and `_classify_interpreter`,
+  at module level in `tools/doctor.py`.** These names are load-bearing, not stylistic:
+  three anti-criterion rows in the Verification table scan the union of these two
+  function bodies plus `_check_console_scripts_resolve`'s, and they fail closed if a
+  name is absent. Renaming either helper without updating those rows breaks the
+  verification. Module-level placement follows the file's own convention —
+  `_repo_venv_bin_dirs` (`:108`) and `_same_file` (`:138`) both sit outside the check
+  function.
+- `_shebang_interpreter(path)` — a shebang extractor for the plain absolute form only.
+  Binary-mode bounded read; `OSError` and decode errors yield `unverified`. Return
+  `None` for a missing `#!`, a relative target, or a first token whose basename is
+  `sh` / `bash` / `dash` / `env`. Write no `'''exec'` parser, no `dirname $0` resolver,
+  and no `shutil.which` fallback.
+- `_classify_interpreter(target, venv_bins, pin)` — returns `ok` / `missing` /
+  `off-pin` / `outside`, ordered existence → venv membership → pin, reusing
+  `_repo_venv_bin_dirs()`, `venv_python_version`, and `repo_interpreter_pin`. Compare
+  membership by realpathing **both sides of the parent directory** (mirroring
+  `tools/doctor.py:242-243`); never compute `Path(os.path.realpath(target)).parent`.
+- Call both **inside the existing resolution loop** at `tools/doctor.py:228-255`, on the
+  `match is not None` branch (the `elif` at `:254`), appending to an
+  `interpreter_findings` list and incrementing verified / unverified counters. Do **not**
+  add the read after the `if misresolved:` early return at `:300-310` — that placement
+  makes a simultaneous resolution + interpreter failure unreportable and leaves task 3
+  case 10 unreachable. See the control-flow bullet in Technical Approach.
+- Widen the tail guard at `:259` from `if misresolved:` to
+  `if misresolved or interpreter_findings:`, and inside it compute `path_note` and the
+  PATH / `uv sync` fixes only when `misresolved` is non-empty, and the interpreter clause
+  and remedies only when `interpreter_findings` is non-empty.
 - Group findings by `(reason, target)`; cap example names and append `(+N more)`,
   matching the convention at `:260-263`.
-- Append the interpreter clause to `message` and a reason-specific sentence to `fixes`.
+- Append the interpreter clause to `message` and a reason-specific sentence to `fixes`,
+  using the three fix shapes tabulated in Technical Approach — the diagnostic clause
+  differs per reason, the `rm -rf .venv && uv sync --all-extras` command is shared.
   When only interpreter findings exist, emit a standalone message that does not reuse
   the `X/N ... do not resolve` phrasing.
+- When `repo_interpreter_pin(PROJECT_DIR)` is `None`, append
+  `(pin unresolvable; off-pin comparison skipped)` to the interpreter clause on **both**
+  the pass and the failure path. The comparison is skipped in the classifier; the
+  disclosure lives in the message construction.
 - Add no `/update` sentence: `/update` hardlinks no `[project.scripts]` name (see the
   remediation bullet in Technical Approach).
 - Extend the pass message with the interpreter-verified count, keeping today's
@@ -1075,12 +1105,22 @@ new finding inside an existing check that the agent already knows how to run and
   `passed is True`, no `outside` finding. Breaking the both-sides realpath rule fails
   exactly this test.
 - Case 8 — no pin: `.python-version` absent → off-pin comparison suppressed, but a
-  broken-symlink target still fails. The fail-open scoping guard.
+  broken-symlink target still fails. The fail-open scoping guard. **Also assert
+  `"pin unresolvable; off-pin comparison skipped" in result.message`**, so the fail-open
+  cannot ship as a silent skip. Add a companion assertion on the *pass* path (no pin, all
+  shebangs `ok`) that the same substring appears, since that is the case where silence
+  would read as a clean bill of health.
 - Case 9 — grouping: several scripts sharing one bad target → the target appears once
   with a count, and the finding line count is below the script count.
 - Case 10 — mixed: one misresolved name plus one bad-interpreter name → both clauses in
-  `message`, both remedies in `fix`.
-- Case 11 — distinct remedies: the three reasons produce three different fix sentences.
+  `message`, both remedies in `fix`. This case is what proves the merged tail guard was
+  built; it is unreachable if the interpreter read sits after the `:300-310` early
+  return.
+- Case 11 — distinct remedies: the three reasons produce three different **diagnostic
+  clauses** (the text preceding `In {checkout}:`), while all three share the
+  `rm -rf .venv && uv sync --all-extras` command. Assert the three prefixes are pairwise
+  unequal *and* that all three carry the shared command — asserting the commands differ
+  would contradict Risk 5's mitigation.
 - Case 12 — pass-message contract: the pass message still starts with today's
   `N console scripts resolve into <venv bin>` text and names no venv path in the
   appended clause (guards `test_main_checkout_venv_accepted_from_a_worktree`).
@@ -1116,7 +1156,7 @@ new finding inside an existing check that the agent already knows how to run and
 - **Task ID**: document-feature
 - **Depends On**: validate-mutations
 - **Assigned To**: `doctor-interpreter-builder`
-- **Agent Type**: documentarian
+- **Agent Type**: builder
 - **Parallel**: false
 - Update `docs/features/local-doctor.md` per the Documentation section.
 - Update the Local Doctor row in `docs/features/README.md`.
@@ -1144,8 +1184,6 @@ new finding inside an existing check that the agent already knows how to run and
 
 ## Verification
 
-| Check | Command | Expected |
-|-------|---------|----------|
 Every row is exit-code-honest: the command exits 0 exactly when the Expected column is
 satisfied, so a runner can key on exit status alone. `grep -c` is avoided throughout,
 because it exits 1 on a zero count — which makes a count row indistinguishable from a
@@ -1153,6 +1191,33 @@ failed row, and inverts for the anti-criteria, whose passing state *is* zero. Me
 main: `grep -c unlink tools/doctor.py` prints `0` and exits 1 in its **passing** state,
 while `grep -c shebang tools/doctor.py` prints `0` and exits 1 in its **failing** state.
 `grep -q` and `! grep -q` give the two directions unambiguously.
+
+**Scope of the token anti-criteria.** Three rows below (no subprocess, no `/update`
+remedy, no `returncode`) must scan the **union of three function bodies** —
+`_check_console_scripts_resolve`, `_shebang_interpreter`, and `_classify_interpreter` —
+not just the check function. An earlier draft sliced from
+`def _check_console_scripts_resolve` to the next top-level `def`, which is lines 150-319
+on main; the two new helpers sit outside that window by the file's own convention
+(`_repo_venv_bin_dirs` at `:108` and `_same_file` at `:138` are both outside it too), so
+any offending token landing in a helper would be invisible and all three rows would pass
+vacuously.
+
+A whole-file scan is **not** an acceptable fallback. Measured on main:
+`grep -c subprocess tools/doctor.py` is `22`, `grep -c returncode` is `6`, and
+`grep -c '/update'` is `14`, so whole-file rows would fail unconditionally and carry no
+signal.
+
+The three rows share this shape, which was executed against main in all three states
+(helpers absent → exit 1 with no traceback; helpers present and token absent → exit 0;
+helpers present and token present → exit 1). Substitute `TOKEN`:
+
+```
+.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if 'TOKEN' not in bodies else 1)"
+```
+
+It is fail-closed on the helper names: a missing or renamed `_shebang_interpreter` or
+`_classify_interpreter` exits 1 rather than silently narrowing the scan. That is why
+task 2 pins both names.
 
 | Check | Command | Expected |
 |-------|---------|----------|
@@ -1164,12 +1229,13 @@ while `grep -c shebang tools/doctor.py` prints `0` and exits 1 in its **failing*
 | Pass message discloses verification | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if 'interpreter' in c().message else 1)"` | exit 0 |
 | Pass message keeps #2665's prefix | `.venv/bin/python -c "from tools.doctor import _check_console_scripts_resolve as c; import sys; sys.exit(0 if c().message.startswith('26 console scripts resolve into ') else 1)"` | exit 0 |
 | Existing assertions unmodified | `.venv/bin/python -c "import subprocess,sys;d=subprocess.run(['git','diff','main','--','tests/unit/test_doctor_console_scripts.py'],capture_output=True,text=True).stdout;sys.exit(0 if not any(l.startswith('-') and 'assert ' in l for l in d.splitlines()) else 1)"` | exit 0 |
-| Anti-criterion: no subprocess in this check | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if 'subprocess' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Helpers exist under their pinned names | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text();sys.exit(0 if 'def _shebang_interpreter' in s and 'def _classify_interpreter' in s else 1)"` | exit 0 (both present) |
+| Anti-criterion: no subprocess in this check (union of 3 bodies) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if 'subprocess' not in bodies else 1)"` | exit 0 (absent) |
 | Anti-criterion: interpreter target never realpath-ed | `.venv/bin/python -c "import pathlib,re,sys;s=pathlib.Path('tools/doctor.py').read_text();sys.exit(0 if not re.search(r'realpath\([^)]*target[^)]*\)\s*\)?\s*\.parent', s) else 1)"` | exit 0 (absent) |
-| Anti-criterion: no `/update` remedy in this check | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if '/update' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Anti-criterion: no `/update` remedy in this check (union of 3 bodies) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if '/update' not in bodies else 1)"` | exit 0 (absent) |
 | Anti-criterion: doctor deletes nothing (#2780 stays out) | `! grep -q unlink tools/doctor.py` | exit 0 (absent) |
 | Anti-criterion: doctor removes no trees (#2780 stays out) | `! grep -q rmtree tools/doctor.py` | exit 0 (absent) |
-| Anti-criterion: check inspects no process result (#2749 stays out) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();a=next(i for i,l in enumerate(s) if l.startswith('def _check_console_scripts_resolve'));b=next(i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def '));sys.exit(0 if 'returncode' not in chr(10).join(s[a:b]) else 1)"` | exit 0 (absent) |
+| Anti-criterion: check inspects no process result, #2749 stays out (union of 3 bodies) | `.venv/bin/python -c "import pathlib,sys;s=pathlib.Path('tools/doctor.py').read_text().splitlines();N=('_check_console_scripts_resolve','_shebang_interpreter','_classify_interpreter');st={n:[i for i,l in enumerate(s) if l.startswith('def '+n)] for n in N};sys.exit(1) if not all(st.values()) else None;body=lambda a:chr(10).join(s[a:next((i for i,l in enumerate(s[a+1:],a+1) if l.startswith('def ')),len(s))]);bodies=''.join(body(st[n][0]) for n in N);sys.exit(0 if 'returncode' not in bodies else 1)"` | exit 0 (absent) |
 | Docs cover the interpreter half | `grep -q interpreter docs/features/local-doctor.md` | exit 0 (present) |
 | Docs cover the resolution half | `grep -q "console script" docs/features/local-doctor.md` | exit 0 (present) |
 | Lint clean | `python -m ruff check tools/doctor.py tests/unit/test_doctor_console_scripts.py` | exit 0 |
@@ -1179,12 +1245,12 @@ while `grep -c shebang tools/doctor.py` prints `0` and exits 1 in its **failing*
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Three of the six anti-criterion Verification rows (no subprocess, no `/update` remedy, no `returncode`) slice `tools/doctor.py` from `def _check_console_scripts_resolve` to the next top-level `def` — measured as lines 150-319 — but task 2 puts the new logic in separate module-private helpers, following the file's own convention where `_repo_venv_bin_dirs` (`:108`) and `_same_file` (`:138`) both sit outside that window. Any offending token that lands in a helper is invisible to all three rows, which then pass vacuously. | pending | A whole-file scan is not a fallback: measured on main, `grep -c subprocess tools/doctor.py` is 22 and `grep -c returncode tools/doctor.py` is 6, so the rows would fail unconditionally. Pin the two helper names in task 2 (e.g. `_shebang_interpreter`, `_classify_interpreter`) and rewrite each of the three rows to scan the union of the three function bodies, e.g. `bodies = "".join(_body(s, n) for n in ("_check_console_scripts_resolve", "_shebang_interpreter", "_classify_interpreter"))`, then assert the token is absent from `bodies`. |
-| CONCERN | History & Consistency | The interpreter read has no stated position in the control flow, and the merged code returns early: `if misresolved:` builds its message and returns at `tools/doctor.py:300-310`, with the pass `CheckResult` at `:312-317`. A builder who adds the interpreter read after that block gets it only on the pass path, making task 3 case 10 (mixed resolution + interpreter failure, both clauses in `message`, both remedies in `fix`) unreachable. Data Flow item 7 compounds this by modelling only two outcomes, omitting the interpreter-only failure the Technical Approach requires. | pending | Collect interpreter findings into a list during the resolution loop at `tools/doctor.py:228-255`, on the `match is not None` branch. Then restructure the tail as one `if misresolved or interpreter_findings:` block that composes `path_note` only when `misresolved` is non-empty and appends the interpreter clause only when `interpreter_findings` is non-empty. Composing after the existing early return at `:300-310` cannot satisfy case 10. Update Data Flow item 7 to name all three outcomes. |
-| CONCERN | History & Consistency | The Technical Approach bullet headed "one remedy" says `missing` and `off-pin` "both point at `rm -rf .venv && uv sync --all-extras`" and `outside` "points at the same rebuild", while Success Criteria, Failure Path Test Strategy, and task 3 case 11 all require three distinct fix sentences. A builder implementing the Technical Approach literally emits one shared sentence and case 11 fails. Same shape as the round-one BLOCKER: two sections stating incompatible contracts for one output string. | pending | State that "distinct" means the diagnostic clause differs while the rebuild command is shared, and write the three shapes into the bullet verbatim — `missing`: "shebang target {t} does not exist"; `off-pin`: "shebang target {t} is Python {v}, pin is {p}"; `outside`: "shebang target {t} is outside every repo venv, so it carries no editable install of this repo" — each followed by the identical `In {checkout}: rm -rf .venv && uv sync --all-extras`. Case 11 then asserts the three diagnostic prefixes differ, not the commands. Keep the shared command: it is what `_check_worktree_interpreters` prescribes at `:520-523`, which is Risk 5's mitigation. |
-| CONCERN | Risk & Robustness | The plan states its own disclosure rule as "Both degradations must be visible" and "verified is never claimed for a set the check did not read", but only the extraction degradation is disclosed. When `repo_interpreter_pin` returns `None` the off-pin comparison silently disappears and the pass message still reports the full count as interpreter-verified, so an operator with an unreadable `.python-version` reads a clean bill of health for a comparison that never ran. Case 8 asserts only that a broken-symlink target still fails. | pending | `repo_interpreter_pin(PROJECT_DIR)` (`agent/worktree_manager.py:1076-1096`) returns `None` only when neither this working tree's `.python-version` nor the main checkout's is readable, and it is the classifier's only pin source. Guard the message construction, not the classifier: `if pin is None: clause += " (pin unresolvable; off-pin comparison skipped)"`. Extend task 3 case 8 to assert that substring is in `result.message` alongside the `missing` failure, so the fail-open cannot ship as a silent skip. |
-| CONCERN | Scope & Value | Of the four classification states, `off-pin` carries most of the plan's cost and detects almost nothing the doctor run does not already fail on. Its membership set is exactly `_repo_venv_bin_dirs()` (`tools/doctor.py:108-135`), and `_check_worktree_interpreters` (`:442-539`) already measures the main venv plus every `.worktrees/*/.venv` and `.claude/worktrees/*/.venv` against the same pin, in the same base check list (`:1819-1852`) so it runs under `--quick` too. Measured now, that check is already red: "pin is Python 3.14 (from .python-version), 4 venv(s) are not". Yet `off-pin` is what forces the `.python-version` half of the fixture upgrade — spike-4's named main hazard — plus the fail-open scoping, cases 2 and 8, and a mutation check. | pending | The one shape genuinely uncovered by `_check_worktree_interpreters` is a checkout whose `.venv` sits under neither `checkout/.worktrees/` nor `checkout/.claude/worktrees/`: its glob at `:496-498` never sees it while `_repo_venv_bin_dirs()` does via `PROJECT_DIR / ".venv" / "bin"`. Keep `off-pin` and add that sentence to Risk 5 as the justification, or drop the state — dropping it also removes task 1's `.python-version` and `pyvenv.cfg` fixture work and the whole fail-open scoping bullet. |
-| NIT | Scope & Value | Task 5 is assigned to `doctor-interpreter-builder` but declares `Agent Type: documentarian`, while the Team Members roster declares that member's agent type as `builder` and lists only two members. The Appetite section separately describes the team as "Solo dev, code reviewer". | pending | Roster-consistency edit only; set task 5's Agent Type to `builder` to match the member it assigns to. |
+| CONCERN | Risk & Robustness | Three of the six anti-criterion Verification rows (no subprocess, no `/update` remedy, no `returncode`) slice `tools/doctor.py` from `def _check_console_scripts_resolve` to the next top-level `def` — measured as lines 150-319 — but task 2 puts the new logic in separate module-private helpers, following the file's own convention where `_repo_venv_bin_dirs` (`:108`) and `_same_file` (`:138`) both sit outside that window. Any offending token that lands in a helper is invisible to all three rows, which then pass vacuously. | ADDRESSED — task 2 (helper-name bullet), Verification table preamble + the three rewritten rows + new "Helpers exist under their pinned names" row, Success Criteria | Confirmed the whole-file fallback is unusable: measured on main, `grep -c subprocess` = 22, `grep -c returncode` = 6, `grep -c '/update'` = 14. Task 2 now pins `_shebang_interpreter` and `_classify_interpreter` as load-bearing names and says why. All three rows scan the union of the three bodies and are fail-closed on a missing helper name. The shared command shape was executed against main in all three states (helpers absent → exit 1, no traceback; present + token absent → exit 0; present + token present → exit 1). |
+| CONCERN | History & Consistency | The interpreter read has no stated position in the control flow, and the merged code returns early: `if misresolved:` builds its message and returns at `tools/doctor.py:300-310`, with the pass `CheckResult` at `:312-317`. A builder who adds the interpreter read after that block gets it only on the pass path, making task 3 case 10 (mixed resolution + interpreter failure, both clauses in `message`, both remedies in `fix`) unreachable. Data Flow item 7 compounds this by modelling only two outcomes, omitting the interpreter-only failure the Technical Approach requires. | ADDRESSED — new "Control-flow position" bullet in Technical Approach, Data Flow item 7 rewritten, task 2 bullets 4-5, task 3 case 10, Success Criteria | Adopted verbatim. The read now happens inside the `for name in sorted(scripts):` loop at `:228-255` on the `match is not None` branch, and the tail guard widens from `if misresolved:` at `:259` to `if misresolved or interpreter_findings:`, with `path_note` composed only when `misresolved` is non-empty. Data Flow item 7 now names all three outcomes explicitly, and task 3 case 10 states that it is the case proving the merged tail exists. |
+| CONCERN | History & Consistency | The Technical Approach bullet headed "one remedy" says `missing` and `off-pin` "both point at `rm -rf .venv && uv sync --all-extras`" and `outside` "points at the same rebuild", while Success Criteria, Failure Path Test Strategy, and task 3 case 11 all require three distinct fix sentences. A builder implementing the Technical Approach literally emits one shared sentence and case 11 fails. Same shape as the round-one BLOCKER: two sections stating incompatible contracts for one output string. | ADDRESSED — Technical Approach remediation bullet (retitled, now carries a three-row fix-sentence table), task 3 case 11, Risk 5 | Adopted verbatim. "Distinct" is now defined as *the diagnostic clause differs while the rebuild command is shared*, with the three sentences written out in a table. Case 11 asserts the three diagnostic prefixes are pairwise unequal **and** that all three carry the shared `rm -rf .venv && uv sync --all-extras`, since asserting the commands differ would contradict Risk 5's one-action mitigation. |
+| CONCERN | Risk & Robustness | The plan states its own disclosure rule as "Both degradations must be visible" and "verified is never claimed for a set the check did not read", but only the extraction degradation is disclosed. When `repo_interpreter_pin` returns `None` the off-pin comparison silently disappears and the pass message still reports the full count as interpreter-verified, so an operator with an unreadable `.python-version` reads a clean bill of health for a comparison that never ran. Case 8 asserts only that a broken-symlink target still fails. | ADDRESSED — Technical Approach fail-open bullet (rewritten with a two-row disclosure table), task 2 final bullet, task 3 case 8, Success Criteria | Adopted verbatim. The disclosure `(pin unresolvable; off-pin comparison skipped)` is appended in the **message construction**, not the classifier, on both the pass and failure paths. Case 8 asserts the substring alongside the `missing` failure, plus a companion assertion on the pass path — that is the case where silence would read as a clean bill of health. Also recorded that `_check_worktree_interpreters` fails outright on the same state at `tools/doctor.py:484-491`, so the operator has a second signal in the same run; the clause exists so *this* check's output cannot be misread as full verification. |
+| CONCERN | Scope & Value | Of the four classification states, `off-pin` carries most of the plan's cost and detects almost nothing the doctor run does not already fail on. Its membership set is exactly `_repo_venv_bin_dirs()` (`tools/doctor.py:108-135`), and `_check_worktree_interpreters` (`:442-539`) already measures the main venv plus every `.worktrees/*/.venv` and `.claude/worktrees/*/.venv` against the same pin, in the same base check list (`:1819-1852`) so it runs under `--quick` too. Measured now, that check is already red: "pin is Python 3.14 (from .python-version), 4 venv(s) are not". Yet `off-pin` is what forces the `.python-version` half of the fixture upgrade — spike-4's named main hazard — plus the fail-open scoping, cases 2 and 8, and a mutation check. | ADDRESSED (option A: keep, with the redundancy stated) — new `off-pin` bullet in Technical Approach, Risk 5 retitled and rewritten, new `[NEW-ISSUE]` entry in No-Gos | **Finding verified and strengthened.** Measured directly: `_repo_venv_bin_dirs()` returns exactly **one** directory on this machine, because `main_checkout_venv(PROJECT_DIR)` resolves to the same venv and is deduped at `:125-134`. So in the standard topology `off-pin` is fully redundant, not merely near-fully. `_check_worktree_interpreters` is red right now for an unrelated reason (4 worktree venvs on 3.13 against a 3.14 pin). **Decision: keep, for two reasons in order of weight.** (1) #2748's Desired Outcome explicitly names "off the `.python-version` pin" as one of three fail conditions; cutting it is a scope reduction against the issue text, and Small-appetite pressure is not severe enough to make that call without the human. The honest cost is also smaller than the critique implies — two lines in `_fake_checkout`, two cases, one mutation check — because spike-4's "7 assertions flip" hazard was predicated on a naive implementation that classifies `#!/bin/sh` as `outside`, which this plan's design already refuses. (2) One shape is genuinely uncovered, confirmed by reading `PROJECT_DIR = Path(__file__).resolve().parent.parent` (`:32`): a **linked git worktree outside both worktree roots** is visible to `_repo_venv_bin_dirs()` but invisible to the `:496-498` glob. Two such worktrees exist on this machine today (session scratchpad); neither carries a `.venv`, so the shape is reachable but is not one house tooling creates. **What is explicitly not claimed:** this plan does not close the worktree-scan gap. Widening that glob is the honest home for the pin question and is now filed as a `[NEW-ISSUE]` No-Go, along with the note that CLAUDE.md's "names every one on the machine" is already false for foreign worktrees, independently of this issue. |
+| NIT | Scope & Value | Task 5 is assigned to `doctor-interpreter-builder` but declares `Agent Type: documentarian`, while the Team Members roster declares that member's agent type as `builder` and lists only two members. The Appetite section separately describes the team as "Solo dev, code reviewer". | ADDRESSED — task 5 | Task 5's Agent Type is now `builder`, matching `doctor-interpreter-builder`'s roster entry. The Appetite section's "Solo dev, code reviewer" is the human-team shape and the roster is the agent shape; the two describe different things and both stand. |
 
 ---
 
