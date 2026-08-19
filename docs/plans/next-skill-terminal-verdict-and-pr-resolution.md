@@ -7,7 +7,7 @@ created: 2026-08-19
 tracking: https://github.com/tomcounsell/ai/issues/2817
 last_comment_id: 5324622874
 revision_applied: true
-revision_applied_at: 2026-08-19T05:45:10Z
+revision_applied_at: 2026-08-19T06:20:00Z
 ---
 
 # Terminal Verdict and PR Resolution: the three stage-marker residuals left outside #2826's fence
@@ -439,6 +439,9 @@ bounded diffs plus their tests.
 | Repo resolvable | `gh repo view --json nameWithOwner -q .nameWithOwner` | `_lookup_pr` / `_review_artifact_posted` need a repo slug |
 | Venv on the pinned interpreter | `./.venv/bin/python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); assert '.'.join(map(str,sys.version_info[:2])) in pin, (sys.version, pin)"` | `scripts/pytest-clean.sh` aborts on an off-pin venv, so every test row depends on this |
 | Live fixture issues still in shape | `./.venv/bin/python -c "from tools.sdlc_stage_query import _lookup_pr; assert _lookup_pr(2494, repo='tomcounsell/ai', state='merged') == 2516"` | The #2824 live reproduction must still reproduce at build time |
+| WS-B's regression fixture still in shape | `./.venv/bin/python -c "from tools.sdlc_stage_query import _lookup_pr; assert _lookup_pr(2694, slug='sdlc-2694', repo='tomcounsell/ai', state='merged') == 2695"` | #2694 is the single measured loss the existence check exists to prevent. If it has healed (via [#2869](https://github.com/tomcounsell/ai/issues/2869) or a slug adoption), WS-B has **no live regression fixture left** — say so in the PR body rather than quietly dropping the row, and fall back to a synthetic fixture patching `lane_branch_exists_on_remote`. |
+| #2694's lane branch still absent from origin | `git ls-remote --heads origin refs/heads/session/sdlc-2694` | Empty output. The other half of the same fixture: the loss only occurs because this branch does not exist. |
+| Terminal-ledger issue states still CLOSED | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; c=sum(subprocess.run(['gh','issue','view',str(n),'--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns); assert c==len(ns), (c, len(ns))"` | 16/16 at plan time. A drift means the `!= \"CLOSED\"` polarity now costs real coverage and must be re-argued before build. |
 
 ## Solution
 
@@ -809,6 +812,24 @@ No xfail or runtime `pytest.xfail()` markers exist anywhere in `tests/` (`grep` 
   start writing a parser.
 - **Backfilling `slug` onto #2494 and #2518 so WS-B covers them.** Mutating two live
   ledgers to make a fix look complete. The honest move is the scope statement in WS-B.
+- **Fixing the lane-slug adoption gap while WS-B is open.** #2694's slug is `sdlc-2694`
+  while its PR's head is `session/dev-41a59eee`, and the temptation is to chase the write
+  site that failed to call `adopt_lane_slug`. That is a real bug and it is
+  [#2869](https://github.com/tomcounsell/ai/issues/2869). It is **not** a prerequisite:
+  WS-B's existence check makes a minted-but-wrong slug degrade to today's behavior rather
+  than to a wrong answer, so the two are independent in both directions. Fixing #2869 later
+  strictly increases how often WS-B resolves authoritatively; it can never invalidate it.
+- **Making the terminal guard "smarter" about re-entry than one `issue_state` string.**
+  Reopen timestamps, comparing the merge time against the reopen time, per-lifecycle ledger
+  keys — all plausible, all strictly more machinery than the failure needs. `CLOSED` versus
+  not-`CLOSED` fails in the safe direction and costs zero measured coverage (16/16). If a
+  second terminal reason ever needs finer state, revisit then.
+- **Un-writing `MERGE = completed` so a reopened lane starts clean.** The obvious "real"
+  fix for Risk 6, and the reason it is a rabbit hole is that every route to it is worse than
+  the gate: a new backwards `--status` value widens a CLI contract three other tools read,
+  and zeroing `stage_states_json` is documented as a clobber
+  (`docs/features/sdlc-issue-keyed-stage-ledger.md:324`). Per-lifecycle ledger identity is
+  the honest long-term answer and it belongs to #2491's pipeline-graph work, not here.
 - **Extending the terminal guard to the `docs_success_no_pr` path.** It needs `pr_open`,
   which needs I/O, which breaks the router's purity and its no-`tools/` import
   constraint. Out of scope by design, not by omission.
@@ -1160,12 +1181,19 @@ in-process.
 - [ ] **KNOWN-UNCOVERED — the two live #2824 candidates stay broken, by design.**
       #2494 and #2518 are the only OPEN reopened issues carrying a stale prior-lifecycle
       PR, and `sdlc-tool stage-query` reports `slug: null, slug_source: "unresolved"` for
-      both. WS-B keys on a *recorded* slug, so **it does not fix either of them.** It fixes
-      every future lane, because lanes now record their slug at lane start
-      (`docs/features/sdlc-lane-identity.md`). This lane closes #2824 as "the mechanism is
-      correct going forward", not as "the two live instances are repaired" — backfilling
-      their ledgers to make the fix look complete is an explicit Rabbit Hole. Stating this
-      here, at the completion bar, rather than only in task 8's issue comment.
+      both. WS-B keys on a *recorded* slug **naming a branch that exists**, so **it does not
+      fix either of them** — a lane with no slug has no branch to check. This lane closes
+      #2824 as "the mechanism is correct going forward", not as "the two live instances are
+      repaired"; backfilling their ledgers to make the fix look complete is an explicit
+      Rabbit Hole.
+      **Round-2 addendum — the forward-looking claim is narrower than round 1 stated.**
+      "It fixes every future lane" was too strong: measured over every slugged ledger on this
+      machine, the existence-checked mechanism changes **zero** answers today (0 gains,
+      0 losses, 11 unchanged). It fixes every future lane *whose recorded slug names a branch
+      that exists*, and [#2869](https://github.com/tomcounsell/ai/issues/2869) is how that
+      population grows. WS-B's value in this PR is that it makes the reopened-issue path
+      correct while costing nothing measurable — not that it repairs something observable
+      today. Say exactly that in task 8's issue comment.
 - [ ] The terminal shape is consumed correctly end to end by **both** router consumers:
       `.claude/skills-global/do-sdlc/SKILL.md` **and** `.claude/skills/sdlc/SKILL.md` route
       `complete: true` to loop-exit-success, not to human escalation. Both edits land in the
@@ -1339,7 +1367,7 @@ in-process.
 | Terminal verdict, `pr_number` present | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{'branch_exists':True}))"` | output contains `TERMINAL` and does not contain `/do-merge` |
 | **Risk 6 — a reopened (OPEN) issue is NOT latched** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(d(s,{'issue_state':'OPEN'},{'branch_exists':True}))"` | output does **not** contain `TERMINAL`. The single most important row in this table: a terminal ledger whose issue was reopened must route as it does today, not terminate forever. |
 | **Risk 6 — an unresolvable issue state fails open** | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH','MERGE']}; print(all('TERMINAL' not in str(d(dict(s),m,{'branch_exists':True})) for m in [{},{'issue_state':None},{'issue_state':''},{'issue_state':'closed'},{'issue_state':42}]))"` | output contains `True`. Pins the `!= "CLOSED"` polarity: the `== "OPEN"` form would fail every case here. |
-| **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('stages',{}).get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Measured 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. |
+| **Risk 6 — all live terminal ledgers are still CLOSED (guard coverage unchanged)** | `./.venv/bin/python -c "from agent.pipeline_ledger import PipelineLedger; import json,subprocess; ns=[int(r.issue_number) for r in PipelineLedger.query.all() if json.loads(r.stage_states_json or '{}').get('MERGE')=='completed']; print(len(ns), sum(subprocess.run(['gh','issue','view',str(n),'--json','state','-q','.state'],capture_output=True,text=True).stdout.strip()=='CLOSED' for n in ns))"` | both numbers equal. Measured 2026-08-19: **16 16**. A drop means the gate is now costing real coverage and the polarity needs re-argument. |
 | Negative control — non-terminal still routes to merge | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','PATCH']}; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555},{'branch_exists':False}))"` | output contains `/do-merge` |
 | Terminal verdict, `PATCH` unsettled (ninth cell) | `./.venv/bin/python -c "from agent.sdlc_router import decide_next_dispatch as d; s={k:'completed' for k in ['ISSUE','PLAN','CRITIQUE','BUILD','TEST','REVIEW','DOCS','MERGE']}; s['PATCH']='pending'; s['_verdicts']={'REVIEW':{'verdict':'APPROVED','at':'2026-08-19T00:00:00Z'}}; print(d(s,{'pr_number':555,'issue_state':'CLOSED'},{}))"` | output contains `TERMINAL` (red today: returns `/do-merge` row 10) |
 | Terminal guard survives a non-dict ledger | `./.venv/bin/python -c "from agent.sdlc_router import guard_terminal_pipeline as g; print(all(g(b,{},{}) is None for b in [None,'x',42,[]]))"` | output contains `True`. Asserts **the new guard alone**, not `evaluate_guards` — see the note under the table. |
@@ -1370,6 +1398,22 @@ they start green, their job is to *stay* green, and Risk 5's mutation table must
 any of them as coverage for any workstream. Recording them in the red-state paper trail as
 if they had failed would manufacture four rows of false evidence — which is precisely the
 #2091 stale-fixture problem this plan is trying not to repeat.
+
+### Note: `stage_states_json` is flat — the `stages` wrapper belongs to the CLI projection only
+
+Caught while writing the Risk 6 rows above, and recorded because it silently manufactures a
+vacuous gate. `PipelineLedger.stage_states_json` stores stage names as **top-level** keys
+(`{"ISSUE": ..., "MERGE": "pending", "_patch_cycle_count": 0, ...}`). The `{"stages": {...}}`
+envelope that `sdlc-tool stage-query` emits is a *projection*, built by the CLI — it is not
+what is on disk.
+
+A row written as `json.loads(r.stage_states_json).get("stages", {}).get("MERGE")` therefore
+matches **nothing**, returns an empty population, and any `assert count == len(population)`
+over it passes as `0 == 0`. Both Risk 6 rows were briefly written that way and measured
+`0 0` before being corrected to read the flat shape, at which point they measured the real
+`16 16`. Anyone extending these rows must read the flat shape, and must sanity-check that
+the population is **non-empty** before trusting a comparison over it — an all-pass over an
+empty set is the #2091 stale-fixture problem wearing a different hat.
 
 ### Note: the non-dict ledger is a pre-existing router-wide fragility, not one this lane creates
 
