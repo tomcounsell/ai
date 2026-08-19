@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/2836
 also_closes: https://github.com/tomcounsell/ai/issues/2843
 last_comment_id: 5324500130
 revision_applied: true
-revision_applied_at: 2026-08-19T05:30:10Z
+revision_applied_at: 2026-08-19T06:04:26Z
 ---
 
 # Verification-Runner Convergence: One Table Definition, One Expectation Evaluator
@@ -63,7 +63,13 @@ whose tables carry no `Command` column fails loudly instead of quietly gating on
 
 ## Freshness Check
 
-**Disposition: Unchanged.** Baseline `main` @ `f491306c5` (2026-08-18 23:16 +0700).
+**Disposition: Unchanged.** Baseline `main` @ `ba8fdd9d6` (2026-08-19 12:56 +0700). This is the
+single baseline SHA for the whole plan; `## Spike Results` pins the same one and no third SHA is
+cited anywhere as a measurement baseline. Re-verified at this SHA:
+`git log f491306c5..ba8fdd9d6 -- agent/verification_parser.py scripts/validate_build.py
+tests/unit/test_verification_parser.py tests/unit/test_validate_build.py docs/sdlc/do-build.md
+docs/sdlc/do-pr-review.md docs/features/machine-readable-dod.md` returns **zero commits**, so
+every row below still holds unchanged at the newer baseline.
 
 | Re-verified | Result |
 |---|---|
@@ -121,11 +127,23 @@ one was, by a build gate failing a plan that is fine.
 
 ## Spike Results
 
-Every figure below is measured against the plan corpus at `main` @ `32f16f0f0` (590 documents
-under `docs/plans/**`, of which **505** carry a `## Verification` section; 28 of those are active
-plans in `docs/plans/*.md`). The corpus grows daily, so a re-measurement at a later SHA will
-report larger totals; T14 re-measures and writes the refreshed numbers back into this section as
-well as into the PR body.
+**Baseline: `main` @ `ba8fdd9d6`** — the same single SHA `## Freshness Check` pins.
+
+**Corpus definition, stated so any round re-derives the same number.** The corpus is
+`find docs/plans -name '*.md'` → **590** documents. `.worktrees/` is excluded by construction: it
+is not under `docs/plans/`. A bare `grep -rl` from the repo root instead sweeps 19 live worktree
+copies of the same tree — thousands of matches, hundreds of times the real corpus, and unstable
+as lanes create and destroy worktrees. The counting unit is a *file whose heading matches*
+`^## Verification\s*$`, the same regex `agent/verification_parser.py:129-135` uses: **505** files.
+A prefix-matching `grep -l '^## Verification'` returns 507 instead, because it also catches
+`## Verification Results`. That two-file gap, plus the four `docs/plans/` subdirectories
+(`completed/`, `done/`, `critiques/`, `notes/`), is the whole reason three rounds produced three
+different totals — no round's method was wrong, they counted different populations. Of the 505,
+**25** are active plans in `docs/plans/*.md`.
+
+Re-measured at this baseline, every figure below reproduces exactly: 505 sections, 502
+pipe-blocks, 493 check tables. T14 re-measures at build time and records the refreshed figures
+**in the PR body only** — see T14 for why nothing is written back into this document.
 
 ### spike-1: Does per-block header-signature scoping preserve legitimate multi-table check layouts?
 
@@ -150,17 +168,28 @@ well as into the PR body.
 - **Assumption:** "Scoping the parser will change how existing plans parse."
 - **Method:** simulate the proposed parser against every plan with a `## Verification` section
   and diff check/malformed counts against the current parser.
-- **Result:** 505 plans carrying a `## Verification` section examined. **0 active plans**
-  (`docs/plans/*.md`) change their parse
-  result. 8 completed plans change; every delta removes junk rows or `.worktrees`-fenced shell
-  lines that currently parse as checks. Two completed plans
+- **Result:** 505 plans carrying a `## Verification` section examined. **0 of the 25 active plans**
+  (`docs/plans/*.md`) change their parse result — re-measured at the pinned baseline `ba8fdd9d6`
+  by simulating the per-block parser against every active plan and diffing both check and
+  malformed counts against the live parser. 8 completed plans change; every delta removes junk
+  rows or `.worktrees`-fenced shell lines that currently parse as checks. Two completed plans
   (`delivery_guard_resume_epoch_scoping.md`, `redis-replication-sentinel-failover.md`) head
   their only table `| # | Criterion | Check |` with no Command column and would yield zero
   checks.
-- **Confidence:** high.
-- **Impact:** the fix is behavior-preserving for everything currently in flight. The
-  zero-check case must be a **loud** malformed error, or the fix trades one silent gate for
-  another.
+- **One active plan transited this state and is reported rather than rewritten.** During critique
+  round 2, `docs/plans/doctor-console-script-interpreter-check.md` (#2748, active) carried two
+  `| Check | Command | Expected |` tables in one `## Verification` section; the current parser read
+  the second table's header and separator as two checks whose Expected cells were `Expected` and
+  `---` — two guaranteed FAILs, a live second instance of #2836 biting a real lane. Its own lane
+  independently collapsed it to a single 19-check table at `496a9cb5e`, before this revision.
+  `## No-Gos` says an active plan changing "is a finding to report, not a document to quietly
+  rewrite": the trigger fired, this bullet is the report, and this lane edited no plan document to
+  suit the parser.
+- **Confidence:** high (direct measurement, method and baseline recorded in the preamble).
+- **Impact:** the fix is behavior-preserving for everything currently in flight, and every delta
+  it does produce is the removal of guaranteed-fail junk rows — no plan, active or completed,
+  loses a real check. The zero-check case must be a **loud** malformed error, or the fix trades
+  one silent gate for another.
 
 ### spike-3: Strict cell-equality or loose substring for the check-table header signature?
 
@@ -376,7 +405,8 @@ Every failure path gets a test that fails against the current code first.
 | `match count == 0` false FAIL (#2843) | `test_validate_build_match_count_zero_clean_passes` — `grep -c` on a clean file (prints `0`, exits 1) reports PASS. Fails today. |
 | `match count == 0` false PASS (#2783 Severity-1) | `test_validate_build_violated_anti_criterion_fails` — `grep -c` finding 24 matches (prints `24`, exits 0) reports FAIL. Fails today (reports PASS). |
 | Stripped-stdout divergence re-introduced | `test_validate_build_and_run_checks_agree_on_trailing_newline` — a command whose stdout is `"0\n"` evaluates identically through both paths. |
-| Cross-runner divergence generally | `test_both_runners_agree_on_fixture_corpus` — parametrized over the committed fixtures, asserts `validate_build`'s per-check verdicts equal `run_checks`' verdicts row for row. This is the regression test for the *class*, not the instance. |
+| Cross-runner divergence generally | `test_both_runners_agree_on_execution_fixture` — parametrized over `runner_agreement.md` only (instantaneous, hermetic commands covering all six expectation branches), asserts `validate_build`'s per-check verdicts equal `run_checks`' verdicts row for row. This is the regression test for the *class*, not the instance. |
+| Parse-only fixtures silently diverging | `test_parse_only_fixtures_parse_identically` — the four real-text fixtures are compared through `parse_verification_table` alone. Their commands are never executed, so the unconverged 120s/30s timeout axis cannot manufacture a red. |
 
 ## Test Impact
 
@@ -417,6 +447,9 @@ Every failure path gets a test that fails against the current code first.
   active plans and none is supported. Tempting, in scope for #2791, out of scope here.
 - **Converging the timeouts.** `run_checks` uses 120s, `validate_build.py` 30s. A real
   difference, no observed divergence, and unifying it changes what the build gate blocks on.
+  Because this is the one axis on which the converged runners can still disagree, T13 asserts
+  verdict equality only over commands that are instantaneous by construction — the axis is held
+  out of the test rather than raced against a wall clock.
 - **Fixing `validate_verification_section.py`.** A third divergent reader, but inert until
   #2778 registers it. Touching it here means changing a hook that gates plan writes, for zero
   present-day benefit.
@@ -436,16 +469,23 @@ Every failure path gets a test that fails against the current code first.
    it is a completed plan. Mitigated by printing the skipped block's header and row count in
    both runners' reports. Accepted deliberately: failing on skipped tables would re-create
    #2836.
-3. **Convergence surfaces failures that `validate_build.py` used to hide.** Up to 68 rows across
-   9 active plans use grammar neither evaluator recognizes and will now FAIL under
-   `validate_build.py`. All 68 already FAIL the canonical runner at `docs/sdlc/do-build.md:185`
-   today, so no lane gains a blocker it did not already have. `validate_build.py` runs against
-   one plan at a time — the lane's own — so the exposure is bounded to that lane.
+3. **Convergence surfaces failures that `validate_build.py` used to hide.** The load-bearing
+   claim is a property, not a count: **every row that newly FAILs under `validate_build.py` is
+   already FAILing the canonical runner at `docs/sdlc/do-build.md:185` today**, so no lane gains
+   a blocker it did not already have. These are rows using grammar neither evaluator recognizes
+   (`prints N`, `output == N`, bare `> 0`, `ok`, `exit 0` — #2791's territory). Exposure is
+   bounded further because `validate_build.py` runs against one plan at a time, the lane's own.
+   Scale, indicative at `ba8fdd9d6` and re-measured by T14: ~68 rows across ~9 active plans. The
+   integer is decorative — the property holds at any corpus size, and T14 must re-assert the
+   property, not merely refresh the number.
 4. **Command-cell extraction changes in `validate_build.py`.** It currently takes the first
-   backtick-delimited span; the canonical parser takes `cells[1].strip("\`")`. These differ for
-   **21 rows across 4 active plans**, all of which put prose in the Command cell (manual runbook
-   steps that were never executable under either runner). The canonical behavior wins; the delta
-   is named in the PR body rather than discovered later.
+   backtick-delimited span; the canonical parser takes `cells[1].strip("\`")`. The load-bearing
+   claim is again a universal: **every row on which the two differ puts prose in the Command
+   cell** — manual runbook steps that were never executable under either runner — so the
+   canonical behavior wins without losing an executable check. Scale, indicative at `ba8fdd9d6`
+   and re-measured by T14: ~21 rows across ~4 active plans. T14 re-asserts the universal (no
+   differing row holds a runnable command); the delta is named in the PR body rather than
+   discovered later.
 5. **`format_results`' signature change is breaking, deliberately.** Both
    `docs/sdlc/do-build.md:185` and `docs/sdlc/do-pr-review.md:72` embed a one-liner calling
    `format_results(r, t.malformed)`; both become `format_results(r, t)` in this PR. These are the
@@ -471,6 +511,18 @@ shared mutable state. No async, no cross-process handoff, no ordering hazard.
 - Changing `run_checks`' timeout, its exception handling, or `CheckResult`'s shape.
 - Touching `.claude/hooks/validators/validate_verification_section.py` (#2778) or
   `scripts/evaluate_build.py` (spike-4: unaffected).
+- **Converging `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and
+  `::parse_success_criteria_commands` (`:149-180`).** Both read the same plan document with their
+  own private grammar and both feed the same exit code, so they are a real third and fourth
+  divergence living inside the very file this lane converges. `parse_file_assertions` captures a
+  backtick-quoted path after Create/Add/Delete/Update and asserts it relative to the repo root,
+  which turns a bare filename into a permanently-false assertion (this plan tripped exactly that
+  in critique round 2 — see T2). `parse_success_criteria_commands` takes only the *first*
+  backtick span of a criterion line, so a criterion naming two commands is silently reduced to
+  one. Named here rather than left unnamed: leaving them out of scope is defensible, leaving them
+  undocumented would repeat the #2570 carry-forward failure this plan diagnoses. They belong to
+  their own issue, and T20's carry-forward comment covers all four readers so the successor has
+  the full list.
 - Editing any plan document's `## Verification` section to suit the new parser. Spike-2 measured
   zero active plans changing; if one did, that is a finding to report, not a document to quietly
   rewrite.
@@ -529,8 +581,11 @@ path — the fix validates itself.
       cell splitting is `agent.verification_parser.split_row_cells`. Registering
       `.claude/hooks/validators/validate_verification_section.py` in
       `.claude/hooks/manifest.toml` without importing those three gives the repo a write-time
-      gate that can reject a `## Verification` section both runners accept. This is the
-      carry-forward that #2570 did not leave, and its absence is why this lane exists.
+      gate that can reject a `## Verification` section both runners accept. The comment also
+      names the other two unconverged readers held out of scope by `## No-Gos` —
+      `scripts/validate_build.py::parse_file_assertions` and `::parse_success_criteria_commands` —
+      so the successor inherits all four rather than two. This is the carry-forward that #2570 did
+      not leave, and its absence is why this lane exists.
 - [ ] Update `.claude/skills-global/do-plan/PLAN_TEMPLATE.md` — add to the `## Verification`
       guidance that a check table is identified by a `Command` column, that additional
       non-check tables in the section are skipped with a named diagnostic rather than executed,
@@ -564,13 +619,15 @@ path — the fix validates itself.
 - [ ] `python -m pytest tests/unit/test_verification_parser.py tests/unit/test_validate_build.py -q`
       exits 0.
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean on both changed files.
-- [ ] Both runners produce identical per-row verdicts over the committed fixture corpus.
+- [ ] Both runners produce identical per-row verdicts over the execution fixture
+      `runner_agreement.md`, and identical parses over the four parse-only fixtures. No test in
+      this lane invokes `scripts/pytest-clean.sh` or `pytest` as a subprocess.
 
 ## Team Orchestration
 
-Two agents, sequential — the second's work is defined by the first's return type.
+Three agents, sequential — each one's work is defined by the previous one's return type.
 
-Every task T1–T20 is assigned to exactly one agent below. An unassigned task is an unbuilt task.
+Every task T1–T20 is assigned to exactly one agent below; an unassigned task is an unbuilt task.
 
 ### 1. Parser scoping and fixtures
 - **Task ID**: parser-scoping
@@ -602,8 +659,9 @@ Every task T1–T20 is assigned to exactly one agent below. An unassigned task i
 - **Parallel**: false
 - **Owns**: T14, T18
 - Runs this plan's `## Verification` table through the changed code (T18), re-measures the
-  505-section corpus to confirm zero active-plan drift and writes the refreshed figures back into
-  `## Spike Results` (T14), and confirms the cross-runner agreement test written in T13 passes.
+  505-section corpus to confirm zero active-plan drift and records the refreshed figures **in the
+  PR body only** — it edits no plan document, for the G7 reason given in T14 (T14) — and confirms
+  the cross-runner agreement test written in T13 passes.
 
 ## Step by Step Tasks
 
@@ -612,11 +670,27 @@ Every task T1–T20 is assigned to exactly one agent below. An unassigned task i
       returning 27 checks; `validate_build.py`'s evaluator reporting FAIL for
       `output > 0`/`1` and for `match count == 0`/`0`; and reporting PASS for
       `match count == 0`/`24`.
-- [ ] **T2 — Create `tests/fixtures/verification/`.** Add `2741_pre_fix_verification.md` (the
-      `## Verification` section from `61717ccb2^:docs/plans/docs-auditor-rename-detection.md`,
-      verbatim), `two_check_tables.md` (a `Check` table plus an `Anti-criterion` table),
-      `no_command_column.md` (a `| # | Criterion | Check |` table), and
-      `check_plus_summary.md` (one check table plus a prose summary table).
+- [ ] **T2 — Create the fixture directory `tests/fixtures/verification/`.** Add
+      `tests/fixtures/verification/2741_pre_fix_verification.md` (the `## Verification` section
+      from `61717ccb2^:docs/plans/docs-auditor-rename-detection.md`, verbatim),
+      `tests/fixtures/verification/two_check_tables.md` (a `Check` table plus an `Anti-criterion`
+      table), `tests/fixtures/verification/no_command_column.md` (a `| # | Criterion | Check |`
+      table), `tests/fixtures/verification/check_plus_summary.md` (one check table plus a prose
+      summary table), and `tests/fixtures/verification/runner_agreement.md` — the **execution**
+      fixture specified in T13, the only fixture whose commands are ever run.
+      **Write every fixture name as a full repo-relative path, exactly as above.**
+      `scripts/validate_build.py:43-77` captures the backtick-quoted path after Create/Add and
+      evaluates `Path(p).exists()` from the repo root (`:190-207`), so a bare filename such as
+      `2741_pre_fix_verification.md` resolves False forever — the fixtures land under
+      `tests/fixtures/verification/`. `main()` then returns 1 (`:417`) and
+      `docs/sdlc/do-build.md:182` routes a green build into three futile `/do-patch` iterations,
+      chasing a failure no code change can clear. That is the outcome this plan's `## Problem`
+      exists to eliminate, and this plan tripped it against itself in critique round 2. Only the
+      first path on the line is captured today (the regex needs the verb immediately before the
+      backtick), but pathing all five survives a rewrap.
+      **Acceptance:** after T2 lands, every path returned by
+      `scripts/validate_build.py::parse_file_assertions` on this plan with `action == "exists"`
+      resolves on disk.
       **Every fixture file starts with a literal `## Verification` heading line and carries no
       second `^## ` heading before its tables.** `parse_verification_table` matches
       `^## Verification\s*$` (`agent/verification_parser.py:129-135`) and terminates the section
@@ -657,17 +731,53 @@ Every task T1–T20 is assigned to exactly one agent below. An unassigned task i
       and to guard on checks-or-malformed-or-skipped.
 - [ ] **T12 — Update the existing `test_validate_build.py` cases** listed in Test Impact, and
       confirm T9's tests pass.
-- [ ] **T13 — Add `test_both_runners_agree_on_fixture_corpus`**, parametrized over
-      `tests/fixtures/verification/`, asserting per-row verdict equality between
-      `validate_build`'s loop and `run_checks`. This is the guard against the next divergence.
-      Open the parametrized body with
+- [ ] **T13 — Split the cross-runner guard by role. Never execute the parse-only fixtures.**
+      Two tests, not one.
+      **(a)** `test_both_runners_agree_on_execution_fixture` — parametrized over the single
+      execution fixture `tests/fixtures/verification/runner_agreement.md`, asserting per-row
+      verdict equality between `validate_build`'s loop and `run_checks`. Every Command cell in
+      that fixture is instantaneous, hermetic, and deterministic (`echo 1`, `true`, `false`,
+      `grep -c zzz /dev/null`), and between them its rows cover all six `evaluate_expectation`
+      branches: `exit code N`, `exit code != N`, `output contains X`, `output does not contain X`,
+      `match count == 0`, and `output > N`. This is the guard against the next divergence.
+      **(b)** `test_parse_only_fixtures_parse_identically` — the other four fixtures
+      (`2741_pre_fix_verification.md`, `two_check_tables.md`, `no_command_column.md`,
+      `check_plus_summary.md`) are asserted through `parse_verification_table` alone. Their
+      commands are never run.
+      **Why the split is mandatory.** `2741_pre_fix_verification.md` is a verbatim real
+      `## Verification` section, so executing it runs 16 real commands twice per case — including
+      a nested `scripts/pytest-clean.sh` invocation (measured: 130 tests, 17.9s on an idle
+      machine, 10 xdist workers) and two repo-wide ruff passes. A nested xdist run competes with
+      its own parent for the same test-db claims (#2628). Worse, it is load-bearing red: after
+      delegation the only axis on which the two runners can still disagree is the timeout this
+      plan deliberately refuses to converge — `run_checks` at 120s yields
+      `passed=False, exit_code=-1` (`agent/verification_parser.py:303-312`) while
+      `validate_build` at 30s yields `status="SKIP"` (`scripts/validate_build.py:318-319`). A
+      17.9s command against a 30s ceiling is a 1.7x margin on an *idle* machine, so the test would
+      go red under load for a reason unrelated to the defect it guards. Scoping execution to
+      instantaneous commands removes the axis instead of racing it.
+      **No test added in this lane shells out to `scripts/pytest-clean.sh` or to `pytest`.**
+      Open each parametrized body with
       `assert p.read_text().lstrip().startswith("## Verification")` so a heading-less fixture
       fails loudly at the top of the test rather than passing vacuously against an empty parse.
-- [ ] **T14 — Re-run the corpus measurement.** Confirm zero active plans in `docs/plans/*.md`
-      change their parse result. Write the refreshed figures — corpus size, sections, pipe-blocks,
-      check tables, and the two Risks §3/§4 counts — **back into `## Spike Results` and `## Risks`
-      in this plan** as well as into the PR body, re-pinning the SHA in the `## Spike Results`
-      preamble. The plan and the PR must not be able to drift apart on these numbers.
+- [ ] **T14 — Re-run the corpus measurement; record it in the PR body only.** Use the corpus
+      definition pinned in the `## Spike Results` preamble (`find docs/plans -name '*.md'`,
+      counting files whose heading matches `^## Verification\s*$`, `.worktrees/` excluded by
+      construction). Confirm zero active plans in `docs/plans/*.md` change their parse result, and
+      re-assert the two **universals** rather than only refreshing integers: **Risks §3** — every
+      row that newly FAILs under `validate_build.py` is already FAILing the canonical runner
+      today; **Risks §4** — every row on which the two Command-cell extractions differ holds
+      prose, not a runnable command. Report the refreshed figures and both universals in the PR
+      body.
+      **Write nothing back into this plan document, and commit no plan edit during BUILD.**
+      `validate-all` depends on both builders, so T14 runs at the end of BUILD — inside the window
+      guarded by the G7 mid-build plan-hash guard (`docs/sdlc/do-build.md:80-93`), which records
+      `git log -1 --format=%H origin/main -- <plan-rel-path>` at build start, re-reads it before
+      PR creation, and ABORTS the build (marking BUILD `failed`, "plan revised mid-build") on any
+      difference. Plan documents commit on `main` in this repo, so a write-back would kill its own
+      build immediately before the PR is opened. The corpus figures are explicitly indicative and
+      the load-bearing claims are the universals, so the PR body is their correct home; nothing is
+      lost and no G7 exposure is created.
 - [ ] **T15 — Update `docs/features/machine-readable-dod.md`** per the Documentation section.
 - [ ] **T16 — Update the `format_results` one-liners** in `docs/sdlc/do-build.md:185` and
       `docs/sdlc/do-pr-review.md:72` to `print(format_results(r, t))`. The exit guard stays
@@ -688,8 +798,13 @@ Every task T1–T20 is assigned to exactly one agent below. An unassigned task i
       `Command`-column signature, and `split_row_cells` as the cell splitter — plus the statement
       that registering the hook means importing all three rather than reimplementing them. No
       code change to `.claude/hooks/validators/validate_verification_section.py` in this lane;
-      the comment is the entire deliverable. This is the carry-forward #2570 did not leave, and
-      writing it is what keeps this plan from repeating one surface over the mistake it diagnoses.
+      the comment is the entire deliverable. The comment must enumerate **all four** unconverged
+      readers of a plan document, not two: the hook itself, and — per `## No-Gos` —
+      `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and
+      `::parse_success_criteria_commands` (`:149-180`), which still carry private grammars inside
+      the file this lane converges. A successor needs the full list or it inherits the same
+      partial-convergence failure. This is the carry-forward #2570 did not leave, and writing it
+      is what keeps this plan from repeating one surface over the mistake it diagnoses.
 
 ## Verification
 
@@ -716,8 +831,10 @@ Every task T1–T20 is assigned to exactly one agent below. An unassigned task i
 | Clean anti-criterion evaluates true (#2843) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if e('match count == 0', exit_code=1, output='0') else 'BAD')"` | output contains ok |
 | output > N evaluated numerically (#2843) | `python -c "from agent.verification_parser import evaluate_expectation as e; print('ok' if e('output > 0', exit_code=0, output='1') else 'BAD')"` | output contains ok |
 | All six expectation forms still evaluate (grammar-frozen no-go guard) | `python -c "from agent.verification_parser import evaluate_expectation as e; print(sum([e('exit code 0', exit_code=0, output=''), e('exit code != 1', exit_code=0, output=''), e('output contains x', exit_code=0, output='x'), e('output does not contain y', exit_code=0, output='x'), e('match count == 0', exit_code=1, output='0'), e('output > 1', exit_code=0, output='2')]))"` | output contains 6 |
-| Cross-runner agreement test exists | `grep -c 'both_runners_agree' tests/unit/test_validate_build.py` | output > 0 |
-| Fixture corpus committed | `ls tests/fixtures/verification/ \| wc -l` | output > 3 |
+| Cross-runner agreement test exists | `grep -c 'both_runners_agree_on_execution_fixture' tests/unit/test_validate_build.py` | output > 0 |
+| Parse-only fixtures compared without executing them | `grep -c 'parse_only_fixtures_parse_identically' tests/unit/test_validate_build.py` | output > 0 |
+| No test shells out to the pytest wrapper (T13 blocker guard) | `grep -c 'pytest-clean' tests/unit/test_validate_build.py tests/unit/test_verification_parser.py` | match count == 0 |
+| Execution fixture committed alongside the parse-only four | `ls tests/fixtures/verification/ \| wc -l` | output > 4 |
 | No stale call to the deleted validator parser | `grep -c 'validate_build.parse_verification_table' tests/unit/test_validate_build.py` | match count == 0 |
 | Feature doc records the skipped diagnostic | `grep -c 'skipped' docs/features/machine-readable-dod.md` | output > 0 |
 | format_results takes two required parameters | `python -c "import inspect; from agent.verification_parser import format_results as f; p=inspect.signature(f).parameters; print('ok' if list(p)==['results','table'] and all(v.default is v.empty for v in p.values()) else 'BAD')"` | output contains ok |
@@ -736,15 +853,22 @@ verified as landed. Every load-bearing spike was independently re-measured again
 executing the real parser and validator; spike-1, spike-3 and spike-6 reproduce, spike-2 does not.
 All three blockers are deterministic self-inflicted failures of this lane's own build gate.
 
+**Revision round 2 applied.** All 7 findings resolved — dispositions in the table below. Baseline
+re-pinned to `main` @ `ba8fdd9d6` and every corpus figure re-measured under a now-stated method:
+505 sections, 502 pipe-blocks, 493 check tables all reproduce exactly, so no new figure set was
+introduced; the one correction is the active-plan count (28 → 25). spike-2 **does** reproduce at
+this baseline — the active plan the critique caught diverging was independently repaired by its
+own lane at `496a9cb5e`, and spike-2 now records that transient rather than a stale delta.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; History & Consistency | T13's `test_both_runners_agree_on_fixture_corpus` asserts row-for-row verdict equality between `validate_build`'s loop and `run_checks` over a fixture corpus that includes `2741_pre_fix_verification.md` — a verbatim real `## Verification` section whose 16 checks are executed for real, twice per case (measured: `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` = 130 tests, 17.9s idle, 10 xdist workers; plus two repo-wide ruff passes). After delegation the ONLY axis on which the runners can still disagree is the timeout the plan refuses to converge: `run_checks` 120s → `passed=False, exit_code=-1` (`agent/verification_parser.py:303-312`) vs `validate_build` 30s → `status="SKIP"` (`scripts/validate_build.py:318-319`). A 1.7x margin against a 30s ceiling on an idle machine is load-dependent-red here. This also contradicts `## Rabbit Holes`, which justifies leaving the timeouts alone with "no observed divergence". | pending | Split the corpus by role. Parse-only fixtures (`2741_pre_fix_verification.md`) are asserted through `parse_verification_table` alone. Add an execution fixture `runner_agreement.md` whose every Command cell is instantaneous and deterministic (`echo 1`, `true`, `false`, `grep -c zzz /dev/null`) and covers all six `evaluate_expectation` branches; run the agreement test only over those. If the 2741 fixture must be executed, call `run_checks(t.checks, timeout=30)` so both sides share a ceiling and the SKIP-vs-FAIL asymmetry cannot fire, and amend the `## Rabbit Holes` timeout bullet to say equality is asserted with the timeout held constant. Never shell out to `scripts/pytest-clean.sh` from a unit test: a nested xdist run spawns 10 more workers and competes with the parent for the same test-db claims (#2628). |
-| BLOCKER | Risk & Robustness | T2 is worded "Add `2741_pre_fix_verification.md`". `scripts/validate_build.py:57` captures that bare filename as an `exists` file assertion and `:190-207` evaluates `Path("2741_pre_fix_verification.md").exists()` from the repo root. Measured by running the real function against this plan: exactly one `exists` assertion is emitted, for the bare filename, and it resolves False — the fixture lands at `tests/fixtures/verification/`. `main()` returns 1 (`:417`) and `docs/sdlc/do-build.md:182` routes that to `/do-patch` for up to three iterations, chasing a failure no code change can clear. This plan's own Problem section describes that outcome as the bug it exists to eliminate. | pending | In T2, write all four fixture names as full repo-relative paths inside their backticks: `tests/fixtures/verification/2741_pre_fix_verification.md`, `.../two_check_tables.md`, `.../no_command_column.md`, `.../check_plus_summary.md`. Only the first is captured today (the regex needs the verb immediately before the backtick), but pathing all four survives a rewrap. Verify: every path returned by `vb.parse_file_assertions(plan_text)` with `action == "exists"` must exist on disk after T2 runs. |
-| BLOCKER | Risk & Robustness; Scope & Value | T14 instructs the validator agent to write refreshed corpus figures "back into `## Spike Results` and `## Risks` in this plan". `validate-all` depends on both builders, so T14 runs at the end of BUILD — inside the window guarded by the G7 mid-build plan-hash guard at `docs/sdlc/do-build.md:80-93`, which records `git log -1 --format=%H origin/main -- <plan-rel-path>` at build start, re-reads it before PR creation, and ABORTS the build (marking BUILD `failed`, "plan revised mid-build") on a difference. This repo's convention is that plan documents commit directly on `main`, so the default reading of T14 kills its own build immediately before the PR is opened. The plan never says where T14's commit lands. | pending | Commit T14's figure refresh on the lane branch `session/{slug}` as part of the PR diff, never on `main`: G7 compares `origin/main`'s last commit touching the plan path, so a feature-branch commit leaves `STORED_HASH == CURRENT_HASH`, and the figures still reach `main` at merge. Add to T14 verbatim: "Commit this edit on the lane branch, never on `main` — a mid-build plan commit on `main` trips the G7 plan-hash guard at `docs/sdlc/do-build.md:80-93` and fails the build." If a `main` commit is genuinely required, T14 must run after `gh pr create` and re-record `sdlc-tool meta-set --key plan_hash_at_build_start` with the new hash in the same block. Simpler alternative (Scope & Value): drop the write-back entirely and record the refreshed figures in the PR body only. |
-| CONCERN | Scope & Value | The plan names every unconverged reader it is leaving alone (`validate_verification_section.py` via #2778, `scripts/evaluate_build.py` via spike-4) except the two that live inside the file being converged: `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`). Both parse the same plan document with their own private grammar and both feed the same exit code. Measured on this plan: the first yields 7 assertions including one unsatisfiable path, and the second reduces "`python -m ruff check` and `python -m ruff format --check` clean on both changed files" to a bare repo-wide `python -m ruff check`. Leaving them out of scope is defensible; leaving them unnamed repeats the #2570 carry-forward failure the plan diagnoses. | pending | Docs-only. Add a `## No-Gos` bullet: "Converging `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`). Both read the same plan document with their own private grammar and both feed the same exit code — the first asserts backtick-captured paths relative to the repo root, the second takes only the first backtick span of a criterion line. A real third and fourth divergence in this very file, out of scope here, belonging to its own issue." Extend T20's #2778 comment (or file the successor issue) so the carry-forward covers all four readers rather than two. |
-| CONCERN | History & Consistency | spike-2's headline "**0 active plans** change their parse result" and its Impact line "behavior-preserving for everything currently in flight" no longer reproduce. Re-measured at current `main` by simulating the proposed per-block parser over every active plan: `docs/plans/doctor-console-script-interpreter-check.md` goes 20 checks / 0 malformed → 18 checks / 0 malformed / 0 skipped. That plan is active and in flight (revised at `04e54cad8`) and carries two `\| Check \| Command \| Expected \|` tables in one section; today the second table's header and separator are parsed as checks and both are guaranteed FAILs (Expected cells `Expected` and `---`). `## Freshness Check` still declares "Disposition: Unchanged", and `## No-Gos` says an active plan changing "is a finding to report" — the trigger has fired and is unreported. The direction is favourable, and this is a live second instance of #2836 biting a real lane right now. | pending | Docs-only. Rewrite spike-2's Result as "1 active plan changes: `docs/plans/doctor-console-script-interpreter-check.md`, 20 checks → 18, because its `## Verification` section carries two `\| Check \| Command \| Expected \|` tables and the second table's header and separator rows are currently parsed as checks (both guaranteed FAILs). The delta removes exactly those two junk rows." Change the Impact line to "every in-flight change is a removal of guaranteed-fail junk rows; no active plan loses a real check." Correct the preamble's active-plan count (measured: 25 carry a `## Verification` section, not 28) and add this plan to spike-1's multi-check-table list as the third case and the only active one. |
-| NIT | Scope & Value | `## Team Orchestration`'s preamble reads "Two agents, sequential" but three agents are listed (`parser-scoping`, `validator-delegation`, `validate-all`). The round-1 revision added the third agent and the `Owns` mapping but left the count sentence, so a dispatcher reading the preamble spawns two and T14/T18 go unowned — reopening the gap round 1 closed. | pending | Replace the preamble with "Three agents, sequential — each one's work is defined by the previous one's return type. Every task T1-T20 is assigned to exactly one agent below; an unassigned task is an unbuilt task." |
-| NIT | History & Consistency | Three SHAs are cited as the baseline for one measurement set: `## Spike Results` says `32f16f0f0`, `## Freshness Check` says `f491306c5`, and round 1's own implementation note instructs pinning `f491306c5` onto the Spike Results heading. **Root cause of the corpus-figure churn, measured this round: the plan never states its corpus glob, and the count is glob-sensitive at a single fixed commit.** `docs/plans/` has four subdirectories (`completed/`, `done/`, `critiques/`, `notes/`). Files carrying a `^## Verification` heading at current `main`: top-level alone = 25; top-level + `completed/` = 496; the full recursive tree (`find docs/plans -name '*.md'`) = 507. Three rounds have produced 493, 505 and 503 — every one of those sits inside this spread. No round's method is wrong; they counted different populations, so the figures cannot reproduce by construction and a fourth number would churn again. A second, independent inflation trap: a bare `grep -rl` from the repo root sweeps `.worktrees/`, where 19 live worktrees each carry a full `docs/plans/` copy — 8,744 matching files, ~350x the real corpus, and the total changes as lanes create and destroy worktrees. | pending | Two parts, both docs-only. **(a) Record the method, once.** Pin one baseline SHA across the `## Spike Results` preamble and `## Freshness Check`, delete the other two SHA references, and state the corpus definition verbatim next to it so any round can re-derive the same number: corpus = `find docs/plans -name '*.md'` (507 files carry `^## Verification` at the pinned SHA); counting unit = files with the heading, not pipe-blocks; `.worktrees/` is excluded explicitly. **(b) Demote the counts, promote the properties.** The Risks §3/§4 numbers are decorative — the load-bearing claims are the properties they wrap, and both survive any corpus choice. Restate §3 as "every row that newly FAILs under `validate_build.py` is already FAILing the canonical runner today, so no lane gains a blocker it did not already have" with the row count marked "(indicative at `<SHA>`; T14 re-measures)". Restate §4 as "every differing row puts prose in the Command cell and was never executable under either runner" — that universal, not the count, is what makes the delta safe, and T14 must re-assert the universal rather than only refreshing the integer. |
+| BLOCKER | Risk & Robustness; History & Consistency | T13's `test_both_runners_agree_on_fixture_corpus` asserts row-for-row verdict equality between `validate_build`'s loop and `run_checks` over a fixture corpus that includes `2741_pre_fix_verification.md` — a verbatim real `## Verification` section whose 16 checks are executed for real, twice per case (measured: `scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` = 130 tests, 17.9s idle, 10 xdist workers; plus two repo-wide ruff passes). After delegation the ONLY axis on which the runners can still disagree is the timeout the plan refuses to converge: `run_checks` 120s → `passed=False, exit_code=-1` (`agent/verification_parser.py:303-312`) vs `validate_build` 30s → `status="SKIP"` (`scripts/validate_build.py:318-319`). A 1.7x margin against a 30s ceiling on an idle machine is load-dependent-red here. This also contradicts `## Rabbit Holes`, which justifies leaving the timeouts alone with "no observed divergence". | Resolved — T13 rewritten: split into (a) `test_both_runners_agree_on_execution_fixture` over a new instantaneous, hermetic execution fixture `runner_agreement.md` covering all six `evaluate_expectation` branches, and (b) `test_parse_only_fixtures_parse_identically`, which compares the four real-text fixtures through `parse_verification_table` alone and never runs their commands. The nested `scripts/pytest-clean.sh` invocation and the 120s-vs-30s SKIP/FAIL axis are both designed out rather than raced. T2 creates the new fixture; `## Rabbit Holes`' timeout bullet, the Failure Path Test Strategy, and `## Success Criteria` all record that equality is asserted only over instantaneous commands. Two new `## Verification` rows guard it, including an anti-criterion that no test greps as invoking `pytest-clean`. | Split the corpus by role. Parse-only fixtures (`2741_pre_fix_verification.md`) are asserted through `parse_verification_table` alone. Add an execution fixture `runner_agreement.md` whose every Command cell is instantaneous and deterministic (`echo 1`, `true`, `false`, `grep -c zzz /dev/null`) and covers all six `evaluate_expectation` branches; run the agreement test only over those. If the 2741 fixture must be executed, call `run_checks(t.checks, timeout=30)` so both sides share a ceiling and the SKIP-vs-FAIL asymmetry cannot fire, and amend the `## Rabbit Holes` timeout bullet to say equality is asserted with the timeout held constant. Never shell out to `scripts/pytest-clean.sh` from a unit test: a nested xdist run spawns 10 more workers and competes with the parent for the same test-db claims (#2628). |
+| BLOCKER | Risk & Robustness | T2 is worded "Add `2741_pre_fix_verification.md`". `scripts/validate_build.py:57` captures that bare filename as an `exists` file assertion and `:190-207` evaluates `Path("2741_pre_fix_verification.md").exists()` from the repo root. Measured by running the real function against this plan: exactly one `exists` assertion is emitted, for the bare filename, and it resolves False — the fixture lands at `tests/fixtures/verification/`. `main()` returns 1 (`:417`) and `docs/sdlc/do-build.md:182` routes that to `/do-patch` for up to three iterations, chasing a failure no code change can clear. This plan's own Problem section describes that outcome as the bug it exists to eliminate. | Resolved — T2 now writes all five fixture names as full repo-relative paths (`tests/fixtures/verification/...`), explains the `:43-77` capture and `:190-207` repo-root resolution that made the bare filename False forever, and carries an explicit acceptance: every `action == "exists"` path returned by `parse_file_assertions` on this plan must resolve on disk. Re-verified by executing the real function against the revised plan — zero unsatisfiable `exists` assertions remain. | In T2, write all four fixture names as full repo-relative paths inside their backticks: `tests/fixtures/verification/2741_pre_fix_verification.md`, `.../two_check_tables.md`, `.../no_command_column.md`, `.../check_plus_summary.md`. Only the first is captured today (the regex needs the verb immediately before the backtick), but pathing all four survives a rewrap. Verify: every path returned by `vb.parse_file_assertions(plan_text)` with `action == "exists"` must exist on disk after T2 runs. |
+| BLOCKER | Risk & Robustness; Scope & Value | T14 instructs the validator agent to write refreshed corpus figures "back into `## Spike Results` and `## Risks` in this plan". `validate-all` depends on both builders, so T14 runs at the end of BUILD — inside the window guarded by the G7 mid-build plan-hash guard at `docs/sdlc/do-build.md:80-93`, which records `git log -1 --format=%H origin/main -- <plan-rel-path>` at build start, re-reads it before PR creation, and ABORTS the build (marking BUILD `failed`, "plan revised mid-build") on a difference. This repo's convention is that plan documents commit directly on `main`, so the default reading of T14 kills its own build immediately before the PR is opened. The plan never says where T14's commit lands. | Resolved — the write-back is dropped. T14 now re-measures and records the refreshed figures **in the PR body only**, and states verbatim that it writes nothing back into this plan and commits no plan edit during BUILD, citing the G7 plan-hash guard at `docs/sdlc/do-build.md:80-93`. The `## Spike Results` preamble and `## Team Orchestration` §3 were updated to match, so no section still promises a write-back. Nothing is lost: the corpus figures are explicitly indicative and the load-bearing claims are the universals T14 re-asserts. | Commit T14's figure refresh on the lane branch `session/{slug}` as part of the PR diff, never on `main`: G7 compares `origin/main`'s last commit touching the plan path, so a feature-branch commit leaves `STORED_HASH == CURRENT_HASH`, and the figures still reach `main` at merge. Add to T14 verbatim: "Commit this edit on the lane branch, never on `main` — a mid-build plan commit on `main` trips the G7 plan-hash guard at `docs/sdlc/do-build.md:80-93` and fails the build." If a `main` commit is genuinely required, T14 must run after `gh pr create` and re-record `sdlc-tool meta-set --key plan_hash_at_build_start` with the new hash in the same block. Simpler alternative (Scope & Value): drop the write-back entirely and record the refreshed figures in the PR body only. |
+| CONCERN | Scope & Value | The plan names every unconverged reader it is leaving alone (`validate_verification_section.py` via #2778, `scripts/evaluate_build.py` via spike-4) except the two that live inside the file being converged: `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`). Both parse the same plan document with their own private grammar and both feed the same exit code. Measured on this plan: the first yields 7 assertions including one unsatisfiable path, and the second reduces "`python -m ruff check` and `python -m ruff format --check` clean on both changed files" to a bare repo-wide `python -m ruff check`. Leaving them out of scope is defensible; leaving them unnamed repeats the #2570 carry-forward failure the plan diagnoses. | Resolved — a `## No-Gos` bullet now names both readers with line ranges and both failure shapes (repo-root path resolution; first-backtick-span-only reduction), states that they are a real third and fourth divergence inside the file being converged, and defers them to their own issue. T20 and the `## Documentation` bullet both now require the #2778 comment to enumerate all four readers rather than two. | Docs-only. Add a `## No-Gos` bullet: "Converging `scripts/validate_build.py::parse_file_assertions` (`:43-77`) and `::parse_success_criteria_commands` (`:149-180`). Both read the same plan document with their own private grammar and both feed the same exit code — the first asserts backtick-captured paths relative to the repo root, the second takes only the first backtick span of a criterion line. A real third and fourth divergence in this very file, out of scope here, belonging to its own issue." Extend T20's #2778 comment (or file the successor issue) so the carry-forward covers all four readers rather than two. |
+| CONCERN | History & Consistency | spike-2's headline "**0 active plans** change their parse result" and its Impact line "behavior-preserving for everything currently in flight" no longer reproduce. Re-measured at current `main` by simulating the proposed per-block parser over every active plan: `docs/plans/doctor-console-script-interpreter-check.md` goes 20 checks / 0 malformed → 18 checks / 0 malformed / 0 skipped. That plan is active and in flight (revised at `04e54cad8`) and carries two `\| Check \| Command \| Expected \|` tables in one section; today the second table's header and separator are parsed as checks and both are guaranteed FAILs (Expected cells `Expected` and `---`). `## Freshness Check` still declares "Disposition: Unchanged", and `## No-Gos` says an active plan changing "is a finding to report" — the trigger has fired and is unreported. The direction is favourable, and this is a live second instance of #2836 biting a real lane right now. | Resolved, with a correction the concern could not have seen. Re-measured at the newly pinned baseline `ba8fdd9d6` by simulating the per-block parser against all 25 active plans and diffing both check and malformed counts: **0 active plans change** — spike-2 reproduces. `doctor-console-script-interpreter-check.md` did carry two check tables and 20 checks at `04e54cad8` as the critique measured, and its own lane independently collapsed it to a single 19-check table at `496a9cb5e`, before this revision. Rather than assert a delta that no longer exists, spike-2 now records the transient explicitly as the `## No-Gos` "report, don't rewrite" trigger firing and being discharged, and its Impact line leads with the property (every delta removes guaranteed-fail junk; no plan loses a real check). Preamble active-plan count corrected 28 → 25. spike-1's list is unchanged and re-verified: exactly two plans in the whole corpus carry more than one check table, both completed, both already named. | Docs-only. Rewrite spike-2's Result as "1 active plan changes: `docs/plans/doctor-console-script-interpreter-check.md`, 20 checks → 18, because its `## Verification` section carries two `\| Check \| Command \| Expected \|` tables and the second table's header and separator rows are currently parsed as checks (both guaranteed FAILs). The delta removes exactly those two junk rows." Change the Impact line to "every in-flight change is a removal of guaranteed-fail junk rows; no active plan loses a real check." Correct the preamble's active-plan count (measured: 25 carry a `## Verification` section, not 28) and add this plan to spike-1's multi-check-table list as the third case and the only active one. |
+| NIT | Scope & Value | `## Team Orchestration`'s preamble reads "Two agents, sequential" but three agents are listed (`parser-scoping`, `validator-delegation`, `validate-all`). The round-1 revision added the third agent and the `Owns` mapping but left the count sentence, so a dispatcher reading the preamble spawns two and T14/T18 go unowned — reopening the gap round 1 closed. | Resolved — preamble now reads "Three agents, sequential — each one's work is defined by the previous one's return type. Every task T1–T20 is assigned to exactly one agent below; an unassigned task is an unbuilt task." | Replace the preamble with "Three agents, sequential — each one's work is defined by the previous one's return type. Every task T1-T20 is assigned to exactly one agent below; an unassigned task is an unbuilt task." |
+| NIT | History & Consistency | Three SHAs are cited as the baseline for one measurement set: `## Spike Results` says `32f16f0f0`, `## Freshness Check` says `f491306c5`, and round 1's own implementation note instructs pinning `f491306c5` onto the Spike Results heading. **Root cause of the corpus-figure churn, measured this round: the plan never states its corpus glob, and the count is glob-sensitive at a single fixed commit.** `docs/plans/` has four subdirectories (`completed/`, `done/`, `critiques/`, `notes/`). Files carrying a `^## Verification` heading at current `main`: top-level alone = 25; top-level + `completed/` = 496; the full recursive tree (`find docs/plans -name '*.md'`) = 507. Three rounds have produced 493, 505 and 503 — every one of those sits inside this spread. No round's method is wrong; they counted different populations, so the figures cannot reproduce by construction and a fourth number would churn again. A second, independent inflation trap: a bare `grep -rl` from the repo root sweeps `.worktrees/`, where 19 live worktrees each carry a full `docs/plans/` copy — 8,744 matching files, ~350x the real corpus, and the total changes as lanes create and destroy worktrees. | Resolved — (a) one baseline SHA, `ba8fdd9d6`, pinned in both `## Freshness Check` and the `## Spike Results` preamble; the other two references are gone, and the code-drift re-check across the two candidate SHAs returns zero commits. The corpus method is now stated verbatim: `find docs/plans -name '*.md'` (590 files), counting unit = files whose heading matches `^## Verification\s*$` (505), `.worktrees/` excluded by construction. The 505-vs-507 gap is explained as prefix-matching `grep -l` also catching `## Verification Results`. Re-measured at the pinned SHA, every existing figure reproduces exactly — 505 sections, 502 pipe-blocks, 493 check tables — so no fourth set of numbers was introduced; only the active-plan count changed (28 → 25, measured). (b) Risks §3 and §4 now lead with their universals and mark the integers "indicative at `ba8fdd9d6`; T14 re-measures"; T14 is required to re-assert the universals, not merely refresh the integers. | Two parts, both docs-only. **(a) Record the method, once.** Pin one baseline SHA across the `## Spike Results` preamble and `## Freshness Check`, delete the other two SHA references, and state the corpus definition verbatim next to it so any round can re-derive the same number: corpus = `find docs/plans -name '*.md'` (507 files carry `^## Verification` at the pinned SHA); counting unit = files with the heading, not pipe-blocks; `.worktrees/` is excluded explicitly. **(b) Demote the counts, promote the properties.** The Risks §3/§4 numbers are decorative — the load-bearing claims are the properties they wrap, and both survive any corpus choice. Restate §3 as "every row that newly FAILs under `validate_build.py` is already FAILing the canonical runner today, so no lane gains a blocker it did not already have" with the row count marked "(indicative at `<SHA>`; T14 re-measures)". Restate §4 as "every differing row puts prose in the Command cell and was never executable under either runner" — that universal, not the count, is what makes the delta safe, and T14 must re-assert the universal rather than only refreshing the integer. |
 
 ---
 
