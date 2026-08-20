@@ -931,6 +931,31 @@ existing task. The reference sweep found six citation slips where round 11 repor
 the honest correction to that round's zero-defect claim, and not one of them changes a prescribed
 edit. This is a converged plan with two loose gates; the revision pass closes both mechanically.
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound. Round 12 returned
+READY TO BUILD (WITH CONCERNS) and the revision that closed both concerns was applied
+afterwards, so no round 13 verified those closures. The concerns below were carried into
+BUILD with their fixes unreviewed by a further critique round, and are accepted on the record.
+
+- **The `warn_state` CLI's `project_dir` resolution was unspecified, and its Verification row
+  could not fail** (Risk & Robustness) — `_load` returns `{}` on `OSError`, so a `_main()`
+  resolving the wrong root prints an empty map and exits 0. Accepted because: non-blocking by
+  definition of CONCERN, and the revision's closure is itself gated by executable checks rather
+  than by a reviewer's reading — the Verification row now asserts the printed
+  `state: <repo>/data/update_warn_state.json` path, and Task 4 carries
+  `test_state_path_resolves_to_repo_data_dir`. A wrong root fails both.
+- **`_check_gws_auth`'s mandated coverage had no owning task** (Scope & Value) — Task 4's
+  `Validates` omitted `tests/unit/test_doctor.py`, and no Verification row failed on the
+  tests' absence. Accepted because: non-blocking by definition of CONCERN, and the revision
+  closed it with a row that fails loudly rather than silently — `pytest -k gws` exits 5 when the
+  selector collects nothing, so the gate distinguishes "tests written and passing" from
+  "tests never written" without needing a critique round to confirm the task edit landed.
+
+Both are gate gaps rather than design defects, which is why building with them standing is
+acceptable: neither can make a faithful build land broken, and each one's closure is verified
+by a Verification row that bites, not by assertion.
+
 ---
 
 ## Resolved Questions
