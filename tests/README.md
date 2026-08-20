@@ -281,6 +281,7 @@ tests/
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
+| unit | `test_stale_reference_sweep.py` | 3 | Stale-prose sweep (#2853, #2839): the unregistered reflection name, the two deleted granite package paths, and a scoped cadence-wording anti-criterion. Enumerates via `git ls-files` (untracked scratch Markdown is not repo content) and assembles every compared token by concatenation so the file cannot trip its own sweeps |
 | unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |
 
 ### `reflections` — Learning system
