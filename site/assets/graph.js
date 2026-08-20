@@ -5629,10 +5629,10 @@ window.VALOR_GRAPH = {
    "complexity": "complex"
   },
   {
-   "id": "file:bridge/utc.py",
+   "id": "file:utils/utc.py",
    "type": "file",
    "name": "utc.py",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "summary": "Shared timezone helpers giving the whole codebase timezone-aware UTC clocks, ISO strings, and robust conversion to Unix timestamps.",
    "tags": [
     "utility",
@@ -5644,10 +5644,10 @@ window.VALOR_GRAPH = {
    "languageNotes": "Centralizes timezone-aware datetime handling to avoid naive-datetime bugs across modules."
   },
   {
-   "id": "function:bridge/utc.py:to_unix_ts",
+   "id": "function:utils/utc.py:to_unix_ts",
    "type": "function",
    "name": "to_unix_ts",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "lineRange": [
     38,
     64
@@ -5661,10 +5661,10 @@ window.VALOR_GRAPH = {
    "complexity": "moderate"
   },
   {
-   "id": "function:bridge/utc.py:to_local",
+   "id": "function:utils/utc.py:to_local",
    "type": "function",
    "name": "to_local",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "lineRange": [
     19,
     30
@@ -23632,7 +23632,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:agent/branch_manager.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25655,7 +25655,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/escape_hatch.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25690,7 +25690,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/session_transcript.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25759,29 +25759,29 @@ window.VALOR_GRAPH = {
    "weight": 0.6
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_unix_ts",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_unix_ts",
    "type": "contains",
    "direction": "forward",
    "weight": 1.0
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_unix_ts",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_unix_ts",
    "type": "exports",
    "direction": "forward",
    "weight": 0.8
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_local",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_local",
    "type": "contains",
    "direction": "forward",
    "weight": 1.0
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_local",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_local",
    "type": "exports",
    "direction": "forward",
    "weight": 0.8
@@ -25823,7 +25823,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/alerts.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25865,7 +25865,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/bridge_watchdog.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26033,7 +26033,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/resource_monitor.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26054,7 +26054,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/session_tracker.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26201,7 +26201,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/image_gen/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26250,7 +26250,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/selfie/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26278,7 +26278,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/sms_reader/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26362,7 +26362,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/test_scheduler/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26474,7 +26474,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/valor_telegram.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -27230,7 +27230,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/telegram_bridge.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -27734,7 +27734,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:agent/messenger.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -28833,7 +28833,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/valor_calendar.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -29764,7 +29764,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:ui/app.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -36057,7 +36057,7 @@ window.VALOR_GRAPH = {
     "file:bridge/dedup.py",
     "file:bridge/escape_hatch.py",
     "file:bridge/session_transcript.py",
-    "file:bridge/utc.py",
+    "file:utils/utc.py",
     "file:bridge/dead_letters.py",
     "file:bridge/response.py",
     "file:bridge/telegram_bridge.py",
