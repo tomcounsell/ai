@@ -88,9 +88,22 @@ def test_self_skip_and_stale_plist_removal(installer_src):
     assert "rm -f" in installer_src
 
 
-def test_fails_open_on_unreadable_config(installer_src):
-    # has_worker_role returns 0 (install) when config/venv/scutil are unavailable.
-    assert "Fail open" in installer_src
+def test_fails_closed_on_unreadable_config(installer_src):
+    """Installing a nightly full-suite run is not a safe default.
+
+    This gate used to fail *open* (qualify when config/venv/scutil were
+    unavailable), which was tolerable only while scripts/update/run.py wrapped
+    the call in a second `if has_bridge:` check. That wrapper is gone, so this
+    is the only gate — and projects.json lives in the iCloud-synced vault that
+    remote-update.sh already warns is intermittently unreadable.
+
+    Exit code 2 ("undeterminable") must stay distinct from 1 ("parsed cleanly,
+    this host owns nothing"): only 1 may reach the stale-plist removal path, so
+    a transient stall never uninstalls a correctly-running detector.
+    """
+    assert "Fail open" not in installer_src
+    assert "Failing closed" in installer_src
+    assert "sys.exit(2)" in installer_src
 
 
 def test_success_marker_is_pinned(installer_src):
