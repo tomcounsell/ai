@@ -274,6 +274,37 @@ async def test_fix_session_brief_is_legible(event, monkeypatch):
     assert "/repo/data/update.txt" in message_text
 
 
+def test_tail_cap_is_a_real_bound_including_one_oversized_line():
+    """`_FIX_SESSION_TAIL_CAP` must bound the tail, not merely aim at it.
+
+    Two ways the earlier shape overran it: the elision marker was prepended
+    after the budget was already spent, and a single physical line wider than
+    the cap was kept whole. Neither is exotic — `_append_warning` collapses
+    embedded newlines by design, so a multi-KB exception `str()` arrives as
+    one line, and the result becomes an AgentSession `message_text` and then a
+    `claude -p` prompt.
+    """
+    from bridge.update import _FIX_SESSION_TAIL_CAP, _tail_with_elision
+
+    one_huge_line = "x" * 50_000
+    out = _tail_with_elision(one_huge_line, "", cap=_FIX_SESSION_TAIL_CAP)
+    assert len(out) <= _FIX_SESSION_TAIL_CAP
+    assert out.startswith("[... ")
+    # ...and the budget is actually spent on content, not thrown away.
+    assert out.count("x") > _FIX_SESSION_TAIL_CAP // 2
+
+    many_lines = "\n".join(f"line {i} " + "y" * 80 for i in range(500))
+    out = _tail_with_elision(many_lines, "", cap=_FIX_SESSION_TAIL_CAP)
+    assert len(out) <= _FIX_SESSION_TAIL_CAP
+    # A multi-line tail still cuts on a line boundary.
+    assert out.split("\n")[1].startswith("line ")
+
+    # Under the cap, nothing is elided and both streams survive intact.
+    small = _tail_with_elision("a\nb", "c", cap=_FIX_SESSION_TAIL_CAP)
+    assert "characters elided" not in small
+    assert "stdout:" in small and "stderr:" in small
+
+
 @pytest.mark.asyncio
 async def test_fix_session_brief_with_empty_warnings_is_usable(event, monkeypatch):
     enqueue = AsyncMock()

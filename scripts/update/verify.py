@@ -1062,6 +1062,14 @@ _PASSTHROUGH_SIGIL_RE = re.compile(r"^@passthrough\s+(\S+)$")
 _INLINE_KEY_CAP = 5
 _DESCRIPTION_CHAR_CAP = 80
 
+# The command the `(+N more)` suffix points at. It must name a surface that
+# actually renders the FULL set: `check_env_completeness` is the only
+# producer of the missing-key report and its `error` is what every consumer
+# prints verbatim, so pointing at anything that re-runs the check (`--verify`
+# included) reproduces the identical capped string and strands the remaining
+# keys (#2845 review). `_main()` below is that surface.
+_FULL_REPORT_COMMAND = "python -m scripts.update.verify"
+
 
 def _parse_env_example(path: Path) -> list[tuple[str, str, bool, str | None]]:
     """Return (key, description, optional, passthrough) tuples from .env.example.
@@ -1185,9 +1193,7 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
                 parts.append(k)
         if len(sorted_missing) > _INLINE_KEY_CAP:
             remaining = len(sorted_missing) - _INLINE_KEY_CAP
-            parts.append(
-                f"(+{remaining} more — run scripts/update/run.py --verify for the full list)"
-            )
+            parts.append(f"(+{remaining} more — run {_FULL_REPORT_COMMAND} for the full list)")
         error = f"{len(missing_keys)} missing: {'; '.join(parts)} ({optional_unset} optional unset)"
         return ToolCheck(name="env-completeness", available=False, error=error)
 
@@ -1197,6 +1203,68 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             available=True,
             version="skipped (read error)",
         )
+
+
+def render_env_completeness_report(project_dir: Path) -> str:
+    """Render the FULL missing-key report — no key cap, no description cap.
+
+    The capped `ToolCheck.error` above is what rides the cron summary and the
+    Telegram reply, where an 89-key dump would be unreadable. This is the
+    surface its `(+N more)` suffix points at, so every key it elides is
+    reachable by one documented command. Keep the two in the same module: a
+    second renderer living elsewhere is the producer/consumer drift that
+    produced this issue's Defect 2.
+    """
+    env_example = project_dir / ".env.example"
+    env_file = project_dir / ".env"
+
+    if not env_example.exists():
+        return "skipped: .env.example not found"
+    if not env_file.exists():
+        return "skipped: .env not found"
+
+    declared = _parse_env_example(env_example)
+    present = _parse_env_keys(env_file)
+    declared_keys = {k for k, _d, _o, _p in declared}
+    optional_keys = {k for k, _d, o, _p in declared if o}
+    required_keys = declared_keys - optional_keys
+    missing = sorted(required_keys - present)
+    optional_missing = sorted(optional_keys - present)
+    desc_map = {k: d for k, d, _o, _p in declared}
+
+    lines = [
+        f"env-completeness: {len(required_keys)} required declared, "
+        f"{len(missing)} missing, {len(optional_missing)} optional unset",
+        "",
+    ]
+    if missing:
+        lines.append(f"MISSING REQUIRED ({len(missing)}):")
+        lines.extend(f"  {k}" + (f" — {desc_map[k]}" if desc_map.get(k) else "") for k in missing)
+    else:
+        lines.append("MISSING REQUIRED: none")
+    if optional_missing:
+        lines.extend(["", f"OPTIONAL UNSET ({len(optional_missing)}):"])
+        lines.extend(
+            f"  {k}" + (f" — {desc_map[k]}" if desc_map.get(k) else "") for k in optional_missing
+        )
+    return "\n".join(lines)
+
+
+def _main() -> int:
+    """`python -m scripts.update.verify` — the uncapped env-completeness report."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Print the full .env completeness report (no key or description cap)."
+    )
+    parser.add_argument("--project-dir", type=Path, default=Path(__file__).resolve().parents[2])
+    args = parser.parse_args()
+    print(render_env_completeness_report(args.project_dir))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
 
 
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:

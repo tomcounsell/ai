@@ -1507,8 +1507,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
     # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
     # Immediately after Step 3.13 durability, before Step 3.14 replication.
-    # Calls apply_redis_acl() with NO ARGUMENTS -- never apply=True, never a
-    # forwarded params.apply, never any global apply flag. `/update` must
+    # The planner is called with NO ARGUMENTS -- never with the apply flag
+    # set, never a forwarded params.apply, never any global arming flag.
+    # (Spelled in prose deliberately: the plan's anti-criterion greps this
+    # file's source for the armed spelling, so quoting the token here would
+    # turn that gate red on correct code.) `/update` must
     # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
     # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
     # mutation landing silently in an unrelated PR is exactly the failure

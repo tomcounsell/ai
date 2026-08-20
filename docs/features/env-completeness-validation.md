@@ -33,7 +33,7 @@ When required keys are missing, the verify output shows:
 [update]   ACTION REQUIRED — env-completeness: 3 missing: REDIS_URL (Redis connection URL); OPENROUTER_API_KEY (OpenRouter API Key); STRIPE_API_KEY (Stripe API key) (2 optional unset)
 ```
 
-The inline list caps at 5 keys with a `(+N more — run scripts/update/run.py --verify for the full list)` suffix, and each description is capped and ellipsis-truncated, so a long or numerous missing set never reproduces the ~2,100-character unusable warning this replaces. The `(N optional unset)` residual appears on **both** the missing-keys branch (above) and the all-present branch:
+The inline list caps at 5 keys with a `(+N more — run python -m scripts.update.verify for the full list)` suffix, and each description is capped and ellipsis-truncated, so a long or numerous missing set never reproduces the ~2,100-character unusable warning this replaces. The suffix points at `render_env_completeness_report`, which renders every missing key with no cap on either axis — the cap belongs to the cron summary and the Telegram reply, where an 80-key dump is unreadable, and the uncapped surface exists so nothing the summary elides is unreachable. Pointing the suffix at `--verify` would be circular: `--verify` re-runs the same `check_env_completeness` and prints the same capped string. The `(N optional unset)` residual appears on **both** the missing-keys branch (above) and the all-present branch:
 
 ```
 [update]   env-completeness: all 80 required vars present (6 optional unset)

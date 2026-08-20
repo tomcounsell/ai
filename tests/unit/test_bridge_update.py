@@ -257,8 +257,7 @@ async def test_suppressed_prefix_constant_is_shared(update_env, tg_client, event
     assert trailer in message
 
 
-@pytest.mark.asyncio
-async def test_suppressed_trailer_extracts_as_zero_warnings():
+def test_suppressed_trailer_extracts_as_zero_warnings():
     """The load-bearing half of the inertness claim (critique round 9): fed
     through extract_update_warnings, the REAL trailer (built from the real
     SUPPRESSED_PREFIX) yields []. Asserted alone, and again immediately

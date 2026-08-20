@@ -41,6 +41,10 @@ _FAILURE_SUMMARY_RE = re.compile(r"^update failed at\s+\S+")
 # thousand, applied on whole-line boundaries so a cut is never mid-word.
 _FIX_SESSION_TAIL_CAP = 4000
 
+# Width reserved for `[... N characters elided ...]\n` so the marker is paid
+# for out of the cap instead of added on top of it.
+_ELISION_MARKER_RESERVE = 48
+
 
 def extract_update_warnings(status_lines: list[str]) -> list[str]:
     """Parse every warning/error shape ``scripts/update/run.py`` can emit.
@@ -124,17 +128,30 @@ def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
     if len(combined) <= cap:
         return combined
 
-    lines = combined.split("\n")
-    kept: list[str] = []
-    kept_len = 0
-    for line in reversed(lines):
-        line_len = len(line) + 1  # +1 for the newline this line reintroduces
-        if kept and kept_len + line_len > cap:
-            break
-        kept.append(line)
-        kept_len += line_len
-    kept.reverse()
-    kept_text = "\n".join(kept)
+    # Reserve the marker's own width before spending the budget, so the
+    # returned string honours `cap` rather than exceeding it by the marker.
+    budget = max(cap - _ELISION_MARKER_RESERVE, 0)
+
+    # Take the last `budget` characters, then drop the leading partial line so
+    # the cut lands on a line boundary. When the tail is a single line wider
+    # than the whole budget there is no boundary to land on, and the hard
+    # slice stands: `_append_warning`/`_append_error` collapse embedded
+    # newlines by design, so a multi-KB exception `str()` legitimately arrives
+    # as one physical line. Slicing it beats both alternatives — dropping it
+    # loses the most diagnostic text in the payload, and keeping it whole
+    # makes `cap` a fiction for a string that becomes a `claude -p` prompt.
+    tail = combined[-budget:] if budget else ""
+    kept_text = tail
+    boundary = tail.find("\n")
+    if 0 <= boundary < len(tail) - 1:
+        trimmed = tail[boundary + 1 :]
+        # Only pay for the clean boundary when it is cheap. If the leading
+        # partial line IS the oversized one, trimming it throws away nearly
+        # everything the budget just bought, which is worse than a single
+        # mid-word cut the marker already announces.
+        if len(trimmed) * 2 >= len(tail):
+            kept_text = trimmed
+
     elided_chars = len(combined) - len(kept_text)
     return f"[... {elided_chars} characters elided ...]\n{kept_text}"
 

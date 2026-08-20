@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.update.verify import check_env_completeness
+from scripts.update.verify import check_env_completeness, render_env_completeness_report
 
 
 @pytest.fixture()
@@ -336,3 +336,36 @@ class TestInlineCap:
         assert result.error is not None
         assert "8 missing" in result.error
         assert "+3 more" in result.error
+
+    def test_more_suffix_points_at_a_command_that_renders_the_full_set(self, env_dir: Path) -> None:
+        """The `(+N more)` pointer must name a surface that is actually uncapped.
+
+        It previously named `scripts/update/run.py --verify`, which re-runs
+        `check_env_completeness` and so reproduces the identical capped
+        string — the elided keys were unreachable from any documented
+        command (#2845 review blocker).
+        """
+        example_lines = [f"# Key {i}\nZZ_FIXTURE_KEY_{i}=x" for i in range(8)]
+        write_example(env_dir, "\n".join(example_lines) + "\n")
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+        assert result.error is not None
+        assert "--verify" not in result.error
+
+        full = render_env_completeness_report(env_dir)
+        for i in range(8):
+            assert f"ZZ_FIXTURE_KEY_{i}" in full, "the pointed-at report must name every key"
+
+    def test_individual_description_is_capped_with_an_ellipsis(self, env_dir: Path) -> None:
+        """The key cap bounds how MANY descriptions appear, not how long one is."""
+        long_desc = "D" * 200
+        write_example(env_dir, f"# {long_desc}\nZZ_LONG_DESC_KEY=x\n")
+        write_env(env_dir, "# nothing\n")
+
+        result = check_env_completeness(env_dir)
+
+        assert result.error is not None
+        assert "…" in result.error
+        assert "D" * 200 not in result.error
+        assert "D" * 80 in result.error

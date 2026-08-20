@@ -10,12 +10,38 @@ the 85 warning/error-injection sites in `run.py` routes through one of them.
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from scripts.update import readme_check
+from scripts.update import run as run_module
 from scripts.update.run import UpdateResult, _append_error, _append_warning
 
 pytestmark = pytest.mark.unit
+
+
+def _readme_block_source() -> ast.stmt:
+    """The README-check `if rc.ok: ... else: for warn in rc.warnings: ...` block.
+
+    Located by the call it makes rather than by line number, so the tests that
+    execute it survive edits above it in `run_update`.
+    """
+    source = Path(run_module.__file__).read_text()
+    tree = ast.parse(source)
+    run_update = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_update"
+    )
+    for node in ast.walk(run_update):
+        if not isinstance(node, ast.If):
+            continue
+        if (ast.get_source_segment(source, node.test) or "") != "rc.ok":
+            continue
+        return node
+    raise AssertionError("README-check block not found in run_update")
 
 
 def test_append_warning_collapses_embedded_newlines():
@@ -62,29 +88,81 @@ def test_readme_shaped_multiline_warning_collapses_complete():
 
 
 def test_readme_warnings_are_not_duplicated():
-    """The dedup fix for run.py:1804-1807's N² bug: `result.warnings.extend`
-    sat INSIDE the `for warn in rc.warnings:` loop, so N warnings produced
-    N² entries. `_append_warning(result, warn)` per iteration makes it N —
-    mirrors run.py's fixed loop shape exactly (`for warn in rc.warnings:
-    _append_warning(result, warn)`)."""
+    """The dedup fix for the README step's N² bug, driven through run.py's
+    OWN loop source rather than a copy of it.
+
+    `result.warnings.extend(rc.warnings)` sat INSIDE the
+    `for warn in rc.warnings:` loop, so N warnings produced N² entries. A
+    test that re-types the fixed loop in its own body cannot observe that:
+    it appends three items one at a time and asserts three came out, which
+    holds under both the bug and the fix. So lift the real block out of
+    `run_update` by AST and execute THAT, with `rc` stubbed — reverting the
+    block to a raw `.extend()` turns this red at 9 entries.
+    """
+    block = _readme_block_source()
     rc_warnings = [
         "[popoto] README.md is missing a '## Running' section",
         "[other-repo] README.md is missing a '## Running' section",
         "[third-repo] README.md is missing a '## Running' section",
     ]
+
+    class _Rc:
+        ok = False
+        checked = 3
+        warnings = list(rc_warnings)
+
     result = UpdateResult()
-    for warn in rc_warnings:
-        _append_warning(result, warn)
-    assert len(result.warnings) == 3
+    namespace = dict(vars(run_module))
+    namespace.update(
+        {
+            "result": result,
+            "rc": _Rc(),
+            "project_dir": Path("."),
+            "v": False,
+            "log": lambda *a, **k: None,
+            "readme_check": SimpleNamespace(check_project_readmes=lambda _d: _Rc()),
+        }
+    )
+    exec(compile(ast.Module(body=[block], type_ignores=[]), "<readme>", "exec"), namespace)
+
+    assert len(result.warnings) == 3, (
+        f"expected 3 entries, got {len(result.warnings)} — the N² duplication is back"
+    )
     assert result.warnings == rc_warnings
 
 
+def test_every_warning_injection_site_routes_through_the_helpers():
+    """Source-level completeness gate for the 85-site conversion.
+
+    The behavioural tests above each exercise one producer. This one asserts
+    the sweep itself: after the conversion, the only surviving
+    `result.warnings.append(` / `.errors.append(` / `.extend(` calls in
+    `run.py` are the single call inside `_append_warning`'s own body and the
+    single call inside `_append_error`'s. A new injection site added raw --
+    or the `readme_check` `extend` restored -- pushes the count above 2 and
+    fails here rather than silently truncating a multi-line warning in
+    production.
+    """
+    source = (Path(run_module.__file__)).read_text()
+    hits = re.findall(
+        r"result\.(?:warnings|errors)\.(?:append|extend)\(",
+        source,
+    )
+    assert len(hits) == 2, (
+        f"expected exactly 2 raw injection calls (one per helper body), found {len(hits)} — "
+        "a site bypasses _append_warning/_append_error"
+    )
+
+
 def test_render_time_guard_no_newlines_in_warnings_or_errors():
-    """The recurrence guard: at render time, no entry in either list may
-    contain a newline. Seeded with a README-path fixture — the one producer
-    proven to emit multi-line text unconditionally today — so this guard
-    would fail if that producer's conversion (run.py:1804-1807) were ever
-    reverted to a raw `.extend()`."""
+    """At render time, no entry in either list may contain a newline.
+
+    Seeded with a README-path fixture — the one producer proven to emit
+    multi-line text unconditionally today. This asserts the helpers' collapse
+    contract only; the guard that the README producer still *routes* through
+    them is `test_readme_warnings_are_not_duplicated` above, which executes
+    run.py's own block.
+    """
     result = UpdateResult()
     _append_warning(
         result,
