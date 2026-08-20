@@ -72,7 +72,7 @@ owns_a_project() {
     [ -f "$PROJECTS_CONFIG" ] || return 1
     [ -x "$PROJECT_DIR/.venv/bin/python" ] || return 1
     "$PROJECT_DIR/.venv/bin/python" - "$PROJECTS_CONFIG" <<'PYEOF'
-import json, subprocess, sys, unicodedata
+import json, subprocess, sys
 
 try:
     host = subprocess.check_output(
@@ -83,43 +83,43 @@ try:
 except Exception:
     sys.exit(1)  # Print no token; the caller then does nothing.
 
-
-def norm(value):
-    """Comparable form of a machine name, or None if it is not usable.
-
-    NFC-normalises because macOS filesystems store NFD. This host's
-    ComputerName carries U+2019 (a curly apostrophe), and today both sides of
-    the comparison happen to hold the identical codepoint — so this is
-    hardening against a reachable class, not a bug being fixed. The moment such
-    a name round-trips through a path, the composed and decomposed forms stop
-    comparing equal while remaining visually identical in every log. A
-    non-ASCII codepoint in the name is the precondition, and it is already
-    present; today's equality is a property of the read path rather than of the
-    data.
-
-    Returns None for anything that is not a usable string. That is deliberately
-    explicit: previously a non-string `machine` (a number, `true`, a nested
-    object) was handled only by `.strip()` raising AttributeError OUTSIDE the
-    try block above, which exits without a token and is therefore safe. But
-    that safety was undocumented and incidental — anyone "tidying up" by
-    wrapping the expression in a try would silently convert those inputs from
-    "fail closed" into "skip", and under a future removal path that becomes a
-    confident negative. Load-bearing behaviour nobody wrote down is exactly the
-    shape this gate has already been wrong about four times.
-    """
-    if not isinstance(value, str):
-        return None
-    cleaned = unicodedata.normalize("NFC", value).strip().lower()
-    return cleaned or None
-
-
-target = norm(host)
-if target is None:
+# Reading an input is not the same as establishing it is meaningful. `scutil`
+# can exit 0 printing NOTHING, which means "I don't know who I am".
+#
+# Under install-only this guard is BEHAVIOURALLY REDUNDANT and deliberately
+# untested: an empty identity matches no project, so without it the result is
+# ROLE:NONE, and ROLE:NONE now means "do nothing" — the same outcome. Mutation
+# confirms removing it changes no test.
+#
+# It is kept because it stops being redundant the moment a removal path
+# returns. This exact input produced a confident "owns nothing" that deleted a
+# healthy detector's plist, and whoever implements removal (see the follow-up
+# issue) needs the identity validated before a negative can be trusted.
+if not host:
     sys.exit(1)
 
+target = host.lower()
+# `isinstance(proj, dict)` is NOT redundant — it is the one clause here with an
+# observable effect, and it makes this path MORE permissive. Measured on a
+# config whose malformed entry precedes a matching one:
+#
+#   {"projects": {"a": "malformed", "b": {"machine": <this host>}}}
+#     with the clause     -> ROLE:OWNS  (installs)
+#     without the clause  -> rc=1, no token, does nothing
+#
+# Without it, `.strip()` raises on the malformed entry and kills the whole run
+# before the legitimate match behind it is ever reached. That is the wrong
+# outcome: refusing to install because of an unrelated malformed sibling
+# silently drops a machine out of the fleet's regression detection, which is
+# the failure this feature exists to prevent.
+#
+# The resulting install is legitimate — it rests entirely on entry `b`, which
+# passed every check. Being the only permissive-direction clause in this gate,
+# it deserves the most accurate comment, not the least.
 owns = any(
-    isinstance(proj, dict) and norm(proj.get("machine")) == target
+    (proj.get("machine") or "").strip().lower() == target
     for proj in (cfg.get("projects") or {}).values()
+    if isinstance(proj, dict) and (proj.get("machine") or "").strip()
 )
 print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
