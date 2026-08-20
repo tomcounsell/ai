@@ -692,7 +692,7 @@ class Job(Model):
 
         For each Job the stored score in its Room partition (key **derived**
         via ``SortedField.get_sortedset_db_key``, never hand-built) is
-        compared against ``bridge.utc.to_unix_ts(job.last_active_at)``; a row
+        compared against ``utils.utc.to_unix_ts(job.last_active_at)``; a row
         outside a 1-second tolerance is re-read fresh and repaired with the
         structural clobber-proof idiom
         ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped

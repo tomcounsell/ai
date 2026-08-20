@@ -48,7 +48,7 @@ from models.agent_session import AgentSession
 def _as_utc(dt: datetime) -> datetime:
     """Attach UTC tzinfo to a naive datetime (popoto strips tzinfo on load).
 
-    This is the same logic used by bridge/utc.py::to_unix_ts and the
+    This is the same logic used by utils/utc.py::to_unix_ts and the
     AgentSession read-back normalization: naive == UTC.
     """
     if dt is None:

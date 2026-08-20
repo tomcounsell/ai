@@ -294,8 +294,8 @@ class TestElapsedTimezoneGuard:
 
     def test_unparseable_timestamp_returns_healthy_not_stalled(self):
         # Patch to_unix_ts to always return None (simulates unparseable timestamp).
-        # _classify does `from bridge.utc import to_unix_ts` inside its body,
-        # so we patch `bridge.utc.to_unix_ts` which is what gets imported.
+        # _classify does `from utils.utc import to_unix_ts` inside its body,
+        # so we patch `utils.utc.to_unix_ts` which is what gets imported.
         session = _session(status="running", created_at="not-a-date")
         with patch("utils.utc.to_unix_ts", return_value=None):
             verdict = classify_session_stall([], session=session)

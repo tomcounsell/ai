@@ -1129,7 +1129,7 @@ class TestPerChatCursorCutoff:
     async def test_future_cursor_never_shrinks_the_window(self):
         """Clock-skew guard: a cursor in the FUTURE must not shrink the window
         below the rolling floor (min(), never max()), and the cutoff math can
-        never go negative/absurd -- pinned via bridge.utc.to_unix_ts."""
+        never go negative/absurd -- pinned via utils.utc.to_unix_ts."""
         from utils.utc import to_unix_ts
 
         dialog = _make_dialog("Test Group", entity_id=706)

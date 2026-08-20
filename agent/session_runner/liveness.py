@@ -65,7 +65,7 @@ def _read_field(entry: Any, name: str) -> Any:
 def _as_unix_ts(val: Any) -> float | None:
     """Coerce a datetime / int / float / ISO-string to a Unix timestamp.
 
-    Mirrors ``bridge.utc.to_unix_ts`` semantics (naive datetimes are treated
+    Mirrors ``utils.utc.to_unix_ts`` semantics (naive datetimes are treated
     as UTC — Popoto strips tzinfo on save) without importing it: this module
     stays stdlib-only so ``agent/crash_signature.py`` can import it where it
     deliberately cannot import ``agent/session_health.py``. Returns ``None``

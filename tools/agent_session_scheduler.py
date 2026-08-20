@@ -42,7 +42,7 @@ from models.session_lifecycle import NON_TERMINAL_STATUSES
 def _to_ts(val):
     """Convert datetime or float to Unix timestamp.
 
-    Delegates to ``bridge.utc.to_unix_ts`` which treats naive datetimes as UTC
+    Delegates to ``utils.utc.to_unix_ts`` which treats naive datetimes as UTC
     (Popoto strips tzinfo on save). Directly calling ``val.timestamp()`` on a
     naive datetime would interpret it as machine-local time and silently offset
     every derived age by the machine's UTC offset.

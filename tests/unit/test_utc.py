@@ -1,4 +1,4 @@
-"""Tests for bridge.utc utility module."""
+"""Tests for utils.utc utility module."""
 
 from datetime import UTC, datetime
 

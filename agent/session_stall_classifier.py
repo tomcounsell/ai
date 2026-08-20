@@ -8,7 +8,7 @@ Design constraints:
   - Fail-soft: any exception inside classify_session_stall returns "healthy".
   - No import from agent.session_health — this classifier must never pull in
     the kill/recovery machinery (enforced by the test suite).
-  - Uses bridge.utc.to_unix_ts for all datetime → float conversions.
+  - Uses utils.utc.to_unix_ts for all datetime → float conversions.
 
 Usage::
 

@@ -344,7 +344,7 @@ class TestRecentTerminalFailedSessionDirect:
         from datetime import UTC, datetime
 
         # This is literally what Popoto returns: naive, no tzinfo -- but
-        # representing UTC wall-clock time, per bridge.utc.to_unix_ts's
+        # representing UTC wall-clock time, per utils.utc.to_unix_ts's
         # documented contract ("Popoto strips tzinfo on save").
         recent_naive = datetime.now(UTC).replace(tzinfo=None, microsecond=469935)
         fake_agent_session.query = _GateFakeQuery(

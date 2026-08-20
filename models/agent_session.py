@@ -1019,7 +1019,7 @@ class AgentSession(Model):
 
         Popoto auto_now mints naive local time (bug #1645); instead we stamp
         explicitly so the stored value is always UTC wall-clock, consistent
-        with how created_at/started_at are handled (see bridge/utc.py::utc_now).
+        with how created_at/started_at are handled (see utils/utc.py::utc_now).
 
         update_fields guard: if update_fields omits 'updated_at', skip the stamp
         entirely (no in-memory mutation without a matching persist, to avoid
@@ -1132,7 +1132,7 @@ class AgentSession(Model):
                     continue  # None is safe — save() will stamp on next write
 
                 # Popoto strips tzinfo on load — treat naive datetimes as UTC
-                # (consistent with bridge/utc.py::to_unix_ts).
+                # (consistent with utils/utc.py::to_unix_ts).
                 updated_at_utc = record.updated_at
                 if updated_at_utc.tzinfo is None:
                     updated_at_utc = updated_at_utc.replace(tzinfo=UTC)

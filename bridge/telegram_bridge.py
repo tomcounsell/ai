@@ -152,7 +152,7 @@ def _pending_session_age_seconds(created_at, now_ts: float) -> float:
 
     ``AgentSession.created_at`` is a datetime (Popoto SortedField, naive on
     read); raw ``now_ts - created_at`` raises TypeError (#2458 D2). Coerce
-    through ``bridge.utc.to_unix_ts`` (naive treated as UTC). A missing or
+    through ``utils.utc.to_unix_ts`` (naive treated as UTC). A missing or
     uncoercible created_at returns +inf so the session falls outside any
     merge window instead of crashing the intake classifier.
     """
