@@ -182,7 +182,7 @@ class UpdateResult:
 def _append_warning(result: UpdateResult, text: str) -> None:
     """Append a warning with embedded newlines collapsed to one physical line.
 
-    `the summary render block below` renders one `⚠️` bullet per `result.warnings` entry
+    The summary render block below renders one `⚠️` bullet per `result.warnings` entry
     (`status += f"\\n  ⚠️ {warn}"`) — a raw multi-line entry (an exception
     `str()`, a wrapped multi-line diagnostic) would render its sentinel on
     only the first physical line, dropping the rest. This is the exact

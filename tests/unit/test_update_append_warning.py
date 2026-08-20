@@ -50,6 +50,11 @@ def _injection_call_count() -> int:
     Counted as AST call nodes rather than by regex: a regex over source also
     matches the pattern inside comments and docstrings, which is exactly the
     self-defeating-gate shape this PR had to repair on the Redis ACL row.
+
+    Residual gap, accepted: the walk requires the receiver to be the bare
+    name `result`, so `self.result.warnings.append(...)` or an aliased
+    receiver would slip through. No such site exists in `run.py`, and the
+    trade buys comment-immunity, which closed a demonstrated hole.
     """
     tree = ast.parse(Path(run_module.__file__).read_text())
     total = 0

@@ -122,7 +122,8 @@ def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
 
     Two invariants, in priority order:
 
-    1. **The return is never longer than ``cap``** — the elision marker is
+    1. **For any ``cap >= _ELISION_MARKER_RESERVE``, the return is never
+       longer than ``cap``** — the elision marker is
        paid for out of the budget, not added on top of it. The payload
        becomes an AgentSession ``message_text`` and then a ``claude -p``
        prompt, so an unbounded tail is a real cost.

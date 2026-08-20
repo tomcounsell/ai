@@ -169,7 +169,7 @@ def test_failure_block_bullets_matched_only_inside_the_block():
 
 
 def test_failed_run_with_only_warnings_still_renders_bullets():
-    """success=False, empty errors, two warnings: run.py:704/:1999/:2014's shape."""
+    """success=False, empty errors, two warnings: the warn-and-continue failure sites' shape."""
     status_lines = [
         "update failed at abc1234",
         "  ⚠️ Worker not running after install and kickstart retry",

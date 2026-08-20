@@ -1180,8 +1180,8 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             )
 
         present = _parse_env_keys(env_file)
-        required_keys, missing_keys, optional_missing = _classify_env_keys(declared, present)
-        optional_unset = len(optional_missing)
+        required_keys, missing_keys, optional_unset_keys = _classify_env_keys(declared, present)
+        optional_unset = len(optional_unset_keys)
 
         if not missing_keys:
             return ToolCheck(
@@ -1246,9 +1246,9 @@ def render_env_completeness_report(project_dir: Path) -> str:
         # traceback instead.
         return f"skipped: read error ({e})"
 
-    required_keys, missing_set, optional_unset = _classify_env_keys(declared, present)
-    missing = sorted(missing_set)
-    optional_missing = sorted(optional_unset)
+    required_keys, missing_keys, optional_unset_keys = _classify_env_keys(declared, present)
+    missing = sorted(missing_keys)
+    optional_missing = sorted(optional_unset_keys)
     desc_map = {k: d for k, d, _o, _p in declared}
 
     lines = [
