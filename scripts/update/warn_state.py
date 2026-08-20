@@ -21,10 +21,22 @@ block `/update`.
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 _STATE_FILENAME = "update_warn_state.json"
+
+# scripts/update/ -> repo root, the same idiom as run.py and verify.py.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# The bare stdout spelling of the suppression trailer's leading token
+# (#2845). `run.py`'s `log()` prepends "[update] " before writing to
+# data/update.txt, so that sink carries this constant offset by those five
+# bytes — `bridge/update.py` matches the bare form because it reads
+# stdout-derived `status_lines`. Shared by both sides so the producer and
+# consumer can never spell it differently (the drift that produced Defect 2).
+SUPPRESSED_PREFIX = "suppressed (unchanged since first warning):"
 
 
 def _state_path(project_dir: Path) -> Path:
@@ -77,3 +89,42 @@ def should_emit(key: str, signature: str, project_dir: Path) -> bool:
         state.pop(key, None)
     _save(project_dir, state)
     return True
+
+
+def active(project_dir: Path = PROJECT_ROOT) -> dict[str, str]:
+    """Return the currently-suppressed key -> signature map, fail-soft.
+
+    Enumerates whatever `_load` returns, including keys this module's
+    callers never wired explicitly (e.g. `calendar-config`, wired bespoke at
+    its own call site) — the retrieval surface for Risk 4: a suppressed
+    condition must stay discoverable by an operator who missed the one
+    emission. Fails soft to `{}`, matching `_load`'s own contract.
+    """
+    return _load(project_dir)
+
+
+def _main() -> int:
+    """`python -m scripts.update.warn_state` — the retrieval surface's CLI.
+
+    Prints which state file it read FIRST, because every failure mode of
+    this surface is silent: `_load`'s fail-soft `{}` on OSError means a
+    `_main()` that resolved the wrong root would otherwise print an empty
+    map and exit 0, indistinguishable from a machine with nothing
+    suppressed.
+    """
+    parser = argparse.ArgumentParser(description="Show currently-suppressed /update warnings.")
+    parser.add_argument("--project-dir", type=Path, default=PROJECT_ROOT)
+    args = parser.parse_args()
+
+    print(f"state: {_state_path(args.project_dir)}")
+    state = active(args.project_dir)
+    if not state:
+        print("(nothing suppressed)")
+        return 0
+    for key, signature in sorted(state.items()):
+        print(f"{key}: {signature}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

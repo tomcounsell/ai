@@ -125,6 +125,10 @@ Every bridge-contact identifier in `projects.json` is owned by exactly **one** m
 
 All secrets go in **`~/Desktop/Valor/.env`**; never write them to `repo/.env`. To add one: add it to the vault `.env`, add a placeholder to `.env.example` with a comment line above the `KEY=` (required by the completeness check), and add a field to `config/settings.py`. No sync step needed.
 
+**Required by default.** `check_env_completeness` (`scripts/update/verify.py`) treats every `.env.example` declaration as required unless its comment block carries a bare `# @optional` line — a traced read site with an in-code default, and never a credential. Unmarked is the fail-closed default: a forgotten marker costs one spurious warning, a wrong one silences a real secret forever. Never derive the marker from running the check on your own machine and annotating whatever it flags; that set is per-machine and its wider form includes genuine credentials. See [`docs/features/env-completeness-validation.md`](docs/features/env-completeness-validation.md).
+
+**No declaration without a reader.** A key with no reader in tracked non-markdown code needs a `# @passthrough <binary>` sigil naming the external binary that reads it straight out of the environment — `OP_SERVICE_ACCOUNT_TOKEN` below is exactly this shape, since `op` reads it, not any tracked Python. A passthrough key is still required; the axis is orthogonal to `@optional`. `tests/unit/test_env_declaration_readers.py` enforces this for every declaration.
+
 ### 1Password (`op`) — always non-interactive
 
 `op` authenticates via the `valor-local` service account using `OP_SERVICE_ACCOUNT_TOKEN` from the vault `.env`. Vault of record: `m-valor`.

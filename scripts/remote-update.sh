@@ -162,7 +162,12 @@ if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
 fi
 
 # ── Run update in cron mode ──────────────────────────────────────────
-# Output goes directly to Telegram - keep it clean for PM-style summary
+# Output does NOT go directly to Telegram (#2845 correction of a previously
+# false comment here): on the interactive path this stdout is captured by
+# bridge/update.py::handle_update_command, which composes its own status
+# message and never quotes it verbatim; on the unattended launchd path
+# (this script run directly by com.valor.update) it lands in logs/update.log
+# and, on problems, data/update.txt — there is no chat context at all here.
 # --no-pull: git pull already done above; orchestrator skips its own pull step
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
 

@@ -161,10 +161,12 @@ A compact **turn-history mirror** — `{ts, actor: pm|dev, text}` — is appende
 to the existing session-event stream every turn. It is observability and a
 disaster-recovery seed if on-disk transcripts are ever garbage-collected; the
 on-disk Claude transcripts remain the source of truth and the mirror is never
-read on the normal resume path. The event stream is capped at
-`SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES` (default 200, oldest entries
-dropped first, `exit_summary` entries preserved) so a long-lived session's
-per-save serialization stays bounded.
+read on the normal resume path. **No count-based trim** (durability plan
+#2494): the event stream is the forensic record and is bounded by the
+session's TTL (`Meta.ttl`), not by an arbitrary entry count — a trimmed-away
+authorship or delivery event made a delivered session look "owed" to the
+at-rest health check, which depends on the full record surviving for the
+session's lifetime.
 
 Stale or invalid scalars (missing `runner_cwd`, unknown `claude_session_uuid`)
 discard cleanly to a cold start with a full first-turn prime — there is no
