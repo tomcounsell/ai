@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from bridge.utc import utc_now
 from config.settings import settings
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 

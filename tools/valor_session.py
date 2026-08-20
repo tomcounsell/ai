@@ -599,8 +599,8 @@ def create_session(
         import os
 
         from agent.agent_session_queue import _push_agent_session
-        from bridge.utc import utc_now
         from config.enums import SessionType
+        from utils.utc import utc_now
 
         # ------------------------------------------------------------------
         # Stopgap (#1633): refuse parent-attached session creation here too.

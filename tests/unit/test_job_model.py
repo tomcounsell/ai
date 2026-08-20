@@ -263,7 +263,7 @@ class TestFieldScopedLifecycleSaves:
     clobbered by the whole-hash rewrite a bare ``save()`` would perform."""
 
     def test_touch_preserves_a_concurrent_goal_write(self, scratch_room_id):
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         a = Job.mint(scratch_room_id, "check the deploy")
         b = Job.query.get(id=a.id, room_id=scratch_room_id)
@@ -277,7 +277,7 @@ class TestFieldScopedLifecycleSaves:
         assert to_unix_ts(reloaded.last_active_at) > before
 
     def test_revive_preserves_a_concurrent_goal_write(self, scratch_room_id):
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         a = Job.mint(scratch_room_id, "check the deploy")
         a.mark_at_rest()
@@ -304,7 +304,7 @@ class TestFieldScopedLifecycleSaves:
         assert eid in {e["id"] for e in reloaded.open_expectations()}
 
     def test_mark_at_rest_does_not_refresh_recency(self, scratch_room_id):
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         job = Job.mint(scratch_room_id, "check the deploy")
         before_ts = to_unix_ts(job.last_active_at)
@@ -319,7 +319,7 @@ class TestFieldScopedLifecycleSaves:
 
     @pytest.mark.parametrize("method", ["touch", "revive"])
     def test_touch_and_revive_still_score_correctly(self, scratch_room_id, method):
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         job = Job.mint(scratch_room_id, "check the deploy")
         getattr(job, method)()
@@ -984,7 +984,7 @@ class TestGuardedRepair:
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         job = Job.mint(scratch_room_id, "repair me")
         partition = _partition_key(scratch_room_id)

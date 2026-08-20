@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 load_dotenv()
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op

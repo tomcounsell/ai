@@ -8,13 +8,15 @@ All timestamps in the system are stored and logged as **tz-aware UTC datetimes**
 - **Cross-machine consistency**: Deployed instances in different timezones produce identical timestamp formats.
 - **No naive datetimes**: Every `datetime` object in the system carries timezone info, preventing `TypeError` from mixed naive/aware comparisons.
 
-## The `bridge/utc` Module
+## The `utils/utc` Module
 
 Central utilities for timestamp handling:
 
 ```python
-from bridge.utc import utc_now, to_local, utc_iso, to_unix_ts
+from utils.utc import utc_now, to_local, utc_iso, to_unix_ts
 ```
+
+The module lives in `utils/` because it is dependency-free (stdlib `datetime` only) and standalone `tools/` packages import it, so it must not chain them to the harness (#2867).
 
 ### `utc_now() -> datetime`
 
@@ -57,7 +59,7 @@ Display surfaces fall into two categories:
 **Conversational output** (Telegram messages, UI relative times): convert to local time with `to_local()`:
 
 ```python
-from bridge.utc import utc_now, to_local
+from utils.utc import utc_now, to_local
 
 ts = utc_now()  # Store this
 display = to_local(ts).strftime("%H:%M")  # Show this to humans
@@ -82,7 +84,7 @@ The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all o
 - `time.time()` calls are unchanged -- epoch timestamps are timezone-neutral.
 - Telethon message timestamps were already UTC and are unchanged.
 - `AgentSession.updated_at` is explicitly UTC-stamped in `AgentSession.save()` (issue #1645 — Popoto's `auto_now=True` historically minted naive local wall-clock time). `created_at` and other `DatetimeField` timestamps are set explicitly at write time using `utc_now()`. As of **popoto >= 1.7.1** (issue #1653, popoto#421) `auto_now`/`auto_now_add` now stamp `datetime.now(timezone.utc)`, so the upstream producer bug is fixed and `auto_now` is safe to use. We nonetheless keep the explicit `utc_now()` stamp in `AgentSession.save()` for now: it also covers save paths that bypass `format_value_pre_save` (e.g. raw/pipeline updates). Removing the override is gated on confirming `auto_now` fires on every save path — until then, prefer explicit `utc_now()` stamps on `AgentSession`.
-- `SortedField` / `DatetimeField` deserialization can return naive datetimes — code that calls `.timestamp()` on values read from Popoto must treat them as UTC. **Use `bridge.utc.to_unix_ts(val)` for all read-path conversions.** It normalizes naive datetimes to UTC before `.timestamp()`, handles `None`/float/ISO-string inputs, and is the single source of truth for this coercion. Rewire sites include `scripts/update/run.py::_cleanup_stale_sessions`, `tools/agent_session_scheduler._to_ts`, `agent/sustainability`, `reflections/memory_management`, `tools/telegram_history._parse_ts`, and `models.agent_session.cleanup_expired`. Three older helpers (`monitoring/session_watchdog._to_timestamp`, `agent/session_health._to_ts`, `ui/data/sdlc._safe_float`) already implement the same `val.tzinfo is None` guard inline — they pre-date the shared helper and are intentionally left untouched. New code must import `to_unix_ts` rather than add a fourth copy (issues #777, hotfix 9e3a64f5).
+- `SortedField` / `DatetimeField` deserialization can return naive datetimes — code that calls `.timestamp()` on values read from Popoto must treat them as UTC. **Use `utils.utc.to_unix_ts(val)` for all read-path conversions.** It normalizes naive datetimes to UTC before `.timestamp()`, handles `None`/float/ISO-string inputs, and is the single source of truth for this coercion. Rewire sites include `scripts/update/run.py::_cleanup_stale_sessions`, `tools/agent_session_scheduler._to_ts`, `agent/sustainability`, `reflections/memory_management`, `tools/telegram_history._parse_ts`, and `models.agent_session.cleanup_expired`. Three older helpers (`monitoring/session_watchdog._to_timestamp`, `agent/session_health._ts`, `ui/data/sdlc._safe_float`) already implement the same `val.tzinfo is None` guard inline — they pre-date the shared helper and are intentionally left untouched. New code must import `to_unix_ts` rather than add a fourth copy (issues #777, hotfix 9e3a64f5).
 
 ## Related
 

@@ -710,7 +710,7 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     import os
 
     from agent.agent_session_queue import _push_agent_session
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     if not entry.command:
         logger.error("[reflection] Agent reflection '%s' has no command", entry.name)

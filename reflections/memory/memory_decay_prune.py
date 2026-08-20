@@ -152,7 +152,7 @@ def _created_ts(memory) -> float | None:
     created_at = getattr(memory, "created_at", None)
     if created_at is None:
         return None
-    from bridge.utc import to_unix_ts
+    from utils.utc import to_unix_ts
 
     return to_unix_ts(created_at)
 

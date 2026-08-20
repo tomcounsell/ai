@@ -22,7 +22,6 @@ from popoto import SortedField
 from popoto.redis_db import POPOTO_REDIS_DB
 
 from agent.pipeline_ledger import PipelineLedger
-from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
 from models.job import Job
 from models.session_lifecycle import touch_issue_lock
@@ -31,6 +30,7 @@ from scripts.update.migrations import (
     _migrate_backfill_job_last_active_scores,
     _migrate_backfill_pipeline_ledger,
 )
+from utils.utc import to_unix_ts
 
 _TEST_REPO = "test-owner/test-repo"
 

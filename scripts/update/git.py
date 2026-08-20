@@ -113,7 +113,7 @@ def stash_changes(project_dir: Path) -> StashResult:
     import os
     import uuid
 
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
     # pid + random suffix: the token is the identity, so it must not collide

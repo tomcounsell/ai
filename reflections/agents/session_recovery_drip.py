@@ -88,7 +88,7 @@ def run() -> None:
 
         # Pop oldest session (FIFO by created_at) — paused_circuit has priority
         def _ts(session):
-            from bridge.utc import to_unix_ts
+            from utils.utc import to_unix_ts
 
             return to_unix_ts(getattr(session, "created_at", None)) or 0.0
 

@@ -281,9 +281,9 @@ def _cleanup_stale_sessions(
 
     from agent.pid_fence import fence_is_live
     from agent.session_health import _is_ledger
-    from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
+    from utils.utc import to_unix_ts
 
     # Attempt to import the live-worker registry; fails gracefully if the queue
     # module is not initialized in this process (standalone subprocess invocation).

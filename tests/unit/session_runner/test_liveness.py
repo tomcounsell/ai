@@ -178,7 +178,7 @@ class TestHasDemonstrableActivityFreshness:
 
     def test_naive_datetime_treated_as_utc(self):
         """Popoto strips tzinfo on save; a naive datetime must be read as UTC
-        (mirrors bridge.utc.to_unix_ts), not machine-local time."""
+        (mirrors utils.utc.to_unix_ts), not machine-local time."""
         naive = _now().replace(tzinfo=None) - timedelta(seconds=30)
         entry = _ActivityEntry(last_tool_use_at=naive)
         assert has_demonstrable_activity(entry, freshness_window=300) is True

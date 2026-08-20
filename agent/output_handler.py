@@ -515,8 +515,8 @@ class TelegramRelayOutputHandler:
         """
         session_id = getattr(session, "session_id", None) or str(chat_id)
         try:
-            from bridge.utc import utc_now
             from models.room import SYSTEM_ADDRESSEE, Room
+            from utils.utc import utc_now
 
             project_key = getattr(session, "project_key", None)
             room = Room.resolve(str(project_key), SYSTEM_ADDRESSEE)

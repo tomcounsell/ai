@@ -8,7 +8,7 @@ Design constraints:
   - Fail-soft: any exception inside classify_session_stall returns "healthy".
   - No import from agent.session_health — this classifier must never pull in
     the kill/recovery machinery (enforced by the test suite).
-  - Uses bridge.utc.to_unix_ts for all datetime → float conversions.
+  - Uses utils.utc.to_unix_ts for all datetime → float conversions.
 
 Usage::
 
@@ -230,7 +230,7 @@ def _classify(
     project_counters: dict | None = None,
 ) -> StallVerdict:
     """Core classification logic.  Raises on unexpected errors (caller wraps)."""
-    from bridge.utc import to_unix_ts  # local import to avoid top-level coupling
+    from utils.utc import to_unix_ts  # local import to avoid top-level coupling
 
     events = events or []
     counters = project_counters or {}

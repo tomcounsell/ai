@@ -298,9 +298,9 @@ def _live_pm_session(project_key: str, holder: str):
     recently updated live non-ledger eng session in the project."""
     try:
         from agent.session_health import _is_ledger
-        from bridge.utc import to_unix_ts
         from models.agent_session import AgentSession
         from models.session_lifecycle import NON_TERMINAL_STATUSES
+        from utils.utc import to_unix_ts
 
         rows = list(AgentSession.query.filter(project_key=project_key, session_type="eng"))
         live = [
