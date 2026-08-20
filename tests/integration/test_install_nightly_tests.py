@@ -96,8 +96,24 @@ def test_self_skip_and_stale_plist_removal(installer_src):
     assert "rm -f" in installer_src
 
 
+# A per-process label prefix, so nothing this file does can name a REAL service.
+#
+# $HOME is sandboxed by tmp_path, but the launchd domain is NOT: the installer's
+# skip path runs a genuine `launchctl bootout gui/<uid>/<LABEL>`. With the
+# production prefix that unloads the live nightly detector until the next
+# /update — on precisely the machines this PR deploys to. Inert here only
+# because nothing is currently loaded, which is luck, not isolation.
+_TEST_LABEL_PREFIX = f"com.valortest{os.getpid()}"
+_TEST_PLIST_NAME = f"{_TEST_LABEL_PREFIX}.nightly-tests.plist"
+
+
 def _run_installer(proj: Path, home: Path, config: Path | None, **extra_env):
-    env = {**os.environ, "HOME": str(home), "SERVICE_LABEL_PREFIX": "com.valor", **extra_env}
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "SERVICE_LABEL_PREFIX": _TEST_LABEL_PREFIX,
+        **extra_env,
+    }
     if config is not None:
         env["PROJECTS_CONFIG_PATH"] = str(config)
     return subprocess.run(
@@ -113,7 +129,7 @@ def _run_installer(proj: Path, home: Path, config: Path | None, **extra_env):
 def _home_with_plist(tmp_path: Path, name: str = "home") -> tuple[Path, Path]:
     home = tmp_path / name
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
-    plist = home / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
+    plist = home / "Library" / "LaunchAgents" / _TEST_PLIST_NAME
     plist.write_text("<plist>existing</plist>")
     return home, plist
 
@@ -283,12 +299,78 @@ def test_token_cannot_lie(tmp_path: Path, stub, expect_removed, label):
     assert plist.exists() is not expect_removed, f"{label}: wrong removal decision"
 
 
-def test_role_answer_requires_a_positive_token(installer_src):
-    """The removal path must be gated on an explicit affirmative token.
+def _stub_scutil(tmp_path: Path, body: str) -> Path:
+    """A PATH shim whose `scutil` behaves as `body` dictates."""
+    binp = tmp_path / "stubbin"
+    binp.mkdir(exist_ok=True)
+    sc = binp / "scutil"
+    sc.write_text(f"#!/bin/bash\n{body}")
+    sc.chmod(0o755)
+    return binp
 
-    Structural companion to the behavioural cases above: it pins the *reason*
-    they pass. If the gate ever goes back to keying on an exit code, every
-    unenumerated interpreter death silently becomes "owns nothing" again.
+
+def test_empty_computer_name_is_not_an_answer(tmp_path: Path):
+    """`scutil` exiting 0 with no output means "I don't know who I am".
+
+    An empty host matches no project, so the heredoc would emit a confident
+    ROLE:NONE and authorise uninstalling the detector from a machine that
+    genuinely qualifies. Reading an input is not the same as understanding it:
+    this is the indeterminate-input-becomes-confident-negative failure the
+    token was introduced to eliminate, reappearing one layer further in.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    binp = _stub_scutil(tmp_path, 'if [ "$1" = "--get" ]; then echo ""; exit 0; fi\nexit 0\n')
+    result = _run_installer(proj, home, config, PATH=f"{binp}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    assert plist.exists(), "empty ComputerName uninstalled a qualifying host"
+    assert "Stale nightly-tests plist removed" not in result.stdout
+
+
+def test_verdict_from_an_incomplete_run_is_not_a_verdict(tmp_path: Path):
+    """ROLE:NONE followed by a crash must not authorise removal.
+
+    "An exit code cannot carry the answer" does not mean it carries nothing:
+    rc==0 still means the process completed normally. A run that printed a
+    verdict and then died produced it under unknown conditions. The DESTRUCTIVE
+    branch therefore requires token AND rc==0; the install branch deliberately
+    does not, because installing wrongly is recoverable and uninstalling is not.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    py = proj / ".venv" / "bin" / "python"
+    py.write_text('#!/bin/bash\necho "ROLE:NONE"\nexit 9\n')
+    py.chmod(0o755)
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert plist.exists(), "a verdict from a crashed run authorised removal"
+    assert "did not complete" in result.stdout
+
+
+def test_role_answer_requires_a_positive_token(installer_src):
+    """The heredoc emits an explicit token rather than encoding its verdict in
+    an exit code.
+
+    Documentation-grade only. This does NOT catch a revert to exit-code
+    keying: reverting the bash while leaving both `print()` calls in place
+    keeps this green (measured). `test_token_cannot_lie` is what actually
+    catches that, via the five behavioural vectors. Kept because it names the
+    contract at the point someone editing the heredoc would look.
     """
     assert "ROLE:NONE" in installer_src
     assert "ROLE:OWNS" in installer_src

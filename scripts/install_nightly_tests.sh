@@ -94,10 +94,29 @@ try:
 except Exception:
     sys.exit(1)  # Undeterminable — print no token, so the caller fails closed
 
+# Reading the inputs is not the same as understanding them. `scutil` can exit 0
+# printing NOTHING, which means "I don't know who I am" — and an empty host
+# matches no project, so it would yield a confident ROLE:NONE and authorise
+# uninstalling the detector from a machine that genuinely qualifies. That is
+# the same indeterminate-input-becomes-confident-negative failure the token
+# replaced, one layer further in. An unusable identity is not an answer.
+if not host:
+    sys.exit(1)
+
 target = host.lower()
+# The `if ...strip()` clause keeps an empty/missing `machine` from matching an
+# empty host — the mirror of the bug above, in the install direction.
+#
+# It is UNREACHABLE as written, because the `if not host` guard exits before
+# this line can see an empty target, and a non-empty target cannot equal "".
+# It is kept so the two guards are independent: if the host guard is ever
+# weakened, this one still holds. Deliberately NOT given a test — a test for an
+# unreachable branch passes no matter what the branch says, which is the
+# vacuous-guard pattern this lane has already shipped twice.
 owns = any(
-    (proj.get("machine") or "").lower() == target
+    (proj.get("machine") or "").strip().lower() == target
     for proj in cfg.get("projects", {}).values()
+    if (proj.get("machine") or "").strip()
 )
 print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
@@ -105,7 +124,15 @@ PYEOF
 
 # stderr is discarded, so a token can only come from stdout — a traceback or a
 # dyld message cannot be mistaken for an answer.
-role_out="$(has_worker_role 2>/dev/null || true)"
+#
+# The exit code is captured rather than discarded. "An exit code cannot carry
+# the answer" does not mean it carries nothing: rc==0 still means the process
+# completed normally. A run that printed ROLE:NONE and then died has produced a
+# verdict of unknown provenance, so the DESTRUCTIVE branch additionally
+# requires rc==0. The install branch deliberately does not — installing on a
+# host that printed OWNS then crashed is recoverable; uninstalling is not.
+role_rc=0
+role_out="$(has_worker_role 2>/dev/null)" || role_rc=$?
 
 # Both tokens present is not a possible outcome of the heredoc (exactly one
 # print executes), so it means something else wrote to stdout — a sitecustomize
@@ -125,6 +152,11 @@ case "$role_out" in
         : # This host owns at least one project — fall through and install.
         ;;
     *ROLE:NONE*)
+        if [ "$role_rc" -ne 0 ]; then
+            echo "Skipping nightly-tests install: role check printed ROLE:NONE then exited $role_rc"
+            echo "Failing closed — a verdict from a run that did not complete is not a verdict."
+            exit 0
+        fi
         host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
         echo "Skipping nightly-tests install (no projects assigned to '$host')"
         if [ -f "$PLIST_DST" ]; then
