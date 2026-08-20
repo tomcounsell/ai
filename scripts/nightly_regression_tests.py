@@ -627,6 +627,40 @@ def prior_dispatched(prev: dict) -> set[str]:
     return set(prev.get("failing_tests") or [])
 
 
+def seeded_nodes(prev: dict) -> set[str]:
+    """Node IDs absorbed into a baseline seed's umbrella issue.
+
+    A seeded node has **no per-node issue**. The seed files exactly one
+    umbrella titled ``Nightly regression baseline: ...``, while the per-node
+    dedup contract in :func:`_build_triage_prompt` keys on a different title,
+    ``Nightly regression: {node}``. The two live in separate title namespaces.
+
+    That mismatch is what makes a *flapping* seeded node dangerous.
+    :func:`carry_dispatched_nodes` drops a node from ``dispatched_nodes`` the
+    moment it stops failing, so a seeded node that passes one night and fails
+    the next looks unfiled to :func:`compute_dispatch_set`. It then dispatches
+    against a per-node title that never existed, and the triage agent's
+    search-before-file check finds nothing — so it files a fresh issue, and
+    does so again on every subsequent flap. That rebuilds exactly the
+    #2429 / #2430 / #2462 duplicate-issue churn this detector exists to end.
+
+    The live population makes this concrete rather than theoretical: #2807,
+    #2808 and #2809 are open guards that sweep the working tree and read stale
+    ``.pyc`` files, so they are red or green depending on which interpreter
+    last touched ``__pycache__``. They are simultaneously the nodes most
+    likely to be in night one's seed and the most likely to flap.
+
+    Suppression here is deliberately **sticky**: a seeded node is never
+    per-node dispatched, because the umbrella remains its record. This does
+    not silence a regression. :func:`compute_new_failures` keys on
+    ``failing_tests``, not on dispatch state, so a seeded node that regresses
+    still fires its Telegram alert — only the automatic issue-filing is
+    suppressed. Trading an auto-filed issue for an alert on this population is
+    the whole point, given the alternative is a duplicate per flap.
+    """
+    return set(prev.get("seeded_nodes") or [])
+
+
 def compute_dispatch_set(prev: dict, confirmed_failing: list[str]) -> list[str]:
     """Confirmed-failing node IDs that no previous run has handed to triage.
 
@@ -636,11 +670,20 @@ def compute_dispatch_set(prev: dict, confirmed_failing: list[str]) -> list[str]:
     watchdog node (issue #2559). Suppressing already-filed nodes is what makes
     a second issue against the same node impossible.
 
+    Two independent suppression sets feed this, and both are required:
+
+    - ``dispatched_nodes`` — nodes with their own per-node issue. Dropped once
+      they stop failing, so a genuine fixed-then-regressed node becomes
+      dispatchable again (see :func:`carry_dispatched_nodes`).
+    - ``seeded_nodes`` — nodes covered by a baseline umbrella issue and having
+      no per-node issue at all. Never dropped, because a flap would otherwise
+      file a duplicate (see :func:`seeded_nodes`).
+
     Note this is deliberately *not* ``compute_new_failures``: a node whose
     dispatch subprocess failed is still unfiled, so it stays in the set and gets
     retried on the next run rather than being lost.
     """
-    already = prior_dispatched(prev)
+    already = prior_dispatched(prev) | seeded_nodes(prev)
     return sorted(n for n in set(confirmed_failing) if n not in already)
 
 
@@ -743,11 +786,15 @@ def _build_triage_prompt(dispatch_nodes: list[str]) -> str:
     return "\n".join(lines)
 
 
+DRY_RUN_SESSION_ID = "dry-run-session"
+
+
 def maybe_dispatch_triage_session(
     dispatch_nodes: list[str],
     *,
     prompt: str | None = None,
     slug_suffix: str | None = None,
+    dry_run: bool = False,
 ) -> str | None:
     """Dispatch one triage Eng session for node IDs that have never been filed.
 
@@ -762,6 +809,14 @@ def maybe_dispatch_triage_session(
     triage session for a re-baseline seed instead of one issue per node.
     ``slug_suffix`` overrides the sha256-derived slug, so a retried seed
     dispatch reuses one slug instead of hashing a synthetic node ID.
+
+    ``dry_run`` short-circuits before the subprocess and returns
+    :data:`DRY_RUN_SESSION_ID`. Without it ``--dry-run`` suppressed only the
+    Telegram send while still spawning a real Eng session that files real
+    GitHub issues — which made the one command an operator would reach for to
+    preview a run the very command that could not be previewed safely. The
+    sentinel is a truthy session id so the caller's success path is exercised
+    exactly as it would be for real.
 
     Returns the dispatched session ID, or ``None`` when there is nothing to
     dispatch or the dispatch subprocess failed. The caller records which nodes
@@ -778,6 +833,13 @@ def maybe_dispatch_triage_session(
         slug = f"nightly-triage-{slug_hash}"
 
     message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes)
+
+    if dry_run:
+        log(
+            f"[DRY RUN] Would dispatch triage session slug={slug} for "
+            f"{len(dispatch_nodes)} node(s); no session created, no issue filed"
+        )
+        return DRY_RUN_SESSION_ID
 
     try:
         result = subprocess.run(
@@ -980,7 +1042,7 @@ def main() -> int:
         # fresh discoveries, and escalate it as exactly ONE umbrella triage
         # session rather than reusing the per-node reassignment below (which
         # would wipe the seed to []).
-        just_dispatched = list(confirmed_failing)
+        just_dispatched: list[str] = []
         dispatch_nodes: list[str] = []
         if confirmed_failing:
             seed_size = len(confirmed_failing)
@@ -1005,9 +1067,26 @@ def main() -> int:
                 [f"seed:{len(confirmed_failing)}"],
                 prompt=seed_prompt,
                 slug_suffix="baseline",
+                dry_run=args.dry_run,
             )
-            if triage_session_id is not None:
-                current["dispatched_session_id"] = triage_session_id
+            # A failed seed dispatch must NOT write a baseline. Recording the
+            # seed anyway would mark every absorbed node as filed while no
+            # umbrella issue exists, so compute_dispatch_set() would suppress
+            # all of them forever and the whole night-one population would be
+            # lost silently — behind a Telegram message that reads like
+            # success. Refusing to save state instead means the next run sees
+            # no prior state, re-seeds, and retries the dispatch. This mirrors
+            # _fatal()'s existing invariant that no untrusted run reaches
+            # save_last_run().
+            if triage_session_id is None:
+                return _fatal(
+                    f"seed triage dispatch failed — no umbrella issue exists for "
+                    f"{seed_size} absorbed node(s); refusing to write a baseline "
+                    "so the next run retries the seed",
+                    args.dry_run,
+                )
+            current["dispatched_session_id"] = triage_session_id
+            just_dispatched = list(confirmed_failing)
             current["seed_collection"] = COLLECTION_PATHS
             current["seed_size"] = len(confirmed_failing)
             current["seeded_nodes"] = list(confirmed_failing)
@@ -1028,12 +1107,19 @@ def main() -> int:
         if suppressed > 0:
             log(f"Triage dispatch suppressed for {suppressed} already-filed node(s)")
 
-        triage_session_id = maybe_dispatch_triage_session(dispatch_nodes)
+        triage_session_id = maybe_dispatch_triage_session(dispatch_nodes, dry_run=args.dry_run)
         if triage_session_id is not None:
             # Record only what actually went out. A failed dispatch leaves its nodes
             # unfiled, so the next run picks them up again instead of losing them.
             just_dispatched = dispatch_nodes
             current["dispatched_session_id"] = triage_session_id
+
+    # Carry the seed's umbrella coverage forward on EVERY run, not just seed
+    # runs. Without this the set exists only in the night the seed was written
+    # and is gone by night two, which would leave compute_dispatch_set() blind
+    # to it exactly when the first flap arrives. Union rather than replace: a
+    # later re-baseline adds a second umbrella without invalidating the first.
+    current["seeded_nodes"] = sorted(seeded_nodes(prev) | set(current.get("seeded_nodes") or []))
 
     # The shallow-shrink warning changes how dispatched_nodes carries forward:
     # carry_dispatched_nodes()'s prior_dispatched(prev) & confirmed_failing

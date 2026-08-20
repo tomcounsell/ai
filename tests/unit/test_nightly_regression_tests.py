@@ -783,6 +783,21 @@ class TestMaybeDispatchTriage:
         r.stderr = ""
         return r
 
+    def test_dry_run_spawns_no_session(self, tmp_path: Path) -> None:
+        """``--dry-run`` must not create a real Eng session or file real issues.
+
+        It previously suppressed only the Telegram send while still spawning
+        the session subprocess, which made the one command an operator would
+        reach for to preview a run the very command that could not be
+        previewed safely.
+        """
+        nrt.LOG_FILE = tmp_path / "test.log"
+        nodes = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run") as mock_run:
+            session_id = nrt.maybe_dispatch_triage_session(nodes, dry_run=True)
+        mock_run.assert_not_called()
+        assert session_id == nrt.DRY_RUN_SESSION_ID
+
     def test_dispatch_once(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         nodes = ["tests/unit/test_a.py::test_1"]
@@ -927,7 +942,7 @@ class TestMainDispatchPersistence:
             tmp_path, prev, [standing, fresh], "triage-session-1"
         )
         assert rc == 0
-        mock_dispatch.assert_called_once_with([fresh])
+        mock_dispatch.assert_called_once_with([fresh], dry_run=True)
         assert saved["dispatched_nodes"] == sorted([standing, fresh])
 
     def test_no_dispatch_when_everything_is_already_filed(self, tmp_path: Path) -> None:
@@ -935,7 +950,7 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[standing], dispatched_nodes=[standing])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [standing], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([])
+        mock_dispatch.assert_called_once_with([], dry_run=True)
         assert saved["dispatched_nodes"] == [standing]
 
     def test_failed_dispatch_leaves_nodes_unfiled_for_retry(self, tmp_path: Path) -> None:
@@ -945,7 +960,7 @@ class TestMainDispatchPersistence:
         )
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([node])
+        mock_dispatch.assert_called_once_with([node], dry_run=True)
         assert saved["dispatched_nodes"] == []
         assert saved["dispatched_session_id"] == "earlier-session"
 
@@ -1011,10 +1026,80 @@ class TestMainDispatchPersistence:
     def test_collection_mismatch_reseeds_with_no_per_node_dispatch(self, tmp_path: Path) -> None:
         prev = {"collection": ["tests/unit/"], "failing_tests": [], "dispatched_nodes": []}
         confirmed = ["a::t1", "b::t2", "c::t3"]
-        rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, confirmed, None)
+        rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, confirmed, "umbrella-id")
         assert rc == 0
         assert saved["dispatched_nodes"] == sorted(confirmed)
         assert saved["collection"] == nrt.COLLECTION_PATHS
+        # The umbrella dispatch is the only call; no per-node dispatch fires.
+        assert mock_dispatch.call_args.kwargs.get("slug_suffix") == "baseline"
+
+    def test_failed_seed_dispatch_writes_no_baseline(self, tmp_path: Path) -> None:
+        """A seed whose umbrella dispatch failed must not record a baseline.
+
+        Recording it would mark every absorbed node as filed while no umbrella
+        issue exists, so compute_dispatch_set() would suppress the entire
+        night-one population forever -- behind a Telegram message that reads
+        like success. Refusing to save state means the next run re-seeds and
+        retries, matching _fatal()'s invariant that no untrusted run reaches
+        save_last_run().
+        """
+        prev = {"collection": ["tests/unit/"], "failing_tests": [], "dispatched_nodes": []}
+        pre_existing_bytes = json.dumps(prev)
+        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
+        confirmed = ["a::t1", "b::t2", "c::t3"]
+        rc, _, _, mock_send = self._run_main(tmp_path, prev, confirmed, None)
+
+        assert rc == 1
+        # The pre-existing state file is byte-identical -- no baseline written.
+        assert nrt.LAST_RUN_FILE.read_text() == pre_existing_bytes
+        # And the operator is told, rather than seeing a success-shaped message.
+        assert "seed triage dispatch failed" in mock_send.call_args.args[0]
+
+    def test_seeded_nodes_are_carried_forward_across_runs(self, tmp_path: Path) -> None:
+        """The seed's umbrella coverage must outlive the night it was written.
+
+        Without carry-forward the set is gone by night two, leaving
+        compute_dispatch_set() blind to it exactly when the first flap lands.
+        """
+        prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=["a::t1"])
+        rc, saved, _, _ = self._run_main(tmp_path, prev, [], "session")
+        assert rc == 0
+        assert saved["seeded_nodes"] == ["a::t1"]
+
+    def test_flapping_seeded_node_is_not_refiled(self, tmp_path: Path) -> None:
+        """Blocker regression: a seeded node that passes then fails again.
+
+        It has no per-node issue (the seed filed one umbrella under a different
+        title), so dispatching it would open a duplicate. It must stay
+        suppressed while still producing its Telegram alert -- suppressing the
+        auto-filing is not the same as going silent.
+        """
+        node = "tests/unit/test_sdlc_review_finalize.py::test_anti_criterion"
+        # Night 2 dropped it from dispatched_nodes when it passed; the seed set
+        # is what remains.
+        prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=[node])
+        rc, saved, mock_dispatch, mock_send = self._run_main(tmp_path, prev, [node], None)
+
+        assert rc == 0
+        mock_dispatch.assert_called_once_with([], dry_run=True)
+        assert saved["seeded_nodes"] == [node]
+        # The regression is still announced even though no issue is filed.
+        assert "newly-confirmed failure" in mock_send.call_args.args[0]
+
+    def test_unseeded_node_that_regresses_is_still_dispatchable(self, tmp_path: Path) -> None:
+        """The counterpart the seed suppression must not break.
+
+        A node with its own per-node issue, fixed and then genuinely
+        regressed, stays dispatchable -- the behaviour
+        test_drops_a_node_that_stopped_failing legitimately covers. Both must
+        hold at once.
+        """
+        node = "tests/unit/test_b.py::test_real"
+        prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=[])
+        rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], "new-session")
+        assert rc == 0
+        mock_dispatch.assert_called_once_with([node], dry_run=True)
+        assert saved["dispatched_nodes"] == [node]
 
     def test_collection_mismatch_regression_seed_survives_successful_dispatch(
         self, tmp_path: Path

@@ -81,9 +81,9 @@ is swallowed and logged as non-fatal.
 |------|---------|
 | `scripts/nightly_regression_tests.py` | Main script: acquires the run lock, runs the default collection through `scripts/pytest-clean.sh`, validates run integrity, computes the failure delta or re-baselines on a collection change, summarizes/dispatches on new failures, runs the TTFT gate, sends Telegram alerts, saves state |
 | `com.valor.nightly-tests.plist` | launchd plist template with `__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__` placeholders |
-| `scripts/install_nightly_tests.sh` | Install script: refuses to install from a lane worktree, worker-role gated (`has_worker_role()` — any machine owning a project, Telegram-independent), substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on a machine owning no project |
+| `scripts/install_nightly_tests.sh` | Install script: refuses to install from a lane worktree, fails closed when the projects config is unreadable or the host role is undeterminable, worker-role gated (`has_worker_role()` — any machine owning a project, Telegram-independent), substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on a machine owning no project |
 | `data/nightly_tests.lock` | Advisory `flock` lock file preventing overlapping runs (gitignored) — see `docs/features/nightly-alert-triage.md` |
-| `data/nightly_tests_last_run.json` | Delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `collection`, `head_commit`, `dispatched_nodes`, `dispatched_session_id`, and — on a re-baseline night only — `seed_collection`, `seed_size`, `seeded_nodes`, `min_expected_collected` (gitignored) |
+| `data/nightly_tests_last_run.json` | Delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `collection`, `head_commit`, `dispatched_nodes`, `dispatched_session_id`, `seeded_nodes` (carried forward on every run), and — on a re-baseline night only — `seed_collection`, `seed_size`, `min_expected_collected` (gitignored) |
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
@@ -129,11 +129,37 @@ change of scope) is treated as a fresh baseline: the whole currently-failing
 population is seeded into `dispatched_nodes` and escalated as one umbrella
 triage session, so it is never re-filed node-by-node the next time the
 detector runs — the #2429/#2430/#2462 duplicate-filing trap this design
-protects against by construction. Every node absorbed into the seed is
-permanently out of scope for this detector: it will not be filed until it
-stops failing and re-fails. *Repairing* the seeded population is a separate
-lane (the #2852 model, "get `main`'s unit suite to zero"); this detector's job
-is only ever to *book and escalate* it once, not to fix it.
+protects against by construction. *Repairing* the seeded population is a
+separate lane (the #2852 model, "get `main`'s unit suite to zero"); this
+detector's job is only ever to *book and escalate* it once, not to fix it.
+
+**Seed suppression is sticky, because a flapping node would otherwise be
+re-filed** — The seed files exactly one umbrella issue (`Nightly regression
+baseline: ...`), while per-node dedup keys on a different title (`Nightly
+regression: <nodeid>`). The two are separate title namespaces, so a seeded
+node has no per-node issue to find. Since `carry_dispatched_nodes()` drops a
+node from `dispatched_nodes` as soon as it passes, a seeded node that *flaps*
+— passes one night, fails the next — would look unfiled, dispatch against a
+title that never existed, and open a fresh issue on every flap. That is
+#2429/#2430/#2462 rebuilt through a different door.
+
+So `seeded_nodes` is persisted on **every** run (not just the seed night) and
+`compute_dispatch_set()` subtracts it permanently. This does not silence a
+regression: `compute_new_failures()` keys on `failing_tests`, not on dispatch
+state, so a seeded node that re-fails still fires its Telegram alert — only
+the automatic issue-filing is suppressed. The population this matters most
+for is the `.pyc`-sensitive working-tree guards (#2807, #2808, #2809), which
+are red or green depending on which interpreter last touched `__pycache__`
+and are therefore both the likeliest members of night one's seed and the
+likeliest to flap. Fixing those three also defuses this interaction.
+
+**A failed seed dispatch writes no baseline** — If the umbrella dispatch
+fails, `main()` routes through `_fatal()` and skips `save_last_run()`
+entirely. Recording the seed anyway would mark every absorbed node as filed
+while no umbrella issue existed, so `compute_dispatch_set()` would suppress
+the whole night-one population forever — behind a Telegram message that reads
+like a successful baseline. Refusing to persist means the next run sees no
+prior state, re-seeds, and retries.
 
 **Starvation presents as missing tests, never as errors** — Since #2628,
 `claim_test_db()` polls inside `tests/conftest.py::pytest_configure`, before
@@ -208,7 +234,9 @@ launchctl list | grep nightly-tests
 ## Manual Testing
 
 ```bash
-# Dry-run: runs tests, prints what Telegram message would be sent, saves state
+# Dry-run: runs tests, prints what Telegram message would be sent, saves state.
+# Side-effect free with respect to triage: no Eng session is spawned and no
+# GitHub issue is filed (dispatch short-circuits to a sentinel session id).
 python scripts/nightly_regression_tests.py --dry-run
 
 # Stream live output

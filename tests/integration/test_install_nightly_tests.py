@@ -20,6 +20,7 @@ not bootstrap a real launchd service.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -133,6 +134,67 @@ def test_plist_lints_clean():
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
         Path(tf_path).unlink(missing_ok=True)
+
+
+def _fake_checkout(tmp_path: Path) -> Path:
+    """A non-worktree project dir carrying a copy of the installer."""
+    proj = tmp_path / "fake-main-checkout"
+    scripts = proj / "scripts"
+    scripts.mkdir(parents=True)
+    (proj / ".git").mkdir()  # a directory, so the worktree refusal does NOT fire
+    lib_dir = scripts / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "launchctl.sh").write_text("launchctl_bootstrap_fail_soft() { return 0; }\n")
+    installer_copy = scripts / "install_nightly_tests.sh"
+    installer_copy.write_text(_INSTALLER.read_text())
+    installer_copy.chmod(0o755)
+    return proj
+
+
+def test_unreadable_projects_config_fails_closed_without_removing_plist(tmp_path: Path):
+    """An unreadable projects.json must not qualify a machine.
+
+    This gate used to fail *open*, which was safe only while
+    scripts/update/run.py wrapped the call in a second `if has_bridge:` check.
+    That wrapper is gone, so this is the only gate, and projects.json lives in
+    the iCloud-synced vault that remote-update.sh already warns is
+    intermittently unreadable.
+
+    It must also leave an existing plist alone: a transient iCloud stall must
+    not uninstall a correctly-running detector every 30 minutes.
+    """
+    proj = _fake_checkout(tmp_path)
+    fake_home = tmp_path / "home"
+    (fake_home / "Library" / "LaunchAgents").mkdir(parents=True)
+    existing_plist = fake_home / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
+    existing_plist.write_text("<plist>existing</plist>")
+
+    env = {
+        **os.environ,
+        "HOME": str(fake_home),
+        "PROJECTS_CONFIG_PATH": str(tmp_path / "does-not-exist.json"),
+        "SERVICE_LABEL_PREFIX": "com.valor",
+    }
+    result = subprocess.run(
+        ["/bin/bash", str(proj / "scripts" / "install_nightly_tests.sh")],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    # Pin the *specific* first-layer message. Asserting only the generic
+    # "Failing closed" would be vacuous: deleting this guard falls through to
+    # has_worker_role()'s exit-2 path, which prints that same phrase, so a
+    # loose assertion stays green against a mutation that removes the guard
+    # entirely. (Verified by mutation: the loose form did not go red.)
+    assert "projects config unreadable at" in result.stdout
+    # The install must not have happened...
+    assert _SUCCESS_MARKER not in result.stdout
+    # ...and the pre-existing plist must be untouched.
+    assert existing_plist.read_text() == "<plist>existing</plist>"
 
 
 def test_worktree_refusal_fires_in_a_real_worktree_checkout(tmp_path: Path):

@@ -33,6 +33,32 @@ if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/.git/worktrees/' "$PROJECT
 fi
 # ── End worktree refusal ─────────────────────────────────────────────────
 
+# ── Unreadable-config refusal (fail closed) ──────────────────────────────
+# Installing a nightly full-suite run is not a safe default, so an unreadable
+# projects config must not qualify a machine. This gate used to fail *open*,
+# which was tolerable only while `scripts/update/run.py` wrapped the call in a
+# second, independent `if has_bridge:` check; that wrapper is gone, leaving
+# this as the only gate. `projects.json` lives in the iCloud-synced vault and
+# `scripts/remote-update.sh` already warns that directory is intermittently
+# unreadable, so a transient stall would otherwise install the detector on a
+# machine the gate meant to exclude.
+#
+# Deliberately NOT the role-gate skip path below: that one removes an existing
+# plist, and a transient stall must not uninstall a correctly-running detector
+# every time iCloud hiccups. Unreadable config => change nothing.
+PROJECTS_CONFIG="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+if [ ! -f "$PROJECTS_CONFIG" ]; then
+    echo "Skipping nightly-tests install: projects config unreadable at $PROJECTS_CONFIG"
+    echo "Failing closed — not installing, and leaving any existing plist untouched."
+    exit 0
+fi
+if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
+    echo "Skipping nightly-tests install: no venv python at $PROJECT_DIR/.venv/bin/python"
+    echo "Failing closed — not installing, and leaving any existing plist untouched."
+    exit 0
+fi
+# ── End unreadable-config refusal ────────────────────────────────────────
+
 # ── Worker-role gate ─────────────────────────────────────────────────────
 # Running the test suite requires a checkout and a worker, not a Telegram
 # bridge — gating on has_bridge_role() (this script's prior form) stranded the
@@ -41,14 +67,13 @@ fi
 # the same fix #1379 applied to the reflection-worker installer
 # (scripts/install_reflection_worker.sh). Any machine that owns a project
 # qualifies, regardless of whether that project bridges Telegram.
+# Exit codes: 0 = this host owns a project (qualify), 1 = parsed cleanly and
+# this host owns nothing (a real answer — safe to remove a stale plist),
+# 2 = could not determine (scutil or JSON parse failed). 2 is distinct from 1
+# precisely so an *unanswerable* check never reaches the removal path below:
+# "I don't know" must not uninstall a correctly-running detector.
 has_worker_role() {
-    local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-    if [ ! -f "$config" ]; then
-        return 0  # Fail open when config is unreadable
-    fi
-    if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
-        return 0  # Fail open when venv is missing
-    fi
+    local config="$PROJECTS_CONFIG"
     "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
 import json, subprocess, sys
 
@@ -57,13 +82,13 @@ try:
         ["scutil", "--get", "ComputerName"], text=True
     ).strip()
 except Exception:
-    sys.exit(0)  # Fail open on scutil error
+    sys.exit(2)  # Undeterminable — fail closed, change nothing
 
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
 except Exception:
-    sys.exit(0)  # Fail open on config parse error
+    sys.exit(2)  # Undeterminable — fail closed, change nothing
 
 target = host.lower()
 for proj in cfg.get("projects", {}).values():
@@ -73,7 +98,16 @@ sys.exit(1)  # No project assigned to this host
 PYEOF
 }
 
-if ! has_worker_role; then
+role_rc=0
+has_worker_role || role_rc=$?
+
+if [ "$role_rc" -eq 2 ]; then
+    echo "Skipping nightly-tests install: could not determine host role"
+    echo "Failing closed — not installing, and leaving any existing plist untouched."
+    exit 0
+fi
+
+if [ "$role_rc" -ne 0 ]; then
     host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
     echo "Skipping nightly-tests install (no projects assigned to '$host')"
     if [ -f "$PLIST_DST" ]; then
