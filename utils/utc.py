@@ -4,8 +4,11 @@ All timestamps in the system should be tz-aware UTC. Use these utilities
 instead of datetime.now() to ensure consistency across logs, storage,
 and cross-component correlation.
 
-Display conversion to local time happens only at the presentation boundary
-(e.g., Telegram messages to humans).
+Display conversion to local time happens only at the presentation boundary.
+
+This module is dependency-free by contract: it imports nothing outside the
+standard library. Standalone ``tools/`` packages import it, and any first-party
+import added here would chain them back to the harness.
 """
 
 from datetime import UTC, datetime

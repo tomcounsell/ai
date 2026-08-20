@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

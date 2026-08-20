@@ -72,7 +72,7 @@ async def record_last_processed(chat_id, message_id: int, message_ts) -> None:
     ``record_message_processed``); catchup falls back to the global cutoff.
     """
     try:
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         unix_ts = to_unix_ts(message_ts)
         if unix_ts is None:
@@ -222,7 +222,7 @@ async def record_last_event(chat_id, event_ts=None) -> None:
     Best-effort: failures log a WARNING and never raise.
     """
     try:
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         unix_ts = to_unix_ts(event_ts)
         if unix_ts is None:

@@ -230,7 +230,7 @@ def _classify(
     project_counters: dict | None = None,
 ) -> StallVerdict:
     """Core classification logic.  Raises on unexpected errors (caller wraps)."""
-    from bridge.utc import to_unix_ts  # local import to avoid top-level coupling
+    from utils.utc import to_unix_ts  # local import to avoid top-level coupling
 
     events = events or []
     counters = project_counters or {}

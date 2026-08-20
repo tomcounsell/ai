@@ -914,8 +914,8 @@ def build(project: dict, slot_config: dict) -> tuple[str, str, dict[str, Any]]:
         ``(transcript, followup_markdown, raw_signals)``. On skip-when-empty
         (no activity for the target day), returns ``("", "", {})``.
     """
-    from bridge.utc import utc_now
     from reflections.pm_briefings import builder
+    from utils.utc import utc_now
 
     target_date = utc_now() - timedelta(days=1)
 

@@ -1037,7 +1037,7 @@ class AgentSession(Model):
         the combination is a caller smell — a WARNING names the caller and no
         exception is raised (fail-quiet, matching every other guard here).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         if preserve_updated_at:
             if update_fields is not None and "updated_at" not in update_fields:
@@ -1116,7 +1116,7 @@ class AgentSession(Model):
         Returns the number of future-dated records detected (NOT healed —
         nothing is mutated or re-saved).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         now = utc_now()
         count = 0
@@ -2614,7 +2614,7 @@ class AgentSession(Model):
                 continue
             # Handle both datetime and float timestamps (migration period).
             # to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo).
-            from bridge.utc import to_unix_ts
+            from utils.utc import to_unix_ts
 
             ts = to_unix_ts(started)
             if ts is None:

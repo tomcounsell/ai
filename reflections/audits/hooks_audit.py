@@ -166,7 +166,7 @@ def _hooks_audit_for_project(project: dict) -> dict:
     """
     import time as _time
 
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     wd = project.get("working_directory", "")
     repo_root = Path(wd) if wd else PROJECT_ROOT

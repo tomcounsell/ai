@@ -31,9 +31,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from bridge.utc import to_unix_ts, utc_iso, utc_now
 from config.machine import get_machine_name
 from config.settings import settings
+from utils.utc import to_unix_ts, utc_iso, utc_now
 
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist

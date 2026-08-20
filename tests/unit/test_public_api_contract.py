@@ -54,7 +54,7 @@ PUBLIC_API_SIGNATURES: dict[tuple[str, str], str] = {
         "(change_summary: 'str', top_n: 'int' = 20, repo_root: 'Path | None' = None) "
         "-> 'tuple[list[AffectedCode], ImpactFinderMeta]'"
     ),
-    ("bridge.utc", "utc_now"): "() -> datetime.datetime",
+    ("utils.utc", "utc_now"): "() -> datetime.datetime",
 }
 
 

@@ -49,8 +49,8 @@ from pathlib import Path
 
 import redis
 
-from bridge.utc import utc_iso, utc_now
 from config.settings import settings
+from utils.utc import utc_iso, utc_now
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent

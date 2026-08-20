@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from bridge.utc import to_local, to_unix_ts, utc_iso, utc_now
+from utils.utc import to_local, to_unix_ts, utc_iso, utc_now
 
 
 class TestUtcNow:

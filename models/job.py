@@ -480,7 +480,7 @@ class Job(Model):
         """
         rested = 0
         try:
-            from bridge.utc import to_unix_ts
+            from utils.utc import to_unix_ts
 
             now_ts = now if now is not None else time.time()
             cutoff = now_ts - JOB_AT_REST_AGE_SECONDS
@@ -722,7 +722,7 @@ class Job(Model):
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         # Maintenance path never raises: an enumeration failure (Redis down,
         # popoto decode blow-up) logs and returns (0, 0) so repair_indexes

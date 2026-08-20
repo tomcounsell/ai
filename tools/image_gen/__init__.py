@@ -18,13 +18,13 @@ from typing import Literal
 
 import requests
 
-from bridge.utc import utc_now
 from config.models import (
     IMAGE_ASPECT_RATIOS,
     IMAGE_GEN_PROVIDERS,
     OPENAI_IMAGE_SIZES,
     OPENROUTER_URL,
 )
+from utils.utc import utc_now
 
 
 class ImageGenError(Exception):

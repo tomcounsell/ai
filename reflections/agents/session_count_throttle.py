@@ -65,7 +65,7 @@ def run() -> None:
         # Phantom guard: drop records whose fields are still Popoto Field descriptors
         # (orphan $IndexF members).
         all_sessions = _filter_hydrated_sessions(AgentSession.query.filter(project_key=project_key))
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         recent = []
         for s in all_sessions:

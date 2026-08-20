@@ -330,7 +330,7 @@ def _parse_ts(ts_val) -> float:
     Uses ``bridge.utc.to_unix_ts`` to treat naive datetimes as UTC so age
     calculations stay correct on non-UTC hosts.
     """
-    from bridge.utc import to_unix_ts
+    from utils.utc import to_unix_ts
 
     if ts_val is None:
         return time.time()

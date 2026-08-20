@@ -26,8 +26,8 @@ from agent.constants import (
     SESSION_ARCHIVE_BUSY_TIMEOUT_MS,
     SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS,
 )
-from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
+from utils.utc import to_unix_ts
 
 pytestmark = pytest.mark.usefixtures("redis_test_db")
 
