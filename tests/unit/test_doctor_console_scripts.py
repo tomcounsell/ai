@@ -707,6 +707,53 @@ class TestWinningScriptInterpreter:
         # argument -- `uv sync --all-extras Then re-run.`
         assert "--all-extras Then re-run" not in result.fix
 
+    def test_case15c_one_group_spanning_two_checkouts_names_both(self, tmp_path, monkeypatch):
+        """Two venvs, one shared bad target -- the remedy names both checkouts.
+
+        `shutil.which` picks one winner per name, so a single `(reason, target)`
+        group spans two checkouts when different names win in different venv
+        bin dirs while sharing one shebang. Rebuilding only the first leaves the
+        other's shims still on PATH with the same bad interpreter.
+        """
+        main_root = _fake_checkout(tmp_path, names=(), venv_version="3.14", pin_version="3.14")
+        worktree = main_root / ".worktrees" / "lane-a"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {main_root / '.git' / 'worktrees' / 'lane-a'}\n")
+        (worktree / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n\n[project.scripts]\n'
+            'main-shim = "tools.main_shim:main"\n'
+            'wt-shim = "tools.wt_shim:main"\n'
+        )
+        wt_venv_bin = worktree / ".venv" / "bin"
+        wt_python3 = wt_venv_bin / "python3"
+        _executable(wt_python3)
+        (worktree / ".venv" / "pyvenv.cfg").write_text("version_info = 3.13\n")
+
+        # Both shims name the *same* off-pin interpreter, but each wins
+        # `shutil.which` from a different venv bin dir.
+        _executable(main_root / ".venv" / "bin" / "main-shim", f"#!{wt_python3}\n")
+        _executable(wt_venv_bin / "wt-shim", f"#!{wt_python3}\n")
+
+        result = _run(worktree, [main_root / ".venv" / "bin", wt_venv_bin], monkeypatch)
+        assert result.passed is False, result.message
+        assert result.fix
+        # One group, one remedy sentence, naming both checkouts.
+        assert f"In each of {main_root}, {worktree}: rm -rf .venv" in result.fix
+        assert result.fix.count("rm -rf .venv && uv sync --all-extras.") == 1
+
+    def test_case6c_nul_in_shebang_target_is_unverified_not_a_crash(self, tmp_path, monkeypatch):
+        """`Path()` raises `ValueError` on an embedded NUL -- not `OSError`, so
+        neither I/O handler would catch it. Rejected before `Path` is built."""
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names)
+        target = self._add_target_script(root)
+        target.write_bytes(b"#!/usr/bin/py\x00thon3\n")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "3 of 4 interpreter-verified" in result.message
+
     # --- Case 16: divergent PATH spelling (hardlink-trailer guard) --------------
 
     def test_case16_divergent_path_spelling_gets_no_hardlink_trailer(self, tmp_path, monkeypatch):

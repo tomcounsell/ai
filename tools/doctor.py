@@ -190,7 +190,12 @@ def _shebang_interpreter(path: Path) -> str | None:
     if not rest:
         return None
     prog = rest.split()[0]
-    if not prog.startswith("/") or Path(prog).name in {"sh", "bash", "dash", "env"}:
+    # An embedded NUL is rejected before `Path`, which raises `ValueError` (not
+    # `OSError`) on one -- the two handlers above would not catch it and the
+    # documented "never a crash" contract would break on a corrupt shim.
+    if not prog.startswith("/") or "\0" in prog:
+        return None
+    if Path(prog).name in {"sh", "bash", "dash", "env"}:
         return None
     return prog
 
@@ -531,7 +536,9 @@ def _check_console_scripts_resolve() -> CheckResult:
                     f"{', '.join(shown_names)}{names_suffix})"
                 )
 
-                checkouts = group["checkouts"] or [str(PROJECT_DIR)]
+                # Always non-empty: every group is created alongside its first
+                # `checkouts` append, so no `PROJECT_DIR` fallback is reachable.
+                checkouts = group["checkouts"]
                 where = f"each of {', '.join(checkouts)}" if len(checkouts) > 1 else checkouts[0]
                 fix_sentence = f"{fix_diag} In {where}: rm -rf .venv && uv sync --all-extras."
                 hardlinked = group["hardlinked_paths"]

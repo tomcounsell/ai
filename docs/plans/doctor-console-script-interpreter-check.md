@@ -1528,6 +1528,8 @@ new finding inside an existing check that the agent already knows how to run and
   | `except UnicodeDecodeError` in `_shebang_interpreter` replaced with `raise` | case 6b (Mach-O byte prefix) |
   | Remedy checkout reverted to `PROJECT_DIR` instead of the flagged shim's `match.parent.parent` | case 15b |
   | Terminal period dropped from the remedy sentence (`--all-extras Then re-run.`) | case 15b |
+  | Multi-checkout remedy rendering collapsed to `where = checkouts[0]` | case 15c |
+  | NUL rejection dropped from the shebang-target guard (`ValueError` escapes both I/O handlers) | case 6c |
 
   The realpath rule is verified **here**, by mutation, and not by a source scan: the
   whole-file regex row an earlier draft carried matched the prohibition written in prose and
