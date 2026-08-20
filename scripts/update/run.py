@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Add project root to path for imports
@@ -769,6 +770,47 @@ def run_release_verify(
             log(f"WARN: Sentry capture failed: {sentry_err}", v)
     except Exception as verify_err:
         log(f"WARN: release verify errored (inconclusive): {verify_err}", v, always=True)
+
+
+_NIGHTLY_TESTS_STALE_AFTER = timedelta(days=2)
+
+
+def _nightly_tests_staleness_warning(project_dir: Path) -> str | None:
+    """Warn when the nightly detector is installed but has not run recently.
+
+    This is the only check in the pipeline that observes the *absence* of a
+    run. The clock is ``now - max(plist_mtime, run_at)``, never file-absence:
+    the installer is idempotent and takes the "installed" leg on every
+    ``/update``, so an absence-keyed check would warn on the very run that
+    installs the detector and keep warning until a 03:00 night lands.
+
+    Gated on the caller only invoking this on the ``"installed"`` leg — a
+    plist booted out, a bootstrap that failed quietly, a machine asleep at
+    03:00, or the detector's own run-lock collision (returns 0 silently) all
+    look exactly like a green suite otherwise, and ``tools/doctor.py`` has no
+    coverage for any of them.
+    """
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
+    anchor: datetime | None = None
+    if plist_path.exists():
+        try:
+            anchor = datetime.fromtimestamp(plist_path.stat().st_mtime, UTC)
+        except OSError:
+            anchor = None
+
+    run_at: datetime | None = None
+    last_run_file = project_dir / "data" / "nightly_tests_last_run.json"
+    try:
+        state = json.loads(last_run_file.read_text())
+        raw_run_at = state.get("run_at")
+        run_at = datetime.fromisoformat(raw_run_at) if raw_run_at else None
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        run_at = None
+
+    newest = max([d for d in (anchor, run_at) if d is not None], default=None)
+    if newest is None or (datetime.now(UTC) - newest) >= _NIGHTLY_TESTS_STALE_AFTER:
+        return "Nightly tests: service installed but last run is 2+ days old (or never ran)"
+    return None
 
 
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
@@ -2094,17 +2136,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
                 _append_warning(result, "Reflection-worker service install failed")
 
-        # Install nightly-tests launchd service on bridge machines.
-        # The install script self-gates on has_bridge_role() — it skips
-        # gracefully and removes stale plists on non-bridge machines.
-        if has_bridge:
-            if service.install_nightly_tests(project_dir):
-                log("Nightly tests service installed/verified", v)
-            else:
-                log("WARN: Nightly tests service install failed or not supported", v, always=True)
-                _append_warning(result, "Nightly tests service install failed")
+        # Install nightly-tests launchd service. UNCONDITIONAL (NOT under
+        # `if has_bridge:`) — running the test suite requires a checkout and a
+        # worker, not a Telegram bridge (issue #2823). The install script
+        # self-gates on a worktree refusal plus has_worker_role() and reports
+        # its outcome as a three-way result rather than a bool, so a role-gate
+        # skip is never conflated with an install failure.
+        #
+        # Warnings go through _append_warning (#2845/#2892), never
+        # result.warnings.append: a raw multi-line entry renders its sentinel
+        # on only the first physical line and silently drops the rest.
+        nightly_outcome = service.install_nightly_tests(project_dir)
+        if nightly_outcome == "installed":
+            log("Nightly tests service installed/verified", v)
+            staleness_warning = _nightly_tests_staleness_warning(project_dir)
+            if staleness_warning:
+                _append_warning(result, staleness_warning)
+        elif nightly_outcome == "skipped":
+            log("Nightly tests: no regression coverage on this machine (install skipped)", v)
+            _append_warning(
+                result, "Nightly tests: no regression coverage on this machine (install skipped)"
+            )
         else:
-            log("Nightly tests: skipped (no projects assigned to this machine)", v)
+            log("WARN: Nightly tests service install failed or not supported", v, always=True)
+            _append_warning(result, "Nightly tests service install failed")
 
         # Ensure email bridge is running if this machine has projects AND IMAP is configured.
         # If the machine has no projects, stop any stray email bridge process.

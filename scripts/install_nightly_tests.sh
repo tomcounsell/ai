@@ -20,59 +20,133 @@ PLIST_SRC="$PROJECT_DIR/com.valor.nightly-tests.plist"
 LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-# ── Bridge-role gate ────────────────────────────────────────────────────
-# Nightly-test alerts route through the Telegram bridge, so the schedule is
-# only meaningful on a machine that has at least one Telegram-configured
-# (bridge) project assigned to it. Non-bridge machines (e.g. skills-only
-# laptops) skip the install and remove any stale plist from a prior install.
+# ── Worktree refusal (issue #2823) ──────────────────────────────────────
+# The plist is machine-global and hardcodes an absolute PROJECT_DIR. Installing
+# from a lane worktree would aim the fleet's nightly detector at a directory
+# that `/do-build` cleanup deletes once the lane's PR merges. Refuse before the
+# role gate — a worktree's `.git` is a FILE containing `gitdir: <main-repo>/
+# .git/worktrees/<slug>`, never a directory.
+if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/.git/worktrees/' "$PROJECT_DIR/.git" 2>/dev/null; then
+    echo "Skipping nightly-tests install: running from a worktree checkout ($PROJECT_DIR)"
+    echo "The nightly detector must only be installed from a machine's main checkout."
+    exit 0
+fi
+# ── End worktree refusal ─────────────────────────────────────────────────
+
+# ── Install gate: INSTALL-ONLY, no removal path ───────────────────────
 #
-# Mirrors the has_email_role() pattern from scripts/install_email_bridge.sh.
-has_bridge_role() {
-    local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-    if [ ! -f "$config" ]; then
-        return 0  # Fail open when config is unreadable
-    fi
-    if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
-        return 0  # Fail open when venv is missing
-    fi
-    "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
+# This gate answers one question — "does this host own a project?" — and its
+# only possible actions are "install" or "do nothing". There is deliberately NO
+# stale-plist removal here.
+#
+# That absence is the design, not an omission. The removal branch was reviewed
+# four times and produced four bugs, and every one wrongly UNINSTALLED a
+# healthy detector while not one caused a bad install:
+#
+#   1. `-eq 2` enumerated the exit codes meaning "undeterminable", missing the rest.
+#   2. `-ne 0 && -ne 1` widened the enumeration and still missed exit 1 — what an
+#      orphaned CPython and an unhandled heredoc exception both return, the same
+#      1 that otherwise means "owns nothing".
+#   3. `scutil` exiting 0 with EMPTY output produced a confident "owns nothing"
+#      from an identity never established as usable.
+#   4. A verdict printed and then followed by a crash was still trusted.
+#
+# The asymmetry is structural. Removal must be certain of a NEGATIVE ("this host
+# owns nothing"), and every indeterminate input met so far collapsed into that
+# confident negative. Installing needs certainty about a POSITIVE, which is far
+# easier to establish and cheaper to get wrong: a spurious install is
+# recoverable, a spurious uninstall runs silently across the fleet.
+#
+# Accepted cost: a machine that stops owning projects keeps a stale plist until
+# a follow-up lands removal deliberately. Non-destructive and recoverable — the
+# trade this gate makes on purpose.
+#
+# Properties covered by tests/integration/test_install_nightly_tests.py:
+#   - The verdict is a printed TOKEN, never an exit code. An exit code the
+#     interpreter did not choose cannot carry an answer.
+#   - stderr is discarded, so a traceback can never read as a verdict.
+#   - Anything other than an unambiguous ROLE:OWNS means DO NOTHING.
+PROJECTS_CONFIG="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+
+owns_a_project() {
+    [ -f "$PROJECTS_CONFIG" ] || return 1
+    [ -x "$PROJECT_DIR/.venv/bin/python" ] || return 1
+    "$PROJECT_DIR/.venv/bin/python" - "$PROJECTS_CONFIG" <<'PYEOF'
 import json, subprocess, sys
 
 try:
     host = subprocess.check_output(
         ["scutil", "--get", "ComputerName"], text=True
     ).strip()
-except Exception:
-    sys.exit(0)  # Fail open on scutil error
-
-try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
 except Exception:
-    sys.exit(0)  # Fail open on config parse error
+    sys.exit(1)  # Print no token; the caller then does nothing.
+
+# Reading an input is not the same as establishing it is meaningful. `scutil`
+# can exit 0 printing NOTHING, which means "I don't know who I am".
+#
+# Under install-only this guard is BEHAVIOURALLY REDUNDANT and deliberately
+# untested: an empty identity matches no project, so without it the result is
+# ROLE:NONE, and ROLE:NONE now means "do nothing" — the same outcome. Mutation
+# confirms removing it changes no test.
+#
+# It is kept because it stops being redundant the moment a removal path
+# returns. This exact input produced a confident "owns nothing" that deleted a
+# healthy detector's plist, and whoever implements removal (see the follow-up
+# issue) needs the identity validated before a negative can be trusted.
+if not host:
+    sys.exit(1)
 
 target = host.lower()
-for proj in cfg.get("projects", {}).values():
-    if (proj.get("machine") or "").lower() != target:
-        continue
-    if proj.get("telegram"):
-        sys.exit(0)  # At least one bridge-role project found — qualify
-sys.exit(1)  # No bridge-role project found for this host
+# `isinstance(proj, dict)` is NOT redundant — it is the one clause here with an
+# observable effect, and it makes this path MORE permissive. Measured on a
+# config whose malformed entry precedes a matching one:
+#
+#   {"projects": {"a": "malformed", "b": {"machine": <this host>}}}
+#     with the clause     -> ROLE:OWNS  (installs)
+#     without the clause  -> rc=1, no token, does nothing
+#
+# Without it, `.strip()` raises on the malformed entry and kills the whole run
+# before the legitimate match behind it is ever reached. That is the wrong
+# outcome: refusing to install because of an unrelated malformed sibling
+# silently drops a machine out of the fleet's regression detection, which is
+# the failure this feature exists to prevent.
+#
+# The resulting install is legitimate — it rests entirely on entry `b`, which
+# passed every check. Being the only permissive-direction clause in this gate,
+# it deserves the most accurate comment, not the least.
+owns = any(
+    (proj.get("machine") or "").strip().lower() == target
+    for proj in (cfg.get("projects") or {}).values()
+    if isinstance(proj, dict) and (proj.get("machine") or "").strip()
+)
+print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
 }
 
-if ! has_bridge_role; then
-    host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
-    echo "Skipping nightly-tests install (no bridge projects assigned to '$host')"
-    if [ -f "$PLIST_DST" ]; then
-        echo "Removing stale nightly-tests plist from non-bridge machine..."
-        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-        rm -f "$PLIST_DST"
-        echo "Stale nightly-tests plist removed."
-    fi
-    exit 0
-fi
-# ── End bridge-role gate ────────────────────────────────────────────────
+role_out="$(owns_a_project 2>/dev/null || true)"
+
+case "$role_out" in
+    *ROLE:OWNS*)
+        # Both tokens present means something other than the heredoc wrote to
+        # stdout, so it is not an answer either.
+        case "$role_out" in
+            *ROLE:NONE*)
+                echo "Skipping nightly-tests install: contradictory role output"
+                echo "Not installing. No existing plist is touched."
+                exit 0
+                ;;
+        esac
+        ;;
+    *)
+        echo "Skipping nightly-tests install: this host does not own a project,"
+        echo "or its role could not be determined. Not installing."
+        echo "Any existing plist is left alone (removal is not this script's job)."
+        exit 0
+        ;;
+esac
+# ── End install gate ─────────────────────────────────────
 
 # Prerequisite: pytest-json-report must be installed
 if ! "$PROJECT_DIR/.venv/bin/python" -m pytest --json-report --help > /dev/null 2>&1; then

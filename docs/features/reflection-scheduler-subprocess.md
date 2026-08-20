@@ -74,10 +74,12 @@ restart-rate classifier: it is not computable from the cumulative snapshot, and
 
 The subprocess installs exactly where the worker installs. The worker install is ungated
 by role (`scripts/install_worker.sh` has no machine gate; `run.py` guards it only on plist
-existence), so `scripts/install_reflection_worker.sh` gates on **`has_worker_role()`** —
-`has_bridge_role()` minus the Telegram-block check. It qualifies as soon as any project's
-`machine` matches this host, regardless of Telegram config, with the same fail-open
-contract and self-skip + stale-plist removal.
+existence), so `scripts/install_reflection_worker.sh` gates on **`has_worker_role()`**. It
+qualifies as soon as any project's `machine` matches this host, regardless of Telegram
+config, with the same fail-open contract and self-skip + stale-plist removal a bridge-role
+gate uses — unlike a bridge-role gate, it drops the Telegram-block requirement.
+`scripts/install_nightly_tests.sh` carries an identical `has_worker_role()` gate for the
+same reason (issue #2823).
 
 Gating on bridge-role would strand reflections on worker-only (non-Telegram) machines —
 the [#1379](https://github.com/tomcounsell/ai/issues/1379) over-narrow-gating failure

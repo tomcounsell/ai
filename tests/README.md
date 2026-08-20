@@ -421,9 +421,11 @@ here.
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_nightly_regression_tests.py` | 28 | Nightly regression runner: suite invocation, JSON report parsing, Telegram alerting, version-pinned `claude` canary |
+| unit | `test_nightly_regression_tests.py` | 107 | Nightly regression runner: widened-collection argv, process-group ownership, run-integrity guard (coverage floor, fixture-error ceiling, signal-death), serial re-confirmation trust, collection-aware re-baseline/seed escalation, `_fatal`/`load_env_or_die` refusal paths, JSON report parsing, Telegram alerting |
+| unit | `test_update_nightly_tests_staleness.py` | 11 | Three-way install-outcome classification (`installed`/`skipped`/`failed`) and the `/update` staleness warning clock (`max(plist_mtime, run_at)`) |
 | unit | `test_template_filter_registry.py` | 4 | Dashboard Jinja filter guards (#2719): every template's filter demand resolves against `ui.app.register_template_filters`; filter-key equality against a `Jinja2Templates`-shaped env; registrar-completeness; no test file hand-copies a `.filters[...]` registration |
 | unit | `test_analytics_stats_render.py` | 3 | Render coverage for `_partials/analytics_stats.html`'s two `\| usd` cost cards, including the sub-cent-renders-as-$0.01 case |
+| integration | `test_install_nightly_tests.py` | 13 | `install_nightly_tests.sh`: worktree refusal precedes the role gate, `has_worker_role()` gate text, the shipped success-marker `scripts/update/service.py` depends on |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
 
 Dashboard render-test fixtures (`test_session_modal_liveness_render.py`,
