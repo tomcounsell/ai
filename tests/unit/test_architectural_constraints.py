@@ -36,8 +36,10 @@ def _iter_imports(filepath: str) -> list[tuple[str, int, int]]:
 
     imports: list[tuple[str, int, int]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imports.append((node.module, node.lineno, node.level))
+        if isinstance(node, ast.ImportFrom):
+            # ``from . import X`` parses with module=None; record it as "." so the
+            # node is still counted rather than silently dropped.
+            imports.append((node.module or ".", node.lineno, node.level))
         elif isinstance(node, ast.Import):
             imports.extend((alias.name, node.lineno, 0) for alias in node.names)
     return imports
