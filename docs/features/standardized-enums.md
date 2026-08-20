@@ -10,13 +10,13 @@ All magic strings for session types, persona identifiers, access levels, and cla
 
 ### SessionType
 
-Discriminator for AgentSession: eng, teammate, or granite.
+Discriminator for AgentSession: eng or teammate (`granite` is a historical value; see the row below).
 
 | Member | Value | Usage |
 |--------|-------|-------|
 | `SessionType.ENG` | `"eng"` | Eng session -- engineer persona, full permissions; handles both SDLC work and conversational responses |
 | `SessionType.TEAMMATE` | `"teammate"` | Teammate session -- conversational, informational queries |
-| `SessionType.GRANITE` | `"granite"` | Direct invocations of the standalone `valor-granite-loop` CLI (`tools/granite_interactive_tui_poc/cli.py`); labels CLI-originated sessions so they are not misclassified as bridge-originated. Bridge sessions that run through the granite PTY container are typed `ENG`. |
+| `SessionType.GRANITE` | `"granite"` | Historical value. Its sole producer, the standalone `valor-granite-loop` CLI, was deleted with the PTY substrate (plan #1924); nothing creates new sessions with it. Retained so pre-cutover Redis records carrying `session_type="granite"` keep hydrating and rendering. |
 
 ### PersonaType
 

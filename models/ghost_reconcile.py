@@ -20,7 +20,7 @@ What is ALREADY safe (verified empirically, see tests/unit/test_ghost_reconcile.
     session) is not reachable through ``.filter()``/``.all()`` today.
 
 What is NOT safe: the ghost member itself is never removed from the index.
-Left alone it is only cleaned by the nightly ``popoto-index-cleanup``
+Left alone it is only cleaned by the daily ``redis-index-cleanup``
 reflection (``scripts/popoto_index_cleanup.py``, once/24h), so between hash
 expiry and that sweep:
     - every query pays an extra round-trip per ghost and logs a
@@ -33,7 +33,7 @@ hash TTL: Redis SETs/ZSETs have no per-member expiry primitive, so "TTL the
 index members" would require re-modeling every index as a ZSET keyed by
 expiry and a periodic ZREMRANGEBYSCORE sweep -- strictly more code and risk
 than reusing the SCAN-based, production-safe primitive popoto already ships
-(``Model.clean_indexes()``, the same one the nightly reflection calls).
+(``Model.clean_indexes()``, the same one the daily reflection calls).
 Reconcile-on-read just moves that primitive earlier: instead of waiting up to
 24h for the scheduled sweep, a ghost-prone read path (dedup lookups, email
 subject-coalescing) triggers it inline, rate-limited so a hot path never pays
