@@ -1,12 +1,19 @@
-"""Tests for doctor's `[project.scripts]` PATH-resolution check (#2566).
+"""Tests for doctor's `[project.scripts]` health check, both halves.
 
-The defect these guard is pure host state: `.venv/bin` missing from PATH while
-a stale `~/Library/Python/3.12/bin` sits on it holding shims for a system
-interpreter with no editable install of this repo. Two of the three SDLC entry
-points resolved to those shims and died with `ModuleNotFoundError`; the third
-had no shim and failed as `command not found`. Both shapes are simulated here
-with real files and a real PATH, because a check that only ever sees a healthy
-machine proves nothing.
+**PATH resolution (#2566).** The defect these guard is pure host state:
+`.venv/bin` missing from PATH while a stale `~/Library/Python/3.12/bin` sits on
+it holding shims for a system interpreter with no editable install of this
+repo. Two of the three SDLC entry points resolved to those shims and died with
+`ModuleNotFoundError`; the third had no shim and failed as `command not found`.
+
+**Interpreter identity (#2748).** `TestWinningScriptInterpreter` covers the
+second half: what the winning script's shebang actually binds to, sorted into
+`ok` / `missing` / `off-pin` / `outside` / `unverified`. A script that resolves
+correctly still fails at runtime when its shebang names an interpreter that was
+deleted, sits outside every repo venv, or is off the pin.
+
+Every shape is simulated with real files and a real PATH, because a check that
+only ever sees a healthy machine proves nothing.
 """
 
 from __future__ import annotations
@@ -456,6 +463,47 @@ class TestWinningScriptInterpreter:
         assert result.passed is True, result.message
         assert "3 of 4 interpreter-verified" in result.message
 
+    # --- Case 6b: the two I/O guards ------------------------------------------
+
+    def _add_target_script(self, root: Path) -> Path:
+        (root / "pyproject.toml").write_text(
+            (root / "pyproject.toml").read_text() + 'target-script = "tools.target_script:main"\n'
+        )
+        return root / ".venv" / "bin" / "target-script"
+
+    def test_case6b_non_utf8_shim_is_unverified_not_a_crash(self, tmp_path, monkeypatch):
+        """`.venv/bin` legitimately holds compiled binaries; a decode error is
+        `unverified`, never a traceback out of the check."""
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names)
+        target = self._add_target_script(root)
+        # A Mach-O header: 0xFA is not a valid continuation byte for the 0xCF
+        # lead, so `readline().decode("utf-8")` raises UnicodeDecodeError.
+        target.write_bytes(b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\xff\xfe\x00\n")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+        assert result.passed is True, result.message
+        assert "3 of 4 interpreter-verified" in result.message
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the read-permission bit")
+    def test_case6b_unreadable_shim_is_unverified_not_a_crash(self, tmp_path, monkeypatch):
+        """Execute-without-read (`0o111`) keeps `shutil.which` finding the name
+        while `open()` raises PermissionError -- the `OSError` guard's shape."""
+        names = ("critique-roster-check", "critique-resume-probe", "sdlc-push-guard")
+        root = _fake_checkout(tmp_path, names=names)
+        target = self._add_target_script(root)
+        target.write_text("#!/usr/bin/python3\n")
+        target.chmod(0o111)
+
+        try:
+            result = _run(root, [root / ".venv" / "bin", Path("/usr/bin")], monkeypatch)
+            assert result.passed is True, result.message
+            assert "3 of 4 interpreter-verified" in result.message
+        finally:
+            # Restore read permission so tmp_path teardown can unlink it.
+            target.chmod(0o755)
+
     # --- Case 7: realpath guard -----------------------------------------------
 
     def test_case7_symlinked_venv_python_is_not_realpathed(self, tmp_path, monkeypatch):
@@ -630,6 +678,34 @@ class TestWinningScriptInterpreter:
         assert "3.13" in result.message
         assert "pin is 3.14" in result.message
         assert str(wt_python3) in result.message
+
+    def test_case15b_remedy_names_the_checkout_holding_the_flagged_shim(
+        self, tmp_path, monkeypatch
+    ):
+        """The rebuild directory follows the shim, not `PROJECT_DIR`.
+
+        Doctor invoked from a worktree whose lane uses the main venv: the
+        flagged shims live in the main checkout's `.venv/bin`, so naming
+        `PROJECT_DIR` would tell the operator to rebuild the worktree. Doing so
+        leaves PATH resolving to the same off-pin shebang and the next run
+        reports the identical finding.
+        """
+        main_root = _fake_checkout(tmp_path, venv_version="3.13", pin_version="3.14")
+        worktree = main_root / ".worktrees" / "lane-a"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {main_root / '.git' / 'worktrees' / 'lane-a'}\n")
+        (worktree / "pyproject.toml").write_text((main_root / "pyproject.toml").read_text())
+
+        result = _run(worktree, [main_root / ".venv" / "bin"], monkeypatch)
+        assert result.passed is False, result.message
+        assert result.fix
+        # Spelled with the command attached: `str(main_root)` alone is a prefix
+        # of `str(worktree)` and would pass even on the wrong directory.
+        assert f"In {main_root}: rm -rf .venv && uv sync --all-extras." in result.fix
+        assert str(worktree) not in result.fix
+        # The terminal period keeps the joined trailer from reading as an
+        # argument -- `uv sync --all-extras Then re-run.`
+        assert "--all-extras Then re-run" not in result.fix
 
     # --- Case 16: divergent PATH spelling (hardlink-trailer guard) --------------
 

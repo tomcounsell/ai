@@ -93,9 +93,19 @@ still winning the PATH race with the old shebang.
 the `off-pin` comparison -- `missing` and `outside` still fire with no pin,
 and the pass/failure message discloses the skip with
 `(pin unresolvable; off-pin comparison skipped)`. A venv whose own version
-cannot be read (`pyvenv.cfg` missing or unparseable) is `unverified`, never
-compared against the pin, so it never renders a false `is Python None`
-accusation and is excluded from the pass message's verified count.
+cannot be read (`pyvenv.cfg` missing or unparseable) is `unverified` **when the
+pin resolves** -- never compared against it, so it never renders a false
+`is Python None` accusation, and it is excluded from the pass message's
+verified count. With the pin *also* absent there is nothing left to compare
+against: the classifier returns `ok` before it reaches the version guard, and
+the script counts as verified. Both corners are deliberate -- the check
+declines to accuse on incomplete evidence, and the disclosure clause is what
+tells the operator the comparison was skipped.
+
+Reading a script's shebang is likewise fail-open on I/O: an unreadable file
+(`OSError`) and a non-UTF-8 one (`UnicodeDecodeError`, ordinary for the
+compiled binaries that legitimately share `.venv/bin`) both map to
+`unverified` rather than crashing the check.
 
 The pass message discloses how many scripts were interpreter-verified, as a
 ratio (`N of M interpreter-verified`) -- a run that verified nothing cannot

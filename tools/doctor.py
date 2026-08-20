@@ -228,11 +228,9 @@ def _classify_interpreter(
 
     target_path = Path(target)
     if not target_path.exists():
-        try:
-            dangling = os.path.realpath(target)
-        except OSError:
-            dangling = target
-        return "missing", dangling
+        # `realpath` defaults to `strict=False`: it absorbs its own `OSError`
+        # and returns the path unresolved, so a guard here could never fire.
+        return "missing", os.path.realpath(target)
 
     parent = target_path.parent
     match = next(
@@ -418,9 +416,23 @@ def _check_console_scripts_resolve() -> CheckResult:
         )
         group = interpreter_groups.setdefault(
             (reason, target),
-            {"names": [], "hardlinked_paths": [], "version": None, "dangling": None},
+            {
+                "names": [],
+                "hardlinked_paths": [],
+                "version": None,
+                "dangling": None,
+                "checkouts": [],
+            },
         )
         group["names"].append(name)
+        # The checkout whose `.venv` holds the flagged shim -- never
+        # PROJECT_DIR, which is the wrong checkout whenever doctor runs from a
+        # worktree and the winning shim lives in the main venv. Rebuilding
+        # PROJECT_DIR's venv there leaves PATH resolving to the same bad
+        # shebang, so the next run reports the identical finding.
+        checkout = str(match.parent.parent)
+        if checkout not in group["checkouts"]:
+            group["checkouts"].append(checkout)
         if reason == "off-pin":
             group["version"] = detail
         elif reason == "missing":
@@ -519,7 +531,9 @@ def _check_console_scripts_resolve() -> CheckResult:
                     f"{', '.join(shown_names)}{names_suffix})"
                 )
 
-                fix_sentence = f"{fix_diag} In {PROJECT_DIR}: rm -rf .venv && uv sync --all-extras"
+                checkouts = group["checkouts"] or [str(PROJECT_DIR)]
+                where = f"each of {', '.join(checkouts)}" if len(checkouts) > 1 else checkouts[0]
+                fix_sentence = f"{fix_diag} In {where}: rm -rf .venv && uv sync --all-extras."
                 hardlinked = group["hardlinked_paths"]
                 if hardlinked:
                     shown_hl = hardlinked[:5]
