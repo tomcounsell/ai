@@ -220,7 +220,36 @@ clean night.
 ## Installation
 
 Nightly tests are installed automatically by `/update` on any machine that
-owns at least one project (worker-role, not bridge-role):
+owns at least one project (worker-role, not bridge-role).
+
+### Opting one machine out
+
+Create `data/nightly-tests-disabled` in that machine's checkout:
+
+```bash
+touch data/nightly-tests-disabled   # this machine stops installing
+rm    data/nightly-tests-disabled   # re-enable; next /update installs
+```
+
+`data/` is gitignored, so the marker is **per-machine by construction** — the
+opted-out host stays down and every other machine sees no marker and installs
+on its next `/update`. Same mechanism as `data/auto-revert-enabled`
+(bridge-self-healing.md).
+
+The check runs before every other consideration, including the worktree
+refusal, so an opted-out machine short-circuits immediately.
+
+**The marker skips installation; it does not uninstall.** This installer
+installs or does nothing (see the install gate). To remove a detector that is
+already running, use the uninstall line the installer prints on success:
+
+```bash
+launchctl bootout gui/$(id -u)/com.valor.nightly-tests \
+  && rm ~/Library/LaunchAgents/com.valor.nightly-tests.plist
+```
+
+Wiring removal to the marker would reintroduce the branch #2905 exists to
+reimplement carefully, for a case the operator is already standing in front of.
 
 ```bash
 /update  # or: python scripts/update/run.py --full

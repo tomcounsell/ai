@@ -396,6 +396,67 @@ def test_installer_contains_no_removal_path(installer_src):
     assert "Stale nightly-tests plist removed" not in installer_src
 
 
+def test_per_machine_opt_out_marker_blocks_install(tmp_path: Path):
+    """`data/nightly-tests-disabled` opts one machine out, behaviourally.
+
+    Asserted on outcomes rather than source text: the run must not install,
+    and it must say why and where. The host here genuinely OWNS a project, so
+    without the marker this would install — that is what makes the case
+    non-vacuous.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    (proj / "data").mkdir(parents=True, exist_ok=True)
+    (proj / "data" / "nightly-tests-disabled").write_text("")
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert _SUCCESS_MARKER not in result.stdout
+    assert "opted out on this machine" in result.stdout
+    assert "nightly-tests-disabled" in result.stdout
+    # Skip only: the marker must not delete anything.
+    assert plist.read_text() == "<plist>existing</plist>"
+
+
+def test_opt_out_marker_absent_still_installs(tmp_path: Path):
+    """The control that keeps the marker test honest.
+
+    Without this, an installer that refused unconditionally would pass the
+    case above. Same fixture, no marker: the run must reach the install path.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, _ = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    result = _run_installer(proj, home, config)
+
+    assert "opted out on this machine" not in result.stdout
+    # It must get PAST the gate. It then stops at one of the install path's
+    # own prerequisites, which the sandbox cannot satisfy (no real plist
+    # source, no pytest-json-report). Asserting on "reached the install path"
+    # rather than on a specific prerequisite keeps this from breaking when the
+    # sandbox's failure mode shifts — the point is that no skip fired.
+    for skip_text in (
+        "opted out on this machine",
+        "does not own a project",
+        "worktree checkout",
+        "contradictory role output",
+    ):
+        assert skip_text not in result.stdout, f"unexpectedly skipped: {skip_text}"
+    assert "Plist not found" in result.stdout or "pytest-json-report" in result.stdout
+
+
 def test_role_answer_requires_a_positive_token(installer_src):
     """The heredoc emits an explicit token rather than encoding its verdict in
     an exit code.

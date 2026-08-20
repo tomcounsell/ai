@@ -20,6 +20,31 @@ PLIST_SRC="$PROJECT_DIR/com.valor.nightly-tests.plist"
 LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
+# ── Per-machine opt-out ──────────────────────────────────────────────────
+# `data/nightly-tests-disabled` opts this machine out. `data/` is gitignored,
+# so the marker is per-machine by construction: this host stays down and every
+# other machine sees no marker and installs on its next `/update`. Same shape
+# as `data/auto-revert-enabled` (see docs/features/bridge-self-healing.md).
+#
+# Checked FIRST, above the worktree refusal, so an opted-out machine
+# short-circuits before any other consideration.
+#
+# Skip only — the marker does not uninstall. This script installs or does
+# nothing (see the install gate below), and an operator who needs an already
+# installed detector gone runs the uninstall line this script prints on
+# success. Wiring removal to the marker would reintroduce the branch #2905
+# exists to reimplement carefully, for a case the operator is already standing
+# in front of.
+NIGHTLY_DISABLED_MARKER="$PROJECT_DIR/data/nightly-tests-disabled"
+if [ -f "$NIGHTLY_DISABLED_MARKER" ]; then
+    echo "Skipping nightly-tests install: opted out on this machine."
+    echo "Marker: $NIGHTLY_DISABLED_MARKER (delete it to re-enable)"
+    echo "Not installing. Any existing plist is left alone; to remove one, run:"
+    echo "  launchctl bootout gui/$(id -u)/$LABEL && rm $PLIST_DST"
+    exit 0
+fi
+# ── End per-machine opt-out ──────────────────────────────────────────────
+
 # ── Worktree refusal (issue #2823) ──────────────────────────────────────
 # The plist is machine-global and hardcodes an absolute PROJECT_DIR. Installing
 # from a lane worktree would aim the fleet's nightly detector at a directory
