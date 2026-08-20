@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -394,6 +395,94 @@ def test_installer_contains_no_removal_path(installer_src):
     """
     assert 'rm -f "$PLIST_DST"' not in installer_src
     assert "Stale nightly-tests plist removed" not in installer_src
+
+
+def _run_role_heredoc(installer_src: str, cfg, host=None) -> str:
+    """Execute the role heredoc directly and return its stdout token.
+
+    The heredoc's contract IS the token it prints. Testing only the
+    installer's side effects cannot observe that contract under install-only,
+    because every failure mode converges on "do nothing" — so guards that are
+    genuinely load-bearing look vacuous. Driving the heredoc directly tests it
+    at the level where it actually makes a decision.
+    """
+    body = installer_src.split("<<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+    if host is not None:
+        body = body.replace(
+            "host = subprocess.check_output(\n"
+            '        ["scutil", "--get", "ComputerName"], text=True\n'
+            "    ).strip()",
+            f"host = {host!r}",
+        )
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(cfg, f)
+        path = f.name
+    r = subprocess.run([sys.executable, "-c", body, path], capture_output=True, text=True)
+    return r.stdout.strip() or f"<no-token rc={r.returncode}>"
+
+
+# U+2019 (this machine's actual ComputerName) has NO canonical decomposition,
+# so NFC/NFD rows built on it pass trivially — verified: normalize("NFD", x)
+# == normalize("NFC", x). The accented vowel does decompose (17 chars NFC,
+# 18 NFD), which is what makes those rows able to fail.
+_HOST = "Tom\u2019s MacB\u00f3ok Air"
+
+
+@pytest.mark.parametrize(
+    "cfg, host, expected, label",
+    [
+        # --- must qualify -------------------------------------------------
+        ({"projects": {"x": {"machine": _HOST}}}, _HOST, "ROLE:OWNS", "exact"),
+        ({"projects": {"x": {"machine": f"  {_HOST}  "}}}, _HOST, "ROLE:OWNS", "padded"),
+        ({"projects": {"x": {"machine": _HOST.upper()}}}, _HOST, "ROLE:OWNS", "case"),
+        # NFC/NFD: macOS stores NFD, so a name round-tripped through a path
+        # decomposes while looking identical. Must still match, both directions.
+        (
+            {"projects": {"x": {"machine": unicodedata.normalize("NFD", _HOST)}}},
+            _HOST,
+            "ROLE:OWNS",
+            "config-NFD",
+        ),
+        (
+            {"projects": {"x": {"machine": _HOST}}},
+            unicodedata.normalize("NFD", _HOST),
+            "ROLE:OWNS",
+            "host-NFD",
+        ),
+        # A malformed entry must not prevent a legitimate match behind it.
+        (
+            {"projects": {"a": {"machine": 42}, "b": {"machine": _HOST}}},
+            _HOST,
+            "ROLE:OWNS",
+            "malformed-then-match",
+        ),
+        # --- must NOT qualify ---------------------------------------------
+        ({"projects": {"x": {"machine": 42}}}, _HOST, "ROLE:NONE", "machine-int"),
+        # Type discipline, not plausibility. A ComputerName of "42" is legal,
+        # and `"machine": 42` (an unquoted JSON number) is a plausible typo.
+        # Coercing with str() instead of rejecting non-strings would make those
+        # two match and INSTALL — a wrong positive, the only direction that
+        # still matters under install-only.
+        ({"projects": {"x": {"machine": 42}}}, "42", "ROLE:NONE", "numeric-host-coercion"),
+        ({"projects": {"x": {"machine": True}}}, _HOST, "ROLE:NONE", "machine-bool"),
+        ({"projects": {"x": {"machine": {"a": 1}}}}, _HOST, "ROLE:NONE", "machine-object"),
+        ({"projects": {"x": {"machine": None}}}, _HOST, "ROLE:NONE", "machine-null"),
+        ({"projects": {"x": {"machine": ""}}}, _HOST, "ROLE:NONE", "machine-empty"),
+        ({"projects": {"x": ["not", "a", "dict"]}}, _HOST, "ROLE:NONE", "project-list"),
+        ({"projects": {"x": {"machine": "Other Mac"}}}, _HOST, "ROLE:NONE", "no-match"),
+        # --- must refuse to answer at all ---------------------------------
+        ({"projects": {"x": {"machine": _HOST}}}, "", "<no-token rc=1>", "empty-identity"),
+        ({"projects": {"x": {"machine": _HOST}}}, "   ", "<no-token rc=1>", "blank-identity"),
+    ],
+)
+def test_role_heredoc_token_matrix(installer_src, cfg, host, expected, label):
+    """Every guard in the heredoc, observed where it is observable.
+
+    A wrong ROLE:OWNS installs the fleet's nightly detector on a machine that
+    does not own a project. A wrong ROLE:NONE, under install-only, only means
+    "not installed" — recoverable. A refusal to answer is always safe.
+    """
+    assert _run_role_heredoc(installer_src, cfg, host) == expected, label
 
 
 def test_role_answer_requires_a_positive_token(installer_src):
