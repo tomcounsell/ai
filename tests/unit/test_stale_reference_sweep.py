@@ -35,7 +35,10 @@ Three trade-offs, deliberate:
   "nightly" from those four files. A future author with a legitimate reason
   to use it there (a nightly digest in the email bridge is the obvious case)
   should read this docstring and extend or narrow `_NIGHTLY_SCOPED`
-  knowingly, rather than deleting or muting the assertion.
+  knowingly, rather than deleting or muting the assertion. Each scoped path
+  is asserted to exist before it is read, so a rename or deletion fails the
+  test by name instead of quietly shrinking its coverage -- the silent-death
+  mode that killed every earlier gate for this defect class.
 - Enumeration is further scoped by suffix to `.py`/`.md`/`.yaml`/`.yml`/
   `.toml`, so a stale token sitting in a tracked file of any other suffix --
   shell scripts, JSON, HTML, plist, or plain text, 146 tracked files outside
@@ -156,10 +159,12 @@ def test_no_nightly_cadence_at_scoped_sites():
     hits: list[str] = []
     for rel_str in _NIGHTLY_SCOPED:
         abs_path = REPO_ROOT / rel_str
-        try:
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
+        assert abs_path.is_file(), (
+            f"{rel_str} is listed in _NIGHTLY_SCOPED but is not a readable file. "
+            "A rename or deletion would otherwise drop it from this sweep in "
+            "silence -- update the tuple deliberately."
+        )
+        text = abs_path.read_text(encoding="utf-8", errors="ignore")
         for lineno, line in enumerate(text.splitlines(), start=1):
             if _NIGHTLY_TOKEN in line:
                 hits.append(f"{rel_str}:{lineno}")
