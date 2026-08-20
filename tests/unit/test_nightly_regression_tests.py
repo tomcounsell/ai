@@ -278,8 +278,45 @@ class TestValidateRunIntegrity:
     code, so only a floor on `total` catches it (spike-3).
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_ambient_floor(self, monkeypatch):
+        """Neutralise the seeded module constant for this class by default.
+
+        MIN_EXPECTED_COLLECTED carries a real measured floor (15248), so the
+        small synthetic totals these cases use would trip it and mask the
+        condition each one actually pins. Tests that are *about* the floor set
+        it explicitly, as they already did.
+        """
+        monkeypatch.setattr(nrt, "MIN_EXPECTED_COLLECTED", 0)
+
     def _healthy(self, total=100, error=0, failed=0):
         return {"summary": {"total": total, "error": error, "failed": failed}, "tests": []}
+
+    def test_seeded_constant_floors_a_truncated_first_run(self, monkeypatch) -> None:
+        """The seeded measurement is what protects night one.
+
+        With no prior state there is no baseline to diff against, so the
+        module constant is the only thing standing between a partially-starved
+        run and a baseline written from a fraction of the suite.
+        """
+        monkeypatch.setattr(nrt, "MIN_EXPECTED_COLLECTED", 15248)
+        reason, _ = nrt.validate_run_integrity(self._healthy(total=9000), 0, {})
+        assert reason is not None
+        assert "truncated" in reason
+        # A full run against the same floor passes.
+        reason, _ = nrt.validate_run_integrity(self._healthy(total=15248), 0, {})
+        assert reason is None
+
+    def test_re_baseline_night_is_floorless(self, monkeypatch) -> None:
+        """A changed collection must not inherit the old collection's floor.
+
+        Otherwise deliberately narrowing COLLECTION_PATHS would trip the guard
+        every night forever, judged against a scope that no longer applies.
+        """
+        monkeypatch.setattr(nrt, "MIN_EXPECTED_COLLECTED", 15248)
+        prev = {"collection": ["tests/unit/"], "total": 13788}
+        reason, _ = nrt.validate_run_integrity(self._healthy(total=42), 0, prev)
+        assert reason is None
 
     def test_missing_report_trips(self) -> None:
         reason, warnings = nrt.validate_run_integrity(None, 0, {})
@@ -912,6 +949,12 @@ class TestMainDispatchPersistence:
         run_result = (raw_report, self._run_result(confirmed), 0)
         with (
             patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            # These cases exercise dispatch bookkeeping against a deliberately
+            # tiny synthetic run (total=11). The real coverage floor (15248,
+            # measured 2026-08-20) would trip validate_run_integrity on every
+            # one of them before dispatch was reached. The floor has its own
+            # coverage in TestValidateRunIntegrity.
+            patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
             patch.object(nrt, "load_env_or_die", return_value=(42, None)),
             patch.object(nrt, "run_tests", return_value=run_result),
             patch.object(

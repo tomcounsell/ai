@@ -29,6 +29,7 @@ is ever reached, so its double-failure test only asserts on the first label.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -207,6 +208,32 @@ class InstallHarness:
 
         (self.home / "Library" / "LaunchAgents").mkdir(parents=True)
 
+        # A projects config assigning this host a project, so the worker-role
+        # gate in install_nightly_tests.sh reaches its real install path.
+        # That installer now fails CLOSED on an unreadable config, so without
+        # this the install would be skipped and the bootstrap call sites under
+        # test would never be reached.
+        #
+        # Delivered via PROJECTS_CONFIG_PATH rather than by creating
+        # $HOME/Desktop/Valor/projects.json: the latter is also read by
+        # install_worker.sh and install_email_bridge.sh, which copy it into
+        # proj/config/ and fail here because that directory does not exist in
+        # the sandbox. Scoping it to the env var keeps this fixture's blast
+        # radius to the one script that needs it.
+        host = subprocess.run(
+            ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+        ).stdout.strip()
+        # The project carries an `email` key so install_email_bridge.sh's
+        # has_email_role() also qualifies — it reads the same env var, and a
+        # config without one would send it down its skip path instead of the
+        # bootstrap call site under test.
+        self.projects_config = tmp_path / "projects.json"
+        self.projects_config.write_text(
+            json.dumps(
+                {"projects": {"harness": {"machine": host, "email": "harness@example.invalid"}}}
+            )
+        )
+
     def run(self, extra_env: dict | None = None, timeout: int = 60) -> subprocess.CompletedProcess:
         env = {
             "PATH": f"{self.stub_bin}:{os.environ['PATH']}",
@@ -215,6 +242,7 @@ class InstallHarness:
             "REAL_PYTHON": sys.executable,
             "LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP": "0",
             "LAUNCHCTL_BOOTSTRAP_RETRIES": str(RETRIES),
+            "PROJECTS_CONFIG_PATH": str(self.projects_config),
         }
         if extra_env:
             env.update(extra_env)

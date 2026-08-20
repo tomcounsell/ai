@@ -125,17 +125,35 @@ NIGHTLY_XDIST_WORKERS = os.environ.get("NIGHTLY_XDIST_WORKERS", "6")
 
 # The pre-baseline coverage floor (see validate_run_integrity). This is a
 # source literal — a run cannot rewrite it — so it can only be seeded by an
-# edit (e.g. from a completed widening-night probe's summary.total). Left at
-# 0 (no floor) until that edit lands; from night two onward the persisted
-# state's own `min_expected_collected` field supplies the floor instead.
-MIN_EXPECTED_COLLECTED = int(os.environ.get("NIGHTLY_MIN_EXPECTED_COLLECTED", "0"))
+# edit from a completed widening-night probe's summary.total; from night two
+# onward the persisted state's own `min_expected_collected` field supplies the
+# floor instead.
+#
+# Measurement (2026-08-20, `--dry-run` on Tom's MacBook Air, the first widened
+# run to complete end to end): summary.total = 15248 collected, 15193 passed,
+# 35 failed, 0 errors. `--collect-only` independently reported the same 15248,
+# so the figure is the true collection size and not a partially-run total.
+# validate_run_integrity() trips below 0.9x this, i.e. 13723.
+#
+# Grain of salt: 13723 sits just *below* the 13788 that `tests/unit/` alone
+# collects, so a silent revert of COLLECTION_PATHS to the unit tier would clear
+# this floor. The `collection` field comparison is what catches that case; the
+# floor is aimed at truncation within a given collection, not at scope changes.
+MIN_EXPECTED_COLLECTED = int(os.environ.get("NIGHTLY_MIN_EXPECTED_COLLECTED", "15248"))
 
-# Bound, not measurement: the widened collection could not be measured to
-# completion on this machine during recon (spike-2, spike-3, spike-7 each
-# recorded slot exhaustion or a stall-watchdog kill). Derived as
-# ~1260s unit-tier baseline (pyproject.toml) x 1.1 collection growth x 3.5
-# contention headroom. Update this comment to "measurement" with the date and
-# observed total the first time a widened run completes end to end.
+# Measurement (2026-08-20, first widened run to complete end to end on this
+# machine, 15 of 15 test-DB slots free): the parallel `-n 6` pass took 1411s
+# and the whole run, including a 60s serial re-confirmation of 35 nodes, took
+# 1472s (24.5 min). The 5400s ceiling is therefore ~3.7x the observed time.
+#
+# The estimate this replaces was accurate: it assumed ~1.1x collection growth
+# over the unit tier, and the measured item counts are 15248 vs 13788, a
+# ratio of 1.106. Item counts, not file counts, are what the estimate turned
+# on — 624 unit files growing to 760 looks like 1.22x and is the wrong figure.
+#
+# Headroom is deliberately kept: 1472s was measured with the machine to
+# itself. The production 03:00 run competes with sibling lanes for the same
+# 15 slots, and the claim wait alone is budgeted at 300s per process.
 PYTEST_TIMEOUT_SECONDS = 5400
 
 # Serial re-confirmation only re-runs the already-failing node IDs, bounded
@@ -449,6 +467,19 @@ def validate_run_integrity(
     floor = None
     if same_collection and prev_total:
         floor = 0.9 * prev_total
+    elif prev.get("collection") is not None and not same_collection:
+        # Re-baseline night: prior state records a DIFFERENT collection, so
+        # neither the prior total nor the module constant describes what this
+        # run should have collected. Deliberately floorless — a narrowed
+        # collection must not be judged against the wide one's floor forever.
+        # The `collection` comparison in main() routes this run to the seed
+        # path.
+        #
+        # Keyed on the collection field being present and different, not on
+        # `prev` merely being non-empty: state that carries a persisted
+        # `min_expected_collected` but no `collection` key must still get its
+        # floor.
+        floor = None
     else:
         floor_base = prev.get("min_expected_collected") or MIN_EXPECTED_COLLECTED
         if floor_base:
