@@ -432,11 +432,25 @@ def validate_run_integrity(
     starvation gives ``total == 0`` (caught below); *partial* starvation
     gives a merely-reduced ``total`` with ``error == 0`` and exit 0 — every
     other check here passes it, which is exactly the false-green shape this
-    plan exists to close. The floor is read from persisted state first
-    (``prev["min_expected_collected"]``, set by the collection-aware baseline
-    on a re-baseline night) and only then from the module constant
-    ``MIN_EXPECTED_COLLECTED``; with both unset, the widening night runs
-    floorless rather than fabricating a floor with no measurement behind it.
+    plan exists to close.
+
+    Floor precedence, in the order the branches actually run:
+
+    1. ``0.9 * prev["total"]`` when the recorded ``collection`` matches the
+       current one. This is the live floor on every ordinary night, and it
+       takes precedence over everything below.
+    2. No floor at all when prior state records a *different* collection — a
+       re-baseline night, where neither the old total nor a constant measured
+       against a different scope describes what should have been collected.
+    3. ``0.9 * (prev["min_expected_collected"] or MIN_EXPECTED_COLLECTED)``
+       otherwise, which in practice means the true first run. With both unset
+       that night is floorless rather than judged against a fabricated number.
+
+    Note that (1) shadows the persisted ``min_expected_collected`` on every
+    subsequent same-collection night, so for state this version writes, that
+    field is near-unreachable. It is retained because it is the only floor
+    source that survives a state file written by a future version that stops
+    recording ``total``.
     """
     warnings: list[str] = []
 

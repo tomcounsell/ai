@@ -198,13 +198,10 @@ def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path,
     config = tmp_path / "mine.json"
     config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
 
-    # unlink() first: _fake_checkout leaves a SYMLINK to the real interpreter
-    # here, and write_text() through a symlink lands on its target. That target
-    # is sys.executable, itself a symlink into the shared uv-managed
-    # interpreter behind every venv on this machine — so the blast radius of
-    # getting this wrong is far wider than the fixture.
+    # Safe to overwrite: _fake_checkout ships a plain stub file here, not a
+    # symlink to the shared uv interpreter. See its docstring for why that
+    # distinction matters well beyond this test.
     broken = proj / ".venv" / "bin" / "python"
-    broken.unlink()
     broken.write_text(f"#!/bin/bash\n{stub}")
     broken.chmod(0o755)
 
@@ -213,6 +210,29 @@ def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path,
     assert result.returncode == 0, result.stderr
     assert plist.read_text() == "<plist>existing</plist>", f"{label} interpreter uninstalled it"
     assert "Stale nightly-tests plist removed" not in result.stdout
+
+
+def test_heredoc_exception_with_a_real_interpreter_fails_closed(tmp_path: Path):
+    """The other exit-1 death: a working python, an exception in the heredoc.
+
+    Uses the REAL interpreter — no stub — so it exercises the genuine path
+    rather than simulating it. A config that is valid JSON but not an object
+    makes `cfg.get(...)` raise outside the guarded block, so python exits 1
+    having printed no token. Exit-code keying could not tell that apart from
+    "parsed cleanly, this host owns nothing", which authorises removal; the
+    token requirement does, without needing to anticipate this case.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    config = tmp_path / "list.json"
+    config.write_text(json.dumps(["not", "an", "object"]))
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert plist.read_text() == "<plist>existing</plist>"
+    assert "Stale nightly-tests plist removed" not in result.stdout
+    assert "could not determine host role" in result.stdout
 
 
 def test_role_answer_requires_a_positive_token(installer_src):
@@ -272,10 +292,23 @@ def test_plist_lints_clean():
 def _fake_checkout(tmp_path: Path) -> Path:
     """A non-worktree project dir carrying a copy of the installer.
 
-    Ships a WORKING venv python. Without one the installer exits at the venv
-    fail-closed guard, which would make the corrupt-config case below pass for
-    the wrong reason — never reaching the JSON parse whose exit-2 path it is
-    supposed to be exercising.
+    Ships a working *interpreter* at `.venv/bin/python` — not a real venv
+    (there is no `pyvenv.cfg`, so no project site-packages). The role-gate
+    heredoc only needs the stdlib, so that is sufficient. Without it the
+    installer exits at the venv fail-closed guard, which would make the
+    corrupt-config case below pass for the wrong reason, never reaching the
+    JSON parse it is meant to exercise.
+
+    It is a STUB that delegates to `$REAL_PYTHON`, deliberately not a symlink.
+    A symlink here is a live hazard: tests that install a broken interpreter
+    write to this path, and `write_text()` through a symlink writes to its
+    target. `sys.executable` is itself a symlink into
+    `~/.local/share/uv/python/cpython-3.14.6-.../bin/python3.14`, the shared
+    uv-managed interpreter behind **every venv on this machine** — 24 worktree
+    venvs at last count. Clobbering it would not break one fixture; it would
+    require re-downloading through uv and re-syncing all of them. A plain file
+    makes that mistake harmless instead of merely discouraged. Mirrors the
+    `$REAL_PYTHON` delegation InstallHarness.PYTHON_STUB already uses.
     """
     proj = tmp_path / "fake-main-checkout"
     scripts = proj / "scripts"
@@ -289,7 +322,9 @@ def _fake_checkout(tmp_path: Path) -> Path:
     installer_copy.chmod(0o755)
     venv_bin = proj / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
-    (venv_bin / "python").symlink_to(sys.executable)
+    stub = venv_bin / "python"
+    stub.write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
+    stub.chmod(0o755)
     return proj
 
 
