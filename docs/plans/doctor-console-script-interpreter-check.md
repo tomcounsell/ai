@@ -711,9 +711,9 @@ three example names → **fix** names the rebuild
 
   | Reason | Fix sentence |
   |--------|--------------|
-  | `missing` | `Console script shebang target {t} does not exist. In {checkout}: rm -rf .venv && uv sync --all-extras` |
-  | `off-pin` | `Console script shebang target {t} is Python {v}, pin is {p}. In {checkout}: rm -rf .venv && uv sync --all-extras` |
-  | `outside` | `Console script shebang target {t} is outside every repo venv, so it carries no editable install of this repo. In {checkout}: rm -rf .venv && uv sync --all-extras` |
+  | `missing` | `Console script shebang target {t} does not exist. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
+  | `off-pin` | `Console script shebang target {t} is Python {v}, pin is {p}. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
+  | `outside` | `Console script shebang target {t} is outside every repo venv, so it carries no editable install of this repo. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
 
   Task 3 case 11 therefore asserts that the three **diagnostic prefixes** differ (the
   text up to the `In {checkout}:` clause), not that the commands differ. Asserting the
@@ -1517,13 +1517,19 @@ new finding inside an existing check that the agent already knows how to run and
   | Hardlink trailer removed | case 5 |
   | Pass-message verified clause removed | cases 6, 12 |
   | **Interpreter read reverted to hang off the `elif str(match) not in resolved_into:` dedup guard** | **case 14** |
-  | Merged tail guard reverted to `if misresolved:` | case 10 |
+  | Merged tail guard reverted to `if misresolved:` | cases 2, 3, 4, 5, 8, 9, 11, 14, 15, 16, 18, 19 (NOT case 10 — its fixture already carries a misresolved name, so `if misresolved:` stays true; case 10 instead pins the placement mutation, interpreter read moved after the early return) |
   | Realpath leg dropped from the hardlink-trailer gate (`found_path.parent not in venv_bins and _same_file(...)`) | case 16 |
   | `v is None` guard removed from the pin comparison (`None` reaches the inequality) | case 17 |
   | `is_symlink` leg dropped from the hardlink-trailer gate | case 18 |
   | Trailer rendered from one arbitrary group member instead of the whole `hardlinked_paths` list | case 19 |
   | Pin-unresolvable disclosure clause removed | case 8 |
   | Interpreter read applied to misresolved names too (moved outside the `match is not None` branch) | `test_a_shadowed_name_still_reads_as_shadowed` |
+  | `except OSError` in `_shebang_interpreter` replaced with `raise` | case 6b (`0o111` execute-without-read shim) |
+  | `except UnicodeDecodeError` in `_shebang_interpreter` replaced with `raise` | case 6b (Mach-O byte prefix) |
+  | Remedy checkout reverted to `PROJECT_DIR` instead of the flagged shim's `match.parent.parent` | case 15b |
+  | Terminal period dropped from the remedy sentence (`--all-extras Then re-run.`) | case 15b |
+  | Multi-checkout remedy rendering collapsed to `where = checkouts[0]` | case 15c |
+  | NUL rejection dropped from the shebang-target guard (`ValueError` escapes both I/O handlers) | case 6c |
 
   The realpath rule is verified **here**, by mutation, and not by a source scan: the
   whole-file regex row an earlier draft carried matched the prohibition written in prose and
