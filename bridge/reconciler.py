@@ -13,6 +13,7 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 
+from agent.private_tag import strip_private
 from bridge.dedup import (
     claim_message,
     get_or_init_dm_coverage_epoch,
@@ -22,6 +23,7 @@ from bridge.dedup import (
     release_message_claim,
 )
 from bridge.history_fetch import fetch_messages_back_to
+from bridge.room_inbox import shadow_append_inbox
 from bridge.routing import (
     find_project_for_dm_dialog,
     persona_to_session_type,
@@ -363,6 +365,25 @@ async def reconcile_once(
                         message.id,
                     )
                     continue
+
+                # Durable Room-inbox shadow append (durability plan Task 11
+                # phase 1, issue #2494): written alongside the untouched
+                # re-enqueue below, mirroring live intake's append-precedes-
+                # dispatch order. NOT authoritative — dispatch still routes
+                # from the re-enqueue; shadow_append_inbox never raises into
+                # the recovery path. `strip_private` mirrors live intake's
+                # `safe_text`: the inbox is a durable no-TTL list, so <private>
+                # content must never reach it on this path either.
+                if project:
+                    shadow_append_inbox(
+                        project,
+                        chat_id=chat_id,
+                        message_id=message.id,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=strip_private(text),
+                        date=message.date,
+                    )
 
                 try:
                     await enqueue_agent_session_fn(
