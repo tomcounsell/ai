@@ -104,7 +104,7 @@ class TestAnalyzeSessionsFromRedis:
             tool_call_count=20,
         )
 
-        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
+        today = __import__("utils.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = _analyze_sessions_from_redis(today)
         assert result["sessions_analyzed"] == 1
         assert "thrash_sessions" not in result
@@ -126,7 +126,7 @@ class TestAnalyzeSessionsFromRedis:
             summary="Crashed during build step",
         )
 
-        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
+        today = __import__("utils.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = _analyze_sessions_from_redis(today)
         assert len(result.get("error_patterns", [])) >= 1
 

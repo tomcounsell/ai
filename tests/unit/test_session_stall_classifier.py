@@ -297,7 +297,7 @@ class TestElapsedTimezoneGuard:
         # _classify does `from bridge.utc import to_unix_ts` inside its body,
         # so we patch `bridge.utc.to_unix_ts` which is what gets imported.
         session = _session(status="running", created_at="not-a-date")
-        with patch("bridge.utc.to_unix_ts", return_value=None):
+        with patch("utils.utc.to_unix_ts", return_value=None):
             verdict = classify_session_stall([], session=session)
         # With ts=None the never-started branch is skipped → falls through → healthy
         assert verdict.level == "healthy"
