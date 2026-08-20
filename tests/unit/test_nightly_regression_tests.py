@@ -1071,6 +1071,56 @@ class TestMainDispatchPersistence:
         # the exact night it exists for.
         assert saved["seeded_nodes"] == sorted(standing)
 
+    def _dry_run_main(self, tmp_path: Path, prev_state: dict, confirmed: list[str]):
+        """Run main() under --dry-run, returning (rc, dispatch_mock, saved_bytes)."""
+        nrt.LOG_FILE = tmp_path / "test.log"
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
+        pre_existing = json.dumps(prev_state)
+        nrt.LAST_RUN_FILE.write_text(pre_existing)
+
+        raw_report = {"summary": {"total": 11}, "tests": []}
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
+            patch.object(nrt, "load_env_or_die", return_value=(42, None)),
+            patch.object(
+                nrt, "run_tests", return_value=(raw_report, self._run_result(confirmed), 0)
+            ),
+            patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
+            patch.object(nrt, "summarize_failures", return_value="mocked"),
+            patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel") as disp,
+            patch.object(nrt, "send_telegram"),
+            patch.object(nrt, "run_ttft_gate", return_value=None),
+            patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
+        ):
+            rc = nrt.main()
+        return rc, disp, pre_existing
+
+    def test_dry_run_propagates_to_per_node_dispatch(self, tmp_path: Path) -> None:
+        """--dry-run must reach the per-node dispatch call, not just Telegram.
+
+        _run_main deliberately does NOT pass --dry-run (it asserts on persisted
+        state), so without this case, breaking `dry_run=args.dry_run` at the
+        call site leaves every test green while restoring #2899 in full:
+        `--dry-run` spawning real Eng sessions that file real GitHub issues.
+        """
+        node = "tests/unit/test_a.py::test_new"
+        prev = self._prev(failing_tests=[], dispatched_nodes=[])
+        _, disp, _ = self._dry_run_main(tmp_path, prev, [node])
+        assert disp.call_args.kwargs.get("dry_run") is True
+
+    def test_dry_run_propagates_to_seed_dispatch(self, tmp_path: Path) -> None:
+        """The seed path has its own dispatch call site and its own kwarg.
+
+        Its blast radius is larger than the per-node one: a seed umbrella
+        covers the ENTIRE currently-failing population, so an un-propagated
+        flag here files against everything at once.
+        """
+        _, disp, _ = self._dry_run_main(tmp_path, {}, ["a::t1", "b::t2"])
+        assert disp.call_args.kwargs.get("slug_suffix") == "baseline"
+        assert disp.call_args.kwargs.get("dry_run") is True
+
     def test_dry_run_writes_no_state(self, tmp_path: Path) -> None:
         """--dry-run must not persist a baseline.
 

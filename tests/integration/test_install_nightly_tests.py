@@ -81,9 +81,13 @@ def test_gate_is_worker_role_not_bridge(installer_src):
 
 
 def test_gate_qualifies_on_any_machine_match(installer_src):
-    """The Python snippet exits 0 (qualify) as soon as a project's machine matches host."""
+    """The snippet qualifies as soon as any project's machine matches the host.
+
+    The verdict is carried by a printed token, not an exit code — see
+    test_role_answer_requires_a_positive_token for why.
+    """
     assert 'proj.get("machine")' in installer_src
-    assert "sys.exit(0)" in installer_src
+    assert 'print("ROLE:OWNS" if owns else "ROLE:NONE")' in installer_src
 
 
 def test_self_skip_and_stale_plist_removal(installer_src):
@@ -167,13 +171,24 @@ def test_host_owning_nothing_does_remove_the_plist(tmp_path: Path):
     assert not plist.exists()
 
 
-def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path):
+@pytest.mark.parametrize(
+    "stub, label",
+    [
+        # The realistic half-`uv sync` state. CPython orphaned from its stdlib
+        # exits 1 — the SAME code that would otherwise mean "parsed cleanly,
+        # this host owns nothing" and authorise an uninstall. This case is the
+        # reason the gate keys on a stdout token rather than an exit code:
+        # enumerating "bad" exit codes cannot separate them.
+        ("echo 'Fatal Python error: Failed to import encodings module' >&2\nexit 1\n", "exit-1"),
+        ("echo 'dyld: symbol not found' >&2\nexit 133\n", "exit-133"),
+    ],
+)
+def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path, stub, label):
     """A venv python that exists but cannot run must fail closed.
 
-    The `-x` test passes straight through a half-finished `uv sync` or an
-    off-pin interpreter. If such a python dies with any code other than 0/1,
-    treating that as "owns nothing" uninstalls the detector from a host that
-    actually qualifies.
+    `-x` passes straight through a half-finished `uv sync` or an off-pin
+    interpreter, so this is a live condition. On a host that genuinely
+    qualifies, a broken interpreter must never be read as "owns nothing".
     """
     proj = _fake_checkout(tmp_path)
     home, plist = _home_with_plist(tmp_path)
@@ -183,20 +198,32 @@ def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path)
     config = tmp_path / "mine.json"
     config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
 
-    # Executable, but dies with a code that is neither 0 nor 1.
     # unlink() first: _fake_checkout leaves a SYMLINK to the real interpreter
-    # here, and write_text() on a symlink writes through to its target — which
-    # would clobber the system python rather than the fixture.
+    # here, and write_text() through a symlink lands on its target. That target
+    # is sys.executable, itself a symlink into the shared uv-managed
+    # interpreter behind every venv on this machine — so the blast radius of
+    # getting this wrong is far wider than the fixture.
     broken = proj / ".venv" / "bin" / "python"
     broken.unlink()
-    broken.write_text("#!/bin/bash\necho 'dyld: symbol not found' >&2\nexit 133\n")
+    broken.write_text(f"#!/bin/bash\n{stub}")
     broken.chmod(0o755)
 
     result = _run_installer(proj, home, config)
 
     assert result.returncode == 0, result.stderr
-    assert plist.read_text() == "<plist>existing</plist>", "broken interpreter uninstalled it"
+    assert plist.read_text() == "<plist>existing</plist>", f"{label} interpreter uninstalled it"
     assert "Stale nightly-tests plist removed" not in result.stdout
+
+
+def test_role_answer_requires_a_positive_token(installer_src):
+    """The removal path must be gated on an explicit affirmative token.
+
+    Structural companion to the behavioural cases above: it pins the *reason*
+    they pass. If the gate ever goes back to keying on an exit code, every
+    unenumerated interpreter death silently becomes "owns nothing" again.
+    """
+    assert "ROLE:NONE" in installer_src
+    assert "ROLE:OWNS" in installer_src
 
 
 def test_success_marker_is_pinned(installer_src):

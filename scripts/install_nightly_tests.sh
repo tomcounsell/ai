@@ -67,11 +67,19 @@ fi
 # the same fix #1379 applied to the reflection-worker installer
 # (scripts/install_reflection_worker.sh). Any machine that owns a project
 # qualifies, regardless of whether that project bridges Telegram.
-# Exit codes: 0 = this host owns a project (qualify), 1 = parsed cleanly and
-# this host owns nothing (a real answer — safe to remove a stale plist),
-# 2 = could not determine (scutil or JSON parse failed). 2 is distinct from 1
-# precisely so an *unanswerable* check never reaches the removal path below:
-# "I don't know" must not uninstall a correctly-running detector.
+# The answer is carried by an explicit STDOUT TOKEN, never by an exit code.
+#
+# An exit code the interpreter did not choose cannot carry an answer. An
+# orphaned CPython (the realistic half-`uv sync` state, "Failed to import
+# encodings module") exits 1, and so does an unhandled exception in this
+# heredoc — the same 1 that would otherwise mean "parsed cleanly, this host
+# owns nothing" and authorise uninstalling a running detector. Keying the
+# removal path on a token the script only prints after successfully reading
+# the config makes every failure mode, named or not, fall through to
+# fail-closed by construction rather than by enumeration.
+#
+# `-x` on the interpreter does not help: it passes straight through a
+# half-finished `uv sync` or an off-pin python.
 has_worker_role() {
     local config="$PROJECTS_CONFIG"
     "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
@@ -81,51 +89,43 @@ try:
     host = subprocess.check_output(
         ["scutil", "--get", "ComputerName"], text=True
     ).strip()
-except Exception:
-    sys.exit(2)  # Undeterminable — fail closed, change nothing
-
-try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
 except Exception:
-    sys.exit(2)  # Undeterminable — fail closed, change nothing
+    sys.exit(1)  # Undeterminable — print no token, so the caller fails closed
 
 target = host.lower()
-for proj in cfg.get("projects", {}).values():
-    if (proj.get("machine") or "").lower() == target:
-        sys.exit(0)  # This host owns at least one project — qualify
-sys.exit(1)  # No project assigned to this host
+owns = any(
+    (proj.get("machine") or "").lower() == target
+    for proj in cfg.get("projects", {}).values()
+)
+print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
 }
 
-role_rc=0
-has_worker_role || role_rc=$?
+role_out="$(has_worker_role 2>/dev/null || true)"
 
-# Only rc=1 is a real "this host owns nothing" answer. Everything that is not
-# 0 or 1 — rc=2 from the script's own undeterminable paths, but equally a
-# SIGSEGV, a dyld failure, or any other interpreter death — means the check did
-# not answer. Treating "did not answer" as "owns nothing" would take the
-# removal path below and uninstall a healthy detector from a qualifying host.
-# A broken-but-executable `.venv/bin/python` is a live condition here: the
-# `-x` test above passes straight through a half-finished `uv sync` or an
-# off-pin interpreter.
-if [ "$role_rc" -ne 0 ] && [ "$role_rc" -ne 1 ]; then
-    echo "Skipping nightly-tests install: could not determine host role (rc=$role_rc)"
-    echo "Failing closed — not installing, and leaving any existing plist untouched."
-    exit 0
-fi
-
-if [ "$role_rc" -ne 0 ]; then
-    host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
-    echo "Skipping nightly-tests install (no projects assigned to '$host')"
-    if [ -f "$PLIST_DST" ]; then
-        echo "Removing stale nightly-tests plist from non-worker machine..."
-        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-        rm -f "$PLIST_DST"
-        echo "Stale nightly-tests plist removed."
-    fi
-    exit 0
-fi
+case "$role_out" in
+    *ROLE:OWNS*)
+        : # This host owns at least one project — fall through and install.
+        ;;
+    *ROLE:NONE*)
+        host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
+        echo "Skipping nightly-tests install (no projects assigned to '$host')"
+        if [ -f "$PLIST_DST" ]; then
+            echo "Removing stale nightly-tests plist from non-worker machine..."
+            launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+            rm -f "$PLIST_DST"
+            echo "Stale nightly-tests plist removed."
+        fi
+        exit 0
+        ;;
+    *)
+        echo "Skipping nightly-tests install: could not determine host role"
+        echo "Failing closed — not installing, and leaving any existing plist untouched."
+        exit 0
+        ;;
+esac
 # ── End worker-role gate ─────────────────────────────────────────────────
 
 # Prerequisite: pytest-json-report must be installed
