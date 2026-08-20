@@ -7,9 +7,10 @@ Covers scripts/install_nightly_tests.sh:
   - has_worker_role() install/skip matrix — running the test suite requires a
     checkout and a worker, not a Telegram bridge (the #1379 over-narrow-gating
     class this replaces has_bridge_role() to avoid). A machine owning a
-    NON-Telegram project still installs; a machine owning no project skips AND
-    removes any stale plist; an unreadable or unparseable config fails CLOSED
-    (does not install, and leaves any existing plist alone).
+    NON-Telegram project still installs. Everything else — a machine owning no
+    project, an unreadable or unparseable config, an undeterminable identity —
+    does nothing at all. There is deliberately no removal path (see the
+    installer's own header for why); nothing here may delete a plist.
   - The installer's stable success-line marker, pinned so
     scripts/update/service.py::install_nightly_tests can classify "installed"
     vs "skipped" by matching the *success* text (fails closed on any other
@@ -55,10 +56,10 @@ def test_installer_exists_and_executable():
 
 
 def test_worktree_refusal_precedes_role_gate(installer_src):
-    """The worktree refusal must appear before has_worker_role() is defined
-    or invoked, so a lane worktree never reaches the role gate at all."""
+    """The worktree refusal must appear before owns_a_project() is defined or
+    invoked, so a lane worktree never reaches the install gate at all."""
     refusal_idx = installer_src.index("gitdir:.*/.git/worktrees/")
-    role_gate_idx = installer_src.index("has_worker_role()")
+    role_gate_idx = installer_src.index("owns_a_project()")
     assert refusal_idx < role_gate_idx
 
 
@@ -69,11 +70,12 @@ def test_worktree_refusal_matches_gitdir_shape(installer_src):
 
 
 def test_gate_is_worker_role_not_bridge(installer_src):
-    assert "has_worker_role" in installer_src
-    # The function must no longer be DEFINED or INVOKED — only an explanatory
-    # comment may still name the old identifier for context.
+    assert "owns_a_project" in installer_src
+    # Neither the bridge-role gate nor its successor name may be DEFINED or
+    # INVOKED; only an explanatory comment may name them for context.
     assert "has_bridge_role() {" not in installer_src
     assert "if ! has_bridge_role" not in installer_src
+    assert "has_worker_role() {" not in installer_src
     # The bridge-role Telegram clause must be dropped — nightly tests run
     # wherever the worker runs, regardless of Telegram config.
     assert 'proj.get("telegram")' not in installer_src
@@ -88,12 +90,6 @@ def test_gate_qualifies_on_any_machine_match(installer_src):
     """
     assert 'proj.get("machine")' in installer_src
     assert 'print("ROLE:OWNS" if owns else "ROLE:NONE")' in installer_src
-
-
-def test_self_skip_and_stale_plist_removal(installer_src):
-    assert "Skipping nightly-tests install" in installer_src
-    assert "launchctl bootout" in installer_src
-    assert "rm -f" in installer_src
 
 
 # A per-process label prefix, so nothing this file does can name a REAL service.
@@ -191,25 +187,6 @@ def test_undeterminable_role_never_removes_the_plist(tmp_path: Path, config_cont
     assert "Stale nightly-tests plist removed" not in result.stdout
 
 
-def test_host_owning_nothing_does_remove_the_plist(tmp_path: Path):
-    """The counterpart that keeps the fail-closed guard honest.
-
-    A *parsed* config that genuinely assigns this host no project is a real
-    answer, and must still take the removal path. Without this, making the
-    installer refuse everything unconditionally would pass the test above.
-    """
-    proj = _fake_checkout(tmp_path)
-    home, plist = _home_with_plist(tmp_path)
-    config = tmp_path / "other.json"
-    config.write_text(json.dumps({"projects": {"x": {"machine": "Some Other Machine"}}}))
-
-    result = _run_installer(proj, home, config)
-
-    assert result.returncode == 0, result.stderr
-    assert "Stale nightly-tests plist removed" in result.stdout
-    assert not plist.exists()
-
-
 @pytest.mark.parametrize(
     "stub, label",
     [
@@ -271,11 +248,11 @@ def test_heredoc_exception_with_a_real_interpreter_fails_closed(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert plist.read_text() == "<plist>existing</plist>"
     assert "Stale nightly-tests plist removed" not in result.stdout
-    assert "could not determine host role" in result.stdout
+    assert "role could not be determined" in result.stdout
 
 
 @pytest.mark.parametrize(
-    "stub, expect_removed, label",
+    "stub, _unused, label",
     [
         # Only stdout can carry an answer, so a token on stderr is not one.
         ('echo "ROLE:NONE" >&2\nexit 0\n', False, "token-on-stderr"),
@@ -287,11 +264,11 @@ def test_heredoc_exception_with_a_real_interpreter_fails_closed(tmp_path: Path):
         ('echo "ROLE:NONE"\necho "ROLE:OWNS"\nexit 0\n', False, "both-tokens"),
         # Silence is not an answer.
         ("exit 0\n", False, "no-token"),
-        # Unrelated stdout noise must NOT hide a legitimate verdict.
-        ('echo "some .pth banner"\necho "ROLE:NONE"\nexit 0\n', True, "noise-then-NONE"),
+        # A legitimate ROLE:NONE, noise or not: no install, nothing touched.
+        ('echo "some .pth banner"\necho "ROLE:NONE"\nexit 0\n', False, "noise-then-NONE"),
     ],
 )
-def test_token_cannot_lie(tmp_path: Path, stub, expect_removed, label):
+def test_token_cannot_lie(tmp_path: Path, stub, _unused, label):
     """The removal path is reachable only by a genuine, unambiguous ROLE:NONE.
 
     The gate was wrong twice by enumerating exit codes (`-eq 2`, then
@@ -319,7 +296,8 @@ def test_token_cannot_lie(tmp_path: Path, stub, expect_removed, label):
     result = _run_installer(proj, home, config)
 
     assert result.returncode == 0, result.stderr
-    assert plist.exists() is not expect_removed, f"{label}: wrong removal decision"
+    assert plist.exists(), f"{label}: nothing may remove the plist"
+    assert _SUCCESS_MARKER not in result.stdout, f"{label}: must not install"
 
 
 def _stub_scutil(tmp_path: Path, body: str) -> Path:
@@ -357,32 +335,65 @@ def test_empty_computer_name_is_not_an_answer(tmp_path: Path):
     assert "Stale nightly-tests plist removed" not in result.stdout
 
 
-def test_verdict_from_an_incomplete_run_is_not_a_verdict(tmp_path: Path):
-    """ROLE:NONE followed by a crash must not authorise removal.
+@pytest.mark.parametrize(
+    "config_kind",
+    ["owns-nothing", "corrupt", "not-an-object", "absent", "empty-identity"],
+)
+def test_no_input_can_cause_a_removal(tmp_path: Path, config_kind):
+    """The load-bearing invariant of the install-only gate.
 
-    "An exit code cannot carry the answer" does not mean it carries nothing:
-    rc==0 still means the process completed normally. A run that printed a
-    verdict and then died produced it under unknown conditions. The DESTRUCTIVE
-    branch therefore requires token AND rc==0; the install branch deliberately
-    does not, because installing wrongly is recoverable and uninstalling is not.
+    This script installs or does nothing. It never removes. That is deliberate:
+    the removal branch was reviewed four times and produced four bugs, and every
+    one wrongly uninstalled a healthy detector while none caused a bad install.
+    Removal must be certain of a NEGATIVE, and every indeterminate input met so
+    far collapsed into a confident negative.
+
+    Parametrized across the inputs that each previously reached, or nearly
+    reached, the removal path. A plist that exists before the run must exist
+    after it, whatever the gate concludes.
     """
     proj = _fake_checkout(tmp_path)
     home, plist = _home_with_plist(tmp_path)
-    host = subprocess.run(
-        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
-    ).stdout.strip()
-    config = tmp_path / "mine.json"
-    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+    extra = {}
 
-    py = proj / ".venv" / "bin" / "python"
-    py.write_text('#!/bin/bash\necho "ROLE:NONE"\nexit 9\n')
-    py.chmod(0o755)
+    if config_kind == "owns-nothing":
+        config = tmp_path / "c.json"
+        config.write_text(json.dumps({"projects": {"x": {"machine": "Some Other Machine"}}}))
+    elif config_kind == "corrupt":
+        config = tmp_path / "c.json"
+        config.write_text("{ not json")
+    elif config_kind == "not-an-object":
+        config = tmp_path / "c.json"
+        config.write_text(json.dumps(["not", "an", "object"]))
+    elif config_kind == "absent":
+        config = tmp_path / "missing.json"
+    else:  # empty-identity: scutil exits 0 printing nothing
+        host = subprocess.run(
+            ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+        ).stdout.strip()
+        config = tmp_path / "c.json"
+        config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+        binp = _stub_scutil(tmp_path, 'if [ "$1" = "--get" ]; then echo ""; exit 0; fi\nexit 0\n')
+        extra["PATH"] = f"{binp}:{os.environ['PATH']}"
 
-    result = _run_installer(proj, home, config)
+    result = _run_installer(proj, home, config, **extra)
 
     assert result.returncode == 0, result.stderr
-    assert plist.exists(), "a verdict from a crashed run authorised removal"
-    assert "did not complete" in result.stdout
+    assert plist.read_text() == "<plist>existing</plist>", f"{config_kind} removed the plist"
+    assert _SUCCESS_MARKER not in result.stdout
+
+
+def test_installer_contains_no_removal_path(installer_src):
+    """Structural companion: the skip path must not delete anything.
+
+    The two surviving `bootout` references are legitimate and must stay — one
+    unloads an existing service before bootstrapping its replacement on the
+    INSTALL path, the other is the printed instruction telling a human how to
+    uninstall by hand, which matters more now that the script never does it.
+    What must not exist is a `rm` of the destination plist.
+    """
+    assert 'rm -f "$PLIST_DST"' not in installer_src
+    assert "Stale nightly-tests plist removed" not in installer_src
 
 
 def test_role_answer_requires_a_positive_token(installer_src):

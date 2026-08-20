@@ -33,56 +33,45 @@ if [ -f "$PROJECT_DIR/.git" ] && grep -qE '^gitdir:.*/.git/worktrees/' "$PROJECT
 fi
 # ── End worktree refusal ─────────────────────────────────────────────────
 
-# ── Unreadable-config refusal (fail closed) ──────────────────────────────
-# Installing a nightly full-suite run is not a safe default, so an unreadable
-# projects config must not qualify a machine. This gate used to fail *open*,
-# which was tolerable only while `scripts/update/run.py` wrapped the call in a
-# second, independent `if has_bridge:` check; that wrapper is gone, leaving
-# this as the only gate. `projects.json` lives in the iCloud-synced vault and
-# `scripts/remote-update.sh` already warns that directory is intermittently
-# unreadable, so a transient stall would otherwise install the detector on a
-# machine the gate meant to exclude.
+# ── Install gate: INSTALL-ONLY, no removal path ───────────────────────
 #
-# Deliberately NOT the role-gate skip path below: that one removes an existing
-# plist, and a transient stall must not uninstall a correctly-running detector
-# every time iCloud hiccups. Unreadable config => change nothing.
+# This gate answers one question — "does this host own a project?" — and its
+# only possible actions are "install" or "do nothing". There is deliberately NO
+# stale-plist removal here.
+#
+# That absence is the design, not an omission. The removal branch was reviewed
+# four times and produced four bugs, and every one wrongly UNINSTALLED a
+# healthy detector while not one caused a bad install:
+#
+#   1. `-eq 2` enumerated the exit codes meaning "undeterminable", missing the rest.
+#   2. `-ne 0 && -ne 1` widened the enumeration and still missed exit 1 — what an
+#      orphaned CPython and an unhandled heredoc exception both return, the same
+#      1 that otherwise means "owns nothing".
+#   3. `scutil` exiting 0 with EMPTY output produced a confident "owns nothing"
+#      from an identity never established as usable.
+#   4. A verdict printed and then followed by a crash was still trusted.
+#
+# The asymmetry is structural. Removal must be certain of a NEGATIVE ("this host
+# owns nothing"), and every indeterminate input met so far collapsed into that
+# confident negative. Installing needs certainty about a POSITIVE, which is far
+# easier to establish and cheaper to get wrong: a spurious install is
+# recoverable, a spurious uninstall runs silently across the fleet.
+#
+# Accepted cost: a machine that stops owning projects keeps a stale plist until
+# a follow-up lands removal deliberately. Non-destructive and recoverable — the
+# trade this gate makes on purpose.
+#
+# Properties covered by tests/integration/test_install_nightly_tests.py:
+#   - The verdict is a printed TOKEN, never an exit code. An exit code the
+#     interpreter did not choose cannot carry an answer.
+#   - stderr is discarded, so a traceback can never read as a verdict.
+#   - Anything other than an unambiguous ROLE:OWNS means DO NOTHING.
 PROJECTS_CONFIG="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-if [ ! -f "$PROJECTS_CONFIG" ]; then
-    echo "Skipping nightly-tests install: projects config unreadable at $PROJECTS_CONFIG"
-    echo "Failing closed — not installing, and leaving any existing plist untouched."
-    exit 0
-fi
-if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
-    echo "Skipping nightly-tests install: no venv python at $PROJECT_DIR/.venv/bin/python"
-    echo "Failing closed — not installing, and leaving any existing plist untouched."
-    exit 0
-fi
-# ── End unreadable-config refusal ────────────────────────────────────────
 
-# ── Worker-role gate ─────────────────────────────────────────────────────
-# Running the test suite requires a checkout and a worker, not a Telegram
-# bridge — gating on has_bridge_role() (this script's prior form) stranded the
-# detector on zero of 20 fleet projects, since none carry a truthy `telegram`
-# key. has_worker_role() is has_bridge_role() minus the Telegram-block clause,
-# the same fix #1379 applied to the reflection-worker installer
-# (scripts/install_reflection_worker.sh). Any machine that owns a project
-# qualifies, regardless of whether that project bridges Telegram.
-# The answer is carried by an explicit STDOUT TOKEN, never by an exit code.
-#
-# An exit code the interpreter did not choose cannot carry an answer. An
-# orphaned CPython (the realistic half-`uv sync` state, "Failed to import
-# encodings module") exits 1, and so does an unhandled exception in this
-# heredoc — the same 1 that would otherwise mean "parsed cleanly, this host
-# owns nothing" and authorise uninstalling a running detector. Keying the
-# removal path on a token the script only prints after successfully reading
-# the config makes every failure mode, named or not, fall through to
-# fail-closed by construction rather than by enumeration.
-#
-# `-x` on the interpreter does not help: it passes straight through a
-# half-finished `uv sync` or an off-pin python.
-has_worker_role() {
-    local config="$PROJECTS_CONFIG"
-    "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
+owns_a_project() {
+    [ -f "$PROJECTS_CONFIG" ] || return 1
+    [ -x "$PROJECT_DIR/.venv/bin/python" ] || return 1
+    "$PROJECT_DIR/.venv/bin/python" - "$PROJECTS_CONFIG" <<'PYEOF'
 import json, subprocess, sys
 
 try:
@@ -92,88 +81,59 @@ try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
 except Exception:
-    sys.exit(1)  # Undeterminable — print no token, so the caller fails closed
+    sys.exit(1)  # Print no token; the caller then does nothing.
 
-# Reading the inputs is not the same as understanding them. `scutil` can exit 0
-# printing NOTHING, which means "I don't know who I am" — and an empty host
-# matches no project, so it would yield a confident ROLE:NONE and authorise
-# uninstalling the detector from a machine that genuinely qualifies. That is
-# the same indeterminate-input-becomes-confident-negative failure the token
-# replaced, one layer further in. An unusable identity is not an answer.
+# Reading an input is not the same as establishing it is meaningful. `scutil`
+# can exit 0 printing NOTHING, which means "I don't know who I am".
+#
+# Under install-only this guard is BEHAVIOURALLY REDUNDANT and deliberately
+# untested: an empty identity matches no project, so without it the result is
+# ROLE:NONE, and ROLE:NONE now means "do nothing" — the same outcome. Mutation
+# confirms removing it changes no test.
+#
+# It is kept because it stops being redundant the moment a removal path
+# returns. This exact input produced a confident "owns nothing" that deleted a
+# healthy detector's plist, and whoever implements removal (see the follow-up
+# issue) needs the identity validated before a negative can be trusted.
 if not host:
     sys.exit(1)
 
 target = host.lower()
-# The `if ...strip()` clause keeps an empty/missing `machine` from matching an
-# empty host — the mirror of the bug above, in the install direction.
-#
-# It is UNREACHABLE as written, because the `if not host` guard exits before
-# this line can see an empty target, and a non-empty target cannot equal "".
-# It is kept so the two guards are independent: if the host guard is ever
-# weakened, this one still holds. Deliberately NOT given a test — a test for an
-# unreachable branch passes no matter what the branch says, which is the
-# vacuous-guard pattern this lane has already shipped twice.
+# `isinstance(proj, dict)` is likewise redundant here — a malformed entry would
+# raise, the except above would exit without a token, and the caller would do
+# nothing, which is already correct. Kept for the same reason: under a removal
+# path, "it raised" must never be reachable as "owns nothing".
 owns = any(
     (proj.get("machine") or "").strip().lower() == target
-    for proj in cfg.get("projects", {}).values()
-    if (proj.get("machine") or "").strip()
+    for proj in (cfg.get("projects") or {}).values()
+    if isinstance(proj, dict) and (proj.get("machine") or "").strip()
 )
 print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
 }
 
-# stderr is discarded, so a token can only come from stdout — a traceback or a
-# dyld message cannot be mistaken for an answer.
-#
-# The exit code is captured rather than discarded. "An exit code cannot carry
-# the answer" does not mean it carries nothing: rc==0 still means the process
-# completed normally. A run that printed ROLE:NONE and then died has produced a
-# verdict of unknown provenance, so the DESTRUCTIVE branch additionally
-# requires rc==0. The install branch deliberately does not — installing on a
-# host that printed OWNS then crashed is recoverable; uninstalling is not.
-role_rc=0
-role_out="$(has_worker_role 2>/dev/null)" || role_rc=$?
-
-# Both tokens present is not a possible outcome of the heredoc (exactly one
-# print executes), so it means something else wrote to stdout — a sitecustomize
-# or a .pth, or a wrapper script. Refuse explicitly rather than letting the
-# case order below decide: OWNS is matched first, so ambiguity would silently
-# resolve to "install". That happens to be the non-destructive branch, but
-# safe-by-branch-ordering is the kind of accident this gate has already been
-# wrong about twice.
-if [ "${role_out#*ROLE:OWNS}" != "$role_out" ] && [ "${role_out#*ROLE:NONE}" != "$role_out" ]; then
-    echo "Skipping nightly-tests install: contradictory role output"
-    echo "Failing closed — not installing, and leaving any existing plist untouched."
-    exit 0
-fi
+role_out="$(owns_a_project 2>/dev/null || true)"
 
 case "$role_out" in
     *ROLE:OWNS*)
-        : # This host owns at least one project — fall through and install.
-        ;;
-    *ROLE:NONE*)
-        if [ "$role_rc" -ne 0 ]; then
-            echo "Skipping nightly-tests install: role check printed ROLE:NONE then exited $role_rc"
-            echo "Failing closed — a verdict from a run that did not complete is not a verdict."
-            exit 0
-        fi
-        host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
-        echo "Skipping nightly-tests install (no projects assigned to '$host')"
-        if [ -f "$PLIST_DST" ]; then
-            echo "Removing stale nightly-tests plist from non-worker machine..."
-            launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-            rm -f "$PLIST_DST"
-            echo "Stale nightly-tests plist removed."
-        fi
-        exit 0
+        # Both tokens present means something other than the heredoc wrote to
+        # stdout, so it is not an answer either.
+        case "$role_out" in
+            *ROLE:NONE*)
+                echo "Skipping nightly-tests install: contradictory role output"
+                echo "Not installing. No existing plist is touched."
+                exit 0
+                ;;
+        esac
         ;;
     *)
-        echo "Skipping nightly-tests install: could not determine host role"
-        echo "Failing closed — not installing, and leaving any existing plist untouched."
+        echo "Skipping nightly-tests install: this host does not own a project,"
+        echo "or its role could not be determined. Not installing."
+        echo "Any existing plist is left alone (removal is not this script's job)."
         exit 0
         ;;
 esac
-# ── End worker-role gate ─────────────────────────────────────────────────
+# ── End install gate ─────────────────────────────────────
 
 # Prerequisite: pytest-json-report must be installed
 if ! "$PROJECT_DIR/.venv/bin/python" -m pytest --json-report --help > /dev/null 2>&1; then
