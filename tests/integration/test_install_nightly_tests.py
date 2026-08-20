@@ -107,13 +107,36 @@ _TEST_LABEL_PREFIX = f"com.valortest{os.getpid()}"
 _TEST_PLIST_NAME = f"{_TEST_LABEL_PREFIX}.nightly-tests.plist"
 
 
+def _launchctl_stub(proj: Path) -> Path:
+    """A PATH shim so `launchctl` in these tests never reaches the live domain.
+
+    Belt and braces with `_TEST_LABEL_PREFIX`: the prefix already means the
+    installer can only name a label no real service uses, but the removal path
+    invokes `launchctl bootout` directly rather than through
+    `scripts/lib/launchctl.sh`, so without this the call still lands in
+    `gui/<uid>/` on the developer's machine. Measured before this shim existed:
+    exactly two such calls escaped per run.
+    """
+    binp = proj / "_stubbin"
+    binp.mkdir(exist_ok=True)
+    sh = binp / "launchctl"
+    sh.write_text("#!/bin/bash\nexit 0\n")
+    sh.chmod(0o755)
+    return binp
+
+
 def _run_installer(proj: Path, home: Path, config: Path | None, **extra_env):
+    stub_path = _launchctl_stub(proj)
     env = {
         **os.environ,
         "HOME": str(home),
         "SERVICE_LABEL_PREFIX": _TEST_LABEL_PREFIX,
         **extra_env,
     }
+    # Prepend AFTER merging extra_env: callers that supply their own PATH (the
+    # scutil-stub cases) would otherwise silently drop the launchctl shim and
+    # start reaching the live domain again.
+    env["PATH"] = f"{stub_path}:{env.get('PATH', os.environ['PATH'])}"
     if config is not None:
         env["PROJECTS_CONFIG_PATH"] = str(config)
     return subprocess.run(
