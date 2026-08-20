@@ -349,7 +349,12 @@ PR body. The branch sweeper reads that marker from its own `gh pr list` query
 and never closes or deletes the branch of a PR carrying it — instead it files
 a **separate**, PR-scoped escalation issue (`docs-auditor: withheld PR #{n}
 still unreviewed`), distinct from the per-defect titles above so the two
-filings never collide on the same dedup key. It also passes the withheld
+filings never collide on the same dedup key. The exemption from stale-close
+applies at any age; the escalation issue waits for the same
+`STALE_PR_AGE_DAYS` threshold that would have closed a plain PR, so the
+title's "still unreviewed" claim is true when it is made. Because the dedup
+key fires once ever, a filing made on sight would make the wrong wording the
+permanent record. It also passes the withheld
 count to `_write_liveness` as a keyword `fixes_withheld`, emitted into the
 Redis summary only when non-zero — a secondary signal now that the durable
 operator surface is the GitHub issue plus the reflection dashboard's rendered

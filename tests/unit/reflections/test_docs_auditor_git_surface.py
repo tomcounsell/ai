@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -563,6 +564,39 @@ class TestSweeperClosePath:
         assert close_calls == []
         assert filed, "a withheld PR must file its own escalation issue"
         assert filed[0]["title"] == "docs-auditor: withheld PR #42 still unreviewed"
+
+    def test_fresh_withheld_pr_is_exempt_but_files_no_stale_claim_yet(
+        self, repo: Path, gh, monkeypatch, fake_redis
+    ):
+        """The exemption is immediate; the "still unreviewed" filing waits.
+
+        A withheld PR opened minutes ago must never be closed, but it must also
+        not yet be titled as stale: the dedup key is once-ever, so a filing made
+        on sight would make the wrong wording the permanent record.
+        """
+        self._push_docs_audit_branch(repo, "withheld-fresh-20260101-0000")
+        monkeypatch.setattr(docs_auditor, "PROJECT_ROOT", repo)
+        monkeypatch.setattr(docs_auditor, "_get_redis", lambda: fake_redis)
+        fresh = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gh.pr_list_result = [
+            {
+                "number": 43,
+                "state": "OPEN",
+                "createdAt": fresh,
+                "body": f"pass\n\n{docs_auditor.WITHHELD_PR_MARKER}\nwithheld",
+            }
+        ]
+
+        filed: list[dict] = []
+        monkeypatch.setattr(
+            docs_auditor, "_file_issue_if_new", lambda f, r: (filed.append(f), True)[1]
+        )
+
+        docs_auditor.run_docs_branch_sweeper()
+
+        close_calls = [c for c in gh.calls if c[:3] == ["gh", "pr", "close"]]
+        assert close_calls == [], "a withheld PR is exempt from stale-close at any age"
+        assert filed == [], "no staleness claim before STALE_PR_AGE_DAYS"
 
     def test_non_marker_stale_pr_is_still_closed(self, repo: Path, gh, monkeypatch, fake_redis):
         self._push_docs_audit_branch(repo, "plain-20260101-0000")
