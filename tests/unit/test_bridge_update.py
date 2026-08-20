@@ -111,9 +111,12 @@ async def test_stale_bridge_reports_failed_not_ok(update_env, tg_client, event, 
     assert "✅" not in message
     assert f"bridge STALE {STALE_SHA}" in message
     assert "worker restarted" in message
-    # The fix session is still spawned, marked failed.
+    # The fix session is still spawned, marked failed. `failed` is passed by
+    # keyword (#2845), so this assertion is order-independent regardless of
+    # whether a positional `warnings` argument sits before it.
     bridge_update._queue_fix_session.assert_awaited_once()
-    assert bridge_update._queue_fix_session.await_args.args[-1] is True
+    call = bridge_update._queue_fix_session.await_args
+    assert call.kwargs.get("failed", call.args[-1] if call.args else None) is True
 
 
 @pytest.mark.asyncio
@@ -217,6 +220,62 @@ async def test_interim_send_failure_never_blocks_update(update_env, tg_client, e
     await bridge_update.handle_update_command(tg_client, event)
     assert tg_client.send_message.await_count == 2
     assert "update OK" in tg_client.send_message.await_args_list[1].args[1]
+
+
+# ---------------------------------------------------------------------------
+# #2845 Task 5: suppression trailer forwarding to the Telegram reply
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_suppressed_trailer_reaches_telegram_on_clean_run(update_env, tg_client, event):
+    """The modal suppressed case: empty result.warnings, non-empty active().
+    The trailer must still reach the Telegram reply — the both-present case
+    (warnings AND suppressed) passes either way and proves nothing."""
+    from scripts.update.warn_state import SUPPRESSED_PREFIX
+
+    trailer = f"{SUPPRESSED_PREFIX} gws-auth — details: python -m scripts.update.warn_state"
+    update_env["stdout"] = f"update successful\n{trailer}\n"
+    await bridge_update.handle_update_command(tg_client, event)
+    message = _final_message(tg_client)
+    assert trailer in message
+    # A clean run with only a suppressed trailer must NOT spawn a fix session.
+    bridge_update._queue_fix_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_suppressed_prefix_constant_is_shared(update_env, tg_client, event, monkeypatch):
+    """The bridge-side match resolves through the imported constant, never a
+    locally-spelled literal — that drift is exactly what produced Defect 2."""
+    import scripts.update.warn_state as warn_state_mod
+
+    monkeypatch.setattr(warn_state_mod, "SUPPRESSED_PREFIX", "totally different spelling:")
+    trailer = "totally different spelling: gws-auth — details: python -m scripts.update.warn_state"
+    update_env["stdout"] = f"update successful\n{trailer}\n"
+    await bridge_update.handle_update_command(tg_client, event)
+    message = _final_message(tg_client)
+    assert trailer in message
+
+
+def test_suppressed_trailer_extracts_as_zero_warnings():
+    """The load-bearing half of the inertness claim (critique round 9): fed
+    through extract_update_warnings, the REAL trailer (built from the real
+    SUPPRESSED_PREFIX) yields []. Asserted alone, and again immediately
+    after a real (N warnings) block — the parser must stay inert to it even
+    while already in a matching state."""
+    from scripts.update.warn_state import SUPPRESSED_PREFIX
+
+    line = f"{SUPPRESSED_PREFIX} gws-auth — details: python -m scripts.update.warn_state"
+    assert bridge_update.extract_update_warnings([line]) == []
+
+    status_lines = [
+        "up to date at abc1234 (2 warnings)",
+        "  ⚠️ warn1",
+        "  ⚠️ warn2",
+        line,
+    ]
+    result = bridge_update.extract_update_warnings(status_lines)
+    assert result == ["warn1", "warn2"]
 
 
 @pytest.mark.asyncio

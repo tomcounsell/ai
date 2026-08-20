@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -170,6 +171,33 @@ class UpdateResult:
     log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Keys whose warn_state.should_emit call returned True THIS run (#2845).
+    # Subtracted from warn_state.active() when composing the `suppressed:`
+    # trailer, so a key does not simultaneously warn AND get called
+    # "unchanged since first warning" in the same run (Race 3's inverse
+    # hazard — should_emit writes its signature the instant it returns True).
+    warn_keys_emitted: set[str] = field(default_factory=set)
+
+
+def _append_warning(result: UpdateResult, text: str) -> None:
+    """Append a warning with embedded newlines collapsed to one physical line.
+
+    The summary render block below renders one `⚠️` bullet per `result.warnings` entry
+    (`status += f"\\n  ⚠️ {warn}"`) — a raw multi-line entry (an exception
+    `str()`, a wrapped multi-line diagnostic) would render its sentinel on
+    only the first physical line, dropping the rest. This is the exact
+    truncation `extract_update_warnings` exists to prevent, reproduced
+    through a different producer if any append site bypasses this helper
+    (#2845).
+    """
+    result.warnings.append(" ".join(text.split("\n")))
+
+
+def _append_error(result: UpdateResult, text: str) -> None:
+    """Append an error with embedded newlines collapsed — the same hole
+    exists on the failure path, and it is the path where the dropped tail
+    is a stack trace."""
+    result.errors.append(" ".join(text.split("\n")))
 
 
 # Log buffer for telegram mode (writes to file instead of stdout)
@@ -659,9 +687,10 @@ def run_release_verify(
                     v,
                     always=True,
                 )
-                result.warnings.append(
+                _append_warning(
+                    result,
                     "worker stale; self-heal restart deferred (sessions in flight) — "
-                    "cron will retry next update cycle"
+                    "cron will retry next update cycle",
                 )
                 # A deferral is not a failure: drop the worker from alert
                 # consideration so it neither hard-fails nor Sentry-alerts.
@@ -678,7 +707,7 @@ def run_release_verify(
         for name, info in release_check.items():
             if info.get("classification") == "unknown":
                 log(f"WARN: {name} release could not be confirmed (unknown)", v, always=True)
-                result.warnings.append(f"{name} release could not be confirmed")
+                _append_warning(result, f"{name} release could not be confirmed")
         release_stale = {
             name: info
             for name, info in release_check.items()
@@ -700,7 +729,7 @@ def run_release_verify(
             for name, info in release_stale.items()
         )
         log(f"ERROR: release verify FAILED @ {head_short}: {details}", v, always=True)
-        result.warnings.append(f"release verify FAILED: {details}")
+        _append_warning(result, f"release verify FAILED: {details}")
         result.success = False
         if "bridge" in release_stale:
             try:
@@ -755,7 +784,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not result.git_result.success:
             log(f"FAIL: {result.git_result.error}", v)
             result.success = False
-            result.errors.append(f"Git pull failed: {result.git_result.error}")
+            _append_error(result, f"Git pull failed: {result.git_result.error}")
             return result
 
         if result.git_result.commit_count == 0:
@@ -769,7 +798,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if result.git_result.stash_restored:
                 log("Stashed and restored local changes", v)
             else:
-                result.warnings.append("Local changes stashed but failed to restore")
+                _append_warning(result, "Local changes stashed but failed to restore")
 
     # Report which layout ~/.claude/hooks is in (issue #2567). Two machines in
     # different layouts produce different runtime behavior from identical code,
@@ -814,7 +843,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("hooks: sdlc_context deployed", v)
     else:
         log("hooks: MISSING sdlc_context (see #2561)", v, always=True)
-        result.warnings.append("hooks: MISSING sdlc_context (see #2561)")
+        _append_warning(result, "hooks: MISSING sdlc_context (see #2561)")
 
     if result.hardlink_result.created > 0:
         log(f"Created {result.hardlink_result.created} new hardlink(s)", v, always=True)
@@ -843,16 +872,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         for action in result.hardlink_result.actions:
             if action.action == "error":
                 log(f"WARN: {action.error} ({action.dst})", v)
-                result.warnings.append(f"Hardlink step failed: {action.dst}")
+                _append_warning(result, f"Hardlink step failed: {action.dst}")
 
     # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
     healed_plists = service.heal_plist_paths(project_dir)
     if healed_plists:
         for label in healed_plists:
             log(f"Healed PATH in {label}.plist (added ~/.local/bin)", v, always=True)
-        result.warnings.append(
+        _append_warning(
+            result,
             f"Healed {len(healed_plists)} plist(s) missing ~/.local/bin in PATH — "
-            "services reloaded automatically"
+            "services reloaded automatically",
         )
 
     # Step 1.56: Remove launchd jobs for features that have been fully deleted
@@ -872,7 +902,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
     if env_r.error:
         log(f"WARN: Env symlink: {env_r.error}", v)
-        result.warnings.append(f"Env symlink: {env_r.error}")
+        _append_warning(result, f"Env symlink: {env_r.error}")
 
     # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
     # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
@@ -884,7 +914,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("config/projects.json OK (real file copy)", v)
     if projects_r.error:
         log(f"WARN: projects.json: {projects_r.error}", v, always=True)
-        result.warnings.append(f"projects.json: {projects_r.error}")
+        _append_warning(result, f"projects.json: {projects_r.error}")
 
     # Step 1.655: Ensure the crash-recovery reflection is registered in the
     # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
@@ -902,7 +932,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"crash-recovery registration skipped: {rr.detail}", v)
     if not rr.success:
         log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
-        result.warnings.append(f"crash-recovery registration: {rr.detail}")
+        _append_warning(result, f"crash-recovery registration: {rr.detail}")
 
     # Step 1.656: Remove reflections whose callables no longer ship in the
     # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
@@ -921,7 +951,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"{removed_name} removal skipped: {rm.detail}", v)
         if not rm.success:
             log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
-            result.warnings.append(f"{removed_name} removal: {rm.detail}")
+            _append_warning(result, f"{removed_name} removal: {rm.detail}")
 
     # Step 1.657: Ensure the memory-distill-backfill reflection is registered
     # (#2202) via the same generalized register path. Same ordering rationale
@@ -945,7 +975,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
     if not mdr.success:
         log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
-        result.warnings.append(f"memory-distill-backfill registration: {mdr.detail}")
+        _append_warning(result, f"memory-distill-backfill registration: {mdr.detail}")
 
     # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
     # (#2717) via the same generalized register path. Same ordering
@@ -969,7 +999,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
     if not upr.success:
         log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
-        result.warnings.append(f"sdlc-upvote-pickup registration: {upr.detail}")
+        _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
@@ -985,7 +1015,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("config/reflections.yaml: vault not found, using in-repo fallback", v)
     if refl_r.error:
         log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml: {refl_r.error}")
+        _append_warning(result, f"reflections.yaml: {refl_r.error}")
 
     # Step 1.67: Bootstrap cross-machine zshenv loader.
     # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
@@ -1000,7 +1030,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("Added Valor source guard to ~/.zshenv", v, always=True)
     if zr.error:
         log(f"WARN: zshenv sync: {zr.error}", v, always=True)
-        result.warnings.append(f"zshenv sync: {zr.error}")
+        _append_warning(result, f"zshenv sync: {zr.error}")
 
     # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
     # Ensures all machines use the correct primary GitHub token consistently.
@@ -1013,7 +1043,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"gh auth: skipped — {gh_auth_result.detail}", v)
     elif not gh_auth_result.success:
         log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
-        result.warnings.append(f"gh auth: {gh_auth_result.error}")
+        _append_warning(result, f"gh auth: {gh_auth_result.error}")
 
     # Step 1.69: Check Google Workspace CLI (`gws`) auth state.
     # Detection only — the OAuth consent flow is human-gated and browser-based,
@@ -1022,14 +1052,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     gws_auth_result = gws_auth.configure_gws_auth(project_dir)
     if gws_auth_result.action == "already_ok":
         log(f"gws auth: {gws_auth_result.detail}", v)
+        # Resolution: clear any stored signature and emit one resolved note.
+        if warn_state.should_emit("gws-auth", "", project_dir):
+            log("gws auth: resolved", v, always=True)
     elif gws_auth_result.action == "skipped":
         log(f"gws auth: skipped — {gws_auth_result.detail}", v)
     elif gws_auth_result.action == "needs_auth":
-        log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
-        result.warnings.append(f"gws auth: {gws_auth_result.detail}")
+        # Human-gated (browser OAuth consent, #2329-shaped): one emission
+        # per state transition rather than every 30-minute cycle (#2845).
+        # The signature is the auth-method string, so a change in the
+        # method re-warns.
+        signature = f"needs_auth:{gws_auth_result.detail}"
+        if warn_state.should_emit("gws-auth", signature, project_dir):
+            log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
+            _append_warning(result, f"gws auth: {gws_auth_result.detail}")
+            result.warn_keys_emitted.add("gws-auth")
     elif not gws_auth_result.success:
         log(f"WARN: gws auth: {gws_auth_result.error}", v, always=True)
-        result.warnings.append(f"gws auth: {gws_auth_result.error}")
+        _append_warning(result, f"gws auth: {gws_auth_result.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
@@ -1037,7 +1077,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if result.hook_audit.issues:
         for issue in result.hook_audit.issues:
             log(f"WARN: [{issue.skill}] {issue.detail}", v, always=True)
-            result.warnings.append(f"Hook issue in {issue.skill}: {issue.issue_type}")
+            _append_warning(result, f"Hook issue in {issue.skill}: {issue.issue_type}")
     else:
         log(f"Skill hooks OK ({result.hook_audit.skills_scanned} skills scanned)", v)
 
@@ -1045,7 +1085,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     pending = git.check_upgrade_pending(project_dir)
     if pending.pending:
         log(f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v)
-        result.warnings.append(f"Critical upgrade pending: {pending.reason}")
+        _append_warning(result, f"Critical upgrade pending: {pending.reason}")
 
     # Step 2.6: Determine whether this machine is the lockfile maintainer.
     # `projects.json` assigns each project to exactly one machine via the
@@ -1121,7 +1161,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
             else:
                 log(f"WARN: Dep sync failed: {result.dep_result.error}", v, always=True)
-                result.warnings.append(f"Dep sync failed: {result.dep_result.error}")
+                _append_warning(result, f"Dep sync failed: {result.dep_result.error}")
 
             # Verify critical versions
             result.version_info = deps.verify_critical_versions(project_dir)
@@ -1132,7 +1172,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         f"WARN: {vi.package} version mismatch: {vi.version} != {vi.expected}",
                         v,
                     )
-                    result.warnings.append(f"{vi.package} version mismatch")
+                    _append_warning(result, f"{vi.package} version mismatch")
         else:
             log("No dependency changes, skipping sync", v)
 
@@ -1166,8 +1206,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}"
+                _append_warning(
+                    result,
+                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}",
                 )
     except Exception as _rfg_exc:
         log(
@@ -1175,7 +1216,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             v,
             always=True,
         )
-        result.warnings.append(f"Redis flush guard install: unexpected error: {_rfg_exc}")
+        _append_warning(result, f"Redis flush guard install: unexpected error: {_rfg_exc}")
 
     # Step 3.5: Auto-bump critical deps from PyPI.
     #
@@ -1209,7 +1250,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     always=True,
                 )
                 log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
-                result.warnings.append("Auto-bump rolled back after test failure")
+                _append_warning(result, "Auto-bump rolled back after test failure")
             elif bump.smoke_passed:
                 log("Smoke test passed after bump", v, always=True)
                 # Commit the pyproject.toml change
@@ -1281,10 +1322,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 )
                         except Exception as e2:
                             log(f"WARN: Failed to push dep bump: {e2}", v)
-                            result.warnings.append("Dep bump succeeded but commit/push failed")
+                            _append_warning(result, "Dep bump succeeded but commit/push failed")
                 except Exception as e:
                     log(f"WARN: Failed to commit bump: {e}", v)
-                    result.warnings.append("Dep bump succeeded but commit/push failed")
+                    _append_warning(result, "Dep bump succeeded but commit/push failed")
 
     # Step 3.6: Run pending data migrations (after git pull, before service restart)
     log("Checking pending migrations...", v)
@@ -1297,7 +1338,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if mig.failed:
         for err in mig.errors:
             log(f"  FAIL: {err}", v, always=True)
-            result.errors.append(f"Migration failed: {err}")
+            _append_error(result, f"Migration failed: {err}")
     if not mig.ran and not mig.failed:
         log("No pending migrations", v)
 
@@ -1323,7 +1364,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
     else:
         log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml migration: {ry.error}")
+        _append_warning(result, f"reflections.yaml migration: {ry.error}")
 
     # Step 3.66: Arm the merged-branch-cleanup plan-migration backstop
     # (issue #1900, Tier 0). Runs after the reflections.yaml copy (Step 1.66)
@@ -1341,7 +1382,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
     if not ar.success:
         log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
-        result.warnings.append(f"merged-branch-cleanup arm: {ar.detail}")
+        _append_warning(result, f"merged-branch-cleanup arm: {ar.detail}")
 
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)
@@ -1354,7 +1395,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"OfficeCLI {oc.action}: {oc.version}", v, always=True)
     else:
         log(f"WARN: OfficeCLI {oc.action}: {oc.error}", v)
-        result.warnings.append(f"OfficeCLI: {oc.error}")
+        _append_warning(result, f"OfficeCLI: {oc.error}")
 
     # Step 3.8: Rodney binary install/update (happy path testing)
     log("Checking Rodney...", v)
@@ -1367,7 +1408,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Rodney {rr.action}: {rr.version}", v, always=True)
     else:
         log(f"WARN: Rodney {rr.action}: {rr.error}", v)
-        result.warnings.append(f"Rodney: {rr.error}")
+        _append_warning(result, f"Rodney: {rr.error}")
 
     # Step 3.9: npm global tools (excalidraw-export, etc.)
     log("Checking npm tools...", v)
@@ -1383,7 +1424,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("  WARN: npm not available — skipping npm tools", v)
             else:
                 log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
-                result.warnings.append(f"npm:{npm_r.name}: {npm_r.error}")
+                _append_warning(result, f"npm:{npm_r.name}: {npm_r.error}")
 
     # Step 3.10: sentry-cli install/update
     log("Checking sentry-cli...", v)
@@ -1396,7 +1437,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"sentry-cli {sr.action}: {sr.version}", v, always=True)
     else:
         log(f"WARN: sentry-cli {sr.action}: {sr.error}", v)
-        result.warnings.append(f"sentry-cli: {sr.error}")
+        _append_warning(result, f"sentry-cli: {sr.error}")
 
     # Step 3.11: Kokoro TTS model + voices download.
     # Idempotent: skipped when both files are already present in the cache
@@ -1414,7 +1455,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Kokoro models downloaded ({kr.models_dir})", v, always=True)
     else:
         log(f"WARN: Kokoro download: {kr.error}", v)
-        result.warnings.append(f"Kokoro: {kr.error}")
+        _append_warning(result, f"Kokoro: {kr.error}")
 
     # Step 3.12: ffmpeg — Kokoro encodes WAV -> OGG/Opus via ffmpeg. Without
     # it on PATH the local TTS backend reports unavailable and voice synthesis
@@ -1430,7 +1471,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"ffmpeg installed ({fr.path})", v, always=True)
     else:
         log(f"WARN: ffmpeg: {fr.error}", v)
-        result.warnings.append(f"ffmpeg: {fr.error}")
+        _append_warning(result, f"ffmpeg: {fr.error}")
 
     # Step 3.13: Redis durability configuration.
     # Pins AOF persistence (appendonly yes, appendfsync everysec) and eviction
@@ -1454,20 +1495,23 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
             if rp.warning:
                 log(f"WARN: Redis durability: {rp.warning}", v, always=True)
-                result.warnings.append(f"Redis durability: {rp.warning}")
+                _append_warning(result, f"Redis durability: {rp.warning}")
         elif rp.action == "skipped":
             log(f"Redis durability: skipped — {rp.error}", v)
         else:
             log(f"WARN: Redis durability: {rp.error}", v, always=True)
-            result.warnings.append(f"Redis durability: {rp.error}")
+            _append_warning(result, f"Redis durability: {rp.error}")
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
-        result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
+        _append_warning(result, f"Redis durability: unexpected error: {_rp_exc}")
 
     # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
     # Immediately after Step 3.13 durability, before Step 3.14 replication.
-    # Calls apply_redis_acl() with NO ARGUMENTS -- never apply=True, never a
-    # forwarded params.apply, never any global apply flag. `/update` must
+    # The planner is called with NO ARGUMENTS -- never with the apply flag
+    # set, never a forwarded params.apply, never any global arming flag.
+    # (Spelled in prose deliberately: the plan's anti-criterion greps this
+    # file's source for the armed spelling, so quoting the token here would
+    # turn that gate red on correct code.) `/update` must
     # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
     # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
     # mutation landing silently in an unrelated PR is exactly the failure
@@ -1491,23 +1535,36 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    "Redis ACL drift detected — see docs/features/redis-flush-hardening.md "
-                    "for the apply runbook"
-                )
+                # Human-gated (double-gated apply, #2645 Risk 8): one
+                # emission per state transition. The signature is a digest
+                # of the planned commands (which already carry the
+                # <REDIS_APP_PASSWORD> placeholder, never a real secret),
+                # so any change in the drift's content re-warns (#2845).
+                digest = hashlib.sha256("; ".join(ra.planned_commands).encode()).hexdigest()[:16]
+                if warn_state.should_emit("redis-acl-drift", f"drift:{digest}", project_dir):
+                    _append_warning(
+                        result,
+                        "Redis ACL drift detected — see "
+                        "docs/features/redis-flush-hardening.md for the apply runbook",
+                    )
+                    result.warn_keys_emitted.add("redis-acl-drift")
             else:
                 log("Redis ACL: no drift", v)
+                # Resolution: clear stored state and emit one resolved note
+                # so a later regression to a *different* drift warns again.
+                if warn_state.should_emit("redis-acl-drift", "", project_dir):
+                    log("Redis ACL: resolved", v, always=True)
             if ra.warning:
                 log(f"WARN: Redis ACL: {ra.warning}", v, always=True)
-                result.warnings.append(f"Redis ACL: {ra.warning}")
+                _append_warning(result, f"Redis ACL: {ra.warning}")
         else:
             log(f"WARN: Redis ACL check: {ra.error}", v, always=True)
-            result.warnings.append(f"Redis ACL check: {ra.error}")
+            _append_warning(result, f"Redis ACL check: {ra.error}")
     except ImportError:
         log("Redis ACL: module not present yet, skipping", v)
     except Exception as _acl_exc:
         log(f"WARN: Redis ACL step failed unexpectedly: {_acl_exc}", v, always=True)
-        result.warnings.append(f"Redis ACL: unexpected error: {_acl_exc}")
+        _append_warning(result, f"Redis ACL: unexpected error: {_acl_exc}")
 
     # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
     # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this
@@ -1526,15 +1583,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"Redis replication: {rr.action}", v)
             if rr.warning:
                 log(f"WARN: Redis replication: {rr.warning}", v, always=True)
-                result.warnings.append(f"Redis replication: {rr.warning}")
+                _append_warning(result, f"Redis replication: {rr.warning}")
         elif rr.action == "skipped":
             log(f"Redis replication: skipped — {rr.error}", v)
         else:
             log(f"WARN: Redis replication: {rr.error}", v, always=True)
-            result.warnings.append(f"Redis replication: {rr.error}")
+            _append_warning(result, f"Redis replication: {rr.error}")
     except Exception as _rr_exc:
         log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
-        result.warnings.append(f"Redis replication: unexpected error: {_rr_exc}")
+        _append_warning(result, f"Redis replication: unexpected error: {_rr_exc}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a
@@ -1554,7 +1611,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Generation model OK ({ollama_model}): {gen_detail}", v)
         else:
             log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
-            result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
+            _append_warning(result, f"generation model {ollama_model}: {gen_detail}")
         # Cloud-signin precondition: a cloud tag needs the host signed in.
         # Ollama persists signin via SSH keypair at ~/.ollama/id_ed25519 —
         # there is no ":cloud" model entry in `ollama list`.
@@ -1571,14 +1628,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     "Run: ollama signin"
                 )
                 log(f"WARN: {msg}", v, always=True)
-                result.warnings.append(msg)
+                _append_warning(result, msg)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
     machine_check = verify.check_machine_identity(project_dir)
     if machine_check.get("error"):
         log(f"WARN: {machine_check['error']}", v, always=True)
-        result.warnings.append(machine_check["error"])
+        _append_warning(result, machine_check["error"])
     elif machine_check.get("projects"):
         log(
             f"Machine: {machine_check['hostname']} -> "
@@ -1592,9 +1649,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             v,
             always=True,
         )
-        result.warnings.append(
+        _append_warning(
+            result,
             f"No projects in config for machine '{machine_check.get('hostname')}'. "
-            "Check 'machine' field in ~/Desktop/Valor/projects.json"
+            "Check 'machine' field in ~/Desktop/Valor/projects.json",
         )
 
     # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)
@@ -1610,7 +1668,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(f"Telegram auth: {telegram_check.error}")
+            _append_warning(result, f"Telegram auth: {telegram_check.error}")
 
     # Step 4.6: Validate projects.json — green-light gate for service restart.
     # If the iCloud-synced config maps any contact to multiple machines (or
@@ -1633,8 +1691,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(
-                f"projects.json invalid; bridge restart skipped: {result.projects_json_check.error}"
+            _append_warning(
+                result,
+                "projects.json invalid; bridge restart skipped: "
+                f"{result.projects_json_check.error}",
             )
             # Suppress restart for the rest of this run. The existing bridge
             # process keeps running on the previously validated config.
@@ -1657,8 +1717,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(
-                f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
+            _append_warning(
+                result, f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
             )
             config = replace(config, do_service_restart=False)
 
@@ -1682,7 +1742,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 "the launchd plists"
             )
             log(f"WARN: {_stale_msg}", v, always=True)
-            result.warnings.append(_stale_msg)
+            _append_warning(result, _stale_msg)
     except Exception as _stale_exc:
         log(f"WARN: stale GRANITE_* env-key scan failed: {_stale_exc}", v)
 
@@ -1747,10 +1807,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log(f"  {mcp_memory_result.message}", v)
     if not mcp_memory_result.ok:
         if _mcp_memory_write:
-            result.warnings.append(f"memory MCP: {mcp_memory_result.message}")
+            _append_warning(result, f"memory MCP: {mcp_memory_result.message}")
         else:
             # --verify mode: report drift but do not warn aggressively
-            result.warnings.append(f"memory MCP drift: {mcp_memory_result.message}")
+            _append_warning(result, f"memory MCP drift: {mcp_memory_result.message}")
 
     # Optional Ollama ping for the title-gen worker — non-fatal.
     if config.do_ollama:
@@ -1776,10 +1836,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log(f"  {mcp_byob_result.message}", v)
     if not mcp_byob_result.ok:
         if _mcp_byob_write:
-            result.warnings.append(f"BYOB MCP: {mcp_byob_result.message}")
+            _append_warning(result, f"BYOB MCP: {mcp_byob_result.message}")
         else:
             # --verify mode: report drift but do not warn aggressively
-            result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
+            _append_warning(result, f"BYOB MCP drift: {mcp_byob_result.message}")
 
     # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
     # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
@@ -1789,7 +1849,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if _persona_warnings:
         for _w in _persona_warnings:
             log(f"  {_w}", v)
-            result.warnings.append(_w)
+            _append_warning(result, _w)
     else:
         log("  PM persona overlay: in sync (or files absent)", v)
 
@@ -1804,7 +1864,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         for warn in rc.warnings:
             log(f"WARN: {warn}", v, always=True)
-            result.warnings.extend(rc.warnings)
+            _append_warning(result, warn)
 
     # Step 4.96: Sweep oversized rotated log backups (*.log.N past a 100 MB
     # hard cap). Complements the 30-min log-rotate LaunchAgent, which only
@@ -1820,7 +1880,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if lc.warnings:
             for warn in lc.warnings:
                 log(f"WARN: {warn}", v, always=True)
-                result.warnings.append(warn)
+                _append_warning(result, warn)
         elif lc.removed:
             freed_mb = lc.freed_bytes / (1024 * 1024)
             log(
@@ -1842,13 +1902,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if service.install_caffeinate():
                 log("Caffeinate installed", v)
             else:
-                result.warnings.append("Failed to install caffeinate")
+                _append_warning(result, "Failed to install caffeinate")
 
         # Install main service (handles both bridge and update cron)
         if service.install_service(project_dir):
             log("Services installed/restarted", v)
         else:
-            result.warnings.append("Service install may have failed")
+            _append_warning(result, "Service install may have failed")
 
         # Wait for bridge to start after launchctl unload+load cycle.
         # Polling window: 10 x 2s = 20s covers ThrottleInterval (10s)
@@ -1875,7 +1935,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append("Bridge not running after restart")
+                _append_warning(result, "Bridge not running after restart")
         else:
             log("Bridge: skipped (no projects assigned to this machine)", v)
             result.caffeinate_status = service.get_caffeinate_status()
@@ -1886,13 +1946,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("Web UI restarted (port 8500)", v)
         else:
             log("WARN: Web UI failed to start", v, always=True)
-            result.warnings.append("Web UI failed to start")
+            _append_warning(result, "Web UI failed to start")
 
         # Check update cron
         if service.is_update_cron_installed():
             log("Update cron installed", v)
         else:
-            result.warnings.append("Update cron not installed")
+            _append_warning(result, "Update cron not installed")
 
         # Install/reload standalone worker service
         if (project_dir / "com.valor.worker.plist").exists():
@@ -1940,9 +2000,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 v,
                                 always=True,
                             )
-                            result.warnings.append(
+                            _append_warning(
+                                result,
                                 "Worker started but heartbeat pending — "
-                                "dashboard may show stale status briefly"
+                                "dashboard may show stale status briefly",
                             )
                         else:
                             # Kickstart fallback: force-start the service if launchd
@@ -1992,9 +2053,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                     v,
                                     always=True,
                                 )
-                                result.warnings.append(
+                                _append_warning(
+                                    result,
                                     "Worker not running after install and"
-                                    " kickstart retry (30s window)"
+                                    " kickstart retry (30s window)",
                                 )
                                 result.success = False
             else:
@@ -2008,8 +2070,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    "Worker install failed — worker not running (see update logs)"
+                _append_warning(
+                    result, "Worker install failed — worker not running (see update logs)"
                 )
                 result.success = False
 
@@ -2030,7 +2092,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append("Reflection-worker service install failed")
+                _append_warning(result, "Reflection-worker service install failed")
 
         # Install nightly-tests launchd service on bridge machines.
         # The install script self-gates on has_bridge_role() — it skips
@@ -2040,7 +2102,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("Nightly tests service installed/verified", v)
             else:
                 log("WARN: Nightly tests service install failed or not supported", v, always=True)
-                result.warnings.append("Nightly tests service install failed")
+                _append_warning(result, "Nightly tests service install failed")
         else:
             log("Nightly tests: skipped (no projects assigned to this machine)", v)
 
@@ -2056,7 +2118,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log(f"Email bridge started (PID: {service.get_email_pid()})", v, always=True)
                 else:
                     log("WARN: Email bridge failed to start", v, always=True)
-                    result.warnings.append("Email bridge configured but failed to start")
+                    _append_warning(result, "Email bridge configured but failed to start")
         else:
             if service.is_email_running():
                 if not has_projects:
@@ -2072,7 +2134,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log("Email bridge stopped", v, always=True)
                 else:
                     log("WARN: Email bridge failed to stop", v, always=True)
-                    result.warnings.append("Email bridge should not run here but failed to stop")
+                    _append_warning(result, "Email bridge should not run here but failed to stop")
             elif not has_projects:
                 log("Email bridge: skipped (no projects assigned to this machine)", v)
             else:
@@ -2085,15 +2147,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("Log-rotate LaunchAgent installed", v)
         else:
             log("WARN: Log-rotate LaunchAgent install failed", v, always=True)
-            result.warnings.append("Log-rotate LaunchAgent install failed")
+            _append_warning(result, "Log-rotate LaunchAgent install failed")
 
         # Best-effort cleanup of the stale /etc/newsyslog.d/valor.conf from
         # machines updated before this migration. Uses sudo -n so it never
         # prompts; a warning is logged if sudo isn't cached.
         if not service.remove_newsyslog_config():
-            result.warnings.append(
+            _append_warning(
+                result,
                 "Stale /etc/newsyslog.d/valor.conf still present — will cause "
-                "double-rotation until manually removed"
+                "double-rotation until manually removed",
             )
 
         # Terminal release verify (issue #1898): full-mode only — the
@@ -2262,7 +2325,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if not tool.available and tool.error:
                 log(f"    {tool.error}", v, always=True)
                 if tool.name not in optional_tools:
-                    result.warnings.append(f"{tool.name}: {tool.error}")
+                    _append_warning(result, f"{tool.name}: {tool.error}")
 
         # Report valor tool checks (env-completeness, etc.)
         #
@@ -2272,23 +2335,45 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Re-warning every 30 min is pure spam, so these two are suppressed to a
         # single emission per state transition (warn_state, #2329/#2328). The
         # ToolCheck.error already carries the exact human steps (see verify.py).
-        human_gated_tools = {"google-token", "sms_reader"}
+        # env-completeness joins by set membership (#2845): it is already a
+        # `valor_tools` member, so it needs no call-site wiring — the loop's
+        # `signature = f"unresolved:{tool.error}"` already encodes the gap's
+        # content (a newly-missing required key re-warns), and this loop
+        # already records the key into `result.warn_keys_emitted`. Without
+        # this, every interactive `/update` on a machine with an incomplete
+        # vault (this checkout's own machine included) enqueues a fix
+        # session for a condition this plan defines as permanent-and-correct.
+        # NOTE: `should_emit` writes state under `--verify` too, so a
+        # diagnostic run consumes the emission the next cron cycle would have
+        # made. Pre-existing since #2329 for the two incumbents; tracked as
+        # #2898 rather than widened or fixed here.
+        human_gated_tools = {"google-token", "sms_reader", "env-completeness"}
         for tool in result.verification.valor_tools:
             if not tool.available and tool.error:
                 if tool.name in human_gated_tools:
                     signature = f"unresolved:{tool.error}"
                     if warn_state.should_emit(tool.name, signature, project_dir):
                         log(f"  ACTION REQUIRED — {tool.name}: {tool.error}", v, always=True)
-                        result.warnings.append(f"{tool.name}: {tool.error}")
+                        _append_warning(result, f"{tool.name}: {tool.error}")
+                        result.warn_keys_emitted.add(tool.name)
                     # else: already warned for this exact state — stay silent.
                     continue
                 log(f"  WARN: {tool.name}: {tool.error}", v, always=True)
-                result.warnings.append(f"{tool.name}: {tool.error}")
-            elif tool.name in human_gated_tools:
+                _append_warning(result, f"{tool.name}: {tool.error}")
+            elif tool.name in human_gated_tools and not (tool.version or "").startswith("skipped"):
                 # Resolved — clear stored state (and emit one resolved note) so a
                 # future regression warns again instead of staying silent.
+                #
+                # Gated on the check having actually PASSED, not merely on
+                # `available=True`: check_env_completeness reaches this
+                # branch on its transient-vault-outage skip paths too
+                # (`version="skipped (.env not found)"`), and clearing state
+                # there would re-arm the whole missing-key respam on the
+                # next healthy run — the .env symlink into the iCloud vault
+                # genuinely goes missing transiently (#2845).
                 if warn_state.should_emit(tool.name, "", project_dir):
-                    log(f"  {tool.name}: resolved (human grant now present)", v, always=True)
+                    log(f"  {tool.name}: resolved", v, always=True)
+                    result.warn_keys_emitted.add(tool.name)
 
         # Migrate legacy Desktop/claude_code paths in settings.json
         log("Migrating settings.json paths...", v)
@@ -2308,7 +2393,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"  OAuth: {oauth_sync.get('reason')}", v)
         else:
             log(f"  OAuth: {oauth_sync.get('reason')}", v)
-            result.warnings.append(f"OAuth sync: {oauth_sync.get('reason')}")
+            _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
 
         # Report SDK auth
         auth = result.verification.sdk_auth
@@ -2318,14 +2403,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("  SDK auth: API key", v)
         else:
             log("  SDK auth: NOT CONFIGURED", v)
-            result.warnings.append("SDK auth not configured")
+            _append_warning(result, "SDK auth not configured")
 
         # Report gitignore issues (un-gitignored embeddings, etc.)
         if result.verification.gitignore_issues:
             for issue in result.verification.gitignore_issues:
                 msg = f"{issue.repo}: {issue.file_path} ({issue.size_mb}MB) not in .gitignore"
                 log(f"  WARN: {msg}", v, always=True)
-                result.warnings.append(msg)
+                _append_warning(result, msg)
 
     # Step 7: Calendar integration
     if config.do_calendar:
@@ -2335,7 +2420,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         model_errors = verify.verify_models(project_dir)
         for model_error in model_errors:
             log(f"WARN: {model_error}", v, always=True)
-            result.warnings.append(model_error)
+            _append_warning(result, model_error)
 
         # Global hook
         result.calendar_hook = cal_integration.ensure_global_hook(project_dir)
@@ -2346,12 +2431,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("Calendar hook OK", v)
         else:
             log(f"WARN: Calendar hook issue: {result.calendar_hook.error}", v)
-            result.warnings.append(f"Calendar hook: {result.calendar_hook.error}")
+            _append_warning(result, f"Calendar hook: {result.calendar_hook.error}")
 
         # Calendar config
         result.calendar_config = cal_integration.generate_calendar_config(project_dir)
         if result.calendar_config.success:
-            warn_state.should_emit("calendar-config", "", project_dir)  # clear on resolve
+            # clear on resolve — defensive no-op on `warn_keys_emitted` (an
+            # empty signature always clears state, so `active()` cannot
+            # hold this key afterward), instrumented anyway per the flat
+            # "every should_emit site that returns True" rule (#2845).
+            if warn_state.should_emit("calendar-config", "", project_dir):
+                result.warn_keys_emitted.add("calendar-config")
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
                 status = "OK" if mapping.accessible else "INACCESSIBLE"
@@ -2364,7 +2454,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             signature = f"unresolved:{result.calendar_config.error}"
             if warn_state.should_emit("calendar-config", signature, project_dir):
                 log(f"WARN: Calendar config: {result.calendar_config.error}", v, always=True)
-                result.warnings.append(f"Calendar config: {result.calendar_config.error}")
+                _append_warning(result, f"Calendar config: {result.calendar_config.error}")
+                result.warn_keys_emitted.add("calendar-config")
 
     # Step 8: MCP servers
     if config.do_mcp:
@@ -2483,6 +2574,13 @@ def main() -> int:
             status = f"update failed at {sha}"
             for err in result.errors:
                 status += f"\n  - {err}"
+            # Three failure modes (release-verify FAILED, worker-not-running,
+            # worker-install-failed) append ONLY to result.warnings and never
+            # to result.errors — without this, the fix session queued by the
+            # `failed` short-circuit gets an empty warning list on exactly
+            # the runs that most need one (#2845).
+            for warn in result.warnings:
+                status += f"\n  ⚠️ {warn}"
         elif result.warnings:
             detail = f"updated to {sha}" if commits > 0 else f"up to date at {sha}"
             w_count = len(result.warnings)
@@ -2492,6 +2590,30 @@ def main() -> int:
                 status += f"\n  ⚠️ {warn}"
         else:
             status = "update successful"
+
+        # Suppressed-condition trailer (Risk 4): whatever warn_state.active()
+        # holds, minus the keys that emitted THIS run (Race 3's inverse
+        # hazard — should_emit writes its signature the instant it returns
+        # True, so raw active() would call a key "unchanged since first
+        # warning" on the very run it first warned). Composed here, after
+        # every should_emit call for the run has completed and OUTSIDE the
+        # if/elif/else above — the modal suppressed case is the `else`
+        # branch (nothing else wrong), and nesting inside `elif
+        # result.warnings:` would make the trailer silently disappear on
+        # exactly the run Risk 4 exists to cover.
+        suppressed = {
+            k: v
+            for k, v in warn_state.active(args.project_dir).items()
+            if k not in result.warn_keys_emitted
+        }
+        if suppressed:
+            names = ", ".join(sorted(suppressed))
+            trailer = (
+                f"{warn_state.SUPPRESSED_PREFIX} {names} — "
+                "details: python -m scripts.update.warn_state"
+            )
+            log(trailer, always=True)  # -> _log_buffer -> data/update.txt
+            status += "\n" + trailer  # -> stdout -> status_lines -> Telegram
 
         # One-time valor-ingest backfill reminder, fired on the run that
         # actually installed the [knowledge] extra. Gated by a per-machine
@@ -2510,8 +2632,12 @@ def main() -> int:
                     # Flag-file failure is not worth blocking the run.
                     pass
 
-        # Only attach log file if there were problems; clean success = simple message
-        if not result.success or result.warnings:
+        # Only attach log file if there were problems; clean success = simple message.
+        # Widened to `suppressed` (the emitted-subtracted map) so the file
+        # exists on a clean-except-suppressed run too — otherwise data/update.txt
+        # is absent on exactly the run Risk 4 exists to cover, and the
+        # second trailer emission (above) has nowhere to land.
+        if not result.success or result.warnings or suppressed:
             log_file = args.project_dir / "data" / "update.txt"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.write_text("\n".join(_log_buffer) + "\n")
