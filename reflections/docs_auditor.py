@@ -2649,19 +2649,26 @@ def run_docs_branch_sweeper() -> dict:
                 # The escalation issue is distinct from `_file_issue_if_new`'s
                 # per-defect withheld-fix titles, since a same-title filing is
                 # a guaranteed no-op — this names the PR, not the substitution.
+                # The exemption is unconditional; the *filing* waits for the
+                # same staleness threshold that would have closed a plain PR,
+                # so the title's "still unreviewed" claim is true at the moment
+                # it is made. Filing on sight would title a minutes-old PR as
+                # stale, and the dedup key is once-ever, so the wrong wording
+                # would be the permanent record.
                 if WITHHELD_PR_MARKER in (pr.get("body") or ""):
-                    _file_issue_if_new(
-                        {
-                            "title": f"docs-auditor: withheld PR #{pr_num} still unreviewed",
-                            "body": (
-                                f"PR #{pr_num} (branch `{branch}`) is {age_days} day(s) old "
-                                "and carries withheld fixes that need a human review before "
-                                "merge. The sweeper will not close it or delete its branch."
-                            ),
-                            "category": "withheld-pr",
-                        },
-                        PROJECT_ROOT,
-                    )
+                    if age_days >= STALE_PR_AGE_DAYS:
+                        _file_issue_if_new(
+                            {
+                                "title": f"docs-auditor: withheld PR #{pr_num} still unreviewed",
+                                "body": (
+                                    f"PR #{pr_num} (branch `{branch}`) is {age_days} day(s) old "
+                                    "and carries withheld fixes that need a human review before "
+                                    "merge. The sweeper will not close it or delete its branch."
+                                ),
+                                "category": "withheld-pr",
+                            },
+                            PROJECT_ROOT,
+                        )
                     continue
 
                 if age_days >= STALE_PR_AGE_DAYS:
