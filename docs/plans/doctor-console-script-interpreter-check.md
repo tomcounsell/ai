@@ -711,9 +711,9 @@ three example names → **fix** names the rebuild
 
   | Reason | Fix sentence |
   |--------|--------------|
-  | `missing` | `Console script shebang target {t} does not exist. In {checkout}: rm -rf .venv && uv sync --all-extras` |
-  | `off-pin` | `Console script shebang target {t} is Python {v}, pin is {p}. In {checkout}: rm -rf .venv && uv sync --all-extras` |
-  | `outside` | `Console script shebang target {t} is outside every repo venv, so it carries no editable install of this repo. In {checkout}: rm -rf .venv && uv sync --all-extras` |
+  | `missing` | `Console script shebang target {t} does not exist. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
+  | `off-pin` | `Console script shebang target {t} is Python {v}, pin is {p}. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
+  | `outside` | `Console script shebang target {t} is outside every repo venv, so it carries no editable install of this repo. In {checkout}: rm -rf .venv && uv sync --all-extras.` |
 
   Task 3 case 11 therefore asserts that the three **diagnostic prefixes** differ (the
   text up to the `In {checkout}:` clause), not that the commands differ. Asserting the
@@ -1524,6 +1524,10 @@ new finding inside an existing check that the agent already knows how to run and
   | Trailer rendered from one arbitrary group member instead of the whole `hardlinked_paths` list | case 19 |
   | Pin-unresolvable disclosure clause removed | case 8 |
   | Interpreter read applied to misresolved names too (moved outside the `match is not None` branch) | `test_a_shadowed_name_still_reads_as_shadowed` |
+  | `except OSError` in `_shebang_interpreter` replaced with `raise` | case 6b (`0o111` execute-without-read shim) |
+  | `except UnicodeDecodeError` in `_shebang_interpreter` replaced with `raise` | case 6b (Mach-O byte prefix) |
+  | Remedy checkout reverted to `PROJECT_DIR` instead of the flagged shim's `match.parent.parent` | case 15b |
+  | Terminal period dropped from the remedy sentence (`--all-extras Then re-run.`) | case 15b |
 
   The realpath rule is verified **here**, by mutation, and not by a source scan: the
   whole-file regex row an earlier draft carried matched the prohibition written in prose and
