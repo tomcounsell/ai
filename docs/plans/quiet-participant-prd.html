@@ -1,0 +1,727 @@
+<title>Quiet Participant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,300&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground: #F5F6F3;
+    --surface: #FCFDFB;
+    --ink: #191D19;
+    --muted: #5D655E;
+    --faint: #8B938C;
+    --rule: #DBDFD8;
+    --rule-strong: #C3C9C0;
+    --accent: #3D6B4E;
+    --accent-wash: #E7EEE8;
+    --caution: #9E5334;
+    --caution-wash: #F4E7E0;
+
+    --serif: "Newsreader", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #121513;
+      --surface: #181C19;
+      --ink: #E5E8E2;
+      --muted: #98A199;
+      --faint: #6E766F;
+      --rule: #282D29;
+      --rule-strong: #39403A;
+      --accent: #82B18E;
+      --accent-wash: #1D2620;
+      --caution: #C98459;
+      --caution-wash: #2A1F19;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #121513;
+    --surface: #181C19;
+    --ink: #E5E8E2;
+    --muted: #98A199;
+    --faint: #6E766F;
+    --rule: #282D29;
+    --rule-strong: #39403A;
+    --accent: #82B18E;
+    --accent-wash: #1D2620;
+    --caution: #C98459;
+    --caution-wash: #2A1F19;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+    padding: 0 1.5rem 8rem;
+  }
+
+  .page {
+    max-width: 62rem;
+    margin: 0 auto;
+  }
+
+  /* ---- masthead ---- */
+
+  .masthead {
+    padding: 5rem 0 2.5rem;
+    border-bottom: 1px solid var(--rule-strong);
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.4rem;
+  }
+
+  .kicker span.dot::before {
+    content: "·";
+    margin-right: 1.4rem;
+    color: var(--faint);
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: clamp(2.9rem, 7vw, 4.6rem);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-family: var(--serif);
+    font-size: clamp(1.2rem, 2.4vw, 1.45rem);
+    line-height: 1.5;
+    font-weight: 300;
+    color: var(--muted);
+    max-width: 34em;
+    margin: 0;
+  }
+
+  /* ---- transcript-rail sections ---- */
+
+  section {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 42rem);
+    gap: 0 3.5rem;
+    padding: 3.25rem 0;
+    border-bottom: 1px solid var(--rule);
+    align-items: start;
+  }
+
+  .rail {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding-top: 0.55rem;
+    position: sticky;
+    top: 1.5rem;
+  }
+
+  .body { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.85rem;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.4rem;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.005em;
+    margin: 1.1rem 0 -0.35rem;
+  }
+
+  p { margin: 0; max-width: 65ch; }
+
+  .lede {
+    font-family: var(--serif);
+    font-size: 1.2rem;
+    line-height: 1.55;
+    font-weight: 300;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  ul { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  li { max-width: 63ch; }
+  li::marker { color: var(--faint); }
+
+  /* ---- principles ---- */
+
+  .principles { display: flex; flex-direction: column; gap: 1.4rem; margin-top: 0.4rem; }
+
+  .principle {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding-left: 1.1rem;
+    border-left: 2px solid var(--accent);
+  }
+
+  .principle dt {
+    font-family: var(--serif);
+    font-size: 1.22rem;
+    font-weight: 400;
+    line-height: 1.3;
+  }
+
+  .principle dd { margin: 0; color: var(--muted); max-width: 60ch; }
+
+  /* ---- scenarios ---- */
+
+  .scenario {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    padding: 1.35rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .scenario .who {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  .scenario .said { font-family: var(--serif); font-size: 1.1rem; line-height: 1.45; }
+
+  .scenario .did {
+    color: var(--muted);
+    font-size: 0.95rem;
+    padding-top: 0.55rem;
+    border-top: 1px solid var(--rule);
+  }
+
+  .scenario .did b { color: var(--accent); font-weight: 500; }
+
+  .stack { display: flex; flex-direction: column; gap: 0.85rem; }
+
+  /* ---- capability list ---- */
+
+  .caps { display: flex; flex-direction: column; gap: 0; margin-top: 0.3rem; }
+
+  .cap {
+    display: grid;
+    grid-template-columns: 1.6rem minmax(0, 1fr);
+    gap: 0 0.9rem;
+    padding: 0.95rem 0;
+    border-top: 1px solid var(--rule);
+    align-items: baseline;
+  }
+
+  .cap:last-child { border-bottom: 1px solid var(--rule); }
+
+  .cap .tag {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .cap h3 { margin: 0 0 0.2rem; }
+  .cap p { color: var(--muted); font-size: 0.95rem; }
+
+  /* ---- tables ---- */
+
+  .table-wrap { overflow-x: auto; margin-top: 0.4rem; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 30rem;
+    font-size: 0.92rem;
+  }
+
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.68rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 0 0.9rem 0.6rem 0;
+    border-bottom: 1px solid var(--rule-strong);
+    vertical-align: bottom;
+  }
+
+  td {
+    padding: 0.75rem 0.9rem 0.75rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    color: var(--muted);
+  }
+
+  td:first-child { color: var(--ink); }
+  th:last-child, td:last-child { padding-right: 0; }
+
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+
+  /* ---- phases ---- */
+
+  .phases { display: flex; flex-direction: column; gap: 0; margin-top: 0.3rem; }
+
+  .phase {
+    display: grid;
+    grid-template-columns: 3.4rem minmax(0, 1fr);
+    gap: 0 1rem;
+    padding: 1.25rem 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .phase:last-child { border-bottom: 1px solid var(--rule); }
+
+  .phase .n {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--faint);
+    letter-spacing: 0.08em;
+    padding-top: 0.15rem;
+  }
+
+  .phase h3 { margin: 0 0 0.3rem; }
+  .phase p { color: var(--muted); font-size: 0.95rem; }
+
+  .gate {
+    margin-top: 0.6rem;
+    font-size: 0.88rem;
+    color: var(--ink);
+    background: var(--accent-wash);
+    border-left: 2px solid var(--accent);
+    padding: 0.5rem 0.75rem;
+    max-width: 58ch;
+  }
+
+  .gate b {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.15rem;
+    font-weight: 500;
+  }
+
+  /* ---- callout ---- */
+
+  .callout {
+    background: var(--caution-wash);
+    border-left: 2px solid var(--caution);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    max-width: 62ch;
+  }
+
+  .callout .label {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--caution);
+    font-weight: 500;
+  }
+
+  .callout p { font-size: 0.95rem; }
+
+  footer {
+    padding: 3rem 0 0;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+    max-width: 55ch;
+    line-height: 1.7;
+  }
+
+  @media (max-width: 800px) {
+    section { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 2.5rem 0; }
+    .rail { position: static; padding: 0 0 1rem; }
+    body { font-size: 16px; }
+    .masthead { padding-top: 3rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="kicker">
+      <span>Product Requirements</span>
+      <span class="dot">Draft for review</span>
+      <span class="dot">August 2026</span>
+    </div>
+    <h1>Quiet Participant</h1>
+    <p class="standfirst">A meeting agent that listens to the whole call and writes in the chat only when it can answer something the room actually asked.</p>
+  </header>
+
+  <section>
+    <div class="rail">Summary</div>
+    <div class="body">
+      <p class="lede">Invite it to the meeting like a colleague. It joins, listens, and stays silent — until someone asks a question it can answer, at which point it posts the answer in the meeting chat while the question still matters.</p>
+      <p>This is not a notetaker. Notetakers optimize what you can recall afterward. This optimizes what you can decide during. The two products share an input and almost nothing else.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Problem</div>
+    <div class="body">
+      <h2>Meetings run on unanswered questions</h2>
+      <p>Every working meeting generates a handful of questions that nobody in the room can answer from memory: what did we decide last time, is that ticket still open, what was the actual number, did the customer ever reply. The information almost always exists somewhere the participants have access to.</p>
+      <p>But retrieving it costs more than asking is worth. Someone would have to stop listening, find it, and interrupt to deliver it. So the group does one of three things instead: guesses and moves on, defers the decision by a week, or assigns "I'll check after" to someone who often doesn't.</p>
+      <p>The gap is not knowledge. It is that no participant is both fully present and free to go look things up.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Goals</div>
+    <div class="body">
+      <h2>What success looks like</h2>
+      <ul>
+        <li><strong>Answers land while they still matter.</strong> A question raised at 14:02 is answered in the chat before the topic closes — not in a summary afterward.</li>
+        <li><strong>Every comment earns its place.</strong> Participants should be glad it spoke, every time. A single unnecessary comment does more damage than three missed opportunities.</li>
+        <li><strong>It is invited, not installed.</strong> Whoever runs a meeting decides whether it attends, using the same mechanism they use for people. No admin rollout, no per-meeting configuration.</li>
+        <li><strong>It leaves a usable trace.</strong> What it heard and what it said are retrievable afterward and feed whatever memory the wider system keeps.</li>
+      </ul>
+
+      <h3>Explicitly not goals</h3>
+      <ul>
+        <li>Transcription, minutes, or summaries as a product. That market is well served; competing there wastes the interesting part.</li>
+        <li>Speaking aloud. Text only. Voice raises the cost of every mistake and solves nothing this product needs.</li>
+        <li>Facilitation — timekeeping, agenda enforcement, prompting quiet participants.</li>
+        <li>Taking consequential action mid-meeting. It answers; it does not send, deploy, book, or commit on anyone's behalf.</li>
+        <li>Any observation about the people in the room: performance, tone, participation, sentiment.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Principles</div>
+    <div class="body">
+      <h2>The product is a judgment system</h2>
+      <p>Capturing audio and generating text are solved problems available to any competent team. The entire product risk sits in one decision, made continuously: <em>is this a moment to speak?</em> These principles exist to keep that decision from drifting toward chattiness, which is the natural failure direction.</p>
+
+      <dl class="principles">
+        <div class="principle">
+          <dt>Silence is the resting state</dt>
+          <dd>Not speaking is the correct behavior for the overwhelming majority of a meeting. The system does not need a reason to stay quiet; it needs a reason to speak.</dd>
+        </div>
+        <div class="principle">
+          <dt>Precision over recall</dt>
+          <dd>Missing an answerable question is a small loss, invisible to the room. Posting something unwanted is a visible cost paid by everyone present, and it compounds — a few of those and people stop reading the chat.</dd>
+        </div>
+        <div class="principle">
+          <dt>Answer, never narrate</dt>
+          <dd>"Looking into that" and "good question" are noise wearing the costume of helpfulness. If there is no answer yet, there is nothing to post.</dd>
+        </div>
+        <div class="principle">
+          <dt>Cite or stay quiet</dt>
+          <dd>Every claim carries where it came from — a document, a ticket, a prior meeting, a record. An answer nobody can check is a guess with better formatting, and in a room making decisions that is worse than silence.</dd>
+        </div>
+        <div class="principle">
+          <dt>Late is a different message</dt>
+          <dd>An answer that arrives after the conversation has moved on is not the same contribution delivered slowly — it is an interruption. Either frame it explicitly as a callback to the earlier point, or drop it.</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Scenarios</div>
+    <div class="body">
+      <h2>Three moments it exists for</h2>
+
+      <div class="stack">
+        <div class="scenario">
+          <div class="who">Engineering sync · minute 6</div>
+          <div class="said">"Wasn't there a bug filed about this exact thing? I feel like we already looked at it."</div>
+          <div class="did"><b>Posts:</b> the two matching open issues with titles, ages, and current status, linked. The room reads them and drops one line of planned work.</div>
+        </div>
+
+        <div class="scenario">
+          <div class="who">Customer call · minute 22</div>
+          <div class="said">"You mentioned a deadline last time — was it the end of the quarter or the end of the month?"</div>
+          <div class="did"><b>Posts:</b> the quoted line from the previous call's record, with its date. Nobody has to promise to check and follow up.</div>
+        </div>
+
+        <div class="scenario">
+          <div class="who">Planning review · minute 41</div>
+          <div class="said">"I think we're at about sixty percent on that migration, roughly."</div>
+          <div class="did"><b>Posts:</b> the current figure from the tracked source, dated. The estimate was low by a third, and the plan changes in the meeting rather than the week after.</div>
+        </div>
+      </div>
+
+      <p>The pattern in all three: something checkable was said or asked, the answer existed, and the cost of retrieving it was the only reason it went unretrieved.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Capabilities</div>
+    <div class="body">
+      <h2>What it has to be able to do</h2>
+      <p>Stated as capabilities, not components — any sufficiently capable agent system should be able to satisfy these with its own architecture.</p>
+
+      <div class="caps">
+        <div class="cap">
+          <span class="tag">A</span>
+          <div>
+            <h3>Accept an invitation</h3>
+            <p>It holds an identity that can be invited to a meeting the way a person is. The invitation is simultaneously the trigger to attend, the permission to be there, and the record of who granted it. Withdrawing the invitation is the complete off switch, and needs no other mechanism.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">B</span>
+          <div>
+            <h3>Arrive prepared</h3>
+            <p>Before the meeting starts it reads whatever the invitation exposes — subject, description, participants, attached material — and pulls related context from the systems it can reach. Preparation is the single largest lever on comment quality. A cold arrival produces generic remarks and generic remarks are the failure mode.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">C</span>
+          <div>
+            <h3>Follow the conversation</h3>
+            <p>It maintains a running, speaker-attributed record of what is being said, accurate enough to tell a question from an aside and to know who asked. It does not need perfect transcription; it needs reliable turn boundaries and enough fidelity to catch names, numbers, and references.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">D</span>
+          <div>
+            <h3>Judge whether to speak</h3>
+            <p>Continuously and cheaply, it evaluates the recent window for a speakable moment: an open question, a checkable claim, a named artifact whose state it knows. It defaults to no. It applies a hard budget — a ceiling per hour and a cooldown after each comment — so that even a correct judgment cannot produce a flood.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">E</span>
+          <div>
+            <h3>Answer at two speeds</h3>
+            <p>Moments answerable from what it already holds are handled immediately. Moments needing real retrieval or reasoning are dispatched to deeper work that runs without blocking its attention on the meeting. It must never stop listening in order to think.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">F</span>
+          <div>
+            <h3>Write for a meeting chat</h3>
+            <p>Short, self-contained, scannable in the two seconds someone spends glancing away from a speaker. It states the answer first and the source second, and it never posts something that requires leaving the meeting to understand.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">G</span>
+          <div>
+            <h3>Check that the answer is still wanted</h3>
+            <p>Between deciding to answer and posting, the conversation keeps moving. Immediately before publishing, it re-checks its answer against the current state of the discussion and posts, reframes as an explicit callback, or discards. This is the requirement most easily forgotten and the one that separates a helpful participant from a laggy one.</p>
+          </div>
+        </div>
+        <div class="cap">
+          <span class="tag">H</span>
+          <div>
+            <h3>Hand off what it learned</h3>
+            <p>After the meeting, what was discussed and what it contributed are retained where the wider system can use them — so the next meeting starts better prepared than this one did.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Measurement</div>
+    <div class="body">
+      <h2>How we know it is working</h2>
+      <p>Conventional engagement metrics actively mislead here. More comments is not better; time-in-meeting is not better. The metric set is built around precision, with volume as a guardrail rather than a goal.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Measure</th><th>Definition</th><th>Target</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Comment usefulness</td>
+              <td>Share of posted comments rated worth reading by an attendee, collected as one lightweight prompt after the meeting</td>
+              <td class="num">≥ 70%</td>
+            </tr>
+            <tr>
+              <td>Volume ceiling</td>
+              <td>Comments posted per hour of meeting — a guardrail, never a target to grow</td>
+              <td class="num">≤ 4</td>
+            </tr>
+            <tr>
+              <td>Time to answer</td>
+              <td>Median seconds from the triggering moment to the comment appearing</td>
+              <td class="num">&lt; 20s</td>
+            </tr>
+            <tr>
+              <td>Staleness rate</td>
+              <td>Share of comments landing after the room has moved on, judged from the record</td>
+              <td class="num">&lt; 10%</td>
+            </tr>
+            <tr>
+              <td>Answerable-miss rate</td>
+              <td>Questions that went unanswered in the meeting but that it could have answered — measurable only while running silently</td>
+              <td class="num">Track, don't optimize</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="label">Kill criterion</span>
+        <p>If usefulness cannot be held above 70% across a month of real meetings, the product does not work and no amount of retrieval quality rescues it. The judgment is the product; ship it when the judgment is good, not when the plumbing is.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Constraints</div>
+    <div class="body">
+      <h2>What to verify before committing to a platform</h2>
+      <p>Meeting platforms differ sharply in what they permit, and the difference decides whether this product is buildable there at all. Establish both halves before design work starts:</p>
+      <ul>
+        <li><strong>Can it attend?</strong> Some platforms offer an official interface for accessing live meeting audio; others do not, and every available route is some form of joining as an ordinary participant.</li>
+        <li><strong>Can it post?</strong> Separately and more restrictively — official interfaces frequently allow listening while offering no way to write into the meeting chat. Listen-only access reduces this product to a notetaker.</li>
+      </ul>
+      <p>Where a platform allows one but not the other, the honest options are to route the output somewhere else the participants already are, or to attend as an ordinary participant and accept the maintenance and account risk that comes with it. Decide this deliberately; it is not a detail that can be deferred to implementation.</p>
+
+      <h3>Standing constraints regardless of platform</h3>
+      <ul>
+        <li><strong>Visible presence.</strong> It appears in the participant list under a name that makes clear what it is. A listening agent should never be a surprise to anyone in the room.</li>
+        <li><strong>One meeting at a time</strong>, at least initially. Overlapping invitations resolve to the first and log the skip.</li>
+        <li><strong>Access is inherited, never expanded.</strong> It can retrieve only what the meeting's participants could already retrieve themselves.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Risks</div>
+    <div class="body">
+      <h2>What will go wrong</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Risk</th><th>Why it happens</th><th>Response</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Chattiness creep</td>
+              <td>Every tuning pass that fixes a miss loosens the gate; nothing pushes back the other way</td>
+              <td>Hard volume ceiling in code, and usefulness reviewed on a fixed cadence rather than on complaint</td>
+            </tr>
+            <tr>
+              <td>Confident wrong answers</td>
+              <td>Retrieval finds something plausible and adjacent rather than correct</td>
+              <td>Mandatory sourcing; no source means no post, enforced as a rule not a preference</td>
+            </tr>
+            <tr>
+              <td>Chilling effect</td>
+              <td>People speak differently knowing a system is listening and may respond</td>
+              <td>Per-meeting invitation, visible presence, and an obvious way to remove it mid-meeting</td>
+            </tr>
+            <tr>
+              <td>Sensitive material</td>
+              <td>Meetings drift into compensation, personnel, legal matters</td>
+              <td>Recognize the drift and fall fully silent; retain nothing from those stretches</td>
+            </tr>
+            <tr>
+              <td>Platform fragility</td>
+              <td>The attendance route depends on a surface the vendor can change without notice</td>
+              <td>Isolate everything platform-specific behind one boundary; expect to repair it repeatedly</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Rollout</div>
+    <div class="body">
+      <h2>Earn the right to speak</h2>
+      <p>The sequence matters: each phase exists to validate the judgment before more people are exposed to it being wrong. Do not compress it.</p>
+
+      <div class="phases">
+        <div class="phase">
+          <span class="n">01</span>
+          <div>
+            <h3>Silent</h3>
+            <p>It attends and posts nothing. Every comment it would have made is written to a log with the moment that triggered it. Read the log, not the meeting.</p>
+            <div class="gate"><b>Exit when</b> a reviewer reading the log agrees with the great majority of the calls, including the decisions to stay silent.</div>
+          </div>
+        </div>
+        <div class="phase">
+          <span class="n">02</span>
+          <div>
+            <h3>Assisted</h3>
+            <p>Proposed comments go privately to one participant who can forward them into the chat with a single action. The human veto is the safety net and, more usefully, the label.</p>
+            <div class="gate"><b>Exit when</b> the forward rate is high enough that the veto is no longer doing meaningful work.</div>
+          </div>
+        </div>
+        <div class="phase">
+          <span class="n">03</span>
+          <div>
+            <h3>Live</h3>
+            <p>It posts directly, starting with meetings whose participants opted in knowingly. Widen only as the usefulness measure holds.</p>
+            <div class="gate"><b>Reverse when</b> usefulness drops below target for two consecutive weeks — return to assisted rather than tuning in place.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail">Open</div>
+    <div class="body">
+      <h2>Unresolved</h2>
+      <ul>
+        <li>Should it answer when addressed directly by name, bypassing the relevance gate entirely? Convenient, and the most likely route to the chattiness it is designed to avoid.</li>
+        <li>Does it correct a factual error nobody asked about? High value when right, and the fastest way to become unwelcome when wrong.</li>
+        <li>Where does the usefulness rating actually come from — a prompt after every meeting will be ignored within two weeks.</li>
+        <li>What does it do in a meeting whose participants did not know it was coming, when the person who invited it never mentioned it?</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    Draft — written to be implementable by any sufficiently capable agent system.<br>
+    Deliberately free of architecture, vendor, and platform commitments.
+  </footer>
+
+</div>

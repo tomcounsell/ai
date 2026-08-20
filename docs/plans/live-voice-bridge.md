@@ -153,3 +153,10 @@ One recurring internal meeting. Calendar-triggered join, captions-only
 transcript, no tier 2, and **post nothing** — log the comments it would have
 made. Read that log after three meetings. If the gate is right, wire the chat
 panel; if it is wrong, nobody in the meeting had to watch it be wrong.
+
+---
+
+A platform- and architecture-neutral PRD for this feature — goals, principles, capabilities,
+measurement, and rollout, written to be implementable by any sufficiently capable agent system —
+lives alongside this doc at [`quiet-participant-prd.html`](quiet-participant-prd.html). This file
+is the architecture-coupled counterpart: it records what the shape costs *here*.
