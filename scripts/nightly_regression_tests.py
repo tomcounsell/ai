@@ -131,15 +131,23 @@ NIGHTLY_XDIST_WORKERS = os.environ.get("NIGHTLY_XDIST_WORKERS", "6")
 #
 # Measurement (2026-08-20, `--dry-run` on Tom's MacBook Air, the first widened
 # run to complete end to end): summary.total = 15248 collected, 15193 passed,
-# 35 failed, 0 errors. `--collect-only` independently reported the same 15248,
-# so the figure is the true collection size and not a partially-run total.
-# validate_run_integrity() trips below 0.9x this, i.e. 13723.
+# 35 failed, 0 errors, in 1472s. Re-measured after rebasing onto main
+# `1e398e46d`: 15296, the value used here. The delta is ordinary suite growth
+# (main moved, and this branch adds tests), not measurement noise —
+# `--collect-only` and a full run agreed exactly at each point.
 #
-# Grain of salt: 13723 sits just *below* the 13788 that `tests/unit/` alone
-# collects, so a silent revert of COLLECTION_PATHS to the unit tier would clear
-# this floor. The `collection` field comparison is what catches that case; the
-# floor is aimed at truncation within a given collection, not at scope changes.
-MIN_EXPECTED_COLLECTED = int(os.environ.get("NIGHTLY_MIN_EXPECTED_COLLECTED", "15248"))
+# This is a FLOOR, not a running total, so it does not need updating as tests
+# accumulate: growth only makes it more conservative, and a stale-low value can
+# never cause a false trip. It matters on night one alone. From night two the
+# persisted state's own `total` (or `min_expected_collected`) supersedes it, so
+# the constant's job is to protect the single run that has no baseline to diff
+# against. validate_run_integrity() trips below 0.9x this, i.e. 13766.
+#
+# Grain of salt: 13766 sits just *below* what `tests/unit/` alone collects, so
+# a silent revert of COLLECTION_PATHS to the unit tier would clear this floor.
+# The `collection` field comparison is what catches that case; the floor is
+# aimed at truncation within a given collection, not at scope changes.
+MIN_EXPECTED_COLLECTED = int(os.environ.get("NIGHTLY_MIN_EXPECTED_COLLECTED", "15296"))
 
 # Measurement (2026-08-20, first widened run to complete end to end on this
 # machine, 15 of 15 test-DB slots free): the parallel `-n 6` pass took 1411s
