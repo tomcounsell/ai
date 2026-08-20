@@ -690,12 +690,23 @@ def seeded_nodes(prev: dict) -> set[str]:
     likely to be in night one's seed and the most likely to flap.
 
     Suppression here is deliberately **sticky**: a seeded node is never
-    per-node dispatched, because the umbrella remains its record. This does
-    not silence a regression. :func:`compute_new_failures` keys on
-    ``failing_tests``, not on dispatch state, so a seeded node that regresses
-    still fires its Telegram alert — only the automatic issue-filing is
-    suppressed. Trading an auto-filed issue for an alert on this population is
-    the whole point, given the alternative is a duplicate per flap.
+    per-node dispatched, because the umbrella remains its record.
+
+    Be precise about what that costs, because the obvious summary overstates
+    the safety. A seeded node that regresses is **alerted once, then never
+    filed**. :func:`compute_new_failures` keys on ``failing_tests`` rather than
+    dispatch state, so the night it re-fails does fire a Telegram alert — but
+    from the following night it is in ``failing_tests`` and is no longer
+    "new", so no further alert fires and no issue is ever opened. The durable
+    record for a non-seeded node is a GitHub issue; for a seeded node it is a
+    single line in a chat log, and the umbrella may long since be closed.
+
+    This set also never retires entries, unlike ``dispatched_nodes``, which
+    drops a node once it stops failing. A renamed or deleted test stays in
+    ``seeded_nodes`` forever. Both are accepted deliberately: the alternative
+    is a duplicate issue on every flap of a population that is known to flap
+    (#2807/#2808/#2809). Repairing the seeded population is a separate lane,
+    and closing that lane is what makes this suppression stop mattering.
     """
     return set(prev.get("seeded_nodes") or [])
 
@@ -1202,9 +1213,21 @@ def main() -> int:
     else:
         log("Clean run (no newly-confirmed failures) — no Telegram alert sent")
 
-    # Save state
-    save_last_run(current)
-    log(f"State saved to {LAST_RUN_FILE}")
+    # Save state — never under --dry-run.
+    #
+    # The dry-run dispatch short-circuit returns a truthy sentinel so the
+    # caller's success path is exercised realistically. That makes persisting
+    # actively dangerous: on a seed night the success path writes
+    # `seeded_nodes`, and because that set is sticky, compute_dispatch_set()
+    # would suppress the whole absorbed population permanently against an
+    # umbrella issue that was never filed. That is precisely the failure the
+    # failed-seed `_fatal()` branch above exists to prevent, reachable through
+    # a command whose entire purpose is to change nothing.
+    if args.dry_run:
+        log(f"[DRY RUN] Would save state to {LAST_RUN_FILE} (not written)")
+    else:
+        save_last_run(current)
+        log(f"State saved to {LAST_RUN_FILE}")
 
     # Post-run TTFT gate (issue #1227). A TTFT regression is reported as a
     # regression (Telegram alert), not a test failure — return code unchanged.

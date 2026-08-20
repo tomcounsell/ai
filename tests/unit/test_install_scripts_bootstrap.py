@@ -220,9 +220,15 @@ class InstallHarness:
         # proj/config/ and fail here because that directory does not exist in
         # the sandbox. Scoping it to the env var keeps this fixture's blast
         # radius to the one script that needs it.
-        host = subprocess.run(
+        # Fail loudly rather than yielding host="": an empty machine name
+        # matches nothing, so all five installers would silently take their
+        # skip paths and every parametrized case would fail as a confusing
+        # "bootstrap was never called" instead of naming the real cause.
+        _scutil = subprocess.run(
             ["scutil", "--get", "ComputerName"], capture_output=True, text=True
-        ).stdout.strip()
+        )
+        host = _scutil.stdout.strip()
+        assert host, f"scutil --get ComputerName returned nothing (rc={_scutil.returncode})"
         # The project carries an `email` key so install_email_bridge.sh's
         # has_email_role() also qualifies — it reads the same env var, and a
         # config without one would send it down its skip path instead of the

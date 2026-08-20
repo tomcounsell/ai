@@ -144,10 +144,20 @@ title that never existed, and open a fresh issue on every flap. That is
 #2429/#2430/#2462 rebuilt through a different door.
 
 So `seeded_nodes` is persisted on **every** run (not just the seed night) and
-`compute_dispatch_set()` subtracts it permanently. This does not silence a
-regression: `compute_new_failures()` keys on `failing_tests`, not on dispatch
-state, so a seeded node that re-fails still fires its Telegram alert — only
-the automatic issue-filing is suppressed. The population this matters most
+`compute_dispatch_set()` subtracts it permanently.
+
+Be precise about the cost, because the short version overstates the safety. A
+seeded node that regresses is **alerted once, then never filed**.
+`compute_new_failures()` keys on `failing_tests` rather than dispatch state,
+so the night it re-fails does produce a Telegram alert — but from the next
+night it is no longer "new", so no further alert fires and no issue is ever
+opened. For a non-seeded node the durable record is a GitHub issue; for a
+seeded node it is one line in a chat log, and the umbrella may since have been
+closed. `seeded_nodes` also never retires entries, unlike `dispatched_nodes`,
+so a renamed or deleted test stays in it indefinitely. Both costs are accepted
+deliberately: the alternative is a duplicate issue on every flap of a
+population known to flap, and closing the repair lane is what makes this
+suppression stop mattering. The population this matters most
 for is the `.pyc`-sensitive working-tree guards (#2807, #2808, #2809), which
 are red or green depending on which interpreter last touched `__pycache__`
 and are therefore both the likeliest members of night one's seed and the
@@ -234,9 +244,13 @@ launchctl list | grep nightly-tests
 ## Manual Testing
 
 ```bash
-# Dry-run: runs tests, prints what Telegram message would be sent, saves state.
-# Side-effect free with respect to triage: no Eng session is spawned and no
-# GitHub issue is filed (dispatch short-circuits to a sentinel session id).
+# Dry-run: runs the suite and prints what would be sent, changing nothing.
+# No Telegram send, no Eng session spawned, no GitHub issue filed, and NO
+# state written. The state write is suppressed deliberately: dispatch
+# short-circuits to a truthy sentinel so the success path runs realistically,
+# and on a seed night that path records `seeded_nodes` — which is sticky, so
+# persisting it would permanently suppress the whole absorbed population
+# against an umbrella issue that was never filed.
 python scripts/nightly_regression_tests.py --dry-run
 
 # Stream live output

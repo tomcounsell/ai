@@ -34,8 +34,16 @@ PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 # bridge-role gate, which additionally requires a Telegram block and would
 # strand a worker-only machine. Same fail-open contract as the bridge-role
 # gates elsewhere in this repo (e.g. scripts/install_email_bridge.sh's
-# has_email_role()). scripts/install_nightly_tests.sh carries an identical
-# has_worker_role() for the same reason (issue #2823).
+# has_email_role()).
+#
+# scripts/install_nightly_tests.sh has the same SHAPE but no longer the same
+# failure contract: as of #2823 it fails CLOSED when the config is unreadable
+# or the host role is undeterminable, because installing an unattended
+# full-suite run is not a safe default and its second gate in
+# scripts/update/run.py was removed. This installer and
+# install_email_bridge.sh still fail open, and carry the same iCloud-vault
+# exposure that motivated that change — worth revisiting, but out of scope
+# for #2823 and deliberately not changed here.
 has_worker_role() {
     local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
     if [ ! -f "$config" ]; then

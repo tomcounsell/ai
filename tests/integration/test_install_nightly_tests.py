@@ -8,20 +8,24 @@ Covers scripts/install_nightly_tests.sh:
     checkout and a worker, not a Telegram bridge (the #1379 over-narrow-gating
     class this replaces has_bridge_role() to avoid). A machine owning a
     NON-Telegram project still installs; a machine owning no project skips AND
-    removes any stale plist; an unreadable config fails OPEN (installs).
+    removes any stale plist; an unreadable or unparseable config fails CLOSED
+    (does not install, and leaves any existing plist alone).
   - The installer's stable success-line marker, pinned so
     scripts/update/service.py::install_nightly_tests can classify "installed"
     vs "skipped" by matching the *success* text (fails closed on any other
     early exit).
 
-These are static/structural assertions on the shipped script + plist — they do
-not bootstrap a real launchd service.
+Mixed: some structural assertions on the shipped script + plist, plus
+behavioural cases that run the real installer against a sandboxed project
+dir and fake $HOME. No real launchd service is bootstrapped.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -88,22 +92,111 @@ def test_self_skip_and_stale_plist_removal(installer_src):
     assert "rm -f" in installer_src
 
 
-def test_fails_closed_on_unreadable_config(installer_src):
-    """Installing a nightly full-suite run is not a safe default.
+def _run_installer(proj: Path, home: Path, config: Path | None, **extra_env):
+    env = {**os.environ, "HOME": str(home), "SERVICE_LABEL_PREFIX": "com.valor", **extra_env}
+    if config is not None:
+        env["PROJECTS_CONFIG_PATH"] = str(config)
+    return subprocess.run(
+        ["/bin/bash", str(proj / "scripts" / "install_nightly_tests.sh")],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
 
-    This gate used to fail *open* (qualify when config/venv/scutil were
-    unavailable), which was tolerable only while scripts/update/run.py wrapped
-    the call in a second `if has_bridge:` check. That wrapper is gone, so this
-    is the only gate — and projects.json lives in the iCloud-synced vault that
-    remote-update.sh already warns is intermittently unreadable.
 
-    Exit code 2 ("undeterminable") must stay distinct from 1 ("parsed cleanly,
-    this host owns nothing"): only 1 may reach the stale-plist removal path, so
-    a transient stall never uninstalls a correctly-running detector.
+def _home_with_plist(tmp_path: Path, name: str = "home") -> tuple[Path, Path]:
+    home = tmp_path / name
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    plist = home / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
+    plist.write_text("<plist>existing</plist>")
+    return home, plist
+
+
+@pytest.mark.parametrize(
+    "config_content, label",
+    [(None, "absent"), ("{ this is not json", "corrupt")],
+)
+def test_undeterminable_role_never_removes_the_plist(tmp_path: Path, config_content, label):
+    """Behavioural, not a source grep.
+
+    An unreadable or unparseable projects.json means the check did not answer.
+    "Did not answer" must never take the removal path — projects.json lives in
+    the iCloud-synced vault that remote-update.sh already warns is
+    intermittently unreadable, and the installer re-runs every 30 minutes, so
+    conflating it with "this host owns nothing" would uninstall a healthy
+    detector on any sync hiccup.
+
+    Asserted on observable outcomes (plist bytes survive, no success marker),
+    so reverting the guard fails this test even if its comments are left in
+    place. The prior source-grep form stayed green against exactly that.
     """
-    assert "Fail open" not in installer_src
-    assert "Failing closed" in installer_src
-    assert "sys.exit(2)" in installer_src
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    if config_content is None:
+        config = tmp_path / "does-not-exist.json"
+    else:
+        config = tmp_path / "bad.json"
+        config.write_text(config_content)
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert _SUCCESS_MARKER not in result.stdout
+    assert plist.read_text() == "<plist>existing</plist>", f"{label} config removed the plist"
+    assert "Stale nightly-tests plist removed" not in result.stdout
+
+
+def test_host_owning_nothing_does_remove_the_plist(tmp_path: Path):
+    """The counterpart that keeps the fail-closed guard honest.
+
+    A *parsed* config that genuinely assigns this host no project is a real
+    answer, and must still take the removal path. Without this, making the
+    installer refuse everything unconditionally would pass the test above.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    config = tmp_path / "other.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": "Some Other Machine"}}}))
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert "Stale nightly-tests plist removed" in result.stdout
+    assert not plist.exists()
+
+
+def test_broken_interpreter_does_not_uninstall_a_qualifying_host(tmp_path: Path):
+    """A venv python that exists but cannot run must fail closed.
+
+    The `-x` test passes straight through a half-finished `uv sync` or an
+    off-pin interpreter. If such a python dies with any code other than 0/1,
+    treating that as "owns nothing" uninstalls the detector from a host that
+    actually qualifies.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    # Executable, but dies with a code that is neither 0 nor 1.
+    # unlink() first: _fake_checkout leaves a SYMLINK to the real interpreter
+    # here, and write_text() on a symlink writes through to its target — which
+    # would clobber the system python rather than the fixture.
+    broken = proj / ".venv" / "bin" / "python"
+    broken.unlink()
+    broken.write_text("#!/bin/bash\necho 'dyld: symbol not found' >&2\nexit 133\n")
+    broken.chmod(0o755)
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert plist.read_text() == "<plist>existing</plist>", "broken interpreter uninstalled it"
+    assert "Stale nightly-tests plist removed" not in result.stdout
 
 
 def test_success_marker_is_pinned(installer_src):
@@ -150,7 +243,13 @@ def test_plist_lints_clean():
 
 
 def _fake_checkout(tmp_path: Path) -> Path:
-    """A non-worktree project dir carrying a copy of the installer."""
+    """A non-worktree project dir carrying a copy of the installer.
+
+    Ships a WORKING venv python. Without one the installer exits at the venv
+    fail-closed guard, which would make the corrupt-config case below pass for
+    the wrong reason — never reaching the JSON parse whose exit-2 path it is
+    supposed to be exercising.
+    """
     proj = tmp_path / "fake-main-checkout"
     scripts = proj / "scripts"
     scripts.mkdir(parents=True)
@@ -161,53 +260,10 @@ def _fake_checkout(tmp_path: Path) -> Path:
     installer_copy = scripts / "install_nightly_tests.sh"
     installer_copy.write_text(_INSTALLER.read_text())
     installer_copy.chmod(0o755)
+    venv_bin = proj / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
     return proj
-
-
-def test_unreadable_projects_config_fails_closed_without_removing_plist(tmp_path: Path):
-    """An unreadable projects.json must not qualify a machine.
-
-    This gate used to fail *open*, which was safe only while
-    scripts/update/run.py wrapped the call in a second `if has_bridge:` check.
-    That wrapper is gone, so this is the only gate, and projects.json lives in
-    the iCloud-synced vault that remote-update.sh already warns is
-    intermittently unreadable.
-
-    It must also leave an existing plist alone: a transient iCloud stall must
-    not uninstall a correctly-running detector every 30 minutes.
-    """
-    proj = _fake_checkout(tmp_path)
-    fake_home = tmp_path / "home"
-    (fake_home / "Library" / "LaunchAgents").mkdir(parents=True)
-    existing_plist = fake_home / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
-    existing_plist.write_text("<plist>existing</plist>")
-
-    env = {
-        **os.environ,
-        "HOME": str(fake_home),
-        "PROJECTS_CONFIG_PATH": str(tmp_path / "does-not-exist.json"),
-        "SERVICE_LABEL_PREFIX": "com.valor",
-    }
-    result = subprocess.run(
-        ["/bin/bash", str(proj / "scripts" / "install_nightly_tests.sh")],
-        cwd=proj,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=env,
-    )
-
-    assert result.returncode == 0
-    # Pin the *specific* first-layer message. Asserting only the generic
-    # "Failing closed" would be vacuous: deleting this guard falls through to
-    # has_worker_role()'s exit-2 path, which prints that same phrase, so a
-    # loose assertion stays green against a mutation that removes the guard
-    # entirely. (Verified by mutation: the loose form did not go red.)
-    assert "projects config unreadable at" in result.stdout
-    # The install must not have happened...
-    assert _SUCCESS_MARKER not in result.stdout
-    # ...and the pre-existing plist must be untouched.
-    assert existing_plist.read_text() == "<plist>existing</plist>"
 
 
 def test_worktree_refusal_fires_in_a_real_worktree_checkout(tmp_path: Path):

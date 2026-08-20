@@ -101,8 +101,16 @@ PYEOF
 role_rc=0
 has_worker_role || role_rc=$?
 
-if [ "$role_rc" -eq 2 ]; then
-    echo "Skipping nightly-tests install: could not determine host role"
+# Only rc=1 is a real "this host owns nothing" answer. Everything that is not
+# 0 or 1 — rc=2 from the script's own undeterminable paths, but equally a
+# SIGSEGV, a dyld failure, or any other interpreter death — means the check did
+# not answer. Treating "did not answer" as "owns nothing" would take the
+# removal path below and uninstall a healthy detector from a qualifying host.
+# A broken-but-executable `.venv/bin/python` is a live condition here: the
+# `-x` test above passes straight through a half-finished `uv sync` or an
+# off-pin interpreter.
+if [ "$role_rc" -ne 0 ] && [ "$role_rc" -ne 1 ]; then
+    echo "Skipping nightly-tests install: could not determine host role (rc=$role_rc)"
     echo "Failing closed — not installing, and leaving any existing plist untouched."
     exit 0
 fi

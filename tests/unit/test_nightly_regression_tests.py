@@ -271,6 +271,32 @@ class TestRunTests:
         assert raw is not None
 
 
+def test_module_constant_is_actually_seeded() -> None:
+    """The shipped default must be a real measurement, not 0.
+
+    Deliberately OUTSIDE TestValidateRunIntegrity: that class's autouse
+    fixture zeroes MIN_EXPECTED_COLLECTED, and every floor test in it
+    monkeypatches the value. So reverting the shipped default to 0 — which
+    disables night one's only protection entirely — leaves the whole suite
+    green. This is the one assertion that reads the module default as shipped.
+
+    The bound is deliberately loose. Pinning the exact figure would fail on
+    every commit that adds a test, and the value is a floor whose point is to
+    tolerate growth. What must never happen is it silently returning to
+    "no floor".
+    """
+    assert nrt.MIN_EXPECTED_COLLECTED > 10000, (
+        "MIN_EXPECTED_COLLECTED looks unseeded. It is the only guard on a first "
+        "run, which has no baseline to diff against."
+    )
+    # And it must actually bite: a run at half the floor has to trip.
+    half = nrt.MIN_EXPECTED_COLLECTED // 2
+    report = {"summary": {"total": half, "error": 0, "failed": 0}, "tests": []}
+    reason, _ = nrt.validate_run_integrity(report, 0, {})
+    assert reason is not None
+    assert "truncated" in reason
+
+
 class TestValidateRunIntegrity:
     """validate_run_integrity classifies a completed run before anything
     downstream trusts it (issue #2823). The headline case is the coverage
@@ -282,7 +308,7 @@ class TestValidateRunIntegrity:
     def _no_ambient_floor(self, monkeypatch):
         """Neutralise the seeded module constant for this class by default.
 
-        MIN_EXPECTED_COLLECTED carries a real measured floor (15248), so the
+        MIN_EXPECTED_COLLECTED carries a real measured floor, so the
         small synthetic totals these cases use would trip it and mask the
         condition each one actually pins. Tests that are *about* the floor set
         it explicitly, as they already did.
@@ -948,9 +974,12 @@ class TestMainDispatchPersistence:
         raw_report = {"summary": {"total": 11}, "tests": []}
         run_result = (raw_report, self._run_result(confirmed), 0)
         with (
-            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            # NOT --dry-run: these cases assert on the state main() persists,
+            # and --dry-run deliberately writes none. Telegram and dispatch are
+            # patched below, so the real path is already side-effect free here.
+            patch("sys.argv", ["nightly_regression_tests.py"]),
             # These cases exercise dispatch bookkeeping against a deliberately
-            # tiny synthetic run (total=11). The real coverage floor (15248,
+            # tiny synthetic run (total=11). The real coverage floor (measured,
             # measured 2026-08-20) would trip validate_run_integrity on every
             # one of them before dispatch was reached. The floor has its own
             # coverage in TestValidateRunIntegrity.
@@ -985,7 +1014,7 @@ class TestMainDispatchPersistence:
             tmp_path, prev, [standing, fresh], "triage-session-1"
         )
         assert rc == 0
-        mock_dispatch.assert_called_once_with([fresh], dry_run=True)
+        mock_dispatch.assert_called_once_with([fresh], dry_run=False)
         assert saved["dispatched_nodes"] == sorted([standing, fresh])
 
     def test_no_dispatch_when_everything_is_already_filed(self, tmp_path: Path) -> None:
@@ -993,7 +1022,7 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[standing], dispatched_nodes=[standing])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [standing], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dry_run=True)
+        mock_dispatch.assert_called_once_with([], dry_run=False)
         assert saved["dispatched_nodes"] == [standing]
 
     def test_failed_dispatch_leaves_nodes_unfiled_for_retry(self, tmp_path: Path) -> None:
@@ -1003,7 +1032,7 @@ class TestMainDispatchPersistence:
         )
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([node], dry_run=True)
+        mock_dispatch.assert_called_once_with([node], dry_run=False)
         assert saved["dispatched_nodes"] == []
         assert saved["dispatched_session_id"] == "earlier-session"
 
@@ -1035,6 +1064,50 @@ class TestMainDispatchPersistence:
         assert mock_dispatch.call_args.kwargs.get("slug_suffix") == "baseline"
         assert saved["dispatched_nodes"] == sorted(standing)
         assert saved["seed_size"] == 2
+        # The seed run must PRODUCE seeded_nodes, not merely carry one forward.
+        # Every other seeded-node test injects this set through _prev(), so
+        # without this assertion deleting the line that writes it leaves the
+        # whole suppression mechanism green while doing nothing on night one —
+        # the exact night it exists for.
+        assert saved["seeded_nodes"] == sorted(standing)
+
+    def test_dry_run_writes_no_state(self, tmp_path: Path) -> None:
+        """--dry-run must not persist a baseline.
+
+        The dry-run dispatch short-circuit returns a truthy sentinel so the
+        caller's success path runs realistically. That makes persisting
+        actively harmful: on a seed night the success path writes
+        `seeded_nodes`, and because that set is sticky, the whole absorbed
+        population would be suppressed forever against an umbrella issue that
+        was never filed — reachable through the one command whose purpose is
+        to change nothing.
+        """
+        nrt.LOG_FILE = tmp_path / "test.log"
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
+        pre_existing = json.dumps({"collection": nrt.COLLECTION_PATHS, "failing_tests": []})
+        nrt.LAST_RUN_FILE.write_text(pre_existing)
+
+        raw_report = {"summary": {"total": 11}, "tests": []}
+        confirmed = ["a::t1", "b::t2"]
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            patch.object(nrt, "MIN_EXPECTED_COLLECTED", 0),
+            patch.object(nrt, "load_env_or_die", return_value=(42, None)),
+            patch.object(
+                nrt, "run_tests", return_value=(raw_report, self._run_result(confirmed), 0)
+            ),
+            patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [], True)),
+            patch.object(nrt, "summarize_failures", return_value="mocked"),
+            patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel"),
+            patch.object(nrt, "send_telegram"),
+            patch.object(nrt, "run_ttft_gate", return_value=None),
+            patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
+        ):
+            rc = nrt.main()
+
+        assert rc == 0
+        assert nrt.LAST_RUN_FILE.read_text() == pre_existing, "--dry-run persisted state"
 
     def test_seed_prompt_carries_the_exact_umbrella_title(self, tmp_path: Path) -> None:
         standing = ["a::t1", "b::t2"]
@@ -1074,6 +1147,9 @@ class TestMainDispatchPersistence:
         assert saved["dispatched_nodes"] == sorted(confirmed)
         assert saved["collection"] == nrt.COLLECTION_PATHS
         # The umbrella dispatch is the only call; no per-node dispatch fires.
+        # call_count, not just call_args: the latter is the LAST call, so a
+        # stray per-node dispatch before it would go unnoticed.
+        assert mock_dispatch.call_count == 1
         assert mock_dispatch.call_args.kwargs.get("slug_suffix") == "baseline"
 
     def test_failed_seed_dispatch_writes_no_baseline(self, tmp_path: Path) -> None:
@@ -1124,7 +1200,7 @@ class TestMainDispatchPersistence:
         rc, saved, mock_dispatch, mock_send = self._run_main(tmp_path, prev, [node], None)
 
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dry_run=True)
+        mock_dispatch.assert_called_once_with([], dry_run=False)
         assert saved["seeded_nodes"] == [node]
         # The regression is still announced even though no issue is filed.
         assert "newly-confirmed failure" in mock_send.call_args.args[0]
@@ -1141,7 +1217,7 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[], dispatched_nodes=[], seeded_nodes=[])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], "new-session")
         assert rc == 0
-        mock_dispatch.assert_called_once_with([node], dry_run=True)
+        mock_dispatch.assert_called_once_with([node], dry_run=False)
         assert saved["dispatched_nodes"] == [node]
 
     def test_collection_mismatch_regression_seed_survives_successful_dispatch(
