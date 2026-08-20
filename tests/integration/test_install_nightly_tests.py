@@ -235,6 +235,54 @@ def test_heredoc_exception_with_a_real_interpreter_fails_closed(tmp_path: Path):
     assert "could not determine host role" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "stub, expect_removed, label",
+    [
+        # Only stdout can carry an answer, so a token on stderr is not one.
+        ('echo "ROLE:NONE" >&2\nexit 0\n', False, "token-on-stderr"),
+        # A truncated write matches neither token.
+        ('echo "ROLE:NON"\nexit 0\n', False, "truncated-token"),
+        # Contradictory output means something other than the heredoc wrote to
+        # stdout (a sitecustomize, a .pth, a wrapper). Refused explicitly, not
+        # left to the case order.
+        ('echo "ROLE:NONE"\necho "ROLE:OWNS"\nexit 0\n', False, "both-tokens"),
+        # Silence is not an answer.
+        ("exit 0\n", False, "no-token"),
+        # Unrelated stdout noise must NOT hide a legitimate verdict.
+        ('echo "some .pth banner"\necho "ROLE:NONE"\nexit 0\n', True, "noise-then-NONE"),
+    ],
+)
+def test_token_cannot_lie(tmp_path: Path, stub, expect_removed, label):
+    """The removal path is reachable only by a genuine, unambiguous ROLE:NONE.
+
+    The gate was wrong twice by enumerating exit codes (`-eq 2`, then
+    `-ne 0 && -ne 1`), each enumeration missing a real death mode. The token is
+    a different shape, so the question becomes whether the token itself can be
+    produced, suppressed, or corrupted by anything other than the code that
+    means it. These are those vectors.
+
+    Note the last case is the only one that may remove: noise around a real
+    verdict must not suppress it, or a legitimate skip would silently start
+    installing everywhere.
+    """
+    proj = _fake_checkout(tmp_path)
+    home, plist = _home_with_plist(tmp_path)
+    host = subprocess.run(
+        ["scutil", "--get", "ComputerName"], capture_output=True, text=True
+    ).stdout.strip()
+    config = tmp_path / "mine.json"
+    config.write_text(json.dumps({"projects": {"x": {"machine": host}}}))
+
+    py = proj / ".venv" / "bin" / "python"
+    py.write_text(f"#!/bin/bash\n{stub}")
+    py.chmod(0o755)
+
+    result = _run_installer(proj, home, config)
+
+    assert result.returncode == 0, result.stderr
+    assert plist.exists() is not expect_removed, f"{label}: wrong removal decision"
+
+
 def test_role_answer_requires_a_positive_token(installer_src):
     """The removal path must be gated on an explicit affirmative token.
 

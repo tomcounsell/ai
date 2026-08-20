@@ -103,7 +103,22 @@ print("ROLE:OWNS" if owns else "ROLE:NONE")
 PYEOF
 }
 
+# stderr is discarded, so a token can only come from stdout — a traceback or a
+# dyld message cannot be mistaken for an answer.
 role_out="$(has_worker_role 2>/dev/null || true)"
+
+# Both tokens present is not a possible outcome of the heredoc (exactly one
+# print executes), so it means something else wrote to stdout — a sitecustomize
+# or a .pth, or a wrapper script. Refuse explicitly rather than letting the
+# case order below decide: OWNS is matched first, so ambiguity would silently
+# resolve to "install". That happens to be the non-destructive branch, but
+# safe-by-branch-ordering is the kind of accident this gate has already been
+# wrong about twice.
+if [ "${role_out#*ROLE:OWNS}" != "$role_out" ] && [ "${role_out#*ROLE:NONE}" != "$role_out" ]; then
+    echo "Skipping nightly-tests install: contradictory role output"
+    echo "Failing closed — not installing, and leaving any existing plist untouched."
+    exit 0
+fi
 
 case "$role_out" in
     *ROLE:OWNS*)
