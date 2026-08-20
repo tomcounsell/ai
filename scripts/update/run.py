@@ -182,7 +182,7 @@ class UpdateResult:
 def _append_warning(result: UpdateResult, text: str) -> None:
     """Append a warning with embedded newlines collapsed to one physical line.
 
-    `run.py:2482-2494` renders one `⚠️` bullet per `result.warnings` entry
+    `the summary render block below` renders one `⚠️` bullet per `result.warnings` entry
     (`status += f"\\n  ⚠️ {warn}"`) — a raw multi-line entry (an exception
     `str()`, a wrapped multi-line diagnostic) would render its sentinel on
     only the first physical line, dropping the rest. This is the exact
@@ -2343,6 +2343,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # this, every interactive `/update` on a machine with an incomplete
         # vault (this checkout's own machine included) enqueues a fix
         # session for a condition this plan defines as permanent-and-correct.
+        # NOTE: `should_emit` writes state under `--verify` too, so a
+        # diagnostic run consumes the emission the next cron cycle would have
+        # made. Pre-existing since #2329 for the two incumbents; tracked as
+        # #2898 rather than widened or fixed here.
         human_gated_tools = {"google-token", "sms_reader", "env-completeness"}
         for tool in result.verification.valor_tools:
             if not tool.available and tool.error:

@@ -346,16 +346,25 @@ class TestInlineCap:
         command (#2845 review blocker).
         """
         example_lines = [f"# Key {i}\nZZ_FIXTURE_KEY_{i}=x" for i in range(8)]
+        # One @optional declaration, so the report's optional branch is
+        # exercised rather than collapsing to required_keys == declared_keys.
+        example_lines.append("# A tunable with an in-code default\n# @optional\nZZ_OPTIONAL_KEY=x")
         write_example(env_dir, "\n".join(example_lines) + "\n")
         write_env(env_dir, "# nothing\n")
 
         result = check_env_completeness(env_dir)
         assert result.error is not None
         assert "--verify" not in result.error
+        assert "ZZ_OPTIONAL_KEY" not in result.error
 
         full = render_env_completeness_report(env_dir)
         for i in range(8):
             assert f"ZZ_FIXTURE_KEY_{i}" in full, "the pointed-at report must name every key"
+        # The optional key is reported, but under OPTIONAL UNSET -- never as
+        # a missing requirement.
+        required_block, _, optional_block = full.partition("OPTIONAL UNSET")
+        assert "ZZ_OPTIONAL_KEY" not in required_block
+        assert "ZZ_OPTIONAL_KEY" in optional_block
 
     def test_individual_description_is_capped_with_an_ellipsis(self, env_dir: Path) -> None:
         """The key cap bounds how MANY descriptions appear, not how long one is."""

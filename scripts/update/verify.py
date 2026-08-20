@@ -1126,6 +1126,23 @@ def _parse_env_keys(path: Path) -> set[str]:
     return keys
 
 
+def _classify_env_keys(
+    declared: list[tuple[str, str, bool, str | None]], present: set[str]
+) -> tuple[set[str], set[str], set[str]]:
+    """Split declarations into (required, missing-required, unset-optional).
+
+    The single owner of the required/optional axis. Both the capped summary
+    and the uncapped report call it, because those two surfaces are exactly
+    the pair that must agree: the summary tells the operator to go read the
+    report, so a fork here would send them to a document that disagrees with
+    the warning that sent them.
+    """
+    declared_keys = {k for k, _d, _o, _p in declared}
+    optional_keys = {k for k, _d, o, _p in declared if o}
+    required_keys = declared_keys - optional_keys
+    return required_keys, required_keys - present, optional_keys - present
+
+
 def check_env_completeness(project_dir: Path) -> ToolCheck:
     """Check that .env contains all REQUIRED keys declared in .env.example.
 
@@ -1163,11 +1180,8 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             )
 
         present = _parse_env_keys(env_file)
-        declared_keys = {k for k, _d, _o, _p in declared}
-        optional_keys = {k for k, _d, o, _p in declared if o}
-        required_keys = declared_keys - optional_keys
-        missing_keys = required_keys - present
-        optional_unset = len(optional_keys - present)
+        required_keys, missing_keys, optional_missing = _classify_env_keys(declared, present)
+        optional_unset = len(optional_missing)
 
         if not missing_keys:
             return ToolCheck(
@@ -1223,13 +1237,18 @@ def render_env_completeness_report(project_dir: Path) -> str:
     if not env_file.exists():
         return "skipped: .env not found"
 
-    declared = _parse_env_example(env_example)
-    present = _parse_env_keys(env_file)
-    declared_keys = {k for k, _d, _o, _p in declared}
-    optional_keys = {k for k, _d, o, _p in declared if o}
-    required_keys = declared_keys - optional_keys
-    missing = sorted(required_keys - present)
-    optional_missing = sorted(optional_keys - present)
+    try:
+        declared = _parse_env_example(env_example)
+        present = _parse_env_keys(env_file)
+    except OSError as e:
+        # The capped summary degrades to `skipped (read error)` on this path;
+        # the remediation surface it points at must not hand the operator a
+        # traceback instead.
+        return f"skipped: read error ({e})"
+
+    required_keys, missing_set, optional_unset = _classify_env_keys(declared, present)
+    missing = sorted(missing_set)
+    optional_missing = sorted(optional_unset)
     desc_map = {k: d for k, d, _o, _p in declared}
 
     lines = [
@@ -1251,7 +1270,13 @@ def render_env_completeness_report(project_dir: Path) -> str:
 
 
 def _main() -> int:
-    """`python -m scripts.update.verify` — the uncapped env-completeness report."""
+    """`python -m scripts.update.verify` — the uncapped env-completeness report.
+
+    Echoes the directory it resolved first, mirroring
+    `warn_state._main()` and for the same reason: a `--project-dir` aimed at
+    another populated checkout would otherwise render a complete, confident,
+    wrong report with nothing on screen to say so.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -1259,12 +1284,9 @@ def _main() -> int:
     )
     parser.add_argument("--project-dir", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args()
+    print(f"project-dir: {args.project_dir}")
     print(render_env_completeness_report(args.project_dir))
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())
 
 
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
@@ -1511,3 +1533,7 @@ def check_machine_identity(project_dir: Path) -> dict:
         "bridge_projects": bridge_projects,
         "config_path": str(config_path),
     }
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

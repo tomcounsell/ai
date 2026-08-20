@@ -66,7 +66,7 @@ Suppression without retrieval is how a real condition goes dark. Four surfaces a
    suppressed (unchanged since first warning): gws-auth, redis-acl-drift — details: python -m scripts.update.warn_state
    ```
 
-   The **emitted-subtracted** map matters: `should_emit` writes its signature the instant it returns `True`, so a trailer built from raw `active()` would call a key "unchanged since first warning" on the very run it first warned. `result.warn_keys_emitted` records every `should_emit` site that returned `True` this run (all six: `gws-auth`, `redis-acl-drift`, `env-completeness`'s two branches, and `calendar-config`'s two branches), and the trailer names `active() - warn_keys_emitted`.
+   The **emitted-subtracted** map matters: `should_emit` writes its signature the instant it returns `True`, so a trailer built from raw `active()` would call a key "unchanged since first warning" on the very run it first warned. `result.warn_keys_emitted` records every `should_emit` site that returned `True` **with a non-empty signature** — the six warning sites, out of eight total. The two resolution branches (`gws-auth` at `run.py:1056`, `redis-acl-drift` at `:1555`) pass an empty signature, which makes `should_emit` `state.pop(key, None)` the key; it is therefore absent from `active()` and the subtraction is a provable no-op, so recording there would be dead code. The trailer names `active() - warn_keys_emitted`.
 
    The trailer is composed at the summary-render site in `run.py`, **outside** the success/failure `if/elif/else` — the modal suppressed case is a run with nothing else wrong (the `else` branch), so composing it inside `elif result.warnings:` would make it silently disappear on exactly the run this exists to cover.
 

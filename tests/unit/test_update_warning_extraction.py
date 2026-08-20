@@ -204,7 +204,7 @@ def test_embedded_newline_collapsed_by_producer_survives_complete():
 
 
 def test_readme_shaped_warning_survives_complete():
-    """A README-producer warning (run.py:1804-1807) collapsed to one line."""
+    """A README-producer warning (run.py's README-check step) collapsed to one line."""
     collapsed = (
         "[popoto] README.md is missing a '## Running' section   "
         "Add the following to README.md:   ## Running"

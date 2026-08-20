@@ -1,7 +1,7 @@
 """Unit tests for scripts/update/run.py's `_append_warning`/`_append_error`
 newline-collapse helpers (#2845).
 
-`run.py:2482-2494` renders one `⚠️`/`-` bullet per list entry — a raw
+run.py's summary render block emits one `⚠️`/`-` bullet per list entry — a raw
 multi-line entry (an exception `str()`, a wrapped multi-line diagnostic)
 renders its sentinel on only the first physical line, dropping the rest.
 These helpers are the recurrence guard for that whole class: every one of
@@ -11,9 +11,7 @@ the 85 warning/error-injection sites in `run.py` routes through one of them.
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -27,14 +25,16 @@ pytestmark = pytest.mark.unit
 def _readme_block_source() -> ast.stmt:
     """The README-check `if rc.ok: ... else: for warn in rc.warnings: ...` block.
 
-    Located by the call it makes rather than by line number, so the tests that
+    Located by its `rc.ok` test rather than by line number, so the tests that
     execute it survive edits above it in `run_update`.
     """
     source = Path(run_module.__file__).read_text()
     tree = ast.parse(source)
     run_update = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_update"
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_update"),
+        None,
     )
+    assert run_update is not None, "run_update not found as a top-level sync def in run.py"
     for node in ast.walk(run_update):
         if not isinstance(node, ast.If):
             continue
@@ -42,6 +42,28 @@ def _readme_block_source() -> ast.stmt:
             continue
         return node
     raise AssertionError("README-check block not found in run_update")
+
+
+def _injection_call_count() -> int:
+    """Count `result.<warnings|errors>.<append|extend>(...)` CALLS in run.py.
+
+    Counted as AST call nodes rather than by regex: a regex over source also
+    matches the pattern inside comments and docstrings, which is exactly the
+    self-defeating-gate shape this PR had to repair on the Redis ACL row.
+    """
+    tree = ast.parse(Path(run_module.__file__).read_text())
+    total = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("append", "extend"):
+            continue
+        owner = node.func.value
+        if not isinstance(owner, ast.Attribute) or owner.attr not in ("warnings", "errors"):
+            continue
+        if isinstance(owner.value, ast.Name) and owner.value.id == "result":
+            total += 1
+    return total
 
 
 def test_append_warning_collapses_embedded_newlines():
@@ -117,10 +139,8 @@ def test_readme_warnings_are_not_duplicated():
         {
             "result": result,
             "rc": _Rc(),
-            "project_dir": Path("."),
             "v": False,
             "log": lambda *a, **k: None,
-            "readme_check": SimpleNamespace(check_project_readmes=lambda _d: _Rc()),
         }
     )
     exec(compile(ast.Module(body=[block], type_ignores=[]), "<readme>", "exec"), namespace)
@@ -143,13 +163,9 @@ def test_every_warning_injection_site_routes_through_the_helpers():
     fails here rather than silently truncating a multi-line warning in
     production.
     """
-    source = (Path(run_module.__file__)).read_text()
-    hits = re.findall(
-        r"result\.(?:warnings|errors)\.(?:append|extend)\(",
-        source,
-    )
-    assert len(hits) == 2, (
-        f"expected exactly 2 raw injection calls (one per helper body), found {len(hits)} — "
+    count = _injection_call_count()
+    assert count == 2, (
+        f"expected exactly 2 raw injection calls (one per helper body), found {count} — "
         "a site bypasses _append_warning/_append_error"
     )
 

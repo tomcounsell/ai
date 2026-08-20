@@ -33,12 +33,12 @@ _PROJECT_DIR = Path(__file__).parent.parent
 # not match).
 _LEGACY_WARNING_PREFIXES = ("[update] WARN", "WARNING:", "ERROR", "RESTART FAILED")
 
-# scripts/update/run.py:2482-2494's rendered summary formats.
+# The rendered summary formats from run.py's `--cron` summary block.
 _WARNING_SUMMARY_RE = re.compile(r"^(?:updated to|up to date at)\s+\S+\s+\((\d+)\s+warnings?\)$")
 _FAILURE_SUMMARY_RE = re.compile(r"^update failed at\s+\S+")
 
 # Fix-session tail cap: raised from the historical 500 chars (#2845) to a few
-# thousand, applied on whole-line boundaries so a cut is never mid-word.
+# thousand. A hard bound on the returned tail -- see _tail_with_elision.
 _FIX_SESSION_TAIL_CAP = 4000
 
 # Width reserved for `[... N characters elided ...]\n` so the marker is paid
@@ -52,7 +52,7 @@ def extract_update_warnings(status_lines: list[str]) -> list[str]:
     Recognises, in the order lines are encountered:
 
     - ``  ⚠️ <text>`` bullets — the cron warning form (one per
-      ``result.warnings`` entry, rendered at ``run.py:2486-2494``).
+      ``result.warnings`` entry, rendered in run.py's summary block).
     - The ``(N warnings)`` / ``(N warning)`` summary line
       (``updated to <sha> (N warnings)`` / ``up to date at <sha> (N
       warnings)``). Used only to cross-check the parsed ``⚠️`` bullet count —
@@ -118,11 +118,27 @@ def extract_update_warnings(status_lines: list[str]) -> list[str]:
 
 
 def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
-    """Combine stdout/stderr into one tail block, capped at whole-line boundaries.
+    """Combine stdout/stderr into one tail block, hard-bounded by ``cap``.
 
-    A silent character-index cut at a fixed, tiny size is what produced the
-    original truncation defect (#2845); a marked, line-boundary cut is
-    recoverable — the reader can tell there is more and go get it.
+    Two invariants, in priority order:
+
+    1. **The return is never longer than ``cap``** — the elision marker is
+       paid for out of the budget, not added on top of it. The payload
+       becomes an AgentSession ``message_text`` and then a ``claude -p``
+       prompt, so an unbounded tail is a real cost.
+    2. **A cut is never silent.** Every truncated return leads with
+       ``[... N characters elided ...]`` and ``N`` is exact. A silent
+       character-index cut at a fixed, tiny size is what produced the
+       original truncation defect (#2845); a marked cut is recoverable,
+       because the reader can tell there is more and go get it.
+
+    The cut lands on a line boundary when one is affordable. It deliberately
+    does *not* when the leading partial line is itself oversized — a
+    multi-KB exception ``str()`` arrives as one physical line, because
+    ``_append_warning``/``_append_error`` collapse embedded newlines by
+    design, and discarding it to buy a clean boundary would throw away
+    nearly everything the budget just paid for. Invariant 2 still holds
+    there: the mid-word slice is announced and counted.
     """
     combined = f"stdout:\n{stdout or '(empty)'}\n\nstderr:\n{stderr or '(empty)'}"
     if len(combined) <= cap:
