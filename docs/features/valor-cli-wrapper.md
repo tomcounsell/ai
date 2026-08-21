@@ -271,15 +271,12 @@ tests.
 ## Tests Run on the Branch
 
 Historical record from this doc's originating PR (#1612), predating the
-granite-pty-teardown cutover (#1924) — the `granite_container` paths below no
-longer exist; see [Headless Session Runner](headless-session-runner.md) for
-current test coverage.
+granite-pty-teardown cutover (#1924) — the `granite_container` paths this
+section previously listed no longer exist; see [Headless Session
+Runner](headless-session-runner.md) for current test coverage.
 
 | Scope | Result |
 |-------|--------|
-| `tests/unit/granite_container/` (BridgeAdapter, PTYPool, container, classifier, persona priming) | 143 passed, 5 skipped |
-| `tests/integration/test_granite_container_loop.py` + `test_granite_pty_production.py` | 3 passed, 1 skipped |
-| `tests/unit/test_session_executor_granite.py` | green |
 | `tests/unit/test_agent_session_queue.py` | green |
 | Wider unit suite | 36 pre-existing failures (memory model, work request classifier, media handling) — confirmed on main, out of scope for this branch |
 
