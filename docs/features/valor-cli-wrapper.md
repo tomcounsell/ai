@@ -277,9 +277,6 @@ current test coverage.
 
 | Scope | Result |
 |-------|--------|
-| `tests/unit/granite_container/` (BridgeAdapter, PTYPool, container, classifier, persona priming) | 143 passed, 5 skipped |
-| `tests/integration/test_granite_container_loop.py` + `test_granite_pty_production.py` | 3 passed, 1 skipped |
-| `tests/unit/test_session_executor_granite.py` | green |
 | `tests/unit/test_agent_session_queue.py` | green |
 | Wider unit suite | 36 pre-existing failures (memory model, work request classifier, media handling) — confirmed on main, out of scope for this branch |
 
