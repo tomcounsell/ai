@@ -125,16 +125,17 @@ Without **either** path, a session with `transport=email` would still write to `
 
 ### Persona resolution for email-spawned sessions
 
-As of issue #1692, persona is delivered to the granite PTY container via prime
-commands (`.claude/commands/granite/prime-*-role.md`), not via
+Persona is delivered via the role prime commands
+(`.claude/commands/roles/prime-{pm,dev,teammate}-role.md`), not via
 `--append-system-prompt`. The `compose_system_prompt` / `load_persona_prompt`
-path has been retired from the granite execution path.
+path is not part of the session-execution path.
 
-**Email sessions in the granite container:**
+**Email sessions:**
 
 - Email-spawned sessions become `SessionType.TEAMMATE` sessions.
-- The granite container primes the PM with `/granite:prime-teammate-role` (if
-  `session_type == TEAMMATE`) or `/granite:prime-pm-role` (if `ENG`).
+- The headless session runner primes the session with
+  `/roles:prime-teammate-role` (if `session_type == TEAMMATE`) or
+  `/roles:prime-pm-role` (if `ENG`).
 - The `_resolve_compose_args` resolver in `session_executor.py` is preserved to
   derive the `(persona, access_level)` tuple from `project.email.persona`; this
   will be used for prime-command selection in a future issue.
