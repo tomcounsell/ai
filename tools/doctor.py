@@ -190,9 +190,12 @@ def _shebang_interpreter(path: Path) -> str | None:
     if not rest:
         return None
     prog = rest.split()[0]
-    # An embedded NUL is rejected before `Path`, which raises `ValueError` (not
-    # `OSError`) on one -- the two handlers above would not catch it and the
-    # documented "never a crash" contract would break on a corrupt shim.
+    # An embedded NUL is rejected here rather than later: `Path` tolerates NUL
+    # at every step (`.exists()` returns `False`), so a NUL target slips
+    # through to `os.path.realpath` in `_classify_interpreter`'s missing
+    # branch, which raises `ValueError` (not `OSError`) -- neither of the two
+    # handlers above would catch it and the documented "never a crash"
+    # contract would break on a corrupt shim.
     if not prog.startswith("/") or "\0" in prog:
         return None
     if Path(prog).name in {"sh", "bash", "dash", "env"}:
