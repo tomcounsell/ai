@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: valor
 created: 2026-08-21
 tracking: https://github.com/yudame/ai/issues/2904
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-21T11:37:06Z
 ---
 
 # Fix red main: two unit tests broken by the #2803 run-identity anchor
@@ -107,8 +109,8 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Fix test #1** (`test_sdlc_dispatch.py::test_lease_lost_between_peek_and_write_refuses`): the test's intent is that the dispatch WRITE is refused when the lease is lost between peek and revalidate. The source already returns `ISSUE_LOCKED` and never calls `record_dispatch_for_ledger`. The stale `mock_get_or_create.assert_not_called()` must be replaced with an assertion on the actual write path — assert `record_dispatch_for_ledger` is not called (the dispatch write), which is the real guarantee. `get_or_create` may legitimately fire once for the #2803 anchor.
-- **Fix test #2** (`test_sdlc_meta_set.py::test_pr_number_writes_ledger_field_not_meta_key`): the test's intent is that `pr_number` is written as a ledger FIELD and no `_pr_number` meta key is ever written to `stage_states_json`. The source already does this via `ledger.save()`. The stale `update_mock.assert_not_called()` must be replaced with an assertion that no `update_stage_states` call writes a `_pr_number` key (the anchor's call writes `_run_identities`, which is unrelated and legitimate).
+- **Fix test #1** (`test_sdlc_dispatch.py::test_lease_lost_between_peek_and_write_refuses`): the test's intent is that the dispatch WRITE is refused when the lease is lost between peek and revalidate. The source already returns `ISSUE_LOCKED` and never reaches the write-path `get_or_create` at `sdlc_dispatch.py:256`. The stale `mock_get_or_create.assert_not_called()` must be replaced with `assert mock_get_or_create.call_count == 1` — the anchor's single `get_or_create` is legitimate, and a second call would mean the write path ran.
+- **Fix test #2** (`test_sdlc_meta_set.py::test_pr_number_writes_ledger_field_not_meta_key`): the test's intent is that `pr_number` is written as a ledger FIELD and no `_pr_number` meta key is ever written to `stage_states_json`. The source already does this via `ledger.save()`. The stale `update_mock.assert_not_called()` must be replaced with a real-dict membership check: initialize `mock_ledger.stage_states_json = {}` and assert `"_pr_number" not in mock_ledger.stage_states_json` (the anchor's `_run_identities` write is unrelated and legitimate).
 
 ### Flow
 
@@ -116,8 +118,9 @@ Red test → update assertion to target the real guarantee → green test → su
 
 ### Technical Approach
 
-- **Test #1**: patch `tools.sdlc_dispatch.record_dispatch_for_ledger` and assert it is not called; keep the existing `result["reason"] == "ISSUE_LOCKED"` and `result["ok"] is False` assertions. Optionally assert `get_or_create` is called at most once (the anchor), but the `record_dispatch_for_ledger` assertion is the load-bearing one.
-- **Test #2**: keep `mock_ledger.save.assert_called_once()` and `mock_ledger.pr_number == 42`. Replace `update_mock.assert_not_called()` with a loop over `update_mock.call_args_list` asserting that no updater function writes a `_pr_number` key (e.g. `"_pr_number" not in updater({})`). This preserves the single-writer contract while tolerating the anchor's `_run_identities` write.
+- **Test #1** (`test_lease_lost_between_peek_and_write_refuses`): replace the stale `mock_get_or_create.assert_not_called()` with a load-bearing `assert mock_get_or_create.call_count == 1`. The lease-lost write path would perform a second `get_or_create` after revalidation (the write-path call at `sdlc_dispatch.py:256`), so `call_count == 1` distinguishes anchor-only from anchor + write path. Keep the existing `result["reason"] == "ISSUE_LOCKED"` and `result["ok"] is False` assertions. The `record_dispatch_for_ledger` patch is not required; the `call_count == 1` pin is the load-bearing guard.
+- **Test #2** (`test_pr_number_writes_ledger_field_not_meta_key`): initialize `mock_ledger.stage_states_json = {}` before `write_meta`, then assert `"_pr_number" not in mock_ledger.stage_states_json` alongside the existing `mock_ledger.pr_number == 42` and `mock_ledger.save.assert_called_once()` checks. A bare MagicMock makes the membership check vacuous, so the real dict assignment is required. Drop the `update_mock.call_args_list` loop — it guards nothing about the single-writer contract because `write_meta` writes `pr_number` as a field via `ledger.save()`, not via `update_stage_states`. If a loop over `update_mock.call_args_list` is retained as a secondary guard, extract the updater as `update_mock.call_args_list[i].args[1]` and coerce the result with `or {}` before the membership check, so a future updater indexing a pre-existing key cannot false-fail.
+- **Docstring (test #2)**: amend the test #2 docstring to the anchor-aware contract — it currently states "update_stage_states must not be called at all" (`test_sdlc_meta_set.py:254`), which the #2803 anchor now legitimately violates. Reword to e.g. "no `_pr_number` meta key is ever written to stage_states_json; the run-identity anchor may write `_run_identities`." Ship the docstring edit in the same commit as the assertion edit.
 - **Integration points**: none — both edits are local to the two test files.
 
 ## Failure Path Test Strategy
@@ -133,8 +136,8 @@ Red test → update assertion to target the real guarantee → green test → su
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_dispatch.py::TestDispatchRecordLease::test_lease_lost_between_peek_and_write_refuses` — UPDATE: replace `mock_get_or_create.assert_not_called()` with an assertion that `record_dispatch_for_ledger` is not called (the dispatch write is refused).
-- [ ] `tests/unit/test_sdlc_meta_set.py::TestMetaSetWriteMeta::test_pr_number_writes_ledger_field_not_meta_key` — UPDATE: replace `update_mock.assert_not_called()` with an assertion that no `update_stage_states` call writes a `_pr_number` key.
+- [ ] `tests/unit/test_sdlc_dispatch.py::TestDispatchRecordLease::test_lease_lost_between_peek_and_write_refuses` — UPDATE: replace `mock_get_or_create.assert_not_called()` with `assert mock_get_or_create.call_count == 1` (the dispatch write is refused; the anchor's single `get_or_create` is legitimate).
+- [ ] `tests/unit/test_sdlc_meta_set.py::TestMetaSetWriteMeta::test_pr_number_writes_ledger_field_not_meta_key` — UPDATE: initialize `mock_ledger.stage_states_json = {}`, replace `update_mock.assert_not_called()` with `assert "_pr_number" not in mock_ledger.stage_states_json`, and amend the docstring to the anchor-aware contract.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py::test_every_test_subprocess_inherits_the_claimed_test_db` — NOT in scope; owned by #2805.
 
 ## Rabbit Holes
@@ -172,7 +175,7 @@ No agent integration required — this is a test-only change. No new CLI entry p
 
 ## Documentation
 
-No documentation changes needed — this is a test-assertion fix that restores existing intended behavior; there is no new capability, interface, or user-facing surface to document. The two tests' docstrings already describe the intended contract and will be kept accurate.
+No documentation changes needed — this is a test-assertion fix that restores existing intended behavior; there is no new capability, interface, or user-facing surface to document. The only doc edit is the in-code docstring of `test_pr_number_writes_ledger_field_not_meta_key`, which is amended to the anchor-aware contract (see Technical Approach) so it stays accurate.
 
 ## Success Criteria
 
@@ -191,61 +194,37 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 - **Builder (test-fix)**
   - Name: test-fix-builder
-  - Role: Apply the two test-assertion updates
+  - Role: Apply both test-assertion updates (and the test #2 docstring amendment) in one task, then self-verify both tests pass
   - Agent Type: builder
-  - Resume: true
-
-- **Validator (test-fix)**
-  - Name: test-fix-validator
-  - Role: Verify both tests pass and intent is preserved
-  - Agent Type: validator
   - Resume: true
 
 ### Available Agent Types
 
-Tier 1 core agents (`builder`, `validator`, `code-reviewer`, `test-engineer`, `documentarian`) are sufficient for this Small-appetite fix.
+A single Tier 1 core agent (`builder`) is sufficient for this Small-appetite fix. The two edits are small, tightly coupled, and share one root cause, so a single builder task with a self-verifying validation step replaces the earlier two-builder / two-validator orchestration — avoiding disproportionate machinery and the rival-incarnation hazard of two parallel builders on the same named agent.
 
 ## Step by Step Tasks
 
-### 1. Fix test #1 (dispatch lease-lost refusal)
-- **Task ID**: build-test1
+### 1. Apply both test-assertion fixes (single builder task)
+- **Task ID**: build-testfix
 - **Depends On**: none
-- **Validates**: tests/unit/test_sdlc_dispatch.py
+- **Validates**: tests/unit/test_sdlc_dispatch.py, tests/unit/test_sdlc_meta_set.py
 - **Assigned To**: test-fix-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- In `test_lease_lost_between_peek_and_write_refuses`, patch `tools.sdlc_dispatch.record_dispatch_for_ledger` and assert it is not called (the dispatch write is refused).
-- Keep `result["ok"] is False` and `result["reason"] == "ISSUE_LOCKED"`.
-- Remove the stale `mock_get_or_create.assert_not_called()` (the #2803 anchor legitimately calls `get_or_create` on the confirmed-owner path).
+- **Parallel**: false
+- **Test #1** (`test_lease_lost_between_peek_and_write_refuses`): replace `mock_get_or_create.assert_not_called()` with `assert mock_get_or_create.call_count == 1`. Keep `result["ok"] is False` and `result["reason"] == "ISSUE_LOCKED"`. The lease-lost write path would perform a second `get_or_create` after revalidation, so `call_count == 1` distinguishes anchor-only from anchor + write path.
+- **Test #2** (`test_pr_number_writes_ledger_field_not_meta_key`): add `mock_ledger.stage_states_json = {}` before `write_meta`; keep `mock_ledger.pr_number == 42` and `mock_ledger.save.assert_called_once()`; replace `update_mock.assert_not_called()` with `assert "_pr_number" not in mock_ledger.stage_states_json`. Do NOT use a loop over `update_mock.call_args_list` — it guards nothing about the single-writer contract (write_meta writes pr_number as a field via `ledger.save()`). If a loop is retained as a secondary guard, extract the updater as `update_mock.call_args_list[i].args[1]` and coerce with `or {}` before the membership check.
+- **Docstring (test #2)**: amend the test #2 docstring from "update_stage_states must not be called at all" to the anchor-aware contract (e.g. "no `_pr_number` meta key is ever written to stage_states_json; the run-identity anchor may write `_run_identities`"). Ship in the same commit as the assertion edit.
 
-### 2. Fix test #2 (pr_number field write)
-- **Task ID**: build-test2
-- **Depends On**: none
-- **Validates**: tests/unit/test_sdlc_meta_set.py
+### 2. Self-verify (same builder task)
+- **Task ID**: verify-testfix
+- **Depends On**: build-testfix
 - **Assigned To**: test-fix-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- In `test_pr_number_writes_ledger_field_not_meta_key`, keep `mock_ledger.save.assert_called_once()` and `mock_ledger.pr_number == 42`.
-- Replace `update_mock.assert_not_called()` with a loop asserting no `update_stage_states` call writes a `_pr_number` key (the anchor's `_run_identities` write is unrelated and legitimate).
-
-### 3. Validate
-- **Task ID**: validate-testfix
-- **Depends On**: build-test1, build-test2
-- **Assigned To**: test-fix-validator
-- **Agent Type**: validator
 - **Parallel**: false
 - Run both tests individually and confirm they pass.
 - Confirm no production code changed (`git diff --stat` shows only the two test files).
-- Confirm the tests still assert their original intent.
-
-### 4. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: validate-testfix
-- **Assigned To**: test-fix-validator
-- **Agent Type**: validator
-- **Parallel**: false
 - Run `python -m ruff check` and `python -m ruff format --check` on the two changed test files.
-- Verify all success criteria met.
+- Confirm the tests still assert their original intent (write refused / no `_pr_number` meta key).
 
 ## Verification
 
@@ -261,14 +240,10 @@ Tier 1 core agents (`builder`, `validator`, `code-reviewer`, `test-engineer`, `d
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Test #2's proposed loop over `update_mock.call_args_list` only inspects the anchor's `append_run_identity` (write_meta writes pr_number as a field via `ledger.save()`), so it guards nothing about the single-writer contract; a bug writing a `_pr_number` meta key directly into the blob bypassing the helper passes silently. | pending | Initialize `mock_ledger.stage_states_json = {}` before `write_meta`, then assert `"_pr_number" not in mock_ledger.stage_states_json` alongside the existing `pr_number == 42` and `save.assert_called_once()` checks. A bare MagicMock makes the membership check vacuous, so the real dict assignment is required. |
-| CONCERN | History & Consistency | The plan claims the two docstrings "will be kept accurate," but the fix makes test #2's docstring false: it states "update_stage_states must not be called at all" (tests/unit/test_sdlc_meta_set.py:254), yet the #2803 anchor now legitimately calls it. No task step updates the docstring. | pending | Add a sub-step to Task 2 amending the test #2 docstring to the anchor-aware contract (e.g. "no `_pr_number` meta key is ever written to stage_states_json; the run-identity anchor may write `_run_identities`"), shipped in the same commit as the assertion edit. |
-| CONCERN | Scope & Value | A two-line test-assertion fix is wrapped in a 4-task, two-role, two-agent orchestration (build-test1, build-test2, validate-testfix, validate-all) with two parallel builders assigned to the same named agent `test-fix-builder` — machinery disproportionate to the work and a rival-incarnation hazard. | pending | Collapse to a single builder task applying both edits with a self-verifying validation step, or make the two build tasks sequential under one agent rather than `Parallel: true`. |
-| NIT | Risk & Robustness | The plan leaves the `get_or_create` pin for test #1 optional; pinning it is a cheap meaningful guard. | pending | Make `assert mock_get_or_create.call_count == 1` load-bearing: the lease-lost write path would perform a second `get_or_create` after revalidation, so call_count == 1 distinguishes anchor-only from anchor + write path. |
-| NIT | History & Consistency | The proposed `"_pr_number" not in updater({})` loop invokes each captured update_fn on a bare empty dict; a future updater that indexes a pre-existing key would raise and false-fail an unrelated test. | pending | Extract the update_fn as `update_mock.call_args_list[i].args[1]` and coerce the result with `or {}` before the membership check. |
+| CONCERN | Risk & Robustness | Test #2's proposed loop over `update_mock.call_args_list` only inspects the anchor's `append_run_identity` (write_meta writes pr_number as a field via `ledger.save()`), so it guards nothing about the single-writer contract; a bug writing a `_pr_number` meta key directly into the blob bypassing the helper passes silently. | Technical Approach + Task 1 | Initialize `mock_ledger.stage_states_json = {}` before `write_meta`, then assert `"_pr_number" not in mock_ledger.stage_states_json` alongside the existing `pr_number == 42` and `save.assert_called_once()` checks. A bare MagicMock makes the membership check vacuous, so the real dict assignment is required. |
+| CONCERN | History & Consistency | The plan claims the two docstrings "will be kept accurate," but the fix makes test #2's docstring false: it states "update_stage_states must not be called at all" (tests/unit/test_sdlc_meta_set.py:254), yet the #2803 anchor now legitimately calls it. No task step updates the docstring. | Technical Approach + Task 1 + Documentation | Add a sub-step to Task 2 amending the test #2 docstring to the anchor-aware contract (e.g. "no `_pr_number` meta key is ever written to stage_states_json; the run-identity anchor may write `_run_identities`"), shipped in the same commit as the assertion edit. |
+| CONCERN | Scope & Value | A two-line test-assertion fix is wrapped in a 4-task, two-role, two-agent orchestration (build-test1, build-test2, validate-testfix, validate-all) with two parallel builders assigned to the same named agent `test-fix-builder` — machinery disproportionate to the work and a rival-incarnation hazard. | Team Orchestration + Step by Step Tasks | Collapse to a single builder task applying both edits with a self-verifying validation step, or make the two build tasks sequential under one agent rather than `Parallel: true`. |
+| NIT | Risk & Robustness | The plan leaves the `get_or_create` pin for test #1 optional; pinning it is a cheap meaningful guard. | Technical Approach + Task 1 | Make `assert mock_get_or_create.call_count == 1` load-bearing: the lease-lost write path would perform a second `get_or_create` after revalidation, so call_count == 1 distinguishes anchor-only from anchor + write path. |
+| NIT | History & Consistency | The proposed `"_pr_number" not in updater({})` loop invokes each captured update_fn on a bare empty dict; a future updater that indexes a pre-existing key would raise and false-fail an unrelated test. | Technical Approach + Task 1 | Extract the update_fn as `update_mock.call_args_list[i].args[1]` and coerce the result with `or {}` before the membership check. |
 
 ---
-
-## Open Questions
-
-1. For test #1, is asserting `record_dispatch_for_ledger` is not called the preferred guarantee, or should the test also assert `get_or_create` is called at most once (to pin the anchor's single call)? The former is the load-bearing contract; the latter is more brittle.
