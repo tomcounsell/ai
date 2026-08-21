@@ -271,9 +271,9 @@ tests.
 ## Tests Run on the Branch
 
 Historical record from this doc's originating PR (#1612), predating the
-granite-pty-teardown cutover (#1924) — the `granite_container` paths below no
-longer exist; see [Headless Session Runner](headless-session-runner.md) for
-current test coverage.
+granite-pty-teardown cutover (#1924) — the `granite_container` paths this
+section previously listed no longer exist; see [Headless Session
+Runner](headless-session-runner.md) for current test coverage.
 
 | Scope | Result |
 |-------|--------|
