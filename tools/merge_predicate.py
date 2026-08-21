@@ -307,9 +307,15 @@ def _extract_issue_number(body: str | None) -> int | None:
 
 
 def _derive_slug(head_ref: str) -> str:
-    """Slug from a PR head ref: strip ``session/``; main/master/HEAD/empty → no slug."""
+    """Slug from a PR head ref: strip ``session/``; main/master/HEAD/empty → no slug.
+
+    A slug still containing ``/`` (any non-``session/`` prefixed head ref,
+    e.g. ``fix/router-blocked-on-conflict``) is likewise unusable -- the
+    docs/features fallback would otherwise probe a nested path that can never
+    exist. See #2891.
+    """
     slug = (head_ref or "").removeprefix("session/")
-    if slug in _NO_SLUG_REFS:
+    if slug in _NO_SLUG_REFS or "/" in slug:
         return ""
     return slug
 
