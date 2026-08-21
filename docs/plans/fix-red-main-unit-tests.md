@@ -202,12 +202,12 @@ No agent integration required — this is a test-only change. No new CLI entry p
 
 ## Success Criteria
 
-- [ ] `tests/unit/test_sdlc_dispatch.py::TestDispatchRecordLease::test_lease_lost_between_peek_and_write_refuses` passes.
-- [ ] `tests/unit/test_sdlc_meta_set.py::TestMetaSetWriteMeta::test_pr_number_writes_ledger_field_not_meta_key` passes.
-- [ ] The two tests still assert their original intent (write refused / no `_pr_number` meta key).
-- [ ] No production code changed.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`) — no changes needed.
+- [x] `tests/unit/test_sdlc_dispatch.py::TestDispatchRecordLease::test_lease_lost_between_peek_and_write_refuses` passes.
+- [x] `tests/unit/test_sdlc_meta_set.py::TestMetaSetWriteMeta::test_pr_number_writes_ledger_field_not_meta_key` passes.
+- [x] The two tests still assert their original intent (write refused / no `_pr_number` meta key).
+- [x] No production code changed.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`) — no changes needed.
 
 ## Team Orchestration
 
