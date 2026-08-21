@@ -98,7 +98,7 @@ Sentry token resolution cascade: `SENTRY_PERSONAL_TOKEN` env var → `SENTRY_AUT
 
 ### Engineer persona injection — `--append-system-prompt` (issue #1148)
 
-> **Granite PTY sessions (all bridge-originated sessions) no longer use this path.** As of issue #1692, persona is delivered to the granite PTY container via prime commands (`.claude/commands/granite/prime-*-role.md`) at PTY startup — `--append-system-prompt` is not set at all. The description below applies to the headless `claude -p` path only (direct `get_response_via_harness()` callers, drafter turns, non-bridge tool invocations).
+> **Runner-driven sessions (all bridge-originated sessions) do not use this path.** Persona is delivered via the role prime commands (`.claude/commands/roles/prime-{pm,dev,teammate}-role.md`) at turn 1 — `--append-system-prompt` is not set at all. The description below applies to the headless `claude -p` path only (direct `get_response_via_harness()` callers, drafter turns, non-bridge tool invocations).
 
 Eng sessions append the engineer persona to `claude -p`'s default system prompt via `--append-system-prompt`:
 
