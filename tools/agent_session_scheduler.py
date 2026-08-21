@@ -37,6 +37,7 @@ from agent.constants import WORKER_DOWN_THRESHOLD_S
 from config.enums import SessionType
 from models.reflection import Reflection
 from models.session_lifecycle import NON_TERMINAL_STATUSES
+from tools._sdlc_utils import _resolve_target_repo_fallback
 
 
 def _to_ts(val):
@@ -141,10 +142,29 @@ def _check_rate_limit(project_key: str) -> bool:
 
 
 def _validate_issue(issue_number: int) -> dict | None:
-    """Validate GitHub issue exists and return its details."""
+    """Validate GitHub issue exists and return its details.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from the wrong
+    checkout) it would answer about a different repository's issue #N and
+    exit 0 (issue #2889). This gates whether an autonomous session is
+    scheduled on an issue, so a wrong-repo lookup could schedule unattended
+    work against the wrong repository. The resolved slug mirrors
+    ``tools/sdlc_stage_query.py``'s ladder (GH_REPO env first, else
+    ``gh repo view --json nameWithOwner`` from the working-tree root).
+    """
     try:
+        repo = _resolve_target_repo_fallback()
         result = subprocess.run(
-            ["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"],
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                *(["--repo", repo] if repo else []),
+                "--json",
+                "title,state,body,url",
+            ],
             capture_output=True,
             text=True,
             timeout=15,  # timeout-guard: allow

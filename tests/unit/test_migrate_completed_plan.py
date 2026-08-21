@@ -432,3 +432,108 @@ class TestRunIssueEvidenceGate:
         gate_calls = []
         monkeypatch.setattr(mcp, "_gh_issue_state", lambda n: gate_calls.append(n) or "closed")
         assert mcp.run_issue("999", apply=True) == 2
+
+
+class TestGhIssueStateRepoScoping:
+    """Issue #2889: `_gh_issue_state` must scope `gh issue view` with --repo.
+
+    A bare ``gh issue view N`` resolves GH_REPO from the environment before
+    cwd, so under a foreign GH_REPO it answers about a *different*
+    repository's issue #N and exits 0. The argv must carry
+    ``--repo <resolved-slug>`` when a repo resolves (mirroring the
+    tools/sdlc_stage_query.py ladder: GH_REPO env first, else
+    ``gh repo view --json nameWithOwner`` from the working-tree root); when
+    nothing resolves, the argv degrades to the prior unscoped shape and the
+    ``"unknown"``-on-failure contract is preserved.
+    """
+
+    def test_argv_scoped_from_gh_repo_env(self, monkeypatch):
+        import scripts.migrate_completed_plan as mcp
+
+        captured: dict = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = '{"state": "closed"}'
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return FakeResult()
+
+        monkeypatch.setenv("GH_REPO", "tomcounsell/ai")
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "closed"
+        assert captured["argv"] == [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "--repo",
+            "tomcounsell/ai",
+            "--json",
+            "state",
+        ]
+
+    def test_argv_scoped_from_derived_repo(self, monkeypatch):
+        """GH_REPO unset: slug derived via gh repo view from the git root."""
+        import scripts.migrate_completed_plan as mcp
+
+        captured: list = []
+
+        class IssueResult:
+            returncode = 0
+            stdout = '{"state": "open"}'
+
+        def fake_run(argv, **kwargs):
+            captured.append(argv)
+            if argv[:2] == ["git", "rev-parse"]:
+                return type("GitResult", (), {"returncode": 0, "stdout": "/repo/root"})()
+            if argv[:3] == ["gh", "repo", "view"]:
+                return type("RepoResult", (), {"returncode": 0, "stdout": "tomcounsell/ai"})()
+            return IssueResult()
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "open"
+        assert captured[-1] == [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "--repo",
+            "tomcounsell/ai",
+            "--json",
+            "state",
+        ]
+
+    def test_argv_unscoped_when_repo_resolution_fails(self, monkeypatch):
+        """No GH_REPO and gh repo view fails: degrade to the unscoped argv."""
+        import scripts.migrate_completed_plan as mcp
+
+        captured: list = []
+
+        class IssueResult:
+            returncode = 0
+            stdout = '{"state": "closed"}'
+
+        def fake_run(argv, **kwargs):
+            captured.append(argv)
+            if argv[:2] == ["git", "rev-parse"] or argv[:3] == ["gh", "repo", "view"]:
+                return type("FailResult", (), {"returncode": 1, "stdout": ""})()
+            return IssueResult()
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "closed"
+        assert captured[-1] == ["gh", "issue", "view", "42", "--json", "state"]
+
+    def test_gh_failure_returns_unknown(self, monkeypatch):
+        """The fail-soft contract: any gh failure reads as "unknown"."""
+        import scripts.migrate_completed_plan as mcp
+
+        def fake_run(argv, **kwargs):
+            raise OSError("gh missing")
+
+        monkeypatch.setenv("GH_REPO", "tomcounsell/ai")
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "unknown"

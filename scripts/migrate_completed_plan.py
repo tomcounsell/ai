@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools._sdlc_utils import _resolve_target_repo_fallback
+
 
 def extract_tracking_issue(plan_text: str) -> str | None:
     """Extract tracking issue URL from plan frontmatter.
@@ -360,10 +362,27 @@ def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) 
 
 
 def _gh_issue_state(issue_number: str) -> str:
-    """Look up a GitHub issue's state via gh. Returns 'unknown' on any failure."""
+    """Look up a GitHub issue's state via gh. Returns 'unknown' on any failure.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from the wrong
+    checkout) it would answer about a different repository's issue #N and
+    exit 0 (issue #2889). The resolved slug mirrors
+    ``tools/sdlc_stage_query.py``'s ladder (GH_REPO env first, else
+    ``gh repo view --json nameWithOwner`` from the working-tree root).
+    """
     try:
+        repo = _resolve_target_repo_fallback()
         result = subprocess.run(
-            ["gh", "issue", "view", str(issue_number), "--json", "state"],
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                *(["--repo", repo] if repo else []),
+                "--json",
+                "state",
+            ],
             capture_output=True,
             text=True,
             timeout=30,
