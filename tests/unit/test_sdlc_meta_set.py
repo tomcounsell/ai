@@ -254,18 +254,22 @@ class TestMetaSetWriteMeta:
     def test_pr_number_writes_ledger_field_not_meta_key(self):
         """#2003 T1.7 / #2012: `--key pr_number` writes the PipelineLedger.pr_number
         FIELD. Single-writer contract: no `_pr_number` meta key is ever
-        written to stage_states_json — update_stage_states must not be
-        called at all.
+        written to stage_states_json; the run-identity anchor may write
+        `_run_identities`.
         """
         from tools.sdlc_meta_set import write_meta
 
         mock_ledger = MagicMock()
         mock_ledger.pr_number = None
+        mock_ledger.stage_states_json = {}  # real dict, not a MagicMock
+
+        def _apply(_, update_fn, **kwargs):
+            mock_ledger.stage_states_json = update_fn(mock_ledger.stage_states_json) or {}
 
         with (
             patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=mock_ledger),
-            patch("tools.stage_states_helpers.update_stage_states") as update_mock,
+            patch("tools.stage_states_helpers.update_stage_states", side_effect=_apply),
         ):
             result = write_meta(key="pr_number", value="42", issue_number=1, run_id="run-test")
 
@@ -273,7 +277,7 @@ class TestMetaSetWriteMeta:
         assert mock_ledger.pr_number == 42
         assert isinstance(mock_ledger.pr_number, int)
         mock_ledger.save.assert_called_once()
-        update_mock.assert_not_called()
+        assert "_pr_number" not in mock_ledger.stage_states_json
 
     def test_pr_number_save_failure_returns_empty_dict(self):
         """Field-write path fails soft: ledger.save() raising returns {}."""
