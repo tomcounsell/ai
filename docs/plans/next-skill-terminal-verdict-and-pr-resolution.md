@@ -1163,7 +1163,13 @@ resolves itself on the following tick.
   point: this No-Go is now enforced by a test rather than by an argument default.
 
 - **The other unscoped `gh issue view` readers stay as they are.** Two of them, not one —
-  the round-4 framing said "a third reader" and undercounted (corrected at round-6 critique):
+  the round-4 framing said "a third reader" and undercounted (corrected at round-6 critique).
+  **Follow-up landed:** the `bug`-labelled issue named here was filed (#2889, closed
+  2026-08-21); #2913 then threaded `--repo` into **both** readers below, and #2925 scoped the
+  rest of the class (`reflections/sdlc_progress.py::_issue_is_open`,
+  `scripts/check_plan_freshness.py::_latest_issue_comment_id`, and
+  `scripts/build_audit_set.py::get_issue_pr` / `get_issue_body`). Nothing in this class
+  remains unscoped. The as-named state at the time this lane wrote it:
 
   - `scripts/migrate_completed_plan.py:362::_gh_issue_state` carries **both** divergences
     this lane fixes elsewhere: the argv has no `--repo`
@@ -1184,7 +1190,8 @@ resolves itself on the following tick.
   put further files in a two-file PR and dilute the mutation table with work that has no
   measured failure behind it. **Follow-up obligation:** task 8 files one `bug`-labelled issue
   naming **both** files, their divergences, and their call sites, and links it from this
-  bullet. This lane adds `--repo` to neither, and a build that does has exceeded scope.
+  bullet. This lane adds `--repo` to neither, and a build that does has exceeded scope —
+  which is exactly what #2913/#2925 subsequently did.
 
 Everything else #2817 and #2825 describe is in scope for this plan. #2824 is scoped out in
 full and handed to #2869.
@@ -1896,7 +1903,9 @@ Entry 6 is new at round 6.
    autonomous session scheduling; **neither result reaches `decide_next_dispatch`**, so
    neither can terminate a live lane, which is the failure the round-3 `--repo` blocker was
    about. Task 8 files one `bug`-labelled follow-up naming both files, both divergences, and
-   all call sites. Adding `--repo` here would put two more files in a two-file PR.
+   all call sites. Adding `--repo` here would put two more files in a two-file PR. **Landed
+   since this was written:** the follow-up (#2889) was filed and closed; #2913 scoped both
+   readers and #2925 scoped the rest of the class, so nothing here remains unscoped.
 
 6. **Round 6's third nit is falsified; the plan's wording stands and was not changed.** The
    nit said the plan overstates `tests/unit/test_architectural_constraints.py` as forbidding
