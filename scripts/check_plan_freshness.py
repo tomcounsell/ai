@@ -26,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools._sdlc_utils import _resolve_target_repo_fallback
+
 _TRACKING_RE = re.compile(r"^tracking:\s*(.+?)\s*$", re.MULTILINE)
 _ISSUE_NUM_RE = re.compile(r"/issues/(\d+)")
 _LAST_COMMENT_RE = re.compile(r"^last_comment_id:\s*(.*?)\s*$", re.MULTILINE)
@@ -53,14 +55,31 @@ def _read_frontmatter(plan_path: Path) -> tuple[str | None, str | None]:
 def _latest_issue_comment_id(issue_number: str) -> str | None:
     """Return the ID of the most recent comment on *issue_number*.
 
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from a wrong cwd)
+    it would answer about a *different* repository's issue #N and exit 0
+    (issue #2889). The slug resolves via the shared ladder (GH_REPO env first,
+    else ``gh repo view --json nameWithOwner`` from the working-tree root /
+    ``SDLC_TARGET_REPO``); when nothing resolves, the argv degrades to the
+    prior unscoped shape.
+
     Returns ``None`` if the issue has no comments or if the ``gh`` call
     fails for any reason. A failed call is treated as a soft non-failure
     (freshness cannot be verified) to avoid turning a transient network
     glitch into a build-blocking stale-plan error.
     """
     try:
+        repo = _resolve_target_repo_fallback()
         result = subprocess.run(
-            ["gh", "issue", "view", issue_number, "--json", "comments"],
+            [
+                "gh",
+                "issue",
+                "view",
+                issue_number,
+                *(["--repo", repo] if repo else []),
+                "--json",
+                "comments",
+            ],
             capture_output=True,
             text=True,
             check=True,

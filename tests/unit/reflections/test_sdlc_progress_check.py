@@ -361,7 +361,7 @@ def stalled_pr(monkeypatch):
     """Gates 1-4 pass: one open non-draft SDLC PR whose head commit is 9h old."""
     now = int(time.time())
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr(number=1237)])
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(
         sdlc_progress, "_last_commit", lambda cwd, branch: ("abc123def456", now - 9 * 3600)
     )
@@ -1431,7 +1431,7 @@ def test_create_brake_caps_creations_per_project_per_tick(lab, stub_workdir, mon
             _pr(number=2, branch="session/sdlc-200"),
         ],
     )
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(
         sdlc_progress,
         "_last_commit",
@@ -1477,7 +1477,7 @@ def test_create_brake_never_claims_the_deferred_lanes_action_window(lab, stub_wo
             _pr(number=2, branch="session/sdlc-200"),
         ],
     )
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(
         sdlc_progress,
         "_last_commit",
@@ -1650,7 +1650,7 @@ def test_degradation_marker_distinguishes_from_a_healthy_zero_stall_tick(
 def test_unknown_issue_state_marks_findings(lab, stub_workdir, monkeypatch):
     now = int(time.time())
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: None)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: None)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha", now - 9 * 3600))
 
     result = sdlc_progress._check_project_stalls(_PROJECT)
@@ -1741,7 +1741,7 @@ def test_draft_prs_not_flagged(lab, stub_workdir, monkeypatch):
 
 def test_closed_issue_skipped(lab, stub_workdir, monkeypatch):
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: False)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: False)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda *a: ("x", 0))
     sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
@@ -1754,7 +1754,7 @@ def test_missing_local_branch_is_reported_not_silently_skipped(lab, stub_workdir
     lane dropped in silence is indistinguishable from a healthy quiet tick.
     """
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, branch: None)
     result = sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
@@ -1764,7 +1764,7 @@ def test_missing_local_branch_is_reported_not_silently_skipped(lab, stub_workdir
 def test_fresh_commit_is_not_a_stall(lab, stub_workdir, monkeypatch):
     now = int(time.time())
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [_pr()])
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha", now - 600))
     sdlc_progress._check_project_stalls(_PROJECT)
     assert (lab.alerts, lab.steers, lab.creates) == ([], [], [])
@@ -1920,3 +1920,57 @@ def test_run_sdlc_progress_check_uses_per_project_helper(lab, monkeypatch):
     assert out["status"] in {"ok", "disabled"}
     assert "summary" in out
     assert (lab.steers, lab.resumes, lab.creates, lab.alerts) == ([], [], [], [])
+
+
+# ---------------------------------------------------------------------------
+# Issue #2889 / #2921: `_issue_is_open` must scope `gh issue view` with --repo
+# ---------------------------------------------------------------------------
+
+
+class TestIssueIsOpenRepoScoping:
+    """Issue #2889: `_issue_is_open` must scope `gh issue view` with --repo.
+
+    ``_issue_is_open`` gates the stall action ladder, so a wrong-repo lookup
+    (bare ``gh issue view`` under a foreign GH_REPO, which answers about a
+    *different* repository's issue #N and exits 0) could dispatch work against
+    a foreign issue. The argv must carry ``--repo <resolved-slug>`` when the
+    caller threads a repo; when nothing resolves, the argv degrades to the
+    prior unscoped shape and the None-on-failure contract is preserved.
+    """
+
+    def test_argv_scoped_from_project_repo(self, monkeypatch):
+        captured: dict = {}
+
+        def fake_run_gh(args, *, cwd, timeout=None):
+            captured["args"] = args
+            captured["cwd"] = cwd
+            return _FakeProc(stdout='{"state": "open"}')
+
+        monkeypatch.setattr(sdlc_progress, "_run_gh", fake_run_gh)
+        assert sdlc_progress._issue_is_open("/some/wd", 1237, "tomcounsell/ai") is True
+        assert captured["args"] == [
+            "issue",
+            "view",
+            "1237",
+            "--repo",
+            "tomcounsell/ai",
+            "--json",
+            "state",
+        ]
+        assert captured["cwd"] == "/some/wd"
+
+    def test_argv_unscoped_when_no_repo_resolves(self, monkeypatch):
+        captured: dict = {}
+
+        def fake_run_gh(args, *, cwd, timeout=None):
+            captured["args"] = args
+            return _FakeProc(stdout='{"state": "closed"}')
+
+        monkeypatch.setattr(sdlc_progress, "_run_gh", fake_run_gh)
+        assert sdlc_progress._issue_is_open("/some/wd", 1237, None) is False
+        assert captured["args"] == ["issue", "view", "1237", "--json", "state"]
+
+    def test_gh_failure_returns_none(self, monkeypatch):
+        """The fail-soft contract: any gh failure reads as None (unknown)."""
+        monkeypatch.setattr(sdlc_progress, "_run_gh", lambda args, *, cwd, timeout=None: None)
+        assert sdlc_progress._issue_is_open("/some/wd", 1237, "tomcounsell/ai") is None
