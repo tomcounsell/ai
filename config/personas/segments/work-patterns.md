@@ -265,7 +265,7 @@ The engineer running longer threads of useful work outperforms others. The engin
 
 ### AI Developer Workflows (ADWs)
 
-Complex work follows the SDLC pipeline (see `.claude/skills/sdlc/SKILL.md` for ground truth):
+Complex work follows the SDLC pipeline (see `.claude/skills-global/do-sdlc/SKILL.md` for ground truth):
 
 **Plan -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge**
 

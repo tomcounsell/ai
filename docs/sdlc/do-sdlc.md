@@ -26,7 +26,7 @@ stage-tracking history over.
 
 ## `session-ensure` re-ensure invocations, this repo's paths
 
-Both the Step 2 initial ensure and the Step 3d.6 between-stage continuity re-ensure run the same
+Both the Step 2 initial ensure and the Step 5d.6 between-stage continuity re-ensure run the same
 `sdlc-tool` entry point (installed to `~/.local/bin` by `/update`, so no repo-relative path is
 needed) and are cwd-independent per `docs/features/sdlc-tool-resolver.md`:
 
@@ -34,7 +34,7 @@ needed) and are cwd-independent per `docs/features/sdlc-tool-resolver.md`:
 # Initial (Step 2)
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}"
 
-# Between-stage continuity re-ensure (Step 3d.6) — always includes --reuse-run-id
+# Between-stage continuity re-ensure (Step 5d.6) — always includes --reuse-run-id
 sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 ```
 
@@ -42,7 +42,7 @@ sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
 forces its own cwd to `~/src/ai` and relies on this env var to locate the target repo's plans and
 worktree when the target repo is not `ai` itself.
 
-### Step 3d.6 is loud, and its `run_id` is authoritative (issue #2675)
+### Step 5d.6 is loud, and its `run_id` is authoritative (issue #2675)
 
 Neither invocation may be wrapped in anything that discards stderr. Both used to carry
 `2>/dev/null || true`, which routed every `LEASE_ABSENT`/`ISSUE_LOCKED` diagnostic to `/dev/null` —
@@ -55,7 +55,7 @@ Two obligations follow:
 - **Adopt the returned identity.** On an unblocked payload, read `run_id` out of the JSON and use
   *that* value for every subsequent stage and `--run-id` flag. It can legitimately differ from the
   one you passed in: a re-ensure rebinds a lapsed lease, and a fresh contest mints a new id. This is
-  also the value Step 5's `session-release` must carry.
+  also the value Step 7's `session-release` must carry.
 - **Branch on the payload, not the exit code.** `session-ensure` exits 0 on every outcome it can
   report (`tools/sdlc_session_ensure.py::main` prints the result and returns) and signals refusal as
   `{"blocked": true, "reason": ...}`, so an exit-code check would never fire on one. The exception
@@ -70,7 +70,7 @@ Two obligations follow:
 
 The disposition is per-tool and does not generalize: `stage-marker` genuinely does exit non-zero on
 an ownership refusal (`RUN_ID_REQUIRED`, `ISSUE_LOCKED`), which is why the stage-marker guidance in
-`docs/sdlc/do-plan.md` and `.claude/skills-global/do-sdlc/SKILL.md` Step 3d.3 *is* written against
+`docs/sdlc/do-plan.md` and `.claude/skills-global/do-sdlc/SKILL.md` Step 5d *is* written against
 the exit code. See [SDLC Tool Resolver](../features/sdlc-tool-resolver.md) for the loud/best-effort
 split across the whole `sdlc-tool` surface.
 
@@ -78,16 +78,16 @@ Rebinding after a lapse is now backed by the durable, issue-keyed `_run_identiti
 `PipelineLedger` rather than by the session record alone — see
 [SDLC Issue Ownership Lock](../features/sdlc-issue-ownership-lock.md) for the four reuse proofs.
 
-## `session-release` invocation, this repo's path (Step 5)
+## `session-release` invocation, this repo's path (Step 7)
 
-Step 5's release runs through the same `sdlc-tool` entry point as `session-ensure` (installed to
+Step 7's release runs through the same `sdlc-tool` entry point as `session-ensure` (installed to
 `~/.local/bin` by `/update`; cwd-independent per `docs/features/sdlc-tool-resolver.md`):
 
 ```bash
 sdlc-tool session-release --issue-number {issue_number} --run-id {run_id}
 ```
 
-`{run_id}` is the value this run is carrying — the one Step 3d.6 passes as `--reuse-run-id`, rebound
+`{run_id}` is the value this run is carrying — the one Step 5d.6 passes as `--reuse-run-id`, rebound
 if any refusal in the Step 2 table made you re-ensure. Pass the *current* value; a stale one is
 refused as a foreign release and leaves the lease held.
 
@@ -101,5 +101,5 @@ Output is typed JSON, exit code always 0:
 | `missing_args` | You passed an empty/absent issue number or `run_id`. |
 | `error` | The Redis substrate raised; the lease may still be held and will lapse on its own TTL. |
 
-Never let any of these change the outcome you reported in Step 4. The release is a courtesy that
+Never let any of these change the outcome you reported in Step 6. The release is a courtesy that
 shortens the *next* run's wait, not part of this run's result.

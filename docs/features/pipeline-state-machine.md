@@ -115,7 +115,7 @@ Promotes the ISSUE-rooted success spine behind `stage` to `completed`, using `_r
 
 ### Marker vs. Router Semantics
 
-The marker tool (`tools/sdlc_stage_marker.py`) and the router (`.claude/skills/sdlc/SKILL.md`) both operate on the same `PipelineStateMachine`, but with different intent:
+The marker tool (`tools/sdlc_stage_marker.py`) and the router (`.claude/skills-global/do-sdlc/SKILL.md`) both operate on the same `PipelineStateMachine`, but with different intent:
 
 - **The marker tool records reality.** A marker write means "we reached this stage" — an unrecorded predecessor is evidence it happened, not an ordering violation, so the tool opts into backfill.
 - **The router enforces ordering.** It decides which stage to dispatch next, so a missing predecessor there is a genuine misorder signal, and it keeps the strict default so it still raises.
@@ -164,7 +164,7 @@ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to han
 
 ## Router Integration (Read Path)
 
-The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: the in-session hooks write stage transitions (via `start_stage()` on skill invoke and `complete_stage()` on skill return), and the router reads the resulting state to determine which sub-skill to dispatch next.
+The SDLC router skill (`.claude/skills-global/do-sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: the in-session hooks write stage transitions (via `start_stage()` on skill invoke and `complete_stage()` on skill return), and the router reads the resulting state to determine which sub-skill to dispatch next.
 
 ### How the Router Reads stage_states
 
@@ -206,7 +206,7 @@ Final delivery is driven by `_agent_session_hierarchy_health_check` (`agent/sess
 
 ## Integration Points
 
-- **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
+- **SDLC Router** (`.claude/skills-global/do-sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
 - **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from an eng session by session ID or issue number
 - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` on skill invoke (`_handle_skill_tool_start()` with `_SKILL_TO_STAGE` mapping), marking the stage as `in_progress`
 - **PostToolUse hook** (`agent/hooks/post_tool_use.py`): Calls `complete_stage()` when a mapped SDLC Skill tool finishes, reading the current `in_progress` stage via `current_stage()`
@@ -232,7 +232,7 @@ Final delivery is driven by `_agent_session_hierarchy_health_check` (`agent/sess
 | `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router, supports `--issue-number`) |
 | `tools/sdlc_session_ensure.py` | CLI tool to create/find local SDLC sessions keyed by issue number |
 | `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` helper (deduplicated from sdlc_stage_query) |
-| `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
+| `.claude/skills-global/do-sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 3.0) |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring on skill invoke via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |
 | `agent/hooks/post_tool_use.py` | `complete_stage()` wiring on skill return via `_complete_pipeline_stage()` |
 | `agent/session_health.py` | `_agent_session_hierarchy_health_check()` — drives `schedule_pipeline_completion()` for final delivery |

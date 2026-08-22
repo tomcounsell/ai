@@ -97,7 +97,7 @@ The old "Tier 2 — Specialists (13)" pack and the stub agents (planner, reviewe
 
 ## Skill Categories
 
-### SDLC Core (the critical path — see `.claude/skills/sdlc/SKILL.md` for ground truth)
+### SDLC Core (the critical path — see `.claude/skills-global/do-sdlc/SKILL.md` for ground truth)
 ```
 do-plan → do-build → do-test → do-patch → do-pr-review → do-patch → do-docs → merge
 ```

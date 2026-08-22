@@ -159,7 +159,7 @@ frozen ledger becomes diagnosable and a healed one shows the recovery:
 
 There is **no** artifact-inference `--reconcile`. The SDLC invariant — "never
 infer stage completion from artifacts; completion is exclusively determined by
-stored state" — is load-bearing (`.claude/skills/sdlc/SKILL.md`). Instead:
+stored state" — is load-bearing (`.claude/skills-global/do-sdlc/SKILL.md`). Instead:
 
 - **Forward repair is automatic:** with self-heal, the next state-mutating
   write after a resume re-establishes identity and lands, so the ledger

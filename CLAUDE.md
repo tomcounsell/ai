@@ -37,7 +37,7 @@ Never point a debug script at a test db with `os.environ.setdefault("REDIS_URL",
 6. **MINIMAL TOOLS** — loading all tools pollutes context and degrades performance. Start minimal, expand only if needed.
 7. **DEFINITION OF DONE** — the authoritative list lives in [`.claude/skills-global/do-build/SKILL.md`](.claude/skills-global/do-build/SKILL.md) and is enforced by `/do-build` and the builder agent.
 8. **PARALLEL EXECUTION** — spawn parallel sub-agents for genuinely independent tasks; never for sequential or dependent work. Aggregate results before reporting.
-9. **SDLC PIPELINE** — an Eng-role AgentSession handles both orchestration and execution. `/sdlc` is a **single-stage router**: assess state, invoke ONE sub-skill, return. Never write code, run tests, or create plans directly; always delegate through sub-skills. Agent gating reads of a PR's head SHA must resolve through `tools/pr_head_resolver.py::resolve_pr_head_sha` (git-first via `git ls-remote refs/pull/N/head`), never a bare `gh` read: a stale `gh` head SHA matches the recorded verdict's trailer and flips the verdict-staleness gate from fail-closed to fail-open (see [`docs/features/gh-stale-state-verdict-gate.md`](docs/features/gh-stale-state-verdict-gate.md)). Ground truth on stages: [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md).
+9. **SDLC PIPELINE** — an Eng-role AgentSession handles both orchestration and execution. `/sdlc` is a **single-stage router**: assess state, invoke ONE sub-skill, return. Never write code, run tests, or create plans directly; always delegate through sub-skills. Agent gating reads of a PR's head SHA must resolve through `tools/pr_head_resolver.py::resolve_pr_head_sha` (git-first via `git ls-remote refs/pull/N/head`), never a bare `gh` read: a stale `gh` head SHA matches the recorded verdict's trailer and flips the verdict-staleness gate from fail-closed to fail-open (see [`docs/features/gh-stale-state-verdict-gate.md`](docs/features/gh-stale-state-verdict-gate.md)). Ground truth on stages: [`.claude/skills-global/do-sdlc/SKILL.md`](.claude/skills-global/do-sdlc/SKILL.md).
 10. **RESTART RUNNING SERVICES** — see the restart note under Commands.
 
 ## Development Workflow
@@ -80,7 +80,7 @@ Sync wiring is `scripts/update/hardlinks.py`. Adding a directory with a `SKILL.m
 
 Global skill bodies stay generic; repo-specific behavior layers in via `.claude/skill-context/{skill}.md` (non-SDLC) or `docs/sdlc/{skill}.md` (SDLC stages). Coupled bodies carry the probe sentence "If <context-path> exists, read it and honor its declarations; otherwise use the generic defaults described below." See [`docs/features/skill-context-convention.md`](docs/features/skill-context-convention.md).
 
-Some skills are too coupled to generalize even with a probe: `setup`, `prime`, `sdlc`, and `do-deploy` stay project-only.
+Some skills are too coupled to generalize even with a probe: `setup`, `prime`, and `do-deploy` stay project-only. The `sdlc` skill is now a thin `context: fork` router shim over the global `do-sdlc` skill — the substantive SDLC body lives in `.claude/skills-global/do-sdlc/` with this repo's specifics in `docs/sdlc/do-sdlc.md`.
 
 ## Testing Philosophy
 

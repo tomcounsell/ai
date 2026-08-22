@@ -223,7 +223,7 @@ is alive (issue #2620).** The payload's `pid` is stamped by the short-lived
 `sdlc-tool session-ensure` CLI at acquire time -- that process exits within
 seconds, and renewal never re-stamps the field -- so pid inference alone read
 **every** locally-minted lease as orphaned. That inverted the router's
-contract (`.claude/skills/sdlc/SKILL.md`): `orphaned_lock: true` means "the
+contract (`.claude/skills-global/do-sdlc/SKILL.md`): `orphaned_lock: true` means "the
 owning run died, wait out the TTL" while `false` is the unconditional stop, so
 a rival meeting a genuinely LIVE local owner was told to wait instead of stop.
 PR #2615 had already removed the heartbeat's dependence on the signal; #2620
@@ -407,7 +407,7 @@ The consequence is the one the table above states: a ledger write of any kind ex
 
 When a lock check finds the issue owned by a different live run, the caller surfaces a blocked signal parallel to the existing G-guard `blocked` shape (`{"blocked": true, "reason": ..., "guard_id": ...}`) used elsewhere in SDLC routing.
 
-`/sdlc` and `/do-sdlc` treat this exactly like a guard block: surface `reason`, `owner_run_id`, and `owner_session_id` to the human, do not loop, do not attempt to route around it by guessing an alternative skill. See `.claude/skills/sdlc/SKILL.md`'s ISSUE_LOCKED guard documentation for the pipeline-level interpretation contract -- not duplicated here.
+`/sdlc` and `/do-sdlc` treat this exactly like a guard block: surface `reason`, `owner_run_id`, and `owner_session_id` to the human, do not loop, do not attempt to route around it by guessing an alternative skill. See `.claude/skills-global/do-sdlc/SKILL.md`'s ISSUE_LOCKED guard documentation for the pipeline-level interpretation contract -- not duplicated here.
 
 ### Where the literal JSON shape is actually emitted
 
@@ -461,5 +461,5 @@ The deploy runbook pairs the merge with an immediate worker restart: `./scripts/
 | `tools/sdlc_meta_set.py` | `--run-id` CLI flag on state-mutating keys (e.g. `pr_number`); ownership guard (no renewal) |
 | `tools/sdlc_next_skill.py` | `decide()`'s peek pre-check |
 | `agent/session_executor.py` | `_tick_issue_lock_renewal()` (tier-1 heartbeat, `active_run_id` read-back) |
-| `.claude/skills/sdlc/SKILL.md` | `ISSUE_LOCKED` guard interpretation contract for `/sdlc`/`/do-sdlc`; `--run-id` threading rules |
+| `.claude/skills-global/do-sdlc/SKILL.md` | `ISSUE_LOCKED` guard interpretation contract for `/sdlc`/`/do-sdlc`; `--run-id` threading rules |
 | `.claude/skills-global/do-sdlc/SKILL.md` | Reads `run_id` from `session-ensure`'s JSON output and threads `--run-id` through every state-mutating `sdlc-tool` call for the run |

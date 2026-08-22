@@ -93,7 +93,7 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 | `.claude/skills-global/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check, artifact-based roster barrier (#1690) |
 | `.claude/skills-global/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor (#1042) and serialization-boundary item in Skeptic |
 | `tools/critique_roster_check.py` | `critique-roster-check` CLI helper — reads `_roster.json`, verifies terminal fences, exits 0 with JSON gate decision when full roster is complete (#1690) |
-| `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
 | `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
 | `config/personas/engineer.md` | Hard gate rule: CRITIQUE mandatory after PLAN — Rule 1 (in-repo fallback) |

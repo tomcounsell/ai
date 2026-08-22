@@ -88,7 +88,7 @@ python -c "from agent.worktree_manager import ensure_clean_git_state; from pathl
 | `tests/unit/test_git_state_guard.py` | 21 unit tests covering all detection/resolution paths |
 | `.claude/skills/do-build/SKILL.md` | Guard call at Step 6 |
 | `.claude/skills/do-pr-review/SKILL.md` | Guard call in Step 1 before `gh pr checkout` |
-| `.claude/skills/sdlc/SKILL.md` | Guard call at Step 2 |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Guard call in Step 3 (assess current state) |
 
 ## Tracking
 
