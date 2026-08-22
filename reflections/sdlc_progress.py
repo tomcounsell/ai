@@ -295,9 +295,27 @@ def _list_open_lane_prs(cwd: str) -> list[dict[str, Any]]:
     ]
 
 
-def _issue_is_open(cwd: str, number: int) -> bool | None:
-    """True if issue is open, False if closed, None if lookup failed/unknown."""
-    proc = _run_gh(["issue", "view", str(number), "--json", "state"], cwd=cwd)
+def _issue_is_open(cwd: str, number: int, target_repo: str | None = None) -> bool | None:
+    """True if issue is open, False if closed, None if lookup failed/unknown.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from a cwd that is
+    not the issue's own checkout) it answers about a *different* repository's
+    issue #N and exits 0 (issue #2889). This gate feeds the stall action
+    ladder, so a wrong-repo answer could dispatch work against a foreign
+    issue. The caller threads the project's resolved repo slug -- the same
+    ``target_repo`` the issue resolution ladder was scoped by -- and when
+    nothing resolves, the argv degrades to the prior unscoped shape.
+    """
+    args = [
+        "issue",
+        "view",
+        str(number),
+        *(["--repo", target_repo] if target_repo else []),
+        "--json",
+        "state",
+    ]
+    proc = _run_gh(args, cwd=cwd)
     if proc is None or proc.returncode != 0:
         return None
     try:
@@ -1111,7 +1129,7 @@ def _check_project_stalls(project: dict) -> dict:
                 findings.append(f"gate-unknown: issue-unresolved {slug}")
             continue
 
-        issue_open = _issue_is_open(wd, issue_num)
+        issue_open = _issue_is_open(wd, issue_num, target_repo)
         if issue_open is False:
             continue
         if issue_open is None:
