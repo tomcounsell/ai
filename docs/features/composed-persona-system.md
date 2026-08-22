@@ -1,17 +1,19 @@
 # Composed Persona System
 
-> **Granite PTY path retired (issue #1692):** The `compose_system_prompt`
-> composition model described here is retired for the granite PTY container path.
-> All granite sessions (Eng, Teammate) now receive persona entirely via prime
-> commands (`.claude/commands/granite/prime-*-role.md`) — no `--append-system-prompt`
-> flag is set at spawn. The `compose_system_prompt` function and the
-> `get_response_via_harness` non-granite path are preserved for backward compat
-> but are no longer the production persona delivery mechanism.
+> **Persona delivered via prime commands (issue #1692):** The `compose_system_prompt`
+> composition model described here is not the production persona delivery
+> mechanism. All sessions (Eng, Teammate) receive persona entirely via the role
+> prime commands (`.claude/commands/roles/prime-{pm,dev,teammate}-role.md`),
+> prepended by the headless runner's role driver on the first turn — no
+> `--append-system-prompt` flag is set at spawn. `compose_system_prompt` and the
+> preserved `load_system_prompt` / `load_eng_system_prompt` wrappers remain for
+> the byte-stability baseline and backward compat.
 
 Single composer (`compose_system_prompt`) that assembles the agent's system
 prompt from three orthogonal axes — **persona**, **access level**, and
 (reserved) **channel** — replacing the hand-coded picker ladders that used to
-live in two parallel sites. Applies to non-granite (direct `claude -p`) sessions.
+live in two parallel sites. Its live use is the byte-stability baseline and the
+preserved `load_system_prompt` / `load_eng_system_prompt` wrappers.
 
 ## Problem this solves
 

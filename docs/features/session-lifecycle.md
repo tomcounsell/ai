@@ -191,7 +191,7 @@ Before consolidation, completion side effects were scattered across 4 paths, eac
 
 ## Child Session Creation Temporarily Disabled (#1633)
 
-Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. The granite PTY cutover (PR #1612) runs every session in a container that owns its own PM+Dev claude TUI pair from a bounded pool, so parent-spawned child AgentSessions (the old PM→Dev pattern) double-consume scarce pool slots and risk starvation/deadlock when a parent in `waiting_for_children` holds a slot its child needs. Dependent work should run as subagents inside the current session instead.
+Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. Sessions run as headless `claude -p` subprocesses via `agent/session_runner/`; parent-spawned child AgentSessions (the old PM→Dev pattern) are refused because they are semantically redundant — dependent work runs as subagents within the session (the D1 topology) — and unbounded, with no independent fanout cap until #1633's subagent refactor lands or #1926 names a cap. Dependent work should run as subagents inside the current session instead.
 
 Gated creation paths (all share `models/child_session_gate.py`):
 
@@ -202,7 +202,7 @@ Gated creation paths (all share `models/child_session_gate.py`):
 
 **Escape hatch (genuine emergencies only):** `VALOR_ALLOW_CHILD_SESSIONS=1` bypasses the block with a loud warning at each creation site.
 
-**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal and hold no pool slot. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
+**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
 
 ## Parent Finalization
 
