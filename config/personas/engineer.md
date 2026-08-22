@@ -365,7 +365,7 @@ exit — the pipeline is not complete until the gate passes.
 ### G4 Convergence Rule
 
 The SDLC router's G4 oscillation guard caps same-skill dispatches at 3 without
-state change (`.claude/skills/sdlc/SKILL.md`). If the same blocker category
+state change (`.claude/skills-global/do-sdlc/SKILL.md`). If the same blocker category
 recurs 3 times in a row, escalate to the human with the specific blocker text
 from the gate output. Do not loop further. G4 is load-bearing and must not be
 bypassed — it is the only backstop between a recoverable gate failure and an

@@ -1,7 +1,7 @@
 """Production SDLC router dispatch algorithm.
 
 This module is the **canonical dispatch source of truth** for the SDLC pipeline.
-The PM session (via ``.claude/skills/sdlc/SKILL.md``) calls the CLI wrapper
+The PM session (via ``.claude/skills-global/do-sdlc/SKILL.md``) calls the CLI wrapper
 ``sdlc-tool next-skill`` (implemented in ``tools/sdlc_next_skill.py``) which
 delegates to ``decide_next_dispatch()`` in this module.
 

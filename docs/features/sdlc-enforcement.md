@@ -68,7 +68,7 @@ Set `SKIP_SDLC=1` to bypass **all** SDLC stop gates — both the Claude Code hoo
 
 ## Pipeline Stage Model
 
-See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages.
+See `.claude/skills-global/do-sdlc/SKILL.md` for the ground truth on pipeline stages.
 
 Stages: **Plan → Critique → Build → Test → Patch → Review → Patch → Docs → Merge**
 

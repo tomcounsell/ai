@@ -4,7 +4,7 @@ When the merge gate (`/do-merge`) fails on a PR that is otherwise approved,
 mergeable, and green, the PM session can self-resolve the blocker using the
 recipes below. Each section follows the house style of other `docs/sdlc/`
 pages: terse, command-first, with explicit verify-then-proceed hooks. The
-G4 oscillation guard (`.claude/skills/sdlc/SKILL.md`) caps same-category
+G4 oscillation guard (`.claude/skills-global/do-sdlc/SKILL.md`) caps same-category
 retries at 3; anything beyond that escalates to a human.
 
 See also:
@@ -50,7 +50,7 @@ Then re-dispatch `/do-merge {pr}`.
 ## G4 Oscillation (Same Skill Dispatched 3x)
 
 **Symptom.** The SDLC router's G4 guard refuses to dispatch the same skill
-a fourth time without a state change (`.claude/skills/sdlc/SKILL.md`). The
+a fourth time without a state change (`.claude/skills-global/do-sdlc/SKILL.md`). The
 PM is looping on the same remediation without making progress.
 
 **Diagnose.** Look at the last three dispatches for this issue:

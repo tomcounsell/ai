@@ -25,12 +25,21 @@ from pathlib import Path
 from agent.sdlc_router import DISPATCH_RULES, GUARDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
-DO_SDLC_MD = REPO_ROOT / ".claude" / "skills-global" / "do-sdlc" / "SKILL.md"
+# After the sdlc → do-sdlc consolidation (#2930), the router contract (Step 4
+# dispatch + Step 3.5 guard table) lives in the single merged body; the thin
+# /sdlc shim (.claude/skills/sdlc/SKILL.md) only points at it and carries no
+# dispatch table or guard rows of its own. The parity checks therefore read
+# the merged body.
+SKILL_MD = REPO_ROOT / ".claude" / "skills-global" / "do-sdlc" / "SKILL.md"
+DO_SDLC_MD = SKILL_MD
 
-# Every skill body that is told how to interpret the router's JSON. Both consume
-# `sdlc-tool next-skill`, so both must describe shapes the router can emit.
-ROUTER_CONSUMER_SKILLS = (SKILL_MD, DO_SDLC_MD)
+# Every skill body that is told how to interpret the router's JSON. Both the
+# merged body and the /sdlc shim consume `sdlc-tool next-skill`, so both must
+# describe shapes the router can emit.
+ROUTER_CONSUMER_SKILLS = (
+    SKILL_MD,
+    REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md",
+)
 
 
 # ---------------------------------------------------------------------------

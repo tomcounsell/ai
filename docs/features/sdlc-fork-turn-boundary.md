@@ -16,8 +16,8 @@ Commit `8542ffb19` ("Fix do-sdlc/do-build fork phantom-wait: force `run_in_backg
 - `.claude/skills-global/do-build/WORKFLOW.md:76`: explicit rule forbidding background dispatch inside the fork, with the failure mode spelled out.
 - `.claude/skills-global/do-build/WORKFLOW.md:98`: the old 15-minute poll/resume block is gone. Step 4 verifies builder results in-turn, since they are already in hand.
 - `.claude/skills-global/do-build/SKILL.md:154`: orchestrator rule, "Run parallel tasks together, always in the foreground."
-- `.claude/skills-global/do-sdlc/SKILL.md:26`: Hard Rule 6, always dispatch with `run_in_background: false`.
-- `.claude/skills-global/do-sdlc/SKILL.md:135`: the stage-dispatch prompt itself carries the explicit `run_in_background: false` flag.
+- `.claude/skills-global/do-sdlc/SKILL.md:57`: Hard Rule 6, always dispatch with `run_in_background: false`.
+- `.claude/skills-global/do-sdlc/SKILL.md:551`: the stage-dispatch prompt itself carries the explicit `run_in_background: false` flag.
 
 ## The concurrent-foreground builder model
 
@@ -31,7 +31,7 @@ Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}
 
 Supervisors and the resumable `dev` subagent do not allocate separate `.worktrees/sdlc-{N}` lanes. Nothing in the codebase reads a lane override, so lane instructions were silently dropped, which is exactly how #1904, #1899, and #1898 collided: a supervisor's separate branch and the fork's own branch both tried to own the same issue's build.
 
-Converging fork and supervisor onto one branch per plan structurally collapses duplicate PRs, because GitHub permits only one open PR per head branch. The ownership rule is declared in `.claude/skills-global/do-sdlc/SKILL.md:26` and `.claude/skills/sdlc/SKILL.md:13`, under a "Worktree & branch ownership" heading in both files.
+Converging fork and supervisor onto one branch per plan structurally collapses duplicate PRs, because GitHub permits only one open PR per head branch. The ownership rule is declared in `.claude/skills-global/do-sdlc/SKILL.md:72`, under the "Worktree & branch ownership" heading in the merged SDLC body.
 
 ## The live-ref PR dedup guard
 

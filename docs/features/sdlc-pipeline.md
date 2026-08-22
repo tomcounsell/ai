@@ -332,4 +332,4 @@ The enriched stage query output (`sdlc-tool stage-query`) includes a `_meta` dic
 - `tools/sdlc_stage_query.py` — enriched query and `_compute_meta()`
 - `tools/sdlc_meta_set.py` — whitelisted metadata writes
 - `docs/sdlc/` — per-stage skill addenda
-- `.claude/skills/sdlc/SKILL.md` — runtime routing instructions
+- `.claude/skills-global/do-sdlc/SKILL.md` — runtime routing instructions (router mode = Steps 1–4)
