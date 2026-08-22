@@ -1,5 +1,6 @@
 ---
-status: Ready
+status: docs_complete
+pr: https://github.com/tomcounsell/ai/pull/2931
 type: refactor
 appetite: Small
 owner: Valor Engels
