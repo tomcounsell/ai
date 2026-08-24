@@ -1,5 +1,13 @@
 # Durability Model: Room / Job / AgentSession
 
+> **Naming collision:** the web dashboard (`localhost:8500/`) also has a
+> top-level list it calls "Jobs" (`ui/data/jobs.py::JobGroup`). That is an
+> unpersisted, render-time grouping of `AgentSession` runs — not this `Job`.
+> The two share no identifier. The dashboard's session detail modal resolves
+> and shows *this* `Job` separately, only for the one session open in the
+> modal; see [Dashboard §Jobs Table](dashboard.md#jobs-table) and
+> [§Modal Job block](dashboard.md#modal-job-block).
+
 The single place that answers **"a message or an obligation is durable because X."**
 Shipped incrementally by `docs/plans/durability-room-job-agentrun.md`
 (issue #2494): Milestone 1 (fenced execution record), Milestone 2 (Room +

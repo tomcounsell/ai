@@ -146,6 +146,7 @@ The central data model for dashboard display, containing:
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`
 - Links: `issue_url`, `plan_url`, `pr_url`
 - Computed properties: `duration`, `is_active`, `is_complete`, `display_name` (fallback chain: `slug` > issue/PR title via GitHub API > `context_summary` > `MESSAGE:`/`FROM:` extracted from system prompt preamble > `type • project`)
+- Real Job (detail-fetch only): `room_id`, `job_id`, `job_status`, `job_goal`, `job_goal_is_placeholder`, `job_open_expectations` — resolved by `get_pipeline_detail()` via `room_id_for_session()` + `Job.recent_for_room()`, never by the list-view `load_pipelines()`/`group_into_jobs()` path. `models/job.py::Job` is a distinct, durable, room-scoped record — not the same object as this doc's `JobGroup` (see [Dashboard](dashboard.md#jobs-table) and [Durability Model](durability-model.md))
 
 ### `StageState`
 
@@ -161,3 +162,4 @@ A history entry with `role`, `text`, and optional `timestamp`, parsed from the s
 - [SDLC Observer](sdlc-observer.md) -- Pipeline tracking dashboard at `/sdlc/`
 - [Pipeline State Machine](pipeline-state-machine.md) -- How `stage_states` gets populated
 - [Agent Session Model](agent-session-model.md) -- The underlying Redis model
+- [Durability Model](durability-model.md) -- The real `Room`/`Job`/`AgentSession` shape; this doc's "Jobs" (`JobGroup`) is a presentation-level grouping, not that `Job`

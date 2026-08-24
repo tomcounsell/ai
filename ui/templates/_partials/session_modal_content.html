@@ -36,6 +36,7 @@
                     data-thread="{{ pipeline.session_id or '-' }}"
                     data-project="{{ (pipeline.project_name or pipeline.project_key) or '-' }}"
                     data-slug="{{ pipeline.slug or '-' }}"
+                    data-job-id="{{ pipeline.job_id or '-' }}"
                     onclick="copySessionDetails(this)"
                     title="Copy identification details">&#128203;</button>
         </div>
@@ -63,7 +64,35 @@
                 <div class="modal-ids-row">
                     <span class="modal-id-chip" title="{{ pipeline.agent_session_id }}">session {{ pipeline.agent_session_id[:8] }}…</span>
                     {% if pipeline.session_id %}<span class="modal-id-chip" title="{{ pipeline.session_id }}">thread {{ pipeline.session_id }}</span>{% endif %}
+                    {% if pipeline.job_id %}<span class="modal-id-chip" title="{{ pipeline.job_id }} — durable Job (models/job.py), this session's Room's obligation record">job {{ pipeline.job_id[:8] }}…</span>{% endif %}
                 </div>
+
+                {% if pipeline.job_id %}
+                {# The durable Job (models/job.py) this session's Room owns — a
+                   distinct object from this dashboard's own unpersisted JobGroup
+                   row grouping (docs/features/dashboard.md), resolved here via
+                   room_id_for_session() + Job.recent_for_room(). See
+                   docs/features/durability-model.md for the full model. #}
+                <h3 class="mt-4">Job</h3>
+                <table class="data-table compact">
+                    <tr>
+                        <td class="text-secondary">Status</td>
+                        <td class="mono">
+                            <span class="badge badge-{{ 'blue' if pipeline.job_status == 'active' else 'purple' }}">{{ pipeline.job_status }}</span>
+                            {% if pipeline.job_open_expectations %}<span class="badge badge-warning" title="Open (undischarged) expectations on this Job">{{ pipeline.job_open_expectations }} open expectation{{ 's' if pipeline.job_open_expectations != 1 else '' }}</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% if pipeline.job_goal %}
+                    <tr>
+                        <td class="text-secondary">Goal</td>
+                        <td style="font-size: 13px;" title="{{ pipeline.job_goal }}">
+                            {{ pipeline.job_goal[:160] }}{% if pipeline.job_goal|length > 160 %}…{% endif %}
+                            {% if pipeline.job_goal_is_placeholder %}<span class="badge bg-secondary" title="Router-seeded placeholder — the PM has not yet authored the real goal (job_tool author-goal)">unauthored</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                </table>
+                {% endif %}
 
                 {% if pipeline.issue_url or pipeline.plan_url or pipeline.pr_url %}
                 <h3 class="mt-4">Links</h3>
@@ -328,12 +357,13 @@
 <script>
 function copySessionDetails(btn) {
     var lines = [
-        'Valor dashboard Job — backed by an AgentSession record (Popoto/Redis).',
+        'Valor dashboard run — backed by an AgentSession record (Popoto/Redis).',
         'Session ID    ' + btn.dataset.sessionId,
         'Thread    ' + btn.dataset.thread,
         'Project    ' + btn.dataset.project
     ];
     if (btn.dataset.slug && btn.dataset.slug !== '-') lines.push('Slug    ' + btn.dataset.slug);
+    if (btn.dataset.jobId && btn.dataset.jobId !== '-') lines.push('Job ID    ' + btn.dataset.jobId + '  (models/job.py::Job, room-scoped)');
     lines.push('Look up with: valor-session status --id ' + btn.dataset.sessionId);
     var text = lines.join('\n');
     navigator.clipboard.writeText(text).then(function() {

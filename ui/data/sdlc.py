@@ -443,6 +443,18 @@ class PipelineProgress(BaseModel):
     # Claude Code resume
     claude_session_uuid: str | None = None
 
+    # Durable Job (models/job.py) this session's Room owns, resolved lazily —
+    # only populated by get_pipeline_detail, not the list views, since it costs
+    # a Job.query.filter(room_id=...) lookup. Distinct from the dashboard's own
+    # unpersisted JobGroup key (ui/data/jobs.py); see docs/features/dashboard.md
+    # and docs/features/durability-model.md.
+    room_id: str | None = None
+    job_id: str | None = None
+    job_status: str | None = None
+    job_goal: str | None = None
+    job_goal_is_placeholder: bool | None = None
+    job_open_expectations: int | None = None
+
     @property
     def duration(self) -> float | None:
         """Total duration in seconds from start to completion or now."""
@@ -1374,12 +1386,30 @@ def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
         PipelineProgress with full details, or None if not found.
     """
     from models.agent_session import AgentSession
+    from models.room import room_id_for_session
 
     try:
         session = AgentSession.get_by_id(agent_session_id)
         if session is None:
             return None
-        return _session_to_pipeline(session)
+        pipeline = _session_to_pipeline(session)
+        rid = room_id_for_session(session)
+        if rid:
+            pipeline.room_id = rid
+            try:
+                from models.job import Job
+
+                jobs = Job.recent_for_room(rid, limit=1)
+                if jobs:
+                    job = jobs[0]
+                    pipeline.job_id = job.id
+                    pipeline.job_status = job.status
+                    pipeline.job_goal = job.current_goal()
+                    pipeline.job_goal_is_placeholder = job.goal_is_placeholder()
+                    pipeline.job_open_expectations = len(job.open_expectations())
+            except Exception as e:
+                logger.warning(f"Failed to resolve Job for room {rid}: {e}")
+        return pipeline
     except Exception as e:
         logger.warning(f"Failed to get pipeline detail for {agent_session_id}: {e}")
         return None
