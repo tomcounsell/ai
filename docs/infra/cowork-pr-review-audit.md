@@ -110,7 +110,7 @@ raw value; egress-scoped to GitHub hosts.
 
 ## Redis-Bypass Note
 
-`PRReviewAudit` (`models/reflections.py`) is touched at three unconditional
+`PRReviewAudit` (`models/pr_review_audit.py`) is touched at three unconditional
 points in the local path, each of which would crash a Redis-less cloud run.
 `COWORK_ROUTINE=1` bypasses all three:
 

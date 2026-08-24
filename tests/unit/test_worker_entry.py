@@ -277,12 +277,6 @@ class TestImportDecoupling:
 
         assert callable(save_session_snapshot)
 
-    def test_session_logs_re_exports_from_bridge(self):
-        """save_session_snapshot should still be importable from bridge.session_logs."""
-        from bridge.session_logs import save_session_snapshot
-
-        assert callable(save_session_snapshot)
-
 
 class TestWorkerStartupSequence:
     """Test that worker/__main__.py startup sequence is complete and deterministic.

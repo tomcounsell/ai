@@ -367,7 +367,7 @@ def load_ignore_entries() -> list[dict]:
         Returns empty list if Redis is unavailable.
     """
     try:
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         active = ReflectionIgnore.get_active()
         return [

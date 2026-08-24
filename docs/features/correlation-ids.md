@@ -15,7 +15,7 @@ Every message journey through the system now carries a shared `correlation_id` -
    - `agent/agent_session_queue.py` stores it in the AgentSession via `_push_agent_session()` and reads it back in `_execute_agent_session()` for use as a log prefix
    - `agent/session_executor.py` reads `session.correlation_id` and threads it into session-event payloads for tracing (replacing the internally-generated `request_id`); the `get_agent_response_sdk()` call site described here was deleted in #2000 along with the rest of the dead SDK path
    - `bridge/session_transcript.py` includes it in the transcript file header
-   - `bridge/session_logs.py` receives it via `extra_context` in snapshot metadata
+   - `agent/session_logs.py` receives it via `extra_context` in snapshot metadata
 
 4. **Auto-continue inheritance**: The delete-and-recreate copy set is derived from `AgentSession._meta`, so `correlation_id` is preserved across the pattern used by `_enqueue_continuation()`. Continuation sessions inherit the parent's correlation_id.
 

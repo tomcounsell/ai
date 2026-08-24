@@ -642,7 +642,7 @@ class TestStaleTermWordBoundary:
         "content",
         [
             "| `save_session_snapshot()` | `agent/session_logs.py` | (none) |",
-            "See `bridge/session_logs.py` for the re-export shim.",
+            "See `agent/session_logs.py` for the canonical module.",
             "The SessionLogs collection is plural.",
             "A `_RedisJob` wrapper carries the payload.",
         ],
