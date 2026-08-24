@@ -2,12 +2,12 @@
 
 Every prior attempt to sweep these tokens out of the tree died with the
 artifact that carried it: a diff-scoped grep can never see pre-existing text
-(#2833's closure criterion), and a filesystem walk that excludes
-`docs/plans/completed/` is only correct until the next teardown lands (#1643,
-#1924). This module is the first version of that gate meant to outlive the
-plan doc that motivated it -- the plan's own Verification rows are archived
-into `docs/plans/` at merge, which every sweep below (and this file's own
-enumeration) excludes by construction.
+(#2833's closure criterion), and a hardcoded exclusion of the completed-plan
+directory is only correct until that directory moves (#1643, #1924, and #2878,
+which moved it out of `docs/plans/` entirely). This module is the first version
+of that gate meant to outlive the plan doc that motivated it -- the plan's own
+Verification rows are archived at merge, which every sweep below (and this
+file's own enumeration) excludes by construction via `_EXCLUDED_DIRS`.
 
 Three assertions, all scoped to tracked content:
 
@@ -42,14 +42,14 @@ Three trade-offs, deliberate:
 - Enumeration is further scoped by suffix to `.py`/`.md`/`.yaml`/`.yml`/
   `.toml`, so a stale token sitting in a tracked file of any other suffix --
   shell scripts, JSON, HTML, plist, or plain text, 146 tracked files outside
-  `docs/plans/` in this repo today -- is invisible to every assertion here;
+  the excluded plan directories in this repo today -- is invisible to every assertion here;
   a stale token in a tracked `.sh` file was confirmed to slip through this
   way. `.yaml`/`.yml` themselves currently match no tracked hits --
   `config/reflections.yaml` is gitignored -- so the reflection registry's
   own name and cadence contract is actually pinned by
   `tests/integration/test_reflections_redis.py`, which asserts both the
   registered name and the 86400s interval, not by anything in this file.
-  No live occurrence exists outside `docs/plans/` today and every
+  No live occurrence exists outside the excluded plan directories today and every
   realistic reintroduction path is Python, Markdown, or YAML/TOML, so this
   suffix list is intentionally not widened here.
 
@@ -69,7 +69,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 THIS_FILE = Path(__file__).resolve()
 
 _SCOPED_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".toml"}
-_EXCLUDED_DIR = "docs/plans"
+
+# Plan documents are excluded by construction (see the module docstring): they
+# are point-in-time records that correctly name things as they were when
+# written. Both the live plan directory and the shipped-plan archive qualify.
+#
+# The archive is a SEPARATE entry rather than a longer prefix because it sits
+# outside `docs/plans/` (#2878) -- nine archived plans carry the tokens swept
+# below, so a single-prefix exclusion turns the move into three failures here.
+# This is precisely the "only correct until the next teardown lands" fragility
+# the docstring predicted; the fix is to keep this tuple in step with
+# `scripts/migrate_completed_plan.COMPLETED_PLANS_DIR`, not to widen a glob.
+_EXCLUDED_DIRS = ("docs/plans", "docs/archive/plans-completed")
 
 # The stale reflection name: hyphenated, distinct from the still-accurate
 # module path `scripts/popoto_index_cleanup.py` (underscored).
@@ -94,7 +105,7 @@ _NIGHTLY_TOKEN = "night" + "ly"
 
 def _tracked_files() -> list[Path]:
     """Return in-scope tracked files: repo-relative, extension-filtered,
-    excluding docs/plans and this guard file itself.
+    excluding every _EXCLUDED_DIRS prefix and this guard file itself.
     """
     result = subprocess.run(
         ["git", "ls-files", "-z"],
@@ -109,7 +120,7 @@ def _tracked_files() -> list[Path]:
             continue
         if Path(rel).suffix not in _SCOPED_SUFFIXES:
             continue
-        if rel.startswith(_EXCLUDED_DIR + "/") or rel == _EXCLUDED_DIR:
+        if any(rel == d or rel.startswith(d + "/") for d in _EXCLUDED_DIRS):
             continue
         abs_path = (REPO_ROOT / rel).resolve()
         if abs_path == THIS_FILE:
@@ -134,7 +145,7 @@ def _find_hits(token: str) -> list[str]:
 
 
 def test_no_stale_reflection_name():
-    """No tracked file outside docs/plans/ names the reflection by its old,
+    """No in-scope tracked file names the reflection by its old,
     unregistered name.
     """
     hits = _find_hits(_STALE_NAME_TOKEN)
@@ -142,8 +153,8 @@ def test_no_stale_reflection_name():
 
 
 def test_no_deleted_granite_package_path():
-    """No tracked file outside docs/plans/ references either deleted
-    granite package path.
+    """No in-scope tracked file references either deleted granite package
+    path.
     """
     all_hits: list[str] = []
     for token in _GRANITE_PATH_TOKENS:

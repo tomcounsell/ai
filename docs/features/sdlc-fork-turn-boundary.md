@@ -51,8 +51,8 @@ If two forks somehow call the guard at the same instant and both see "no PR," Gi
 
 Every defect above traces back to the same root cause: a `context: fork` skill has no enforced invariant that it must reach terminal state within its own turn. The identical background-then-await bug was fixed twice by point patches before this work, each time only in the skill that had most recently burned a pipeline:
 
-- `docs/plans/completed/critique_await_all_critics_barrier.md` fixed `do-plan-critique`, which spawned critics with `run_in_background: true` and could record a verdict before late critics finished, silently dropping their findings. The fix replaced background-and-await with an in-turn filesystem roster barrier.
-- `docs/plans/completed/sdlc-fork-issue-number-divert.md` established and documented the underlying failure class: a `context: fork` skill is a single non-resumable turn that loses session context if it doesn't finish its own work.
+- `docs/archive/plans-completed/critique_await_all_critics_barrier.md` fixed `do-plan-critique`, which spawned critics with `run_in_background: true` and could record a verdict before late critics finished, silently dropping their findings. The fix replaced background-and-await with an in-turn filesystem roster barrier.
+- `docs/archive/plans-completed/sdlc-fork-issue-number-divert.md` established and documented the underlying failure class: a `context: fork` skill is a single non-resumable turn that loses session context if it doesn't finish its own work.
 - `8542ffb19` fixed `do-build` and `do-sdlc`, the two skills the #1915 batch implicated, but left every other `context: fork` skill relying on the tool's background default with no mechanical guard against a future regression.
 
 This work generalizes the fix into an enforced invariant instead of a fourth point patch.
@@ -73,5 +73,5 @@ A revert of any part of `8542ffb19`, or a new fork skill added without the invar
 
 - [Headless Session Runner](headless-session-runner.md): the resumable `dev` subagent that calls leaf `context: fork` skills like `/do-build` directly
 - [Eng Session Architecture](eng-session-architecture.md): session-type routing for the Eng session that owns SDLC work
-- `docs/plans/completed/critique_await_all_critics_barrier.md`: prior art for the background-then-await bug class
-- `docs/plans/completed/sdlc-fork-issue-number-divert.md`: prior art establishing the fork-loses-context failure class
+- `docs/archive/plans-completed/critique_await_all_critics_barrier.md`: prior art for the background-then-await bug class
+- `docs/archive/plans-completed/sdlc-fork-issue-number-divert.md`: prior art establishing the fork-loses-context failure class

@@ -146,5 +146,5 @@ unchanged.
 - `.claude/commands/roles/_prime-rails.md` — `## Re-Verification on Resume`
 - `config/personas/segments/work-patterns.md` — resume caveat
 - `config/personas/engineer.md` — Stage Artifact Verification cross-reference
-- `docs/plans/completed/sdlc-2138.md` — full plan and recorded decision
+- `docs/archive/plans-completed/sdlc-2138.md` — full plan and recorded decision
 - #2136 — resume goal re-injection (sibling resume gap, tracked separately)

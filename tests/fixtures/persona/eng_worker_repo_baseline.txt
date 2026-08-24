@@ -815,7 +815,7 @@ For each APPROVED PR, spawn a merge agent. Each:
 1. Records pipeline state (`sdlc-tool stage-marker`, `sdlc-tool verdict record --stage REVIEW --verdict APPROVED`)
 2. Posts `## Review: Approved` PR comment if absent
 3. Invokes `/do-merge {N}` via Skill tool; falls back to `gh pr merge {N} --squash --delete-branch` if the gate refuses
-4. Migrates the plan to `docs/plans/completed/`
+4. Migrates the plan to `docs/archive/plans-completed/`
 5. Files any follow-up issues the reviewer requested
 6. Cleans the worktree (`git worktree remove .worktrees/{slug} --force; git branch -D session/{slug}`)
 

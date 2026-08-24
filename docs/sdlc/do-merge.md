@@ -158,7 +158,7 @@ python scripts/migrate_completed_plan.py --issue <closed-issue-number> --apply
 
 This resolves the plan by reading its `tracking:` frontmatter (not by guessing a
 filename from the branch slug — a slug≠filename mismatch never bites) and does a
-guarded `git mv` into `docs/plans/completed/`. The plan stays on `main` (not the
+guarded `git mv` into `docs/archive/plans-completed/`. The plan stays on `main` (not the
 branch) throughout the lifecycle — migrate it on `main` post-merge, the same as
 before, just via this command instead of a hand `git mv`.
 

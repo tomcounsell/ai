@@ -90,7 +90,7 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 
 ## Cross-References
 
-- Plan: [`docs/plans/compaction-hardening.md`](../plans/compaction-hardening.md) (migrated to `docs/plans/completed/` by `/do-merge` post-merge)
+- Plan: [`docs/plans/compaction-hardening.md`](../plans/compaction-hardening.md) (migrated to `docs/archive/plans-completed/` by `/do-merge` post-merge)
 - Issue: [#1127](https://github.com/tomcounsell/ai/issues/1127)
 - Hook: `agent/hooks/pre_compact.py`
 - Router guard: `agent/output_router.py::determine_delivery_action` (`last_compaction_ts` parameter, `"defer_post_compact"` action)

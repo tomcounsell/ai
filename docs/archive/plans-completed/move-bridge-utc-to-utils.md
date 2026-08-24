@@ -119,13 +119,13 @@ where `\s` is not a character class, so anchored patterns silently under-matched
 
 **Commits on main since issue was filed (touching referenced files):** none. `git log --since="2026-08-18T13:10:14Z"` is empty; `HEAD` is the same `a2d13de73` the issue recorded.
 
-**Active plans in `docs/plans/` overlapping this area:** none. Every `docs/plans/*.md` hit for `bridge.utc` is under `docs/plans/completed/`.
+**Active plans in `docs/plans/` overlapping this area:** none. Every plan-document hit for `bridge.utc` is in the shipped-plan archive `docs/archive/plans-completed/`, not in live `docs/plans/`.
 
 **Notes:** The recon that grounds this plan was added to issue #2867 as a `## Recon Summary` section during this stage, after re-measuring each figure independently.
 
 ## Prior Art
 
-- **#542 / `docs/plans/completed/542-utc-timestamp-normalization.md`** — established the tz-aware-UTC convention and created `bridge/utc.py` in the first place. It settled the *semantics* of these four functions and never revisited the module's location. Nothing there argues for `bridge/` as the home; the placement is incidental to that plan's scope.
+- **#542 / `docs/archive/plans-completed/542-utc-timestamp-normalization.md`** — established the tz-aware-UTC convention and created `bridge/utc.py` in the first place. It settled the *semantics* of these four functions and never revisited the module's location. Nothing there argues for `bridge/` as the home; the placement is incidental to that plan's scope.
 - **#777 / hotfix `9e3a64f5`** — added `to_unix_ts` as the single source of truth for naive-datetime coercion, and deliberately left three older inline copies (`monitoring/session_watchdog._to_timestamp:52`, `agent/session_health._ts:398`, `ui/data/sdlc._safe_float:803`) untouched. That decision stands and this plan does not disturb it. **The middle name is corrected here.** Every earlier draft wrote `agent/session_health._ts`, a function that does not exist in that file and, per `git log -S'_to_ts' -- agent/session_health.py`, never did. The real helper is `_ts` at `agent/session_health.py:398`, and it does carry the `val.tzinfo is None` guard the claim describes, so the substance was right and only the name was wrong. The stale name was inherited verbatim from `docs/features/utc-timestamps.md:85` — the same line task 6 already rewrites for the path change, so the fix costs nothing extra there. (The `tools/agent_session_scheduler._to_ts` named elsewhere on that doc line is a *different*, real function at `tools/agent_session_scheduler.py:42`; do not "correct" it.)
 - **PR #2610** (merged 2026-08-07) — datetime age coercion fixes in the same helper. Changed behavior inside `to_unix_ts`, not its location.
 - No closed issue or merged PR has previously proposed relocating this module, and no `kernel/` package has ever existed in this repo. There is no failed prior attempt to learn from, so this plan has no **Why Previous Fixes Failed** section.
@@ -651,14 +651,14 @@ reason.
 
 - [ ] Update the moved module's docstring so it no longer reads as bridge-local, and state that it is dependency-free by contract because standalone `tools/` packages import it. (Task 1.)
 - [ ] **All 15 comment and docstring references inside source files are owned by task 4, not by the documentation pass.** They are enumerated there with file:line and spelling. They live under the completeness gate — unlike `docs/` prose, a missed one keeps `git grep` red — so they are sequenced before the guard test and the docs pass rather than after. This includes `agent/session_stall_classifier.py:11` and the two-line comment above `tests/unit/test_session_stall_classifier.py:300`, both of which the first draft filed here.
-- [ ] Leave `docs/plans/completed/*.md` untouched. Those are historical records of shipped work and describe the code as it was when they shipped. They are excluded by pathspec from every gate.
+- [ ] Leave `docs/archive/plans-completed/*.md` untouched. Those are historical records of shipped work and describe the code as it was when they shipped. They are excluded by pathspec from every gate.
 
 ## Success Criteria
 
 - [ ] `utils/utc.py` exists and exports `utc_now`, `to_local`, `utc_iso`, `to_unix_ts` with unchanged signatures and bodies.
 - [ ] `bridge/utc.py` does not exist. No shim, no re-export, no alias anywhere in the repo.
 - [ ] **`git grep -lE 'bridge[./]utc|from bridge import utc' -- '*.py' | wc -l` prints `0`.** This single number covers all 59 import statements and all 19 non-import reference lines, in both the dotted and path spellings. It is the completeness proof for the whole change.
-- [ ] `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' | wc -l` prints `0`. (`docs/plans/completed/*.md` is deliberately excluded — those are shipped history.)
+- [ ] `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' | wc -l` prints `0`. (`docs/archive/plans-completed/*.md` is deliberately excluded — those are shipped history.)
 - [ ] `tools/selfie`, `tools/sms_reader`, and `tools/test_scheduler` have zero imports from `bridge`, `agent`, `worker`, `models`, `monitoring`, or `reflections` — including inside their `tests/` directories and including function-local imports. The guard enforces a **superset**: it also forbids `config`, `analytics`, and `ui`. `config` is the one that matters, at 214 modules against `utils`'s 2 (spike-1); the issue's list omits it, so this is stated as an addition rather than smuggled in as an inherited requirement.
 - [ ] `tests/unit/test_public_api_contract.py` passes with the `("utils.utc", "utc_now")` key.
 - [ ] `tests/unit/test_utc.py` passes with the same collected test count as before the move.
@@ -832,7 +832,7 @@ dotted-only rule misses:**
 - Update `docs/features/session-lifecycle.md:398` — `bridge.utc.utc_now()` → `utils.utc.utc_now()`.
 - Replace the **31** `bridge/utc.py` path strings in `site/assets/graph.js` (node ids, `filePath` fields, and edge endpoints) with `utils/utc.py`.
 - (`agent/session_stall_classifier.py:11` moved to task 4 — it is a source-file docstring and belongs with the other 14 prose sites, under the completeness gate rather than in the docs pass.)
-- Leave `docs/plans/completed/*.md` untouched — they record shipped history and are deliberately excluded from every gate in this plan.
+- Leave `docs/archive/plans-completed/*.md` untouched — they record shipped history and are deliberately excluded from every gate in this plan.
 - Verify: `git grep -lE 'bridge[./]utc' -- 'docs/features/*.md' 'site/assets/graph.js' | wc -l` prints `0`. Measured at `f3fc46c8c` it prints **3**, so this row can fail.
 - **Commit checkpoint 5.**
 
@@ -915,7 +915,7 @@ imports the module and succeeds with a wrong path still in place; only execution
 raises. `tests/integration/` needs Redis, which is why this row belongs to the
 task-7 validator rather than the builder's checkpoint loop.
 
-**Excluded from every gate on purpose:** `docs/plans/completed/*.md` (shipped
+**Excluded from every gate on purpose:** `docs/archive/plans-completed/*.md` (shipped
 history) and this plan document itself, which quotes the old path throughout. All
 gates are scoped by pathspec so neither can turn a row red.
 

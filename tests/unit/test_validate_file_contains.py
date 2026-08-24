@@ -125,13 +125,15 @@ class TestInScope:
         "target,expected",
         [
             ("docs/plans/a.md", True),
-            ("docs/plans/completed/a.md", True),
+            ("docs/plans/critiques/a.md", True),
             ("docs\\plans\\a.md", True),
             ("/abs/checkout/docs/plans/a.md", True),
             ("docs/features/a.md", False),
             ("docs/plans/a.py", False),
             ("tools/foo.py", False),
             ("docs/plansomething/a.md", False),
+            # Archived plans are history, not live plans (#2878).
+            ("docs/archive/plans-completed/a.md", False),
             ("docs/plans_archive/old.md", False),
             ("a.md", False),
         ],

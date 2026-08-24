@@ -9,8 +9,10 @@ indefinitely, indistinguishable from live work. A 2026-08-06 audit of 29 open
 ``bug`` issues found exactly one stale issue, and it was stale because of a
 hotfix rather than any merged PR.
 
-**The rule.** A ``git commit`` on ``main`` that stages any file outside
-``docs/plans/`` must say what it does to the issue tracker. One of:
+**The rule.** A ``git commit`` on ``main`` that stages any file outside the
+plan directories (``docs/plans/`` and the completed-plan archive
+``docs/archive/plans-completed/``) must say what it does to the issue tracker.
+One of:
 
 - a closing keyword and issue -- ``Closes #123`` / ``Fixes #123`` /
   ``Resolves #123``. GitHub auto-closes on push to the default branch.
@@ -23,9 +25,10 @@ ambiguity the gate exists to remove. ``tools/sdlc_stage_query.py`` already
 refuses to treat a bare mention as a link on the PR side; this is the same
 judgement on the hotfix side.
 
-**Why ``docs/plans/`` is exempt.** Plan-document commits (``Migrate completed
-plan: X``, ``Plan (slug): ...``) are the bulk of legitimate direct-to-``main``
-traffic and essentially never resolve an issue by themselves. Exempting them
+**Why the plan directories are exempt.** Plan-document commits (``Migrate
+completed plan: X``, ``Plan (slug): ...``) are the bulk of legitimate
+direct-to-``main`` traffic and essentially never resolve an issue by
+themselves. Exempting them
 keeps the hotfix path fast, which is the whole reason it exists. Everything
 else -- source, tests, config, skills, feature docs, runbooks -- is in scope.
 Skill and doc files are deliberately NOT exempt: commit ``f695d2bed`` ("Hotfix
@@ -75,7 +78,12 @@ from pathlib import Path
 
 # Paths whose commits never need a disposition. Directory prefixes, matched
 # against git's forward-slash-separated paths from the repo root.
-EXEMPT_PREFIXES = ("docs/plans/",)
+#
+# Both endpoints of the plan lifecycle are listed, and both are load-bearing:
+# a `Migrate completed plan: X` commit is a rename, so git stages the deletion
+# under `docs/plans/` AND the addition under the archive. Exempting only one
+# side refuses the mover's own commit (#2878).
+EXEMPT_PREFIXES = ("docs/plans/", "docs/archive/plans-completed/")
 
 # Ceiling on the local `git` reads below. Named rather than inline because this
 # script runs as a git hook in a bare environment and cannot import
@@ -114,7 +122,7 @@ Add ONE of these to the commit message:
   Refs #123            this commit touches #123 but does NOT resolve it
   No-issue: <reason>   nothing to link, and here is why
 
-Staged files outside docs/plans/ ({count}):
+Staged files outside the plan directories ({count}):
 {files}
 
 Bypass with `git commit --no-verify` if this gate is wrong for your case.
