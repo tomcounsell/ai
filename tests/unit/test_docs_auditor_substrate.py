@@ -913,6 +913,68 @@ class TestExistenceInvariant:
         assert withheld == []
         assert "headless_runner.py" in (repo / bare_doc).read_text()
 
+    def test_nested_name_resolvable_by_suffix_passes(self, git_repo):
+        """Resolution order for a multi-segment ref, step 2: suffix match (#2936).
+
+        A nested ref is often written package-relative rather than rooted at the
+        repo root. Resolving against ``repo_root`` alone reads it as absent and
+        over-withholds.
+        """
+        repo = git_repo
+        doc = repo / "docs" / "features" / "nested.md"
+        doc.write_text("The runtime lives in the runner module.\n")
+        (repo / ".claude" / "hooks" / "hook_utils").mkdir(parents=True)
+        (repo / ".claude" / "hooks" / "hook_utils" / "hook_target.py").write_text("")
+
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/nested.md"),
+            repo,
+            [(re.compile(r"\brunner\b"), "hook_utils/hook_target.py")],
+        )
+
+        assert applied == 1
+        assert withheld == []
+        assert "hook_utils/hook_target.py" in doc.read_text()
+
+    @pytest.mark.parametrize(
+        ("owner", "case"),
+        [
+            pytest.param(None, "absent-everywhere", id="absent-everywhere"),
+            pytest.param("pkg/myhook_utils/hook_target.py", "near-miss", id="component-near-miss"),
+        ],
+    )
+    def test_nested_name_without_component_anchored_owner_is_withheld(self, git_repo, owner, case):
+        """The suffix fallback must not weaken the detector.
+
+        ``absent-everywhere`` is the #2711 shape; ``component-near-miss`` pins the
+        boundary rule — ``myhook_utils/hook_target.py`` does not own
+        ``hook_utils/hook_target.py``.
+        """
+        repo = git_repo
+        doc = repo / "docs" / "features" / "nested_absent.md"
+        doc.write_text("The runtime lives in the runner module.\n")
+        if owner is not None:
+            path = repo / owner
+            path.parent.mkdir(parents=True)
+            path.write_text("")
+
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/nested_absent.md"),
+            repo,
+            [(re.compile(r"\brunner\b"), "hook_utils/hook_target.py")],
+        )
+
+        assert applied == 0
+        assert withheld == [
+            {
+                "doc": "docs/features/nested_absent.md",
+                "old": r"\brunner\b",
+                "new": "hook_utils/hook_target.py",
+                "reason": "target-absent",
+            }
+        ], case
+        assert "hook_utils/hook_target.py" not in doc.read_text()
+
     def test_ambiguous_bare_name_passes_and_debug_logs(self, git_repo, caplog):
         """Resolution order step 2, ambiguity ruling: >=1 match passes (#2759 AC2).
 
@@ -1030,11 +1092,12 @@ class TestExistenceInvariant:
     def test_dir_prefixed_decisions_unaffected_by_degraded_index(
         self, repo, doc, clear_basename_cache, failure
     ):
-        """Degradation is scoped to bare names; ``dir/file.py`` never consults the index.
+        """A degraded index changes no ``dir/file.py`` verdict, in either direction.
 
-        The fallback must not leak into the path class that already worked, in
-        either direction: an absent dir-prefixed target still withholds and a
-        present one still applies.
+        Nested refs consult the index too since #2936 (suffix resolution), but only
+        after the direct ``repo_root`` check: an absent dir-prefixed target still
+        withholds when the index is unavailable, and a present one still applies
+        without ever needing it.
         """
         (repo / "agent" / "renamed.py").write_text("")
         with patch.object(docs_auditor.subprocess, "run", side_effect=lambda *a, **k: failure()):
@@ -1623,6 +1686,29 @@ class TestDeletedTargetFiltering:
         content = "The module `agent/inline_ref_xyz.py` is referenced inline in prose.\n"
         findings = _mk_finding(content, repo)
         assert len(findings) == 1
+
+    def test_package_relative_path_resolving_by_suffix_not_flagged(self, git_repo: Path):
+        """The #2936 false positive: a correct ref not rooted at the repo root.
+
+        ``docs/features/README.md`` names the hook helper by its package-relative
+        path; the module really lives under ``.claude/hooks/``. Resolving against
+        ``repo_root`` alone reported a live file as deleted.
+        """
+        repo = git_repo
+        (repo / ".claude" / "hooks" / "hook_utils").mkdir(parents=True)
+        (repo / ".claude" / "hooks" / "hook_utils" / "hook_target.py").write_text("x = 1\n")
+        content = "## Architecture\n\nTargets resolve via `hook_utils/hook_target.py`.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_component_boundary_near_miss_still_flagged(self, git_repo: Path):
+        """Suffix matching is anchored on path components, not raw string ends."""
+        repo = git_repo
+        (repo / "pkg" / "myhook_utils").mkdir(parents=True)
+        (repo / "pkg" / "myhook_utils" / "hook_target.py").write_text("x = 1\n")
+        content = "## Architecture\n\nTargets resolve via `hook_utils/hook_target.py`.\n"
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+        assert "hook_utils/hook_target.py" in findings[0]["title"]
 
     def test_rename_destination_reference_is_reported(self, git_repo: Path):
         """A deleted rename destination must now reach the human-facing report.

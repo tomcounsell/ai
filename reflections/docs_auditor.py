@@ -521,29 +521,33 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
 # invariant (#2759) — the #2711 corruption shape minus its directory prefix.
 _PATH_REF_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
 
-# Basename -> number of owning paths, built once per repo root from the git index.
+# Basename -> the paths that own it, built once per repo root from the git index.
 # Keyed on the resolved ``repo_root`` so distinct checkouts (and distinct test
 # ``tmp_path`` roots) never share an index. Cleared at the top of every ``audit()``
 # run so a long-lived process does not answer from a stale snapshot.
-_BASENAME_INDEX_CACHE: dict[Path, dict[str, int]] = {}
+_BASENAME_INDEX_CACHE: dict[Path, dict[str, list[str]]] = {}
 
 
-def _repo_basename_index(repo_root: Path) -> dict[str, int]:
-    """Map every tracked-or-untracked file's basename to how many paths own it.
+def _repo_paths_by_basename(repo_root: Path) -> dict[str, list[str]]:
+    """Map every tracked-or-untracked file's basename to the paths that own it.
 
     Built from ``git ls-files --cached --others --exclude-standard``: one
     subprocess, ``.gitignore`` respected for free, and files added but not yet
     committed still counted (a doc may reference a file added in the same change).
 
+    The single scan behind both name oracles — bare-name resolution
+    (``_repo_basename_index``) and suffix resolution (``_suffix_owners``) — so the
+    two can never disagree about what the repo contains.
+
     On any subprocess failure the index degrades to empty and a warning is logged;
-    bare-name resolution then falls back to the doc-relative check alone.
+    name resolution then falls back to the direct on-disk checks alone.
     """
     key = repo_root.resolve()
     cached = _BASENAME_INDEX_CACHE.get(key)
     if cached is not None:
         return cached
 
-    index: dict[str, int] = {}
+    index: dict[str, list[str]] = {}
     try:
         proc = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
@@ -554,8 +558,8 @@ def _repo_basename_index(repo_root: Path) -> dict[str, int]:
         )
         if proc.returncode != 0:
             logger.warning(
-                "docs_auditor: git ls-files failed in %s (rc=%s): %s — bare-name "
-                "existence falls back to doc-relative resolution only",
+                "docs_auditor: git ls-files failed in %s (rc=%s): %s — name "
+                "existence falls back to direct on-disk resolution only",
                 key,
                 proc.returncode,
                 (proc.stderr or "").strip(),
@@ -564,17 +568,42 @@ def _repo_basename_index(repo_root: Path) -> dict[str, int]:
             for line in proc.stdout.splitlines():
                 name = line.rsplit("/", 1)[-1]
                 if name:
-                    index[name] = index.get(name, 0) + 1
+                    index.setdefault(name, []).append(line)
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning(
-            "docs_auditor: git ls-files errored in %s: %s — bare-name existence "
-            "falls back to doc-relative resolution only",
+            "docs_auditor: git ls-files errored in %s: %s — name existence "
+            "falls back to direct on-disk resolution only",
             key,
             e,
         )
 
     _BASENAME_INDEX_CACHE[key] = index
     return index
+
+
+def _repo_basename_index(repo_root: Path) -> dict[str, int]:
+    """Map every tracked-or-untracked file's basename to how many paths own it."""
+    return {name: len(paths) for name, paths in _repo_paths_by_basename(repo_root).items()}
+
+
+def _suffix_owners(ref: str, repo_root: Path) -> list[str]:
+    """Repo paths whose trailing path components are exactly ``ref``.
+
+    A multi-segment reference is often written package-relative rather than rooted
+    at the repo root — ``hook_utils/hook_target.py`` names a module that lives at
+    ``.claude/hooks/hook_utils/hook_target.py`` (#2936). Resolving such a ref
+    against ``repo_root`` alone reads it as deleted.
+
+    The match is anchored on **path-component boundaries**: a path owns ``ref``
+    only if it equals ``ref`` or ends with ``"/" + ref``, so ``utils/target.py``
+    never resolves via ``myutils/target.py``.
+    """
+    basename = ref.rsplit("/", 1)[-1]
+    return [
+        path
+        for path in _repo_paths_by_basename(repo_root).get(basename, [])
+        if path == ref or path.endswith("/" + ref)
+    ]
 
 
 def _absent_new_path_refs(
@@ -589,7 +618,10 @@ def _absent_new_path_refs(
 
     Resolution order:
 
-    - A ref containing ``/`` resolves against ``repo_root`` alone, exactly as before.
+    - A ref containing ``/`` resolves first against ``repo_root``, then by
+      component-anchored suffix match over the ``git ls-files`` index (#2936),
+      because a multi-segment ref is often written package-relative
+      (``hook_utils/hook_target.py``) rather than rooted at the repo root.
     - A **bare** ref (no ``/``, #2759) resolves first against the doc's own directory
       (``repo_root / doc_path.parent / ref``), because a bare name in prose is most
       often a sibling; then against the ``git ls-files`` basename index.
@@ -603,8 +635,19 @@ def _absent_new_path_refs(
     absent: list[str] = []
     for ref in sorted(set(_PATH_REF_RE.findall(candidate)) - original_refs):
         if "/" in ref:
-            if not (repo_root / ref).exists():
+            if (repo_root / ref).exists():
+                continue
+            owners = _suffix_owners(ref, repo_root)
+            if not owners:
                 absent.append(ref)
+            elif len(owners) > 1:
+                logger.debug(
+                    "docs_auditor: nested ref %r in %s resolves by suffix to %d paths — "
+                    "ambiguous but present, allowed through",
+                    ref,
+                    doc_path,
+                    len(owners),
+                )
             continue
         if (repo_root / doc_path.parent / ref).exists():
             continue
@@ -876,9 +919,10 @@ def _is_documented_deletion(
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
     """File issues for references to deleted targets.
 
-    Suppresses three classes of false positive before emitting a finding:
+    Suppresses four classes of false positive before emitting a finding:
     placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
-    code blocks, and paths under a deletion-recording heading or deletion prose.
+    code blocks, paths under a deletion-recording heading or deletion prose, and
+    package-relative paths that resolve by component-anchored suffix (#2936).
     Every suppressed match is logged at DEBUG so operators can audit the filter.
     """
     findings: list[dict] = []
@@ -909,6 +953,21 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             )
             continue
         if (repo_root / path).exists():
+            continue
+        # A reference need not be rooted at the repo root to be correct: prose names
+        # a module package-relative (`hook_utils/hook_target.py`) as often as it
+        # names it from the top. Any component-anchored suffix owner means the
+        # target is real, and — as on the write path — one or more owners resolves
+        # the name; ambiguity was never the failure mode this detector guards (#2936).
+        owners = _suffix_owners(path, repo_root)
+        if owners:
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(resolves by suffix to %s)",
+                path,
+                doc_path,
+                ", ".join(owners),
+            )
             continue
         findings.append(
             {
@@ -1190,7 +1249,7 @@ def audit(
         Dict with ``status``, ``files_touched``, ``fixes_applied``,
         ``issues_filed``, ``pr_url``.
     """
-    # The bare-name existence oracle is a per-*run* snapshot: a long-lived process
+    # The name existence oracle is a per-*run* snapshot: a long-lived process
     # must not answer from an index built before the last commit (#2759).
     _BASENAME_INDEX_CACHE.clear()
 
