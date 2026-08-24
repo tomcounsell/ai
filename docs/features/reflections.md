@@ -869,6 +869,8 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
 
+`ReflectionIgnore` and `PRReviewAudit` each live in exactly one module (`models/reflection_ignore.py`, `models/pr_review_audit.py`); there is no `models/reflections.py` compatibility shim. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import these function-locally, straight from their canonical modules. Removing the shim also removes an import-order hazard it created for tests: patching `models.reflections.ReflectionIgnore` only affected code paths that happened to import the shim fresh after the patch, so whether a `unittest.mock.patch` took effect depended on xdist worker import order rather than on the patch target being correct. A wrong patch target now fails loudly (there is only one module object holding each model) instead of silently falling through to an unintended real-Redis integration test.
+
 ## Dependencies
 
 | Dependency | Used By | Required |
