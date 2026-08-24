@@ -34,7 +34,7 @@ reflections:
     every: 60s
     priority: high
     execution_type: function
-    callable: "agent.sustainability.circuit_health_gate"
+    callable: "reflections.agents.circuit_health_gate.run"
     enabled: true
     output_sink: log_only
 ```
@@ -476,7 +476,8 @@ The package is organized into group directories, with one file per reflection. E
 | `reflections.pm_briefings` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
 | `reflections.docs_auditor` | Unified docs auditor substrate (see [Docs Auditor](docs-auditor.md)) |
 
-> **Registry compatibility:** The old bundle module names (`reflections.maintenance`, `reflections.auditing`, `reflections.task_management`, `reflections.memory_management`) remain as thin re-export shims. Each re-exports the relocated reflections under their original `run_*` names so `config/reflections.yaml`'s historical dotted callable paths still resolve without a vault edit. `agent/sustainability.py` is likewise a re-export shim for the 5 agent reflections (keeping `send_hibernation_notification`, `_get_project_key`, and `_get_redis` defined in place as they are used by `agent/agent_session_queue.py`).
+> **Registry compatibility:** The old bundle module names (`reflections.maintenance`, `reflections.auditing`, `reflections.task_management`, `reflections.memory_management`) remain as thin re-export shims. Each re-exports the relocated reflections under their original `run_*` names so `config/reflections.yaml`'s historical dotted callable paths still resolve without a vault edit.
+> **Migrating a registry callable:** `config/reflections.yaml` is gitignored, so a rename cannot ship as a file edit — a hand-edit never reaches other machines and is clobbered by the next vault→config sync. Ship it as a tracked, idempotent rewrite step instead: `scripts/migrate_reflections_callables.py`, wired at `scripts/update/run.py` Step 1.659, is the worked example (issue #2875). It rewrites **both** the vault original and the `config/` copy, because `env_sync.sync_reflections_yaml` refreshes the config copy only when it is *older* than the vault — a newer config copy otherwise masks a vault-only edit indefinitely. The step also import-checks every migration target before writing, since `ReflectionEntry.validate` only asserts the callable string is non-empty and a bad path fails silently at execution time inside `run_reflection`'s broad `except`.
 
 ## State & Persistence
 
