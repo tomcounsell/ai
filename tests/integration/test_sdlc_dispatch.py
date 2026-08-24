@@ -25,7 +25,7 @@ from agent.sdlc_router import (
     decide_next_dispatch,
 )
 from tests.db_claim import subprocess_env
-from tools.sdlc_next_skill import decide
+from tools.sdlc_next_skill import NOT_RECORDED_REASON, decide
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -73,11 +73,18 @@ def _core_decide(stage_states: dict, meta: dict | None = None) -> dict:
             "skill": result.skill,
             "reason": result.reason,
             "row_id": result.row_id,
-            "dispatched": True,
+            "decision": "dispatch",
+            "recorded": False,
+            "recorded_reason": NOT_RECORDED_REASON,
         }
     elif isinstance(result, Blocked):
-        return {"blocked": True, "reason": result.reason, "guard_id": result.guard_id}
-    return {"error": "unknown", "dispatched": False}
+        return {
+            "blocked": True,
+            "decision": "blocked",
+            "reason": result.reason,
+            "guard_id": result.guard_id,
+        }
+    return {"error": "unknown", "decision": "error"}
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +241,7 @@ class TestRecordChangesThenPatchThenReview:
         meta = {"pr_number": 99, "latest_review_verdict": "CHANGES_REQUESTED"}
         result = _decide_with_fixture(states, meta)
         assert result.get("skill") == "/do-patch", f"Expected /do-patch, got: {result}"
-        assert result.get("dispatched") is True
+        assert result.get("decision") == "dispatch"
 
     def test_patch_applied_stale_verdict_dispatches_review(self):
         """Step 2: after patch, stale verdict (recorded before patch) → /do-pr-review (row 8b)."""
@@ -261,7 +268,7 @@ class TestRecordChangesThenPatchThenReview:
         }
         result = _decide_with_fixture(states, meta)
         assert result.get("skill") == "/do-pr-review", f"Expected /do-pr-review, got: {result}"
-        assert result.get("dispatched") is True
+        assert result.get("decision") == "dispatch"
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +285,7 @@ class TestNextSkillOutputSchema:
         # Row 1 should fire for empty stage_states
         assert "skill" in result, f"'skill' key missing: {result}"
         assert "reason" in result, f"'reason' key missing: {result}"
-        assert result.get("dispatched") is True, f"'dispatched' not True: {result}"
+        assert result.get("decision") == "dispatch", f"'decision' not 'dispatch': {result}"
 
     def test_blocked_result_has_blocked_key(self):
         """A blocked result must have the 'blocked' key set to True."""
@@ -306,7 +313,8 @@ class TestNextSkillOutputSchema:
         ):
             result = decide(issue_number=None, session_id=None)
         assert "error" in result, f"Expected error key in result: {result}"
-        assert result.get("dispatched") is False, f"Expected dispatched=False: {result}"
+        assert result.get("decision") == "error", f"Expected decision='error': {result}"
+        assert "dispatched" not in result, f"Ambiguous 'dispatched' key resurfaced: {result}"
 
 
 # ---------------------------------------------------------------------------
