@@ -95,27 +95,10 @@ Two rules:
   to [`features/archived/`](features/archived/) and drop its index row rather than leaving
   a stale copy linked from an active page.
 
-## Documentation Index
-
-### Operations
-
-| Document | Description |
-|----------|-------------|
-| [Deployment](features/deployment.md) | Multi-instance deployment configuration |
-| [Reflections System](features/reflections.md) | Autonomous maintenance process |
-
-### Quality & Testing
-
-| Document | Description |
-|----------|-------------|
-| [Quality Standards](guides/quality-standards.md) | Tool quality standards and patterns |
-| [Tools Reference](tools-reference.md) | Complete tool documentation |
-
-### Postmortems
-
-| Document | Description |
-|----------|-------------|
-| [2026-04-24: PM SDLC Bypass](postmortems/2026-04-24-pm-sdlc-bypass.md) | PM agent implemented code directly instead of routing through SDLC |
+There is deliberately no second index here. The [feature index](features/README.md) is the
+one catalog of feature docs, and every other directory in the table above is browsable on
+its own. A hand-picked shortlist in this file would be a second place for the same
+information, and would go stale the first time someone added a doc without remembering it.
 
 ## Key Principles
 
@@ -152,8 +135,9 @@ PERPLEXITY_API_KEY=pplx-...
 ```
 
 `ANTHROPIC_API_KEY` is still required, but only for direct API calls that are not agent
-turns — inbound image vision, the reflections that call an LLM, intent classification,
-memory extraction, and the PM briefing builder. Most of those resolve the key through
+turns — among them inbound image vision, the reflections that call an LLM, intent
+classification, memory extraction, read-the-room, the promise gate, session completion,
+and the PM briefing builder. Most of those resolve the key through
 `utils/api_keys.py::get_anthropic_api_key`; the rest read `ANTHROPIC_API_KEY` from the
 environment directly. To see the live set rather than a list that goes stale:
 
