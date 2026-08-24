@@ -15,10 +15,13 @@ Session types (permission model):
     Participates in group conversations without orchestration authority.
 
 Parent-child relationship:
-  parent_agent_session_id is the canonical parent link.
-  parent_session_id and parent_chat_session_id are deprecated aliases that
-  delegate to parent_agent_session_id via property.
-  Use create_child() to spawn child sessions.
+  parent_agent_session_id is the sole parent link; get_parent_session() and
+  get_child_sessions() traverse it. Use create_child() to spawn child sessions.
+
+Event storage:
+  session_events is the sole event log (a list of SessionEvent dicts, see
+  models/session_event.py). Use append_event() to write and
+  models.session_event.format_event_lines() to render display strings.
 
 Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
   Non-terminal: pending -> running -> active -> dormant | waiting_for_children | superseded
@@ -836,32 +839,6 @@ class AgentSession(Model):
         if ec_fields and "extra_context" not in kwargs:
             kwargs["extra_context"] = ec_fields
 
-        # Map deprecated field names
-        if "work_item_slug" in kwargs and "slug" not in kwargs:
-            kwargs["slug"] = kwargs.pop("work_item_slug")
-        elif "work_item_slug" in kwargs:
-            kwargs.pop("work_item_slug")
-
-        if "last_activity" in kwargs and "updated_at" not in kwargs:
-            kwargs["updated_at"] = kwargs.pop("last_activity")
-        elif "last_activity" in kwargs:
-            kwargs.pop("last_activity")
-
-        if "scheduled_after" in kwargs and "scheduled_at" not in kwargs:
-            val = kwargs.pop("scheduled_after")
-            if isinstance(val, int | float):
-                kwargs["scheduled_at"] = datetime.fromtimestamp(val, tz=UTC)
-            else:
-                kwargs["scheduled_at"] = val
-        elif "scheduled_after" in kwargs:
-            kwargs.pop("scheduled_after")
-
-        # Map old field names to new ones  # legacy
-        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:  # legacy
-            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")  # legacy
-        elif "parent_job_id" in kwargs:  # legacy
-            kwargs.pop("parent_job_id")  # legacy
-
         # Schema diet (#1927): watchdog_unhealthy -> unhealthy_reason back-alias.
         if "watchdog_unhealthy" in kwargs and "unhealthy_reason" not in kwargs:
             kwargs["unhealthy_reason"] = kwargs.pop("watchdog_unhealthy")
@@ -871,62 +848,11 @@ class AgentSession(Model):
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
 
-        if "job_id" in kwargs:  # legacy
-            kwargs.pop("job_id")  # legacy
-
-        # Map old history to session_events
-        if "history" in kwargs and "session_events" not in kwargs:
-            kwargs["session_events"] = kwargs.pop("history")
-        elif "history" in kwargs:
-            kwargs.pop("history")
-
-        # Convert stage_states to a session event
-        stage_states_val = kwargs.pop("stage_states", None)
-        if stage_states_val is not None and "session_events" not in kwargs:
-            if isinstance(stage_states_val, str):
-                try:
-                    stages_dict = _json.loads(stage_states_val)
-                except (ValueError, TypeError):
-                    stages_dict = None
-            elif isinstance(stage_states_val, dict):
-                stages_dict = stage_states_val
-            else:
-                stages_dict = None
-            if stages_dict:
-                event = SessionEvent.stage_change("bulk", "init", stages_dict)
-                kwargs["session_events"] = [event.model_dump()]
-
-        # Convert commit_sha to a session event
-        commit_sha_val = kwargs.pop("commit_sha", None)
-        if commit_sha_val is not None:
-            events = kwargs.get("session_events", []) or []
-            event = SessionEvent.checkpoint(commit_sha_val)
-            events.append(event.model_dump())
-            kwargs["session_events"] = events
-
-        # Convert summary to a session event
-        summary_val = kwargs.pop("summary", None)
-        if summary_val is not None:
-            events = kwargs.get("session_events", []) or []
-            event = SessionEvent.summary(summary_val)
-            events.append(event.model_dump())
-            kwargs["session_events"] = events
-
-        # Remove dead fields silently. Note: fields removed by the schema
-        # diet (#1927 -- see scripts/migrate_schema_diet_fields.py's
-        # module docstring for the exact deleted-field list) do NOT need an
-        # entry here: Popoto's Model.__init__ silently drops any kwarg that
-        # doesn't match a declared field (verified empirically and matching
-        # the #1924 PTY-teardown precedent, which added no pop-list entries
-        # either), so an archive-restore payload carrying an old dead-field
-        # key never raises.
-        for dead in (
-            "depends_on",
-            "stable_agent_session_id",
-            "scheduling_depth",
-            "_qa_mode_legacy",
-        ):
-            kwargs.pop(dead, None)
+        # No pop-list for fields deleted by past schema changes (#2873, #1927,
+        # #1924). Popoto's Model.__init__ does ``self.__dict__.update(kwargs)``
+        # (popoto/models/base.py), so an unknown key lands harmlessly in the
+        # instance dict and never raises; encoding iterates ``_meta.fields``
+        # only, so it is never persisted and disappears on the next save.
 
         # Ensure created_at has a default (SortedField is not nullable)
         if "created_at" not in kwargs:
@@ -1555,11 +1481,6 @@ class AgentSession(Model):
         self.initial_telegram_message = itm
 
     @property
-    def sender(self) -> str | None:
-        """Alias for sender_name (SessionLog used 'sender')."""
-        return self.sender_name
-
-    @property
     def revival_context(self) -> str | None:
         """Extract revival_context from extra_context."""
         ec = self.extra_context
@@ -1994,13 +1915,6 @@ class AgentSession(Model):
             )
             return None
 
-    def get_parent_chat_session(self) -> "AgentSession | None":
-        """Backward-compat wrapper for get_parent_session().
-
-        Deprecated: Use get_parent_session() instead.
-        """
-        return self.get_parent_session()
-
     def get_child_sessions(self) -> list["AgentSession"]:
         """Return all child sessions linked via parent_agent_session_id."""
         try:
@@ -2008,13 +1922,6 @@ class AgentSession(Model):
         except Exception as e:
             logger.warning(f"Failed to query child sessions for {self.id}: {e}")
             return []
-
-    def get_dev_sessions(self) -> list["AgentSession"]:
-        """Backward-compat wrapper for get_child_sessions().
-
-        Deprecated: Use get_child_sessions() instead.
-        """
-        return self.get_child_sessions()
 
     # === Chat message log helpers (issue #1192) ===
 
@@ -2149,34 +2056,6 @@ class AgentSession(Model):
             )
 
     # === Event log helpers ===
-
-    def get_history_list(self) -> list:
-        """Get session_events as a list of formatted strings (backward compat)."""
-        events = self.session_events
-        if not isinstance(events, list):
-            return []
-        result = []
-        for event in events:
-            if isinstance(event, dict):
-                etype = event.get("event_type", "system")
-                text = event.get("text", "")
-                result.append(f"[{etype}] {text}")
-            elif isinstance(event, str):
-                result.append(event)
-        return result
-
-    # Keep private alias for internal callers
-    _get_history_list = get_history_list
-
-    @property
-    def history(self) -> list | None:
-        """Backward-compatible alias for session_events."""
-        return self.session_events
-
-    @history.setter
-    def history(self, value) -> None:
-        """Backward-compatible setter for session_events."""
-        self.session_events = value
 
     def append_event(self, event_type: str, text: str, data: dict | None = None) -> None:
         """Append a structured event to session_events.

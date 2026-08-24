@@ -93,3 +93,27 @@ class SessionEvent(BaseModel):
     def user(cls, text: str) -> "SessionEvent":
         """Create a user input event."""
         return cls(event_type=EventType.USER, text=text)
+
+
+def format_event_lines(events) -> list[str]:
+    """Render an ``AgentSession.session_events`` list as display strings.
+
+    Each dict event becomes ``"[{event_type}] {text}"``; flat legacy string
+    entries pass through unchanged; anything else is skipped. Callers that match
+    on the bracketed prefix (``agent/goal_gates.py``) depend on this exact shape.
+
+    Args:
+        events: The raw ``session_events`` value. Non-list input yields ``[]``.
+
+    Returns:
+        One display string per renderable event, in order.
+    """
+    if not isinstance(events, list):
+        return []
+    lines: list[str] = []
+    for event in events:
+        if isinstance(event, dict):
+            lines.append(f"[{event.get('event_type', 'system')}] {event.get('text', '')}")
+        elif isinstance(event, str):
+            lines.append(event)
+    return lines

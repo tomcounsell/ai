@@ -982,7 +982,8 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
     stages = _resolve_display_stages(session)
 
-    history_list = session.history if isinstance(session.history, list) else None
+    events = session.session_events
+    history_list = events if isinstance(events, list) else None
     events = _parse_history(history_list)
 
     from agent.session_health import _is_ledger

@@ -253,7 +253,7 @@ def auto_tag_session(session_id: str) -> None:
             new_tags.append("tested")
 
     # Rule 4: Reflections detection
-    sender = session.sender or ""
+    sender = session.sender_name or ""
     if "reflections" in sender.lower() or "reflections" in session_id.lower():
         new_tags.append("reflections")
 
