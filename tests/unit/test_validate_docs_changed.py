@@ -129,7 +129,7 @@ def test_trigger_word_only_in_preexisting_content_exits_0(git_repo: Path):
     Regression for issue #2133 / PR #2132 false positives (e.g. the
     "NO LEGACY CODE TOLERANCE" principle text living verbatim on main). Replaces
     the manual workaround noted in
-    docs/plans/completed/merge-gate-baseline-refresh.md:364.
+    docs/archive/plans-completed/merge-gate-baseline-refresh.md:364.
     """
     rel = "docs/features/principles.md"
     _commit_doc_on_main(

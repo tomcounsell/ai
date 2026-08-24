@@ -18,6 +18,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Ceiling on a single prerequisite check command. Named rather than inline: a
+# prerequisite check is arbitrary user-authored shell from a plan's table, so
+# this is the only thing bounding a hung check. Provisional and tunable.
+PREREQ_CHECK_TIMEOUT_SECONDS = 30
+
 
 def extract_prerequisites(plan_text: str) -> list[dict[str, str]]:
     """Extract prerequisite rows from the ## Prerequisites markdown table.
@@ -53,7 +58,7 @@ def extract_prerequisites(plan_text: str) -> list[dict[str, str]]:
             # `|` (shell pipes). The expectation is that check commands
             # are written without shell pipes — use Python with
             # urllib/requests, or wrap in bash -c '...' with escaped
-            # pipes. See docs/plans/completed/granite-interactive-tui-poc-results.md
+            # pipes. See docs/archive/plans-completed/granite-interactive-tui-poc-results.md
             # for examples.
             while i < len(lines):
                 row = lines[i].strip()
@@ -96,7 +101,7 @@ def run_checks(prerequisites: list[dict[str, str]]) -> tuple[bool, list[str]]:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=PREREQ_CHECK_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 report.append(f"  PASS: {req}")

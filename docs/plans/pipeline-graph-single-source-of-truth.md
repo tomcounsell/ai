@@ -49,7 +49,7 @@ One definition. Every Python consumer imports or derives; every doc cross-refere
 
 ## Prior Art
 
-- **#1216 / PR #1240**: *"SDLC routing is pattern-matching against a markdown table; pipeline graph is decorative"* → *"refactor: consolidate SDLC pipeline routing to a single source of truth"*. Diagnosed three drifting routing surfaces and replaced the markdown dispatch table with a `sdlc-tool next-skill` call. **Succeeded**, and is the structural template for this work. Its plan (`docs/plans/completed/pipeline-routing-consolidation.md:249`) states the deferral this plan picks up: *"Stage groups (Phase 3)... Touching dev-session boundaries, model selection, and PM steering protocol is its own architectural change."*
+- **#1216 / PR #1240**: *"SDLC routing is pattern-matching against a markdown table; pipeline graph is decorative"* → *"refactor: consolidate SDLC pipeline routing to a single source of truth"*. Diagnosed three drifting routing surfaces and replaced the markdown dispatch table with a `sdlc-tool next-skill` call. **Succeeded**, and is the structural template for this work. Its plan (`docs/archive/plans-completed/pipeline-routing-consolidation.md:249`) states the deferral this plan picks up: *"Stage groups (Phase 3)... Touching dev-session boundaries, model selection, and PM steering protocol is its own architectural change."*
 - **#900 / PR #909**: *"SDLC stage model selection and hard-PATCH builder session resume"* (merged 2026-04-11). Established the per-stage model table as **prose** and shipped the hard-PATCH resume mechanism. Relevant because spike-4 confirms that mechanism is real and must not be disturbed.
 - **#563**: pipeline graph routing not wired into runtime. **Partially addressed** by #1216.
 - **#704 / PR #744**: router and dashboard moved to `PipelineStateMachine` instead of artifact inference. **Succeeded** — this is why `ui/data/sdlc.py` is one of the two clean importers today.
@@ -201,21 +201,21 @@ How a stage's model reaches the process that runs it. The two seams are asymmetr
 - **Implementing multi-dispatch.** Filed as #2493. The `{"multi": true}` shape is documented in both skills and implemented in neither. Tempting to "just add it while we're in the JSON," but it drags in parallel-stage semantics, the `pthread` skill, and DOCS+PATCH concurrency safety.
 - **Refactoring `SessionRunnerSettings` wholesale.** Spike-3 found the *entire* group unread, not just the two model fields. Deleting two fields that contradict the new SSOT is in scope; auditing the whole settings group is not.
 - **Making the mermaid diagram generated.** `docs/assets/sdlc-pipeline.mmd` is the densest single restatement, so generating it from the graph is appealing. But it also encodes the deliberate `PATCH -.-> BUILD` annotation which is *not* in `PIPELINE_EDGES` by design — a generator would have to special-case it. Correct it by hand; leave generation alone.
-- **Chasing `docs/plans/completed/**`.** ~25 historical files restate the graph. They are archives of what was true when written.
+- **Chasing `docs/archive/plans-completed/**`.** ~25 historical files restate the graph. They are archives of what was true when written.
 - **Encoding the hard-PATCH "signals" in code.** They are model-judged prose by design (spike-4). Turning them into branching logic is a different project.
 
 ## Risks
 
 ### Risk 1: The guard test fires on legitimate deliberate subsets
 **Impact:** CI blocked by false positives on `GATE_STAGES`, `_ENG_WORKTREE_STAGES`, `_VERDICT_STAGES`, and the test files that legitimately restate the graph as assertions.
-**Mitigation:** The whitelist is part of the deliverable, not an afterthought: `tests/`, `docs/plans/completed/`, `docs/postmortems/`, `site/`, `.worktrees/`, `.claude/worktrees/`. Each remaining in-tree subset gets either a derivation or an inline comment justifying why it differs. Run the guard against current main first and triage every hit before landing it.
+**Mitigation:** The whitelist is part of the deliverable, not an afterthought: `tests/`, `docs/archive/plans-completed/`, `docs/postmortems/`, `site/`, `.worktrees/`, `.claude/worktrees/`. Each remaining in-tree subset gets either a derivation or an inline comment justifying why it differs. Run the guard against current main first and triage every hit before landing it.
 
 ### Risk 2: Deleting the persona table changes eng-session behavior
 **Impact:** `config/personas/engineer.md:389` is baked into every eng/dev system prompt. Removing it without a replacement instruction could leave sessions with no model guidance, silently defaulting to `opus` for every stage.
 **Mitigation:** The replacement instruction ships in the same change: the persona tells the session to use the `model` the router returned. Verify against the regenerated prompt baselines, and confirm `_resolve_session_model`'s fallback chain (`session.model` > `session_default_model` > `opus`) makes the failure mode conservative rather than broken.
 
 ### Risk 3: `agent/pipeline_graph.py` is a force-FULL critique path
-**Impact:** `.claude/skills-global/do-plan-critique/CRITICS.md:209` forces a full critique on any change to this file, and `docs/plans/completed/triage_first_critique.md:317,348` contains verification gates asserting `git diff` does **not** touch it. Those gates may fire.
+**Impact:** `.claude/skills-global/do-plan-critique/CRITICS.md:209` forces a full critique on any change to this file, and `docs/archive/plans-completed/triage_first_critique.md:317,348` contains verification gates asserting `git diff` does **not** touch it. Those gates may fire.
 **Mitigation:** Expected and correct — this is exactly the change that should get full scrutiny. Budget for 2+ review rounds. Check whether those completed-plan gates are still live anywhere before building.
 
 ### Risk 4: The env overlay becomes an unaudited production lever
@@ -364,7 +364,7 @@ The integration that *does* matter is the seam-B contract: `/do-sdlc` must be to
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Sweep: no file outside the graph module defines a ≥4-stage literal or restates a stage→model row
-- Whitelist `tests/`, `docs/plans/completed/`, `docs/postmortems/`, `site/`, `.worktrees/`, `.claude/worktrees/`
+- Whitelist `tests/`, `docs/archive/plans-completed/`, `docs/postmortems/`, `site/`, `.worktrees/`, `.claude/worktrees/`
 - Run against current main FIRST and triage every hit before landing
 - Produce a red-state proof: plant a violation, show the guard FAILS, paste output into the PR
 

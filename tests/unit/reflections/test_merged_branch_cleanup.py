@@ -186,7 +186,9 @@ class TestMigrationGate:
         # of the migration finding -- telling the operator to delete a plan the
         # same run just migrated is contradictory (PR #1903 review Nit).
         assert not any("Plan complete: complete-plan" in f for f in result["findings"])
-        assert any("complete-plan.md -> completed/" in f for f in result["findings"])
+        assert any(
+            f"complete-plan.md -> {mbc.COMPLETED_PLANS_DIR}/" in f for f in result["findings"]
+        )
 
     def test_unknown_issue_state_never_migrates(self, monkeypatch, tmp_path, plans_dir):
         """Regression test for Blocker 2: a gh outage/timeout (state "unknown")
@@ -273,7 +275,7 @@ class TestApplyOnMigrates:
     def test_apply_on_moves_plan_on_disk(self, monkeypatch, tmp_path):
         """End-to-end: with MIGRATION_APPLY_ENABLED armed (the shipped state as
         of the arm-reflection task), run() against a REAL git repo performs
-        the git mv -- the plan file actually lands in docs/plans/completed/.
+        the git mv -- the plan file actually lands in the archive.
         """
         assert mbc.MIGRATION_APPLY_ENABLED is True, (
             "arm-reflection armed this permanently; the reflection registry "
@@ -282,7 +284,9 @@ class TestApplyOnMigrates:
 
         repo = tmp_path / "repo"
         plans_dir = repo / "docs" / "plans"
-        (plans_dir / "completed").mkdir(parents=True)
+        plans_dir.mkdir(parents=True)
+        archive_dir = repo / mbc.COMPLETED_PLANS_DIR
+        archive_dir.mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
         _git(repo, "config", "user.email", "test@example.com")
         _git(repo, "config", "user.name", "Test")
@@ -308,7 +312,7 @@ class TestApplyOnMigrates:
             result = asyncio.run(mbc.run())
 
         assert not plan.exists(), "armed mode must perform the git mv"
-        assert (plans_dir / "completed" / "e2e-plan.md").exists()
+        assert (archive_dir / "e2e-plan.md").exists()
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == "", "the primitive commits its own git mv"
         assert any("e2e-plan.md" in f for f in result["findings"])
@@ -324,7 +328,9 @@ class TestApplyOnMigrates:
 
         repo = tmp_path / "repo"
         plans_dir = repo / "docs" / "plans"
-        (plans_dir / "completed").mkdir(parents=True)
+        plans_dir.mkdir(parents=True)
+        archive_dir = repo / mbc.COMPLETED_PLANS_DIR
+        archive_dir.mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
         _git(repo, "config", "user.email", "test@example.com")
         _git(repo, "config", "user.name", "Test")
@@ -350,7 +356,7 @@ class TestApplyOnMigrates:
             result = asyncio.run(mbc.run())
 
         assert plan.exists(), "report-only mode must never perform the git mv"
-        assert not (plans_dir / "completed" / "e2e-plan-off.md").exists()
+        assert not (archive_dir / "e2e-plan-off.md").exists()
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == "", "report-only mode must leave the tree clean"
         assert any("e2e-plan-off.md" in f for f in result["findings"])

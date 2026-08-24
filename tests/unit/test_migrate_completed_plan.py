@@ -2,7 +2,8 @@
 
 Covers Bug 1 fix: README-based display name extraction replacing .title() mangling.
 Also covers the path-independent migrate_plan_to_completed() primitive (issue
-#1900, Tier 0): guarded git-mv of a root plan into docs/plans/completed/.
+#1900, Tier 0): guarded git-mv of a root plan into the completed-plan
+archive (docs/archive/plans-completed/, #2878).
 """
 
 import contextlib
@@ -17,6 +18,7 @@ import pytest
 # Import the functions under test directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.migrate_completed_plan import (  # noqa: E402
+    COMPLETED_PLANS_DIR,
     extract_feature_doc_path,
     extract_feature_name_from_index,
     migrate_plan_to_completed,
@@ -250,9 +252,10 @@ class TestMigratePlanToCompleted:
     """
 
     def _init_repo(self, tmp_path: Path) -> Path:
-        """Create a bare-bones git repo with docs/plans/ + docs/plans/completed/."""
+        """Create a bare-bones git repo with docs/plans/ + the archive dir."""
         repo = tmp_path / "repo"
-        (repo / "docs" / "plans" / "completed").mkdir(parents=True)
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / COMPLETED_PLANS_DIR).mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
         _git(repo, "config", "user.email", "test@example.com")
         _git(repo, "config", "user.name", "Test")
@@ -271,7 +274,7 @@ class TestMigratePlanToCompleted:
         _git(repo, "commit", "-q", "-m", message)
 
     def test_closed_issue_plan_migrates(self, tmp_path):
-        """A plan on a clean main branch is git-mv'd into completed/, not unlinked."""
+        """A plan on a clean main branch is git-mv'd into the archive, not unlinked."""
         repo = self._init_repo(tmp_path)
         plan = self._write_plan(repo, "example-plan.md")
         self._commit_all(repo)
@@ -280,12 +283,12 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "migrated"
         assert not plan.exists()
-        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
         assert completed.exists()
         assert "example-plan.md" in completed.read_text()
         # Verify it was a tracked git mv, not a bare unlink: git status is clean
         # (the move + commit is fully recorded), and the file shows up under
-        # completed/ in the git history for HEAD.
+        # the archive in the git history for HEAD.
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == ""
         log = _git(repo, "log", "--oneline", "-1")
@@ -298,7 +301,7 @@ class TestMigratePlanToCompleted:
         must not look like a failure.
         """
         repo = self._init_repo(tmp_path)
-        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
         completed.write_text("# already here\n")
         missing_plan = repo / "docs" / "plans" / "example-plan.md"
 
@@ -320,7 +323,7 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "dirty-tree-skip"
         assert plan.exists(), "plan must be preserved in place, never lost"
-        completed = repo / "docs" / "plans" / "completed" / "dirty-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "dirty-plan.md"
         assert not completed.exists()
 
     def test_non_main_branch_preserves_plan(self, tmp_path):
@@ -345,7 +348,7 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "migrated"  # verdict describes what WOULD happen
         assert plan.exists(), "apply=False must not perform the git mv"
-        completed = repo / "docs" / "plans" / "completed" / "dry-run-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "dry-run-plan.md"
         assert not completed.exists()
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == "", "apply=False must leave the tree untouched"

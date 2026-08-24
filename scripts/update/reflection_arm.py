@@ -2,7 +2,7 @@
 
 Issue #1900 (Tier 0). ``scripts/migrate_completed_plan.py``'s
 ``migrate_plan_to_completed()`` is the single guarded mechanism for moving a
-completed plan out of ``docs/plans/`` root into ``docs/plans/completed/``. The
+completed plan out of ``docs/plans/`` root into ``docs/archive/plans-completed/``. The
 ``merged-branch-cleanup`` reflection (``reflections/housekeeping/merged_branch_cleanup.py``)
 calls that mechanism on its ``closed_issue`` branch -- but only takes effect
 once its registry entry carries ``enabled: true``.
@@ -39,6 +39,10 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+# Ceiling on the reflection-registry reload subprocess. Generous because the
+# reload restarts a service; provisional and tunable.
+RELOAD_SCRIPT_TIMEOUT_SECONDS = 120
 
 REFLECTION_NAME = "merged-branch-cleanup"
 OWNING_PROJECT_KEY = "valor"
@@ -256,7 +260,7 @@ def arm_merged_branch_cleanup(project_dir: Path) -> ArmResult:
                 cwd=str(project_dir),
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=RELOAD_SCRIPT_TIMEOUT_SECONDS,
             )
         except Exception as e:
             return ArmResult(

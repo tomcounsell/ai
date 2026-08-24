@@ -10,7 +10,7 @@ Usage:
 
 Also provides the path-independent migration primitive (issue #1900, Tier 0):
 ``migrate_plan_to_completed()`` performs a guarded ``git mv`` of a root plan into
-``docs/plans/completed/`` -- the single authoritative mechanism two call sites
+the completed-plan archive -- the single authoritative mechanism two call sites
 share: the deterministic ``/do-merge --issue`` invocation and the
 ``merged-branch-cleanup`` reflection backstop.
 
@@ -30,6 +30,10 @@ import sys
 from pathlib import Path
 
 from tools._sdlc_utils import _resolve_target_repo_fallback
+
+# Ceiling on a single `gh` call (issue close / issue state lookup). Named
+# rather than inline; provisional and tunable.
+GH_SUBPROCESS_TIMEOUT_SECONDS = 30
 
 
 def extract_tracking_issue(plan_text: str) -> str | None:
@@ -172,7 +176,7 @@ def close_tracking_issue(issue_url: str, dry_run: bool) -> tuple[bool, str]:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=GH_SUBPROCESS_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             return False, f"Failed to close issue: {result.stderr}"
@@ -204,10 +208,22 @@ def delete_plan(plan_path: Path, dry_run: bool) -> tuple[bool, str]:
 # --- Path-independent migration primitive (issue #1900, Tier 0) ------------------
 #
 # ``migrate_plan_to_completed()`` is the ONE authoritative mechanism for moving a
-# completed plan out of ``docs/plans/`` root into ``docs/plans/completed/``. Two
-# call sites share it: the deterministic ``/do-merge --issue`` invocation (Site D)
-# and the ``merged-branch-cleanup`` reflection backstop (Site C). Both call this
-# same function -- neither re-implements the git mv / guard logic.
+# completed plan out of ``docs/plans/`` root into the archive. Two call sites
+# share it: the deterministic ``/do-merge --issue`` invocation (Site D) and the
+# ``merged-branch-cleanup`` reflection backstop (Site C). Both call this same
+# function -- neither re-implements the git mv / guard logic.
+
+# Repo-relative home of shipped plans (#2878). Named rather than spelled inline
+# at each use so the destination has exactly one definition -- the whole point
+# of there being a single mover. The archive deliberately sits OUTSIDE the
+# ``docs/plans/`` prefix: four hook validators and the docs auditor treat that
+# prefix as "live plan", and an archived plan is history, not a live plan.
+#
+# Anything keyed on this location must be updated with it, not alongside it:
+# ``scripts/check_issue_disposition.py``'s EXEMPT_PREFIXES (the mover's own
+# commit is refused otherwise) and ``reflections/docs_auditor.py``'s two
+# plan-exclusion filters.
+COMPLETED_PLANS_DIR = "docs/archive/plans-completed"
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -233,7 +249,7 @@ def _rebase_in_progress(repo_root: Path) -> bool:
 
 
 def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
-    """Guarded git-mv of a root plan into docs/plans/completed/.
+    """Guarded git-mv of a root plan into the completed-plan archive.
 
     Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
     "rebase-conflict-skip". Never raises -- all failure modes return a verdict
@@ -253,7 +269,11 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     anchor = plan_path if plan_path.is_absolute() else plan_path.resolve()
     plans_dir = anchor.parent
     repo_root = plans_dir.parent.parent
-    completed_path = plans_dir / "completed" / plan_path.name
+    # The destination is repo-rooted, not plans-dir-relative: the archive is a
+    # sibling of docs/plans/, not a child of it (#2878). repo_root is still
+    # derived from the SOURCE plan, which remains in docs/plans/, so this
+    # resolves correctly from any caller cwd exactly as before.
+    completed_path = repo_root / COMPLETED_PLANS_DIR / plan_path.name
 
     # Existence-guard (idempotency): git mv is NOT idempotent -- a second attempt
     # on an already-moved plan must not look like a failure.
@@ -261,7 +281,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
         if completed_path.exists():
             print(f"[SKIP] Already migrated: {plan_path.name}")
             return "already-migrated"
-        print(f"[SKIP] Plan not found in root or completed/: {plan_path}")
+        print(f"[SKIP] Plan not found in root or {COMPLETED_PLANS_DIR}/: {plan_path}")
         return "already-migrated"
 
     # Clean-tree/HEAD==main precondition. If either fails, this is the
@@ -282,13 +302,13 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
         if tree_dirty:
             reasons.append("working tree is dirty")
         print(
-            f"[REPORT-ONLY] Would migrate {plan_path.name} -> docs/plans/completed/ "
+            f"[REPORT-ONLY] Would migrate {plan_path.name} -> {COMPLETED_PLANS_DIR}/ "
             f"(blocked: {'; '.join(reasons)})"
         )
         return "dirty-tree-skip"
 
     if not apply:
-        print(f"[DRY-RUN] Would migrate {plan_path.name} -> docs/plans/completed/")
+        print(f"[DRY-RUN] Would migrate {plan_path.name} -> {COMPLETED_PLANS_DIR}/")
         return "migrated"
 
     completed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +329,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     # is already durable as a local commit -- nothing more to do.
     remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
     if remote_check.returncode != 0:
-        print(f"[MIGRATED] {plan_path.name} -> docs/plans/completed/ (no 'origin' remote)")
+        print(f"[MIGRATED] {plan_path.name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
         return "migrated"
 
     # Rebase-retry loop: a losing push replays atop the winner. Distinguish a
@@ -319,7 +339,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     for attempt in range(1, max_attempts + 1):
         push_result = _run_git(["push", "origin", "main"], cwd=repo_root, timeout=60)
         if push_result.returncode == 0:
-            print(f"[MIGRATED] {plan_path.name} -> docs/plans/completed/")
+            print(f"[MIGRATED] {plan_path.name} -> {COMPLETED_PLANS_DIR}/")
             return "migrated"
 
         print(
@@ -385,7 +405,7 @@ def _gh_issue_state(issue_number: str) -> str:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=GH_SUBPROCESS_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
             data = json.loads(result.stdout)

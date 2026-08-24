@@ -28,7 +28,7 @@ import pytest
 import yaml
 
 from agent.reflection_scheduler import _resolve_registry_path
-from scripts.migrate_completed_plan import migrate_plan_to_completed
+from scripts.migrate_completed_plan import COMPLETED_PLANS_DIR, migrate_plan_to_completed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -51,7 +51,9 @@ class TestMigrationInvariantBehavior:
     def test_closed_issue_plan_leaves_root(self, tmp_path):
         repo = tmp_path / "repo"
         plans_dir = repo / "docs" / "plans"
-        (plans_dir / "completed").mkdir(parents=True)
+        plans_dir.mkdir(parents=True)
+        archive_dir = repo / COMPLETED_PLANS_DIR
+        archive_dir.mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
         _git(repo, "config", "user.email", "test@example.com")
         _git(repo, "config", "user.name", "Test")
@@ -68,7 +70,60 @@ class TestMigrationInvariantBehavior:
 
         assert verdict == "migrated"
         assert not plan.exists(), "plan must no longer live in docs/plans/ root"
-        assert (plans_dir / "completed" / "some-finished-plan.md").exists()
+        assert (archive_dir / "some-finished-plan.md").exists()
+
+
+class TestArchiveLocationCouplings:
+    """The archive destination has three consumers that must not drift (#2878).
+
+    `COMPLETED_PLANS_DIR` is the single definition of where a shipped plan
+    lands. Moving it without moving these three together produces failures far
+    from the edit: a blocked mover commit, or archived plans silently
+    re-entering the doc-audit surface the move exists to clear.
+    """
+
+    def test_archive_is_outside_the_live_plan_prefix(self):
+        """The whole point of the move: archived plans stop matching the
+        `docs/plans` prefix that four hook validators and the docs auditor use
+        to mean "live plan". If the archive slid back under that prefix the
+        move would be cosmetic.
+        """
+        assert not COMPLETED_PLANS_DIR.startswith("docs/plans"), (
+            f"COMPLETED_PLANS_DIR is {COMPLETED_PLANS_DIR!r}, which is back under "
+            "the live-plan prefix -- archived plans would again be treated as "
+            "live plans by the plan-structure validators and the docs auditor"
+        )
+
+    def test_mover_commit_survives_the_issue_disposition_gate(self):
+        """Both endpoints of the mover's rename must be disposition-exempt.
+
+        The mover commits on `main` with a fixed message carrying no
+        disposition. Git stages the deletion under `docs/plans/` and the
+        addition under the archive; either one missing from EXEMPT_PREFIXES
+        blocks the commit and strands the move.
+        """
+        from scripts.check_issue_disposition import EXEMPT_PREFIXES
+
+        assert (COMPLETED_PLANS_DIR + "/").startswith(EXEMPT_PREFIXES), (
+            f"{COMPLETED_PLANS_DIR}/ is not in check_issue_disposition."
+            f"EXEMPT_PREFIXES {EXEMPT_PREFIXES} -- the mover's own commit would "
+            "be refused by the commit-msg hook"
+        )
+        assert "docs/plans/" in EXEMPT_PREFIXES, "the rename's source side must stay exempt too"
+
+    def test_docs_auditor_excludes_the_archive(self):
+        """The auditor's two plan-exclusion filters must name the archive.
+
+        Both are literal prefix comparisons, not glob walks, so an archive
+        outside `docs/plans/` is invisible to them unless listed explicitly --
+        which would pull 547 historical files back into the audit surface.
+        """
+        source = (REPO_ROOT / "reflections" / "docs_auditor.py").read_text()
+        assert COMPLETED_PLANS_DIR in source, (
+            f"reflections/docs_auditor.py does not mention {COMPLETED_PLANS_DIR} -- "
+            "its plan-exclusion filters would let archived plans back into the "
+            "neighborhood grep and the PR-changed-files scan"
+        )
 
 
 class TestStaticEnforcementAssertions:

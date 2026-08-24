@@ -533,7 +533,7 @@ results below.
     single-backtick code span. `.claude/skills-global/new-skill/SKILL_TEMPLATE.md`
     contributes three more (`SUB_FILE_A.md`…). A markdown link inside inline code is being
     *shown*, not followed.
-  - **Non-path targets.** `docs/plans/completed/sdlc-1136.md` links a
+  - **Non-path targets.** `docs/archive/plans-completed/sdlc-1136.md` links a
     `file:/Users/…` URL; others carry mangled `blob/main/…` GitHub URLs. Any target
     carrying a URI scheme is out of the filesystem frame entirely.
 
@@ -935,7 +935,7 @@ works if a human learns the PR is there. Nothing automated merges a `docs-audit/
 The evidence for that was re-cited in critique round 1 (C4): the earlier citation,
 `sdlc_progress.py:116`'s `_SDLC_BRANCH_RE = ^session/sdlc-\d+$`, names a symbol that no
 longer exists — it was deleted by
-`docs/plans/completed/sdlc-progress-lane-discovery-branch-shape.md`, which *widened* the
+`docs/archive/plans-completed/sdlc-progress-lane-discovery-branch-shape.md`, which *widened* the
 discovery shape. The conclusion survives the widening, but only because the boundary is
 a namespace rather than a regex: `reflections/sdlc_progress.py:248`
 (`_list_open_lane_prs`) restricts the corpus to the `session/` namespace and `:315`
@@ -1664,7 +1664,7 @@ template files whose purpose is to hold placeholder links:
    finding, not a suppressed rewrite. Sharing one predicate is the point; a second
    link-only placeholder set would be the parallel path Principle 1 forbids.
 7. **Report only for containing docs under `docs/`, excluding the archived plan
-   directories `docs/plans/completed/` and `docs/plans/done/`.** This is what takes the
+   directories `docs/archive/plans-completed/` and `docs/plans/done/`.** This is what takes the
    census from 41 to 19 (spike-6). Two justifications, both structural: `.claude/` holds
    skill *templates* whose links are deliberately unresolvable, and an archived plan is a
    historical record whose links describe the repo as it was. The scope applies to the
@@ -2221,7 +2221,7 @@ existing detector classes:
       line does. This pins the deliberate asymmetry with the `.py` branch; a builder who
       "harmonizes" the two branches fails this test.
 - [ ] **Scope rule (Q7a rule 7).** An identical broken link produces a finding from
-      `docs/features/a.md` and **no** finding from `docs/plans/completed/a.md`,
+      `docs/features/a.md` and **no** finding from `docs/archive/plans-completed/a.md`,
       `docs/plans/done/a.md`, or `.claude/skills-global/x/SKILL_TEMPLATE.md`.
 - [ ] **Placeholder targets** — `[x](filename.md)` and `[x](foo/bar.md)` produce no
       findings; `_is_placeholder_path("docs/foo.md")` returns `True` (the `.md` stem
@@ -2345,7 +2345,7 @@ concurrently. Never bare `pytest`; `scripts/pytest-clean.sh` reaps xdist workers
 - **Widening the `.py` detector's regex to bare filenames.** #2759 ruled on this at
   `:887-892` and the ruling stands. Q7a adds a *link* branch, not a wider path branch.
 - **Extending the census beyond `docs/`.** `.claude/` skill bodies carry deliberately
-  unresolvable template links (spike-6), and `docs/plans/completed/` and
+  unresolvable template links (spike-6), and `docs/archive/plans-completed/` and
   `docs/plans/done/` are archives. Reporting on them is a separate argument nobody has
   made.
 
@@ -2361,7 +2361,7 @@ commit is not new machinery, only the review in front of it. The three doc edits
 explicit acceptance criteria. Add a Verification anti-criterion asserting the stale
 contract phrases appear nowhere **under `.claude/` or `docs/features/`** (NEW-5 — that
 scope is deliberate and matches the Verification row exactly; a repo-wide reading would
-fire on this plan document and on `docs/plans/completed/docs-auditor-rename-guard.md`,
+fire on this plan document and on `docs/archive/plans-completed/docs-auditor-rename-guard.md`,
 both of which quote the phrase to describe history), plus a positive check that the
 skill-context declares the new ownership.
 
@@ -2553,7 +2553,7 @@ the exact structure this plan is removing.
 - [DEFERRED] Fixing the 19 broken `.md` links and the ~842 `.py` deleted-target findings
   the census counted. Q7 makes them reportable and bounded; triaging them is downstream
   work on whatever issues the auditor files. The `.py` census number is dominated by
-  `docs/plans/completed/`, which rotation reaches only through neighborhood links, so it
+  `docs/archive/plans-completed/`, which rotation reaches only through neighborhood links, so it
   is not a pending flood — spike-6 measured the actual per-run exposure at 0.57.
 - [SEPARATE-ISSUE #2839] `docs/features/standardized-enums.md:19` cites
   `tools/granite_interactive_tui_poc/cli.py`, which does not exist, in a live present-tense
@@ -2681,7 +2681,7 @@ The one cross-cutting change, `agent/reflection_scheduler.py` passing
 - [ ] `docs/features/docs-auditor.md` — the detector inventory must describe
       `_detect_deleted_target_issues` as covering **two** reference shapes: backticked
       `.py` paths and markdown-link `.md` targets. State the scope rule (`docs/` minus
-      `docs/plans/completed/` and `docs/plans/done/`) and the two finding categories
+      `docs/archive/plans-completed/` and `docs/plans/done/`) and the two finding categories
       (`deleted-target`, `broken-md-link`) as the status quo. No "previously", no
       "now also".
 - [ ] Same file — state the **frame rule** plainly, because it is the defect #2725 and
@@ -3230,7 +3230,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 - **Q7a: add the `.md` link branch** to `_detect_deleted_target_issues` (`:876`), applying
   Q7a's seven rules in order — match, skip anchors and URI schemes, skip inline code
   spans, resolve doc-relative, apply the shared suppressions, skip placeholders, scope to
-  `docs/` minus `docs/plans/completed/` and `docs/plans/done/`. Follow
+  `docs/` minus `docs/archive/plans-completed/` and `docs/plans/done/`. Follow
   `_resolve_neighborhood:286-298` for the resolution idiom; do **not** borrow
   `_absent_new_path_refs`, which spike-3 showed is structurally blind to the frame.
 - Q7a: extend `_is_placeholder_path` (`:790`) to strip `.md` as well as `.py` on the
@@ -3566,7 +3566,7 @@ The critic re-derived every re-anchored `file:line` independently and found no a
 | CONCERN | Appetite critic | C1: Medium is the wrong appetite. Inventory: a deleted helper, a changed signature, an ~80-line predicate deletion, a guard hoist plus restore rewrite in a live shared-checkout writer, a sweeper branch deletion, a cross-cutting scheduler change affecting every function reflection, 2 skill bodies + 1 skill-context, ~8 doc passages, 14 existing test dispositions (two of which break at import), and a from-scratch synchronous `gh` dispatcher the plan itself says has no in-repo precedent. Critic proposed a three-lane split: Lane A = Q1, Lane B = Q3+Q4, Lane C = Q2+Q5. | Appetite / Step by Step Tasks | Lane stays single per the fleet assignment; resize the appetite to Large and sequence the tasks so each Q-group lands as an independently reviewable commit, preserving the critic's isolation intent without fragmenting the lane. The three-way split remains available to the coordinator as an override. |
 | CONCERN | Completeness critic | C2: Task 2 names only the predicate (`:2005-2086`) and the sweeper branch (`:2235-2258`), but its own Verification row demands `grep -c 'auto-merge'` → 0 against 16 hits. Outside both ranges: module comments `:79`, `:90-91`; `_push_branch_and_pr` docstring `:1470`; PR body text `:1527`; `run_docs_auditor` comments `:1894-1896`; findings string `:1970`; sweeper docstring `:2095`; summary string `:2276`. The builder would hit a red validator with no instruction where to look. | Task 2 | List all 16 anchors in Task 2. State that deleting the merge branch also requires removing the `prs_merged` counter and its clause at `:2274-2277`, or the sweeper permanently reports "0 PRs auto-merged". |
 | CONCERN | Evidence critic | C3: "the dashboard already renders it" is false. `models/reflection.py` and `ui/data/reflections.py` are exactly as cited, but no template in `ui/templates/` references `output_summary` or `last_run_summary`. The value reaches `dashboard.json` (`ui/app.py:931`) and nothing else — which weakens the argument that dismisses `_write_liveness` for having no reader while promoting a JSON key with no rendered reader. | Q5 item 3 / spike-4 / Success Criteria | Restate as "reaches `dashboard.json` via `get_all_reflections()`". Either add a one-line render of `last_run_summary.output_summary` to `modal_content.html` as part of Q5, or drop the "on the dashboard" phrasing from the success criterion. |
-| CONCERN | Citation-rot critic | C4: Q2 cites `sdlc_progress.py:116`'s `_SDLC_BRANCH_RE` as the reason nothing auto-merges a `docs-audit/*` PR. That symbol was deleted by `docs/plans/completed/sdlc-progress-lane-discovery-branch-shape.md` and appears nowhere today. The conclusion still holds, but via a deliberately *widened* discovery shape, so the narrow-regex citation is exactly the kind of evidence that rots. | Q2 | Cite `reflections/sdlc_progress.py:248` (`_list_open_lane_prs`) and `:315` (`_slug_from_branch`), and state the boundary as "the `session/` namespace, which `docs-audit/*` is not in". |
+| CONCERN | Citation-rot critic | C4: Q2 cites `sdlc_progress.py:116`'s `_SDLC_BRANCH_RE` as the reason nothing auto-merges a `docs-audit/*` PR. That symbol was deleted by `docs/archive/plans-completed/sdlc-progress-lane-discovery-branch-shape.md` and appears nowhere today. The conclusion still holds, but via a deliberately *widened* discovery shape, so the narrow-regex citation is exactly the kind of evidence that rots. | Q2 | Cite `reflections/sdlc_progress.py:248` (`_list_open_lane_prs`) and `:315` (`_slug_from_branch`), and state the boundary as "the `session/` namespace, which `docs-audit/*` is not in". |
 | CONCERN | Safety-claim critic | C5: Race 1 asserts flatly "Foreign dirt is preserved by design", but the scoped restore discards `files_touched`. If a concurrent lane writes to a file the auditor also touched — inside the window between the dirty-tree guard at `:1858` and the failure — that lane's uncommitted edit is destroyed. The regression test seeds a file "the auditor never touches", so the overlap case is neither covered nor acknowledged. | Race 1 / Q4 item 3 | Narrow the claim to "foreign dirt **outside `files_touched`** is preserved" and record the overlap as an accepted residual with its bounding argument (dirty-tree preflight + `REDIS_RUNNING_KEY` serialization). Optionally skip-and-report any `files_touched` path whose on-disk content no longer matches what `_apply_fixes_to_file` wrote. |
 | CONCERN | Anchor critic | C6: the skill-context descriptive claim is at `.claude/skill-context/do-docs.md:142-144`, not `:144-146` as the plan states twice. Separately `:152` reads "Before trusting the substrate's **self-committed** output:" — a third stale-contract string that is in neither Q1's edit list nor the Documentation checkboxes, and that the anti-criterion grep (`commits itself\|commits them itself`) does not catch, so it survives a green validator. | Q1 item 3 / Documentation / Verification | Correct the anchors to `:142-144`; add `:152` to Q1 item 3 and to the Documentation checkbox; widen the anti-criterion to also match `self-committed`, keeping the deliberate `.claude/` + `docs/features/` scope so the row never fires on this plan document. |
 | CONCERN | Cross-reference critic | C7: `:870` ("Race 1 / B4") and `:1114` ("(B3)") reference B-numbered findings that exist nowhere in the document, against a then-empty Critique Results table. Residue from a prior round the refresh did not sweep; a builder reading "the regression test for B4" has nothing to look up. | Test Impact / Risks | `:870` → "(Race 1)". `:1114` → drop the "(B3)" marker; the sentence stands alone. |
@@ -3584,7 +3584,7 @@ Round 1's dispositions, re-verified independently against the source: **B1, B3, 
 | CONCERN | Interface critic | NEW-2: deleting `_pr_is_auto_merge_eligible` removes the sweeper's only access to a PR body, which Q5 item 2 then requires. The sweeper's PR query at `:2147-2148` requests only `number,state,createdAt`; the `body` fetch lives at `:2023-2024`, inside the predicate Q2 deletes. Q5 item 2 and Task 3 both assume the `WITHHELD_PR_MARKER` check is available. | Task 3 / Q5 item 2 | State in Task 3 that `body` must be added to the sweeper's `gh pr list --json` field set at `:2147`, and that the test `gh` dispatcher must return it. |
 | CONCERN | Prerequisites critic | NEW-3: the "shared main checkout clean" row (`test -z "$(git status --porcelain)"`) contradicts the plan's own foreign-dirt model and is practically unsatisfiable. The plan states elsewhere that other lanes routinely hold uncommitted work in this checkout, and No-Gos forbids the builder from clearing it — so the builder gets a FAIL they are not permitted to fix. It already failed for exactly this reason during the round-1 revision. | Prerequisites | Scope the row to the auditor's own write surface (`git -C … status --porcelain -- docs/features`) or mark it advisory with an explicit "foreign dirt outside `docs/features/` does not block" note. |
 | CONCERN | Flood critic | NEW-4: Q5 item 1 files one issue per withheld entry with no per-run bound, while the module's own advisory loop deliberately caps at 5 with the comment "Hard per-run cap prevents flood" (`:1277-1289`). | Q5 item 1 | Reuse the same per-run cap, or state an explicit bound and why none is needed. |
-| NIT | Consistency critic | NEW-5: the anti-criterion's scope is stated three ways. Risk 1 says the phrase must appear "nowhere in the repo" and Success Criteria says "survives anywhere", but the Verification row deliberately scopes to `.claude/` + `docs/features/`. A literal repo-wide reading hits this plan and `docs/plans/completed/docs-auditor-rename-guard.md:47,408`. | Risk 1 / Success Criteria | Align both prose sites to the scoped wording the Verification row uses. |
+| NIT | Consistency critic | NEW-5: the anti-criterion's scope is stated three ways. Risk 1 says the phrase must appear "nowhere in the repo" and Success Criteria says "survives anywhere", but the Verification row deliberately scopes to `.claude/` + `docs/features/`. A literal repo-wide reading hits this plan and `docs/archive/plans-completed/docs-auditor-rename-guard.md:47,408`. | Risk 1 / Success Criteria | Align both prose sites to the scoped wording the Verification row uses. |
 | NIT | Anchor critic | NEW-6: the advisory-filing gate is cited as `:1278` in two places; `:1278` is `per_run_cap = …` and the gate is `:1279`. | Q4 / Task 2 | Correct both anchors to `:1279`. |
 | NIT | Prerequisites critic | NEW-7 (unverified): `--search "head:docs-audit"` may not match branches named `docs-audit/{slug}-{ts}` — GitHub's `head:` qualifier is not documented as a prefix match. The row is fail-closed on `gh` errors but potentially fail-open on the condition it exists to catch. | Prerequisites | Confirm at preflight, or switch to `gh pr list --state open --json headRefName -q '[.[]\|select(.headRefName\|startswith("docs-audit/"))]\|length'` (pipe-free at the cell level; the pipes are inside the jq string). |
 

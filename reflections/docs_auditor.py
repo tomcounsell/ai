@@ -65,6 +65,16 @@ VAULT_SITE_MAPPING: dict[str, tuple[str, str | None]] = {
     "Personas/Philip Pullman – Head of Product.md": ("site/runtime.html", None),
 }
 
+# Doc trees the auditor never audits: plan documents are point-in-time working
+# records, not descriptions of the current status quo, so their stale paths and
+# superseded prose are correct-as-written and any finding against them is noise.
+#
+# Both live plans and the shipped-plan archive qualify. The archive is listed
+# explicitly because it deliberately sits OUTSIDE the `docs/plans/` prefix
+# (#2878) -- a prefix test on `docs/plans/` alone would readmit all 547
+# archived plans to the audit surface.
+NON_AUDITED_DOC_PREFIXES = ("docs/plans/", "docs/archive/plans-completed/")
+
 # Hard caps and tunables.
 NEIGHBORHOOD_CAP = 20
 VAULT_DRIFT_ISSUE_CAP = 5
@@ -309,7 +319,7 @@ def _resolve_neighborhood(
         )
         for line in result.stdout.splitlines():
             line = line.strip()
-            if not line or "docs/plans/" in line:
+            if not line or any(p in line for p in NON_AUDITED_DOC_PREFIXES):
                 continue
             if line not in seen:
                 seen.add(line)
@@ -353,7 +363,7 @@ def _resolve_pr_changed_files(repo_root: Path) -> list[Path]:
             line = line.strip()
             if not line:
                 continue
-            if line.endswith(".md") and not line.startswith("docs/plans/"):
+            if line.endswith(".md") and not line.startswith(NON_AUDITED_DOC_PREFIXES):
                 files.append(Path(line))
         return files[:NEIGHBORHOOD_CAP]
     except Exception as e:

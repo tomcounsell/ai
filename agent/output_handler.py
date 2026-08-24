@@ -419,7 +419,7 @@ class TelegramRelayOutputHandler:
     Redis. This closes the worker-bypass gap where worker-executed PM sessions
     previously wrote raw text straight to the outbox, producing
     ``MessageTooLongError`` on content >4096 chars (see
-    docs/plans/completed/message-drafter.md §Problem). Drafter errors fall
+    docs/archive/plans-completed/message-drafter.md §Problem). Drafter errors fall
     through to raw-text delivery via the inner ``try/except`` block.
 
     An optional *file_handler* enables dual-write so output is also persisted
@@ -691,7 +691,7 @@ class TelegramRelayOutputHandler:
         # Single call site for the drafter so both transports receive
         # identically-normalized text. Drafter errors fall through to raw
         # text via the inner try/except — drafter is a guard, never a
-        # blocker. See docs/plans/completed/message-drafter.md §Part C.
+        # blocker. See docs/archive/plans-completed/message-drafter.md §Part C.
         delivery_text = text
         drafter_overflow_file: str | None = None
         steering_deferred = False

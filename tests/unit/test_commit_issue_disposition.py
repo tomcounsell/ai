@@ -31,7 +31,14 @@ from check_issue_disposition import (  # noqa: E402
 
 CODE = ["bridge/telegram_bridge.py"]
 SKILL_MD = [".claude/skills/sdlc/SKILL.md"]
-PLAN = ["docs/plans/completed/foo.md"]
+PLAN = ["docs/archive/plans-completed/foo.md"]
+
+# The literal stage of a `Migrate completed plan: X` commit (#2878). The mover
+# performs a rename, so git stages BOTH endpoints: the deletion under
+# `docs/plans/` and the addition under the archive. If either prefix falls out
+# of the exemption the mover's own commit is refused by the commit-msg hook,
+# which breaks /do-merge's plan-completion step.
+MIGRATION_STAGE = ["docs/plans/foo.md", "docs/archive/plans-completed/foo.md"]
 
 
 class TestRealCommitsFromIssue2540:
@@ -124,6 +131,17 @@ class TestScope:
         """`Migrate completed plan: X` is the bulk of legitimate
         direct-to-main traffic and never resolves an issue by itself."""
         assert find_violation("Migrate completed plan: foo", "main", PLAN) is None
+
+    def test_migration_commit_rename_pair_is_exempt(self):
+        """The mover's own commit must pass this gate (#2878).
+
+        `migrate_plan_to_completed()` git-mv's a plan out of `docs/plans/` into
+        `docs/archive/plans-completed/` and commits on `main` with a fixed
+        message that carries no disposition. Git stages both endpoints of the
+        rename, so exempting only the source prefix would refuse the commit and
+        leave the tree with a staged-but-uncommitted move.
+        """
+        assert find_violation("Migrate completed plan: foo", "main", MIGRATION_STAGE) is None
 
     def test_plan_plus_code_is_not_exempt(self):
         """The exemption is per-commit, not per-file: one code file in the

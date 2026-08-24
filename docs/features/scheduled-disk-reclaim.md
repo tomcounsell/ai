@@ -143,7 +143,7 @@ with no check for uncommitted changes, live sessions, live processes, branch
 merged-ness, or age. A failed `gh` call collapsed to an empty string, so an auth
 blip made *every* worktree a prune candidate.
 
-A plan critique flagged this in 2026-05 (`docs/plans/completed/dev_session_cleanup_unmerged_branch_guard.md`)
+A plan critique flagged this in 2026-05 (`docs/archive/plans-completed/dev_session_cleanup_unmerged_branch_guard.md`)
 and the remedy was deferred as an out-of-scope follow-up. Meanwhile
 `docs/runbooks/backlog-parallel-execution.md` recommended running it during
 parallel execution — the one situation where the machine is fullest of live

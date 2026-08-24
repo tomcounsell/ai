@@ -7,7 +7,8 @@
 ## Why
 
 `docs/plans/` root is supposed to hold only in-flight plans. Once a plan's
-tracking issue closes, the plan should move to `docs/plans/completed/`. Before
+tracking issue closes, the plan should move to `docs/archive/plans-completed/`.
+Before
 this work, that migration was **prose** — `docs/sdlc/do-merge.md` instructed
 the agent to hand-`git mv` the plan on `main` after merge — and prose is not
 an invariant. 212 plans had accumulated in root (13MB), including plans whose
@@ -27,7 +28,10 @@ step leaves a plan stranded.
 is the **only** code that moves a plan out of root. It:
 
 - Resolves repo layout from the plan's own path (works regardless of the
-  caller's process `cwd`).
+  caller's process `cwd`). The source is always `docs/plans/`, so the repo root
+  is derivable from it; the destination is repo-rooted, since the archive is a
+  sibling of `docs/plans/` rather than a child.
+- Writes to `COMPLETED_PLANS_DIR`, the single definition of the destination.
 - Guards existence: if the plan is already absent from root, returns
   `"already-migrated"` rather than treating a second attempt as failure
   (`git mv` is not idempotent on its own).
@@ -41,6 +45,29 @@ is the **only** code that moves a plan out of root. It:
   rebase conflict (not just a non-fast-forward rejection) aborts the rebase,
   leaves the tree clean, and returns `"rebase-conflict-skip"` — it never
   resolves a conflict unattended.
+
+### Why the archive sits outside `docs/plans/`
+
+`COMPLETED_PLANS_DIR` is `docs/archive/plans-completed/`, deliberately a sibling
+of `docs/plans/` and not a child. The `docs/plans/` prefix is a live-plan
+marker that three unrelated subsystems test for, so an archive inside it is
+read as 547 live plans:
+
+| Consumer | Effect of the prefix |
+|---|---|
+| `validate_documentation_section.py` and three sibling hook validators | Editing a file under the prefix demands `## Documentation`, `## Test Impact`, `## No-Gos`, `## Success Criteria` |
+| `reflections/docs_auditor.py` (`NON_AUDITED_DOC_PREFIXES`) | Excluded from the neighborhood grep and the PR-changed-files scan |
+| `scripts/check_issue_disposition.py` (`EXEMPT_PREFIXES`) | Commits touching only these paths need no issue disposition |
+
+The third row is load-bearing for the primitive itself, not just for hygiene.
+A migration is a **rename**, so the commit stages both the deletion under
+`docs/plans/` and the addition under the archive. If the archive prefix is not
+disposition-exempt, the commit-msg hook refuses the primitive's own commit and
+the move is stranded half-applied. Moving `COMPLETED_PLANS_DIR` without moving
+`EXEMPT_PREFIXES` with it breaks `/do-merge`.
+
+`tests/unit/test_plan_migration_invariant.py::TestArchiveLocationCouplings`
+pins all three couplings.
 
 Two thin CLIs wrap it:
 

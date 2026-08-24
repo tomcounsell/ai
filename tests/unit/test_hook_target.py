@@ -199,12 +199,16 @@ class TestInScope:
         [
             # In scope: relative, nested, absolute, and Windows separators.
             ("docs/plans/a.md", True),
-            ("docs/plans/completed/a.md", True),
+            ("docs/plans/critiques/a.md", True),
             ("/Users/x/src/ai/.worktrees/slug/docs/plans/a.md", True),
             ("/private/tmp/pytest-1/docs/plans/a.md", True),
             ("docs\\plans\\a.md", True),
             ("C:\\repo\\docs\\plans\\a.md", True),
             # Out of scope: sibling and prefix lookalikes.
+            # The shipped-plan archive is deliberately NOT a plan target (#2878):
+            # an archived plan is history, and the plan-structure validators
+            # would otherwise demand live-plan sections from it.
+            ("docs/archive/plans-completed/a.md", False),
             ("docs/plans_archive/old.md", False),
             ("docs/plansomething/a.md", False),
             ("/repo/docs/plans_archive/old.md", False),

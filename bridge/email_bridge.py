@@ -898,7 +898,7 @@ class EmailOutputHandler:
         ``medium="email"`` before being wrapped as MIME. This is the same
         plumbing the Telegram handler uses — per-medium format rules live in
         the drafter (no markdown on the wire for email). See
-        docs/plans/completed/message-drafter.md §Part C.
+        docs/archive/plans-completed/message-drafter.md §Part C.
 
         Args:
             chat_id: The sender's email address (used as the reply-to address).

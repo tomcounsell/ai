@@ -5,7 +5,7 @@ What it does: Deletes local git branches merged into main and audits docs/plans/
     and queries GitHub issue state via gh). Also acts as the path-independent
     backstop for the plan-migration invariant (issue #1900, Tier 0): a plan whose
     OWN ``tracking:`` frontmatter issue is closed is migrated into
-    ``docs/plans/completed/`` via ``migrate_plan_to_completed()`` -- the same
+    ``docs/archive/plans-completed/`` via ``migrate_plan_to_completed()`` -- the same
     primitive the deterministic ``/do-merge --issue`` call uses. This catches
     merges that bypass ``/do-merge`` entirely (manual `gh pr merge`, forked
     `/do-sdlc`, cross-machine merges).
@@ -31,7 +31,11 @@ from pathlib import Path
 
 from config.settings import settings
 from reflections.utilities import PROJECT_ROOT, load_local_projects
-from scripts.migrate_completed_plan import extract_tracking_issue, migrate_plan_to_completed
+from scripts.migrate_completed_plan import (
+    COMPLETED_PLANS_DIR,
+    extract_tracking_issue,
+    migrate_plan_to_completed,
+)
 
 logger = logging.getLogger("reflections.maintenance")
 
@@ -54,7 +58,7 @@ async def run() -> dict:
     """Clean up stale git branches and audit plan files.
 
     - Deletes local branches merged into main
-    - Migrates plans whose OWN tracking issue is closed into completed/
+    - Migrates plans whose OWN tracking issue is closed into the archive
     - Audits docs/plans/ for complete/orphaned/stale-issue plans
     """
     findings: list[str] = []
@@ -274,7 +278,7 @@ async def run() -> dict:
                 verdict = migrate_plan_to_completed(plan_file, apply=MIGRATION_APPLY_ENABLED)
                 action_word = "Migrated" if MIGRATION_APPLY_ENABLED else "Would migrate"
                 findings.append(
-                    f"{action_word} ({verdict}): {plan_file.name} -> completed/ "
+                    f"{action_word} ({verdict}): {plan_file.name} -> {COMPLETED_PLANS_DIR}/ "
                     f"(tracking issue #{tracking_num} closed)"
                 )
                 # Only a real "migrated" verdict represents an actual git mv (or,
