@@ -7,7 +7,7 @@ created: 2026-08-24
 tracking: https://github.com/tomcounsell/ai/issues/2805
 last_comment_id: 5392635119
 revision_applied: true
-revision_applied_at: 2026-08-24T10:04:43Z
+revision_applied_at: 2026-08-24T10:25:13Z
 ---
 
 # Pytest exports its own REDIS_URL; the line-keyed ALLOWLIST guard is deleted
@@ -416,7 +416,7 @@ guard deletion still ship and the repairs get their own issue.
   `pytest_configure` calls. A test invoking the hook directly against a synthetic
   claim registry stubs that one function out, so the poisoning write **never
   happens** rather than being undone at teardown. The stub is installed inside
-  `_reset_claim_state`, the helper all twenty-four callers already go through, so
+  `_reset_claim_state`, the helper all twenty-three callers already go through, so
   no call site has to remember. This is the plan's own thesis applied one level
   down: fix the producer, not the consumer. See Risk 1.
 - **The deletion**: `tests/unit/test_subprocess_test_db_isolation.py` goes
@@ -511,7 +511,7 @@ allowlist entry, nothing to remember.
   `_conftest` is already imported at line 61 (`import tests.conftest as
   _conftest`), so no new import is needed. Then delete the now-redundant
   per-call-site `POPOTO_TEST_DB` delenvs at 1096, 1108 and 1126. Risk 1 carries
-  why the seam beats both `delenv` and `setenv`, why all twenty-four callers are
+  why the seam beats both `delenv` and `setenv`, why all twenty-three callers are
   safe, and the pre-existing gap at 1220 that this closes. **Note the helper
   contains no `POPOTO_TEST_DB` handling today** — an earlier draft of this plan
   said it did; it does not.
@@ -519,7 +519,7 @@ allowlist entry, nothing to remember.
   **`REDIS_URL` itself is deliberately NOT touched by the helper.** Neither
   `delenv` nor `setenv` appears. With the write suppressed at the source there is
   nothing to restore, and any `delenv` here would make `REDIS_URL` *absent* for
-  the duration of all twenty-four tests that use this helper — at which point
+  the duration of all twenty-three tests that use this helper — at which point
   every one of the twenty lazy consumers falls back to its hardcoded
   `"redis://localhost:6379/0"` default and the plan manufactures the exact db0
   exposure it exists to remove. An anti-criterion in Verification asserts no
@@ -597,7 +597,7 @@ allowlist entry, nothing to remember.
 
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` (entire file, 688 lines, 9 tests) — **DELETE**: the convention it enforces no longer exists. No module imports it.
 - [ ] `tests/conftest.py::pytest_configure` — **UPDATE**: the export goes through a new module-level `_export_claimed_redis_url()` seam (Risk 1), not an inline `os.environ[...] =`.
-- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::_reset_claim_state` (lines 497-540) — **UPDATE**: add `monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)` so the four direct `pytest_configure()` callers (1098, 1111, 1128, 1220) cannot poison the live session. **No `REDIS_URL` delenv/setenv** — see Risk 1 for why that would open twenty-four db0-fallback windows across this helper's twenty-four callers.
+- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::_reset_claim_state` (lines 497-540) — **UPDATE**: add `monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)` so the four direct `pytest_configure()` callers (1098, 1111, 1128, 1220) cannot poison the live session. **No `REDIS_URL` delenv/setenv** — see Risk 1 for why that would open twenty-three db0-fallback windows across this helper's twenty-three callers.
 - [ ] `tests/unit/test_conftest_isolation_guards.py` lines 1096, 1108, 1126 — **DELETE**: the per-call-site `monkeypatch.delenv("POPOTO_TEST_DB", ...)` calls become redundant once the helper owns them. The assertions at 1101, 1114 and 1130 are unaffected: they read `os.environ` after the synthetic hook call writes it.
 - [ ] **Measured-not-enumerated:** the tests exercising the twenty lazy `REDIS_URL` call sites (Risk 7). Disposition is determined empirically by task 2.5's before/after sweep, not listed here — spike-3 finding 3 explains why a static import list (73 files, 37 of them `agent/`-facing) is a loose upper bound and a misleading work item. The sweep cluster must cover **every** consumer group, `agent/` included; any file that goes red gets an explicit disposition added to this section during build, before task 5 deletes the guard.
 - [ ] `tests/unit/test_output_handler.py`, `tests/unit/test_deliver_pipeline_completion.py` — **MEASURE (added at round 2)**: these are the `agent/`-facing tests that exercise the outbox write/poll paths at `agent/session_completion.py:609`/`:424` and `agent/output_handler.py:438`. They are in the task-2.5 cluster and the db0-delta Verification row so the headline criterion is not measured over a cluster that omits the largest consumer group. Disposition (NO CHANGE vs. repair) is the sweep's output.
@@ -669,13 +669,13 @@ reasons, and the second is the decisive one.
    somebody has to remember when they add a twenty-fifth caller or a sibling
    helper.
 2. *`delenv` would manufacture the exact hazard this plan exists to remove.*
-   `_reset_claim_state` has **twenty-four** call sites in this file (558, 581,
+   `_reset_claim_state` has **twenty-three** call sites in this file (558, 581,
    598, 610, 631, 655, 683, 709, 727, 738, 756, 772, 781, 807, 829, 956, 1004,
-   1052, 1095, 1107, 1125, 1217, 1245 — plus the definition at 498), not the four
+   1052, 1095, 1107, 1125, 1217, 1245; the definition at 498 is not one), not the four
    direct `pytest_configure()` callers the round-1 draft reasoned about.
    `delenv` makes `REDIS_URL` **absent** for the whole body of each of those
-   twenty-four tests, and all twenty lazy consumers (spike-3) fall back to their
-   hardcoded `"redis://localhost:6379/0"` when it is missing. That is twenty-four
+   twenty-three tests, and all twenty lazy consumers (spike-3) fall back to their
+   hardcoded `"redis://localhost:6379/0"` when it is missing. That is twenty-three
    fresh windows of production-db0 exposure, opened by the mitigation, directly
    contradicting the zero-delta Success Criterion.
 
@@ -691,7 +691,7 @@ timing: between the synthetic `pytest_configure()` call and the teardown,
 or any lazy consumer called inside that window still hits a foreign db. The seam
 has no such window. Same edit size, strictly stronger property.
 
-**All twenty-four callers are safe under the seam.** Suppressing the export
+**All twenty-three callers are safe under the seam.** Suppressing the export
 changes nothing any of them assert: no test in the file reads `REDIS_URL` after
 a synthetic hook call, and the class's only subprocess spawn,
 `_spawn_flock_holder` at line 470, runs `import fcntl, os, sys, time` and never
@@ -977,7 +977,7 @@ current Verification row covers it.
 - [ ] Update `tests/db_claim.py::subprocess_env`'s docstring (lines 318-349): its `REDIS_URL` paragraph now describes a redundant belt over a correct environment, and the `POPOTO_TEST_DB` paragraph's "mirror image" framing needs restating.
 - [ ] Update `tests/unit/test_migrate_strip_pid_fields.py`'s module docstring (lines 29-32).
 - [ ] Docstring `tests/conftest.py::_export_claimed_redis_url` with *why it is a separate function at all* — so a synthetic `pytest_configure()` call can suppress the write rather than undo it. A future reader who inlines it back into the hook to "simplify" reintroduces Risk 1, so the reason must be at the definition site.
-- [ ] Comment the two new lines in `_reset_claim_state` (the `setattr` stub and the `POPOTO_TEST_DB` delenv) with *why the helper — not the call site — owns them*: the next direct `pytest_configure()` caller is protected without anyone remembering, which is the same failure mode this whole issue is about. Add a second sentence on **why `REDIS_URL` is deliberately not `delenv`'d here** — absence makes all twenty lazy consumers fall back to hardcoded db0 across this helper's twenty-four callers — because a future reader will otherwise "fix" the apparent asymmetry with `POPOTO_TEST_DB`.
+- [ ] Comment the two new lines in `_reset_claim_state` (the `setattr` stub and the `POPOTO_TEST_DB` delenv) with *why the helper — not the call site — owns them*: the next direct `pytest_configure()` caller is protected without anyone remembering, which is the same failure mode this whole issue is about. Add a second sentence on **why `REDIS_URL` is deliberately not `delenv`'d here** — absence makes all twenty lazy consumers fall back to hardcoded db0 across this helper's twenty-three callers — because a future reader will otherwise "fix" the apparent asymmetry with `POPOTO_TEST_DB`.
 - [ ] (`tests/unit/test_redis_bootstrap.py`'s module docstring is **deferred** — see the Deferred subsection above.)
 
 ## Success Criteria
@@ -985,7 +985,25 @@ current Verification row covers it.
 - [ ] `tests/conftest.py::pytest_configure` exports `REDIS_URL` naming this process's claimed db, immediately after the `POPOTO_TEST_DB` export and after the claim-failure guard.
 - [ ] A plain `subprocess.run([sys.executable, "-c", ...])` with **no `env=`**, launched from a test, resolves `REDIS_URL` to a value **byte-identical** to the parent's — asserted by a permanent test in `TestPerProcessDbClaim` that fires under the default `--dist=load`, not only under `--dist=each`.
 - [ ] **Demonstrated red:** the same probe, run with the export reverted, is shown landing on db0, and that output is pasted into the PR description. A green-only run does not discharge this.
-- [ ] **The outcome, not a proxy: a unit-suite run performs ZERO net writes against production db0.** `redis-cli -n 0 dbsize` before and after the affected-suite sweep shows a **nonzero** delta on `main` (measured at plan time: 61505 → 61509 for `test_dedup.py` alone) and a **zero** delta on the branch. Both numbers go in the PR body beside the demonstrated-red evidence. This is the criterion a human actually cares about, and it is measurable only because the export also moves the in-process consumers off db0 (Risk 7).
+- [ ] **The affected-suite cluster performs ZERO net writes against production db0.** `redis-cli -n 0 dbsize` before and after the eight-file cluster sweep (named verbatim in the Verification row) shows a **nonzero** delta on `main` (measured at plan time: 61505 → 61509 for `test_dedup.py` alone) and a **zero** delta on the branch. Both numbers go in the PR body beside the demonstrated-red evidence. It is measurable at all only because the export also moves the in-process consumers off db0 (Risk 7).
+
+  **Scope resolved deliberately (critique round 3): the claim is stated over the
+  cluster, not over `tests/unit/`.** The earlier wording branded itself "the
+  outcome, not a proxy: a unit-suite run" while being discharged by an eight-file
+  sweep — an inflated claim in the section a reviewer reads to approve a 688-line
+  deletion. The alternative was a full-`tests/unit/` db0-delta row with an
+  ambient-drift floor. It was rejected on two grounds, and neither is appetite:
+  (a) this machine's Redis db0 serves a live bridge and worker that write to it
+  continuously and independently of pytest, so a full-run delta is a signal buried
+  in unbounded ambient noise and a criterion phrased as "delta equals the ambient
+  floor" is a coin-flip that will be waved through the first time it disagrees;
+  (b) the cluster is a *deliberately constructed* sample with at least one test
+  per consumer group, `agent/` write paths included (see the criterion below), so
+  a zero delta over it is a controlled, reproducible measurement rather than a
+  larger but noisier one. A small accurate claim beats a large unfalsifiable one.
+  Any residual db0 writes from paths outside the cluster are the follow-up issue
+  in task 7, not a silent hole: this criterion no longer implies they were
+  measured.
 - [ ] **The db0-delta cluster spans every consumer group, `agent/` included.** The measurement is worthless if drawn from a partial inventory: the round-1 cluster omitted `agent/` entirely, so a zero delta over it would have certified the criterion above while the outbox **write** at `agent/session_completion.py:609` went unmeasured. `tests/unit/test_output_handler.py` and `tests/unit/test_deliver_pipeline_completion.py` are in both the sweep and the Verification row.
 - [ ] **The lazy-consumer inventory in the plan equals the tree: 20 call sites over `bridge/ tools/ reflections/ ui/ agent/ config/`** — asserted by a Verification grep, not by a claim of exhaustiveness.
 - [ ] The affected-suite sweep (task 2.5) is run before and after the export, and every file it turns red has an explicit disposition recorded in Test Impact — fixed, or split to a follow-up issue with a number.
@@ -998,7 +1016,7 @@ current Verification row covers it.
 - [ ] `tests/unit/test_redis_flush_guard_prod.py` is unchanged and still proves the db0 flush guard fires.
 - [ ] The now-tautological `test_the_subprocess_ran_against_the_test_db_not_production` is deleted, not left green-and-unfalsifiable — asserted by a name grep, not inferred from the file still being green.
 - [ ] No file outside `tests/` and `docs/` (plus `CLAUDE.md`) appears in the diff — the twenty lazy `REDIS_URL` call sites change behavior under test without being edited (Risk 7 / Update System).
-- [ ] `_reset_claim_state` stubs `_conftest._export_claimed_redis_url` and owns `POPOTO_TEST_DB` via `monkeypatch.delenv`; the redundant per-call-site delenvs at 1096/1108/1126 are gone; and **no `monkeypatch.delenv("REDIS_URL"` or `setenv("REDIS_URL"` exists anywhere in the guards file** (it would open a hardcoded-db0 fallback window across the helper's 24 callers).
+- [ ] `_reset_claim_state` stubs `_conftest._export_claimed_redis_url` and owns `POPOTO_TEST_DB` via `monkeypatch.delenv`; the redundant per-call-site delenvs at 1096/1108/1126 are gone; and **no `monkeypatch.delenv("REDIS_URL"` or `setenv("REDIS_URL"` exists anywhere in the guards file** (it would open a hardcoded-db0 fallback window across the helper's 23 callers).
 - [ ] Risk 2's coverage loss is stated accurately ("broader on the inheriting path, narrower on the non-inheriting `env=` path") and pinned in code by the fourth assertion, rather than claimed as "strictly broader".
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -1065,7 +1083,7 @@ is not padding.
 - **Parallel**: false
 - Add `monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)` to `_reset_claim_state` (lines 497-540), immediately after the existing `PYTEST_XDIST_WORKER` delenv. `_conftest` is already imported at line 61. **The helper has no `POPOTO_TEST_DB` handling today** — do not go looking for it
 - Delete the now-redundant delenvs at 1096, 1108, 1126; the assertions at 1101, 1114, 1130 keep working because they read `os.environ` after the synthetic hook call, and `POPOTO_TEST_DB` is still written by it (only the `REDIS_URL` seam is stubbed)
-- **Do NOT touch `REDIS_URL` in this helper — no `delenv`, no `setenv`.** The helper has **24** call sites, not 4; `delenv` would make `REDIS_URL` absent for all 24 tests and every one of the 20 lazy consumers would fall back to hardcoded db0, manufacturing the exact exposure this plan removes. The guarded `setenv` form avoids that but still leaves the hook-call-to-teardown window open. Read Risk 1 before deviating
+- **Do NOT touch `REDIS_URL` in this helper — no `delenv`, no `setenv`.** The helper has **23** call sites, not 4; `delenv` would make `REDIS_URL` absent for all 23 tests and every one of the 20 lazy consumers would fall back to hardcoded db0, manufacturing the exact exposure this plan removes. The guarded `setenv` form avoids that but still leaves the hook-call-to-teardown window open. Read Risk 1 before deviating
 - **Verify under `-n 2 --dist=each` with the guards file AND a db-reading probe in the same invocation**; the guards file alone reports green with or without the leak (spike-1 finding F)
 - Do not accept a green `-n0` single-file run as evidence
 
@@ -1108,18 +1126,20 @@ is not padding.
 - **Assigned To**: isolation-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
+- **Deliberately does NOT depend on `build-blast-radius-sweep`.** Task 5 does (see its Why-the-2.5-edge note), but these assertions must stay independently reachable: if 2.5's gate fires and defers the repairs, the replacement assertions and the guard deletion still ship, per the split contract in Appetite and Risk 7
 - Assert the live process's `os.environ["REDIS_URL"]` ends with `/{claim_test_db()}`
 - Assert a deliberately unguarded child's resolved URL is **byte-identical** to the parent's `os.environ["REDIS_URL"]`
 - **Both of the above must fire under the default `--dist=load`**, phrased against this process's own claim rather than a sibling worker. After the guard deletion these are the only regression detectors, and `scripts/pytest-clean.sh` never issues `--dist=each` on its own
 - Assert a nested pytest child spawned without `env=` claims a **different** db (#2628) — the nested target **must live under the repo root**, or pytest picks a different rootdir, never loads `tests/conftest.py`, and the assertion falsely passes (spike-1 hit this)
-- Add the fourth, **documentation** assertion (Risk 2): a child spawned with a non-splatting `env={"PATH": os.environ["PATH"]}` reports `REDIS_URL` **absent**. Comment it with the retired scanner's name and state that this shape is unprotected by design; label it a documentation test in its docstring
+- Add the fourth, **documentation** assertion (Risk 2), named **exactly** `test_non_splatting_env_drops_redis_url` (a Verification row greps for that name): a child spawned with a non-splatting `env={"PATH": os.environ["PATH"]}` reports `REDIS_URL` **absent**. Comment it with the retired scanner's name and state that this shape is unprotected by design; label it a documentation test in its docstring
 - Verify each under `-n 2 --dist=each` so per-worker independence is covered
 - Remember `scripts/pytest-clean.sh` defaults to xdist and swallows `-s`; pass `-n0` or write probe output to a file when you need to read it
 - Cover the `REDIS_PORT` **unset** and **set** cases from Failure Path Test Strategy. The empty-string case is **out of scope** (pre-existing, unchanged) — do not add a test that asserts the malformed URL, and do not fix it here
 
 ### 5. Delete the AST guard and retire the tautology
 - **Task ID**: build-delete-guard
-- **Depends On**: test-replacement-assertions
+- **Depends On**: test-replacement-assertions, build-blast-radius-sweep
+- **Why the 2.5 edge**: this task is the plan's one irreversible step. Task 2.5 carries the stop-and-escalate gate that decides whether the work must split; without this edge a builder walking the graph can delete 688 lines *before* the gate has run, draining it of its purpose. The dependency is on 2.5 having **run**, not on it having come back clean — a fired gate defers the *repairs*, while the export and the guard deletion still ship (Risk 7 / Appetite)
 - **Validates**: tests/unit/
 - **Informed By**: spike-2 (no module imports the guard; the migrate test can no longer go red)
 - **Assigned To**: env-export-builder
@@ -1132,7 +1152,7 @@ is not padding.
 
 ### 6. Validate the isolation contract
 - **Task ID**: validate-isolation
-- **Depends On**: build-delete-guard, test-demonstrated-red
+- **Depends On**: build-delete-guard, test-demonstrated-red, build-blast-radius-sweep
 - **Assigned To**: isolation-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -1173,6 +1193,14 @@ is not padding.
 
 ## Verification
 
+**Two conventions this table's rows must obey, both learned the hard way at
+critique round 3.** (1) Any row whose command uses grep alternation writes
+`grep -cE` — a `\|` inside a markdown table de-escapes to a literal pipe, and
+under BASIC grep the pattern then matches nothing and exits 1, so the row reads
+green-adjacent while verifying nothing. (2) One row, one decidable outcome. A
+row whose Expected cell conjoins two assertions ("exit 0, **and** X is present")
+cannot be recorded as pass or fail; split it into two rows.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Export present in pytest_configure | `grep -c 'os.environ\["REDIS_URL"\]' tests/conftest.py` | output contains 1 |
@@ -1181,7 +1209,8 @@ is not padding.
 | Claim-contract tests pass | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -q` | exit code 0 |
 | Export routed through the seam, not inlined (Risk 1 precondition) | `grep -c 'def _export_claimed_redis_url' tests/conftest.py` | output contains 1 |
 | **Risk 1 mitigation is present in the helper, not just somewhere in the file** (the file-wide `grep -c 'REDIS_URL' > 2` form passes on unmodified `main` — it already has exactly 3 — so it is not usable) | `sed -n '497,548p' tests/unit/test_conftest_isolation_guards.py \| grep -c '_export_claimed_redis_url'` | output contains 1 (currently 0) |
-| **Anti-criterion: no `REDIS_URL` env mutation was introduced in the guards file** — `delenv` would open a hardcoded-db0 fallback window across this helper's 24 callers, and `setenv` leaves the hook-call-to-teardown window open (Risk 1) | `grep -cE 'monkeypatch\.(delenv\|setenv)\("REDIS_URL"' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
+| **Anti-criterion A: no `monkeypatch.delenv("REDIS_URL"` in the guards file** — it would open a hardcoded-db0 fallback window across this helper's 23 callers (Risk 1) | `grep -c 'monkeypatch.delenv("REDIS_URL"' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
+| **Anti-criterion B: no `monkeypatch.setenv("REDIS_URL"` in the guards file** — it avoids the db0 window but leaves the hook-call-to-teardown window open (Risk 1) | `grep -c 'monkeypatch.setenv("REDIS_URL"' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
 | Redundant per-call-site delenvs removed once the helper owns them | `grep -c 'monkeypatch.delenv("POPOTO_TEST_DB"' tests/unit/test_conftest_isolation_guards.py` | output contains 1 (currently 3) |
 | **Claim-contract tests do not leak REDIS_URL across workers** — the guards file and a db-reading probe in the SAME invocation. The guards file alone cannot discharge this: spike-1 finding F measured it green with and without the leak. | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_unguarded_child_inherits_claimed_db" -p no:randomly -n 2 --dist=each -q` | exit code 0 |
 | The unguarded-child detector fires under the DEFAULT dist mode, not only `--dist=each` (Risk 2 / Concern: nothing schedules `--dist=each`) | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n 2 -q` | exit code 0 |
@@ -1191,10 +1220,11 @@ is not padding.
 | Affected suites still pass after moving off db0 (Risk 7 regression surface) | `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py tests/unit/test_duplicate_delivery.py tests/unit/test_last_processed.py tests/unit/test_bridge_dispatch_contract.py tests/unit/test_output_handler.py tests/unit/test_deliver_pipeline_completion.py -p no:randomly -q` | exit code 0 |
 | No production module was edited (Update System claim asserted, not assumed) | `git diff --name-only main \| grep -v '^tests/' \| grep -v '^docs/' \| grep -v '^CLAUDE.md$' \| wc -l` | output contains 0 |
 | The tautological migration test is gone (the adjacent "migration tests green" row passes either way) | `grep -c 'test_the_subprocess_ran_against_the_test_db_not_production' tests/unit/test_migrate_strip_pid_fields.py` | match count == 0 |
-| The hostname decision is recorded at the export site, not left as a side effect | `sed -n '288,298p' tests/conftest.py \| grep -c '127.0.0.1'` | output > 0 |
+| The hostname decision is recorded at the export site (= the seam body, where Documentation bullet 4 puts the rationale — **not** a line window inside `pytest_configure`) | `awk '/def _export_claimed_redis_url/,/^$/' tests/conftest.py \| grep -c '127.0.0.1'` | output > 0 (currently 0 — the seam does not exist yet, so the row can go red) |
 | Export uses the non-shadowing spelling | `grep -c 'db_claim.redis_test_url()' tests/conftest.py` | output contains 1 |
 | **The lazy-consumer inventory in the plan matches the tree** (round-2 BLOCKER: the round-1 sweep omitted `agent/` and undercounted 20 as 15) | `grep -rn 'os.environ.get("REDIS_URL"' --include='*.py' bridge/ tools/ reflections/ ui/ agent/ config/ \| wc -l` | output contains 20 |
-| **The coverage-gap documentation test exists** (Risk 2 — the non-splatting `env=` shape the deleted scanner used to flag) | `grep -c 'PYTHONPATH\|ABSENT' tests/unit/test_conftest_isolation_guards.py` then run `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim" -p no:randomly -q` | exit code 0, and the assertion is present by name |
+| **The coverage-gap documentation test exists by name** (Risk 2 — the non-splatting `env=` shape the deleted scanner used to flag; this is the sole compensating control for the enforcement lost with the 688-line deletion, so it must actually run). The test MUST be named exactly `test_non_splatting_env_drops_redis_url`. | `grep -c 'def test_non_splatting_env_drops_redis_url' tests/unit/test_conftest_isolation_guards.py` | output contains 1 (currently 0 — can go red) |
+| **The coverage-gap documentation test passes** (companion to the row above; split out so each row has one decidable outcome) | `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim" -p no:randomly -q` | exit code 0 |
 | No shadowing import of the fixture name was added | `grep -c 'from tests.db_claim import redis_test_url' tests/conftest.py` | match count == 0 |
 | Previously-violating watchdog sites untouched | `git diff --name-only main -- tests/unit/test_watchdog_log_isolation.py \| wc -l` | output contains 0 |
 | Previously-violating sdlc-next-skill site untouched | `git diff --name-only main -- tests/unit/test_sdlc_next_skill.py \| wc -l` | output contains 0 |
@@ -1222,15 +1252,23 @@ rows that cannot discharge what they claim, one dependency-graph gap that lets t
 irreversible deletion run before the blast-radius gate, and two stale Implementation Notes
 in this table that still spell the superseded seam arity.
 
+**Round-3 revision applied 2026-08-24: all five concerns and both nits are CLOSED** — see
+the Addressed By column of each row for what changed and where. The pass was scoped to
+instrumentation only. **No design decision moved:** all four Open Questions remain RESOLVED
+on their proposed defaults, the `_export_claimed_redis_url` zero-arg seam stands, the
+`_reset_claim_state` mitigation stays REQUIRED with verification under `-n 2 --dist=each`
+(`-n0` masks the bug), the demonstrated-red bar stays encoded as *red with the fix reverted*
+rather than green-after, and the spike results remain authoritative over the issue body.
+
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The Verification row "The hostname decision is recorded at the export site" runs `sed -n '288,298p' tests/conftest.py \| grep -c '127.0.0.1'` expecting `> 0`, but the plan's own design puts the export and its rationale in the module-level seam `_export_claimed_redis_url()`, which will not live in that window — lines 288-298 hold the `POPOTO_TEST_DB` export, the seam *call*, and the `if is_worker:` block ending at 295. The row either fails against a correct implementation or coerces the builder into duplicating the hostname rationale inside `pytest_configure`, where Documentation bullet 4 says it does not belong. | pending | Replace the command with `awk '/def _export_claimed_redis_url/,/^$/' tests/conftest.py \| grep -c '127.0.0.1'`, expected `> 0`. Pre-fix state measured: `grep -c 'def _export_claimed_redis_url' tests/conftest.py` is 0 and the existing `sed` window returns 0, so the replacement can still go red. Do NOT satisfy the existing row by adding a `127.0.0.1` comment inside `pytest_configure` — splitting the rationale across two sites is how the next reader inlines the seam back and reintroduces Risk 1. |
-| CONCERN | Risk & Robustness | The Verification row "The coverage-gap documentation test exists" is not runnable. Inside a markdown table `\|` de-escapes to a literal pipe, so the command is `grep -c 'PYTHONPATH\|ABSENT' …` under BASIC grep, where `\|` is a literal character — it searches for the literal string and can never match (measured: 0, exit 1). Its Expected cell also mashes two assertions ("exit code 0, and the assertion is present by name") into one undecidable outcome. This is the only verification of Risk 2's documentation test, the sole compensating control for the enforcement loss accepted when 688 lines are deleted. | pending | Split into two decidable rows. Row A: `grep -c 'def test_non_splatting_env_drops_redis_url' tests/unit/test_conftest_isolation_guards.py`, expected 1 (currently 0, so it can go red). Row B: `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim" -p no:randomly -q`, expected exit 0. Any alternation kept in this table must use `grep -cE`; every other alternation row already does (e.g. the `monkeypatch\.(delenv\|setenv)` anti-criterion, which was measured correct) — this row is the lone exception, which is why it was missed. |
-| CONCERN | Scope & Value | The headline Success Criterion brands itself "**The outcome, not a proxy: a unit-suite run performs ZERO net writes against production db0**" but the following sentence discharges it by measuring "the affected-suite sweep" — an 8-file cluster — and the matching Verification row runs exactly those 8 files. An 8-file cluster is a proxy for the unit suite, so the criterion that explicitly disclaims proxies is satisfied by one. Round 2's blocker fixed the *cluster membership*; the *scope mismatch between the claim and the measurement* is untouched, so the finding relocated rather than resolved. | pending | Cheapest honest fix: add one Verification row wrapping the full run task 8 already performs — `redis-cli -n 0 dbsize; ./scripts/pytest-clean.sh tests/unit/ -q; redis-cli -n 0 dbsize`, expected delta 0 on the branch. Two gotchas: a full `tests/unit/` run legitimately takes ~20 minutes and must go through `scripts/pytest-clean.sh`, never bare `pytest`; and the machine is shared, so a live bridge/worker writing to db0 contaminates the delta — take two `dbsize` readings with no run between them first to establish the ambient drift floor and state the criterion as "delta equals the ambient floor". If that is out of appetite, instead delete "The outcome, not a proxy" and "a unit-suite run" from the criterion and restate it over the affected-suite cluster. An accurate small claim beats an inflated one in the section a reviewer reads to approve a 688-line deletion. |
-| CONCERN | History & Consistency | `build-blast-radius-sweep` (task 2.5) is a dependency of nothing. Task 5 depends only on `test-replacement-assertions`, task 6 only on `build-delete-guard, test-demonstrated-red` — yet Test Impact requires newly-red files to get dispositions "before task 5 deletes the guard" and task 6's checklist requires task 2.5's before/after db0 numbers. Both constraints live only in prose, so a builder following the graph can delete the 688-line guard before the blast-radius gate has decided whether the work must split, draining the stop-and-escalate gate of its purpose. | pending | Add `build-blast-radius-sweep` to task 5's `Depends On` (→ `test-replacement-assertions, build-blast-radius-sweep`) and to task 6's (→ `build-delete-guard, test-demonstrated-red, build-blast-radius-sweep`). Gotcha: do NOT add it to task 4 — `test-replacement-assertions` must stay independently reachable, or a fired gate that defers 2.5 would also block the replacement assertions, contradicting the split contract that "the export and the guard deletion still ship". Task 5 must depend on 2.5 having *run*, not on it having come back clean. |
-| CONCERN | History & Consistency | This table's round-2 thesis-inconsistency row records the adopted design correctly in Addressed By ("Zero-arg rather than `(db: int)`"), but its Implementation Note cell — the column mandated so a finding is implementable without re-investigation — still spells the superseded arity: `def _export_claimed_redis_url(db: int) -> None:` and `monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda db: None)`. A builder implementing from that column gets a one-arg stub against a zero-arg call site, so `pytest_configure`'s `_export_claimed_redis_url()` raises `TypeError` and all 23 `_reset_claim_state` callers error out. The round-2 `delenv` row has the milder form: its note ends with the imperative "Update the Verification row at plan line 979", a line reference the revision already invalidated. | pending | In the round-2 thesis row, change `(db: int) -> None:` to `() -> None:` and `lambda db: None` to `lambda: None` so it matches Technical Approach, Risk 1 and task 2. Measured divergence: `grep -c 'lambda db: None'` over the plan returns 1 and `grep -c 'lambda: None'` returns 5 — the single outlier is that row. In the round-2 `delenv` row, drop the trailing "Update the Verification row at plan line 979" sentence. Do not delete either row wholesale; this table is the durable record the downstream stages read. |
-| NIT | History & Consistency | The plan states `_reset_claim_state` has "**twenty-four** call sites in this file", then enumerates 23 line numbers "plus the definition at 498". The definition is not a call site. Measured: 23 callers (558, 581, 598, 610, 631, 655, 683, 709, 727, 738, 756, 772, 781, 807, 829, 956, 1004, 1052, 1095, 1107, 1125, 1217, 1245), definition at 498. The number carries rhetorical weight ("twenty-four fresh windows of production-db0 exposure") in the argument that rejects `delenv`. | pending | n/a (NIT) — change "twenty-four" to "twenty-three" in Risk 1, task 2 and the Success Criterion, or restate as "twenty-three callers". |
-| NIT | History & Consistency | Risk 2 cites `_env_value_is_clean` at `tests/unit/test_subprocess_test_db_isolation.py:422-449`; this table's round-2 Scope & Value row cites `420-447`. Measured: the `def` is at line 422, so Risk 2 is right and the table row is off by two. Cosmetic alone, but round 2's own NIT #3 was about exactly this class — a citation recorded as FIXED while a sibling occurrence kept the stale number. | pending | n/a (NIT) — correct the round-2 table row to 422-449 so both citations name the same symbol location. |
+| CONCERN | Risk & Robustness | The Verification row "The hostname decision is recorded at the export site" runs `sed -n '288,298p' tests/conftest.py \| grep -c '127.0.0.1'` expecting `> 0`, but the plan's own design puts the export and its rationale in the module-level seam `_export_claimed_redis_url()`, which will not live in that window — lines 288-298 hold the `POPOTO_TEST_DB` export, the seam *call*, and the `if is_worker:` block ending at 295. The row either fails against a correct implementation or coerces the builder into duplicating the hostname rationale inside `pytest_configure`, where Documentation bullet 4 says it does not belong. | **CLOSED — round-3 revision.** The row's command is now `awk '/def _export_claimed_redis_url/,/^$/' tests/conftest.py \| grep -c '127.0.0.1'`, expected `> 0`. It is keyed to the seam body — where Documentation bullet 4 puts the hostname rationale — instead of a line window inside `pytest_configure`, so it passes against a correct implementation rather than coercing the builder into duplicating the rationale in two places. | Measured this round on the tree at revision time: `grep -c 'def _export_claimed_redis_url' tests/conftest.py` → 0, and the new `awk`-scoped command → 0 with exit 1. The row can therefore still go red, which was the point of replacing it rather than deleting it. |
+| CONCERN | Risk & Robustness | The Verification row "The coverage-gap documentation test exists" is not runnable. Inside a markdown table `\|` de-escapes to a literal pipe, so the command is `grep -c 'PYTHONPATH\|ABSENT' …` under BASIC grep, where `\|` is a literal character — it searches for the literal string and can never match (measured: 0, exit 1). Its Expected cell also mashes two assertions ("exit code 0, and the assertion is present by name") into one undecidable outcome. This is the only verification of Risk 2's documentation test, the sole compensating control for the enforcement loss accepted when 688 lines are deleted. | **CLOSED — round-3 revision.** Split into two decidable rows: (A) `grep -c 'def test_non_splatting_env_drops_redis_url' tests/unit/test_conftest_isolation_guards.py` expecting 1, and (B) the `TestPerProcessDbClaim` run expecting exit 0. The alternation is gone, so no BASIC-grep `\|` trap remains. Task 4 now mandates that exact test name so the grep and the implementation cannot drift. A two-convention preamble was added above the table (use `grep -cE` for alternation; one row, one decidable outcome) so the next row that reaches for either shape is caught at authoring time. | Measured this round: `grep -c 'def test_non_splatting_env_drops_redis_url' tests/unit/test_conftest_isolation_guards.py` → 0, exit 1. Row A can go red. This pair is the only verification of Risk 2's compensating control, so it had to be runnable before the 688-line deletion is approved. |
+| CONCERN | Scope & Value | The headline Success Criterion brands itself "**The outcome, not a proxy: a unit-suite run performs ZERO net writes against production db0**" but the following sentence discharges it by measuring "the affected-suite sweep" — an 8-file cluster — and the matching Verification row runs exactly those 8 files. An 8-file cluster is a proxy for the unit suite, so the criterion that explicitly disclaims proxies is satisfied by one. Round 2's blocker fixed the *cluster membership*; the *scope mismatch between the claim and the measurement* is untouched, so the finding relocated rather than resolved. | **CLOSED — round-3 revision, by narrowing the claim.** The criterion now reads "The affected-suite cluster performs ZERO net writes against production db0" — the words "the outcome, not a proxy" and "a unit-suite run" are deleted, so the claim and the eight-file measurement are the same scope. The full-`tests/unit/` alternative was considered and rejected in writing inside the criterion itself, on the grounds that db0 on this machine carries continuous live bridge/worker traffic, which makes an ambient-drift floor unfalsifiable rather than merely expensive. | Anything the eight-file cluster does not reach is now explicitly *not claimed* rather than silently implied, and residual db0 writers outside it route to task 7's follow-up issue. A reviewer approving the deletion reads a claim the plan can actually discharge. |
+| CONCERN | History & Consistency | `build-blast-radius-sweep` (task 2.5) is a dependency of nothing. Task 5 depends only on `test-replacement-assertions`, task 6 only on `build-delete-guard, test-demonstrated-red` — yet Test Impact requires newly-red files to get dispositions "before task 5 deletes the guard" and task 6's checklist requires task 2.5's before/after db0 numbers. Both constraints live only in prose, so a builder following the graph can delete the 688-line guard before the blast-radius gate has decided whether the work must split, draining the stop-and-escalate gate of its purpose. | **CLOSED — round-3 revision.** Task 5's `Depends On` is now `test-replacement-assertions, build-blast-radius-sweep` and task 6's is `build-delete-guard, test-demonstrated-red, build-blast-radius-sweep`. Task 5 carries a "Why the 2.5 edge" bullet stating the dependency is on 2.5 having **run**, not on it coming back clean. Per the critique gotcha, task 4 was deliberately **not** given the edge, and now says so explicitly, so a fired gate defers the repairs without blocking the replacement assertions or the deletion. | Verified by reading the graph after the edit: 2.5 now has two dependents (5 and 6) and is no longer a leaf. 4 remains reachable from `build-unreachable-write` alone. |
+| CONCERN | History & Consistency | A round-2 findings-table row recorded the adopted design correctly in Addressed By ("zero-arg rather than a `db`-parameterised seam") while its Implementation Note cell still spelled the superseded one-argument arity for both the `def` and the `monkeypatch.setattr` stub. A builder implementing from that column would get a one-arg stub against a zero-arg call site: `pytest_configure`'s `_export_claimed_redis_url()` raises `TypeError`, and all 23 `_reset_claim_state` callers error out. A sibling round-2 row carried the milder form of the same defect — an imperative naming an absolute plan line number that the revision had already invalidated. | **CLOSED — round-3 revision.** The stale one-arg spellings no longer exist anywhere in this plan. The round-2 table they lived in was superseded and removed when this round-3 table replaced it, and the round-3 quotation of the defective text has been paraphrased so no copyable one-arg literal survives. The **only** arity spelled anywhere in this document is now the adopted zero-arg one: `def _export_claimed_redis_url() -> None:` in Technical Approach, `monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)` in Risk 1, Test Impact and task 2. Likewise no absolute-plan-line-number imperative survives; findings anchor to section and symbol names, which the next revision cannot silently invalidate. | Verified by grep over this file: a search for a `db`-parameterised `_export_claimed_redis_url` definition or a one-argument lambda stub returns **0**; the zero-arg `lambda: None` stub returns 5. Do not reintroduce the superseded arity even as a quotation — a builder greps for the symbol, not for the sentence around it, which is precisely how this survived a round. |
+| NIT | History & Consistency | The plan stated `_reset_claim_state` has "**twenty-four** call sites in this file", then enumerated 23 line numbers "plus the definition at 498". The definition is not a call site. Measured: 23 callers (558, 581, 598, 610, 631, 655, 683, 709, 727, 738, 756, 772, 781, 807, 829, 956, 1004, 1052, 1095, 1107, 1125, 1217, 1245), definition at 498. The number carries rhetorical weight ("N fresh windows of production-db0 exposure") in the argument that rejects `delenv`. | **CLOSED — round-3 revision.** Every occurrence now reads "twenty-three callers" (Risk 1 ×4, Solution/Key Elements, Test Impact, task 2, Documentation/Inline). Re-measured this round: `grep -c '_reset_claim_state' tests/unit/test_conftest_isolation_guards.py` = 25 = 23 call sites + the definition at 498 + one docstring mention at 794. | The rejection of `delenv` does not weaken at 23 — 23 fresh db0-fallback windows is the same argument. The count was corrected because an inflated number invites a reviewer to re-derive it and distrust the rest. |
+| NIT | History & Consistency | Risk 2 cites `_env_value_is_clean` at `tests/unit/test_subprocess_test_db_isolation.py:422-449`; a round-2 findings-table row cited a window two lines earlier. Measured: the `def` is at line 422, so Risk 2 is right and the table row was off by two. Cosmetic alone, but round 2's own NIT #3 was about exactly this class — a citation recorded as FIXED while a sibling occurrence kept the stale number. | **CLOSED — round-3 revision.** The divergent citation was in the round-2 table, which this round-3 table superseded and replaced; the round-3 quotation of it has been paraphrased rather than repeating the wrong numbers. Re-measured against the tree this round: `grep -n 'def _env_value_is_clean' tests/unit/test_subprocess_test_db_isolation.py` → **422**. `422-449` in Risk 2 is now the sole citation of this symbol in the plan. | The file is deleted in full by task 5, so this citation is historical context for the Risk 2 coverage-loss argument, not a build target. It still has to be right: a reviewer checking the one concrete claim behind the accepted enforcement loss should not find it off by two. |
 
 **Round-2 findings, confirmed fixed against the tree at `22cb19025`:** the corrected
 inventory grep returns exactly 20 and includes `agent/output_handler.py:438`,
