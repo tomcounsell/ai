@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: valor
 created: 2026-08-24
 tracking: https://github.com/tomcounsell/ai/issues/2805
 last_comment_id: 5392635119
+revision_applied: true
+revision_applied_at: 2026-08-24T09:39:41Z
 ---
 
 # Pytest exports its own REDIS_URL; the line-keyed ALLOWLIST guard is deleted
@@ -94,8 +96,10 @@ and scopes it **out**: "owned by #2805; do not re-diagnose or touch it here."
 Coordination is clean; no contention, no shared files.
 
 **Notes:** Two of the issue body's four stated Consequences are factually wrong
-and are corrected in Technical Approach below. One breakage the body does not
-mention is the plan's hard blocker.
+and are corrected in Technical Approach below. Two breakages the body does not
+mention are the plan's hard blockers: the direct-`pytest_configure()` poisoning
+(Risk 1) and the in-process migration of fifteen production `REDIS_URL`
+consumers off db0 (Risk 7, found during the critique revision — see spike-3).
 
 ## Prior Art
 
@@ -172,11 +176,64 @@ Sources:
   6. No test anywhere reads ambient `REDIS_URL` or does `monkeypatch.delenv("REDIS_URL", ...)`. All nine `monkeypatch.setenv("REDIS_URL", ...)` fixture sites already name the claimed db; none names a different one.
   7. No `xfail` markers exist anywhere in `tests/` — nothing to convert.
   8. `tests/unit/test_subprocess_test_db_isolation.py` is imported by **no other module**. Deleting it is self-contained.
-- **Confidence**: high
+- **Confidence**: high **within `tests/`; its conclusions do not extend past that
+  boundary.** The sweep was scoped to `tests/` by construction, and the plan
+  previously generalized finding 5 ("the export benefits children only") into a
+  claim about the whole repo. That generalization was wrong. spike-3 re-runs the
+  sweep over non-test code and supersedes it.
 - **Impact on plan**: Removed Consequence 1 from scope entirely and added an
   anti-criterion asserting no db0 override is introduced. Promoted the
-  `test_conftest_isolation_guards.py` poisoning to the plan's only hard blocker.
-  Made the tautology an explicit disposition rather than a silent survivor.
+  `test_conftest_isolation_guards.py` poisoning to a hard blocker. Made the
+  tautology an explicit disposition rather than a silent survivor.
+
+### spike-3: Blast radius of a globally-correct `REDIS_URL` across **non-test** code
+
+- **Assumption**: "The change is test-harness-internal; no production module's
+  behavior changes under test." (This was the plan's implicit claim in
+  Architectural Impact and Update System. It is **false**.)
+- **Method**: code-read + one measurement, run during the revision pass
+- **Finding**: **The assumption is false. This is the plan's largest blocker.**
+  1. **Fifteen non-test modules read `REDIS_URL` lazily inside a function body**
+     and therefore resolve it *after* `pytest_configure` runs, switching
+     in-process from production db0 to the claimed test db:
+     `bridge/dedup.py:131`, `bridge/routing.py:1449`, `bridge/liveness.py:66`,
+     `bridge/email_bridge.py:147` and `:830`, `bridge/telegram_relay.py:115`,
+     `bridge/email_relay.py:71`, `bridge/email_dead_letter.py:35`,
+     `tools/send_message.py:86`, `tools/react_with_emoji.py:65`,
+     `tools/valor_email.py:65`, `tools/valor_telegram.py:725`,
+     `tools/email_history/__init__.py:41`,
+     `reflections/pm_briefings/delivery.py:78`, and `ui/app.py:410`, `:456`,
+     `:652`. Every one is the same shape:
+     `os.environ.get("REDIS_URL", "redis://localhost:6379/0")` evaluated per
+     call. Unlike popoto's `pytest11` plugin — which resolves at import, before
+     `tests/conftest.py` loads, and is genuinely immune — these are read at call
+     time and are **fully exposed** to the export.
+  2. **Measured, not reasoned.** `redis-cli -n 0 dbsize` immediately before and
+     after `./scripts/pytest-clean.sh tests/unit/test_dedup.py -p no:randomly -q -n0`
+     on `main` at the revision baseline: **61505 → 61509**. Sixteen passing
+     tests wrote **four net new keys into live production db0**. That is the
+     status quo this export corrects, and it is the single best piece of
+     evidence for the change.
+  3. **Static import-reachability gives a loose upper bound, not the answer.**
+     Seventy-three files under `tests/unit/` and `tests/integration/` import at
+     least one of those modules and contain **no** `REDIS_URL` mention at all
+     (so they pin nothing). That set is a superset: importing a module is not
+     calling its lazy `_get_redis()`. **Do not enumerate the affected set
+     statically — measure it.** The db0-delta probe in item 2 is the instrument;
+     an import grep is not.
+  4. The direction of the change is **correct in every case**: a test writing to
+     production is a defect, and this export fixes it repo-wide as a side
+     effect. The regression surface is not "tests now write to the wrong place"
+     but "tests that silently depended on db0's *persistence* now run against a
+     db the autouse `redis_test_db` fixture flushes per test." Expect
+     key-visibility failures from cross-test key reuse, **not** import errors.
+- **Confidence**: high (the module list is exhaustive over tracked non-test
+  Python; the db0 delta is measured)
+- **Impact on plan**: Corrects Architectural Impact ("Data ownership: unchanged"
+  → changed) and Update System ("test-harness-internal" → the code change is,
+  the *blast radius* is not). Adds Risk 7, a Success Criterion stated as a db0
+  delta rather than a proxy, two Verification rows, and a build task that runs
+  the affected-suite sweep before and after the export.
 
 ## Data Flow
 
@@ -191,6 +248,13 @@ Sources:
    This is the one changed step.
 4. **Collection and fixtures**: the autouse `redis_test_db` fixture swaps
    popoto's in-process client onto the claimed db, as today.
+4b. **A test calls into a production module that resolves `REDIS_URL` lazily**
+   (e.g. `bridge.dedup._get_redis()` at `dedup.py:131`, and fourteen siblings) →
+   the `os.environ.get("REDIS_URL", "redis://localhost:6379/0")` inside the
+   function body now returns the **claimed db** instead of falling through to
+   production db0. This is a **new** step in the flow, missed by the first draft.
+   These reads happen at call time, after `pytest_configure`, so they are not
+   protected by popoto's import-time immunity. See Risk 7.
 5. **A test spawns a child**:
    - *with* `env=subprocess_env(...)` → `REDIS_URL` re-pinned to the same claimed
      db (unchanged), `POPOTO_TEST_DB` stripped, `PYTHONPATH` optionally pinned.
@@ -228,9 +292,18 @@ needs its own hand-rolled correction — and a policeman to remember it.
   `project_root=` pin remains the reason to call it.
 - **Coupling**: **decreases**. Removes a repo-wide static coupling between every
   `subprocess.*` call site in `tests/` and one 688-line meta-test.
-- **Data ownership**: unchanged. `tests/db_claim.py` remains the sole source of
-  the claimed db number; this plan adds one more consumer of it, in the hook
-  that already claims.
+- **Data ownership**: **changed, and this is the point.** `tests/db_claim.py`
+  remains the sole source of the claimed db number, but the set of consumers
+  that read it widens from "popoto's plugin plus children that opt in" to
+  "every consumer in this process that resolves `REDIS_URL` lazily." That
+  includes roughly fifteen **non-test** modules that call
+  `os.environ.get("REDIS_URL", "redis://localhost:6379/0")` *inside a function
+  body* — so they re-read the variable per call, after `pytest_configure` has
+  run, and are **not** immune the way popoto's `pytest11` plugin is. Under test
+  today those consumers write to production db0; after this change they write to
+  the claimed test db. See Risk 7 — that migration is a **correction**, but it is
+  a behavior change with a real regression surface, and the plan owns it rather
+  than claiming it does not exist.
 - **Reversibility**: trivial for the one-line export (revert one line). The
   guard deletion is a `git revert` away but should not be reverted piecemeal —
   the guard and the export are one decision.
@@ -245,9 +318,16 @@ needs its own hand-rolled correction — and a policeman to remember it.
 - PM check-ins: 1-2 (confirming the two dispositions in Open Questions)
 - Review rounds: 1
 
-The code change is one line plus three deletions. The cost is entirely in
-proving the removal is safe — the demonstrated-red bar and the nested-pytest
-invariant.
+The code change is one line, one helper edit, and three deletions. The cost is
+almost entirely in *proving* the removal is safe — the demonstrated-red bar, the
+nested-pytest invariant, and (added at revision) the db0-delta measurement that
+bounds Risk 7's blast radius.
+
+**Appetite is at risk from exactly one thing:** the size of the red set task 2.5
+turns up when fifteen production consumers stop writing to production db0. That
+is a measurement, not a guess, and it is why 2.5 carries an explicit
+stop-and-escalate gate. If the repairs do not fit Small, the export and the
+guard deletion still ship and the repairs get their own issue.
 
 ## Prerequisites
 
@@ -263,7 +343,10 @@ invariant.
 
 - **The export**: `pytest_configure` publishes the claimed db to `REDIS_URL`, in
   the same breath as `POPOTO_TEST_DB`. One line. Every child of the process
-  inherits a correct database instead of a production one.
+  inherits a correct database instead of a production one — **and so does every
+  in-process consumer that resolves `REDIS_URL` lazily**, which is fifteen
+  production modules (spike-3). That second effect is a bonus fix and a real
+  regression surface at the same time; Risk 7 and task 2.5 own it.
 - **The restorable-write fix**: `tests/unit/test_conftest_isolation_guards.py`'s
   `_reset_claim_state` helper takes ownership of `REDIS_URL` via `monkeypatch`
   so that direct `pytest_configure()` invocations against a synthetic claim
@@ -315,18 +398,27 @@ allowlist entry, nothing to remember.
 - **Do not attempt to fix the parent process's popoto client.** popoto's
   `pytest11` plugin resolves `REDIS_URL` before `tests/conftest.py` is even
   imported (spike-2 finding 5). The existing `redis_test_db` autouse swap
-  already handles the parent. The export is for children. Say so in the code
-  comment; do not claim defense-in-depth the change does not provide.
+  already handles the parent's popoto client.
+
+  **But do not repeat the earlier draft's overcorrection that "the export is for
+  children."** That was spike-2's finding generalized past the `tests/` boundary
+  it was measured in. Popoto's plugin is immune because it resolves at *import*;
+  the fifteen consumers in spike-3 resolve inside a *function body*, per call,
+  and are fully affected in-process. The honest code comment states both: popoto's
+  in-process client is untouched by this line, and every lazy `REDIS_URL` reader
+  in the process — test or production module — now resolves to the claimed db.
 
 - **Make the direct-invocation write restorable — this is required, not
   optional.** Extend
   `tests/unit/test_conftest_isolation_guards.py::_reset_claim_state` (lines
-  496-540) to take `monkeypatch` ownership of `REDIS_URL` before returning,
-  alongside the `POPOTO_TEST_DB` handling that already lives there. That way
-  whatever the synthetic `pytest_configure()` call writes is restored at
-  teardown. Doing it in the helper — rather than at each of lines 1098, 1111,
-  1128, 1220 — means the next test that calls the hook directly is protected
-  without anyone remembering.
+  497-540) with two `monkeypatch.delenv` calls — `REDIS_URL` **and**
+  `POPOTO_TEST_DB` — placed immediately after the existing
+  `monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)`. Then delete the
+  now-redundant per-call-site delenvs at 1096, 1108 and 1126. Risk 1 carries the
+  exact spelling, why `setenv` is wrong, why the four callers are safe, and the
+  pre-existing gap at 1220 that this closes. **Note the helper contains no
+  `POPOTO_TEST_DB` handling today** — an earlier draft of this plan said it did;
+  it does not.
 
   **The guards file passes either way; that is not evidence.** spike-1 measured
   44 passed with the fix and no mitigation, because under `-n0` the tmp-registry
@@ -345,11 +437,25 @@ allowlist entry, nothing to remember.
   1. the live process's `os.environ["REDIS_URL"]` ends with `/{claim_test_db()}`;
   2. a deliberately unguarded child (`subprocess.run([sys.executable, "-c",
      "import os; print(os.environ['REDIS_URL'])"])`, **no `env=`**) resolves to
-     the claimed db — this is the permanent regression test for the whole issue,
-     and it is *supposed* to look like a guard violation;
+     a URL **exactly equal** to the parent's `os.environ["REDIS_URL"]` — this is
+     the permanent regression test for the whole issue, and it is *supposed* to
+     look like a guard violation;
   3. a nested pytest child spawned **without** `env=` claims a **different** db
      than its parent (the #2628 invariant), proving the inherited `REDIS_URL` is
      overwritten by the child's own claim rather than leaked.
+
+  **Assertions 1 and 2 must be dist-mode-independent — this is load-bearing.**
+  After the AST guard is deleted these are the only regression detectors, and a
+  detector that only fires under a flag nobody passes is not a detector.
+  `scripts/pytest-clean.sh` defaults to xdist `--dist=load`, so a routine
+  full-suite run never issues `--dist=each` and nothing schedules it. Phrase both
+  assertions against **this process's own claim** rather than against a sibling
+  worker: assert
+  `os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")` and that
+  the child's resolved URL equals `os.environ["REDIS_URL"]` byte-for-byte. Under
+  `--dist=load` each worker executes both in its own process, so a cross-worker
+  leak fails assertion 1 with no special invocation. Keep the `--dist=each` run
+  as an *additional* check, never as the only one.
 - **Leave the four currently-violating call sites completely untouched.** Not
   touching them is the demonstration that the design works. An anti-criterion in
   Verification asserts the diff does not include them.
@@ -378,11 +484,13 @@ allowlist entry, nothing to remember.
 ## Test Impact
 
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` (entire file, 688 lines, 9 tests) — **DELETE**: the convention it enforces no longer exists. No module imports it.
-- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::_reset_claim_state` (lines 496-540) — **UPDATE**: take `monkeypatch` ownership of `REDIS_URL` so the three direct `pytest_configure()` callers (lines 1111, 1128, 1220) cannot poison the live session.
+- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::_reset_claim_state` (lines 497-540) — **UPDATE**: add `monkeypatch.delenv("REDIS_URL", raising=False)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)` so the four direct `pytest_configure()` callers (1098, 1111, 1128, 1220) cannot poison the live session.
+- [ ] `tests/unit/test_conftest_isolation_guards.py` lines 1096, 1108, 1126 — **DELETE**: the per-call-site `monkeypatch.delenv("POPOTO_TEST_DB", ...)` calls become redundant once the helper owns them. The assertions at 1101, 1114 and 1130 are unaffected: they read `os.environ` after the synthetic hook call writes it.
+- [ ] **Measured-not-enumerated:** the tests exercising the fifteen lazy `REDIS_URL` consumers (Risk 7). Disposition is determined empirically by task 2.5's before/after sweep, not listed here — spike-3 finding 3 explains why a static import list (73 files) is a loose upper bound and a misleading work item. Any file that goes red gets an explicit disposition added to this section during build, before task 5 deletes the guard.
 - [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim` — **UPDATE (add)**: three new assertions (live-process export, unguarded-child inheritance, nested-pytest own-claim).
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py::TestSubprocessCapture::test_the_subprocess_ran_against_the_test_db_not_production` (line 411) — **DELETE**: three independent mechanisms would now have to be removed for it to go red, so it can no longer fail. Its purpose is subsumed by the new unguarded-child assertion, which tests the same property at the layer that owns it. Its docstring at line 416 ("`REDIS_URL` is unset on this machine by default") is already false today.
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py` module docstring (lines 29-32) — **UPDATE**: it explains why every test in the file sets `REDIS_URL`; that reasoning changes.
-- [ ] `tests/unit/test_redis_bootstrap.py` module docstring (line 7) — **UPDATE**: "Empty/missing `REDIS_URL`: falls back to 127.0.0.1:6379/db=0" describes a pydantic `Field(default=...)`, not an env read (`REDIS__URL` is the actual seam). Pre-existing drift, corrected while adjacent.
+- [ ] `tests/unit/test_redis_bootstrap.py` module docstring (line 7) — **DEFERRED to a follow-up issue**: "Empty/missing `REDIS_URL`: falls back to 127.0.0.1:6379/db=0" describes a pydantic `Field(default=...)`, not an env read (`REDIS__URL` is the actual seam). Pre-existing drift, wrong identically before and after this change; not adjacent enough to justify riding a Small-appetite fix. The file itself needs no code change (spike-2 finding 4).
 - [ ] `tests/unit/test_redis_flush_guard_prod.py` — **NO CHANGE**, deliberately. Its children never connect to Redis; the issue's proposed override is dropped. Asserted as an anti-criterion.
 - [ ] `tests/unit/test_watchdog_log_isolation.py`, `tests/unit/test_sdlc_next_skill.py` — **NO CHANGE**, deliberately. These are two of the four current violations; leaving them untouched *is* the proof. Asserted as an anti-criterion.
 
@@ -417,7 +525,8 @@ survives the test. Every subsequent test in that worker — and every child it
 spawns — then reads and writes a db this process does not own, quite possibly a
 slot a concurrent pytest process holds and flushes each test. That is the #2605
 cross-process class the claim machinery was built to eliminate, reintroduced by
-the fix meant to strengthen it. This is the plan's only hard blocker.
+the fix meant to strengthen it. (An earlier draft called this the plan's *only*
+hard blocker. It is not — Risk 7 is the larger one.)
 **Measured, not theorised.** spike-1 reproduced it: under `-n 2 --dist=each`,
 `gw1`'s real claim was db2 but its `os.environ["REDIS_URL"]` read db1 for the
 rest of the session, and its subprocess wrote into `gw0`'s database. The guards
@@ -427,9 +536,44 @@ because under `-n0` the stub claim also picks db1 and masks the divergence.
 `REDIS_URL` before returning, so any write by the synthetic hook call is
 restored at teardown. Fixing it in the shared helper rather than at the four
 call sites (1098, 1111, 1128, 1220) means a fifth caller is protected
-automatically. **Verification must run under `-n 2 --dist=each` with the guards
-file and a db-reading probe in the same run**; a green `-n0` single-file run is
-not evidence.
+automatically.
+
+**Exact spelling — `delenv`, not `setenv`.** Add two lines to
+`_reset_claim_state` immediately after its existing
+`monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)`:
+
+```python
+monkeypatch.delenv("REDIS_URL", raising=False)
+monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
+```
+
+`delenv` records the prior value and restores it at teardown, and it matches the
+pattern the file already uses for `POPOTO_TEST_DB` at lines 1096, 1108 and 1126.
+Do **not** write `monkeypatch.setenv("REDIS_URL", os.environ.get("REDIS_URL", ""))`
+— the empty-string fallback exports a malformed URL on the xdist-controller
+path, where nothing was ever set. `delenv` is safe for all callers of the
+helper: the class's only subprocess spawn, `_spawn_flock_holder` at line 470,
+runs `import fcntl, os, sys, time` and never touches Redis.
+
+**Correcting a stale anchor in this plan's own earlier draft:** the instruction
+used to say "alongside the `POPOTO_TEST_DB` handling that already lives there."
+It does not live there. `_reset_claim_state` (lines 497-540) only rebinds
+claim-module globals and clears `PYTEST_XDIST_WORKER`; the `POPOTO_TEST_DB`
+protection lives at three of the four call sites. Moving both `delenv` calls
+into the helper lets the now-redundant ones at 1096, 1108 and 1126 be **deleted**
+— the assertions at 1101, 1114 and 1130 keep working, because they read
+`os.environ` *after* the synthetic `pytest_configure()` call writes it. It also
+closes a pre-existing gap: the fourth direct caller at 1220 has no
+`POPOTO_TEST_DB` delenv at all today.
+
+**Verification must be able to go red.** A `grep -c 'REDIS_URL'` over the whole
+guards file cannot: the file already contains exactly three occurrences on
+unmodified `main` (lines 587, 1194, 1205), so any `> 2` threshold passes without
+the fix. And running the guards file alone under `-n 2 --dist=each` cannot
+either — spike-1 finding F measured that this file reports green whether or not
+the leak exists. Both rows are replaced in Verification: one scoped to the
+helper body, one that runs the guards file **and a db-reading probe in the same
+invocation**. See Verification.
 
 ### Risk 2: Removing the only static enforcement leaves a coverage gap for a case the new tests miss
 **Impact:** If the export is ever reverted, narrowed, or shadowed, nothing
@@ -462,7 +606,7 @@ layers remain and which was only ever a static proxy. Risk 2's argument belongs
 in the PR description, not just the plan.
 
 ### Risk 5: The import spelling collides with the same-named fixture (LOW — resolved by spike-1)
-**Impact:** `tests/conftest.py` defines a fixture `redis_test_url` at line 938;
+**Impact:** `tests/conftest.py` defines a fixture `redis_test_url` at line 937;
 nine modules request it by name. A careless module-scope
 `from tests.db_claim import redis_test_url` shadows it and breaks all nine, or
 is itself shadowed and the export silently writes something wrong.
@@ -485,6 +629,47 @@ is what `subprocess_env` has always passed to children, so this makes the two
 paths agree — or pass `redis_test_url("localhost")` to preserve the ambient
 spelling. The plan's default is to accept `127.0.0.1` for consistency with
 `subprocess_env`, and to say so in the code comment. See Open Question 4.
+
+### Risk 7: Fifteen non-test modules silently move off production db0 in-process
+**Impact:** This is the plan's **largest** blast radius and it was missed
+entirely by the first draft, which called the change "test-harness-internal."
+Roughly fifteen production modules resolve `REDIS_URL` **lazily, inside a
+function body** (spike-3 finding 1: `bridge/dedup.py:131`,
+`bridge/routing.py:1449`, `bridge/liveness.py:66`, `bridge/email_bridge.py:147`
+and `:830`, `bridge/telegram_relay.py:115`, `bridge/email_relay.py:71`,
+`bridge/email_dead_letter.py:35`, `tools/send_message.py:86`,
+`tools/react_with_emoji.py:65`, `tools/valor_email.py:65`,
+`tools/valor_telegram.py:725`, `tools/email_history/__init__.py:41`,
+`reflections/pm_briefings/delivery.py:78`, `ui/app.py:410`/`:456`/`:652`). They
+re-read the variable per call, after `pytest_configure`, so unlike popoto's
+`pytest11` plugin they are **not** immune. Tests exercising them write to
+production db0 today — measured: `tests/unit/test_dedup.py` alone leaves four
+net keys in db0 (61505 → 61509). After the export they write to the claimed test
+db, which the autouse `redis_test_db` fixture **flushes per test**. Any test that
+implicitly relied on a key surviving from a previous test now sees it gone.
+**Expect key-visibility failures, not import errors.**
+
+The *direction* is unambiguously right — a unit test writing to live production
+is the defect, and this export fixes it repo-wide. The hazard is that the
+correction lands as a batch of unexplained red in files nobody expected this
+plan to touch, and gets misdiagnosed as the export being broken.
+
+**Mitigation:** Do not try to enumerate the affected set from the import graph.
+Seventy-three test files import one of those modules without pinning
+`REDIS_URL`, but importing is not calling — that number is a loose upper bound
+and treating it as a work list would blow the appetite on files that never
+change behavior. **Measure instead.** Task 2.5 runs the highest-signal cluster
+before and after the export and diffs the results; any file that goes red is
+triaged as either (a) a genuine cross-test key dependency to fix, or (b) an
+assertion that was only ever passing because production db0 is never flushed —
+which is itself a finding worth writing down. If the red set exceeds what a
+Small appetite absorbs, **stop and split it**: the export plus the guard
+deletion ship, and the follow-on test repairs get their own issue rather than
+silently inflating this one.
+
+**Anti-mitigation, explicitly rejected:** do not paper over this by pinning
+`REDIS_URL` back to db0 in the affected tests. That would preserve the defect
+to protect the assertions that depend on it.
 
 ## Race Conditions
 
@@ -534,12 +719,24 @@ is the one genuine ordering hazard the change introduces.
 
 ## Update System
 
-No update system changes required. This is a test-harness-internal change: one
-line in `tests/conftest.py`, one file deletion under `tests/unit/`, and
-documentation. It adds no dependency, no config file, no secret, no entry point,
-and no migration. `scripts/update/` and the `/update` skill are untouched, and
-nothing needs to propagate to other machines beyond the ordinary `git pull` that
-`/update` already performs.
+No update system changes required — but **not** for the reason the first draft
+gave. That draft called this "test-harness-internal," which is false: spike-3
+found fifteen non-test modules whose in-process Redis target changes under test
+(Risk 7).
+
+The accurate reason is narrower and still holds. Every edited file lives under
+`tests/` or `docs/`; no production module is modified. The behavior change to
+those fifteen consumers is confined to **processes that ran
+`tests/conftest.py::pytest_configure`** — i.e. pytest, and nothing else. The
+bridge, the worker, the reflections scheduler, and `ui/app.py` in production
+never load `tests/conftest.py`, so their resolved `REDIS_URL` is byte-identical
+before and after. Consequently the change adds no dependency, no config file, no
+secret, no entry point, and no migration; `scripts/update/` and the `/update`
+skill are untouched; and nothing propagates to other machines beyond the
+ordinary `git pull` that `/update` already performs.
+
+A Verification row asserts the production-module claim rather than resting on
+it: no file outside `tests/` and `docs/` appears in the diff.
 
 ## Agent Integration
 
@@ -558,8 +755,24 @@ asserted unchanged.
 - [ ] Update `docs/features/test-db-ownership.md` (line 37 table): the "a subprocess that must see the same data" row no longer requires `subprocess_env()` for the db; correct the row and state what `subprocess_env` is still for.
 - [ ] Update `docs/features/README.md` (lines 250, 253): refresh the Test Isolation Hardening and Test-DB Ownership summaries so neither implies a static call-site convention is enforced.
 - [ ] Update `tests/README.md`: rewrite the "Subprocess Test-DB Inheritance (issue #2763)" section (lines ~502-545) — in particular the sentence "`os.environ` is never mutated", which becomes false, and the closing paragraph naming the enforcing guard, which must go entirely. Also correct the guard reference in line 33 and the #2605 corollary in line 48. **Describe only the new status quo**; leave no "formerly enforced by" residue.
-- [ ] Review `CLAUDE.md`'s "Manual Testing Hygiene" paragraph: its claim that "this shell always carries a production `REDIS_URL`" stays true for shells but must not read as true inside pytest. Its `os.environ.setdefault` warning and the "assign explicitly, assert the db number" rule remain correct for standalone debug scripts and are unaffected — draw the shell/pytest line clearly rather than deleting the guidance.
-- [ ] Correct `docs/sdlc/do-build.md:215` ("## Test Isolation"): it tells builders to "use `REDIS_TEST_DB` or a separate prefix". `REDIS_TEST_DB` is not a variable this repo has — the mechanism is the flock claim plus `POPOTO_TEST_DB`, and after this change the environment is correct with no builder action at all. Pre-existing drift, surfaced by the blast-radius scan, and directly misleading for every future build.
+- [ ] Review `CLAUDE.md`'s "Manual Testing Hygiene" paragraph: its claim that "this shell always carries a production `REDIS_URL`" stays true for shells but must not read as true inside pytest. Its `os.environ.setdefault` warning and the "assign explicitly, assert the db number" rule remain correct for standalone debug scripts and are unaffected — draw the shell/pytest line clearly rather than deleting the guidance. **In scope:** this paragraph is now actively wrong inside pytest *because of this change*, so correcting it is status-quo work, not drift cleanup.
+
+### Deferred — pre-existing drift, split to a follow-up issue
+
+Two corrections the first draft carried are **pre-existing drift the plan itself
+labelled as such**, not consequences of this change. At `appetite: Small`, and
+with `docs/sdlc/do-build.md` being loaded at runtime by *every* `/do-build`
+invocation in the repo, coupling a doctrine edit to this fix's merge means a
+reviewer arguing about wording blocks a one-line isolation fix. Split them:
+
+- [ ] **Follow-up issue (not this PR):** `docs/sdlc/do-build.md:215` ("## Test Isolation") tells builders to "use `REDIS_TEST_DB` or a separate prefix". `REDIS_TEST_DB` is not a variable this repo has — the mechanism is the flock claim plus `POPOTO_TEST_DB`. Misleading for every future build, but misleading identically before and after this change.
+- [ ] **Follow-up issue (not this PR):** `tests/unit/test_redis_bootstrap.py`'s module docstring (line 7). Same character: wrong today, wrong in the same way tomorrow.
+
+The build task that files this follow-up is task 7; the issue number goes in the
+PR body so the drift is tracked rather than dropped. If a reviewer insists
+either belongs here, that is a scope decision for the PM, and the anti-regression
+row for `docs/sdlc/do-build.md` must be added before it re-enters scope — no
+current Verification row covers it.
 
 ### External Documentation Site
 - [ ] Not applicable — this repo has no external docs site.
@@ -568,13 +781,16 @@ asserted unchanged.
 - [ ] Comment the new `pytest_configure` line with *why* (children inherit by construction) and its one honest limitation (popoto's plugin has already resolved; this is not defense-in-depth for the parent).
 - [ ] Update `tests/db_claim.py::subprocess_env`'s docstring (lines 318-349): its `REDIS_URL` paragraph now describes a redundant belt over a correct environment, and the `POPOTO_TEST_DB` paragraph's "mirror image" framing needs restating.
 - [ ] Update `tests/unit/test_migrate_strip_pid_fields.py`'s module docstring (lines 29-32).
-- [ ] Correct `tests/unit/test_redis_bootstrap.py`'s module docstring (line 7).
+- [ ] Comment the two new `monkeypatch.delenv` lines in `_reset_claim_state` with *why* the helper — not the call site — owns them: the next direct `pytest_configure()` caller is protected without anyone remembering, which is the same failure mode this whole issue is about.
+- [ ] (`tests/unit/test_redis_bootstrap.py`'s module docstring is **deferred** — see the Deferred subsection above.)
 
 ## Success Criteria
 
 - [ ] `tests/conftest.py::pytest_configure` exports `REDIS_URL` naming this process's claimed db, immediately after the `POPOTO_TEST_DB` export and after the claim-failure guard.
-- [ ] A plain `subprocess.run([sys.executable, "-c", ...])` with **no `env=`**, launched from a test, resolves `REDIS_URL` to the claimed db — asserted by a permanent test in `TestPerProcessDbClaim`.
+- [ ] A plain `subprocess.run([sys.executable, "-c", ...])` with **no `env=`**, launched from a test, resolves `REDIS_URL` to a value **byte-identical** to the parent's — asserted by a permanent test in `TestPerProcessDbClaim` that fires under the default `--dist=load`, not only under `--dist=each`.
 - [ ] **Demonstrated red:** the same probe, run with the export reverted, is shown landing on db0, and that output is pasted into the PR description. A green-only run does not discharge this.
+- [ ] **The outcome, not a proxy: a unit-suite run performs ZERO net writes against production db0.** `redis-cli -n 0 dbsize` before and after the affected-suite sweep shows a **nonzero** delta on `main` (measured at plan time: 61505 → 61509 for `test_dedup.py` alone) and a **zero** delta on the branch. Both numbers go in the PR body beside the demonstrated-red evidence. This is the criterion a human actually cares about, and it is measurable only because the export also moves the in-process consumers off db0 (Risk 7).
+- [ ] The affected-suite sweep (task 2.5) is run before and after the export, and every file it turns red has an explicit disposition recorded in Test Impact — fixed, or split to a follow-up issue with a number.
 - [ ] A nested pytest child spawned without `env=` claims a **different** db than its parent (#2628 invariant), asserted by a permanent test.
 - [ ] Under `-n N`, each xdist worker's unguarded child lands on **that worker's own** claimed db; the controller exports nothing.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` no longer exists, and no reference to it survives in `tests/` or `docs/features/`.
@@ -582,7 +798,9 @@ asserted unchanged.
 - [ ] The hostname decision (`127.0.0.1` vs `localhost`) is made deliberately and recorded in the code comment, not left as a side effect.
 - [ ] `tests/unit/test_watchdog_log_isolation.py` and `tests/unit/test_sdlc_next_skill.py` are **unchanged in the diff**, and their children land on the claimed db.
 - [ ] `tests/unit/test_redis_flush_guard_prod.py` is unchanged and still proves the db0 flush guard fires.
-- [ ] The now-tautological `test_the_subprocess_ran_against_the_test_db_not_production` is deleted, not left green-and-unfalsifiable.
+- [ ] The now-tautological `test_the_subprocess_ran_against_the_test_db_not_production` is deleted, not left green-and-unfalsifiable — asserted by a name grep, not inferred from the file still being green.
+- [ ] No file outside `tests/` and `docs/` (plus `CLAUDE.md`) appears in the diff — the fifteen lazy `REDIS_URL` consumers change behavior under test without being edited (Risk 7 / Update System).
+- [ ] `_reset_claim_state` owns both `REDIS_URL` and `POPOTO_TEST_DB` via `monkeypatch.delenv`, and the redundant per-call-site delenvs at 1096/1108/1126 are gone.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No `xfail`/`xpass` conversions needed — none exist in `tests/`.
@@ -590,6 +808,13 @@ asserted unchanged.
 ## Team Orchestration
 
 ### Team Members
+
+**On the roster size (critique NIT):** every task is `Parallel: false` and that is
+correct — the ordering is genuinely dependent. The demonstrated-red measurement
+must run *before* the export exists; the blast-radius sweep *after* the export
+and *before* the guard deletion; the deletion *after* the replacement assertions
+exist to take over from it. There is no concurrency to buy here, and the roster
+is not padding.
 
 - **Builder (conftest export + guard deletion)**
   - Name: `env-export-builder`
@@ -639,9 +864,28 @@ asserted unchanged.
 - **Assigned To**: env-export-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Extend `_reset_claim_state` (lines 496-540) to take `monkeypatch` ownership of `REDIS_URL`
-- **Verify under `-n 2 --dist=each`** with the guards file and a db-reading probe in the same run; confirm each worker's `os.environ["REDIS_URL"]` still names *its own* claim afterwards
+- Add `monkeypatch.delenv("REDIS_URL", raising=False)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)` to `_reset_claim_state` (lines 497-540), immediately after the existing `PYTEST_XDIST_WORKER` delenv. **The helper has no `POPOTO_TEST_DB` handling today** — do not go looking for it
+- Delete the now-redundant delenvs at 1096, 1108, 1126; the assertions at 1101, 1114, 1130 keep working because they read `os.environ` after the synthetic hook call
+- Do **not** use `monkeypatch.setenv("REDIS_URL", os.environ.get("REDIS_URL", ""))` — the empty-string fallback exports a malformed URL on the controller path
+- **Verify under `-n 2 --dist=each` with the guards file AND a db-reading probe in the same invocation**; the guards file alone reports green with or without the leak (spike-1 finding F)
 - Do not accept a green `-n0` single-file run as evidence
+
+### 2.5. Measure the non-test blast radius (Risk 7)
+- **Task ID**: build-blast-radius-sweep
+- **Depends On**: build-env-export
+- **Validates**: tests/unit/ (the lazy-`REDIS_URL` consumer cluster)
+- **Informed By**: spike-3 — fifteen production modules read `REDIS_URL` inside function bodies and switch dbs in-process; `test_dedup.py` alone writes 4 net keys to production db0 today
+- **Assigned To**: isolation-test-engineer
+- **Agent Type**: test-engineer
+- **Domain**: Redis/Popoto data
+- **Parallel**: false
+- Capture `redis-cli -n 0 dbsize` immediately before and after the affected-suite command (Verification table) on **`main`** — expect a nonzero delta, and record it
+- Repeat on the branch with the export applied — expect a delta of **0**
+- Record both numbers for the PR body. Do **not** use `MONITOR`: it is machine-global and this Redis serves live production traffic
+- Diff the pass/fail set between the two runs. Triage each newly-red file as (a) a genuine cross-test key dependency to fix, or (b) an assertion that only ever passed because production db0 is never flushed — and write the disposition into Test Impact
+- **Do not work from the import graph.** 73 files import one of those modules without pinning `REDIS_URL`; that is a loose upper bound, not a work list
+- **Do not pin `REDIS_URL` back to db0** anywhere to make a red test green — that preserves the defect to protect the assertion depending on it
+- **Stop-and-escalate gate**: if the red set is larger than a Small appetite absorbs, report it and let the PM split the test repairs into their own issue. The export and the guard deletion still ship
 
 ### 3. Prove red, then green
 - **Task ID**: test-demonstrated-red
@@ -665,7 +909,8 @@ asserted unchanged.
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Assert the live process's `os.environ["REDIS_URL"]` ends with `/{claim_test_db()}`
-- Assert a deliberately unguarded child resolves to the claimed db
+- Assert a deliberately unguarded child's resolved URL is **byte-identical** to the parent's `os.environ["REDIS_URL"]`
+- **Both of the above must fire under the default `--dist=load`**, phrased against this process's own claim rather than a sibling worker. After the guard deletion these are the only regression detectors, and `scripts/pytest-clean.sh` never issues `--dist=each` on its own
 - Assert a nested pytest child spawned without `env=` claims a **different** db (#2628) — the nested target **must live under the repo root**, or pytest picks a different rootdir, never loads `tests/conftest.py`, and the assertion falsely passes (spike-1 hit this)
 - Verify each under `-n 2 --dist=each` so per-worker independence is covered
 - Remember `scripts/pytest-clean.sh` defaults to xdist and swallows `-s`; pass `-n0` or write probe output to a file when you need to read it
@@ -681,8 +926,8 @@ asserted unchanged.
 - **Parallel**: false
 - Delete `tests/unit/test_subprocess_test_db_isolation.py` in full
 - Delete `tests/unit/test_migrate_strip_pid_fields.py::test_the_subprocess_ran_against_the_test_db_not_production` and correct that file's module docstring
-- Correct `tests/unit/test_redis_bootstrap.py`'s module docstring
 - Leave the four previously-violating call sites and `test_redis_flush_guard_prod.py` untouched
+- `tests/unit/test_redis_bootstrap.py`'s docstring is **deferred** — do not touch it here
 
 ### 6. Validate the isolation contract
 - **Task ID**: validate-isolation
@@ -694,6 +939,9 @@ asserted unchanged.
 - Confirm the four call sites and `test_redis_flush_guard_prod.py` are absent from the diff
 - Confirm no `6379/0` literal was introduced anywhere in `tests/`
 - Confirm the runtime backstops are untouched and still fire
+- Confirm the db0 dbsize delta is **0** on the branch and **nonzero** on `main`, and that both numbers are in the PR body
+- Confirm no file outside `tests/`, `docs/` and `CLAUDE.md` appears in the diff
+- Confirm the Risk 1 mitigation lives in `_reset_claim_state` itself, not at the call sites
 - Run all Verification rows
 
 ### 7. Documentation
@@ -705,9 +953,9 @@ asserted unchanged.
 - Rewrite `tests/README.md`'s subprocess-inheritance section and correct lines 33 and 48
 - Update `docs/features/test-isolation-hardening.md` and `docs/features/test-db-ownership.md`
 - Refresh the two `docs/features/README.md` index rows
-- Correct `docs/sdlc/do-build.md:215`'s stale `REDIS_TEST_DB` reference
 - Draw the shell-vs-pytest line in `CLAUDE.md`'s Manual Testing Hygiene paragraph without deleting its still-correct debug-script guidance
 - Update `subprocess_env`'s docstring
+- **File the deferred-drift follow-up issue** covering `docs/sdlc/do-build.md:215`'s phantom `REDIS_TEST_DB` and `tests/unit/test_redis_bootstrap.py`'s module docstring; put its number in the PR body. Do **not** edit either file in this PR
 - Leave no historical residue of the retired convention
 
 ### 8. Final Validation
@@ -728,8 +976,17 @@ asserted unchanged.
 | AST guard file is gone | `ls tests/unit/test_subprocess_test_db_isolation.py` | exit code != 0 |
 | No surviving reference to the retired guard | `grep -rn 'test_subprocess_test_db_isolation' tests/ docs/features/ CLAUDE.md` | exit code 1 |
 | Claim-contract tests pass | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -q` | exit code 0 |
-| Claim-contract tests do not leak REDIS_URL across workers (the `-n0`-masked hazard) | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n 2 --dist=each -q` | exit code 0 |
-| `_reset_claim_state` owns REDIS_URL (Risk 1 mitigation present) | `grep -c 'REDIS_URL' tests/unit/test_conftest_isolation_guards.py` | output > 2 |
+| **Risk 1 mitigation is present in the helper, not just somewhere in the file** (the file-wide `grep -c > 2` form passes on unmodified `main` — it already has exactly 3 — so it is not usable) | `sed -n '497,545p' tests/unit/test_conftest_isolation_guards.py \| grep -c 'monkeypatch.delenv("REDIS_URL"'` | output contains 1 (currently 0) |
+| Redundant per-call-site delenvs removed once the helper owns them | `grep -c 'monkeypatch.delenv("POPOTO_TEST_DB"' tests/unit/test_conftest_isolation_guards.py` | output contains 1 (currently 3) |
+| **Claim-contract tests do not leak REDIS_URL across workers** — the guards file and a db-reading probe in the SAME invocation. The guards file alone cannot discharge this: spike-1 finding F measured it green with and without the leak. | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_unguarded_child_inherits_claimed_db" -p no:randomly -n 2 --dist=each -q` | exit code 0 |
+| The unguarded-child detector fires under the DEFAULT dist mode, not only `--dist=each` (Risk 2 / Concern: nothing schedules `--dist=each`) | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n 2 -q` | exit code 0 |
+| **Nested-pytest #2628 invariant holds** (Risk 3's entire mitigation — previously verified nowhere) | `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_nested_pytest_child_claims_its_own_db" -p no:randomly -q` | exit code 0 |
+| Per-worker independence: each worker's child lands on that worker's own db | `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_live_process_redis_url_names_its_own_claim" -p no:randomly -n 2 --dist=each -q` | exit code 0 |
+| **Zero net production-db0 writes from the affected suites** (the outcome criterion; run on `main` AND on the branch). Do NOT use `MONITOR` — it is machine-global and this Redis serves live production traffic. | `redis-cli -n 0 dbsize; ./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py tests/unit/test_duplicate_delivery.py tests/unit/test_last_processed.py tests/unit/test_bridge_dispatch_contract.py -p no:randomly -q; redis-cli -n 0 dbsize` | nonzero delta on `main`; **delta of 0** on the branch |
+| Affected suites still pass after moving off db0 (Risk 7 regression surface) | `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py tests/unit/test_duplicate_delivery.py tests/unit/test_last_processed.py tests/unit/test_bridge_dispatch_contract.py -p no:randomly -q` | exit code 0 |
+| No production module was edited (Update System claim asserted, not assumed) | `git diff --name-only main \| grep -v '^tests/' \| grep -v '^docs/' \| grep -v '^CLAUDE.md$' \| wc -l` | output contains 0 |
+| The tautological migration test is gone (the adjacent "migration tests green" row passes either way) | `grep -c 'test_the_subprocess_ran_against_the_test_db_not_production' tests/unit/test_migrate_strip_pid_fields.py` | match count == 0 |
+| The hostname decision is recorded at the export site, not left as a side effect | `sed -n '288,298p' tests/conftest.py \| grep -c '127.0.0.1'` | output > 0 |
 | Export uses the non-shadowing spelling | `grep -c 'db_claim.redis_test_url()' tests/conftest.py` | output contains 1 |
 | No shadowing import of the fixture name was added | `grep -c 'from tests.db_claim import redis_test_url' tests/conftest.py` | match count == 0 |
 | Previously-violating watchdog sites untouched | `git diff --name-only main -- tests/unit/test_watchdog_log_isolation.py \| wc -l` | output contains 0 |
@@ -748,15 +1005,15 @@ asserted unchanged.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; History & Consistency | The plan asserts the export benefits children only and calls the change test-harness-internal. Roughly fifteen NON-test modules read `REDIS_URL` lazily inside function bodies and therefore switch from production db0 to the claimed test db in-process: `bridge/dedup.py:131`, `bridge/routing.py:1449`, `bridge/liveness.py:66`, `bridge/email_bridge.py:147` and `:830`, `bridge/telegram_relay.py:115`, `bridge/email_relay.py:71`, `bridge/email_dead_letter.py:35`, `tools/send_message.py:86`, `tools/react_with_emoji.py:65`, `tools/valor_email.py:65`, `tools/valor_telegram.py:725`, `tools/email_history/__init__.py:41`, `reflections/pm_briefings/delivery.py:78`, `ui/app.py:410/456/652`. spike-2's sweep was scoped to `tests/` and its conclusion was generalized past that boundary. Ten test files import `bridge.dedup` and NONE monkeypatches `REDIS_URL`, so they write to production db0 today and will land on a per-test-flushed db after the change. Architectural Impact ('Data ownership: unchanged') and Update System ('test-harness-internal') are both wrong. | pending | Re-run the blast-radius sweep over non-test code with `grep -rn "REDIS_URL" --include="*.py" . ; grep -v "^./tests/"`. The consumers use `redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")` INSIDE a function, so the value is read per call, after `pytest_configure` runs; unlike popoto's `pytest11` plugin they are NOT immune. Run `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py tests/unit/test_duplicate_delivery.py tests/unit/test_last_processed.py tests/unit/test_bridge_dispatch_contract.py -p no:randomly` before and after the export and add it as a Verification row. Expect key-visibility failures (cross-test key reuse now flushed), not import errors. |
-| BLOCKER | Risk & Robustness | Risk 1 is the plan's self-declared only hard blocker and neither of its two Verification rows can go red. (a) `grep -c 'REDIS_URL' tests/unit/test_conftest_isolation_guards.py` expected 'output > 2' — the file ALREADY contains exactly 3 occurrences today (lines 587, 1194, 1205), so the row passes on unmodified `main`. (b) The row named for the hazard runs the guards file alone under `-n 2 --dist=each` expecting exit 0, but spike-1 finding F measured that this file reports green whether or not the leak exists, and the plan's own prose requires 'the guards file and a db-reading probe in the same run'. The probe is absent from the command. The Verification table encodes exactly the evidence the Risk section declares insufficient. | pending | For (a) the falsifiable form is `sed -n '498,545p' tests/unit/test_conftest_isolation_guards.py ; grep -c 'REDIS_URL'` expecting 1 (currently 0 — scoped to the helper body, not the file). For (b) the mitigation must be spelled `monkeypatch.delenv("REDIS_URL", raising=False)` inside `_reset_claim_state`: `delenv` records and restores the prior value at teardown and matches the pattern already used for `POPOTO_TEST_DB` at lines 1096/1108/1126. `delenv` is safe for all ~25 callers because the class's only subprocess spawn, `_spawn_flock_holder` at line 488, runs `import fcntl, os, sys, time` and never touches Redis. Do NOT use `monkeypatch.setenv("REDIS_URL", os.environ.get("REDIS_URL", ""))` — the empty-string fallback exports a malformed URL on the xdist-controller path where nothing was ever set. |
-| CONCERN | History & Consistency | The builder instruction anchors on helper state that does not exist. Technical Approach says to extend `_reset_claim_state` 'alongside the `POPOTO_TEST_DB` handling that already lives there', but `_reset_claim_state` (lines 498-540) contains NO `POPOTO_TEST_DB` handling — it only rebinds claim-module globals and clears `PYTEST_XDIST_WORKER`. The `POPOTO_TEST_DB` protection lives at three of the four call sites (`monkeypatch.delenv` at 1096, 1108, 1126). The same reading exposes an existing gap: the fourth direct `pytest_configure()` caller at 1217/1220 has no `POPOTO_TEST_DB` delenv at all. | pending | Add two lines to `_reset_claim_state` immediately after `monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)`: `monkeypatch.delenv("REDIS_URL", raising=False)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)`. Then delete the now-redundant delenv calls at 1096, 1108 and 1126. The assertions at 1101, 1114 and 1130 keep working because they read `os.environ` AFTER the synthetic `pytest_configure()` call writes it. |
-| CONCERN | History & Consistency | Four Success Criteria have no corresponding Verification row, two of which are Risk mitigations. The nested-pytest #2628 invariant (Risk 3's entire mitigation) is verified nowhere. 'Under `-n N`, each xdist worker's unguarded child lands on that worker's own claimed db; the controller exports nothing' has no row. 'The hostname decision is recorded in the code comment' has no row. 'The now-tautological `test_the_subprocess_ran_against_the_test_db_not_production` is deleted' has no row — the adjacent 'Migration tests still green' row passes whether or not the deletion happened. | pending | Add one row per unmapped criterion so tasks 6 and 8 have a command rather than a prose judgement. Nested-pytest and per-worker: name the new test ids directly, e.g. `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_nested_pytest_child_claims_its_own_db" -p no:randomly` expecting exit 0. Hostname: `sed -n '288,296p' tests/conftest.py ; grep -c '127.0.0.1'` expecting nonzero (a bare file-wide grep is too loose). Deletion: `grep -c 'test_the_subprocess_ran_against_the_test_db_not_production' tests/unit/test_migrate_strip_pid_fields.py` expecting 0. |
-| CONCERN | Risk & Robustness | After the deletion the only regression detector is a test whose critical property (per-worker independence) is observable only under `-n 2 --dist=each` with `-p no:randomly`. `scripts/pytest-clean.sh` defaults to xdist `--dist=load`, so a routine full-suite run never exercises it and nothing schedules the `--dist=each` invocation. Risk 2's mitigation holds for the single-process assertion but not for the per-worker Success Criterion. | pending | Make the assertion dist-mode-independent by comparing against this process's own claim rather than a sibling worker: assert `os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")` AND that the unguarded child's resolved URL equals `os.environ["REDIS_URL"]` exactly. Under `--dist=load` each worker runs this in its own process, so a cross-worker leak fails the first assert without needing `--dist=each`. Keep the `--dist=each` row as an additional check, not the only detector. |
-| CONCERN | Scope & Value | `appetite: Small` and 'one line plus three deletions', yet the docs cascade edits two doctrine surfaces unrelated to the root cause: `CLAUDE.md`'s Manual Testing Hygiene paragraph and `docs/sdlc/do-build.md:215`, which the plan itself labels 'Pre-existing drift'. `docs/sdlc/do-build.md` is loaded at runtime by every `/do-build` invocation in the repo, so a doctrine correction is coupled to this fix's merge and a reviewer blocking on wording blocks the fix. | pending | Keep the four status-quo docs edits (`tests/README.md`, `docs/features/test-isolation-hardening.md`, `docs/features/test-db-ownership.md`, `docs/features/README.md`). Split the two pre-existing-drift corrections (`docs/sdlc/do-build.md:215`'s phantom `REDIS_TEST_DB`, and `tests/unit/test_redis_bootstrap.py`'s module docstring) into a follow-up issue. If `docs/sdlc/do-build.md` stays in scope it needs its own anti-regression check, which no current Verification row provides. |
-| CONCERN | Scope & Value | Every Success Criterion stops at a proxy ('a child resolves `REDIS_URL` to the claimed db', 'the guard file no longer exists'). None asserts the outcome a human cares about: that a unit-suite run performs ZERO writes against db0. That criterion is now measurable precisely because the in-process consumers are also moved off db0 by this export, and it is the strongest evidence the change works. | pending | Capture `redis-cli -n 0 dbsize` immediately before and after `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py -p no:randomly`, on both `main` and the branch. Do NOT use `MONITOR` — it is machine-global and this Redis serves live production traffic. Expected: a nonzero db0 delta on `main`, a zero delta on the branch. Put that delta in the PR body next to the demonstrated-red evidence. |
-| NIT | Scope & Value | Four named agent personas and eight sequential tasks are allocated to one added line, one helper edit and one file deletion. Every task is `Parallel: false`, so the orchestration buys no concurrency. | pending | n/a (NIT) |
-| NIT | Structural check | Line-reference drift for the same symbol: Risk 5 cites the `redis_test_url` fixture at `conftest.py:938` while task 1's Informed By cites `conftest.py:937`. The actual definition is at line 937. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness; History & Consistency | The plan asserts the export benefits children only and calls the change test-harness-internal. Roughly fifteen NON-test modules read `REDIS_URL` lazily inside function bodies and therefore switch from production db0 to the claimed test db in-process: `bridge/dedup.py:131`, `bridge/routing.py:1449`, `bridge/liveness.py:66`, `bridge/email_bridge.py:147` and `:830`, `bridge/telegram_relay.py:115`, `bridge/email_relay.py:71`, `bridge/email_dead_letter.py:35`, `tools/send_message.py:86`, `tools/react_with_emoji.py:65`, `tools/valor_email.py:65`, `tools/valor_telegram.py:725`, `tools/email_history/__init__.py:41`, `reflections/pm_briefings/delivery.py:78`, `ui/app.py:410/456/652`. spike-2's sweep was scoped to `tests/` and its conclusion was generalized past that boundary. Ten test files import `bridge.dedup` and NONE monkeypatches `REDIS_URL`, so they write to production db0 today and will land on a per-test-flushed db after the change. Architectural Impact ('Data ownership: unchanged') and Update System ('test-harness-internal') are both wrong. | **ADDRESSED** — sweep re-run during revision and recorded as **spike-3**. Architectural Impact "Data ownership" rewritten (unchanged → **changed, and this is the point**). Update System rewritten with the accurate narrower reason (no production module is *edited*; the behavior change is confined to processes that load `tests/conftest.py`) plus a Verification row asserting it. New **Risk 7** owns the regression surface. New **task 2.5** measures it. New Success Criterion states the outcome as a db0 delta. Measured at revision time: `test_dedup.py` alone leaves 4 net keys in production db0 (61505 → 61509). Import-graph enumeration explicitly rejected as a work list (73 files is a loose upper bound). | Re-run the blast-radius sweep over non-test code with `grep -rn "REDIS_URL" --include="*.py" . ; grep -v "^./tests/"`. The consumers use `redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")` INSIDE a function, so the value is read per call, after `pytest_configure` runs; unlike popoto's `pytest11` plugin they are NOT immune. Run `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py tests/unit/test_duplicate_delivery.py tests/unit/test_last_processed.py tests/unit/test_bridge_dispatch_contract.py -p no:randomly` before and after the export and add it as a Verification row. Expect key-visibility failures (cross-test key reuse now flushed), not import errors. |
+| BLOCKER | Risk & Robustness | Risk 1 is the plan's self-declared only hard blocker and neither of its two Verification rows can go red. (a) `grep -c 'REDIS_URL' tests/unit/test_conftest_isolation_guards.py` expected 'output > 2' — the file ALREADY contains exactly 3 occurrences today (lines 587, 1194, 1205), so the row passes on unmodified `main`. (b) The row named for the hazard runs the guards file alone under `-n 2 --dist=each` expecting exit 0, but spike-1 finding F measured that this file reports green whether or not the leak exists, and the plan's own prose requires 'the guards file and a db-reading probe in the same run'. The probe is absent from the command. The Verification table encodes exactly the evidence the Risk section declares insufficient. | **ADDRESSED** — both unfalsifiable rows deleted from Verification. (a) replaced by a helper-scoped row: `sed -n '497,545p' ... \| grep -c 'monkeypatch.delenv("REDIS_URL"'` expecting 1 (verified 0 on `main` today). (b) replaced by a row that runs the guards file **and** the db-reading probe test in the same invocation under `-n 2 --dist=each`, with the reason spelled in the row itself. Risk 1 now carries the exact `delenv` spelling, the explicit rejection of the `setenv`-with-empty-fallback form, and the `_spawn_flock_holder` safety argument. Two more rows added: the redundant-delenv-removal check and the default-`--dist=load` detector check. | For (a) the falsifiable form is `sed -n '498,545p' tests/unit/test_conftest_isolation_guards.py ; grep -c 'REDIS_URL'` expecting 1 (currently 0 — scoped to the helper body, not the file). For (b) the mitigation must be spelled `monkeypatch.delenv("REDIS_URL", raising=False)` inside `_reset_claim_state`: `delenv` records and restores the prior value at teardown and matches the pattern already used for `POPOTO_TEST_DB` at lines 1096/1108/1126. `delenv` is safe for all ~25 callers because the class's only subprocess spawn, `_spawn_flock_holder` at line 488, runs `import fcntl, os, sys, time` and never touches Redis. Do NOT use `monkeypatch.setenv("REDIS_URL", os.environ.get("REDIS_URL", ""))` — the empty-string fallback exports a malformed URL on the xdist-controller path where nothing was ever set. |
+| CONCERN | History & Consistency | The builder instruction anchors on helper state that does not exist. Technical Approach says to extend `_reset_claim_state` 'alongside the `POPOTO_TEST_DB` handling that already lives there', but `_reset_claim_state` (lines 498-540) contains NO `POPOTO_TEST_DB` handling — it only rebinds claim-module globals and clears `PYTEST_XDIST_WORKER`. The `POPOTO_TEST_DB` protection lives at three of the four call sites (`monkeypatch.delenv` at 1096, 1108, 1126). The same reading exposes an existing gap: the fourth direct `pytest_configure()` caller at 1217/1220 has no `POPOTO_TEST_DB` delenv at all. | **ADDRESSED** — verified: `_reset_claim_state` (497-540) contains no `POPOTO_TEST_DB` handling; the delenvs live at 1096/1108/1126 and caller 1220 has none. The false "already lives there" anchor is removed from Technical Approach and replaced with the explicit correction. Both `delenv` lines now go in the helper, the three redundant call-site delenvs are a **DELETE** row in Test Impact, and the 1220 gap is named as closed. Line range corrected 496 → 497 throughout. | Add two lines to `_reset_claim_state` immediately after `monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)`: `monkeypatch.delenv("REDIS_URL", raising=False)` and `monkeypatch.delenv("POPOTO_TEST_DB", raising=False)`. Then delete the now-redundant delenv calls at 1096, 1108 and 1126. The assertions at 1101, 1114 and 1130 keep working because they read `os.environ` AFTER the synthetic `pytest_configure()` call writes it. |
+| CONCERN | History & Consistency | Four Success Criteria have no corresponding Verification row, two of which are Risk mitigations. The nested-pytest #2628 invariant (Risk 3's entire mitigation) is verified nowhere. 'Under `-n N`, each xdist worker's unguarded child lands on that worker's own claimed db; the controller exports nothing' has no row. 'The hostname decision is recorded in the code comment' has no row. 'The now-tautological `test_the_subprocess_ran_against_the_test_db_not_production` is deleted' has no row — the adjacent 'Migration tests still green' row passes whether or not the deletion happened. | **ADDRESSED** — four rows added, one per unmapped criterion: the nested-pytest #2628 invariant (Risk 3's mitigation, previously verified nowhere), per-worker independence under `--dist=each`, the hostname decision (`sed`-scoped to the export site, not a file-wide grep), and the tautology deletion by name grep (the adjacent "migration tests green" row passed either way). Tasks 6 and 8 now have commands rather than prose judgements. | Add one row per unmapped criterion so tasks 6 and 8 have a command rather than a prose judgement. Nested-pytest and per-worker: name the new test ids directly, e.g. `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_nested_pytest_child_claims_its_own_db" -p no:randomly` expecting exit 0. Hostname: `sed -n '288,296p' tests/conftest.py ; grep -c '127.0.0.1'` expecting nonzero (a bare file-wide grep is too loose). Deletion: `grep -c 'test_the_subprocess_ran_against_the_test_db_not_production' tests/unit/test_migrate_strip_pid_fields.py` expecting 0. |
+| CONCERN | Risk & Robustness | After the deletion the only regression detector is a test whose critical property (per-worker independence) is observable only under `-n 2 --dist=each` with `-p no:randomly`. `scripts/pytest-clean.sh` defaults to xdist `--dist=load`, so a routine full-suite run never exercises it and nothing schedules the `--dist=each` invocation. Risk 2's mitigation holds for the single-process assertion but not for the per-worker Success Criterion. | **ADDRESSED** — assertions 1 and 2 are re-specified against **this process's own claim** rather than a sibling worker (parent URL vs child URL, byte-identical; and `endswith(f"/{claim_test_db()}")`), so a cross-worker leak fails under the default `--dist=load` with no special invocation. Marked load-bearing in Technical Approach and in task 4. The `--dist=each` row is retained as an *additional* check, explicitly not the only detector; a new Verification row exercises the default mode. | Make the assertion dist-mode-independent by comparing against this process's own claim rather than a sibling worker: assert `os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")` AND that the unguarded child's resolved URL equals `os.environ["REDIS_URL"]` exactly. Under `--dist=load` each worker runs this in its own process, so a cross-worker leak fails the first assert without needing `--dist=each`. Keep the `--dist=each` row as an additional check, not the only detector. |
+| CONCERN | Scope & Value | `appetite: Small` and 'one line plus three deletions', yet the docs cascade edits two doctrine surfaces unrelated to the root cause: `CLAUDE.md`'s Manual Testing Hygiene paragraph and `docs/sdlc/do-build.md:215`, which the plan itself labels 'Pre-existing drift'. `docs/sdlc/do-build.md` is loaded at runtime by every `/do-build` invocation in the repo, so a doctrine correction is coupled to this fix's merge and a reviewer blocking on wording blocks the fix. | **ADDRESSED (split accepted)** — `docs/sdlc/do-build.md:215` and `tests/unit/test_redis_bootstrap.py`'s docstring are moved to a **Deferred** subsection under Documentation and out of Test Impact's edit set; task 7 files the follow-up issue and puts its number in the PR body. The four status-quo docs edits stay. `CLAUDE.md`'s Manual Testing Hygiene paragraph **stays in scope** with a reason: this change is what makes it wrong inside pytest, so it is status-quo work, not drift. Re-entry condition recorded: `docs/sdlc/do-build.md` needs its own anti-regression row before it can come back. | Keep the four status-quo docs edits (`tests/README.md`, `docs/features/test-isolation-hardening.md`, `docs/features/test-db-ownership.md`, `docs/features/README.md`). Split the two pre-existing-drift corrections (`docs/sdlc/do-build.md:215`'s phantom `REDIS_TEST_DB`, and `tests/unit/test_redis_bootstrap.py`'s module docstring) into a follow-up issue. If `docs/sdlc/do-build.md` stays in scope it needs its own anti-regression check, which no current Verification row provides. |
+| CONCERN | Scope & Value | Every Success Criterion stops at a proxy ('a child resolves `REDIS_URL` to the claimed db', 'the guard file no longer exists'). None asserts the outcome a human cares about: that a unit-suite run performs ZERO writes against db0. That criterion is now measurable precisely because the in-process consumers are also moved off db0 by this export, and it is the strongest evidence the change works. | **ADDRESSED** — added as a Success Criterion ("a unit-suite run performs ZERO net writes against production db0") and as a Verification row running the six-file cluster on `main` and on the branch, with the `MONITOR` prohibition stated in the row. Task 2.5 owns the measurement and both numbers go in the PR body beside the demonstrated-red evidence. Plan-time baseline already captured: 61505 → 61509 for `test_dedup.py` alone on `main`. | Capture `redis-cli -n 0 dbsize` immediately before and after `./scripts/pytest-clean.sh tests/unit/test_dedup.py tests/unit/test_reconciler.py tests/unit/test_catchup_claim.py -p no:randomly`, on both `main` and the branch. Do NOT use `MONITOR` — it is machine-global and this Redis serves live production traffic. Expected: a nonzero db0 delta on `main`, a zero delta on the branch. Put that delta in the PR body next to the demonstrated-red evidence. |
+| NIT | Scope & Value | Four named agent personas and eight sequential tasks are allocated to one added line, one helper edit and one file deletion. Every task is `Parallel: false`, so the orchestration buys no concurrency. | **ACKNOWLEDGED, roster kept** | The sequencing is genuinely dependent, not padding: the demonstrated-red measurement must run *before* the export, the blast-radius sweep *after* it and *before* the guard deletion, and the deletion *after* the replacement assertions exist. Serializing that is correct. Spike-3 also grew the work (task 2.5), so the roster is now closer to load-bearing than it was. A note to this effect is recorded under Team Members. |
+| NIT | Structural check | Line-reference drift for the same symbol: Risk 5 cites the `redis_test_url` fixture at `conftest.py:938` while task 1's Informed By cites `conftest.py:937`. The actual definition is at line 937. | **FIXED** | Verified `grep -n 'def redis_test_url' tests/conftest.py` → 937. Risk 5 corrected 938 → 937. `_reset_claim_state` also re-anchored 496 → 497 in every reference, and `_spawn_flock_holder` recorded at 470. |
 
 ---
 
