@@ -752,6 +752,29 @@ asserted unchanged.
 
 ## Open Questions
 
+**All four resolved 2026-08-24 — every proposed default is CONFIRMED. No PM
+check-in outstanding; the builder proceeds on the defaults as written below.**
+
+1. **CONFIRMED: DELETE.** A test that cannot go red is not a test. Its purpose
+   is subsumed by the new unguarded-child assertion, which can.
+2. **CONFIRMED: drop Consequence 1.** The measurement beats the issue body, and
+   the body has been corrected on the issue
+   ([comment 5393099353](https://github.com/tomcounsell/ai/issues/2805#issuecomment-5393099353)).
+   Adding a db0 override to eight tests whose own docstring forbids constructing
+   a db0 client would have made them lie. Carry the anti-criterion.
+3. **CONFIRMED: `TestPerProcessDbClaim`.** It owns the claim contract; a new
+   file would split it. The prominent comment on assertion 2 is required, not
+   optional — a future reader must be told that the bare `subprocess.run` with
+   no `env=` is the deliberate subject of the test and not an oversight, or
+   someone will "fix" it.
+4. **CONFIRMED: accept `127.0.0.1`.** Making the guarded and unguarded paths
+   produce byte-identical URLs is worth more than preserving the ambient
+   spelling, and a divergence in host between the two paths is exactly the kind
+   of detail that costs an hour during a future incident. State it in the code
+   comment as a deliberate choice.
+
+### Original question text (retained for the reviewer)
+
 1. **Deleting `test_the_subprocess_ran_against_the_test_db_not_production`** (`tests/unit/test_migrate_strip_pid_fields.py:411`): it can no longer go red once the export lands — three independent mechanisms would have to be removed. The plan proposes DELETE, with its purpose subsumed by the new unguarded-child assertion. The alternative is to keep it and accept a permanently-green test, which the repo's demonstrated-red principle argues against. Confirm DELETE.
 2. **The issue's Consequence 1 is dropped.** Recon established that no subprocess in `tests/unit/test_redis_flush_guard_prod.py` connects to Redis — all eight spawning tests do import/attribute introspection only — so the proposed `env={**subprocess_env(), "REDIS_URL": ".../0"}` edit to five call sites is unnecessary and would misdescribe the tests. Confirm the drop, since the issue body asks for it explicitly.
 3. **Home for the replacement assertions**: the plan puts all three in `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim`, which already owns the claim contract, rather than a new file. The second assertion deliberately looks like the exact pattern the deleted guard used to reject (a bare `subprocess.run` with no `env=`), so it needs a prominent comment saying so. Confirm the placement.
