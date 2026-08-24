@@ -525,6 +525,22 @@ class TestPerProcessDbClaim:
         set — so assertions can read them.
         """
         monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+        # The synthetic registry hands back a db this process does not own, so the
+        # real export would poison the live session env for every later test in this
+        # worker. Suppress the write instead of undoing it: there is then no window
+        # in which os.environ names a foreign db (#2805 Risk 1). This helper — not
+        # each of its 23 call sites — owns the suppression, so the next direct
+        # pytest_configure() caller is protected without anyone remembering.
+        #
+        # REDIS_URL itself is deliberately NOT touched here (no delenv, no setenv):
+        # with the write suppressed at the source there is nothing to restore, and
+        # a delenv would make REDIS_URL absent for the duration of all 23 tests that
+        # use this helper -- at which point every one of the 20 lazy REDIS_URL
+        # consumers in tests/ and production modules falls back to its hardcoded
+        # "redis://localhost:6379/0" default, manufacturing the exact db0 exposure
+        # #2805 exists to remove.
+        monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
         monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
         monkeypatch.setattr(_db_claim, "_CLAIMED_SCRATCH_DB", None, raising=False)
@@ -1093,7 +1109,6 @@ class TestSessionClaimHook:
         makes exhaustion fatal.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=2))
             assert _db_claim._CLAIMED_TEST_DB is None
@@ -1105,7 +1120,6 @@ class TestSessionClaimHook:
     def test_worker_claims_and_exports_popoto_test_db(self, monkeypatch, tmp_path):
         """A worker claims, and points popoto's plugin at the same db."""
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             config = self._stub_config(worker=True, numprocesses=4)
             _conftest.pytest_configure(config)
@@ -1123,7 +1137,6 @@ class TestSessionClaimHook:
         claims nothing and the fail-closed guard denies every flush.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=0))
             assert _db_claim._CLAIMED_TEST_DB is not None

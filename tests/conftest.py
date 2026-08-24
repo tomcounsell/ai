@@ -271,6 +271,37 @@ _install_redis_flush_ownership_guard()
 # very first flush -- no commit window in which the guard is live and the plugin
 # still targets its db-15 default (db 15 is the top slot of the claim pool, so
 # every flush of it was a cross-process wipe).
+def _export_claimed_redis_url() -> None:
+    """Publish THIS process's claimed db as the process-wide ``REDIS_URL``.
+
+    A module-level seam rather than an inline assignment so that tests which
+    call ``pytest_configure()`` directly against a synthetic claim registry can
+    stub it out (via ``monkeypatch.setattr``) and never write a foreign db into
+    the live session env -- see ``_reset_claim_state`` in
+    ``test_conftest_isolation_guards.py`` (#2805 Risk 1).
+
+    Why this line exists: every consumer that resolves ``os.environ["REDIS_URL"]``
+    lazily -- inside a function body, at call time -- now sees this process's
+    claimed test db instead of falling through to the hardcoded production
+    default (``redis://localhost:6379/0``). That includes a plain
+    ``subprocess.run(...)`` with no ``env=`` (the child inherits ``os.environ``
+    by construction) and every in-process production module that reads
+    ``REDIS_URL`` per call rather than at import time.
+
+    Honest limitation: this is NOT defense-in-depth for THIS process's own
+    popoto client. popoto's ``pytest11`` plugin resolves ``REDIS_URL`` and
+    builds ``POPOTO_REDIS_DB`` before ``tests/conftest.py`` is even imported,
+    so the parent process's in-process popoto client is unaffected by this line
+    -- it is already pointed at the claimed db via the existing
+    ``POPOTO_TEST_DB`` export and the autouse ``redis_test_db`` fixture swap.
+
+    Hostname is deliberately ``127.0.0.1``, not ``localhost``: this matches
+    what ``tests.db_claim.subprocess_env`` has always passed to children, so
+    the two paths agree rather than silently diverging on host spelling.
+    """
+    os.environ["REDIS_URL"] = db_claim.redis_test_url()
+
+
 def pytest_configure(config):
     """Claim this process's test db, and point popoto's plugin at it (#2628)."""
     is_worker = getattr(config, "workerinput", None) is not None
@@ -287,6 +318,7 @@ def pytest_configure(config):
         pytest.exit(str(exc), returncode=3)
         return
     os.environ["POPOTO_TEST_DB"] = str(db)
+    _export_claimed_redis_url()
     if is_worker:
         # xdist does not surface a worker's pytest_report_header to the terminal,
         # so provenance travels back through workeroutput instead (see
