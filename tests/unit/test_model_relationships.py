@@ -553,8 +553,9 @@ class TestAgentSessionFieldPresence:
 
         assert "claude_code_session_id" not in AgentSession._meta.field_names
 
-    def test_sender_property_exists(self):
-        """AgentSession should have a sender property aliasing sender_name."""
+    def test_sender_name_property_exists(self):
+        """sender_name is the canonical accessor; the old `sender` alias is gone."""
         from models.agent_session import AgentSession
 
-        assert isinstance(AgentSession.sender, property)
+        assert isinstance(AgentSession.sender_name, property)
+        assert not hasattr(AgentSession, "sender")

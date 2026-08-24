@@ -62,23 +62,25 @@ class TestIsSdlcJobClassificationType:
         assert session.is_sdlc is False
 
     def test_stage_states_triggers_sdlc(self):
-        """stage_states with active stages should trigger SDLC."""
-        import json
+        """A stage event with active stages should trigger SDLC."""
+        from models.session_event import SessionEvent
 
         session = AgentSession(
             session_id="test_legacy_246",
             project_key="test",
-            stage_states=json.dumps({"PLAN": "in_progress"}),
+            session_events=[
+                SessionEvent.stage_change("bulk", "init", {"PLAN": "in_progress"}).model_dump()
+            ],
         )
         assert session.is_sdlc is True
 
-    def test_classification_takes_priority_over_empty_history(self):
-        """classification_type=sdlc should work even with empty history."""
+    def test_classification_takes_priority_over_empty_events(self):
+        """classification_type=sdlc should work even with no session events."""
         session = AgentSession(
             session_id="test_priority_246",
             project_key="test",
             classification_type="sdlc",
-            history=[],
+            session_events=[],
         )
         assert session.is_sdlc is True
 
@@ -88,6 +90,6 @@ class TestIsSdlcJobClassificationType:
             session_id="test_activated_246",
             project_key="test",
             classification_type="sdlc",
-            history=["[user] SDLC issue 246"],
+            session_events=["[user] SDLC issue 246"],
         )
         assert session.is_sdlc is True

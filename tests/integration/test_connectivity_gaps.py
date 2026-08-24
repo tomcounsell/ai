@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 import pytest
 
 from models.agent_session import AgentSession
+from models.session_event import format_event_lines
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ def running_session(redis_test_db):
         slug="test-slug",
         classification_type="bug",
         classification_confidence=0.95,
-        history=["[user] SDLC 209", "[stage] ISSUE completed"],
+        session_events=["[user] SDLC 209", "[stage] ISSUE completed"],
         issue_url="https://github.com/org/repo/issues/209",
         plan_url="https://github.com/org/repo/blob/main/docs/plans/fix.md",
         pr_url="https://github.com/org/repo/pull/210",
@@ -163,7 +164,7 @@ class TestCompleteTranscriptFieldPreservation:
 
         found = list(AgentSession.query.filter(session_id=running_session.session_id))
         s = found[0]
-        history = s._get_history_list()
+        history = format_event_lines(s.session_events)
         assert len(history) >= 2
         assert "[user] SDLC 209" in history[0]
 

@@ -343,7 +343,9 @@ cleaned up by the TTL when they next touch Redis).
 
 ## Backward Compatibility
 
-- `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`; `watchdog_unhealthy` -> `unhealthy_reason` (schema diet, #1927)
+- `_normalize_kwargs()` maps constituent field names into their consolidated DictFields: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`. It also back-aliases `watchdog_unhealthy` -> `unhealthy_reason` (schema diet, #1927) and discards `agent_session_id` (an `AutoKeyField`).
+- `_normalize_kwargs()` maps **nothing else**. The legacy paths for `work_item_slug`, `last_activity`, `scheduled_after`, `parent_job_id`, `job_id`, `history`, `stage_states`, `commit_sha`, `summary`, and the dead-field pop list were removed in #2873, along with the `.sender` and `.history` property aliases and the `get_parent_chat_session()` / `get_dev_sessions()` / `get_history_list()` wrappers. Pass the canonical field names (`slug`, `updated_at`, `scheduled_at`, `parent_agent_session_id`, `session_events`) instead. Render an event log for display with `models.session_event.format_event_lines()`.
+- Unknown kwargs are harmless: Popoto's `Model.__init__` does `self.__dict__.update(kwargs)`, so an unrecognized key lands in the instance dict and never raises, and encoding iterates `_meta.fields` only, so it is never persisted.
 - `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
 - Property accessors provide read access to old field names (`sender_name`, `message_text`, etc.) for backward compatibility
 - `models/agent_session.py` exports `AgentSession = AgentSession` (shim)

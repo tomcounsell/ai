@@ -30,7 +30,7 @@ def _make_mock_session(**overrides):
         "completed_at": None,
         "updated_at": time.time(),
         "stage_states": None,
-        "history": [],
+        "session_events": [],
         "issue_url": None,
         "plan_url": None,
         "pr_url": None,
@@ -646,7 +646,7 @@ class TestSessionToPipeline:
         mock_session = _make_mock_session(
             issue_url=None,
             pr_url=None,
-            history=[
+            session_events=[
                 {"role": "lifecycle", "text": "Created issue https://github.com/org/repo/issues/7"},
                 {"role": "lifecycle", "text": "Opened PR https://github.com/org/repo/pull/8"},
             ],
@@ -662,7 +662,7 @@ class TestSessionToPipeline:
         mock_session = _make_mock_session(
             issue_url="https://github.com/org/repo/issues/1",
             pr_url=None,
-            history=[
+            session_events=[
                 {
                     "role": "lifecycle",
                     "text": "Created issue https://github.com/org/repo/issues/999",
@@ -694,7 +694,7 @@ class TestSessionToPipeline:
         mock_session.completed_at = time.time()
         mock_session.updated_at = time.time()
         mock_session.stage_states = None
-        mock_session.history = []
+        mock_session.session_events = []
         mock_session.issue_url = None
         mock_session.plan_url = None
         mock_session.pr_url = None

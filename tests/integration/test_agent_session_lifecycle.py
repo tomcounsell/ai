@@ -1,12 +1,12 @@
 """Tests for AgentSession lifecycle, summarizer composition, and markdown send.
 
 Covers the gaps identified in PR #180 review:
-1. AgentSession history tracking (append_history, cap at 20, get_stage_progress)
+1. AgentSession event tracking (append_event, session_events, get_stage_progress)
 2. AgentSession link tracking (set_link, get_links)
 3. Summarizer composition (_compose_structured_draft)
 4. Summarizer with session context (draft_message with session param)
 5. Markdown send (send_markdown fallback behavior)
-6. Backward compat (SessionLog shim, sender property)
+6. Backward compat (SessionLog shim, sender_name property)
 7. Full lifecycle simulations (SDLC, Teammate, chit-chat)
 """
 
@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from models.agent_session import SDLC_STAGES, AgentSession
+from models.session_event import SessionEvent, format_event_lines
 
 
 def _make_stage_states(completed=None, in_progress=None):
@@ -53,7 +54,7 @@ def session(redis_test_db):
 @pytest.fixture
 def sdlc_session(redis_test_db):
     """Create an AgentSession with SDLC stage states and links."""
-    all_completed = _make_stage_states(completed=SDLC_STAGES)
+    all_completed = json.loads(_make_stage_states(completed=SDLC_STAGES))
     s = AgentSession.create(
         session_id="sdlc-lifecycle-1",
         project_key="test",
@@ -68,7 +69,7 @@ def sdlc_session(redis_test_db):
         branch_name="session/summarizer-bullet-format",
         turn_count=15,
         tool_call_count=42,
-        stage_states=all_completed,
+        session_events=[SessionEvent.stage_change("bulk", "init", all_completed).model_dump()],
     )
     s.append_history("user", "SDLC 177")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
@@ -117,11 +118,11 @@ def chat_session(redis_test_db):
 
 
 class TestHistoryTracking:
-    """Tests for append_history, _get_history_list, and history cap."""
+    """Tests for append_event/append_history, session_events, and format_event_lines."""
 
     def test_append_history_single(self, session):
         session.append_history("user", "SDLC 177")
-        history = session._get_history_list()
+        history = format_event_lines(session.session_events)
         assert len(history) == 1
         assert history[0] == "[user] SDLC 177"
 
@@ -129,7 +130,7 @@ class TestHistoryTracking:
         session.append_history("user", "SDLC 177")
         session.append_history("classify", "feature")
         session.append_history("stage", "ISSUE completed ☑")
-        history = session._get_history_list()
+        history = format_event_lines(session.session_events)
         assert len(history) == 3
         assert "[classify] feature" in history
 
@@ -141,24 +142,24 @@ class TestHistoryTracking:
         n = 60
         for i in range(n):
             session.append_history("test", f"entry {i}")
-        history = session._get_history_list()
+        history = format_event_lines(session.session_events)
         assert len(history) == n
         assert f"entry {n - 1}" in history[-1]
         # Oldest entries are retained, not trimmed away.
         assert any("entry 0" in h for h in history)
 
-    def test_get_history_list_empty(self, session):
-        assert session._get_history_list() == []
+    def test_format_event_lines_empty(self, session):
+        assert format_event_lines(session.session_events) == []
 
-    def test_get_history_list_none_safe(self, redis_test_db):
+    def test_format_event_lines_none_safe(self, redis_test_db):
         s = AgentSession.create(
             session_id="no-history",
             project_key="test",
             status="active",
             created_at=datetime.now(tz=UTC),
         )
-        # history field is None by default
-        assert s._get_history_list() == []
+        # session_events is None by default
+        assert format_event_lines(s.session_events) == []
 
 
 # ── Stage Progress ────────────────────────────────────────────────────────────
@@ -449,7 +450,7 @@ class TestEscapeMarkdown:
 
 
 class TestBackwardCompatibility:
-    """Tests for SessionLog shim and sender property."""
+    """Tests for the SessionLog shim and the sender_name property."""
 
     def test_session_log_is_agent_session(self):
         from models.session_log import SessionLog
@@ -462,9 +463,8 @@ class TestBackwardCompatibility:
 
         assert AgentSessionAlias is SessionLogAlias
 
-    def test_sender_property(self, session):
-        assert session.sender == session.sender_name
-        assert session.sender == "Tom"
+    def test_sender_name_property(self, session):
+        assert session.sender_name == "Tom"
 
     def test_create_via_session_log_shim(self, redis_test_db):
         from models.session_log import SessionLog
@@ -624,7 +624,7 @@ class TestSDLCClassificationTypeLifecycle:
         # The continuation session starts fresh but has classification_type
         assert s.is_sdlc is True
         # Even without stage_states, is_sdlc returns True via classification_type
-        assert s._get_history_list() == []
+        assert format_event_lines(s.session_events) == []
 
         # Add stage progress via stage_states
         s.stage_states = _make_stage_states(completed=SDLC_STAGES)
