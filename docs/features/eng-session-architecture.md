@@ -6,7 +6,6 @@ The AgentSession model uses a **session_type discriminator** (`SessionType` enum
 
 - **Eng Session** (`session_type=SessionType.ENG`): Full-permission session with Engineer persona, executed by the [headless session runner](headless-session-runner.md) (`agent/session_runner/`). Owns the Telegram conversation, handles SDLC work (planning, coding, testing, review) and conversational responses — a single unified role for both orchestration and execution. For SDLC work, the PM turn spawns and continues a resumable `dev` subagent inline.
 - **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational session with Teammate persona, same runner. Handles informational queries in DMs and may perform operational work (running scripts, restarting services, editing docs and `.claude/` skills, managing the knowledge base). Writes to source-code paths are blocked in code with a redirect that proposes spawning an Eng session — see [Teammate Session Permissions](teammate-session-permissions.md).
-- **Granite** (`session_type=SessionType.GRANITE`): historical enum value only. Pre-cutover records (#1924) carry this value; nothing creates new Granite-typed sessions.
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
@@ -27,7 +26,7 @@ Session type derivation from resolved persona:
 - **Engineer persona** -> `session_type="eng"` (Eng session, full permissions, engineer persona). Handles both quick conversational questions and SDLC work. The session executes through the [headless session runner](headless-session-runner.md) (`agent/session_runner/`).
 - **Teammate persona** -> `session_type="teammate"` (Teammate session, conversational). Handles informational queries directly.
 
-There are three `session_type` values: `eng`, `teammate`, and `granite` (historical only — no live path creates it). The first two are bridge-originated and worker-executed. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
+There are two `session_type` values: `eng` and `teammate`. Both are bridge-originated and worker-executed. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
 ### Persona resolution on all ingest paths (issue #1708)
 
@@ -119,7 +118,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 ### Shared fields (all sessions)
 - `id` (AutoKeyField) -- primary key (aliased as `agent_session_id`)
 - `session_id` -- Telegram-derived identifier
-- `session_type` (KeyField) -- "eng", "teammate", or "granite"
+- `session_type` (KeyField) -- "eng" or "teammate"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed
 - `continuation_depth` (IntField, default 0) -- tracks how many continuation sessions have been chained from the original.
 - `project_key`, `created_at`, `history`, etc.

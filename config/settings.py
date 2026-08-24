@@ -834,8 +834,6 @@ class SessionRunnerSettings(BaseModel):
     per-role transport seam — protocol, not paint.
 
     Env prefix: ``SESSION_RUNNER__`` (e.g. ``SESSION_RUNNER__PM_MODEL``).
-    Legacy ``GRANITE__*``/``GRANITE_*`` keys are ignored and flagged by
-    :func:`stale_granite_env_keys`.
     """
 
     pm_model: str = Field(
@@ -1145,49 +1143,3 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
-
-
-# --- Stale legacy env-prefix guard (plan #1924, hard requirement) ---------
-#
-# The PTY teardown renamed the ``GraniteSettings`` group to
-# ``SessionRunnerSettings`` (env prefix ``GRANITE__*`` -> ``SESSION_RUNNER__*``)
-# and deleted the flat ``GRANITE_*`` knobs. ``extra="ignore"`` means a stale
-# key in the vault .env or a launchd plist silently does NOTHING — the exact
-# silent-failure mode the critique flagged. Warn loudly at settings import;
-# scripts/update/run.py surfaces the same list during deploy.
-
-_LEGACY_GRANITE_ENV_PREFIX = "GRANITE_"
-
-
-def stale_granite_env_keys(env_file: str | Path = ".env") -> list[str]:
-    """Return legacy ``GRANITE__*``/``GRANITE_*`` env keys that are still set.
-
-    Scans both the process environment and ``env_file`` (the same file
-    ``Settings`` reads; skipped under ``VALOR_LAUNCHD=1``, matching
-    ``model_config`` — in the launchd environment all vars are already in
-    the process env). Returns a sorted list of stale key names; empty when
-    the machine is clean.
-    """
-
-    keys = {k for k in os.environ if k.startswith(_LEGACY_GRANITE_ENV_PREFIX)}
-    if not os.environ.get("VALOR_LAUNCHD"):
-        try:
-            for line in Path(env_file).read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith(_LEGACY_GRANITE_ENV_PREFIX) and "=" in stripped:
-                    keys.add(stripped.split("=", 1)[0].strip())
-        except OSError:
-            pass
-    return sorted(keys)
-
-
-_stale_granite_keys = stale_granite_env_keys()
-if _stale_granite_keys:
-    logging.getLogger(__name__).warning(
-        "Stale legacy GRANITE_* env keys detected — ignored since the PTY "
-        "teardown (plan #1924): %s. Rename surviving knobs to the "
-        "SESSION_RUNNER__* prefix (e.g. GRANITE__PM_MODEL -> "
-        "SESSION_RUNNER__PM_MODEL) or delete them from ~/Desktop/Valor/.env "
-        "and the launchd plists.",
-        ", ".join(_stale_granite_keys),
-    )

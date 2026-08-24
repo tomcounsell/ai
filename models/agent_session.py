@@ -1,7 +1,6 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("eng" or "teammate";
-"granite" persists on historical records only — see config/enums.py).
+Single Popoto model with session_type discriminator ("eng" or "teammate").
 
 Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
@@ -99,7 +98,7 @@ class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
     Single Popoto model with a session_type discriminator ("eng" or
-    "teammate"; "granite" persists on historical records only).
+    "teammate").
 
     Session types (permission model):
         Eng session (session_type="eng"):

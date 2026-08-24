@@ -8,29 +8,28 @@ This document defines which Ollama models run locally on each machine and which 
 
 | Workload | Model | Config source | Notes |
 |----------|-------|--------------|-------|
-| **Classification** (bridge routing, memory audit, email triage) | `granite4.1:3b` | `OLLAMA_CLASSIFIER_MODEL` in `config/models.py` | Hard precondition: worker will not start without it. Same model already resident for PTY operator work — zero extra memory. |
+| **Classification** (bridge routing, memory audit, email triage) | `granite4.1:3b` | `OLLAMA_CLASSIFIER_MODEL` in `config/models.py` | Hard precondition: worker will not start without it. |
 | **Free-text generation** (memory title generation, test AI judge, knowledge doc summarization) | `gemma4:31b-cloud` (default) or `gemma4:31b-mlx` (RAM-rich) | `settings.models.ollama_generation_model` (`config/settings.py`) | Soft / fail-soft everywhere. Override per machine via env `MODELS__OLLAMA_GENERATION_MODEL`. |
 | **Embeddings** | `nomic-embed-text` | `agent/embedding_provider.py` | Out of scope for this consolidation; local only. |
-| **PTY operator routing** (PM↔Dev turn classification) | `granite4.1:3b` | `GRANITE__DEV_MODEL` (default) | Same binary as the classifier above; one resident model serves both roles. |
 
 ## Steady-state local Ollama per machine type
 
 **Cloud machine (e.g. 16 GB RAM):**
-- `granite4.1:3b` — classification + PTY routing
+- `granite4.1:3b` — classification
 - `nomic-embed-text` — vector embeddings
 - Generation → Ollama Cloud (`gemma4:31b-cloud`)
 
 **RAM-rich Apple-Silicon machine (≥ 48 GB):**
-- `granite4.1:3b` — classification + PTY routing
+- `granite4.1:3b` — classification
 - `nomic-embed-text` — vector embeddings
 - `gemma4:31b-mlx` — local generation (opt-in, selected by `/setup`)
 
 ## Setup and update integration
 
 - **`/setup`** measures RAM (`sysctl -n hw.memsize`), selects `gemma4:31b-mlx` when RAM ≥ `MIN_LOCAL_GEN_RAM_GB` (48 GB), else `gemma4:31b-cloud`, and writes `MODELS__OLLAMA_GENERATION_MODEL` to `~/.zshenv` (machine-local, NOT the iCloud-synced `~/Desktop/Valor/.env`). `install_worker.sh` injects the same var into the launchd plist.
-- **`/update` Step 4.75** gate verifies granite is present (hard gate, suppresses restart on failure).
+- **`/update` Step 4.76** checks that the classifier model is present on this machine. It is a presence check only; the restart-blocking smoke gate that used to run here died with the PTY substrate (plan #1924).
 - **`/update` Step 4** ensures the configured generation model via `ensure_generation_model()` — cloud: signin check; mlx: RAM-guarded probe/pull. Warning only, never suppresses restart.
-- **`gemma4:e2b`** (the prior single local model, standardized in issue #671) is in `OLLAMA_SUPERSEDED_MODELS` and is removed from each machine by the `/update` superseded-cleanup loop, gated on the granite smoke-test passing AND the `data/spike1_parity_ok` marker being present.
+- **`gemma4:e2b`** (the prior single local model, standardized in issue #671) is in `OLLAMA_SUPERSEDED_MODELS` and is removed from each machine by the `/update` superseded-cleanup loop, gated on the classifier model being present AND the `data/spike1_parity_ok` marker being present.
 
 ## `ensure_generation_model()` helper
 

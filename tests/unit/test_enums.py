@@ -13,50 +13,56 @@ class TestSessionType:
     def test_string_equality(self):
         assert SessionType.ENG == "eng"
         assert SessionType.TEAMMATE == "teammate"
-        assert SessionType.GRANITE == "granite"
 
     def test_str_conversion(self):
         assert str(SessionType.ENG) == "eng"
         assert str(SessionType.TEAMMATE) == "teammate"
-        assert str(SessionType.GRANITE) == "granite"
 
     def test_membership(self):
-        assert "eng" in [SessionType.ENG, SessionType.TEAMMATE, SessionType.GRANITE]
-        assert "teammate" in [SessionType.ENG, SessionType.TEAMMATE, SessionType.GRANITE]
-        assert "granite" in [SessionType.ENG, SessionType.TEAMMATE, SessionType.GRANITE]
-        assert "invalid" not in [SessionType.ENG, SessionType.TEAMMATE, SessionType.GRANITE]
+        assert "eng" in [SessionType.ENG, SessionType.TEAMMATE]
+        assert "teammate" in [SessionType.ENG, SessionType.TEAMMATE]
+        assert "invalid" not in [SessionType.ENG, SessionType.TEAMMATE]
 
     def test_iteration(self):
         members = list(SessionType)
-        assert len(members) == 3
+        assert len(members) == 2
         assert SessionType.ENG in members
         assert SessionType.TEAMMATE in members
-        assert SessionType.GRANITE in members
 
     def test_value_access(self):
         assert SessionType.ENG.value == "eng"
         assert SessionType.TEAMMATE.value == "teammate"
-        assert SessionType.GRANITE.value == "granite"
 
     def test_construction_from_string(self):
         assert SessionType("eng") == SessionType.ENG
         assert SessionType("teammate") == SessionType.TEAMMATE
-        assert SessionType("granite") == SessionType.GRANITE
 
-    def test_invalid_construction_raises(self):
+    @pytest.mark.parametrize("retired", ["invalid", "pm", "dev", "granite"])
+    def test_retired_and_invalid_construction_raises(self, retired):
+        """Retired discriminators must not construct."""
         with pytest.raises(ValueError):
-            SessionType("invalid")
+            SessionType(retired)
 
-        with pytest.raises(ValueError):
-            SessionType("pm")  # Old PM value no longer valid
+    @pytest.mark.parametrize("retired", ["PM", "DEV", "GRANITE"])
+    def test_retired_members_no_longer_exist(self, retired):
+        """PM/DEV (ENG consolidation) and GRANITE (PTY teardown) are removed."""
+        assert not hasattr(SessionType, retired), f"SessionType.{retired} must have been removed"
 
-        with pytest.raises(ValueError):
-            SessionType("dev")  # Old DEV value no longer valid
+    def test_granite_guard_removed_from_settings(self):
+        """The GRANITE_* env staleness guard retired with the enum member.
 
-    def test_pm_and_dev_no_longer_exist(self):
-        """SessionType.PM and SessionType.DEV must not exist after the ENG consolidation."""
-        assert not hasattr(SessionType, "PM"), "SessionType.PM must have been removed"
-        assert not hasattr(SessionType, "DEV"), "SessionType.DEV must have been removed"
+        Resolved through ``sys.modules`` on purpose: ``import config.settings
+        as s`` binds the ``Settings`` *instance* re-exported by
+        ``config/__init__.py``, not the module, so a hasattr check on that
+        name passes vacuously.
+        """
+        import sys
+
+        import config.settings  # noqa: F401
+
+        module = sys.modules["config.settings"]
+        assert not hasattr(module, "stale_granite_env_keys")
+        assert not hasattr(module, "_LEGACY_GRANITE_ENV_PREFIX")
 
     def test_backward_compat_with_constants(self):
         """SESSION_TYPE_ENG alias in agent_session.py should match."""
@@ -115,10 +121,9 @@ class TestEnvVarCompatibility:
 
     def test_str_enum_in_dict_key(self):
         """StrEnum members work as dict keys matching string keys."""
-        d = {"eng": "eng_persona", "teammate": "teammate_persona", "granite": "granite_persona"}
+        d = {"eng": "eng_persona", "teammate": "teammate_persona"}
         assert d[SessionType.ENG] == "eng_persona"
         assert d[SessionType.TEAMMATE] == "teammate_persona"
-        assert d[SessionType.GRANITE] == "granite_persona"
 
     def test_persona_in_config_lookup(self):
         """PersonaType members match string keys from projects.json config."""

@@ -10,13 +10,12 @@ All magic strings for session types, persona identifiers, access levels, and cla
 
 ### SessionType
 
-Discriminator for AgentSession: eng or teammate (`granite` is a historical value; see the row below).
+Discriminator for AgentSession: eng or teammate.
 
 | Member | Value | Usage |
 |--------|-------|-------|
 | `SessionType.ENG` | `"eng"` | Eng session -- engineer persona, full permissions; handles both SDLC work and conversational responses |
 | `SessionType.TEAMMATE` | `"teammate"` | Teammate session -- conversational, informational queries |
-| `SessionType.GRANITE` | `"granite"` | Historical value. Its sole producer, the standalone `valor-granite-loop` CLI, was deleted with the PTY substrate (plan #1924); nothing creates new sessions with it. Retained so pre-cutover Redis records carrying `session_type="granite"` keep hydrating and rendering. |
 
 ### PersonaType
 
@@ -71,7 +70,7 @@ if persona == PersonaType.TEAMMATE:
 
 - `SESSION_TYPE_ENG` and `SESSION_TYPE_TEAMMATE` constants in `models/agent_session.py` alias `SessionType.ENG` and `SessionType.TEAMMATE` for internal use by the model's factory methods and properties. New code should import directly from `config.enums`.
 - The `session_mode` field on AgentSession, which stored `PersonaType.TEAMMATE` for teammate sessions as a legacy fallback, was deleted by the schema diet (#1927) — it had been a no-op since `SessionType.TEAMMATE` became the first-class discriminator. All code now checks `session_type` directly.
-- Environment variables remain string-typed (the `SESSION_TYPE` env var contains `"eng"`, `"teammate"`, or `"granite"`), and `StrEnum` members compare equal to those strings.
+- Environment variables remain string-typed (the `SESSION_TYPE` env var contains `"eng"` or `"teammate"`), and `StrEnum` members compare equal to those strings.
 - The `"passthrough"` return value from `classify_work_request()` is not part of `ClassificationType` -- it is a routing-specific value distinct from intent classification.
 - A Redis key migration script (`scripts/migrate_session_type_pm_to_eng.py`) renames existing `:pm:`/`:dev:` key segments to `:eng:`.
 
@@ -83,7 +82,7 @@ if persona == PersonaType.TEAMMATE:
 
 | File | Changes |
 |------|---------|
-| `config/enums.py` | Enum definitions (SessionType with ENG/TEAMMATE/GRANITE, PersonaType, AccessLevel, ClassificationType) |
+| `config/enums.py` | Enum definitions (SessionType with ENG/TEAMMATE, PersonaType, AccessLevel, ClassificationType) |
 | `models/agent_session.py` | Enum imports, `SESSION_TYPE_ENG`/`SESSION_TYPE_TEAMMATE` aliases, factory methods (`create_eng`, `create_teammate`), properties (`is_eng`, `is_teammate`) |
 | `bridge/telegram_bridge.py` | SessionType routing: ENG or TEAMMATE based on persona |
 | `bridge/routing.py` | PersonaType, ClassificationType, `resolve_persona()` (DMs -> TEAMMATE, `Eng:`-prefixed titles -> ENGINEER) |

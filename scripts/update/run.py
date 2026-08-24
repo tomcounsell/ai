@@ -1764,36 +1764,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             config = replace(config, do_service_restart=False)
 
-    # Step 4.75: Surface stale legacy GRANITE_* env keys (plan #1924). The
-    # settings group renamed to SESSION_RUNNER__* when the PTY substrate was
-    # deleted; pydantic ignores unknown keys silently, so a stale vault/plist
-    # override would otherwise be a silent no-op on this machine forever.
-    # Non-blocking: warn loudly here and let settings import warn at runtime.
-    # (The former Step 4.75 granite-classifier green-light gate was deleted
-    # with the PTY substrate — classifier gating, if bridge routing needs
-    # one, is issue #1923's scope.)
-    try:
-        from config.settings import stale_granite_env_keys
-
-        _stale_granite = stale_granite_env_keys(project_dir / ".env")
-        if _stale_granite:
-            _stale_msg = (
-                "stale legacy GRANITE_* env keys (ignored since plan #1924's "
-                f"PTY teardown): {', '.join(_stale_granite)} — rename to "
-                "SESSION_RUNNER__* or delete from ~/Desktop/Valor/.env and "
-                "the launchd plists"
-            )
-            log(f"WARN: {_stale_msg}", v, always=True)
-            _append_warning(result, _stale_msg)
-    except Exception as _stale_exc:
-        log(f"WARN: stale GRANITE_* env-key scan failed: {_stale_exc}", v)
-
     # Step 4.76: Retire superseded Ollama models. The gemma4:e2b rm is
     # irreversible per-machine, so it is gated on BOTH (a) the granite
     # classifier model being PRESENT on this machine (presence check only —
-    # the former Step 4.75 restart-blocking smoke gate died with the PTY
-    # substrate, plan #1924; never delete gemma while its replacement
-    # classifier is absent), AND (b) the spike-1 parity marker
+    # the restart-blocking classifier smoke gate that used to run here died
+    # with the PTY substrate, plan #1924; never delete gemma while its
+    # replacement classifier is absent), AND (b) the spike-1 parity marker
     # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response,
     # needs gemma resident — never delete it out from under shadow-mode). If
     # either is missing, the machine keeps its superseded models until both
