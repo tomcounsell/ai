@@ -260,14 +260,16 @@ set depends on the promote/keep/delete verdicts that slice reaches.
 ## Documentation
 
 ### Feature Documentation
-- [ ] s0: no new feature doc. The guard and census are documented in their own
-      module docstrings and referenced from this plan; a standalone
-      `docs/features/` page would duplicate the plan while the migration is in
-      flight.
-- [ ] s9: create `docs/features/module-scope-env-reads.md` describing the
-      settled status quo — the Axis A/Axis B triage rule, the guard, the census
-      script, the allowlist marker, and the three permanent exemptions. Add it
-      to the `docs/features/README.md` index table.
+- [x] s0: `docs/features/module-scope-env-guard.md` — the instrument's own page,
+      covering the census script, the diff-scoped guard, the allowlist marker,
+      and the syntactic-census limitation. Indexed in `docs/features/README.md`.
+      This supersedes the original "no new feature doc" line: the guard fires on
+      every `git commit` on the machine, so its behaviour needed a discoverable
+      page from the moment it landed, not at the end of the migration.
+- [ ] s9: fold the settled status quo into
+      `docs/features/module-scope-env-guard.md` — the Axis A/Axis B triage rule
+      and the three permanent exemptions, once the migration is drained. Do not
+      create a second page; extend the s0 one.
 - [ ] s3-s7: update `docs/features/config-timeout-catalog.md` as knobs are
       promoted — its field catalog is the canonical list, and its
       promote-vs-name-locally section is what Axis B extends.
