@@ -362,7 +362,7 @@ def test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan(monkeypatch):
 
     result = sdlc_next_skill.decide(issue_number=6789)
 
-    assert result["dispatched"] is True
+    assert result["decision"] == "dispatch"
     assert result["skill"] == SKILL_DO_PR_REVIEW
     assert result["skill"] != SKILL_DO_PLAN
 
@@ -400,6 +400,7 @@ class TestIssueLockPreCheck:
 
         assert result == {
             "blocked": True,
+            "decision": "blocked",
             "reason": "ISSUE_LOCKED",
             "guard_id": "ISSUE_LOCK",
             "owner_run_id": "foreign-run",
@@ -503,7 +504,9 @@ class TestIssueLockPreCheck:
             "skill": expected.skill,
             "reason": expected.reason,
             "row_id": expected.row_id,
-            "dispatched": True,
+            "decision": "dispatch",
+            "recorded": False,
+            "recorded_reason": sdlc_next_skill.NOT_RECORDED_REASON,
         }
 
 
@@ -793,7 +796,7 @@ class TestSelfLockPeekIdentity:
             result = sdlc_next_skill.decide(issue_number=5009, run_id="my-run")
 
         assert result.get("blocked") is not True
-        assert result["dispatched"] is True
+        assert result["decision"] == "dispatch"
 
     def test_peek_identity_absent_on_dispatch_payload(self, monkeypatch):
         """peek_identity is a diagnostic on ISSUE_LOCKED payloads only --
@@ -1424,7 +1427,7 @@ class TestLedgerDurabilityRecovery:
 
         result = sdlc_next_skill.decide(issue_number=4242)
 
-        assert result["dispatched"] is True
+        assert result["decision"] == "dispatch"
         assert result["skill"] != SKILL_DO_PLAN
 
     def test_empty_ledger_no_durable_signals_still_dispatches_do_plan(self, monkeypatch):
@@ -1445,7 +1448,7 @@ class TestLedgerDurabilityRecovery:
 
         result = sdlc_next_skill.decide(issue_number=4243)
 
-        assert result["dispatched"] is True
+        assert result["decision"] == "dispatch"
         assert result["skill"] == SKILL_DO_PLAN
 
     def test_partial_ledger_passes_through_unchanged(self, monkeypatch):
@@ -1472,7 +1475,7 @@ class TestLedgerDurabilityRecovery:
         # Partial ledger (only ISSUE completed, no PLAN) still routes to /do-plan
         # via the normal guard table -- but the point under test is that the
         # reconstruction path was never invoked.
-        assert result["dispatched"] is True
+        assert result["decision"] == "dispatch"
         assert result["skill"] == SKILL_DO_PLAN
 
     def test_reconstruction_failure_does_not_propagate(self, monkeypatch):
@@ -1498,7 +1501,7 @@ class TestLedgerDurabilityRecovery:
 
         result = sdlc_next_skill.decide(issue_number=4245)
 
-        assert result["dispatched"] is True
+        assert result["decision"] == "dispatch"
         assert result["skill"] == SKILL_DO_PLAN
 
     def test_recover_helper_returns_empty_when_no_session_found(self, monkeypatch):
@@ -1639,7 +1642,7 @@ class TestConcernRoundCountReachesTheRouterThroughTheCLI:
     def test_below_the_bound_the_cli_returns_do_plan_critique(self, tmp_path, monkeypatch, capsys):
         """State S2 below the bound: the concern-closing revision is judged."""
         out = self._run_cli(1, tmp_path, monkeypatch, capsys)
-        assert out.get("dispatched") is True, out
+        assert out.get("decision") == "dispatch", out
         assert out["skill"] == "/do-plan-critique", out
         assert out["row_id"] == "2b", out
 
@@ -1655,7 +1658,139 @@ class TestConcernRoundCountReachesTheRouterThroughTheCLI:
         from agent.pipeline_graph import MAX_CONCERN_RECRITIQUE_ROUNDS
 
         out = self._run_cli(MAX_CONCERN_RECRITIQUE_ROUNDS, tmp_path, monkeypatch, capsys)
-        assert out.get("dispatched") is True, out
+        assert out.get("decision") == "dispatch", out
         assert out["skill"] == "/do-build", out
         assert out["row_id"] == "4c", out
         assert "residual concerns accepted unreviewed" in out["reason"].lower(), out
+
+
+class TestPersistenceHonesty:
+    """Issue #2897: next-skill's payload must never assert a persistence that
+    never happened.
+
+    ``next-skill`` is a **pure decision** call. It writes nothing, ever --
+    with or without ``--run-id`` (which is only a read-only issue-lock peek
+    identity, #2766). Recording the dispatch into the ledger is a separate
+    ``sdlc-tool dispatch record`` call. The old ``"dispatched": true`` key
+    read as "a dispatch happened", so a supervisor that skipped the record
+    step believed the ledger had advanced when it had not: the router
+    re-derived from a history that never grew, pinned on the prior row, and
+    the repeated re-dispatches later tripped G4 (stage oscillation).
+
+    The payload now states the decision (``decision``) separately from the
+    persistence (``recorded``), and the persistence field is honest.
+    """
+
+    @staticmethod
+    def _patch_dispatch(monkeypatch, states, meta=None):
+        from models.session_lifecycle import IssueLockResult
+
+        meta = meta if meta is not None else {}
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(acquired=True, owner_session_id=None),
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": states, "_meta": meta},
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
+        )
+
+    @staticmethod
+    def _mid_pipeline_states():
+        return {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+
+    @pytest.mark.parametrize("run_id", [None, "run-abc123"], ids=["no-run-id", "with-run-id"])
+    def test_dispatch_payload_never_claims_persistence(self, monkeypatch, run_id):
+        """The persistence claim is honest whether or not ``--run-id`` is passed.
+
+        ``--run-id`` does not make next-skill persist anything, so gating the
+        claim on it would still be a lie on the run-id path.
+        """
+        self._patch_dispatch(monkeypatch, self._mid_pipeline_states())
+
+        result = sdlc_next_skill.decide(issue_number=28970, run_id=run_id)
+
+        assert result["decision"] == "dispatch"
+        assert result["recorded"] is False
+        assert result["recorded_reason"] == sdlc_next_skill.NOT_RECORDED_REASON
+        assert result["skill"]
+
+    def test_dispatched_key_is_gone(self, monkeypatch):
+        """The ambiguous ``dispatched`` key is removed outright, not shimmed --
+        a caller reading it must fail loudly rather than read a stale lie."""
+        self._patch_dispatch(monkeypatch, self._mid_pipeline_states())
+
+        result = sdlc_next_skill.decide(issue_number=28971, run_id="run-abc123")
+
+        assert "dispatched" not in result
+
+    def test_blocked_payload_carries_blocked_decision(self, monkeypatch):
+        """Blocked results state ``decision: "blocked"`` and make no
+        persistence claim at all."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(
+                acquired=False, owner_session_id="other", owner_run_id="rival"
+            ),
+        )
+
+        result = sdlc_next_skill.decide(issue_number=28972, run_id="mine")
+
+        assert result["blocked"] is True
+        assert result["decision"] == "blocked"
+        assert "dispatched" not in result
+        assert "recorded" not in result
+
+    def test_error_payload_carries_error_decision(self, monkeypatch):
+        """A fatal lookup failure states ``decision: "error"`` -- no truthy
+        dispatch claim survives the exception path."""
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        result = sdlc_next_skill.decide(issue_number=28973)
+
+        assert result["decision"] == "error"
+        assert "boom" in result["error"]
+        assert "dispatched" not in result
+
+    def test_cli_usage_error_payload_and_exit_code(self, capsys):
+        """The wrapper-level usage error emits the same honest shape."""
+        rc = sdlc_next_skill.main([])
+
+        assert rc == 2
+        out = json.loads(capsys.readouterr().out)
+        assert out["decision"] == "error"
+        assert "dispatched" not in out
+
+    def test_cli_exits_1_on_error_payload(self, monkeypatch, capsys):
+        """An error decision still exits 1 now that the exit-code branch no
+        longer consults ``dispatched``."""
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "decide",
+            lambda **kwargs: {"error": "boom", "decision": "error"},
+        )
+
+        rc = sdlc_next_skill.main(["--issue-number", "28974"])
+
+        assert rc == 1
+        assert json.loads(capsys.readouterr().out)["decision"] == "error"

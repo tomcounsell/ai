@@ -24,7 +24,7 @@ Environment:
     Setting ``SDLC_ROUTER_SOURCE`` has no effect.
 
 Exit codes:
-    0 — decision produced (either ``dispatched`` or ``blocked``)
+    0 — decision produced (``dispatch`` or ``blocked``)
     1 — session lookup or dispatch calculation failed fatally
     2 — wrapper-level usage / configuration error
 
@@ -34,22 +34,32 @@ Output (JSON, stdout)::
         "skill": "/do-build",
         "reason": "...",
         "row_id": "4a",
-        "dispatched": true
+        "decision": "dispatch",
+        "recorded": false,
+        "recorded_reason": "NOT_PERSISTED_CALL_DISPATCH_RECORD"
     }
 
     # When the router blocks:
     {
         "blocked": true,
+        "decision": "blocked",
         "reason": "...",
         "guard_id": "G4"
     }
 
-The ``dispatched`` key is always present in a non-blocked response. It is
-``true`` when the router produced a ``Dispatch`` object, ``false`` otherwise
-(should not happen in practice — the blocked path uses the ``blocked`` key).
+Every response carries ``decision``: ``"dispatch"``, ``"blocked"``, or
+``"error"``.
+
+**This tool persists nothing.** It is a pure decision call plus a read-only
+issue-lock peek — that holds with or without ``--run-id``, which only states
+the identity the lock is peeked under (#2766) and is never written anywhere.
+Advancing the ledger is a separate ``sdlc-tool dispatch record`` call the
+caller must make before invoking the returned skill. ``recorded: false`` on
+every dispatch decision says so in machine-readable form (issue #2897): a
+caller must never read the decision as evidence the ledger moved. It did not.
 
 Graceful failure: any exception in session lookup or dispatch is caught and
-emitted as JSON on stdout with ``{"error": "...", "dispatched": false}``
+emitted as JSON on stdout with ``{"error": "...", "decision": "error"}``
 followed by exit code 1. This prevents the LLM from seeing a raw traceback.
 """
 
@@ -64,6 +74,11 @@ import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Issue #2897: the machine-readable reason a dispatch decision is not a
+# ledger write. Constant because it is unconditional -- next-skill has no
+# code path that persists a dispatch, so there is no other reason to give.
+NOT_RECORDED_REASON = "NOT_PERSISTED_CALL_DISPATCH_RECORD"
 
 # Stage-advance artifact verification (#1267): the top-3 deterministic
 # side-effects the router treats as authoritative composite state rather
@@ -567,14 +582,18 @@ def decide(
 
     Returns:
         On ``Dispatch``: ``{"skill": "/do-X", "reason": "...", "row_id": "...",
-        "dispatched": True}``
-        On ``Blocked``: ``{"blocked": True, "reason": "...", "guard_id": "..."}``
+        "decision": "dispatch", "recorded": False, "recorded_reason": ...}``.
+        ``recorded`` is always ``False`` -- this function never writes to the
+        ledger, so it never claims to (#2897); the caller records the
+        dispatch with ``sdlc-tool dispatch record``.
+        On ``Blocked``: ``{"blocked": True, "decision": "blocked",
+        "reason": "...", "guard_id": "..."}``
         On issue-lock contention: ``{"blocked": True, "reason": "ISSUE_LOCKED",
         "guard_id": "ISSUE_LOCK", "owner_session_id": "...", "peek_identity":
         "caller" | "session_mirror" | "unresolved"}`` (and, only on the
         caller-supplied blocked path, ``"session_mirror_run_id"``:
         diagnostics only, never used to override the block).
-        On error: ``{"error": "...", "dispatched": False}``
+        On error: ``{"error": "...", "decision": "error"}``
     """
     try:
         from agent.sdlc_router import (
@@ -641,6 +660,7 @@ def decide(
             if not lock_result.acquired:
                 blocked_payload = {
                     "blocked": True,
+                    "decision": "blocked",
                     "reason": "ISSUE_LOCKED",
                     "guard_id": "ISSUE_LOCK",
                     "owner_run_id": lock_result.owner_run_id,
@@ -702,15 +722,22 @@ def decide(
         result = decide_next_dispatch(stage_states, meta, context)
 
         if isinstance(result, Dispatch):
+            # ``recorded: False`` is unconditional and load-bearing (#2897):
+            # this function has no write path, so a decision is never a
+            # ledger advance. The caller records it via
+            # ``sdlc-tool dispatch record`` before invoking the skill.
             return {
                 "skill": result.skill,
                 "reason": result.reason,
                 "row_id": result.row_id,
-                "dispatched": True,
+                "decision": "dispatch",
+                "recorded": False,
+                "recorded_reason": NOT_RECORDED_REASON,
             }
         elif isinstance(result, Blocked):
             return {
                 "blocked": True,
+                "decision": "blocked",
                 "reason": result.reason,
                 "guard_id": result.guard_id,
             }
@@ -718,14 +745,14 @@ def decide(
             # Unexpected return type — treat as blocking error
             return {
                 "error": f"Unexpected result type: {type(result).__name__}",
-                "dispatched": False,
+                "decision": "error",
             }
 
     except Exception as e:
         logger.debug(f"decide() failed: {e}", exc_info=True)
         return {
             "error": str(e),
-            "dispatched": False,
+            "decision": "error",
         }
 
 
@@ -762,7 +789,9 @@ def main(argv: list[str] | None = None) -> int:
             "identity so a run is never told to stand down for its own lock. "
             "next-skill never mints, adopts, or renews a run_id with this value -- "
             "it changes only which identity is compared, never whether the peek "
-            "runs. Omit to preserve the prior session-lookup inference path."
+            "runs. Omit to preserve the prior session-lookup inference path. "
+            "Passing it does NOT make this call persist a dispatch; nothing here "
+            "ever does -- use 'sdlc-tool dispatch record' for that (#2897)."
         ),
     )
     parser.add_argument(
@@ -775,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.issue_number and not args.session_id:
         print(
-            json.dumps({"error": "Must supply --issue-number or --session-id", "dispatched": False})
+            json.dumps({"error": "Must supply --issue-number or --session-id", "decision": "error"})
         )
         return 2
 
@@ -798,7 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result))
 
     # Exit 1 on error, 0 on dispatch or block (both are valid outcomes)
-    if result.get("error") and not result.get("dispatched"):
+    if result.get("decision") == "error":
         return 1
     return 0
 
