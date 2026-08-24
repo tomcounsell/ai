@@ -151,14 +151,18 @@ OPENAI_API_KEY=sk-...
 PERPLEXITY_API_KEY=pplx-...
 ```
 
-`ANTHROPIC_API_KEY` is still required, but for direct API calls that are not agent turns:
+`ANTHROPIC_API_KEY` is still required, but only for direct API calls that are not agent
+turns — inbound image vision, the reflections that call an LLM, intent classification,
+memory extraction, and the PM briefing builder. Most of those resolve the key through
+`utils/api_keys.py::get_anthropic_api_key`; the rest read `ANTHROPIC_API_KEY` from the
+environment directly. To see the live set rather than a list that goes stale:
 
-- `bridge/media.py` — image vision on inbound photos
-- `reflections/docs_auditor.py` — the documentation audit reflection
-- `reflections/utilities.py` — the shared LLM helper for reflections
-- `reflections/pm_briefings/builder.py` — briefing generation
+```bash
+grep -rn "get_anthropic_api_key\|ANTHROPIC_API_KEY" --include="*.py" .
+```
 
-Without it those features degrade or skip; agent sessions are unaffected.
+Without the key those features degrade or skip (`reflections/pm_briefings/builder.py`
+raises); agent sessions are unaffected.
 
 ## Claude Code Configuration
 

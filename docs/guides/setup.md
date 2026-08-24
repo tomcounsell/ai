@@ -67,8 +67,8 @@ Required variables:
 # Anthropic API (required) — auxiliary key for direct API calls made OUTSIDE the
 # agent harness. Agent turns run on the Claude subscription (OAuth via `claude`
 # CLI login) and the session runner strips this key from every spawned CLI.
-# Readers: bridge/media.py (image vision), reflections/docs_auditor.py,
-# reflections/utilities.py, reflections/pm_briefings/builder.py.
+# Readers resolve it via utils/api_keys.py::get_anthropic_api_key or read the
+# env var directly; see docs/README.md for what depends on it.
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Telegram User Account (from my.telegram.org)
