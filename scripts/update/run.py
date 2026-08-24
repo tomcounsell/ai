@@ -45,6 +45,7 @@ from scripts.update import (  # noqa: E402
     redis_replication,
     reflection_arm,
     reflection_register,
+    reflections_callables,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -153,6 +154,7 @@ class UpdateResult:
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
+    reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -1042,6 +1044,32 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not upr.success:
         log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
         _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
+
+    # Step 1.659: Repoint the five self-healing reflections off the
+    # `agent.sustainability.*` shim onto `reflections.agents.*` (#2875).
+    # config/reflections.yaml is gitignored, so this registry edit can only
+    # reach machines as tracked code that rewrites the file. Runs BEFORE Step
+    # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
+    # so a vault rewrite propagates on this same cycle; the migration also
+    # rewrites the config copy directly, because Step 1.66 skips the copy when
+    # the config copy is not older than the vault. Idempotent no-op once done.
+    log("Ensuring reflection callables are off the sustainability shim...", v)
+    result.reflections_callables_result = reflections_callables.run_reflections_callables_migration(
+        project_dir
+    )
+    rcr = result.reflections_callables_result
+    if rcr.action == "rewrote":
+        log(
+            f"reflection callables repointed to reflections.agents.* "
+            f"({rcr.rewrites_count} line(s) across {len(rcr.targets or [])} file(s))",
+            v,
+            always=True,
+        )
+    elif rcr.action == "noop":
+        log("reflection callables already off the sustainability shim", v)
+    if not rcr.success:
+        log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
+        _append_warning(result, f"reflection callable migration: {rcr.error}")
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
