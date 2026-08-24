@@ -32,7 +32,6 @@ from popoto.exceptions import ModelException
 
 # Shared mutable session-tracking state — re-exported here for backward compatibility.
 import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
-from agent.branch_manager import get_branch_state  # noqa: F401
 from agent.output_handler import OutputHandler
 
 # Output routing — decision logic lives in output_router; re-exported here
@@ -49,22 +48,17 @@ from agent.redis_offload import offload_redis
 
 # Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
 from agent.session_completion import (  # noqa: F401
-    _CONTINUATION_PM_MAX_DEPTH,
     _complete_agent_session,
     _diagnose_missing_session,
-    _extract_issue_number,
     _transition_parent,
 )
 
 # Session executor (CLI harness, nudge/re-enqueue, steer) — re-exported for backward compatibility.
 from agent.session_executor import (  # noqa: F401
     _HARNESS_EXHAUSTION_MSG,
-    _HARNESS_NOT_FOUND_MAX_RETRIES,
     _HARNESS_NOT_FOUND_PREFIX,
-    _calendar_heartbeat,
     _enqueue_nudge,
     _execute_agent_session,
-    _find_valor_calendar,
     _handle_harness_not_found,
     re_enqueue_session,
     steer_session,
@@ -75,7 +69,6 @@ from agent.session_health import (  # noqa: F401
     AGENT_SESSION_HEALTH_CHECK_INTERVAL,
     AGENT_SESSION_HEALTH_MIN_RUNNING,
     HEARTBEAT_FRESHNESS_WINDOW,
-    HEARTBEAT_WRITE_INTERVAL,
     MAX_RECOVERY_ATTEMPTS,
     TASK_CANCEL_TIMEOUT,
     _agent_session_health_check,
@@ -83,10 +76,8 @@ from agent.session_health import (  # noqa: F401
     _agent_session_hierarchy_health_check,
     _apply_recovery_transition,
     _cleanup_orphaned_claude_processes,
-    _dependency_health_check,
     _has_progress,
     _is_ledger,
-    _reap_orphan_session_processes,
     _recover_interrupted_agent_sessions_startup,
     _should_kill_no_progress,
     _sweep_dead_worker_sessions,
@@ -102,26 +93,19 @@ from agent.session_logs import save_session_snapshot
 
 # Session pickup (pop locking, startup steering drain, dependency checks) — re-exported here.
 from agent.session_pickup import (  # noqa: F401
-    _POP_LOCK_TTL_SECONDS,
     _acquire_pop_lock,
-    _drain_startup_steering,
     _maybe_inject_resume_hydration,
     _pop_agent_session,
     _pop_agent_session_with_fallback,
     _release_pop_lock,
-    dependency_status,
 )
 
 # Revival detection — re-exported here for backward compatibility.
 from agent.session_revival import (  # noqa: F401
-    _COOLDOWN_FILE,
-    REVIVAL_COOLDOWN_SECONDS,
     _load_cooldowns,
-    _save_cooldowns,
     _session_branch_name,
     check_revival,
     cleanup_stale_branches,
-    cleanup_stale_branches_all_projects,
     maybe_send_revival_prompt,
     queue_revival_agent_session,
     record_revival_cooldown,
