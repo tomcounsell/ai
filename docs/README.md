@@ -1,121 +1,162 @@
 # AI System Documentation
 
-## Overview
+Documentation for the Valor AI System — a unified conversational development environment
+that erases the boundary between natural conversation and code execution. Users interact
+with the system through chat (Telegram, email, or a local Claude Code session), and the
+system executes real work in real repositories.
 
-Documentation for the Valor AI System - a unified conversational development environment that eliminates boundaries between natural conversation and code execution. Built on Claude Code, it creates a living codebase where users interact directly WITH the system through chat applications like Telegram.
+This file is the map. The territory is [`README.md`](../README.md) at the repo root
+(install, run, service management) and the [feature index](features/README.md) (how any
+individual thing works).
 
-**Primary Interface**: Telegram (real user account, not a bot)
-**Core Engine**: Claude Code with rich tool ecosystem
-**Model**: Valor provides tools, workflows, and skills; Claude Code orchestrates
+## Architecture in One Screen
+
+The system runs as separate long-lived processes. The **bridge** is I/O only — it receives
+messages, enqueues `AgentSession` records to Redis, runs the nudge loop, and registers
+output callbacks. It has no SDLC awareness and never executes an agent turn. The
+**worker** is the sole session-execution engine, spawning one `claude -p` subprocess per
+turn via the headless session runner.
+
+```
+Telegram / Email / local Claude Code
+            |
+            v
+   Bridge (I/O only)  ──enqueue AgentSession──>  Redis queue
+   bridge/telegram_bridge.py                          |
+            ^                                         v
+            |                              Worker (python -m worker)
+            └───────outbox / callbacks─────  the sole execution engine
+                                                       |
+                                                       v
+                                     Headless session runner: one `claude -p`
+                                     subprocess per turn (subscription auth)
+                                                       |
+                                                       v
+                                     Tools, MCP servers, `gh`, skills, subagents
+```
+
+Read these in order:
+
+| Document | What it covers |
+|----------|----------------|
+| [Bridge/Worker Architecture](features/bridge-worker-architecture.md) | The process split above, and why the bridge holds no execution logic |
+| [Headless Session Runner](features/headless-session-runner.md) | How a turn actually runs: the `claude -p` subprocess, env handling, teardown |
+| [Session Lifecycle](features/session-lifecycle.md) | The 14-state `AgentSession` lifecycle, from enqueue to completion |
+| [Feature Index](features/README.md) | Every implemented feature, with a doc for each |
 
 ## Quick Start
 
+Both the bridge and the worker must be running. Starting only one leaves messages queued
+and never executed.
+
 ```bash
-# Start the Telegram bridge
+# Start the Telegram bridge (receives messages, enqueues sessions)
 ./scripts/start_bridge.sh
 
-# Check status / restart
+# Start the standalone worker (executes every agent session)
+./scripts/valor-service.sh worker-start
+
+# Status and restart — `restart` cycles bridge, watchdog, and worker together
 ./scripts/valor-service.sh status
+./scripts/valor-service.sh worker-status
 ./scripts/valor-service.sh restart
 
-# View logs
+# Logs
 tail -f logs/bridge.log
 ```
 
-## Doc Placement: guides/ vs research/
+Full install, optional services (email bridge, dashboard UI), and service management live
+in the root [`README.md`](../README.md).
+
+## Doc Placement
 
 Each doc topic has exactly one canonical file. Place it by kind:
 
-- `docs/guides/` — evergreen how-to material that stays current with the system (setup, references, standards).
-- `docs/research/` — dated investigations: point-in-time analyses, evaluations, and deep dives, each stamped with its date.
+| Directory | Holds |
+|-----------|-------|
+| `docs/features/` | One doc per implemented feature — the default home for anything describing how the system works. Indexed by [`features/README.md`](features/README.md). |
+| `docs/guides/` | Evergreen how-to and reference material (setup, CLI references, standards). |
+| `docs/conventions/` | Cross-project conventions this repo expects other repos to adopt. |
+| `docs/sdlc/` | Per-stage repo-specific addenda, read at runtime by the global SDLC skills. |
+| `docs/runbooks/` | Step-by-step operational procedures for a recurring task. |
+| `docs/infra/` | Infrastructure and third-party integration setup notes. |
+| `docs/postmortems/` | Dated incident write-ups: what broke, why, what changed. |
+| `docs/audits/` | Dated point-in-time audits of a subsystem. |
+| `docs/research/` | Dated investigations, evaluations, and deep dives, each stamped with its date. |
+| `docs/baselines/` | Captured measurement snapshots used as a comparison point. |
+| `docs/plans/` | Feature plan documents produced by `/do-plan`. |
+| `docs/diagrams/`, `docs/assets/` | Images and diagram sources referenced by the docs above. |
 
-A doc lives in exactly one of the two — never both.
+Two rules:
 
-## Documentation Index
+- **Feature docs go in `features/` and get an index row.** A feature doc that is not in
+  the index is invisible; an index row pointing at a missing file is a dead link.
+- **Nothing lives in two places.** When a doc stops describing the current system, move it
+  to [`features/archived/`](features/archived/) and drop its index row rather than leaving
+  a stale copy linked from an active page.
 
-### Core Architecture
-
-| Document | Description |
-|----------|-------------|
-| [System Overview](features/system-overview.md) | High-level architecture and design principles |
-
-### Interface
-
-| Document | Description |
-|----------|-------------|
-| [Telegram Integration](features/telegram.md) | Complete Telegram interface documentation |
-
-### Operations
-
-| Document | Description |
-|----------|-------------|
-| [Deployment](features/deployment.md) | Multi-instance deployment configuration |
-| [Reflections System](features/reflections.md) | Autonomous maintenance process |
-
-### Features
-
-| Document | Description |
-|----------|-------------|
-| [Feature Index](features/README.md) | All implemented features with documentation |
-
-### Quality & Testing
-
-| Document | Description |
-|----------|-------------|
-| [Quality Standards](guides/quality-standards.md) | Tool quality standards and patterns |
-| [Tools Reference](tools-reference.md) | Complete tool documentation |
-
-### Postmortems
-
-| Document | Description |
-|----------|-------------|
-| [2026-04-24: PM SDLC Bypass](postmortems/2026-04-24-pm-sdlc-bypass.md) | PM agent implemented code directly instead of routing through SDLC |
-
-## Architecture Summary
-
-```
-User (Telegram)
-    |
-    v
-Valor Agent - Conversational AI with full context
-    |
-    v
-Claude Code - Orchestrates tools and subagents
-    |
-    v
-Tool Ecosystem
-    |-- MCP Servers (Sentry, Notion) + GitHub CLI (`gh`)
-    |-- Development Tools (search, code, test)
-    +-- Social Tools (Telegram integration)
-```
+There is deliberately no second index here. The [feature index](features/README.md) is the
+one catalog of feature docs, and every other directory in the table above is browsable on
+its own. A hand-picked shortlist in this file would be a second place for the same
+information, and would go stale the first time someone added a doc without remembering it.
 
 ## Key Principles
 
-1. **Pure Agency**: System handles complexity without exposing intermediate steps
-2. **No Legacy Code**: Complete elimination of deprecated patterns
-3. **Context Management**: Maintain relevant context across interactions
-4. **Tool Selection**: Dynamic filtering to avoid context pollution
-5. **Real Integration Testing**: No mocks, use actual services
+1. **Pure Agency** — the system handles complexity without exposing intermediate steps.
+2. **No Legacy Code** — deprecated patterns are deleted, not deprecated in place.
+3. **Context Management** — relevant context is carried across interactions explicitly.
+4. **Tool Selection** — dynamic filtering, because loading every tool pollutes context.
+5. **Real Integration Testing** — no mocks, use actual services.
 
 ## Environment Setup
 
+Secrets live in `~/Desktop/Valor/.env`; the repo `.env` is a symlink to it. See
+[`guides/setup.md`](guides/setup.md) for the full walkthrough and `.env.example` for the
+complete list.
+
+**Agent auth is subscription-first.** Headless turns run on the Claude subscription (OAuth
+via `claude` CLI login), not on an API key. The session runner strips `ANTHROPIC_API_KEY`
+and the endpoint overrides from every spawned CLI's environment
+(`agent/session_runner/harness/claude.py`, `agent/session_runner/role_driver.py`) so a
+stray key can never silently move agent turns onto metered billing.
+
 ```bash
-# Required
+# Required — Telegram user account (from my.telegram.org)
 TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_PHONE=+1234567890
 
-# API Keys
+# Auxiliary — direct Anthropic API calls made OUTSIDE the agent harness
 ANTHROPIC_API_KEY=sk-ant-...
+
+# Other service keys
 OPENAI_API_KEY=sk-...
 PERPLEXITY_API_KEY=pplx-...
 ```
 
+`ANTHROPIC_API_KEY` is still required, but only for direct API calls that are not agent
+turns — among them inbound image vision, the reflections that call an LLM, intent
+classification, memory extraction, read-the-room, the promise gate, session completion,
+and the PM briefing builder. Most of those resolve the key through
+`utils/api_keys.py::get_anthropic_api_key`; the rest read `ANTHROPIC_API_KEY` from the
+environment directly. To see the live set rather than a list that goes stale:
+
+```bash
+grep -rn "get_anthropic_api_key\|ANTHROPIC_API_KEY" --include="*.py" .
+```
+
+Without the key those features degrade or skip (`reflections/pm_briefings/builder.py`
+raises); agent sessions are unaffected.
+
 ## Claude Code Configuration
 
 The `.claude/` directory contains:
-- `agents/` - Subagent definitions that Claude Code can invoke
-- `commands/` - Slash commands (most migrated to `skills/`)
-- `settings.local.json` - Local configuration
 
-See [CLAUDE.md](/CLAUDE.md) for complete development guidelines.
+- `agents/` — subagent definitions Claude Code can invoke
+- `skills-global/` — skills hardlinked to `~/.claude/skills/` on every machine by `/update`
+- `skills/` — project-only skills coupled to this repo's infrastructure
+- `commands/` — slash commands
+- `hooks/` — validators and lifecycle hooks, registered from `hooks/manifest.toml`
+- `settings.local.json` — local configuration
+
+See [`CLAUDE.md`](../CLAUDE.md) for complete development guidelines.
