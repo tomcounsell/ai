@@ -1889,10 +1889,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log("Checking PM persona overlay drift...", v)
     _persona_warnings = persona_drift.check_pm_persona_drift(project_dir)
     if _persona_warnings:
-        for _w in _persona_warnings:
-            log(f"  {_w}", v)
-            _append_warning(result, _w)
+        # Human-gated (#2893): the vault overlay is a standing per-machine
+        # customization that no /update cycle can reconcile, so this collapses
+        # to one emission per state transition. The joined warning text is the
+        # signature, so a changed diff size re-warns.
+        signature = f"unresolved:{' | '.join(_persona_warnings)}"
+        if warn_state.should_emit("persona-drift", signature, project_dir):
+            for _w in _persona_warnings:
+                log(f"  {_w}", v)
+                _append_warning(result, _w)
+            result.warn_keys_emitted.add("persona-drift")
     else:
+        # Resolved — clear stored state (and emit one resolved note) so a
+        # future regression warns again instead of staying silent.
+        if warn_state.should_emit("persona-drift", "", project_dir):
+            log("  PM persona overlay drift: resolved", v, always=True)
+            result.warn_keys_emitted.add("persona-drift")
         log("  PM persona overlay: in sync (or files absent)", v)
 
     # Step 4.95: Check that each active project repo has a '## Running' README section.
@@ -2446,9 +2458,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("  OAuth: refreshed source from live token", v)
             else:
                 log(f"  OAuth: {oauth_sync.get('reason')}", v)
+            # Resolved — clear stored state (and emit one resolved note) so a
+            # future regression warns again instead of staying silent.
+            if warn_state.should_emit("oauth-sync", "", project_dir):
+                log("  OAuth sync: resolved", v, always=True)
+                result.warn_keys_emitted.add("oauth-sync")
         else:
+            # Human-gated (#2893): the source credential at
+            # ~/Desktop/Valor/claude_oauth_config.json is per-machine and only a
+            # human can provision it — structurally the same shape as
+            # google-token. One emission per state transition; the reason string
+            # is the signature, so a different failure mode re-warns. The
+            # verbose log stays outside the gate: it is diagnostic detail, not
+            # summary output, so it cannot respam the cron channel.
             log(f"  OAuth: {oauth_sync.get('reason')}", v)
-            _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
+            signature = f"unresolved:{oauth_sync.get('reason')}"
+            if warn_state.should_emit("oauth-sync", signature, project_dir):
+                _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
+                result.warn_keys_emitted.add("oauth-sync")
 
         # Report SDK auth
         auth = result.verification.sdk_auth
