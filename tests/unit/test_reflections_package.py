@@ -128,9 +128,13 @@ class TestReflectionsUtils:
         from reflections.utilities import load_ignore_entries
 
         with patch("reflections.utilities.logger"):
-            with patch("models.reflections.ReflectionIgnore") as mock_ri:
+            with patch("models.reflection_ignore.ReflectionIgnore") as mock_ri:
                 mock_ri.get_active.side_effect = Exception("redis down")
                 result = load_ignore_entries()
+        # Assert the patch actually took effect. load_ignore_entries() imports
+        # ReflectionIgnore function-locally, so a wrong patch target is a silent
+        # no-op that would hit real Redis and still return [] on an empty db.
+        mock_ri.get_active.assert_called_once()
         assert result == []
 
 
@@ -189,7 +193,7 @@ class TestMaintenanceCallables:
             patch("models.chat.Chat") as mock_chat,
             patch("models.agent_session.AgentSession") as mock_as,
             patch("models.bridge_event.BridgeEvent") as mock_be,
-            patch("models.reflections.ReflectionIgnore") as mock_ri,
+            patch("models.reflection_ignore.ReflectionIgnore") as mock_ri,
         ):
             mock_tm.cleanup_expired.return_value = 0
             mock_link.cleanup_expired.return_value = 0
@@ -199,6 +203,9 @@ class TestMaintenanceCallables:
             mock_ri.cleanup_expired.return_value = 0
 
             result = run_async(run_redis_ttl_cleanup())
+        # Guards against a stale patch target silently no-op'ing onto real Redis:
+        # run_redis_ttl_cleanup() imports ReflectionIgnore function-locally.
+        mock_ri.cleanup_expired.assert_called_once()
         assert_valid_result(result)
 
     def test_run_redis_data_quality_empty_data(self):
@@ -417,10 +424,13 @@ class TestAuditingCallables:
 
         with (
             patch("reflections.audits.pr_review_audit.load_local_projects", return_value=[]),
-            patch("models.reflections.PRReviewAudit") as mock_pra,
+            patch("models.pr_review_audit.PRReviewAudit") as mock_pra,
         ):
             mock_pra.last_successful_run.return_value = None
             result = run_async(run_pr_review_audit())
+        # Guards against a stale patch target silently no-op'ing onto real Redis:
+        # run() imports PRReviewAudit function-locally.
+        mock_pra.last_successful_run.assert_called_once()
         assert_valid_result(result)
 
 

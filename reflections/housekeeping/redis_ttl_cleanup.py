@@ -30,7 +30,7 @@ async def run() -> dict:
         from models.bridge_event import BridgeEvent
         from models.chat import Chat
         from models.link import Link
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
         from models.telegram import TelegramMessage
 
         msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)

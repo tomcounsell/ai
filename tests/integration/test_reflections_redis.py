@@ -18,7 +18,7 @@ class TestReflectionIgnoreModel:
 
     def test_add_ignore(self):
         """Add an ignore entry and verify it's active."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         entry = ReflectionIgnore.add_ignore("null pointer", reason="known issue", days=14)
         assert entry.pattern == "null pointer"
@@ -29,7 +29,7 @@ class TestReflectionIgnoreModel:
 
     def test_expired_entries_excluded(self):
         """Expired entries are not returned by get_active()."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         # Create expired entry
         ReflectionIgnore.create(
@@ -48,7 +48,7 @@ class TestReflectionIgnoreModel:
 
     def test_cleanup_expired(self):
         """cleanup_expired removes only expired entries."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         ReflectionIgnore.create(
             pattern="expired",
@@ -64,7 +64,7 @@ class TestReflectionIgnoreModel:
 
     def test_is_ignored_case_insensitive(self):
         """is_ignored does case-insensitive substring matching."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         ReflectionIgnore.add_ignore("NULL POINTER", days=14)
         assert ReflectionIgnore.is_ignored("null pointer error") is True
@@ -72,7 +72,7 @@ class TestReflectionIgnoreModel:
 
     def test_is_ignored_substring_match(self):
         """is_ignored matches when entry pattern is substring of query."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         ReflectionIgnore.add_ignore("timeout", days=14)
         assert ReflectionIgnore.is_ignored("connection timeout in bridge") is True
@@ -143,7 +143,7 @@ class TestIgnoreLogRedis:
 
     def test_load_ignore_entries_from_redis(self):
         """load_ignore_entries reads active entries from ReflectionIgnore model."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
         from reflections.utilities import load_ignore_entries
 
         ReflectionIgnore.add_ignore("test pattern", reason="testing", days=14)
@@ -154,7 +154,7 @@ class TestIgnoreLogRedis:
 
     def test_cleanup_expired_via_model(self):
         """ReflectionIgnore.cleanup_expired() cleans up expired entries in Redis."""
-        from models.reflections import ReflectionIgnore
+        from models.reflection_ignore import ReflectionIgnore
 
         # Create expired entry
         ReflectionIgnore.create(

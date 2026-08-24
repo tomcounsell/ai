@@ -841,8 +841,8 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 |---------|-------------|
 | `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler output) |
 | `curl -s localhost:8500/dashboard.json` | Full system state including reflection status |
-| `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern}') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
-| `python -c "from models.reflections import ReflectionIgnore; ReflectionIgnore.add_ignore('pattern', reason='why', days=14)"` | Add an ignore entry |
+| `python -c "from models.reflection_ignore import ReflectionIgnore; [print(f'{e.pattern}') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
+| `python -c "from models.reflection_ignore import ReflectionIgnore; ReflectionIgnore.add_ignore('pattern', reason='why', days=14)"` | Add an ignore entry |
 
 ## Key Files
 
@@ -865,11 +865,12 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
-| `models/reflections.py` | Re-export shim: `ReflectionIgnore`, `PRReviewAudit` |
 | `scripts/reflections_report.py` | GitHub issue creation module (was used by retired `daily_report`) |
 | `scripts/update/env_sync.py` | `sync_reflections_yaml()`: writes the real-file vault copy on update |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
+
+`ReflectionIgnore` and `PRReviewAudit` each live in exactly one module (`models/reflection_ignore.py`, `models/pr_review_audit.py`); there is no `models/reflections.py` compatibility shim. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import these function-locally, straight from their canonical modules. Removing the shim also removes an import-order hazard it created for tests: patching `models.reflections.ReflectionIgnore` only affected code paths that happened to import the shim fresh after the patch, so whether a `unittest.mock.patch` took effect depended on xdist worker import order rather than on the patch target being correct. A wrong patch target now fails loudly (there is only one module object holding each model) instead of silently falling through to an unintended real-Redis integration test.
 
 ## Dependencies
 

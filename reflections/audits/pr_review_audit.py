@@ -211,7 +211,7 @@ def run() -> dict:
     from utils.utc import utc_now
 
     try:
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
     except Exception as e:
         logger.warning(f"PR review audit: could not import PRReviewAudit: {e}")
         return {"status": "error", "findings": [], "summary": f"Import error: {e}"}
