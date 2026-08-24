@@ -388,9 +388,29 @@ bounds Risk 7's blast radius.
 
 **Appetite is at risk from exactly one thing:** the size of the red set task 2.5
 turns up when twenty production call sites stop writing to production db0. That
-is a measurement, not a guess, and it is why 2.5 carries an explicit
-stop-and-escalate gate. If the repairs do not fit Small, the export and the
-guard deletion still ship and the repairs get their own issue.
+is a measurement, not a guess.
+
+**Operator decision (2026-08-24): absorb whatever it takes, and simplify by
+deleting. There is no split and no escalation gate.** Every test the export
+turns red is dispositioned in this PR, however many there are, and the PR grows
+past Small if it must. Splitting them out would leave known-broken isolation on
+`main` under a follow-up issue while the thing that revealed it merges — the
+same defer-the-consumer pattern this plan exists to retire.
+
+**The disposition is delete-first, not repair-first.** Every red test here was
+passing by reading and writing **live production Redis**; its green was an
+artifact of shared production state, so the coverage it appeared to provide was
+never real. When in doubt, delete it. Repair only where the test covers
+behavior that is genuinely worth asserting and the repair is obvious — a
+fixture pointed at the claimed db, a key the test should have been creating
+itself. Do not invent scaffolding to rescue a test: a test that needs new
+machinery to survive correct isolation is telling you it was testing the
+machinery, not the behavior. Record each deletion with one line saying what it
+claimed to cover and why that claim was hollow.
+
+This supersedes the earlier split contract wherever it still appears below. The
+"Affected suites still pass" Verification row holds at exit 0 at merge time,
+unconditionally; nothing merges red.
 
 ## Prerequisites
 
@@ -952,22 +972,18 @@ asserted unchanged.
 - [ ] Update `tests/README.md`: rewrite the "Subprocess Test-DB Inheritance (issue #2763)" section (lines ~502-545) — in particular the sentence "`os.environ` is never mutated", which becomes false, and the closing paragraph naming the enforcing guard, which must go entirely. Also correct the guard reference in line 33 and the #2605 corollary in line 48. **Describe only the new status quo**; leave no "formerly enforced by" residue.
 - [ ] Review `CLAUDE.md`'s "Manual Testing Hygiene" paragraph: its claim that "this shell always carries a production `REDIS_URL`" stays true for shells but must not read as true inside pytest. Its `os.environ.setdefault` warning and the "assign explicitly, assert the db number" rule remain correct for standalone debug scripts and are unaffected — draw the shell/pytest line clearly rather than deleting the guidance. **In scope:** this paragraph is now actively wrong inside pytest *because of this change*, so correcting it is status-quo work, not drift cleanup.
 
-### Deferred — pre-existing drift, split to a follow-up issue
+### Folded in — two stale references, corrected here (operator decision, 2026-08-24)
 
-Two corrections the first draft carried are **pre-existing drift the plan itself
-labelled as such**, not consequences of this change. At `appetite: Small`, and
-with `docs/sdlc/do-build.md` being loaded at runtime by *every* `/do-build`
-invocation in the repo, coupling a doctrine edit to this fix's merge means a
-reviewer arguing about wording blocks a one-line isolation fix. Split them:
+The first draft deferred these to a follow-up issue on appetite grounds. That is
+overturned: both are factual corrections to text naming a variable **this repo
+does not have**, so there is no wording to argue about and nothing for a
+reviewer to block on. Filing an issue to track a two-line correction costs more
+than making it.
 
-- [ ] **Follow-up issue (not this PR):** `docs/sdlc/do-build.md:215` ("## Test Isolation") tells builders to "use `REDIS_TEST_DB` or a separate prefix". `REDIS_TEST_DB` is not a variable this repo has — the mechanism is the flock claim plus `POPOTO_TEST_DB`. Misleading for every future build, but misleading identically before and after this change.
-- [ ] **Follow-up issue (not this PR):** `tests/unit/test_redis_bootstrap.py`'s module docstring (line 7). Same character: wrong today, wrong in the same way tomorrow.
+- [ ] `docs/sdlc/do-build.md:215` ("## Test Isolation") tells builders to "use `REDIS_TEST_DB` or a separate prefix". `REDIS_TEST_DB` does not exist; the mechanism is the flock claim plus `POPOTO_TEST_DB`, and after this change the environment is correct with no builder action at all. This file is loaded at runtime by every `/do-build`, which is an argument for fixing it now, not later.
+- [ ] `tests/unit/test_redis_bootstrap.py`'s module docstring (line 7). Same character, same fix.
 
-The build task that files this follow-up is task 7; the issue number goes in the
-PR body so the drift is tracked rather than dropped. If a reviewer insists
-either belongs here, that is a scope decision for the PM, and the anti-regression
-row for `docs/sdlc/do-build.md` must be added before it re-enters scope — no
-current Verification row covers it.
+Task 7 makes both edits instead of filing an issue.
 
 ### External Documentation Site
 - [ ] Not applicable — this repo has no external docs site.
@@ -1006,7 +1022,7 @@ current Verification row covers it.
   measured.
 - [ ] **The db0-delta cluster spans every consumer group, `agent/` included.** The measurement is worthless if drawn from a partial inventory: the round-1 cluster omitted `agent/` entirely, so a zero delta over it would have certified the criterion above while the outbox **write** at `agent/session_completion.py:609` went unmeasured. `tests/unit/test_output_handler.py` and `tests/unit/test_deliver_pipeline_completion.py` are in both the sweep and the Verification row.
 - [ ] **The lazy-consumer inventory in the plan equals the tree: 20 call sites over `bridge/ tools/ reflections/ ui/ agent/ config/`** — asserted by a Verification grep, not by a claim of exhaustiveness.
-- [ ] The affected-suite sweep (task 2.5) is run before and after the export, and every file it turns red has an explicit disposition recorded in Test Impact — fixed, or split to a follow-up issue with a number.
+- [ ] The affected-suite sweep (task 2.5) is run before and after the export, and every file it turns red has an explicit disposition recorded in Test Impact — **deleted (with its one-line hollow-coverage note) or repaired**. Nothing is split to a follow-up; nothing merges red.
 - [ ] A nested pytest child spawned without `env=` claims a **different** db than its parent (#2628 invariant), asserted by a permanent test.
 - [ ] Under `-n N`, each xdist worker's unguarded child lands on **that worker's own** claimed db; the controller exports nothing.
 - [ ] `tests/unit/test_subprocess_test_db_isolation.py` no longer exists, and no reference to it survives in `tests/` or `docs/features/`.
@@ -1096,14 +1112,18 @@ is not padding.
 - **Agent Type**: test-engineer
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Capture `redis-cli -n 0 dbsize` immediately before and after the affected-suite command (Verification table) on **`main`** — expect a nonzero delta, and record it
-- Repeat on the branch with the export applied — expect a delta of **0**
-- Record both numbers for the PR body. Do **not** use `MONITOR`: it is machine-global and this Redis serves live production traffic
+- **Measure attributed keys, not `dbsize`.** `dbsize` is signed and machine-global: TTL expiry drives it negative and live bridge/worker traffic moves it independently of pytest, so a "delta of 0" is neither achievable nor evidence. Snapshot the **key set** the cluster's consumers actually write instead — `redis-cli -n 0 --scan --pattern '<prefix>'` for each of `telegram:outbox:*`, the dedup prefix, and the last-processed prefix — before and after the affected-suite command
+- On **`main`**: expect the snapshot to grow. Record which keys appeared; those are pytest's writes to production, and they are the defect
+- On the **branch**: expect the snapshot **unchanged** — no key that was absent before the run is present after it. That is the headline criterion, and unlike a `dbsize` delta it is attributable to pytest rather than to whatever else the machine was doing
+- Put both key lists in the PR body. Do **not** use `MONITOR`: it is machine-global and this Redis serves live production traffic
 - Diff the pass/fail set between the two runs. Triage each newly-red file as (a) a genuine cross-test key dependency to fix, or (b) an assertion that only ever passed because production db0 is never flushed — and write the disposition into Test Impact
 - **The cluster must cover every consumer group.** The round-1 cluster (`test_dedup`, `test_reconciler`, `test_catchup_claim`, `test_duplicate_delivery`, `test_last_processed`, `test_bridge_dispatch_contract`) contained no `agent/`-facing test, so a zero delta over it would have certified the headline criterion with the outbox-write path unmeasured. `tests/unit/test_output_handler.py` and `tests/unit/test_deliver_pipeline_completion.py` are now in the cluster and in the Verification row — do not drop them
 - **Do not work from the import graph.** 73 files import one of those modules without pinning `REDIS_URL` (37 reference `session_completion`/`output_handler`); that is a loose upper bound, not a work list. Pick files that *call* the writing paths and measure
 - **Do not pin `REDIS_URL` back to db0** anywhere to make a red test green — that preserves the defect to protect the assertion depending on it
-- **Stop-and-escalate gate — a decidable threshold, not a judgement call**: stop and report **the moment either trigger fires** — (a) **more than 3 test files go red**, or (b) **any single red file needs more than a one-line fix**. Do not attempt repairs past that point; the split is pre-authorized, only the trigger needed naming. The export and the guard deletion still ship
+- **No gate. Disposition every red file in this PR (operator decision, 2026-08-24 — see Appetite).** There is no size trigger, no escalation, and no split. Work the red set until the affected-suite command exits 0
+- **Delete-first.** Each red file was green only because production db0 is never flushed, so its apparent coverage was an artifact of shared production state. Default to **deleting** the test. Repair only where the behavior is genuinely worth asserting and the fix is obvious (point a fixture at the claimed db; have the test create the key it reads). If a test needs new scaffolding to survive correct isolation, it was testing the scaffolding — delete it
+- Record each deletion in Test Impact with one line: what it claimed to cover, and why that claim was hollow. A deletion with no such line is not an accepted disposition
+- **Do not pin `REDIS_URL` back to db0** to rescue anything — that preserves the defect to protect the assertion depending on it (unchanged; still the one forbidden escape)
 
 ### 3. Prove red, then green
 - **Task ID**: test-demonstrated-red
@@ -1119,6 +1139,9 @@ is not padding.
 - Paste both into the PR description as the red/green paper trail
 
 ### 4. Add the permanent behavioral assertions
+
+- **Placement is load-bearing (round-4 blocker).** The leak-detection probe goes in its own class at the **end of the file** — e.g. `class TestExportedRedisUrlSurvivesSyntheticHookCalls` after `TestReloadedRegistryIdentity` — asserting `os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")`. A probe in `TestPerProcessDbClaim` (line 452) runs before the synthetic hook calls at 1098+ and is structurally incapable of failing. The other assertions stay in `TestPerProcessDbClaim`; they check a different property
+- **Demonstrate this row red before accepting it**: remove the `setattr` stub, run under `-n 2 --dist=each`, watch the tail probe fail, restore. A verification row never observed red is the exact failure this plan was written to stop reproducing
 - **Task ID**: test-replacement-assertions
 - **Depends On**: build-unreachable-write
 - **Validates**: tests/unit/test_conftest_isolation_guards.py
@@ -1126,7 +1149,7 @@ is not padding.
 - **Assigned To**: isolation-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- **Deliberately does NOT depend on `build-blast-radius-sweep`.** Task 5 does (see its Why-the-2.5-edge note), but these assertions must stay independently reachable: if 2.5's gate fires and defers the repairs, the replacement assertions and the guard deletion still ship, per the split contract in Appetite and Risk 7
+- **Deliberately does NOT depend on `build-blast-radius-sweep`.** Task 5 does (see its Why-the-2.5-edge note). These assertions prove the export works and are independent of how the blast-radius red set is dispositioned
 - Assert the live process's `os.environ["REDIS_URL"]` ends with `/{claim_test_db()}`
 - Assert a deliberately unguarded child's resolved URL is **byte-identical** to the parent's `os.environ["REDIS_URL"]`
 - **Both of the above must fire under the default `--dist=load`**, phrased against this process's own claim rather than a sibling worker. After the guard deletion these are the only regression detectors, and `scripts/pytest-clean.sh` never issues `--dist=each` on its own
@@ -1139,7 +1162,7 @@ is not padding.
 ### 5. Delete the AST guard and retire the tautology
 - **Task ID**: build-delete-guard
 - **Depends On**: test-replacement-assertions, build-blast-radius-sweep
-- **Why the 2.5 edge**: this task is the plan's one irreversible step. Task 2.5 carries the stop-and-escalate gate that decides whether the work must split; without this edge a builder walking the graph can delete 688 lines *before* the gate has run, draining it of its purpose. The dependency is on 2.5 having **run**, not on it having come back clean — a fired gate defers the *repairs*, while the export and the guard deletion still ship (Risk 7 / Appetite)
+- **Why the 2.5 edge**: this task is the plan's one irreversible step, and 2.5 is what turns the blast radius from a guess into a measured list. Deleting 688 lines before that measurement exists would discard the guard while still blind to what the export exposed. The dependency is on 2.5 having **run and been dispositioned to exit 0** — with no split available, there is no longer a 'came back dirty' branch to reason about
 - **Validates**: tests/unit/
 - **Informed By**: spike-2 (no module imports the guard; the migrate test can no longer go red)
 - **Assigned To**: env-export-builder
@@ -1212,7 +1235,7 @@ cannot be recorded as pass or fail; split it into two rows.
 | **Anti-criterion A: no `monkeypatch.delenv("REDIS_URL"` in the guards file** — it would open a hardcoded-db0 fallback window across this helper's 23 callers (Risk 1) | `grep -c 'monkeypatch.delenv("REDIS_URL"' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
 | **Anti-criterion B: no `monkeypatch.setenv("REDIS_URL"` in the guards file** — it avoids the db0 window but leaves the hook-call-to-teardown window open (Risk 1) | `grep -c 'monkeypatch.setenv("REDIS_URL"' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
 | Redundant per-call-site delenvs removed once the helper owns them | `grep -c 'monkeypatch.delenv("POPOTO_TEST_DB"' tests/unit/test_conftest_isolation_guards.py` | output contains 1 (currently 3) |
-| **Claim-contract tests do not leak REDIS_URL across workers** — the guards file and a db-reading probe in the SAME invocation. The guards file alone cannot discharge this: spike-1 finding F measured it green with and without the leak. | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_unguarded_child_inherits_claimed_db" -p no:randomly -n 2 --dist=each -q` | exit code 0 |
+| **Claim-contract tests do not leak REDIS_URL across workers.** The leak probe must live in a class placed at the **END** of `tests/unit/test_conftest_isolation_guards.py` (after `TestReloadedRegistryIdentity`) — round 4 measured that `TestPerProcessDbClaim` is at line 452 while every synthetic `pytest_configure()` call is at 1098+, so under `-p no:randomly` a probe inside it collects first and the row can never go red. Passing a node ID from the same file does not reorder collection. | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n 2 --dist=each -q` | exit code 0, AND demonstrated red: with the `_export_claimed_redis_url` stub removed, the tail probe must fail |
 | The unguarded-child detector fires under the DEFAULT dist mode, not only `--dist=each` (Risk 2 / Concern: nothing schedules `--dist=each`) | `./scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -p no:randomly -n 2 -q` | exit code 0 |
 | **Nested-pytest #2628 invariant holds** (Risk 3's entire mitigation — previously verified nowhere) | `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_nested_pytest_child_claims_its_own_db" -p no:randomly -q` | exit code 0 |
 | Per-worker independence: each worker's child lands on that worker's own db | `./scripts/pytest-clean.sh "tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_live_process_redis_url_names_its_own_claim" -p no:randomly -n 2 --dist=each -q` | exit code 0 |
@@ -1289,6 +1312,32 @@ file (587, 1194, 1205), matching Risk 1's argument for why the file-wide count r
 unusable.
 
 ---
+
+## Critique Disposition (operator decision, 2026-08-24)
+
+**Planning is capped at round 4. The plan goes to build; no round 5.**
+
+Rounds 1-2 earned their cost: they found the twenty lazy `REDIS_URL` consumers,
+the `agent/session_completion.py:609` write into production db0 under test, and
+the `delenv` mitigation that would have manufactured twenty-three fresh db0
+windows. Rounds 3-4 moved to auditing the verification scaffolding this plan
+invented, and round 4's own text records a finding that "keeps relocating
+instead of resolving" — the signal that more rounds stop converging.
+
+Disposition of round 4:
+
+- **The BLOCKER is accepted and fixed in-plan** (probe-class placement; see task 4
+  and the corresponding Verification row). It was a real catch: a row that cannot
+  go red.
+- **The five CONCERNs are accepted on the record and closed.** The db0-measurement
+  concern is resolved by switching to an attributed key-set snapshot (task 2.5) —
+  `dbsize` was the wrong instrument. The split-contract concern is resolved by
+  removing the split entirely (see Appetite). The remainder are measurement
+  precision, and they settle against real numbers from a build rather than
+  another round of argument in a document.
+
+Anything the build surfaces that contradicts this plan is a build-time finding,
+recorded in the PR, not a reason to re-enter planning.
 
 ## Open Questions
 
