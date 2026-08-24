@@ -945,7 +945,13 @@ class Settings(BaseSettings):
         # into the launchd plist by install_worker.sh. The .env symlinks to
         # ~/Desktop/Valor/.env (iCloud), and pydantic-settings' open() on that
         # file blocks indefinitely under macOS TCC in the launchd environment.
-        env_file=None if __import__("os").environ.get("VALOR_LAUNCHD") else ".env",
+        # Class-body equivalent of the worker/bridge bootstrap gates: pre-config,
+        # launcher-owned, cannot vary per-instance (#2866 triage). The AST census
+        # does not descend into class bodies, so this site is not in the 190; the
+        # marker records the verdict so a later refactor cannot lose it.
+        env_file=None
+        if __import__("os").environ.get("VALOR_LAUNCHD")  # env-scope-guard: allow
+        else ".env",
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
