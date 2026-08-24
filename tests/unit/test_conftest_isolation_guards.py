@@ -1428,13 +1428,24 @@ class TestExportedRedisUrlSurvivesSyntheticHookCalls:
         """A nested pytest child spawned WITHOUT env= inherits the parent's
         REDIS_URL, then overwrites it with its OWN claim (#2628 invariant).
 
-        The nested target must live under the repo root: pytest run from /tmp
-        picks a different rootdir, never loads tests/conftest.py, and this
-        assertion would falsely pass by never exercising the child's own
-        pytest_configure at all.
+        The nested target must live UNDER ``tests/``, not merely under the repo
+        root: pytest only auto-loads a ``conftest.py`` found in an ANCESTOR
+        directory of the collected file. A probe placed as a sibling of
+        ``tests/`` (e.g. directly under repo root) never picks up
+        ``tests/conftest.py``, so the child inherits the parent's env
+        unchanged and never runs its own ``pytest_configure`` -- this
+        assertion would then always fail, for a reason having nothing to do
+        with the #2628 invariant under test.
+
+        The nested dir/probe filename is worker-scoped (PID suffix): under
+        ``-n 2 --dist=each`` two workers run this test concurrently, and a
+        shared path lets one worker's ``finally``-block unlink race the
+        other's still-running nested pytest, producing a spurious
+        ``FileNotFoundError`` that has nothing to do with the #2628
+        invariant under test.
         """
         repo_root = pathlib.Path(__file__).resolve().parents[2]
-        nested_dir = repo_root / ".pytest_nested_probe_2805"
+        nested_dir = repo_root / "tests" / f".pytest_nested_probe_2805_{os.getpid()}"
         nested_dir.mkdir(exist_ok=True)
         probe_file = nested_dir / "test_probe.py"
         out_file = tmp_path / "nested_redis_url.txt"
