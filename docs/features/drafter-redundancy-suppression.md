@@ -183,6 +183,6 @@ successfully-sent drafts as dicts:
 | Test file | Coverage |
 |-----------|---------|
 | `tests/unit/test_redundancy_filter.py` | All 5 termination conditions, Jaccard threshold edges, error fallback, stale priors |
-| `tests/unit/test_output_handler.py::TestRedundancyFilterWiring` | SDLC suppress → reaction, non-SDLC bypass, draft recording, filter exception fallthrough |
+| `tests/unit/output_handler/test_output_handler_filters.py::TestRedundancyFilterWiring` | SDLC suppress → reaction, non-SDLC bypass, draft recording, filter exception fallthrough |
 | `tests/unit/test_agent_session.py::TestRecentSentDraftsField` | Field presence, FIFO cap, scoped save contract |
 | `tests/integration/test_message_drafter_integration.py` | 3-send regression scenario, artifact-termination integration |

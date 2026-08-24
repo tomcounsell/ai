@@ -340,7 +340,11 @@ tests/
 | unit | `test_chunking.py` | 15 | Chunking engine: heading-aware, token-count, overlap |
 | unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
 | unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
-| unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
+| unit | `memory_extraction/test_memory_extraction_post_session.py` | 20 | Post-session Haiku extraction driver, session cap |
+| unit | `memory_extraction/test_memory_extraction_outcome_detection.py` | 37 | Outcome detection, bigrams, act rate, history, LLM judge |
+| unit | `memory_extraction/test_memory_extraction_parsing.py` | 48 | Categorized-observation parsing, JSON payload extraction, post-merge learning |
+| unit | `memory_extraction/test_memory_extraction_refusal_filters.py` | 36 | Refusal detector and scoping-boilerplate filters, narrowness guards |
+| unit | `memory_extraction/test_memory_extraction_event_loop_safety.py` | 7 | No nested `asyncio.run()` on the hook subprocess path |
 | unit | `test_memory_ingestion.py` | 89 | Telegram message memory ingestion |
 | integration | `test_redis_models.py` | 30 | Popoto model CRUD |
 
@@ -472,6 +476,33 @@ The `{feature_keyword}` must match a key in `FEATURE_MAP` (in `tests/conftest.py
 - `test_pipeline_new_stage.py` → auto-tagged `sdlc`
 - `test_session_timeout.py` → auto-tagged `sessions` (matches "session_")
 - `test_bridge_rate_limit.py` → auto-tagged `messaging` (matches "bridge")
+
+### Splitting or Renaming a Test File
+
+Markers are derived from the **basename only** — `pytest_collection_modifyitems` in
+`tests/conftest.py` strips `test_` and `.py` from the nodeid's last path segment and
+substring-matches the remainder against `FEATURE_MAP`, taking the first hit. The
+directory a file sits in contributes nothing, so moving a file into a subpackage is
+marker-neutral while renaming it is not.
+
+That makes a split of a large module a silent marker hazard in both directions:
+
+- **Losing a marker.** `test_stop_hook.py` (marker `sdlc`) split into
+  `tests/unit/stop_hook/test_exit_codes.py` yields basename `exit_codes`, which matches
+  nothing — those tests vanish from `pytest -m sdlc` while still running in a full sweep.
+- **Gaining one.** A new basename can pick up an unrelated pattern by accident;
+  `..._transport_aware_routing` matches `routing` and would be tagged `messaging`.
+
+A `--collect-only` total-count check cannot catch either: the total is unchanged, only
+the tagging moves. So when splitting a file:
+
+1. Keep the original basename as a **prefix** of every new file
+   (`test_output_handler.py` → `test_output_handler_drafter.py`), which preserves any
+   matching substring by construction.
+2. Check each new basename against `FEATURE_MAP` for an accidental new match.
+3. Verify by comparing the per-marker collected counts before and after, not just the
+   total — e.g. `pytest -m <marker> --collect-only -q | tail -1` for every marker the
+   file touches.
 
 ### Feature Marker Registration
 

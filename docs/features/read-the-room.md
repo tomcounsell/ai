@@ -36,7 +36,7 @@ Sources:
 | `agent/output_handler.py` | **Path A** call site. `TelegramRelayOutputHandler.send` calls RTR between the drafter and the outbox `rpush`. |
 | `tools/valor_telegram.py` | **Path B** call site. `cmd_send` calls RTR after linkify+truncate, before the outbox `rpush` (issue #1203). Caller-type gate auto-detects agent vs. human invocations. |
 | `tests/unit/test_read_the_room.py` | Unit tests for verdict parsing, snapshot construction, fail-open paths. |
-| `tests/unit/test_output_handler.py::TestReadTheRoomWiring` | Path A handler-level wiring tests (trim coercion, queue alignment). |
+| `tests/unit/output_handler/test_output_handler_filters.py::TestReadTheRoomWiring` | Path A handler-level wiring tests (trim coercion, queue alignment). |
 | `tests/unit/test_valor_telegram.py::TestCmdSendRTR` | Path B CLI wiring tests (caller-type gate, flag overrides, verdict branching, fail-open). |
 | `tests/integration/test_message_drafter_integration.py` | End-to-end Path A integration tests with RTR enabled. |
 

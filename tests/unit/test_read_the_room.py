@@ -329,7 +329,8 @@ def test_trim_long_verdict_preserves_revised_text(monkeypatch):
 
 def test_trim_short_verdict_preserves_text(monkeypatch):
     """RTR returns the trim verdict verbatim; the *handler* is responsible
-    for coercing too-short trims to suppress (see test in test_output_handler).
+    for coercing too-short trims to suppress (see the test in
+    tests/unit/output_handler/test_output_handler_filters.py).
     """
     _enable_rtr(monkeypatch)
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "moved on"}])

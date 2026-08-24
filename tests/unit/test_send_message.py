@@ -69,7 +69,8 @@ class TestSendViaEmail:
     ``TelegramRelayOutputHandler.send``, which owns the email outbox write.
 
     The unified email payload SHAPE is now asserted at the handler layer in
-    ``tests/unit/test_output_handler.py`` (``TestTransportAwareRouting`` /
+    ``tests/unit/output_handler/test_output_handler_transport.py``
+    (``TestTransportAwareRouting`` /
     ``TestDrafterHoistedAboveTransport``). The tests below assert the
     CLI-side contract: env validation, session lookup, fail-closed default
     on missing session, and the env-gated legacy fallback.
