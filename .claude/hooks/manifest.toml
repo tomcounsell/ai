@@ -93,11 +93,12 @@ exit_policy = "deny-only"
 # headroom -- the budget increase risk is dominated entirely by the
 # out-of-process design-system-sync leg, unchanged by this addition.
 # Re-confirmed for the 10th predicate (issue #2866): validate_no_module_scope_env
-# fires only on `git commit`, and on that path does one `ast.parse` per staged
-# non-test .py file plus two short `git` reads each (`git show :path`,
-# `git diff --cached -U0 -- path`) -- bounded by the size of a single commit,
-# each git call self-capped at 10s, and still dominated by the out-of-process
-# design-system-sync leg. timeout=20 stands unchanged.
+# fires only on `git commit`, and on that path does two whole-commit `git` reads
+# (`git diff --cached --name-only`, `git diff --cached -U0 -M`) plus one
+# `git show :path` and one `ast.parse` per staged non-test .py file -- bounded by
+# the size of a single commit, each git call self-capped at 10s, and still
+# dominated by the out-of-process design-system-sync leg. timeout=20 stands
+# unchanged.
 [[hook]]
 manifest_id = "dispatch_pre_tool_use_bash"
 event = "PreToolUse"

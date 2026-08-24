@@ -22,6 +22,9 @@ This guard flags:
     inside a module-level `if` / `try` / `with` / `for` / `while` body (those
     execute at import time too).
   - Only on lines the staged commit actually ADDS or MODIFIES (see below).
+    Renamed files are included: `git mv old.py new.py` plus a new read in the
+    same commit is a single git `R` entry, and the scan is rename-aware so the
+    new read is caught while the moved file's pre-existing sites are not.
 
 It does NOT flag:
 
@@ -51,9 +54,15 @@ read may stay at import time only if ALL THREE hold:
      human tuning `.env`;
   3. cannot vary per-instance by construction.
 
-Applied to the 190 sites in the baseline census, that exempts exactly three
-(the `VALOR_LAUNCHD` dotenv-bootstrap gates in `worker/__main__.py`,
-`bridge/telegram_bridge.py`, and `config/settings.py`). If a read you are
+Three sites in this repo carry the marker today, but only TWO of them are
+inside the 190-site census: the `VALOR_LAUNCHD` dotenv-bootstrap gates in
+`worker/__main__.py` and `bridge/telegram_bridge.py`. The third,
+`config/settings.py`'s `model_config.env_file`, is NOT in the census and never
+could be — it sits in a class body (the scan does not descend into those) and
+is spelled `__import__("os").environ.get(...)`. It is marked anyway so a later
+refactor that lifts it to module scope cannot lose the verdict. So the census
+reads 190 sites / 2 allowlisted / 188 to migrate, while `grep` for the marker
+finds three. If a read you are
 adding does not clear all three, it belongs in `config/settings.py`.
 
 Registration: NOT a `manifest.toml` entry. #2435 consolidated the PreToolUse
@@ -109,6 +118,10 @@ _SUBPROCESS_TIMEOUT_S = 10
 # `@@ -old,count +new,count @@` — we only care about the new-side range, which
 # is the set of lines the commit adds or rewrites.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+# `+++ b/<path>` — the new-side path of the file the following hunks belong to.
+# A deletion emits `+++ /dev/null`, which this deliberately does not match.
+_DIFF_HEADER_RE = re.compile(r"^\+\+\+ b/(.+)$")
 
 __all__ = [
     "ALLOW_MARKER",
@@ -172,7 +185,15 @@ def _git(args: list[str]) -> str | None:
 
 
 def _staged_python_files() -> list[str]:
-    out = _git(["diff", "--cached", "--name-only", "--diff-filter=ACM"])
+    """Non-test `*.py` paths this commit adds, copies, modifies, or renames.
+
+    `R` is in the filter deliberately. Git detects a rename whenever the
+    content is similar enough, so `git mv old.py new.py` plus a newly added
+    module-scope env read in the same commit lands as a single `R` entry — and
+    an `ACM`-only filter would not scan that file at all, letting the read
+    through silently.
+    """
+    out = _git(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
     if out is None:
         return []
     return [f for f in out.strip().split("\n") if f.endswith(".py") and not is_test_file(f)]
@@ -183,25 +204,39 @@ def _staged_content(path: str) -> str | None:
     return _git(["show", f":{path}"])
 
 
-def _staged_added_lines(path: str) -> set[int]:
-    """New-side line numbers this commit adds or rewrites in `path`.
+def _staged_added_lines_map() -> dict[str, set[int]]:
+    """Map new-side path -> line numbers this commit adds or rewrites.
 
-    Parsed from `git diff --cached -U0` hunk headers. On any git failure the
-    caller gets an empty set, which fails OPEN (no violations reported) —
-    consistent with the dispatcher's fail-open posture for this validator.
+    Parsed in ONE rename-aware pass (`git diff --cached -U0 -M`) rather than a
+    per-path call, because rename detection and path limiting are mutually
+    exclusive in git: passing `-- <newpath>` makes git forget the file was
+    renamed and report the whole file as freshly added, which would flag every
+    pre-existing site in a file that was merely moved. Diffing the whole staged
+    set keeps the rename linked to its source, so a pure `git mv` yields no
+    changed lines at all and only genuinely new lines are reported.
+
+    On any git failure the caller gets an empty map, which fails OPEN (no
+    violations reported) — consistent with the dispatcher's fail-open posture
+    for this validator.
     """
-    out = _git(["diff", "--cached", "-U0", "--", path])
+    out = _git(["diff", "--cached", "-U0", "-M", "--diff-filter=ACMR"])
     if out is None:
-        return set()
-    changed: set[int] = set()
+        return {}
+    per_path: dict[str, set[int]] = {}
+    current: set[int] | None = None
     for line in out.splitlines():
+        header = _DIFF_HEADER_RE.match(line)
+        if header:
+            # `+++ b/<path>` names the new side; `/dev/null` for a deletion.
+            current = per_path.setdefault(header.group(1), set())
+            continue
         match = _HUNK_RE.match(line)
-        if not match:
+        if not match or current is None:
             continue
         start = int(match.group(1))
         count = int(match.group(2)) if match.group(2) is not None else 1
-        changed.update(range(start, start + count))
-    return changed
+        current.update(range(start, start + count))
+    return per_path
 
 
 def read_stdin() -> dict:
@@ -245,11 +280,12 @@ def find_violation_for_command(command: str) -> str | None:
         return None
 
     all_violations: list[str] = []
+    added_lines = _staged_added_lines_map()
     for path in _staged_python_files():
         content = _staged_content(path)
         if content is None:
             continue
-        all_violations.extend(find_violations(content, path, _staged_added_lines(path)))
+        all_violations.extend(find_violations(content, path, added_lines.get(path, set())))
 
     if all_violations:
         return _header() + "\n\n".join(all_violations) + _footer()

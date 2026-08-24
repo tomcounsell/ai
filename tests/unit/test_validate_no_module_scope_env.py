@@ -6,6 +6,7 @@ detector implementation, so these tests cover both: the AST module-scope vs.
 escape hatch, the actionable message, and both entry points.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -303,3 +304,108 @@ class TestSharedDetector:
         allowed = {c.filename for c in result.calls if c.allowed}
         assert allowed <= {"worker/__main__.py", "bridge/telegram_bridge.py"}
         assert all(c.key == "VALOR_LAUNCHD" for c in result.calls if c.allowed)
+
+
+def _init_repo(path: Path) -> None:
+    """A throwaway git repo with one committed module, for real staged-state tests."""
+    subprocess.run(["git", "init", "-q", "."], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
+    # Padding keeps the pre/post rename similarity high enough that git actually
+    # records an `R` entry — the whole point of these tests.
+    body = "import os\n" + "".join(f"CONST_{i} = {i}\n" for i in range(40))
+    (path / "mod.py").write_text(body)
+    subprocess.run(["git", "add", "mod.py"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=path, check=True)
+
+
+class TestStagedRenameHandling:
+    """A rename must not be a bypass, and must not be a false positive.
+
+    Regression tests for the review finding on PR #2940: `_staged_python_files`
+    originally used `--diff-filter=ACM`, which excludes `R`, so `git mv` plus a
+    newly added module-scope read in the same commit was never scanned.
+    """
+
+    def test_rename_plus_new_module_scope_read_is_blocked(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "mv", "mod.py", "mod_renamed.py"], cwd=tmp_path, check=True)
+        with (tmp_path / "mod_renamed.py").open("a") as fh:
+            fh.write('SNEAKY = os.environ.get("SNEAK_IN_VIA_RENAME", "1")\n')
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+        reason = import_validator().find_violation_for_command("git commit -m x")
+
+        assert reason is not None, "rename + new module-scope read slipped the guard"
+        assert "SNEAK_IN_VIA_RENAME" in reason
+        assert "mod_renamed.py:42" in reason
+
+    def test_pure_rename_of_offending_file_is_allowed(self, tmp_path, monkeypatch):
+        """Moving a file that already has module-scope reads must not fire.
+
+        This is the diff-scoping property that makes slices 1-9 possible,
+        restated for renames: rename detection has to stay linked to the source
+        so the moved file's pre-existing sites are not re-litigated as new.
+        """
+        _init_repo(tmp_path)
+        with (tmp_path / "mod.py").open("a") as fh:
+            fh.write('PREEXISTING = os.environ.get("ALREADY_HERE", "1")\n')
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "pre-existing read"], cwd=tmp_path, check=True)
+        monkeypatch.chdir(tmp_path)
+
+        subprocess.run(["git", "mv", "mod.py", "moved.py"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+        assert import_validator().find_violation_for_command("git commit -m x") is None
+
+    def test_rename_plus_read_inside_function_is_allowed(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "mv", "mod.py", "mod_renamed.py"], cwd=tmp_path, check=True)
+        with (tmp_path / "mod_renamed.py").open("a") as fh:
+            fh.write('def load():\n    return os.environ.get("FINE_IN_A_FUNCTION")\n')
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+        assert import_validator().find_violation_for_command("git commit -m x") is None
+
+    def test_rename_plus_allowlisted_read_is_allowed(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "mv", "mod.py", "mod_renamed.py"], cwd=tmp_path, check=True)
+        validator = import_validator()
+        with (tmp_path / "mod_renamed.py").open("a") as fh:
+            fh.write(f'BOOT = os.environ.get("LAUNCHER_FLAG")  # {validator.ALLOW_MARKER}\n')
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+        assert validator.find_violation_for_command("git commit -m x") is None
+
+
+class TestGitFailureFailsOpen:
+    """The documented fail-open posture, which previously had no coverage.
+
+    `_staged_added_lines_map` returning an empty map on a git failure is a
+    deliberate safety property: this guard runs on every `git commit` on the
+    machine, so failing closed on a git hiccup would block all work. A
+    documented property with no test is one refactor away from inverting.
+    """
+
+    def test_git_failure_reports_no_violations(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with (tmp_path / "mod.py").open("a") as fh:
+            fh.write('NEW = os.environ.get("WOULD_NORMALLY_BLOCK")\n')
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        validator = import_validator()
+        assert validator.find_violation_for_command("git commit -m x") is not None
+
+        monkeypatch.setattr(validator, "_git", lambda args: None)
+
+        assert validator.find_violation_for_command("git commit -m x") is None
+
+    def test_added_lines_map_is_empty_on_git_failure(self, monkeypatch):
+        validator = import_validator()
+        monkeypatch.setattr(validator, "_git", lambda args: None)
+
+        assert validator._staged_added_lines_map() == {}
