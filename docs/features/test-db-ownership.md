@@ -35,6 +35,19 @@ not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs
 one resolves to the right answer today and is still a second authority for a fact that has
 one owner.
 
+**The process environment is correct, not just the in-process popoto client (#2805).**
+`pytest_configure` exports the claim as `POPOTO_TEST_DB` for popoto's own plugin and, in the
+same breath, as `REDIS_URL` for everything else in the process tree: any subprocess spawned
+without an explicit `env=` inherits `os.environ` and therefore inherits the claimed
+`REDIS_URL`, and any in-process production module that reads `os.environ.get("REDIS_URL", ...)`
+lazily (inside a function body, at call time — not popoto's own import-time read, which this
+line does not touch) now resolves to the claimed db too. This retired a 688-line AST scanner
+(`tests/unit/test_subprocess_test_db_isolation.py`) that policed the older convention of every
+call site remembering to pass `env=subprocess_env(...)`; the scanner's `path:line`-keyed
+allowlist went stale under ordinary line drift, silently un-exempting or re-exempting call
+sites on unrelated merges. The permanent regression detector is now behavioral — see
+`TestExportedRedisUrlSurvivesSyntheticHookCalls` in `tests/unit/test_conftest_isolation_guards.py`.
+
 ## What the guard denies, and why
 
 `tests/conftest.py::_install_redis_flush_ownership_guard` patches `flushdb` and `flushall` on
