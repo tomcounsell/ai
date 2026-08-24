@@ -5,7 +5,7 @@ appetite: Small
 owner: valor
 created: 2026-08-24
 tracking: https://github.com/tomcounsell/ai/issues/2805
-last_comment_id:
+last_comment_id: 5392635119
 ---
 
 # Pytest exports its own REDIS_URL; the line-keyed ALLOWLIST guard is deleted
@@ -558,7 +558,8 @@ asserted unchanged.
 - [ ] Update `docs/features/test-db-ownership.md` (line 37 table): the "a subprocess that must see the same data" row no longer requires `subprocess_env()` for the db; correct the row and state what `subprocess_env` is still for.
 - [ ] Update `docs/features/README.md` (lines 250, 253): refresh the Test Isolation Hardening and Test-DB Ownership summaries so neither implies a static call-site convention is enforced.
 - [ ] Update `tests/README.md`: rewrite the "Subprocess Test-DB Inheritance (issue #2763)" section (lines ~502-545) — in particular the sentence "`os.environ` is never mutated", which becomes false, and the closing paragraph naming the enforcing guard, which must go entirely. Also correct the guard reference in line 33 and the #2605 corollary in line 48. **Describe only the new status quo**; leave no "formerly enforced by" residue.
-- [ ] Review `CLAUDE.md`'s "Manual Testing Hygiene" paragraph: its claim that "this shell always carries a production `REDIS_URL`" stays true for shells but must not read as true inside pytest. Adjust only if it misleads.
+- [ ] Review `CLAUDE.md`'s "Manual Testing Hygiene" paragraph: its claim that "this shell always carries a production `REDIS_URL`" stays true for shells but must not read as true inside pytest. Its `os.environ.setdefault` warning and the "assign explicitly, assert the db number" rule remain correct for standalone debug scripts and are unaffected — draw the shell/pytest line clearly rather than deleting the guidance.
+- [ ] Correct `docs/sdlc/do-build.md:215` ("## Test Isolation"): it tells builders to "use `REDIS_TEST_DB` or a separate prefix". `REDIS_TEST_DB` is not a variable this repo has — the mechanism is the flock claim plus `POPOTO_TEST_DB`, and after this change the environment is correct with no builder action at all. Pre-existing drift, surfaced by the blast-radius scan, and directly misleading for every future build.
 
 ### External Documentation Site
 - [ ] Not applicable — this repo has no external docs site.
@@ -704,6 +705,8 @@ asserted unchanged.
 - Rewrite `tests/README.md`'s subprocess-inheritance section and correct lines 33 and 48
 - Update `docs/features/test-isolation-hardening.md` and `docs/features/test-db-ownership.md`
 - Refresh the two `docs/features/README.md` index rows
+- Correct `docs/sdlc/do-build.md:215`'s stale `REDIS_TEST_DB` reference
+- Draw the shell-vs-pytest line in `CLAUDE.md`'s Manual Testing Hygiene paragraph without deleting its still-correct debug-script guidance
 - Update `subprocess_env`'s docstring
 - Leave no historical residue of the retired convention
 
