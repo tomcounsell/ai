@@ -1,5 +1,10 @@
 # System Architecture Overview
 
+> **Archived.** This document describes the architecture from before the bridge/worker
+> separation and is kept for historical reference only. For the current architecture read
+> [`bridge-worker-architecture.md`](../bridge-worker-architecture.md) and
+> [`headless-session-runner.md`](../headless-session-runner.md).
+
 ## Overview
 
 This document provides a comprehensive architectural overview of the unified conversational development environment. The system seamlessly integrates natural conversation with code execution capabilities through Claude Code, embodying a production-ready AI platform with the Valor Engels persona.
@@ -122,7 +127,7 @@ Domain-Specific Tools & MCP Servers
 - **Security**: Granular permissions per subagent/tool
 - **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
 
-See [Eng Session Architecture](eng-session-architecture.md) for the current session architecture.
+See [Eng Session Architecture](../eng-session-architecture.md) for the current session architecture.
 
 ## Design Principles
 

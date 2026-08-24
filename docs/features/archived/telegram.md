@@ -1,5 +1,12 @@
 # Telegram Integration
 
+> **Archived.** This document describes the Telegram interface from before the
+> bridge/worker separation and is kept for historical reference only. For current
+> behavior read [`bridge-worker-architecture.md`](../bridge-worker-architecture.md),
+> [`bridge-module-architecture.md`](../bridge-module-architecture.md),
+> [`telegram-messaging.md`](../telegram-messaging.md), and
+> [`telegram-inbound-attachments.md`](../telegram-inbound-attachments.md).
+
 Telegram is the primary (but not only) interface for the Valor AI System. This integration is strictly an **interface layer** - it handles input, displays running status, delivers responses, and provides debug commands. It is mutually exclusive from the core AI system.
 
 ## Architecture
@@ -141,7 +148,7 @@ The processing emoji is selected via embedding cosine similarity against the 72 
 
 This replaces the previous Ollama intent classification approach, which was limited to 10 hardcoded emojis and had 2-10 second latency with frequent timeouts.
 
-See [Emoji Embedding Reactions](emoji-embedding-reactions.md) for full details on the embedding index, caching, and the `react_with_emoji.py` reaction path.
+See [Emoji Embedding Reactions](../emoji-embedding-reactions.md) for full details on the embedding index, caching, and the `react_with_emoji.py` reaction path.
 
 ## Inbound attachments — steering enrichment + auto-ingest
 
@@ -196,7 +203,7 @@ The vault copy is scheduled as a fire-and-forget `asyncio.create_task`
 appended to the module-level `_background_tasks` list, so its work never
 runs on the bridge's hot path; the steering push proceeds without waiting
 on it. Every failure inside the task is caught locally and logged at
-WARNING. See [Markitdown Ingestion](markitdown-ingestion.md) for the
+WARNING. See [Markitdown Ingestion](../markitdown-ingestion.md) for the
 watcher pipeline.
 
 ### Privacy note

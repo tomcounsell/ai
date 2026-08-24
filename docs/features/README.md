@@ -236,11 +236,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, category-weighted recall re-ranking, nightly LLM-based semantic consolidation (`memory-dedup` reflection) with `superseded_by` tracking and recall filter, embedding-file lifecycle with daily `embedding-orphan-sweep` reconciliation against live records, decoupled two-tier `memory-decay-prune` (tier-1 hard-delete opt-in, tier-2 tombstone apply-by-default) with a [corpus-collapse guardrail + cross-run anomaly detector](subconscious-memory.md#corpus-collapse-guardrails-issue-2438), dashboard `/memories` per-record inspector ([dashboard view](subconscious-memory.md#dashboard-view)), and **progressive-disclosure stub injection** (`<thought id="..."[category] title</thought>` ≥5× token reduction) backed by `memory_get` / `memory_search` MCP tools (`mcp_servers/memory_server.py`) and an async Ollama-driven `Memory.title` field wired at 7 writer call sites | Shipped |
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [sustainable-self-healing.md](sustainable-self-healing.md) | Queue governance: circuit-based pause, drip resume, throttle, failure dedup, daily digest | Shipped |
-| [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
 | [Teammate Session Permissions](teammate-session-permissions.md) | Code-level enforcement of the one teammate hard rule (writes to source-code paths require a Dev session); two-pass allowlist (normpath + realpath) closes path-traversal and symlink-escape; `[teammate-audit]` Bash log; capable prompt with TOOL POSTURE / OPERATIONAL WORK ENCOURAGED / WHEN BLOCKED blocks. Also fixes a latent PM MultiEdit gap. | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
+| [Telegram Inbound Attachments](telegram-inbound-attachments.md) | Files arriving in a chat with a live session are enriched with their extracted content (document text, image description, voice transcription) before the steering push, and fire-and-forget copied into `~/work-vault/telegram-attachments/` for the `KnowledgeWatcher` to index; eyes-emoji-first ordering on the media branch, sentinel fallback so delivery never drops (#1215) | Shipped |
 | [Telegram Message Edit Handling](telegram-message-edit-handling.md) | Handles Telegram MessageEdited events — steers running sessions with edited text or spawns a fresh session for completed ones | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
 | [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |
@@ -280,6 +280,14 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Search](youtube-search.md) | Search YouTube by query using yt-dlp, returning structured results (title, URL, duration, views) via `valor-youtube-search` CLI | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context; also exposed as `valor-youtube-transcribe` CLI | Shipped |
+
+## Archived
+
+Documents in [`archived/`](archived/) describe superseded designs and are kept for
+historical reference only. They are not part of the index above and nothing active should
+link to them. Rows still carrying `Archived` in the Status column above remain in place
+because they document a real experiment or a still-referenced result; a doc moves into
+`archived/` once it actively misdescribes the current system.
 
 ## Adding New Entries
 
