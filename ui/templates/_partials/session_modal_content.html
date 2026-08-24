@@ -328,11 +328,13 @@
 <script>
 function copySessionDetails(btn) {
     var lines = [
+        'Valor dashboard Job — backed by an AgentSession record (Popoto/Redis).',
         'Session ID    ' + btn.dataset.sessionId,
         'Thread    ' + btn.dataset.thread,
         'Project    ' + btn.dataset.project
     ];
     if (btn.dataset.slug && btn.dataset.slug !== '-') lines.push('Slug    ' + btn.dataset.slug);
+    lines.push('Look up with: valor-session status --id ' + btn.dataset.sessionId);
     var text = lines.join('\n');
     navigator.clipboard.writeText(text).then(function() {
         var orig = btn.textContent;
