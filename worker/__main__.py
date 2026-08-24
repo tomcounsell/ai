@@ -30,7 +30,10 @@ from pathlib import Path
 # dotenv entirely in that case: macOS TCC blocks open() on iCloud-synced
 # ~/Desktop/Valor/.env (which .env symlinks to), causing the process to
 # hang indefinitely.
-if not os.environ.get("VALOR_LAUNCHD"):
+# Pre-config launcher flag (#2866 triage): this read decides whether .env is
+# loaded at all, so it cannot itself come from config.settings, and launchd sets
+# it per-process — all three exemption tests hold.
+if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     try:
         from dotenv import load_dotenv
 

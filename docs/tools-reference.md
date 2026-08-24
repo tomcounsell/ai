@@ -102,6 +102,19 @@ Deliberately an adjacency check rather than a count of `fence_is_live` occurrenc
 
 Enforced on every suite run by `tests/unit/test_fence_census.py`, not by a CI workflow. A site that reads a fenced pid but drives no decision (log/reason-string interpolation) is exempted with the marker `# fence-census: log-only, not a decision consumer` on the read's own line or the line directly above.
 
+### Module-Scope Env Read Census (`scripts/scan_module_scope_env.py`)
+
+AST census of *module-scope* environment reads — a call to `os.environ.get`/`os.getenv`/`os.environ.setdefault`/`os.environ.pop` at the top level of a `.py` file (executes at import time, not at call time). Single detector implementation shared with the regression guard `.claude/hooks/validators/validate_no_module_scope_env.py`, so the count and the guard can never disagree. Git-tracked `*.py` only, via `git ls-files` — a filesystem walk sweeps `.worktrees/` and inflates the count ~66x. See [Module-Scope Env Read Guard](features/module-scope-env-guard.md).
+
+```bash
+python scripts/scan_module_scope_env.py              # non-test census: 72 modules / 190 sites (baseline)
+python scripts/scan_module_scope_env.py --tests      # include test files: 79 modules / 202 sites
+python scripts/scan_module_scope_env.py --by-file    # per-file breakdown
+python scripts/scan_module_scope_env.py --json       # machine-readable
+```
+
+Syntactic only: blind to an import-time env read made indirectly through a function call, and does not descend into class bodies at all. A future "0 sites" result proves the syntactic class is drained, not that every import-time env read is gone.
+
 ### Design System Sync (`tools.design_system_sync`)
 
 Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.

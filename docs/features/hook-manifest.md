@@ -213,7 +213,9 @@ The first must resolve and print a version with exit 0 from both the main checko
 6. `validate_no_destructive_git_in_worktree`
 7. `validate_no_destructive_git_in_shared_checkout` (#2448)
 8. `validate_no_broad_process_kill` (#2562)
-9. `validate_design_system_sync` (out-of-process — see below)
+9. `validate_no_redis_flush`
+10. `validate_no_module_scope_env` (#2866) — see [Module-Scope Env Read Guard](module-scope-env-guard.md)
+11. `validate_design_system_sync` (out-of-process — see below)
 
 New in-process predicates are added directly to `_VALIDATORS` in `dispatch/pre_tool_use_bash.py`, not as a new standalone `manifest.toml` entry — the manifest declares exactly one `[[hook]]` for `(PreToolUse, Bash)`, pointing at this dispatcher (see `TestManifestOrderConsistency` in `tests/unit/test_pre_tool_use_dispatcher.py`).
 

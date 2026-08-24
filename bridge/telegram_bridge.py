@@ -39,7 +39,10 @@ from utils.utc import to_unix_ts, utc_iso, utc_now
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
 # by install_service() — skip dotenv entirely to avoid macOS TCC hangs on the
 # iCloud-synced ~/Desktop/Valor/.env that .env symlinks to.
-if not os.environ.get("VALOR_LAUNCHD"):
+# Pre-config launcher flag (#2866 triage): this read decides whether .env is
+# loaded at all, so it cannot itself come from config.settings, and launchd sets
+# it per-process — all three exemption tests hold.
+if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     env_path = Path(__file__).parent.parent / ".env"
     load_dotenv(env_path)
     load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
