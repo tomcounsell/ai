@@ -106,14 +106,14 @@ os.environ["SENTRY_DSN"] = ""
 # claude-haiku-4-5 request via `agent.llm.run_typed`. Every `send()` test whose
 # drafted text happens to be a short question therefore makes a live, billed
 # API call. Measured before this guard: one run of
-# tests/unit/test_output_handler.py issued 5 requests to /v1/messages
+# tests/unit/output_handler/ issued 5 requests to /v1/messages
 # (reproducible even under `env -u ANTHROPIC_API_KEY`, because importing
 # bridge.telegram_bridge calls load_dotenv() and repopulates the key from the
 # real .env).
 #
 # The multi-second network await is also a yield point inside `send()`, between
 # the drafter call and the Redis self-draft budget bump. That reordered the
-# interleaving in `test_output_handler.py::TestDrafterFailureRecovery::
+# interleaving in `test_output_handler_drafter.py::TestDrafterFailureRecovery::
 # test_self_draft_attempts_bound_terminates_loop`, which gathers two concurrent
 # `send()` calls and asserts exactly two atomic bumps -- taking it from
 # deterministic-green to 6 failures in 12 runs on the review machine. That flake

@@ -267,7 +267,7 @@ class TestDraftMessage:
 
         This asserts the BASE constant only — unchanged by the local-path
         addendum, which is composed at injection time in
-        agent/output_handler.py (tested in tests/unit/test_output_handler.py).
+        agent/output_handler.py (tested in tests/unit/output_handler/).
         """
         from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 

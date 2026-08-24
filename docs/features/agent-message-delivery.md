@@ -187,7 +187,8 @@ Failure Path Test Strategy):
 - `tests/unit/test_message_drafter.py` — `convert_local_paths_to_attachments` unit matrix (existence gate, secret-exclusion arms, symlink hardening, trimmed-token scrub, finditer all-occurrences)
 - `tests/unit/test_bridge_relay.py` — `TestFlushConversionSendPath`: a converted flush payload reaches the relay's file-send branch; the canned-notice payload is not dropped by the empty guard
 - `tests/unit/test_email_relay.py` — `TestFlushConvertedPayloadParity`: the SMTP relay honors the flush payload's `attachments` key; non-converted deferrals stay text-only
-- `tests/unit/test_output_handler.py` — `TestDrafterHoistedAboveTransport`: the drafter is invoked exactly once for both telegram and email sessions; email payload carries the reply-all `to` list; CLI-supplied file paths propagate to both outboxes. `TestDeferredSelfDraftPersistence`: `deferred_self_draft_pending` and `deferred_self_draft_text` are persisted to `AgentSession.extra_context` on self-draft defer.
+- `tests/unit/output_handler/test_output_handler_transport.py::TestDrafterHoistedAboveTransport` — the drafter is invoked exactly once for both telegram and email sessions; email payload carries the reply-all `to` list; CLI-supplied file paths propagate to both outboxes.
+- `tests/unit/output_handler/test_output_handler_delivery.py::TestDeferredSelfDraftPersistence` — `deferred_self_draft_pending` and `deferred_self_draft_text` are persisted to `AgentSession.extra_context` on self-draft defer.
 
 ## Related
 
