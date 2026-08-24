@@ -115,7 +115,7 @@ def run_reflections_callables_migration(
 
     rewrote = False
     rewrites_count = 0
-    targets: list[str] = []
+    rewritten_targets: list[str] = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
         if not line:
@@ -128,12 +128,12 @@ def run_reflections_callables_migration(
             continue
         rewrote = bool(payload.get("rewrote"))
         rewrites_count = int(payload.get("rewrites_count", 0))
-        targets = list(payload.get("targets") or [])
+        rewritten_targets = list(payload.get("targets") or [])
         break
 
     return ReflectionsCallablesResult(
         success=True,
         action="rewrote" if rewrote else "noop",
         rewrites_count=rewrites_count,
-        targets=targets,
+        targets=rewritten_targets,
     )
