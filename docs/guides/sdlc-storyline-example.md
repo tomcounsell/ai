@@ -442,12 +442,12 @@ The pipeline graph edge `("PATCH", "success") -> "TEST"` fires, but since the wo
 **What could go wrong (stuck in a patch loop)**: Suppose the fix for the off-by-one introduced a new failure. The pipeline would cycle: TEST(fail) -> PATCH -> TEST(fail) -> PATCH -> TEST. The `cycle_count` parameter tracks this:
 
 ```python
-# Count PATCH cycles from history for the max-cycle safety valve
+# Count PATCH cycles from the event log for the max-cycle safety valve
 cycle_count = 0
-history = session.get_history_list()
-for entry in history:
-    if isinstance(entry, dict) and entry.get("stage") == "PATCH":
-        cycle_count += 1
+for event in session.session_events or []:
+    if isinstance(event, dict) and event.get("event_type") == "stage":
+        if "PATCH" in event.get("text", ""):
+            cycle_count += 1
 ```
 
 When `cycle_count >= MAX_PATCH_CYCLES` (which is 3), `get_next_stage` returns `None`:

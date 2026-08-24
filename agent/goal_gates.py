@@ -28,6 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config.settings import settings
+from models.session_event import format_event_lines
+
 if TYPE_CHECKING:
     from models.agent_session import AgentSession
 
@@ -64,13 +67,14 @@ def _run_gh_command(args: list[str], working_dir: str | Path | None = None) -> s
 
     Raises:
         subprocess.CalledProcessError: If the command fails.
-        subprocess.TimeoutExpired: If the command takes longer than 10 seconds.
+        subprocess.TimeoutExpired: If the command exceeds
+            ``settings.timeouts.git_subprocess_s``.
     """
     result = subprocess.run(
         ["gh", *args],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
         cwd=working_dir,
     )
     result.check_returncode()
@@ -167,7 +171,7 @@ def check_test_gate(slug: str, session: AgentSession | None = None) -> GateResul
     # Primary: check session history
     if session is not None:
         try:
-            history = session.get_history_list()
+            history = format_event_lines(session.session_events)
             for entry in history:
                 if not isinstance(entry, str):
                     continue

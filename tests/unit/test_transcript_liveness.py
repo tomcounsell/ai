@@ -149,7 +149,7 @@ class TestCheckStalledSessionsWithTranscript:
             updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
-        session._get_history_list = lambda: []
+        session.session_events = []
 
         # Create a fresh transcript file
         session_dir = tmp_path / "transcript-fresh"
@@ -198,7 +198,7 @@ class TestCheckStalledSessionsWithTranscript:
             updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
-        session._get_history_list = lambda: []
+        session.session_events = []
 
         def mock_filter(**kwargs):
             status = kwargs.get("status", "")
@@ -238,7 +238,7 @@ class TestCheckStalledSessionsWithTranscript:
             updated_at=now,
             project_key="test",
         )
-        session._get_history_list = lambda: []
+        session.session_events = []
 
         def mock_filter(**kwargs):
             status = kwargs.get("status", "")

@@ -43,7 +43,7 @@ def _make_agent_session(
     project_key="test",
     chat_id="12345",
     agent_session_id="session-001",
-    history=None,
+    session_events=None,
 ):
     now = time.time()
     ns = SimpleNamespace(
@@ -56,8 +56,7 @@ def _make_agent_session(
         project_key=project_key,
         chat_id=chat_id,
     )
-    _history = history or []
-    ns._get_history_list = lambda: _history
+    ns.session_events = session_events or []
     ns.log_lifecycle_transition = MagicMock()
     ns.save = MagicMock()
     ns.delete = MagicMock()

@@ -47,6 +47,7 @@ from popoto.exceptions import ModelException
 
 from config.settings import settings
 from models.agent_session import AgentSession
+from models.session_event import format_event_lines
 
 
 def _to_timestamp(val) -> float | None:
@@ -414,10 +415,9 @@ def check_stalled_sessions() -> list[dict]:
                     # Get last history entry for diagnostic context
                     last_history = "no history"
                     try:
-                        if hasattr(session, "_get_history_list"):
-                            history = session._get_history_list()
-                            if history:
-                                last_history = str(history[-1])[:120]
+                        history = format_event_lines(session.session_events)
+                        if history:
+                            last_history = str(history[-1])[:120]
                     except Exception:  # noqa: S110 -- best-effort diagnostic context
                         pass
 

@@ -441,11 +441,6 @@ class TestNoMessageEcho:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session._get_history_list.return_value = [
-            "[user] SDLC 190",
-            "[stage] ISSUE completed ☑",
-            "[stage] PLAN completed ☑",
-        ]
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
@@ -464,7 +459,6 @@ class TestNoMessageEcho:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
         session.session_type = SessionType.ENG
@@ -551,9 +545,6 @@ class TestComposeStructuredDraftWithSession:
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"},
             links=links,
         )
-        session._get_history_list.return_value = [
-            "[user] /sdlc 190",
-        ]
         session.message_text = "continue"
         session.status = "running"
 
@@ -573,7 +564,6 @@ class TestComposeStructuredDraftWithSession:
     def test_non_sdlc_session_no_stage_line(self):
         """Non-SDLC session skips stage progress line."""
         session = _mock_session_with_stages({})  # All pending
-        session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "running"
 
@@ -744,9 +734,6 @@ class TestErrorStateRendering:
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
             links={"issue": "https://github.com/org/repo/issues/200"},
         )
-        session._get_history_list.return_value = [
-            "[user] /sdlc 200",
-        ]
         session.message_text = "continue"
         session.status = "failed"
         session.is_sdlc = True
@@ -766,7 +753,6 @@ class TestErrorStateRendering:
         session = _mock_session_with_stages(
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "completed", "TEST": "failed"},
         )
-        session._get_history_list.return_value = ["[user] test"]
         session.message_text = "test"
         session.status = "failed"
 
@@ -784,7 +770,6 @@ class TestErrorStateRendering:
         session = _mock_session_with_stages(
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
         )
-        session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
         session.is_sdlc = True
@@ -801,7 +786,6 @@ class TestErrorStateRendering:
     def test_error_message_propagated_to_output(self):
         """Error messages in the summary text should reach the rendered output."""
         session = _mock_session_with_stages({})  # All pending
-        session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
 
@@ -821,7 +805,6 @@ class TestErrorStateRendering:
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
             links={"issue": "https://github.com/org/repo/issues/200"},
         )
-        session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
         session.is_sdlc = True
