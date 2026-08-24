@@ -106,6 +106,13 @@ from agent.session_revival import (  # noqa: F401
     _session_branch_name,
     check_revival,
     cleanup_stale_branches,
+    # Resolved at runtime by the reflection scheduler through this hub path:
+    # config/reflections.yaml's `stale-branch-cleanup` entry declares
+    # `callable: "agent.agent_session_queue.cleanup_stale_branches_all_projects"`,
+    # which reflection_scheduler._resolve_callable getattrs off this module.
+    # Untracked config, so no repo-wide source sweep can see the reference.
+    # Deleting this needs the yaml migrated to agent.session_revival first.
+    cleanup_stale_branches_all_projects,
     maybe_send_revival_prompt,
     queue_revival_agent_session,
     record_revival_cooldown,
