@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 if TYPE_CHECKING:
     from monitoring.alerts import Alert

@@ -17,7 +17,7 @@ import logging
 import time
 from pathlib import Path
 
-from bridge.utc import utc_iso
+from utils.utc import utc_iso
 
 logger = logging.getLogger(__name__)
 

@@ -1018,7 +1018,7 @@ class AgentSession(Model):
 
         Popoto auto_now mints naive local time (bug #1645); instead we stamp
         explicitly so the stored value is always UTC wall-clock, consistent
-        with how created_at/started_at are handled (see bridge/utc.py::utc_now).
+        with how created_at/started_at are handled (see utils/utc.py::utc_now).
 
         update_fields guard: if update_fields omits 'updated_at', skip the stamp
         entirely (no in-memory mutation without a matching persist, to avoid
@@ -1036,7 +1036,7 @@ class AgentSession(Model):
         the combination is a caller smell — a WARNING names the caller and no
         exception is raised (fail-quiet, matching every other guard here).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         if preserve_updated_at:
             if update_fields is not None and "updated_at" not in update_fields:
@@ -1115,7 +1115,7 @@ class AgentSession(Model):
         Returns the number of future-dated records detected (NOT healed —
         nothing is mutated or re-saved).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         now = utc_now()
         count = 0
@@ -1131,7 +1131,7 @@ class AgentSession(Model):
                     continue  # None is safe — save() will stamp on next write
 
                 # Popoto strips tzinfo on load — treat naive datetimes as UTC
-                # (consistent with bridge/utc.py::to_unix_ts).
+                # (consistent with utils/utc.py::to_unix_ts).
                 updated_at_utc = record.updated_at
                 if updated_at_utc.tzinfo is None:
                     updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
@@ -2613,7 +2613,7 @@ class AgentSession(Model):
                 continue
             # Handle both datetime and float timestamps (migration period).
             # to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo).
-            from bridge.utc import to_unix_ts
+            from utils.utc import to_unix_ts
 
             ts = to_unix_ts(started)
             if ts is None:

@@ -201,7 +201,7 @@ def run() -> None:
             logger.info("[failure-loop-detector] Queue paused (API outage) — skipping failure scan")
             return
 
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         cutoff = time.time() - (4 * 3600)  # 4 hours ago
         # Phantom guard: drop records whose fields are still Popoto Field descriptors

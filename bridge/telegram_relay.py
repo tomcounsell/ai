@@ -365,8 +365,8 @@ def _record_sent_reaction(message: dict) -> None:
     every other outbound record. Best-effort: never raises into the relay.
     """
     try:
-        from bridge.utc import utc_now
         from tools.telegram_history import store_message
+        from utils.utc import utc_now
 
         chat_id = message.get("chat_id")
         reply_to = message.get("reply_to")
@@ -1175,7 +1175,7 @@ async def process_outbox(telegram_client) -> int:
                     if msg_type is None and msg_id is not None:
                         try:
                             from bridge.telegram_bridge import store_message
-                            from bridge.utc import utc_now
+                            from utils.utc import utc_now
 
                             await asyncio.to_thread(
                                 store_message,

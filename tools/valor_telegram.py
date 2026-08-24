@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 

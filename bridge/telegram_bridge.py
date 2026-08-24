@@ -31,9 +31,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from bridge.utc import to_unix_ts, utc_iso, utc_now
 from config.machine import get_machine_name
 from config.settings import settings
+from utils.utc import to_unix_ts, utc_iso, utc_now
 
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
@@ -152,7 +152,7 @@ def _pending_session_age_seconds(created_at, now_ts: float) -> float:
 
     ``AgentSession.created_at`` is a datetime (Popoto SortedField, naive on
     read); raw ``now_ts - created_at`` raises TypeError (#2458 D2). Coerce
-    through ``bridge.utc.to_unix_ts`` (naive treated as UTC). A missing or
+    through ``utils.utc.to_unix_ts`` (naive treated as UTC). A missing or
     uncoercible created_at returns +inf so the session falls outside any
     merge window instead of crashing the intake classifier.
     """

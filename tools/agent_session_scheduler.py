@@ -43,12 +43,12 @@ from tools._sdlc_utils import _resolve_target_repo_fallback
 def _to_ts(val):
     """Convert datetime or float to Unix timestamp.
 
-    Delegates to ``bridge.utc.to_unix_ts`` which treats naive datetimes as UTC
+    Delegates to ``utils.utc.to_unix_ts`` which treats naive datetimes as UTC
     (Popoto strips tzinfo on save). Directly calling ``val.timestamp()`` on a
     naive datetime would interpret it as machine-local time and silently offset
     every derived age by the machine's UTC offset.
     """
-    from bridge.utc import to_unix_ts
+    from utils.utc import to_unix_ts
 
     return to_unix_ts(val)
 

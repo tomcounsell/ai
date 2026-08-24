@@ -395,7 +395,7 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 ## Timestamp Convention — `updated_at` is Explicit UTC
 
-`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `bridge.utc.utc_now()`, not by a Popoto `auto_now` field.
+`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `utils.utc.utc_now()`, not by a Popoto `auto_now` field.
 
 **Why:** Popoto's `auto_now` calls `datetime.now()` (no `tz` argument), which mints a naive datetime in the host's local timezone. On non-UTC hosts the stored value is naive-local, but every downstream reader (watchdog, dashboard, stale-cleanup) interprets it as UTC. The result is a future-dated `updated_at` for sessions created on hosts running ahead of UTC, causing the watchdog/dashboard to report sessions as perpetually "fresh" and stale-cleanup to skip them forever.
 

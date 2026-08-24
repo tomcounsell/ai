@@ -826,9 +826,9 @@ def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[
     """
     try:
         from agent.session_health import _is_ledger
-        from bridge.utc import to_unix_ts
         from models.agent_session import AgentSession
         from models.session_lifecycle import NON_TERMINAL_STATUSES, RESUMABLE_STATUSES
+        from utils.utc import to_unix_ts
 
         rows = list(AgentSession.query.filter(project_key=project_key, session_type="eng"))
     except Exception as exc:

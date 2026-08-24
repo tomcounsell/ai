@@ -208,7 +208,7 @@ def run() -> dict:
 
     Runs in dry_run=True mode by default to avoid spurious issue creation.
     """
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     try:
         from models.reflections import PRReviewAudit

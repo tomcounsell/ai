@@ -23,7 +23,7 @@ from jinja2 import Environment
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
