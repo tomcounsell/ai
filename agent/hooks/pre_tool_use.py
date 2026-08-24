@@ -429,8 +429,14 @@ def _enforce_tool_budget_sdk() -> dict[str, Any] | None:
 
     # Successful resolution: evaluate + actuate. Fail OPEN on any internal error.
     try:
-        from agent.tool_budget import evaluate_tool_budget, record_budget_trip
+        from agent.tool_budget import (
+            _project_key,
+            evaluate_tool_budget,
+            record_budget_trip,
+            record_evaluation,
+        )
 
+        record_evaluation(_project_key(session))
         verdict = evaluate_tool_budget(session)
         if verdict.allow:
             return None

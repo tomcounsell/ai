@@ -427,7 +427,8 @@ def create_app() -> FastAPI:
         recovery counters (``bridge_reclaims``, ``loop_wedged_detected``,
         ``bridge_contract_stale``), the Fix #6 budget counters
         (``tool_budget_tripped``, the #1886 per-deny ``tool_budget_denied_calls``,
-        ``tool_budget_resolution_errors``), and the last few
+        ``tool_budget_resolution_errors``, and the #2410 denominator
+        ``tool_budget_evaluated``), and the last few
         ``worker:watchdog:actions`` entries. Fail-quiet — never blocks the health
         payload; every field defaults to a safe zero/None on any Redis error.
         """
@@ -440,6 +441,7 @@ def create_app() -> FastAPI:
             "tool_budget_tripped": 0,
             "tool_budget_denied_calls": 0,
             "tool_budget_resolution_errors": 0,
+            "tool_budget_evaluated": 0,
             "injection_inspected": 0,
             "injection_flagged": 0,
             "injection_errors": 0,
@@ -480,6 +482,9 @@ def create_app() -> FastAPI:
             result["tool_budget_resolution_errors"] = _sum_project_counter(
                 "tool-budget:resolution_errors"
             )
+            # #2410: denominator for the three counters above. Without it a zero
+            # `tripped` cannot be distinguished from a backstop that was blind.
+            result["tool_budget_evaluated"] = _sum_project_counter("tool-budget:evaluated")
             # #1630: pre-execution injection-screen counters.
             result["injection_inspected"] = _sum_project_counter("injection-inspector:inspected")
             result["injection_flagged"] = _sum_project_counter("injection-inspector:flagged")
@@ -954,6 +959,7 @@ def create_app() -> FastAPI:
                     "worker_tool_budget_resolution_errors": worker.get(
                         "tool_budget_resolution_errors"
                     ),
+                    "worker_tool_budget_evaluated": worker.get("tool_budget_evaluated"),
                     "worker_injection_inspected": worker.get("injection_inspected"),
                     "worker_injection_flagged": worker.get("injection_flagged"),
                     "worker_injection_errors": worker.get("injection_errors"),
@@ -1035,6 +1041,7 @@ def create_app() -> FastAPI:
                 "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
                 "worker_tool_budget_denied_calls": worker.get("tool_budget_denied_calls"),
                 "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
+                "worker_tool_budget_evaluated": worker.get("tool_budget_evaluated"),
                 "worker_injection_flagged": worker.get("injection_flagged"),
                 "worker_injection_errors": worker.get("injection_errors"),
                 # Additive-only (issue #1828): out-of-process reflection scheduler.

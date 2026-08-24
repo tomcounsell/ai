@@ -174,6 +174,28 @@ def record_resolution_error(project_key: str, err: object, *, surface: str = "ho
         logger.warning("[tool-budget] failed to increment resolution_errors counter: %s", e)
 
 
+def record_evaluation(project_key: str) -> None:
+    """Count one budget evaluation that actually saw a session (#2410).
+
+    This is the DENOMINATOR for the other three counters. Without it,
+    ``tripped == 0`` is ambiguous: it reads identically whether the cap is
+    never hit or the backstop was blind for most calls. ``resolution_errors``
+    alone cannot disambiguate — 200 blind calls is noise against a million
+    evaluations and total blindness against three hundred.
+
+    Incremented only on the post-resolution path, so
+    ``resolution_errors / (evaluated + resolution_errors)`` is the blind rate
+    and ``denied_calls / evaluated`` is the true deny rate. Fail-quiet: a
+    counter must never brick a tool call.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:evaluated")
+    except Exception as e:
+        logger.warning("[tool-budget] failed to increment evaluated counter: %s", e)
+
+
 def record_budget_trip(session, verdict: BudgetVerdict) -> None:
     """Fail-quiet deny surfacing — the caller's inline block proceeds regardless.
 

@@ -281,8 +281,14 @@ def _enforce_tool_budget(hook_input: dict) -> None:
     # Successful resolution: evaluate + actuate. A bug HERE raises Exception →
     # swallowed by main()'s module-level wrapper → exit 0 (fail open). The deny
     # below is sys.exit(2), which propagates (SystemExit is not an Exception).
-    from agent.tool_budget import evaluate_tool_budget, record_budget_trip
+    from agent.tool_budget import (
+        _project_key,
+        evaluate_tool_budget,
+        record_budget_trip,
+        record_evaluation,
+    )
 
+    record_evaluation(_project_key(session))
     verdict = evaluate_tool_budget(session)
     if verdict.allow:
         return
