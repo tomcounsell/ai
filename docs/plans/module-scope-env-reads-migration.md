@@ -109,15 +109,31 @@ expected to be the majority verdict.** A slice that promotes 20 keys into
 `settings` has probably mis-triaged; the goal is eliminating undiscoverable
 knobs, not maximizing the size of `Settings`.
 
-**Launchd caveat, load-bearing for slices 3-7.** Per
-`docs/features/config-timeout-catalog.md:192-204` step 4: if a
-launchd-managed service reads a key at runtime, the key must be added to the
-plist env-injection path in `scripts/update/`. Launchd-managed processes run
-with `VALOR_LAUNCHD=1` and therefore **skip the `.env` read entirely** — a key
-that exists only in `.env` is invisible to them. `worker/`, `bridge/`, and
-`monitoring/` are all launchd-managed. A promotion in those packages that
-stops at "added a settings field + a `.env.example` line" is incomplete and
-will silently run on defaults in production.
+**Launchd caveat, load-bearing for every slice that touches a launchd-managed
+package** (that is s3-s7 *and* s8, which scopes `reflections/` — do not read
+the range as excluding it). Per `docs/features/config-timeout-catalog.md:192-204`
+step 4: launchd-managed processes run with `VALOR_LAUNCHD=1` and therefore
+**skip the `.env` read entirely**, so a key that exists only in `.env` is
+invisible to them. A promotion that stops at "added a settings field + a
+`.env.example` line" is incomplete and will silently run on defaults in
+production.
+
+**But the remedy is per-service, and for most services it is already automatic.**
+There is no single "env-injection path" to edit. The four launchd-managed
+processes use three different mechanisms:
+
+| Process | Install path | Injection |
+|---|---|---|
+| `worker/__main__.py` | `install_worker()` in `scripts/update/service.py` | Automatic — `_inject_env_into_plist()` merges *every* `dotenv_values()` key into the plist. No per-key edit. |
+| `bridge/email_bridge.py` | `scripts/install_email_bridge.sh` | Automatic — same generic merge. No per-key edit. |
+| `reflections/__main__.py` | `com.valor.reflection-worker.plist` | Automatic — the plist runs `/bin/bash -c 'source .env; exec ... -m reflections'`. No per-key edit, and nothing in `service.py` is involved. |
+| `monitoring/bridge_watchdog.py` | `install_bridge_watchdog()` in **`scripts/valor-service.sh`** | **None.** Its `EnvironmentVariables` dict carries only `PATH`, `HOME`, and `VALOR_LAUNCHD`. |
+
+So the caveat binds hard on exactly one service. A slice promoting a key that
+`monitoring/bridge_watchdog.py` reads must extend `install_bridge_watchdog` in
+`scripts/valor-service.sh` — not `scripts/update/service.py`, which has no
+injection point for it. For the other three, the correct action is to confirm
+the key reaches `.env` and then do nothing further.
 
 ## Slices
 
@@ -133,7 +149,7 @@ delta (`python scripts/scan_module_scope_env.py`) in its PR body.
 | **s4** | Telegram credentials + bootstrap (`TELEGRAM_API_ID`/`API_HASH` ×4 modules, `TELEGRAM_PHONE`, `TELEGRAM_PASSWORD`, `TELEGRAM_SESSION_NAME`) | s2 | Credentials — automatic PROMOTE under Axis B. The highest-fan-out keys in the whole census. |
 | **s5** | `bridge/` remainder (`email_bridge.py`, `redundancy_filter.py`, `message_drafter.py`, `telegram_relay.py`, `injection_inspection.py`) | s2 | Independent of s6/s8. Launchd caveat applies. |
 | **s6** | `tools/` (14 modules / 30 calls, incl. `video_watch/constants.py` 11) | s2 | Mostly DELETE-the-knob: single-site, undeclared, logic-coupled. Independent of s5/s8. |
-| **s7** | `monitoring/` + `worker/` (`session_watchdog.py` 5, `worker_watchdog.py` 4, `worker/__main__.py` remaining 8) | s3 | Launchd caveat applies hardest here. |
+| **s7** | `monitoring/` + `worker/` (`session_watchdog.py` 5, `worker_watchdog.py` 4, `bridge_watchdog.py` 2, `worker/__main__.py` remaining 8) | s3 | Launchd caveat applies hardest here, and `monitoring/bridge_watchdog.py` is **the single highest-risk promotion in the migration**: it is the one launchd service with no `.env` injection whatsoever, so a promotion that stops at `.env` leaves it silently on defaults. It already imports `config.settings` at module scope (line 52) yet reads `CRASH_STORM_THRESHOLD` and `WEDGE_DOMINANCE_FRACTION` from `os.environ` at lines 144/150 — it fails Axis A's pre-config test outright, so PROMOTE is the verdict. |
 | **s8** | Tail: `scripts/` 10, `reflections/` 5, `models/` 3, `ui/` 3, `config/` 1, `utils/` 1 | s2 | Independent of s5/s6. `scripts/` are single-shot entry points with different lifecycle constraints — expect a high DELETE rate. |
 | **s9** | Comment sweep + `.env.example` reconciliation | s1-s8 | Drives `git grep -n -iE "provisional\|GRAIN OF SALT"` to zero in production code and closes the "every surviving override is declared or documented" criterion. |
 
@@ -145,13 +161,24 @@ run as parallel lanes. Everything else is a chain.
 - [ ] `python scripts/scan_module_scope_env.py` reports 3 modules / 2 call
       sites, all allowlisted (the two counted `VALOR_LAUNCHD` gates; the
       `config/settings.py` class-body gate is marked but uncounted).
+      **This proves the *syntactic* class is drained, and nothing more — see
+      Limitation 1.** Do not restate it as "the defect class is eliminated."
 - [ ] `git grep -n -iE "provisional|GRAIN OF SALT"` in production code returns
       no hits — every site reclassified promote / keep-with-justification /
       delete. **Note the `-i`:** see Limitation 2.
 - [ ] Every surviving env override is either declared in `config/settings.py`
       or documented in `.env.example` with a clear owner.
-- [ ] Every promoted key read by a launchd-managed service is injected in
-      `scripts/update/`.
+- [ ] Every promoted key read by a launchd-managed service reaches that
+      service by its own mechanism (see the four-row table under the launchd
+      caveat) — in practice: present in `.env` for worker / email-bridge /
+      reflection-worker, and explicitly added to `install_bridge_watchdog` in
+      `scripts/valor-service.sh` for `monitoring/bridge_watchdog.py`.
+
+The two criteria above are the only ones with no script behind them. **s9 owns
+making them checkable** — the same slice that settles the `.env.example`
+counting rule should land a check that walks surviving `# env-scope-guard: allow`
+markers and promoted `Settings` fields and cross-references `.env.example` and
+the watchdog plist. An eyeball-only criterion will not survive nine slices.
 - [ ] `.claude/hooks/validators/validate_no_module_scope_env.py` blocks new
       module-scope reads at commit time (landed in s0).
 
@@ -192,13 +219,15 @@ either number as settled.
 
 `scripts/update/` is a first-class consumer of this plan, not an afterthought.
 
-- **Plist env injection.** Every key promoted in s3-s7 that a launchd-managed
-  service reads must be added to the plist env-injection path in
-  `scripts/update/service.py` (`install_worker` and siblings). Launchd
-  processes run with `VALOR_LAUNCHD=1` and skip the `.env` read; a key that
-  lives only in `.env` is invisible to them. This is
-  `docs/features/config-timeout-catalog.md:192-204` step 4, and it is the most
-  likely way a slice ships a silently-broken promotion.
+- **Plist env injection.** Launchd processes run with `VALOR_LAUNCHD=1` and
+  skip the `.env` read, so a key that lives only in `.env` is invisible to
+  them. This is `docs/features/config-timeout-catalog.md:192-204` step 4 and
+  the most likely way a slice ships a silently-broken promotion. **The remedy
+  is per-service — see the four-row mechanism table under the launchd caveat
+  above.** Three of the four services inject `.env` generically and need no
+  per-key edit; only `monitoring/bridge_watchdog.py` has no injection at all,
+  and its install path is `install_bridge_watchdog` in
+  `scripts/valor-service.sh`, not `scripts/update/service.py`.
 - **`.env.example` completeness.** Promoted keys need a `.env.example`
   declaration with a comment block above the `KEY=` line, per the Secrets
   convention. `check_env_completeness` (`scripts/update/verify.py`) treats
@@ -314,3 +343,30 @@ a public explainer, unaffected by internal config plumbing.
 - `.claude/hooks/validators/validate_no_inline_timeout.py` — the guard shape
   s0 is modelled on.
 - #2435 — the PreToolUse dispatcher that replaced per-validator registration.
+
+## Critique Results
+
+Critique ran after s0 had already been built and approved (PR #2940), so it is
+retrospective for s0 and prospective for s1-s9 — which is where the remaining
+risk lives. **No finding blocks s0**, whose deliverable is the instrument only.
+All five findings are about plan text governing later slices; all are addressed
+in this revision.
+
+| Severity | Finding | Addressed By |
+|---|---|---|
+| CONCERN | The launchd caveat misdescribed the mechanism as one "env-injection path in `scripts/update/service.py`". In fact worker, email-bridge and reflection-worker all inject `.env` generically and need no per-key edit, while `monitoring/bridge_watchdog.py` — the one service with no injection at all — is installed from `scripts/valor-service.sh`, where no such path exists. Following the plan literally meant hunting for an injection point that isn't there. | Replaced with a four-row per-service mechanism table; the Update System bullet now points at it instead of restating the wrong remedy. |
+| CONCERN | `monitoring/bridge_watchdog.py` was never named anywhere in the plan despite being a real in-scope defect: module-scope `CRASH_STORM_THRESHOLD` / `WEDGE_DOMINANCE_FRACTION` at lines 144/150, *after* `from config.settings import settings` at line 52, so it fails Axis A's pre-config test outright. It is also the one launchd service with no `.env` injection, making it the likeliest place to ship a silently-broken promotion. | Added to s7's scope with an explicit PROMOTE verdict and a highest-risk flag. |
+| CONCERN | Success Criteria 3 and 4 had no automated enforcement, unlike 1, 2 and 5 — eyeball-only checkboxes across a nine-slice migration. | s9 now explicitly owns making both checkable, alongside the `.env.example` counting rule it already settles. |
+| NIT | The caveat's "load-bearing for slices 3-7" range excluded s8, which scopes `reflections/` — also launchd-managed. | Rebound to "every slice that touches a launchd-managed package", naming s8. |
+| NIT | Success Criterion 1 ("3 modules / 2 call sites") is the practical restatement of "72 → 0" and did not cross-reference Limitation 1, so a skimmer could present it as proof the defect class was eliminated. | Cross-reference added inline to the criterion. |
+
+Claims checked and found accurate, recorded so they are not re-litigated: the
+s1→s2 `SessionRunnerSettings` collision is real (`config/settings.py:827`
+defines it; `agent/session_runner/runner.py` has 12 module-scope reads under a
+flat `SESSION_RUNNER_*` spelling that collides with the class's nested
+`SESSION_RUNNER__*` prefix); every `config-timeout-catalog.md` line citation
+resolves; and no module-scope `VALOR_LAUNCHD` read exists outside the three
+allowlisted sites. The s5/s6/s8 mutual-independence claim is unrefuted on
+file-scope inspection but was not proven by an exhaustive import-graph check.
+
+Refs #2866
