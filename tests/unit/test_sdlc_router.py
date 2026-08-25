@@ -3,7 +3,7 @@
 Tests the guard_g7_plan_revising function in isolation and through
 decide_next_dispatch().
 
-The existing router decision tests live in test_sdlc_router_decision.py.
+The existing router decision tests live in the sdlc_router_decision/ package.
 This file focuses exclusively on the G7 guard added for issue #1302.
 """
 

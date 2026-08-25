@@ -276,7 +276,7 @@ class AgentSession(Model):
     # an id older than that, judged acceptable because a fork carries the id it
     # was handed seconds ago, not one from hours back. If you raise or remove
     # the cap, update tools/sdlc_session_ensure.py, the bound assertion in
-    # tests/unit/test_sdlc_session_ensure.py::
+    # tests/unit/sdlc_session_ensure/test_sdlc_session_ensure_run_identity.py::
     # test_append_dedups_preserves_order_and_caps, and
     # docs/features/sdlc-run-self-recognition.md together.
     # Additive nullable; Popoto lazy-load descriptor healing default-fills
