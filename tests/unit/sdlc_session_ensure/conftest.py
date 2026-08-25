@@ -1,13 +1,8 @@
 """Shared fixtures for the tools.sdlc_session_ensure test package (#2879)."""
 
-import os
 from unittest.mock import patch
 
 import pytest
-
-REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
 
 _LANE_IDENTITY_CLASS = "TestLaneSlugMintedAtLaneStart"
 
