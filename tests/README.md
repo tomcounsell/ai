@@ -168,7 +168,14 @@ tests/
 |-------|------|------:|-------------|
 | unit | `test_bridge_logic.py` | 40 | Group-to-project mapping, routing |
 | unit | `test_bridge_shutdown.py` | 5 | Graceful shutdown task cancellation |
-| unit | `test_valor_telegram.py` | 17 | Telegram command handling |
+| unit | `valor_telegram/test_valor_telegram_parsing.py` | 23 | `parse_since`, `resolve_chat`, timestamp/relative-age formatting, CLI arg parsing |
+| unit | `valor_telegram/test_valor_telegram_cli_send.py` | 16 | `cmd_send` |
+| unit | `valor_telegram/test_valor_telegram_cli_read.py` | 30 | `cmd_read`: ambiguity handling, flags, did-you-mean, project scoping |
+| unit | `valor_telegram/test_valor_telegram_cli_chats.py` | 10 | `cmd_chats` search and project scoping |
+| unit | `valor_telegram/test_valor_telegram_rtr.py` | 18 | Read-the-room secondary consumer, `cmd_send` RTR path, promise gate |
+| unit | `valor_telegram/test_valor_telegram_await.py` | 10 | Await/settle timing for send |
+| unit | `valor_telegram/test_valor_telegram_chat_log.py` | 5 | Chat-log recording |
+| unit | `valor_telegram/test_valor_telegram_voice_flag.py` | 3 | Voice-note payload flags |
 | unit | `test_media_handling.py` | 17 | Media attachment handling |
 | unit | `test_transcript_liveness.py` | 12 | Transcript state management |
 | unit | `test_messenger.py` | 11 | Message formatting and delivery |
@@ -201,7 +208,17 @@ tests/
 | unit | `test_sdlc_stage_marker.py` | 25 | Stage marker writes via CLI (session resolution, issue-number fallback, opt-in predecessor backfill on `in_progress`/`completed`) |
 | unit | `test_sdlc_lease_helper_binding.py` | 10 | Lease helpers stay unsnapshotted in `sdlc_dispatch`/`sdlc_meta_set`/`sdlc_stage_marker`: per-module globals check, repo-wide AST sweep, and a behavioral late-patch assertion (#2469, #2637) |
 | unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
-| unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_core.py` | 15 | `ensure_session` create/reuse, CLI output, local message text |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_short_circuit.py` | 14 | Env-var short-circuit for bridge-initiated sessions, identifier mismatch |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_adoption.py` | 27 | Ownerless adoption, lane-slug minting at lane start, `--kill-orphans` |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_issue_lock.py` | 16 | Issue-level ownership lock wiring at all return points (#1954) |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_run_identity.py` | 23 | Verified run-id reuse, supervised-run signal/module, owned-run self-recognition |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_lease_identity.py` | 19 | Lease-heartbeat spawn identity, durable run identity, anchor write on lease confirmation |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_dispatch_rows.py` | 33 | `DISPATCH_RULES` wiring and rows 1–10, verdict normalization, plan-existence gate |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_verdict_staleness.py` | 14 | Review and critique verdict staleness |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_convergence.py` | 26 | Convergence latch, dead-end recovery, marker desync, G5 loop bound |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_post_patch.py` | 18 | Row 8b ownership of stale verdicts and its disjointness/failure paths |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_with_concerns.py` | 16 | READY-WITH-CONCERNS scoping, rule ordering, termination |
 | unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |
 | unit | `test_observer_message_for_user.py` | 11 | Observer user messaging |
 | unit | `test_sdlc_env_vars.py` | 10 | SDLC environment variable injection |
@@ -325,7 +342,11 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_worktree_manager.py` | 28 | Worktree management |
+| unit | `worktree_manager/test_worktree_manager_cleanup.py` | 25 | Slug validation, cleanup after merge, stale-worktree recovery |
+| unit | `worktree_manager/test_worktree_manager_creation.py` | 8 | `create_worktree` stale recovery, `get_or_create_worktree` |
+| unit | `worktree_manager/test_worktree_manager_busy_guards.py` | 30 | Busy check/probe, session scan, live-process and removal guards |
+| unit | `worktree_manager/test_worktree_manager_venv_provisioning.py` | 39 | Branch verification, interpreter-pin resolution, venv provisioning wiring |
+| unit | `worktree_manager/test_worktree_manager_uncommitted.py` | 5 | Preserving uncommitted changes |
 | unit | `test_git_state_guard.py` | 21 | Git state validation |
 | unit | `test_workspace_safety.py` | 18 | Workspace safety checks |
 | unit | `test_branch_manager.py` | 11 | Branch creation/deletion |
@@ -503,6 +524,27 @@ the tagging moves. So when splitting a file:
 3. Verify by comparing the per-marker collected counts before and after, not just the
    total — e.g. `pytest -m <marker> --collect-only -q | tail -1` for every marker the
    file touches.
+
+**Step 1 is necessary but not sufficient, because "first hit" means insertion order
+decides.** A correctly-prefixed name can still lose its marker when an *earlier* key in
+`FEATURE_MAP` happens to appear in the suffix you chose. `worktree_manager` sits near the
+end of the dict, well after `config` and `lifecycle`:
+
+```
+test_worktree_manager_config.py     -> "config" is found first    -> tagged `config`,   not `git`
+test_worktree_manager_lifecycle.py  -> "lifecycle" is found first -> tagged `sessions`, not `git`
+test_worktree_manager_cleanup.py    -> no earlier key matches     -> tagged `git`       (correct)
+```
+
+All three follow the prefix rule. Two of them are silently wrong. The same trap applies to
+`test_sdlc_session_ensure_*`: a file named `..._bridge_short_circuit.py` matches `bridge` —
+the very first key — and would be tagged `messaging` instead of `sdlc`.
+
+So the check in step 2 must run a candidate basename through the **real first-hit
+algorithm**, not just scan for an obviously-unrelated word. Iterate `FEATURE_MAP` in order
+and take the first `pattern in basename` hit, exactly as `pytest_collection_modifyitems`
+does. Do this *before* writing the files; renaming afterwards is cheap, but only if you
+notice, and step 3's count check is what catches you if you didn't.
 
 ### Feature Marker Registration
 
