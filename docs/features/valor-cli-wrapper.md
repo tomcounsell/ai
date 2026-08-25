@@ -9,10 +9,11 @@ abstractions, no duplicated state, no schema changes.
 ## Interface
 
 ```bash
-# Create — single positional prompt, defaults to the eng role.
-# Eng and PM sessions require a slug: pass --slug, or include
-# "issue #N" in the prompt so the slug auto-derives to sdlc-N
-# (slugless invocations exit 1).
+# Create — single positional prompt.
+# The two roles are `eng` and `teammate`. Eng sessions require a slug:
+# pass --slug, or include "issue #N" in the prompt so the slug
+# auto-derives to sdlc-N (slugless eng invocations exit 1). Teammate
+# sessions are exempt.
 valor "plan issue #1615"
 valor "fix the typo in app.py" --slug typo-fix
 valor agent-session --role eng --model sonnet --slug feature-x "build the feature"
