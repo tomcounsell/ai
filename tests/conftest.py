@@ -271,6 +271,9 @@ _install_redis_flush_ownership_guard()
 # very first flush -- no commit window in which the guard is live and the plugin
 # still targets its db-15 default (db 15 is the top slot of the claim pool, so
 # every flush of it was a cross-process wipe).
+
+
+# --- Process-wide REDIS_URL export (#2805) ---------------------------------
 def _export_claimed_redis_url() -> None:
     """Publish THIS process's claimed db as the process-wide ``REDIS_URL``.
 
