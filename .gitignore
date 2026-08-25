@@ -232,7 +232,6 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-tests/.pytest_nested_probe_2805_*/
 
 # Translations
 *.mo
