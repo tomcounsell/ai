@@ -86,33 +86,33 @@ A new non-terminal status `paused_circuit` was added to `models/session_lifecycl
 
 ## Registered Reflections
 
-In `config/reflections.yaml`. The `agent.sustainability.*` callable paths shown below still resolve via the compatibility shim in `agent/sustainability.py`. The canonical source for each reflection now lives one-file-each under `reflections/agents/`:
+In `config/reflections.yaml`, one-file-each under `reflections/agents/`:
 
 | Registry callable | Canonical source |
 |-------------------|-----------------|
-| `agent.sustainability.circuit_health_gate` | `reflections/agents/circuit_health_gate.py::run` |
-| `agent.sustainability.session_count_throttle` | `reflections/agents/session_count_throttle.py::run` |
-| `agent.sustainability.failure_loop_detector` | `reflections/agents/failure_loop_detector.py::run` |
-| `agent.sustainability.session_recovery_drip` | `reflections/agents/session_recovery_drip.py::run` |
-| `agent.sustainability.sustainability_digest` | `reflections/agents/system_health_digest.py::run` |
+| `reflections.agents.circuit_health_gate.run` | `reflections/agents/circuit_health_gate.py::run` |
+| `reflections.agents.session_count_throttle.run` | `reflections/agents/session_count_throttle.py::run` |
+| `reflections.agents.failure_loop_detector.run` | `reflections/agents/failure_loop_detector.py::run` |
+| `reflections.agents.session_recovery_drip.run` | `reflections/agents/session_recovery_drip.py::run` |
+| `reflections.agents.system_health_digest.run` | `reflections/agents/system_health_digest.py::run` |
 
-`send_hibernation_notification`, `_get_project_key`, and `_get_redis` remain defined in `agent/sustainability.py` (non-reflection helpers used by `agent/agent_session_queue.py`).
+`send_hibernation_notification` lives in `reflections/agents/circuit_health_gate.py`. `get_project_key` and `get_redis` are the shared helpers in `reflections/redis_access.py`, imported by `reflections/agents/*.py` and `reflections/stall_advisory.py` (used by `agent/agent_session_queue.py` for hibernation notification).
 
 ```yaml
 - name: circuit-health-gate
-  callable: agent.sustainability.circuit_health_gate
+  callable: reflections.agents.circuit_health_gate.run
   interval: 60
 
 - name: session-count-throttle
-  callable: agent.sustainability.session_count_throttle
+  callable: reflections.agents.session_count_throttle.run
   interval: 3600
 
 - name: failure-loop-detector
-  callable: agent.sustainability.failure_loop_detector
+  callable: reflections.agents.failure_loop_detector.run
   interval: 3600
 
 - name: session-recovery-drip
-  callable: agent.sustainability.session_recovery_drip
+  callable: reflections.agents.session_recovery_drip.run
   interval: 30
 
 - name: system-health-digest
@@ -149,14 +149,9 @@ python -m reflections  # runs the reflection scheduler
 
 **Run a specific reflection:**
 ```python
-# Canonical path (preferred):
 import asyncio
 from reflections.agents.circuit_health_gate import run
 asyncio.run(run())
-
-# Compat shim path (also works):
-from agent.sustainability import circuit_health_gate
-circuit_health_gate()
 ```
 
 ## Test Coverage

@@ -1055,7 +1055,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # so a vault rewrite propagates on this same cycle; the migration also
     # rewrites the config copy directly, because Step 1.66 skips the copy when
     # the config copy is not older than the vault. Idempotent no-op once done.
-    log("Ensuring reflection callables are off the sustainability shim...", v)
+    log("Ensuring reflection callables have not reacquired the deleted sustainability shim...", v)
     result.reflections_callables_result = reflections_callables.run_reflections_callables_migration(
         project_dir
     )
@@ -1068,7 +1068,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             always=True,
         )
     elif rcr.action == "noop":
-        log("reflection callables already off the sustainability shim", v)
+        log("reflection callables already clear of the deleted sustainability shim", v)
     if not rcr.success:
         log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
         _append_warning(result, f"reflection callable migration: {rcr.error}")

@@ -1,4 +1,4 @@
-"""Update-system hook that repoints reflections.yaml off the sustainability shim.
+"""Update-system hook that keeps reflections.yaml from reacquiring the deleted sustainability shim.
 
 Wraps ``scripts/migrate_reflections_callables.py`` so ``scripts/update/run.py``
 Step 1.659 can render machine-readable status. Issue #2875.
