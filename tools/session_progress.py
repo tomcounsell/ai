@@ -144,10 +144,8 @@ def window_arg_type(value: str) -> float:
     never passed, and ``format_age(inf)`` cannot even render a reason line —
     it raises, which this module's "never raises" contract forbids.
 
-    Defined once here and imported by both CLI entry points
-    (``tools/valor_cli.py`` and ``tools/valor_session.py``) so a negative or
-    non-finite ``--window`` fails identically — and at parse time, before any
-    session lookup — no matter which one is invoked.
+    Imported by ``tools/valor_session.py``'s parser so a negative or
+    non-finite ``--window`` fails at parse time, before any session lookup.
     """
     try:
         parsed = float(value)

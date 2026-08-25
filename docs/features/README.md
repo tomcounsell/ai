@@ -7,7 +7,6 @@ Feature documentation for the Valor AI system. Each document describes an implem
 | Feature | Description | Status |
 |---------|-------------|--------|
 | [/update Warning Channel](update-warning-channel.md) | `extract_update_warnings` parses the `--cron` summary format; fix-session briefs lead with the complete warning list. `warn_state` suppresses `gws auth`, Redis ACL drift, and `env-completeness` warnings to one emission per state transition, with a `suppressed:` retrieval trailer. Surfaced via `python -m scripts.update.warn_state` and `python -m tools.doctor`. | Shipped |
-| [`valor` CLI Wrapper](valor-cli-wrapper.md) | Thin positional-prompt wrapper around `valor-session`: pure delegation, no new state. The CLI enqueues; the worker's session runner executes. Eng sessions require a slug. | Shipped |
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide for adding a reflection: the no-arg callable contract, one-file-per-reflection layout under `reflections/{group}/`, YAML registration, async-safety, and testing. | Shipped |
 | [Agent Definition Fallback](agent-definition-fallback.md) | Graceful degradation when agent definition markdown files are missing, malformed, or unreadable — logs a warning and continues with a fallback prompt. | Shipped |
 | [Agent Reply Terminus](agent-reply-terminus.md) | Conversation terminus detection (RESPOND/REACT/SILENT) in the reply-to-Valor path to break infinite bot reply loops. | Shipped |
@@ -210,7 +209,7 @@ Feature documentation for the Valor AI system. Each document describes an implem
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and a CLI status report. | Shipped |
 | [Session Liveness Tick Counter](session-liveness-tick-counter.md) | Watchdog-owned advancing counter on a session's originating message, with a hard ceiling forcing a progress message every 100 minutes. | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id; worker health check warnings at session creation and status. | Shipped |
-| [Session Progress Verdict](session-progress-verdict.md) | `valor progress <SESSION_ID>` — read-only aggregation of existing liveness signals into one verdict: PROGRESSING / NO RECENT ACTIVITY / UNKNOWN. | Shipped |
+| [Session Progress Verdict](session-progress-verdict.md) | `valor-session progress --id <SESSION_ID>` — read-only aggregation of existing liveness signals into one verdict: PROGRESSING / NO RECENT ACTIVITY / UNKNOWN. | Shipped |
 | [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 10 recovery mechanisms with a terminal-status safety audit, guards, and CAS conflict detection. | Shipped |
 | [Session Steering](session-steering.md) | Externalized steering via the Redis steering list (`agent/steering.py`) — any process can steer a running session; the worker injects messages at turn boundaries. | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns. | Shipped |

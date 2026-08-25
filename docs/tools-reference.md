@@ -383,16 +383,16 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 
 See `docs/features/session-steering.md` for full documentation.
 
-### Session Progress (`valor progress`)
+### Session Progress (`valor-session progress`)
 
 Answers one question about a session — *is it still working?* — and answers it truthfully rather than confidently. Read-only: it never steers, kills, or writes, so any agent may run it against any session, including one it does not own.
 
 ```bash
-valor progress <SESSION_ID>            # session_id or agent_session_id
-valor progress <SESSION_ID> --json
-valor progress <SESSION_ID> --window 300
+valor-session progress --id <SESSION_ID>            # session_id or agent_session_id
+valor-session progress --id <SESSION_ID> --json
+valor-session progress --id <SESSION_ID> --window 300
 
-# Equivalent long form
+# Equivalent module form
 python -m tools.valor_session progress --id <SESSION_ID>
 ```
 

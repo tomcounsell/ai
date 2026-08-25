@@ -2285,10 +2285,9 @@ def main() -> int:
     progress_parser.add_argument(
         "--id", required=True, help="Session ID (session_id or agent_session_id)"
     )
-    # Shared with `tools/valor_cli.py`'s own `--window` parser (imported here
-    # rather than at module scope, matching `cmd_progress`'s own lazy import
-    # of `tools.session_progress`) so a negative value is rejected identically
-    # by both CLI entry points, at parse time, before any session lookup.
+    # Imported here rather than at module scope, matching `cmd_progress`'s own
+    # lazy import of `tools.session_progress`, so a negative value is rejected
+    # at parse time, before any session lookup.
     from tools.session_progress import window_arg_type  # noqa: PLC0415
 
     progress_parser.add_argument(

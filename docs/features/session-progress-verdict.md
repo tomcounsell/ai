@@ -1,10 +1,10 @@
-# Session Progress Verdict (`valor progress`)
+# Session Progress Verdict (`valor-session progress`)
 
 Answers one question about an `AgentSession` — *is it still working?* — from signals that
 already exist, and answers it **truthfully rather than confidently**.
 
 - **Module:** `tools/session_progress.py`
-- **CLI:** `valor progress <SESSION_ID>` (also `python -m tools.valor_session progress --id <SESSION_ID>`)
+- **CLI:** `valor-session progress --id <SESSION_ID>` (also `python -m tools.valor_session progress --id <SESSION_ID>`)
 - **Tests:** `tests/unit/test_session_progress.py`
 - **Command reference:** [`docs/tools-reference.md`](../tools-reference.md) — flags, output shape, and the full signal list
 

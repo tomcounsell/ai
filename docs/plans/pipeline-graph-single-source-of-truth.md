@@ -79,7 +79,7 @@ No relevant external findings — proceeding with codebase context. This work is
 - **Method**: code-read
 - **Finding**: **Both DEAD.** `grep -rn "settings\.session_runner" --include='*.py'` returns **nothing at all** — the entire `SessionRunnerSettings` group is unread except `supervisor_*`. Zero production readers, zero test readers. The live chain is `session.model` > `settings.models.session_default_model` > `None`, at `agent/session_executor.py:99-120`; neither field appears in it. `agent/session_runner/runner.py:500-513` has **no** settings fallback — if `model` is `None` it stays `None`.
 - **Confidence**: high (95%)
-- **Impact on plan**: No conflict risk — a stage-derived `session.model` wins unopposed. Also surfaced `docs/features/valor-cli-wrapper.md:250`, which **actively and falsely** claims sessions spawn via `SessionRunnerSettings.pm_model`/`dev_model`. Since #1968 (the dead-field inventory) is closed, the two-field deletion is folded into this plan rather than deferred.
+- **Impact on plan**: No conflict risk — a stage-derived `session.model` wins unopposed. Also surfaced a false claim in the `valor` CLI feature doc that sessions spawn via `SessionRunnerSettings.pm_model`/`dev_model`; that doc and CLI have since been removed, so only the two-field deletion remains, folded into this plan rather than deferred.
 
 ### spike-4: Is the PATCH easy/hard model split real?
 - **Assumption**: "It is documentation drift and should be deleted."
@@ -170,7 +170,7 @@ How a stage's model reaches the process that runs it. The two seams are asymmetr
 - For the deliberate stage **subsets** (`agent/goal_gates.py:37`, `models/agent_session.py:619`, `tools/sdlc_verdict.py:112`), derive from the graph where the subset is expressible as a filter; otherwise whitelist with a comment stating *why* the subset differs. `agent/agent_session_queue.py:507,511` holds a third inline copy of the same partition as `_ENG_WORKTREE_STAGES` — that one is a genuine duplicate, not a deliberate subset.
 - Delete the four markdown stage→model tables. Collapse `pipeline-graph.md`'s two PATCH rows into one before deleting, so no information is lost in the move.
 - Correct the five stale doc claims and resolve the circular authority between `pipeline-graph.md:114` and `pm-sdlc-decision-rules.md:28` to a single direction (the graph module wins).
-- Delete dead `pm_model` / `dev_model` and fix `valor-cli-wrapper.md:250`.
+- Delete dead `pm_model` / `dev_model`.
 
 ## Failure Path Test Strategy
 
@@ -254,7 +254,6 @@ The integration that *does* matter is the seam-B contract: `/do-sdlc` must be to
 - [ ] Update `docs/features/sdlc-pipeline-integrity.md:56-64`: add the missing CRITIQUE stage.
 - [ ] Update `docs/features/pm-sdlc-decision-rules.md:28`: resolve the circular authority claim in favor of the graph module.
 - [ ] Update `docs/features/agent-session-model.md:296`: rewrite *"stage routing lives in the engineer persona prose, NOT in settings"* — the claim this plan overturns.
-- [ ] Update `docs/features/valor-cli-wrapper.md:250`: remove the false claim that sessions spawn via `SessionRunnerSettings.pm_model`/`dev_model`.
 - [ ] Update `docs/features/sdlc-local-supervision.md:29,41` and `docs/features/sdlc-stage-handoff.md:35-46`: replace restatements with cross-references.
 - [ ] Update `docs/assets/sdlc-pipeline.mmd`: correct by hand; keep the deliberate `PATCH -.-> BUILD` dotted edge and the `README.md:40,44` bullet that documents it.
 - [ ] Update `README.md:47`: it currently names `.claude/skills/sdlc/SKILL.md` as *"the ground truth on stage definitions."* Point it at the graph module.
