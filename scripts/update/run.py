@@ -155,6 +155,7 @@ class UpdateResult:
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
+    registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -1072,9 +1073,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not rcr.success:
         log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
         _append_warning(result, f"reflection callable migration: {rcr.error}")
-        # Not fail-open: Step 4.65 turns this failure into a skipped service
-        # restart, because the deleted shim is no longer there to absorb an
-        # unmigrated registry.
+        # Warning only HERE, but not fail-open overall: Step 4.65's probe
+        # independently checks whether the registry actually imports, and it is
+        # that probe — not this rewriter's exit status — that suppresses the
+        # service restart. A rewrite failure over a registry that was already
+        # clean is genuinely harmless and stays a warning; one that leaves the
+        # deleted shim named is caught downstream.
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
@@ -1775,31 +1779,54 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # process keeps running on the previously validated config.
             config = replace(config, do_service_restart=False)
 
-    # Step 4.65: Reflection-callable migration — green-light gate for service
-    # restart. Step 1.659 rewrites any registry entry that still names the
-    # deleted `agent.sustainability` shim. While the shim existed it was the
-    # backstop: a failed migration was benign because the stale dotted paths
-    # still imported. #2875 deleted the shim, so there is no backstop left —
-    # restarting the worker against an unmigrated registry means five
-    # self-healing reflections raise ImportError inside
+    # Step 4.65: Reflections-registry import probe — green-light gate for
+    # service restart, on BOTH restart paths.
+    #
+    # Why a gate at all: while `agent/sustainability.py` existed it was the
+    # backstop, so a registry still naming the shim imported anyway. #2875
+    # deleted it. Restarting the worker against a registry whose callables do
+    # not import means five self-healing reflections raise ImportError inside
     # `reflection_scheduler.run_reflection`'s broad `except`, which records
-    # `state.last_error` and keeps ticking with no alert. Same gate pattern as
-    # Steps 4.6/4.7: skip the restart, leave the running worker on the registry
-    # it already resolved.
-    if config.do_service_restart and result.reflections_callables_result is not None:
-        rcr_gate = result.reflections_callables_result
-        if not rcr_gate.success:
-            log(
-                f"FAIL: reflection callable migration failed — skipping service restart\n"
-                f"  {rcr_gate.error}",
-                v,
-                always=True,
-            )
-            _append_warning(
-                result,
-                f"reflection callables unmigrated; service restart skipped: {rcr_gate.error}",
-            )
-            config = replace(config, do_service_restart=False)
+    # `state.last_error` and keeps ticking with no alert.
+    #
+    # Why the probe and not `reflections_callables_result.success`: that flag
+    # only means "the Step 1.659 rewriter did not error". It is True for
+    # `action="noop"`, which also covers *no registry present* and covers a
+    # registry whose shim reference the line-anchored rewrite regex never
+    # matched (a flow-style `{callable: agent.sustainability.x}` entry returns
+    # early, BEFORE the import verification, and reports a clean noop). The
+    # probe checks the actual property the restart needs: every `callable:` in
+    # every existing registry copy imports with `agent.sustainability` banned.
+    #
+    # Why NOT gated on `config.do_service_restart`: `UpdateConfig.cron()` sets
+    # that False, yet the cron path restarts the worker anyway — in the SHELL,
+    # after this process exits (`scripts/remote-update.sh` runs `run.py --cron`
+    # and then `launchctl kickstart -k`, gated only on the diff touching
+    # `agent/`). Gating the check itself on `do_service_restart` therefore made
+    # it inert on the one path this change actually deploys through. So the
+    # probe always runs; `run_registry_probe` stamps `data/registry-probe-
+    # failed`, which `remote-update.sh` consults before its own kickstart, and
+    # a failure additionally suppresses the in-process restart below (same
+    # posture as Steps 4.6/4.7: leave the running worker on the registry it
+    # already resolved).
+    log("Probing reflections-registry callables for importability...", v)
+    result.registry_probe_result = reflections_callables.run_registry_probe(project_dir)
+    probe_gate = result.registry_probe_result
+    if probe_gate.success:
+        log(f"  registry probe: {probe_gate.detail}", v)
+    else:
+        log(
+            f"FAIL: reflections-registry callables did not import — skipping service restart\n"
+            f"  {probe_gate.detail}",
+            v,
+            always=True,
+        )
+        _append_warning(
+            result,
+            f"reflections registry callables unresolvable; service restart skipped: "
+            f"{probe_gate.detail}",
+        )
+        config = replace(config, do_service_restart=False)
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or

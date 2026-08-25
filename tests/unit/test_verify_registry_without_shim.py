@@ -1,0 +1,156 @@
+"""Pin `scripts/verify_registry_without_shim.py` against the enumerations it mirrors.
+
+The probe is the acceptance gate for issue #2875: `scripts/update/run.py` Step
+4.65 runs it and suppresses the service restart when it fails. Its coverage is
+only as good as `_registry_copies()`, a hand-maintained mirror of
+`scripts/migrate_reflections_callables.py::default_targets()` (the set that gets
+rewritten) plus level 4 of `agent.reflection_scheduler._resolve_registry_path()`
+(the owning checkout's copy). Nothing else pins that mirror.
+
+The failure mode these tests exist for: the mirror drifts, the probe passes over
+a subset, and the copy the scheduler actually reads goes unchecked — a green
+gate that greenlights a worker restart onto an unimportable registry.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _load(name: str, rel: str):
+    """Import a `scripts/` module by path — neither is an importable package."""
+    spec = importlib.util.spec_from_file_location(name, _REPO_ROOT / rel)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def probe():
+    return _load("_probe_under_test", "scripts/verify_registry_without_shim.py")
+
+
+@pytest.fixture(scope="module")
+def migrate():
+    return _load("_migrate_under_test", "scripts/migrate_reflections_callables.py")
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry_env(monkeypatch):
+    """Both enumerations read os.environ; start every case from a known state."""
+    monkeypatch.delenv("REFLECTIONS_YAML", raising=False)
+    monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+
+
+class TestRegistryCopiesMirrorsDefaultTargets:
+    """`_registry_copies(None)` must equal `default_targets()` under every env shape.
+
+    `owning_root=None` is the comparable case: level 4 is the probe's documented
+    ADDITION to the migration's target set, so passing None isolates the mirror.
+    """
+
+    def test_clean_env(self, probe, migrate):
+        assert probe._registry_copies(None) == migrate.default_targets()
+
+    def test_explicit_override(self, probe, migrate, monkeypatch, tmp_path):
+        override = tmp_path / "custom-reflections.yaml"
+        monkeypatch.setenv("REFLECTIONS_YAML", str(override))
+        copies = probe._registry_copies(None)
+        assert copies == migrate.default_targets()
+        assert override in copies, "REFLECTIONS_YAML must be probed, not just rewritten"
+
+    def test_launchd_skips_the_vault(self, probe, migrate, monkeypatch):
+        """Under launchd the vault is TCC-unreadable; both sides must skip it."""
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        copies = probe._registry_copies(None)
+        assert copies == migrate.default_targets()
+        vault = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+        assert vault not in copies
+
+    def test_launchd_and_override_together(self, probe, migrate, monkeypatch, tmp_path):
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        monkeypatch.setenv("REFLECTIONS_YAML", str(tmp_path / "r.yaml"))
+        assert probe._registry_copies(None) == migrate.default_targets()
+
+    def test_owning_root_adds_exactly_one_level(self, probe, monkeypatch, tmp_path):
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        base = probe._registry_copies(None)
+        with_owner = probe._registry_copies(tmp_path)
+        assert with_owner == base + [tmp_path / "config" / "reflections.yaml"]
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text)
+    return path
+
+
+class TestCheckCopy:
+    """`_check_copy` returns a count, or None on any failure — never a sentinel int."""
+
+    def test_counts_resolved_callables(self, probe, tmp_path):
+        import yaml
+
+        registry = _write(
+            tmp_path / "r.yaml",
+            "reflections:\n  - name: a\n    callable: os.getcwd\n"
+            "  - name: b\n    callable: os.getpid\n",
+        )
+        assert probe._check_copy(registry, yaml, lambda dotted: object()) == 2
+
+    def test_zero_callables_fails_closed(self, probe, tmp_path, capsys):
+        """A registry with entries but no `callable:` keys proves nothing.
+
+        Returning 0 here would print "OK: 0 callables resolved" and exit 0 — a
+        silent pass, which is the exact shape the gate must not have.
+        """
+        import yaml
+
+        registry = _write(tmp_path / "r.yaml", "reflections:\n  - name: a\n    enabled: true\n")
+        assert probe._check_copy(registry, yaml, lambda dotted: object()) is None
+        err = capsys.readouterr().err
+        assert "FAIL" in err and "`callable:` entries" in err
+
+    def test_unresolvable_callable_fails(self, probe, tmp_path):
+        import yaml
+
+        registry = _write(tmp_path / "r.yaml", "reflections:\n  - name: a\n    callable: x.y\n")
+
+        def boom(dotted):
+            raise ImportError("agent.sustainability is banned")
+
+        assert probe._check_copy(registry, yaml, boom) is None
+
+    def test_malformed_yaml_reports_instead_of_raising(self, probe, tmp_path, capsys):
+        """A corrupt copy must fail in the same shape as the others (nit N2).
+
+        Before the guard this raised out of `_check_copy`, aborting the whole
+        run — so the verdict on every *subsequent* copy was never reported.
+        """
+        import yaml
+
+        registry = _write(tmp_path / "r.yaml", "reflections: [oops\n  - broken: {{{\n")
+        assert probe._check_copy(registry, yaml, lambda dotted: object()) is None
+        assert "could not read registry" in capsys.readouterr().err
+
+    def test_unreadable_file_reports_instead_of_raising(self, probe, tmp_path, capsys):
+        """TCC denial / iCloud dataless placeholder shape: open() itself fails."""
+        import yaml
+
+        missing = tmp_path / "does-not-exist.yaml"
+        assert probe._check_copy(missing, yaml, lambda dotted: object()) is None
+        assert "could not read registry" in capsys.readouterr().err
+
+    def test_non_mapping_registry_reports(self, probe, tmp_path, capsys):
+        import yaml
+
+        registry = _write(tmp_path / "r.yaml", "- just\n- a\n- list\n")
+        assert probe._check_copy(registry, yaml, lambda dotted: object()) is None
+        assert "expected a mapping" in capsys.readouterr().err

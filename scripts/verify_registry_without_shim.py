@@ -43,7 +43,10 @@ silent pass that proves nothing.
 Why this is committed rather than run ad hoc:
 `tests/unit/test_reflection_scheduler.py::test_all_callables_resolve` resolves
 the same vault-first registry, so it validates whatever file happens to sit on
-the running machine and is not a real CI gate.
+the running machine and is not a real CI gate. This script IS the gate:
+`scripts/update/run.py` Step 4.65 runs it via
+`scripts.update.reflections_callables.run_registry_probe` and suppresses the
+service restart when it fails.
 """
 
 from __future__ import annotations
@@ -51,6 +54,11 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from types import ModuleType
 
 BANNED_MODULE = "agent.sustainability"
 
@@ -108,15 +116,45 @@ def _registry_copies(owning_root: Path | None) -> list[Path]:
     return unique
 
 
-def _check_copy(registry_path: Path, yaml_mod, resolve_callable) -> int:
-    """Verify one registry copy. Returns the number of callables checked, or -1 on failure."""
-    with open(registry_path) as fh:
-        data = yaml_mod.safe_load(fh) or {}
+def _check_copy(
+    registry_path: Path,
+    yaml_mod: ModuleType,
+    resolve_callable: Callable[[str], object],
+) -> int | None:
+    """Verify one registry copy. Returns the number of callables checked, or None on failure.
+
+    ``yaml_mod`` and ``resolve_callable`` are injected rather than imported at
+    module scope because both imports must happen AFTER ``main()`` installs the
+    ``_BannedModuleFinder`` — importing ``agent.reflection_scheduler`` up here
+    would resolve the registry's import graph while the ban is still unarmed,
+    which is precisely the hole this script exists to close. Keeping them as
+    parameters makes that ordering a signature-level fact instead of a comment.
+
+    ``None`` rather than a ``-1`` sentinel: the success value is a *count*, and
+    a caller that summed a sentinel would silently fold a failure in as ``-1``.
+    """
+    try:
+        with open(registry_path) as fh:
+            data = yaml_mod.safe_load(fh) or {}
+    except Exception as exc:
+        # An unreadable or malformed copy is a failure in the same shape as the
+        # others, not a traceback: a TCC denial or an iCloud dataless
+        # placeholder would otherwise abort the whole run and hide the verdict
+        # on every copy after this one.
+        print(f"FAIL: {registry_path}: could not read registry: {exc!r}", file=sys.stderr)
+        return None
+
+    if not isinstance(data, dict):
+        print(
+            f"FAIL: {registry_path}: registry is {type(data).__name__}, expected a mapping",
+            file=sys.stderr,
+        )
+        return None
 
     entries = data.get("reflections") or []
     if not entries:
         print(f"FAIL: {registry_path} declares no reflections", file=sys.stderr)
-        return -1
+        return None
 
     checked = 0
     for entry in entries:
@@ -134,7 +172,7 @@ def _check_copy(registry_path: Path, yaml_mod, resolve_callable) -> int:
                 f"resolve with {BANNED_MODULE} banned: {exc!r}",
                 file=sys.stderr,
             )
-            return -1
+            return None
         checked += 1
 
     if checked == 0:
@@ -145,7 +183,7 @@ def _check_copy(registry_path: Path, yaml_mod, resolve_callable) -> int:
             f"`callable:` entries, so nothing was proven about {BANNED_MODULE}",
             file=sys.stderr,
         )
-        return -1
+        return None
 
     return checked
 
@@ -181,7 +219,7 @@ def main() -> int:
     total = 0
     for registry_path in existing:
         checked = _check_copy(registry_path, yaml, _resolve_callable)
-        if checked < 0:
+        if checked is None:
             return 1
         print(f"  OK: {checked} callables resolved in {registry_path}")
         total += checked

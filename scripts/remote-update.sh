@@ -223,6 +223,23 @@ RESTART_FAILED=0
 WORKER_STATE="worker current"
 VERIFY_SINCE=0
 
+# ── Reflections-registry probe verdict (issue #2875) ─────────────────
+# run.py Step 4.65 probes every registry copy for importability and stamps
+# data/registry-probe-failed when a `callable:` entry does not resolve. That
+# step CANNOT stop the restart below — it runs inside a process that has
+# already exited by the time we get here, and on this path it was invoked with
+# --cron, which sets do_service_restart=False. So we read its verdict off disk.
+# Without this, a registry that names the deleted agent.sustainability shim
+# still gets a worker kickstart, and the five self-healing reflections come up
+# raising ImportError inside run_reflection's broad except — recorded to
+# state.last_error, silent, forever. Same posture as RESTART_FAILED above:
+# loud line, non-zero terminal exit, and the worker stays on the code and
+# registry it already resolved.
+REGISTRY_PROBE_OK=true
+if [ -f "$PROJECT_DIR/data/registry-probe-failed" ]; then
+    REGISTRY_PROBE_OK=false
+fi
+
 # ── Reload worker plist if present ───────────────────────────────────
 # Only restart the worker when the pull actually landed new commits that touch
 # worker-loaded code.  This prevents killing in-flight sessions every 30 minutes
@@ -299,7 +316,13 @@ PYEOF
         WORKER_ALIVE=true
     fi
     if launchctl list | grep -q "$WORKER_LABEL" || $WORKER_ALIVE; then
-        if $NEED_RESTART; then
+        if $NEED_RESTART && ! $REGISTRY_PROBE_OK; then
+            # Gate ordered BEFORE the drain: draining sessions to then not
+            # restart would burn the whole drain window for nothing.
+            echo "RESTART BLOCKED: reflections-registry callables did not import (data/registry-probe-failed) — worker NOT restarted; it keeps serving the registry it already resolved. Fix the registry, then re-run /update."
+            WORKER_STATE="worker restart BLOCKED (registry probe failed)"
+            RESTART_FAILED=1
+        elif $NEED_RESTART; then
             # Drain before restart (#2141): a PM turn legitimately runs 20+
             # minutes; killing it mid-turn discards the in-flight work and
             # orphans the harness. Poll until no sessions are running; on
@@ -344,7 +367,10 @@ PYEOF
         # Label absent AND no live worker process (#2141 liveness cross-check
         # above) — the worker is genuinely down. Bootstrapping here is
         # RECOVERY of a dead service, not a restart: nothing is running, so
-        # no drain is needed and the NEED_RESTART gate does not apply.
+        # no drain is needed and neither the NEED_RESTART gate nor the
+        # REGISTRY_PROBE_OK gate applies. Both gates exist to preserve a
+        # working worker; there is no working worker here to preserve, and a
+        # worker up with five broken reflections beats a worker that is down.
         # The grep can still false-negative in exotic cases; the bare
         # bootstrap then fails with `Bootstrap failed: 5: Input/output error`
         # (errno 5 = label already bootstrapped in target domain). EIO here
