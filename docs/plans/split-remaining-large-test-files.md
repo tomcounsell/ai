@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-25
 tracking: https://github.com/tomcounsell/ai/issues/2879
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-26T00:35:00Z
 ---
 
 # Split the remaining four large test files (#2879, part 2 of 2)
@@ -167,7 +169,33 @@ hop is the one this change perturbs, and it is the subject of the verification.
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Provisioned worktree venv on the repo pin | `.venv/bin/python --version` matches `.python-version` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
-| Baseline marker dump captured | `wc -l < baseline.tsv` == 14065 | Parity proof requires a pre-split snapshot |
+| Baseline marker dump captured **in the lane worktree, after rebasing onto current `origin/main`** | `wc -l < baseline.tsv` | Parity proof requires a pre-split snapshot taken at the same commit the split is applied to |
+
+### The collection total is not a constant — do not hardcode it
+
+An earlier draft of this plan gated on the literal `14065`. That is wrong, and the
+way it is wrong is instructive enough to record permanently.
+
+`tests/unit/test_plan_docs.py::test_plan_declares_a_tracking_issue` is
+**parametrized over the files in `docs/plans/`**. Every plan document committed by
+*any* lane adds one collected test to `tests/unit`. Measured directly:
+
+```
+lane worktree @483c7cd14 : 14065
+main checkout  @8557db75f : 14067
+comm -13 →  test_plan_docs.py::test_plan_declares_a_tracking_issue[retire-agent-sustainability-shim.md]
+            test_plan_docs.py::test_plan_declares_a_tracking_issue[split-remaining-large-test-files.md]
+```
+
+`git log 483c7cd14..8557db75f -- tests/` is **empty** — no test file changed. The
+delta is entirely this plan's own document plus lane #2875's. So a global integer
+gate would fail for a mechanically perfect split, and would keep drifting for as
+long as other lanes keep committing plans.
+
+**Consequence for verification:** the parity gate compares the nodeid+marker
+multiset **excluding `tests/unit/test_plan_docs.py`**, which is invariant under
+other lanes' activity, and asserts the four target packages collect exactly 443
+on their own. Both are stable and neither can be falsified by a concurrent lane.
 
 ## Solution
 
@@ -209,21 +237,23 @@ monolith → re-collect → diff nodeid+marker multiset against baseline → zer
 - `REPO_ROOT` gains one `os.path.dirname()` level in each file that uses it.
 - `TestLaneSlugMintedAtLaneStart` stays whole and in one file (spike-2).
 
-**2. `test_sdlc_router_decision.py` (2096 → 4 files) → `tests/unit/sdlc_router_decision/`**
+**2. `test_sdlc_router_decision.py` (2096 → 5 files) → `tests/unit/sdlc_router_decision/`**
 
 | New file | Contents | ~lines |
 |---|---|---|
 | `test_sdlc_router_decision_dispatch_rows.py` | `_states_all_pending`, `TestDispatchRulesTable`, rows 1–10, `TestStageStatesUnavailable…`, `TestNoMatchingRule`, `TestVerdictNormalizationUnderscore`, `TestPlanExistenceGate` | ~505 |
 | `test_sdlc_router_decision_verdict_staleness.py` | `_iso`, `TestReviewVerdictStaleness`, `TestCritiqueVerdictStaleness` | ~275 |
-| `test_sdlc_router_decision_convergence.py` | `TestConvergenceLatchRevisionAppliedAt` through `TestNeedsRevisionInvalidatedByRevision`, plus the `_VERDICT_AT`/`_post_patch_states` block and its row-8b classes | ~965 |
+| `test_sdlc_router_decision_convergence.py` | `TestConvergenceLatchRevisionAppliedAt` → `TestNeedsRevisionInvalidatedByRevision` (L783–1458) | ~675 |
+| `test_sdlc_router_decision_post_patch.py` | `_VERDICT_AT`/`_PATCH_BEFORE_VERDICT`/`_PATCH_AFTER_VERDICT`/`_post_patch_states` and `TestRow8bOwnsStaleVerdict` → `TestNoRuleBlockIsDistinguishable` (L1459–1748) | ~290 |
 | `test_sdlc_router_decision_with_concerns.py` | `_WC`/`_PLAN_HASH`/`_wc_states`/`_wc_meta` and `TestG5AliveOnWithConcerns` → `TestForeverWithConcernsTerminates` | ~350 |
 
 - The three module-level constant blocks (`_VERDICT_AT`, `_WC`, …) each travel with the classes
   that consume them. Verify no cross-group consumer before splitting — if one exists, the group
   boundary moves rather than the constant being duplicated.
 - Easiest of the four: no autouse fixtures, no depth expressions, no Redis.
-- If `_convergence` lands over 800 lines, split it on the `_post_patch_states` boundary into
-  `..._convergence.py` and `..._post_patch.py` (both verified `sdlc`).
+- The `_post_patch` file is **not** conditional. An earlier draft folded it into `_convergence`
+  "if it lands over 800 lines"; the span L783–1748 measures 954 lines, so it always would have.
+  Five files, decided up front.
 
 **3. `test_valor_telegram.py` (2016 → 5 files) → `tests/unit/valor_telegram/`**
 
@@ -254,11 +284,16 @@ monolith → re-collect → diff nodeid+marker multiset against baseline → zer
 | New file | Classes | ~lines |
 |---|---|---|
 | `test_worktree_manager_cleanup.py` | `TestValidateSlug`, `TestCleanupAfterMerge`, `TestFindWorktreeForBranch`, `TestCleanupStaleWorktree` | ~305 |
-| `test_worktree_manager_creation.py` | `TestCreateWorktreeStaleRecovery`, `TestGetOrCreateWorktree`, `_make_session` | ~185 |
-| `test_worktree_manager_busy_guards.py` | `TestWorktreeBusyCheck` → `TestCleanupAfterMergeBusyBlock` (7 classes) | ~385 |
+| `test_worktree_manager_creation.py` | `TestCreateWorktreeStaleRecovery`, `TestGetOrCreateWorktree` | ~170 |
+| `test_worktree_manager_busy_guards.py` | `_make_session`, `TestWorktreeBusyCheck` → `TestCleanupAfterMergeBusyBlock` (7 classes) | ~400 |
 | `test_worktree_manager_venv_provisioning.py` | `_init_git_worktree`, `TestVerifyWorktreeBranch`, `TestInterpreterPinResolution`, `TestProvisionWorktreeVenv`, `TestCreateWorktreeProvisioningWiring` | ~440 |
 | `test_worktree_manager_uncommitted.py` | `_init_git_repo`, `_add_linked_worktree`, `_dirty`, `_git`, `TestPreserveUncommittedChanges` | ~150 |
 
+- `_make_session` (defined L628) is consumed **only** at L655–827, entirely inside
+  `TestWorktreeBusyCheck` / `TestWorktreeBusyProbe` / `TestScanWorktreeSessions`. It therefore
+  belongs in `_busy_guards.py`, not with the creation classes that sit next to its definition.
+  Verified by enumerating all 20 call sites. This is the one place where "the helper travels with
+  its consumers" and "the helper travels with its textual neighbours" disagree — consumers win.
 - **The one in-body edit in the entire change** lives here: `parents[2]` → `parents[3]` at what is
   currently L1268, inside `TestInterpreterPinResolution.test_this_repo_ships_a_committed_pin`.
   Without it the test resolves `repo_root` to `tests/` and fails looking for `.python-version`.
@@ -286,7 +321,7 @@ than an afterthought.
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — REPLACE: becomes `tests/unit/sdlc_session_ensure/` (6 modules + `conftest.py` + `__init__.py`). All 114 tests preserved.
-- [ ] `tests/unit/test_sdlc_router_decision.py` — REPLACE: becomes `tests/unit/sdlc_router_decision/` (4 modules + `__init__.py`). All 107 tests preserved.
+- [ ] `tests/unit/test_sdlc_router_decision.py` — REPLACE: becomes `tests/unit/sdlc_router_decision/` (5 modules + `__init__.py`). All 107 tests preserved.
 - [ ] `tests/unit/test_valor_telegram.py` — REPLACE: becomes `tests/unit/valor_telegram/` (5 modules + `conftest.py` + `__init__.py`). All 97 tests preserved.
 - [ ] `tests/unit/test_valor_telegram_await.py` — UPDATE: `git mv` into the package, contents unmodified.
 - [ ] `tests/unit/test_valor_telegram_chat_log.py` — UPDATE: `git mv` into the package, contents unmodified.
@@ -383,30 +418,45 @@ change is invisible to the running system; it only moves test files on disk.
 
 - [ ] Update `tests/README.md` — replace the four index rows for the split files with the twenty
       new rows, each carrying its real collected-test count.
-- [ ] Confirm `tests/README.md` §"Splitting or Renaming a Test File" (added by #2941) still reads
-      correctly after a second application; extend it only if this split surfaced a step it
-      omits — specifically the **ordering-dependence** of `FEATURE_MAP` that spike-1 found, which
-      the current text does not mention.
+- [ ] Extend `tests/README.md` §"Splitting or Renaming a Test File" (added by #2941) with a
+      **worked example** of the losing-a-marker-by-position case. The section already states the
+      algorithm takes "the first hit" (L484) and already tells you to check a new basename for an
+      accidental *new* match (step 2) — so the concept is present and the gaining direction is
+      covered. What is missing is a concrete demonstration that insertion order alone can strip a
+      marker off a correctly-prefixed name: `test_worktree_manager_config.py` resolves to `config`
+      because `config` precedes `worktree_manager` in the dict, even though the prefix rule was
+      followed exactly. Add spike-1's example, not a restatement of the concept.
 - [ ] No `docs/features/` change — no feature behavior changes.
 
 ## Success Criteria
 
 - [ ] All four target files are gone, replaced by four packages.
 - [ ] Every resulting file is under 800 lines.
-- [ ] `pytest tests/unit --collect-only` reports exactly **14065**, unchanged.
+- [ ] The four packages collect exactly **443** (114 + 107 + 115 + 107). The *global* `tests/unit`
+      total is deliberately not asserted — it tracks the number of files in `docs/plans/`.
 - [ ] The nodeid+marker multiset is **identical** before and after (not just the total).
 - [ ] Per-marker counts unchanged: `sdlc` 2577, `git` 179, `messaging` 990, and all 20 others.
 - [ ] AST source-segment comparison shows every moved definition byte-identical, with exactly
       one documented exception (`parents[3]`).
-- [ ] The four packages pass under `scripts/pytest-clean.sh`: 425 tests (114+107+97+107).
+- [ ] The four packages pass under `scripts/pytest-clean.sh`: 443 tests (114+107+115+107).
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean.
 - [ ] `tests/README.md` index updated.
 
 ## Team Orchestration
 
-Four independent builders, one per target file, with **disjoint file sets** — no two builders
-touch the same path, so their commits cannot interleave. All four run in the single lane
-worktree `.worktrees/split-remaining-test-files/`.
+Four independent builders, one per target file, with **disjoint file sets**. All four run in the
+single lane worktree `.worktrees/split-remaining-test-files/`.
+
+**Builders do not commit.** Disjoint *paths* do not imply safe concurrent commits: the four share
+one working tree and therefore one git index, so any `git add`/`git commit` from one builder can
+stage another's half-written files. This plan's earlier claim that "commits cannot interleave" was
+simply false. The contract instead:
+
+- Each builder **writes and deletes files only** — including the `git rm` of its own monolith,
+  which is that builder's responsibility and not a floating unowned step.
+- The **lead performs every commit**, sequentially, after all four builders return, using an
+  explicit pathspec per package (`git commit -m ... -- tests/unit/<pkg>/ tests/unit/test_<x>.py`).
+- Builders are told not to run `git add`, `git commit`, `git stash`, or `git checkout`.
 
 ### Team Members
 
@@ -485,24 +535,41 @@ worktree `.worktrees/split-remaining-test-files/`.
 - **Assigned To**: split-reviewer
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the four packages under `scripts/pytest-clean.sh`; confirm 425 passed.
+- Run the four packages under `scripts/pytest-clean.sh`; confirm 443 passed.
 - Confirm every success criterion.
 
 ## Verification
 
+All counts below are **lane-invariant**: none of them moves when another lane commits a plan
+document. See the Prerequisites note on why the global `tests/unit` total is not usable as a gate.
+
 | Check | Command | Expected |
 |-------|---------|----------|
-| Collection count unchanged | `.venv/bin/python -m pytest tests/unit --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 14065 |
+| Four packages collect 443 | `.venv/bin/python -m pytest tests/unit/sdlc_session_ensure tests/unit/sdlc_router_decision tests/unit/valor_telegram tests/unit/worktree_manager --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 443 |
 | Monoliths are gone | `ls tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_router_decision.py tests/unit/test_valor_telegram.py tests/unit/test_worktree_manager.py 2>&1` | exit code != 0 |
+| No stranded `valor_telegram` sibling | `ls tests/unit/test_valor_telegram_*.py 2>&1` | exit code != 0 |
 | No file over 800 lines | `find tests/unit/sdlc_session_ensure tests/unit/sdlc_router_decision tests/unit/valor_telegram tests/unit/worktree_manager -name '*.py' -exec wc -l {} + \| awk '$1>800 && $2!="total"' \| wc -l \| tr -d ' '` | output contains 0 |
-| `sdlc` marker count held | `.venv/bin/python -m pytest tests/unit -m sdlc --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 2577 |
-| `git` marker count held | `.venv/bin/python -m pytest tests/unit -m git --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 179 |
-| `messaging` marker count held | `.venv/bin/python -m pytest tests/unit -m messaging --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 990 |
-| No forbidden `worktree_manager` suffix | `ls tests/unit/worktree_manager/ \| grep -cE '_(config\|lifecycle\|checkpoint\|routing\|search)\.py$'` | match count == 0 |
+| `sdlc` count over the two sdlc packages | `.venv/bin/python -m pytest tests/unit/sdlc_session_ensure tests/unit/sdlc_router_decision -m sdlc --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 221 |
+| `git` count over the worktree_manager package | `.venv/bin/python -m pytest tests/unit/worktree_manager -m git --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 107 |
+| `messaging` count over the valor_telegram package | `.venv/bin/python -m pytest tests/unit/valor_telegram -m messaging --collect-only -q 2>/dev/null \| tail -1 \| grep -oE '^[0-9]+'` | output contains 115 |
+| No forbidden `worktree_manager` suffix | `ls tests/unit/worktree_manager/ \| grep -cE '_(config\|lifecycle\|checkpoint\|routing)\.py$'` | match count == 0 |
 | No `bridge` in a session-ensure filename | `ls tests/unit/sdlc_session_ensure/ \| grep -c bridge` | match count == 0 |
 | Lint clean | `python -m ruff check tests/unit` | exit code 0 |
 | Format clean | `python -m ruff format --check tests/unit` | exit code 0 |
 | No line-number-keyed exemption reintroduced | `grep -rn 'ALLOWLIST' tests/ tools/ \| wc -l \| tr -d ' '` | output contains 0 |
+
+The `messaging` figure is **115, not 97**: the package absorbs the three existing siblings
+(`_await` 10, `_chat_log` 5, `_voice_flag` 3 = 18) alongside the 97 from the monolith. That also
+makes the four-package total **443**, not the 425 an earlier draft claimed — 425 counted only the
+four monoliths and forgot the siblings this plan moves. Both figures were re-derived from the
+baseline dump rather than estimated.
+
+**The nodeid+marker multiset parity check is deliberately not a row in this table.** It is a
+one-time build-time proof: it compares a pre-split snapshot against a post-split one, and the
+"before" side ceases to exist the moment the split lands, so it can never re-run as a post-merge
+gate. It is performed once by the lead with a throwaway collect-only plugin and its output is
+pasted into the PR body as evidence — the same shape of proof PR #2941 used. The rows above are
+what remains mechanically checkable in perpetuity.
 
 ## Critique Results
 
@@ -510,13 +577,13 @@ War room (FULL depth, 3 critics) — run 2026-08-26. Verdict: **NEEDS REVISION**
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency, Structural | The baseline total-collection count `14065` is wrong; the real, reproducible count is **14067**. It is hardcoded in three places: Prerequisites (`wc -l < baseline.tsv` == 14065), Success Criteria (`reports exactly **14065**, unchanged`), and the first Verification row (`output contains 14065`). This is NOT baseline drift: `git log 483c7cd14..HEAD -- tests/` is empty, so 14067 was already the count at the plan's own stated baseline commit. Every other number in the plan verifies exactly (per-file 114/107/97/107 = 425; markers sdlc 2577, git 179, messaging 990). As written, a mechanically perfect split fails the Prerequisites gate and the primary Verification row, sending the builder hunting a phantom 2-test regression. **Suggestion:** Replace all three literals with 14067, or better, have Task 5 derive the expected total from the freshly-captured pre-split `baseline.tsv` rather than a plan-authored constant. | pending | Measured by the critique driver at HEAD `c332dcb92`: `.venv/bin/python -m pytest tests/unit --collect-only -q 2>/dev/null \| tail -1` -> `14067 tests collected`. Reproduced twice, stable (collection is not randomized). The three per-marker gates in the Verification table are correct as written and must NOT be changed. Fix exactly: plan line 170 `== 14065` -> `== 14067`; line 396 `exactly **14065**` -> `exactly **14067**`; line 495 `output contains 14065` -> `output contains 14067`. |
-| BLOCKER | Risk & Robustness, Structural | `_make_session` is assigned to the wrong file. Technical Approach section 4 puts it in `test_worktree_manager_creation.py` alongside `TestCreateWorktreeStaleRecovery` and `TestGetOrCreateWorktree`, but neither of those classes calls it. All 20 call sites live inside `TestWorktreeBusyCheck`, `TestWorktreeBusyProbe`, and `TestScanWorktreeSessions` -- the three classes the plan's own table routes to `test_worktree_manager_busy_guards.py`. As specified, `busy_guards.py` raises `NameError` at collection and `creation.py` carries a dead helper. This also falsifies the plan's blanket claim that 'The shared helpers are consumed only by adjacent classes; each travels with its consumers.' **Suggestion:** Move `_make_session` into `test_worktree_manager_busy_guards.py`, and replace the blanket helper claim with the per-helper consumer map below. | pending | Verified by grep against `tests/unit/test_worktree_manager.py`. `_make_session` is defined at L628-641; call sites at L655, 656, 657, 658, 659, 666, 680, 694, 705, 723, 724, 758, 771, 783, 784, 785, 793, 794, 795, 827 -- all within L644-843. Class spans: `TestCreateWorktreeStaleRecovery` L459-552, `TestGetOrCreateWorktree` L555-625, `TestWorktreeBusyCheck` L644-726, `TestWorktreeBusyProbe` L729-802, `TestScanWorktreeSessions` L805-843. The other three helpers in this file were checked and ARE correctly placed: `_init_git_worktree` (L1027) is consumed only at L1054-1143 inside `TestVerifyWorktreeBranch` (venv_provisioning group, correct); `_git` (L1503), `_init_git_repo` (L1465), `_add_linked_worktree` (L1480), `_dirty` (L1492) are consumed only at L1515-1610 inside `TestPreserveUncommittedChanges` (uncommitted group, correct). |
-| CONCERN | Risk & Robustness, Structural | `test_sdlc_router_decision_convergence.py` is specified at ~965 lines in the plan's own table, which already violates the Success Criterion 'Every resulting file is under 800 lines'. The remedy is present but phrased as a conditional ('If `_convergence` lands over 800 lines, split it on the `_post_patch_states` boundary'), when the plan's own arithmetic makes it a certainty. Test Impact compounds this by recording the disposition as '4 modules + `__init__.py`' for this package. **Suggestion:** Promote the `_post_patch_states` split to a mandatory fifth row in the table, and change Test Impact to '5 modules + `__init__.py`'. | pending | Measured AST span of the proposed group: L783-1736 = 954 lines of definitions before the import header, so >800 is guaranteed, not conditional. Split at the constants boundary: file A = `TestConvergenceLatchRevisionAppliedAt` (L783-912) through `TestNeedsRevisionInvalidatedByRevision` (L1282-1452) = 670 lines; file B = `_VERDICT_AT`/`_PATCH_BEFORE_VERDICT`/`_PATCH_AFTER_VERDICT` (L1459-1461), `_post_patch_states` (L1464-1499), and `TestRow8bOwnsStaleVerdict` through `TestNoRuleBlockIsDistinguishable` (L1502-1736) = 278 lines. The driver ran `test_sdlc_router_decision_post_patch.py` through the real `FEATURE_MAP` first-hit algorithm: it resolves to `sdlc`, so the fifth basename is marker-safe. |
-| CONCERN | Scope & Value | Team Orchestration runs four builder subagents concurrently inside one shared worktree and rests correctness on 'no two builders touch the same path, so their commits cannot interleave'. That is false at the git-mechanics level: a working tree has one shared index, not per-path locking, so concurrent `git add` / `git rm` / `git commit` can hit `.git/index.lock` contention or let one builder's commit swallow another's staged files regardless of path disjointness. No task in Step by Step Tasks says who runs `git rm` on the four monoliths or when. **Suggestion:** Have the four builders write and delete files on disk only, and serialize every git-index operation into one pass (either a single commit by Task 5's reviewer, or explicit `git commit -m msg -- <paths>` with a pathspec per builder). | pending | This repo has already been burned by exactly this: a bare `git commit` snapshots the shared index and sweeps another lane's staged files -- the mitigation of record is an explicit pathspec, `git commit -m msg -- <paths>`, never a bare `commit -a`. Concretely: add to each build-* task 'stage and commit with an explicit pathspec covering only your own package directory and your own deleted monolith', or move all four `git rm tests/unit/test_*.py` calls into Task 5 (validate-parity) as a single serialized pass before the parity diff runs. |
-| CONCERN | History & Consistency | The Documentation task claims the `FEATURE_MAP` ordering-dependence found by spike-1 is something 'the current text does not mention', but `tests/README.md:484` already states the algorithm 'substring-matches the remainder against `FEATURE_MAP`, taking the first hit' -- that phrase IS the ordering-dependence. The real gap is narrower: the README states first-hit-wins abstractly but gives no concrete example of dict-insertion order silently changing a real basename's marker. **Suggestion:** Reword the Documentation bullet to say the README lacks a worked example rather than lacking the concept, and have the builder add spike-1's `worktree_manager`-after-`config` collision as that example. | pending | `tests/README.md:482-486` verbatim: 'strips `test_` and `.py` from the nodeid's last path segment and substring-matches the remainder against `FEATURE_MAP`, taking the first hit.' The README's step 2 ('Check each new basename against `FEATURE_MAP` for an accidental new match') already covers the gaining-a-marker direction; the missing example is the losing-a-marker-by-position case. Edit the plan's Documentation bullet, not just the README, so a reviewer diffing the PR body against the README does not flag the characterization as inaccurate. |
-| NIT | Structural | Technical Approach section 3 states '`_CandidateStub` travels with `TestCmdReadFlags`, its only consumer.' `TestCmdReadProject` also consumes it. The grouping is still correct (both classes land in `test_valor_telegram_cli_read.py`), so nothing breaks -- but the stated rationale is wrong and would mislead anyone who later re-derives the boundary from it. | pending | - |
-| NIT | Structural | Two stale figures. (a) `test_worktree_manager_cleanup.py` is estimated at ~305 lines but its four classes span L36-456 = 421 lines -- 38% low, while every other estimate in the plan lands within ~3%. (b) Freshness Check records 'Baseline commit: `483c7cd14`'; HEAD is now `c332dcb92`. The three intervening commits are all `docs/plans/` and `git diff 483c7cd14..HEAD -- tests/` is empty, so no premise changes -- but the recorded baseline should be refreshed. | pending | - |
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency, Structural | The baseline total-collection count `14065` is wrong; the real, reproducible count is **14067**. It is hardcoded in three places: Prerequisites (`wc -l < baseline.tsv` == 14065), Success Criteria (`reports exactly **14065**, unchanged`), and the first Verification row (`output contains 14065`). This is NOT baseline drift: `git log 483c7cd14..HEAD -- tests/` is empty, so 14067 was already the count at the plan's own stated baseline commit. Every other number in the plan verifies exactly (per-file 114/107/97/107 = 425; markers sdlc 2577, git 179, messaging 990). As written, a mechanically perfect split fails the Prerequisites gate and the primary Verification row, sending the builder hunting a phantom 2-test regression. **Suggestion:** Replace all three literals with 14067, or better, have Task 5 derive the expected total from the freshly-captured pre-split `baseline.tsv` rather than a plan-authored constant. | addressed | Measured by the critique driver at HEAD `c332dcb92`: `.venv/bin/python -m pytest tests/unit --collect-only -q 2>/dev/null \| tail -1` -> `14067 tests collected`. Reproduced twice, stable (collection is not randomized). The three per-marker gates in the Verification table are correct as written and must NOT be changed. Fix exactly: plan line 170 `== 14065` -> `== 14067`; line 396 `exactly **14065**` -> `exactly **14067**`; line 495 `output contains 14065` -> `output contains 14067`. |
+| BLOCKER | Risk & Robustness, Structural | `_make_session` is assigned to the wrong file. Technical Approach section 4 puts it in `test_worktree_manager_creation.py` alongside `TestCreateWorktreeStaleRecovery` and `TestGetOrCreateWorktree`, but neither of those classes calls it. All 20 call sites live inside `TestWorktreeBusyCheck`, `TestWorktreeBusyProbe`, and `TestScanWorktreeSessions` -- the three classes the plan's own table routes to `test_worktree_manager_busy_guards.py`. As specified, `busy_guards.py` raises `NameError` at collection and `creation.py` carries a dead helper. This also falsifies the plan's blanket claim that 'The shared helpers are consumed only by adjacent classes; each travels with its consumers.' **Suggestion:** Move `_make_session` into `test_worktree_manager_busy_guards.py`, and replace the blanket helper claim with the per-helper consumer map below. | addressed | Verified by grep against `tests/unit/test_worktree_manager.py`. `_make_session` is defined at L628-641; call sites at L655, 656, 657, 658, 659, 666, 680, 694, 705, 723, 724, 758, 771, 783, 784, 785, 793, 794, 795, 827 -- all within L644-843. Class spans: `TestCreateWorktreeStaleRecovery` L459-552, `TestGetOrCreateWorktree` L555-625, `TestWorktreeBusyCheck` L644-726, `TestWorktreeBusyProbe` L729-802, `TestScanWorktreeSessions` L805-843. The other three helpers in this file were checked and ARE correctly placed: `_init_git_worktree` (L1027) is consumed only at L1054-1143 inside `TestVerifyWorktreeBranch` (venv_provisioning group, correct); `_git` (L1503), `_init_git_repo` (L1465), `_add_linked_worktree` (L1480), `_dirty` (L1492) are consumed only at L1515-1610 inside `TestPreserveUncommittedChanges` (uncommitted group, correct). |
+| CONCERN | Risk & Robustness, Structural | `test_sdlc_router_decision_convergence.py` is specified at ~965 lines in the plan's own table, which already violates the Success Criterion 'Every resulting file is under 800 lines'. The remedy is present but phrased as a conditional ('If `_convergence` lands over 800 lines, split it on the `_post_patch_states` boundary'), when the plan's own arithmetic makes it a certainty. Test Impact compounds this by recording the disposition as '4 modules + `__init__.py`' for this package. **Suggestion:** Promote the `_post_patch_states` split to a mandatory fifth row in the table, and change Test Impact to '5 modules + `__init__.py`'. | addressed | Measured AST span of the proposed group: L783-1736 = 954 lines of definitions before the import header, so >800 is guaranteed, not conditional. Split at the constants boundary: file A = `TestConvergenceLatchRevisionAppliedAt` (L783-912) through `TestNeedsRevisionInvalidatedByRevision` (L1282-1452) = 670 lines; file B = `_VERDICT_AT`/`_PATCH_BEFORE_VERDICT`/`_PATCH_AFTER_VERDICT` (L1459-1461), `_post_patch_states` (L1464-1499), and `TestRow8bOwnsStaleVerdict` through `TestNoRuleBlockIsDistinguishable` (L1502-1736) = 278 lines. The driver ran `test_sdlc_router_decision_post_patch.py` through the real `FEATURE_MAP` first-hit algorithm: it resolves to `sdlc`, so the fifth basename is marker-safe. |
+| CONCERN | Scope & Value | Team Orchestration runs four builder subagents concurrently inside one shared worktree and rests correctness on 'no two builders touch the same path, so their commits cannot interleave'. That is false at the git-mechanics level: a working tree has one shared index, not per-path locking, so concurrent `git add` / `git rm` / `git commit` can hit `.git/index.lock` contention or let one builder's commit swallow another's staged files regardless of path disjointness. No task in Step by Step Tasks says who runs `git rm` on the four monoliths or when. **Suggestion:** Have the four builders write and delete files on disk only, and serialize every git-index operation into one pass (either a single commit by Task 5's reviewer, or explicit `git commit -m msg -- <paths>` with a pathspec per builder). | addressed | This repo has already been burned by exactly this: a bare `git commit` snapshots the shared index and sweeps another lane's staged files -- the mitigation of record is an explicit pathspec, `git commit -m msg -- <paths>`, never a bare `commit -a`. Concretely: add to each build-* task 'stage and commit with an explicit pathspec covering only your own package directory and your own deleted monolith', or move all four `git rm tests/unit/test_*.py` calls into Task 5 (validate-parity) as a single serialized pass before the parity diff runs. |
+| CONCERN | History & Consistency | The Documentation task claims the `FEATURE_MAP` ordering-dependence found by spike-1 is something 'the current text does not mention', but `tests/README.md:484` already states the algorithm 'substring-matches the remainder against `FEATURE_MAP`, taking the first hit' -- that phrase IS the ordering-dependence. The real gap is narrower: the README states first-hit-wins abstractly but gives no concrete example of dict-insertion order silently changing a real basename's marker. **Suggestion:** Reword the Documentation bullet to say the README lacks a worked example rather than lacking the concept, and have the builder add spike-1's `worktree_manager`-after-`config` collision as that example. | addressed | `tests/README.md:482-486` verbatim: 'strips `test_` and `.py` from the nodeid's last path segment and substring-matches the remainder against `FEATURE_MAP`, taking the first hit.' The README's step 2 ('Check each new basename against `FEATURE_MAP` for an accidental new match') already covers the gaining-a-marker direction; the missing example is the losing-a-marker-by-position case. Edit the plan's Documentation bullet, not just the README, so a reviewer diffing the PR body against the README does not flag the characterization as inaccurate. |
+| NIT | Structural | Technical Approach section 3 states '`_CandidateStub` travels with `TestCmdReadFlags`, its only consumer.' `TestCmdReadProject` also consumes it. The grouping is still correct (both classes land in `test_valor_telegram_cli_read.py`), so nothing breaks -- but the stated rationale is wrong and would mislead anyone who later re-derives the boundary from it. | addressed | - |
+| NIT | Structural | Two stale figures. (a) `test_worktree_manager_cleanup.py` is estimated at ~305 lines but its four classes span L36-456 = 421 lines -- 38% low, while every other estimate in the plan lands within ~3%. (b) Freshness Check records 'Baseline commit: `483c7cd14`'; HEAD is now `c332dcb92`. The three intervening commits are all `docs/plans/` and `git diff 483c7cd14..HEAD -- tests/` is empty, so no premise changes -- but the recorded baseline should be refreshed. | addressed | - |
 ---
 
 ## Open Questions
