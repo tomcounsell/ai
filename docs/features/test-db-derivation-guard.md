@@ -2,7 +2,7 @@
 
 A static check that fails the suite when a test computes its own Redis database number instead of
 asking the claim API. Implemented in `tests/db_derivation_guard.py`, enforced by
-`tests/unit/test_db_derivation_guard.py`. Issue #2655.
+`tests/unit/test_db_derivation_guard.py`.
 
 ## Why it exists
 
@@ -11,9 +11,6 @@ owns a private logical database, claimed via an `flock` over the pool `[1..TEST_
 `tests/db_claim.py`. A test that computes its own database number can flush a database another live
 process is using, which shows up as data vanishing mid-test in a run that has no visible connection
 to the offending test.
-
-That defect was fixed at one call site in #2117, at another in #2606, and at a third in #2624. Each
-fix was correct and none of them made the next wrong site visible.
 
 ## The rule
 
@@ -48,15 +45,14 @@ visible at all: the opaque `**name` splat (`redis.Redis(**kw)`) and a dict liter
 `"db"` key but an opaque entry (`redis.Redis(**{**base, "host": "x"})`) are both judged by callee,
 because there is nothing else to judge them by.
 
-Enumerating accepted *callee* shapes is what failed three times: everything unenumerated passes
-silently, and the next call site is always written in a shape nobody enumerated. That is still the
-guard's thesis for every route where the value is visible, and it holds without exception there.
+Enumerating accepted *callee* shapes is fragile: everything unenumerated passes silently, and the
+next call site is always written in a shape nobody enumerated. The guard's thesis for every route
+where the value is visible is callee-agnostic matching, and it holds without exception there.
 
 **Why the opaque leg is scoped to `REDIS_CONSTRUCTORS`.** An unrestricted, callee-agnostic version of
-the opaque-splat leg was tried first, not assumed safe: flagging every opaque `**` splat regardless of
-callee produced 183 violations across 100+ unrelated files, because `**kwargs` forwarding is the
-ordinary way test helpers are written in this tree. `tests/` has 191 `**` splat call sites total and
-zero of them are Redis-ish. A guard that fires on every helper in the repo does not get fixed, it gets
+the opaque-splat leg flags every opaque `**` splat regardless of callee and produces 183 violations
+across 100+ unrelated files, because `**kwargs` forwarding is the ordinary way test helpers are
+written in this tree. `tests/` has 191 `**` splat call sites total and zero of them are Redis-ish. A guard that fires on every helper in the repo does not get fixed, it gets
 deleted, and then the real hole is open again with no guard at all — so the opaque leg alone is scoped
 to `REDIS_CONSTRUCTORS` (`Redis`, `StrictRedis`, `from_url`), and the cost is recorded rather than
 hidden. This matters beyond the code comment: a maintainer reading only this doc, without the module's
@@ -98,7 +94,7 @@ That distinction is worth stating because the failure mode is quiet. One test co
 on its own, and simplifies that condition away, sees a single failure, reads it as noise, and removes
 the only thing holding the invariant up.
 
-**`DEFERRED`** — temporary. Must carry `blocked_on` (an issue like `#2628`) and an ISO `expires` date.
+**`DEFERRED`** — temporary. Must carry `blocked_on` (an issue reference) and an ISO `expires` date.
 Reported on every run and a hard failure once the date passes. This exists so a site that cannot be
 fixed yet is never laundered through `ALLOWLIST` by hiding its pool database behind a variable.
 
@@ -111,15 +107,14 @@ a failure: exemptions cannot outlive the sites they were written for.
 
 ## Relationship to the runtime ownership check
 
-#2628 ships a connection-layer check that fails closed when an unclaimed destructive operation
-executes. The two are complementary rather than redundant:
+The runtime ownership check is a connection-layer check that fails closed when an unclaimed
+destructive operation executes. The two are complementary rather than redundant:
 
 - The static guard sees sites that never execute in a given run, and sites that perform no destructive
   operation at all. `redis.Redis(db=1).ping()` is a wrong derivation that no flush-ownership check
   will ever observe.
-- A runtime raise can be swallowed by the code around it. One such site sat inside
-  `except Exception: pytest.skip(...)`, which would have converted the runtime guard's exception into
-  a green skip.
+- A runtime raise can be swallowed by the code around it. A site inside
+  `except Exception: pytest.skip(...)` converts the runtime guard's exception into a green skip.
 - The runtime check sees derivations computed inside installed library code, which no walk of this
   repo's sources can reach.
 

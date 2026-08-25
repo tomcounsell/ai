@@ -1,14 +1,9 @@
 # Test-DB Ownership
 
-Two `tests/unit/` runs on the same commit, on the same machine, used to produce different
-failure sets. Every failing node passed in isolation. A suite whose failure set changes
-between identical runs cannot answer "did my change break something", so this is a defect in
-the measuring instrument rather than an ordinary flake.
-
-The cause was three independent writers, each corrupting state that a *different live pytest
-process* owned. This page is about the rule that ends that class: **a test process may flush
-only a database it has claimed, and the claim is a kernel-enforced fact rather than a number
-each call site re-derives.**
+A test process may flush only a database it has claimed, and the claim is a kernel-enforced
+fact rather than a number each call site re-derives. This rule ends the failure class where a
+suite's failure set changes between identical runs because one process corrupts state that a
+*different live pytest process* owns.
 
 ## The claim lifecycle
 
@@ -21,11 +16,10 @@ Ownership is established once per process, at session start, and every state is 
 | `unclaimable-permanently` | the pool is exhausted; the claim raised | denies, and the failure is **sticky**: the wait is paid once per process, never once per test. `pytest.exit` aborts the session with one line instead of thousands of setup errors. |
 | `not-applicable-controller` | the xdist controller, which runs no tests | never claims, never flushes. Claiming there would hold one of only 15 machine-global slots for the whole session and never use it. |
 
-Claiming at session start rather than lazily is the decision the whole design rests on. The
-alternative was an exemption permitting each worker's first flush while the claimed set was
-still empty, and that exemption is a hole exactly the width of the bug: "permit a flush when
-we do not know who owns the target" is the pre-#2606 status quo restated, and it would have
-been load-bearing on every worker's first test forever.
+Claiming at session start rather than lazily is the decision the whole design rests on. A
+lazy exemption permitting each worker's first flush while the claimed set is still empty is a
+hole exactly the width of the bug: "permit a flush when we do not know who owns the target"
+would be load-bearing on every worker's first test forever.
 
 ## How to get a database
 
@@ -50,10 +44,10 @@ clients built by installed plugins and not only this repo's own code.
 - `flushdb()` against a db in `claimed_test_dbs()` — permitted.
 - `flushdb()` against anything else — `RuntimeError` naming the attempted db, the claimed
   set, and `scratch_test_db`.
-- `flushdb()` against db 0 — `RuntimeError` with its own message and the 2026-06-03
-  production-wipe rationale. Ownership subsumes this rule (no test process can claim db 0),
-  but the branch stays because the message is what a reader needs. One wrapper, not two
-  idioms: two independently-maintained flush guards is how one of them drifts.
+- `flushdb()` against db 0 — `RuntimeError` with its own message and the production-wipe
+  rationale. Ownership subsumes this rule (no test process can claim db 0), but the branch
+  stays because the message is what a reader needs. One wrapper, not two idioms: two
+  independently-maintained flush guards is how one of them drifts.
 - `flushall()` — always denied. It ignores the selected db and wipes every one.
 - An empty claimed set denies everything. Fail-closed is safe precisely because of the
   lifecycle table above.
@@ -65,7 +59,7 @@ so a captured snapshot would be permanently empty.
 
 `claim_test_db()` polls the pool at roughly one-second intervals for `TEST_DB_CLAIM_WAIT_S`
 seconds (default 30) and then raises, naming the pool size and `scripts/reap-xdist.sh --apply`.
-It does **not** fall back to a derived number any more. A colliding database is strictly worse
+It does **not** fall back to a derived number. A colliding database is strictly worse
 than a clear failure: it silently produces the corruption this whole mechanism exists to
 remove, and a blocked run is recoverable where a corrupted baseline is not.
 
@@ -83,58 +77,31 @@ worker that dies during startup, up to `--max-worker-restart` (default `numproce
 and each replacement is a fresh process with a fresh memo, so "once per process" means once
 per worker process.
 
-The registry-unreachable path keeps its legacy fallback: no lock can be taken there at all, so
-a collision is unavoidable and degrading loudly beats refusing to run. Its number is still
+The registry-unreachable path keeps its fallback: no lock can be taken there at all, so a
+collision is unavoidable and degrading loudly beats refusing to run. Its number is still
 registered as owned — skipping that would compose with the fail-closed guard into a
 whole-process setup outage, turning a documented graceful degradation into an outright one.
 
-## The three writers
-
-### 1. Two call sites still computing the pre-#2606 answer
-
-`tests/unit/test_redis_flush_guard.py` derived `gw{N} -> db{N+1}` in a helper whose docstring
-claimed it "matches `redis_test_db()`" — true until #2606 replaced that derivation with the
-flock claim. `tests/unit/test_conftest_isolation_guards.py` hardcoded db 15 and called it
-"scratch space", but 15 is `_TEST_DB_POOL_MAX`, the top slot of the pool. Under
-`PYTEST_XDIST_WORKER=gw3` a process claimed slot 11 while the legacy rule returned 4, so the
-flush landed on a sibling run's data.
-
-### 2. An unrestored module reload
-
-`tests/unit/test_index_drift.py` called `importlib.reload(agent.index_drift)` to observe a
-module constant, which rebinds `DRIFT_COVERED_MODELS` to a brand-new dict and re-runs the
-registrations into it. `tests/unit/test_index_drift_coverage.py` held the orphaned old dict
-from its collection-time import, so its restore fixture cleaned the orphan while
-`register_drift_model` wrote into the live one: the cleanup silently no-opped and a fake
-in-memory model stayed registered for the rest of that worker. `--dist=loadfile` decides
-whether the reloader and the victim share a worker, which is the same rotate-run-to-run
-signature on a path db ownership cannot touch. The reload is gone, the victim binds through
-the module object, and the conftest identity guard now covers module-level registries as well
-as `BaseException` subclasses.
-
-### 3. Popoto's bundled pytest plugin — the highest-frequency one
+## Installed pytest plugins
 
 `popoto` registers `pytest11 = popoto.pytest_plugin`, which this repo loads on every run:
 `pyproject.toml` addopts disable `postgresql` only. With neither `POPOTO_TEST_DB` nor the
-`popoto_test_db` ini option set, the plugin ran on its default of **db 15** and its
-function-scoped autouse `_popoto_flush_db` flushed that db before *every* test in *every*
-pytest process on the machine.
-
-This is the case that proves the pool's owner is not only this repo's own code, so the rule
-generalises: **any installed pytest plugin that touches Redis must be pointed at the claimed
-db.** The fix is sited at the connection/claim layer, never at the installed plugin.
-`pytest_configure` exports `POPOTO_TEST_DB`, which is the plugin's own documented resolution
-input (env > ini > default, read at fixture setup time, long after the hook). Nothing patches,
-vendors, or pins popoto. Disabling it with `-p no:popoto` was rejected: it drops the plugin's
-per-test `_popoto_reset_async` event-loop reset, which this repo's own fixture does not
-replicate.
+`popoto_test_db` ini option set, the plugin's function-scoped autouse `_popoto_flush_db`
+flushes its configured db before *every* test in *every* pytest process on the machine.
+The rule therefore generalises: **any installed pytest plugin that touches Redis must be
+pointed at the claimed db.** The fix is sited at the connection/claim layer, never at the
+installed plugin. `pytest_configure` exports `POPOTO_TEST_DB`, which is the plugin's own
+documented resolution input (env > ini > default, read at fixture setup time, long after the
+hook). Nothing patches, vendors, or pins popoto. Disabling it with `-p no:popoto` is
+rejected: it drops the plugin's per-test `_popoto_reset_async` event-loop reset, which this
+repo's own fixture does not replicate.
 
 Two checks keep it honest. A session-scoped `_popoto_client_ownership_check` walks whatever
 clients `popoto.redis_db` holds — `POPOTO_REDIS_DB` and `_POPOTO_ASYNC_REDIS_DB` — and asserts
 each points at a claimed db, so a future plugin that swaps those globals is caught whatever
 version put them there. And `os.environ["POPOTO_TEST_DB"] == str(claim_test_db())` is asserted
 as a drift detector: if a future popoto changes its resolution order, that fails loudly
-instead of the suite quietly resuming its rotation.
+instead of the suite quietly resuming rotation.
 
 `_POPOTO_ASYNC_REDIS_DB` is `None` at every moment a session-scoped fixture can observe it, and
 `None` is its correct state — the plugin nulls it at both setup and teardown of every test so
@@ -142,34 +109,29 @@ no client binds to a stale event loop. Skip it; never assert it is non-`None`. A
 `AttributeError` raised inside a session-scoped autouse fixture errors every test in the
 process during setup.
 
-## Why enforcement rather than another sweep
+## Why enforcement
 
-This is the fifth pass over the same substrate. #2117 fixed one victim of a cross-process
-collision. #2606 replaced the derivation with the flock claim — the right fix — but changed
-the *meaning* of the test db without sweeping every consumer, and nothing existed to catch
-the ones it missed. #2624 swept one more consumer, found by a failing test rather than by a
-guard.
-
-The pattern underneath all of them: db ownership was a convention every call site was trusted
-to re-derive correctly, and re-deriving it wrong was silent. Each fix corrected one
-derivation; none made a wrong derivation *detectable*. Enforcing at the point of damage means
-a stale derivation fails at its own line instead of corrupting a stranger three files away —
-the same promotion from discipline to mechanism that #2163 applied to pub/sub channels.
+db ownership is a convention that every call site is trusted to re-derive correctly, and
+re-deriving it wrong is silent. Enforcing at the point of damage means a stale derivation
+fails at its own line instead of corrupting a stranger three files away — the same promotion
+from discipline to mechanism applied to pub/sub channels.
 
 A construction-time backstop (an AST walk rejecting any `db=` value that does not come from
-the claim API) is tracked separately as #2655. It prevents the next recurrence; it stops none
-of the three writers above, which is why it ships on its own cadence.
+the claim API) prevents the next recurrence; see the
+[static derivation guard](test-db-derivation-guard.md). It stops none of the runtime writers,
+which is why the two ship as complementary checks.
 
-## Relationship to #2645
+## Relationship to the db-0 flush guard
 
-#2645's Layer 1 is a guarded connection helper that refuses dangerous operations on db 0. This
-guard is the same mechanism generalised: db 0 is simply the db no test process can ever claim,
-so "deny `flushdb` on any db not in `claimed_test_dbs()`" subsumes "deny `flushdb` on db 0".
+The db-0 flush guard's Layer 1 is a guarded connection helper that refuses dangerous operations
+on db 0. This guard is the same mechanism generalised: db 0 is simply the db no test process can
+ever claim, so "deny `flushdb` on any db not in `claimed_test_dbs()`" subsumes "deny `flushdb` on
+db 0".
 
-#2645's open question — rename-command versus ACLs for legitimate db 1-15 flushes — is looking
-for a **by-db discriminator**. The per-process flock-claimed set is exactly that: ownership is
-decided by a kernel primitive, is queryable at call time, and already distinguishes a
-legitimate test flush from a cross-process wipe. A server-side rule should key off the same
+The db-0 guard's open question — rename-command versus ACLs for legitimate db 1-15 flushes — is
+looking for a **by-db discriminator**. The per-process flock-claimed set is exactly that:
+ownership is decided by a kernel primitive, is queryable at call time, and already distinguishes
+a legitimate test flush from a cross-process wipe. A server-side rule should key off the same
 claim registry rather than a static db allowlist.
 
 ## Run provenance

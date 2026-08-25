@@ -2,11 +2,11 @@
 
 ## Overview
 
-Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn an Eng session (full permissions, handles both SDLC work and conversational responses) or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (the single `Eng:` prefix today). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
+Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn an Eng session (full permissions, handles both SDLC work and conversational responses) or treat the group as a passive teammate listener. The `persona` field in `projects.json` group configuration gives operators direct control over per-group routing without relying on naming conventions.
 
 ## Config Schema
 
-The `persona` field lives inside the `telegram.groups` dictionary of each project in `projects.json`. Groups can be configured as either a simple list (legacy) or a dictionary with per-group settings (new):
+The `persona` field lives inside the `telegram.groups` dictionary of each project in `projects.json`. Groups can be configured as either a simple list or a dictionary with per-group settings:
 
 ```json
 {
@@ -32,7 +32,7 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
 | `"teammate"` | `PersonaType.TEAMMATE` | Teammate session | Passive listener -- only responds on @mention or reply-to-Valor |
 | `"customer-service"` | `PersonaType.CUSTOMER_SERVICE` | Teammate session | Action-oriented, no code writes; used by the email-spawned customer-service override |
 
-`PersonaType` is defined in `config/enums.py` (`ENGINEER`, `TEAMMATE`, `CUSTOMER_SERVICE`). The group-config mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly. Note that `customer-service` is not selected via the Telegram `groups` persona field today -- it is resolved by `agent/sdk_client.py` from an `email.persona` override for email-transport teammate sessions.
+`PersonaType` is defined in `config/enums.py` (`ENGINEER`, `TEAMMATE`, `CUSTOMER_SERVICE`). The group-config mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly. Note that `customer-service` is not selected via the Telegram `groups` persona field -- it is resolved by `agent/sdk_client.py` from an `email.persona` override for email-transport teammate sessions.
 
 ## Mode Resolution Order
 
@@ -41,9 +41,9 @@ The `resolve_persona()` function in `bridge/routing.py` uses the following prior
 1. **DMs** -- use the project's `telegram.dm_persona` if configured (parsed as a `PersonaType`), otherwise default to `PersonaType.TEAMMATE` (direct teammate mode, no SDLC overhead)
 2. **Config persona** -- if the project has a `telegram.groups` dictionary entry matching the chat title with a valid `persona` field, return the corresponding `PersonaType`
 3. **Title prefix fallback** -- if no persona is configured, the `"Eng:"` prefix resolves to `PersonaType.ENGINEER`
-4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (respond_to_all/mention logic for response decisions)
+4. **None (unconfigured)** -- no persona determined; caller falls through to the default behavior (respond_to_all/mention logic for response decisions)
 
-This layered approach ensures full backward compatibility: existing groups that rely on title prefixes continue working without any configuration changes.
+This layered approach keeps full backward compatibility: groups that rely on title prefixes work without any configuration changes.
 
 ## Passive Listener Behavior (Teammate Groups)
 
@@ -81,13 +81,13 @@ For teammate routing, the response-decision path in `bridge/routing.py::should_r
 The async response decision uses `resolve_persona()` to handle teammate groups:
 
 - If persona is `PersonaType.TEAMMATE` -> only respond on @mention or reply-to-Valor; skip LLM classification entirely
-- Other personas -> fall through to existing response logic (respond_to_all, respond_to_unaddressed, etc.)
+- Other personas -> fall through to the default response logic (respond_to_all, respond_to_unaddressed, etc.)
 
 ## Backward Compatibility
 
-- **List-format groups**: If `telegram.groups` is a list (legacy format), `resolve_persona()` skips the persona lookup and falls through to title prefix matching
+- **List-format groups**: If `telegram.groups` is a list, `resolve_persona()` skips the persona lookup and falls through to title prefix matching
 - **Dict without persona**: If a group entry is a dict but has no `persona` key, the function falls through to title prefix matching
-- **No groups config**: Projects without a `telegram.groups` section use title prefix matching as before
+- **No groups config**: Projects without a `telegram.groups` section use title prefix matching
 
 ## Key Files
 

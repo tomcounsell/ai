@@ -2,9 +2,9 @@
 
 ## Overview
 
-`AgentSession.chat_message_log` is a bounded, session-scoped rolling log of inbound and outbound chat traffic. It gives the message drafter (`bridge/message_drafter.py`) a first-class view of what has been said in the current session, so it can avoid duplicating messages it (or the agent) already sent.
+`AgentSession.chat_message_log` is a bounded, session-scoped rolling log of inbound and outbound chat traffic. The PM completion runner (`agent/session_completion.py`) reads it to detect when a drafted summary would restate a message the agent already sent in-session, so it can suppress redundant delivery.
 
-**Problem it solves:** The drafter previously had no visibility into its own prior outbound messages. This caused observable duplication: the same content posted twice in rapid succession, long-form summaries followed immediately by paraphrases of themselves. Issue #1192.
+**Problem it solves:** The runner needs visibility into prior outbound messages to avoid duplication — the same content posted twice in rapid succession, long-form summaries followed immediately by paraphrases of themselves.
 
 ## Data Model
 
@@ -28,7 +28,7 @@ Each entry is a dict with this shape:
 | `message_id` | int or None | Telegram message ID, if available |
 | `ts` | float | Unix timestamp |
 
-The log is bounded to `CHAT_LOG_MAX_ENTRIES` (50). The drafter reads only the last `CHAT_LOG_DISPLAY_ENTRIES` (20) entries to keep prompt size manageable.
+The log is bounded to `CHAT_LOG_MAX_ENTRIES` (50). The runner reads only the last `CHAT_LOG_DISPLAY_ENTRIES` (20) entries to keep prompt size manageable.
 
 ### Method: `AgentSession.append_chat_log`
 
@@ -57,7 +57,7 @@ The function runs synchronously in a thread (`asyncio.to_thread`) so it cannot `
 
 If no session is resolved, the append is skipped silently (logged at DEBUG). The relay must never crash on chat-log bookkeeping.
 
-**Timing invariant:** The outbound entry is appended _after_ the successful send. The drafter never sees the current turn's text in the log (it produces that text). It sees prior turns and any Path B sends from earlier in this session. This is the correct and desired ordering.
+**Timing invariant:** The outbound entry is appended _after_ the successful send. The runner never sees the current turn's text in the log (it produces that text). It sees prior turns and any Path B sends from earlier in this session. This is the correct and desired ordering.
 
 ### Path B: `valor-telegram send` from inside an agent session
 
@@ -83,13 +83,7 @@ Every Telegram message dispatched to a session via `dispatch_telegram_session` r
 
 > **Dispatch gap:** Follow-up steering messages and interjection messages to already-running sessions (dispatched via `bridge/dispatch.py` steering path) are not captured in the chat log — only new-session dispatch is logged.
 
-## Read Path 1: Message Drafter
-
-> **Updated (drafter_passthrough_validation):** The `_build_draft_prompt` function was removed when the drafter was repositioned from an LLM rewriter to a pass-through validation filter. The drafter no longer builds an LLM prompt and no longer reads `chat_message_log` directly. This section is retained for historical context; Read Path 2 (PM Completion Runner) is the active consumer of `chat_message_log`.
->
-> Context about prior outbound messages is now passed to the agent via the harness system prompt (Pass 1 prompt injection in `agent/session_completion.py`) for PM final-delivery turns, not via a drafter prompt block.
-
-## Read Path 2: PM Completion Runner (issue #1262)
+## Read Path: PM Completion Runner
 
 **Location:** `agent/session_completion.py::_build_completion_baseline` (Pass 1 prompt block + post-draft suppression baseline)
 
@@ -105,7 +99,7 @@ To bound the read-after-write race against Path B publishes, the runner first ca
 ## Bound and Trimming
 
 - **Storage bound:** 50 entries (CHAT_LOG_MAX_ENTRIES). Older entries are trimmed on every `append_chat_log` call.
-- **Display cap:** 20 entries in the drafter prompt (CHAT_LOG_DISPLAY_ENTRIES). The full stored log is available for future read patterns.
+- **Display cap:** 20 entries in the runner prompt (CHAT_LOG_DISPLAY_ENTRIES). The full stored log is available to other readers.
 - **Entry size:** ~200 bytes/entry at realistic content lengths. 50 × 200 ≈ 10 KB upper bound per session — well within Redis hash comfort.
 
 ## Race Conditions
@@ -126,11 +120,11 @@ fresh.chat_message_log = log
 fresh.save()
 ```
 
-This narrows the race window to the read-modify-write critical section but does not eliminate it under perfect contention. Given inbound frequency (~1 per user message) and relay outbound tempo (~1 msg/sec ceiling), contention is rare in practice. Accepted as residual risk for v1.
+This narrows the race window to the read-modify-write critical section but does not eliminate it under perfect contention. Given inbound frequency (~1 per user message) and relay outbound tempo (~1 msg/sec ceiling), contention is rare in practice. Accepted as residual risk.
 
-### Drafter reads before current turn's outbound is flushed
+### Reader never sees the current turn's own outbound
 
-By design: the drafter produces the current turn's outbound text. The relay appends _after_ send. The drafter never sees the current turn's text in the log — it sees prior turns and prior Path B sends. No race; correct by construction.
+By design: the runner produces the current turn's outbound text. The relay appends _after_ send. The runner never sees the current turn's text in the log — it sees prior turns and prior Path B sends. No race; correct by construction.
 
 ## Configuration
 
@@ -141,17 +135,10 @@ By design: the drafter produces the current turn's outbound text. The relay appe
 
 Both constants are importable from `models.agent_session` for use in tests.
 
-## No-Gos (Out of Scope for This Feature)
+## No-Gos (Out of Scope)
 
 - Cross-session chat awareness — each session sees only its own scope.
 - Hydrating the log from Telegram history on session resume — fresh start is the default.
-- Email-medium chat_message_log support — Telegram-only for now; email follows the same pattern in a follow-up.
+- Email-medium chat_message_log support — Telegram-only.
 - Compressing or summarizing log entries — raw text only.
 - Merging with `session_events` (lifecycle) — they stay separate.
-
-## Related Issues and PRs
-
-- **#1192** — This feature.
-- **#1191** — `--reply-to` default for `valor-telegram send` (same Path B code path).
-- **#1035** — Message drafter consolidation (substrate this work plugs into).
-- **#318** — Unthreaded message routing into active sessions (confirmed `chat_id → AgentSession` mapping path).

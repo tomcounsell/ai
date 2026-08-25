@@ -6,30 +6,21 @@ noticing.
 
 ## Overview
 
-On 2026-07-14 an eng session crashed with `unpack(b) received extra data` (a
-msgpack decode failure). Afterward `AgentSession.query.all()` returned `0`
-with **no exception**, `valor_session list` reported "No sessions found", and
-the dashboard showed an empty queue -- while **11 AgentSession hashes still
-existed in Redis** (`repair_indexes()` later reported `sessions_rebuilt=11,
-cleaned=0`). Every observability surface read through the same broken index
-and reported "zero sessions" while the data was intact but unreachable.
-
-**Root cause identified (issue #2536).** The crashing session was running a
-popoto below the floor declared in `pyproject.toml`, which cannot decode the
-internal index-pointer fields an at-or-above-floor popoto writes into each model
-hash. `rebuild_indexes()` deletes every index *before* it discovers that, so it
-destroyed the index and rebuilt nothing -- exactly the intact-but-unreachable
-state above. **This module is the alarm for that outcome; the interlock that
-prevents it is [Popoto Version-Floor Guard](popoto-version-floor-guard.md).**
-Drift detection remains load-bearing: it catches index/hash divergence from any
-cause, not just this one.
-
-The root mechanism: when the status index / class set desyncs from the actual
-hashes (index empty or unreadable, hashes present), `query.all()` legitimately
-returns `[]` -- `get_many_objects` finds no db_keys and returns an empty list
-with no error (`popoto/models/query.py:2688-2694`). Nothing distinguishes
+When the status index / class set desyncs from the actual hashes (index empty
+or unreadable, hashes present), `AgentSession.query.all()` returns `[]` with
+**no exception** — `get_many_objects` finds no db_keys and returns an empty
+list with no error (`popoto/models/query.py:2688-2694`). Nothing distinguishes
 "genuinely zero sessions" from "N orphaned hashes the index can no longer
 see." Corruption masquerades as emptiness, silently.
+
+The root cause is a popoto below the floor declared in `pyproject.toml`, which
+cannot decode the internal index-pointer fields an at-or-above-floor popoto
+writes into each model hash. `rebuild_indexes()` deletes every index *before*
+it discovers that, so it destroys the index and rebuilds nothing — leaving the
+hashes intact but unreachable. **This module is the alarm for that outcome; the
+interlock that prevents it is [Popoto Version-Floor
+Guard](popoto-version-floor-guard.md).** Drift detection remains load-bearing:
+it catches index/hash divergence from any cause, not just this one.
 
 This feature closes that gap with a reconciliation function
 (`agent/index_drift.py`), a non-fatal worker-startup guard, and a
@@ -89,8 +80,8 @@ otherwise have downgraded it to a silent warning.
 ### The inverse anomaly is logged distinctly
 
 `hash_count < queryable_count` (stale index members with no backing hash) is
-a different, already-partially-mitigated anomaly -- see
-[`clean_indexes()` / issue #1459](session-lifecycle.md). It is logged as a
+a different, partially-mitigated anomaly -- see
+[`clean_indexes()`](session-lifecycle.md). It is logged as a
 distinct WARNING and does **not** set `drifted=True`, so it is never confused
 with the primary "hashes the index can't see" drift class.
 
@@ -158,24 +149,23 @@ env var.
 ## Detect-Only, Not Repair
 
 This guard **never calls `repair_indexes()`** and never mutates Redis in any
-way. It was deliberately scoped as detect-only during plan critique: an
+way. It is deliberately scoped as detect-only: an
 automatic self-heal on drift would reopen the non-atomic class-set
 delete-then-re-add window documented in
-[Session Lifecycle -- Index-Rebuild Race and Read-Path Retry (issue
-#1720)](session-lifecycle.md#index-rebuild-race-and-read-path-retry-issue-1720),
+[Session Lifecycle -- Index-Rebuild Race and Read-Path
+Retry](session-lifecycle.md#index-rebuild-race-and-read-path-retry-issue-1720),
 and the doctor check's read-only invocation could fire that repair at any
 time the worker or dashboard are actively serving -- potentially
 reproducing the exact silent-empty incident this guard exists to catch.
 
 Repair of detected drift (making index repair atomic) is out of scope for
 this feature and owned by a separate effort: see
-`docs/plans/session-recovery-observation-audit.md` ("candidate 13" -- atomic
-index repair). This guard's sole responsibility is to make divergence
-impossible to miss; recovering from it is a human- or repair-tool-driven next
-step.
+`docs/plans/session-recovery-observation-audit.md` (atomic index repair). This
+guard's sole responsibility is to make divergence impossible to miss;
+recovering from it is a human- or repair-tool-driven next step.
 
 ## Related
 
-- [Session Lifecycle](session-lifecycle.md) -- the 14-state lifecycle model, `clean_indexes()` / issue #1459, and the issue #1720 class-set race this guard's counterpart anomaly relates to
+- [Session Lifecycle](session-lifecycle.md) -- the 14-state lifecycle model, `clean_indexes()`, and the class-set race this guard's counterpart anomaly relates to
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- the other orphan/corruption reapers running at worker startup
 - `docs/plans/session-recovery-observation-audit.md` -- owner of future atomic index-repair work

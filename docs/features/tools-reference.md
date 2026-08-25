@@ -371,7 +371,7 @@ valor-image-analyze --help                               # Show options
 
 ## Browser Automation
 
-Browser automation runs through **BYOB MCP** (`mcp__byob__browser_*`) — a Chrome extension + native messaging host + MCP server that drives the user's already-logged-in Chrome. Public pages and authenticated dashboards both use this surface; the legacy `agent-browser` and `bowser` skills were retired in #1256. See [`byob-browser-control.md`](byob-browser-control.md) for setup and architecture.
+Browser automation runs through **BYOB MCP** (`mcp__byob__browser_*`) — a Chrome extension + native messaging host + MCP server that drives the user's already-logged-in Chrome. Public pages and authenticated dashboards both use this surface. See [`byob-browser-control.md`](byob-browser-control.md) for setup and architecture.
 
 ### Core Workflow
 

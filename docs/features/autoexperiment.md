@@ -20,7 +20,7 @@ All experiments run on isolated git branches (`experiment/{target-name}`). Winni
 # Run 50 iterations on observer routing accuracy
 python scripts/autoexperiment.py --target observer --iterations 50 --budget 2.0
 
-# Dry-run (no git operations) on message drafter (target name is historical)
+# Dry-run (no git operations) on message drafter (`summarizer` target name)
 python scripts/autoexperiment.py --target summarizer --dry-run
 
 # List available targets
@@ -40,7 +40,7 @@ python scripts/autoexperiment.py --target observer --report
 
 Only the static body template is optimized. The dynamic prompt construction logic (`_build_observer_system_prompt`) is off-limits.
 
-### Message Drafter Voice (`summarizer` — historical name; optimizes the message drafter prompt)
+### Message Drafter Voice (`summarizer`) — optimizes the message drafter prompt
 - **File**: `bridge/message_drafter.py` (variable: `DRAFTER_SYSTEM_PROMPT`)
 - **Eval**: 10 sample agent outputs judged for voice quality
 - **Metric**: Average quality score 0-1 (higher is better)
@@ -134,7 +134,7 @@ Using OpenRouter ultra-cheap models:
 | `scripts/autoexperiment.py` | Core framework, CLI, targets, eval functions |
 | `config/models.py` | Model aliases (`MODEL_EXPERIMENT`) |
 | `data/experiments/observer/eval_corpus.jsonl` | Observer routing test scenarios |
-| `data/experiments/summarizer/eval_samples.jsonl` | Message drafter voice test samples (directory name is historical) |
+| `data/experiments/summarizer/eval_samples.jsonl` | Message drafter voice test samples |
 | `com.valor.autoexperiment.plist` | launchd schedule config |
 | `scripts/install_autoexperiment.sh` | Schedule installer |
 | `tests/unit/test_autoexperiment.py` | Unit tests |

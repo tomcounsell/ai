@@ -173,7 +173,7 @@ for TEST pending).
 
 ---
 
-## Worktree Cleanup Blocked (issue #1357)
+## Worktree Cleanup Blocked
 
 **Symptom.** `python scripts/post_merge_cleanup.py {slug}` exits **2** and
 prints `worktree busy: in use by session_id=<id>` to stderr. The local

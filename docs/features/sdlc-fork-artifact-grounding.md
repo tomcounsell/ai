@@ -1,28 +1,20 @@
 # SDLC Fork Artifact-Grounding Guards
 
-**Status:** Shipped · **Issues:** #2124, #2026 · Extends the #2076 (#2026 umbrella) fork/supervisor hardening.
-
-## Problem
+## Rationale
 
 A forked SDLC stage can hand a structurally-valid verdict back to the supervising
 pipeline **without ever having produced the verifiable artifact that gives the
-verdict its meaning**. Three live incidents in one failure family:
+verdict its meaning**. Each stage gate verifies the *artifact* the completion is
+supposed to have produced, rather than trusting the fork's *report of completion*.
+Three failure shapes motivate the guards:
 
-- **CRITIQUE (#2124 / PR #2121):** the `plan-reviewer` fork returned a complete-
-  looking critique that was entirely fabricated — it reviewed a *different,
-  nonexistent plan* and made zero grounded reads of the real plan. A fabricated
-  `READY TO BUILD` (or a fabricated blocker) would have steered the pipeline on a
-  lie; only a human manually checking tool-call counts caught it.
-- **REVIEW (#2112 / PR #2134):** the forked `/do-pr-review` returned while its
-  background judge subagents were still in flight; the children died with the fork,
-  so no `## Review:` comment was ever posted and the verdict store was empty.
-- **MERGE (#2026 / PR #2125):** a worktree HEAD left detached at a PR branch head
-  meant a later docs-cascade `git push` to main carried the PR branch ancestry, and
-  GitHub registered the push as the PR merge — no `gh pr merge` ever ran.
-
-**Root cause pattern:** each stage gate trusted the fork's *report of completion*
-rather than independently verifying the *artifact* the completion is supposed to have
-produced.
+- **CRITIQUE**: a `plan-reviewer` fork can return a fabricated verdict — reviewing
+  a *different, nonexistent plan* with zero grounded reads of the real plan.
+- **REVIEW**: a `/do-pr-review` fork can return while its background judge
+  subagents are still in flight, so no `## Review:` comment is ever posted.
+- **MERGE**: a worktree HEAD detached at a PR branch head means a later
+  docs-cascade `git push` to main carries the PR branch ancestry, and GitHub
+  registers the push as the PR merge with no `gh pr merge` ever running.
 
 ## Guards
 
@@ -31,7 +23,7 @@ silent pass) and additive (independently revertible).
 
 ### WS-A — CRITIQUE grounding leg
 
-`tools/critique_roster_check.py::evaluate()` gains an optional `plan_path`/`plan_text`.
+`tools/critique_roster_check.py::evaluate()` accepts an optional `plan_path`/`plan_text`.
 When supplied, a roster member counts as complete only if it passes BOTH the terminal
 two-line fence AND a **grounding check**: after normalization (collapse whitespace,
 casefold) and stripping the fence lines, the result file must share with the plan
@@ -43,31 +35,31 @@ critic — bounded re-dispatch, then the loud `MAJOR REWORK (CRITIQUE INCOMPLETE
 
 `CRITICS.md` makes a verbatim `GROUNDING:` citation a hard contract for every critic;
 the `critique-roster-check --plan-path` gate is the enforcement. Omitting `--plan-path`
-is byte-identical to the legacy fence-only gate (generic/foreign-repo safety).
+runs the fence-only check (generic/foreign-repo safety).
 
 ### WS-B — worktree-cwd absolute plan path
 
 `do-plan-critique` Plan Resolution canonicalizes `PLAN_PATH` to an absolute path rooted
 at `git rev-parse --show-toplevel` before the existence check and before it is passed to
-critics/SOURCE_FILES. A repo-root-relative plan path was unresolvable from a
-`.claude/worktrees/agent-*` cwd — the critic then found nothing and could improvise a
-critique of a nonexistent plan instead of failing loudly. The read now either succeeds
+critics/SOURCE_FILES. A repo-root-relative plan path is unresolvable from a
+`.claude/worktrees/agent-*` cwd — the critic then finds nothing and can improvise a
+critique of a nonexistent plan instead of failing loudly. The read either succeeds
 or the existence check exits 1.
 
 ### WS-C — CRITIQUE verdict-readability marker gate
 
 `tools/sdlc_stage_marker.py::_critique_verdict_readable()` mirrors the REVIEW WS3c
-(#2062) probe. The CRITIQUE `completed` marker is refused with a named
+probe. The CRITIQUE `completed` marker is refused with a named
 `CRITIQUE_VERDICT_MISSING` error (exit 1, fail-closed) when no readable substrate
 CRITIQUE verdict exists. The idempotent already-completed path stays exit 0.
 
 ### WS-D — REVIEW artifact presence + in-turn-await
 
 `tools/sdlc_stage_marker.py::_review_artifact_posted()` queries the PR for a formal
-GitHub review OR a `## Review:` issue comment. The REVIEW `completed` marker now
+GitHub review OR a `## Review:` issue comment. The REVIEW `completed` marker
 requires **both** a readable verdict (WS3c) AND a verifiable posted artifact; a fork
 that exited with judges in flight is refused with `REVIEW_ARTIFACT_MISSING`. The
-`do-pr-review` skill body adds a hard rule: judge subagents run in the foreground and
+`do-pr-review` skill body carries a hard rule: judge subagents run in the foreground and
 MUST be awaited in-turn — the aggregate `## Review:` comment is posted and the verdict
 recorded BEFORE the skill returns, never `run_in_background` with an un-awaited exit.
 
@@ -80,7 +72,7 @@ it. It reads the git pre-push stdin protocol and acts only on the `main` line.
 
 - **Fail-closed** on an open-PR ancestry match (`PUSH_CARRIES_OPEN_PR_ANCESTRY`).
 - **Fail-open** on a `gh` outage so an offline machine is not bricked — but a HEAD
-  detached exactly at a non-`main` local branch tip (the #2026 shape) is refused
+  detached exactly at a non-`main` local branch tip is refused
   locally without `gh` (`PUSH_DETACHED_AT_PR_BRANCH_TIP`).
 - Scoped strictly to `refs/heads/main`; feature-branch pushes are never impeded.
 
@@ -97,7 +89,7 @@ protection does not depend on hook installation.
 ## Tests
 
 - `tests/unit/test_do_plan_critique_barrier.py` — grounding-leg cases (grounded quote,
-  section header, fenced-but-ungrounded, `--plan-path` omitted = legacy, unreadable plan
+  section header, fenced-but-ungrounded, `--plan-path` omitted (fence-only fallback), unreadable plan
   fails closed).
 - `tests/unit/test_sdlc_stage_marker.py` — CRITIQUE verdict gate + `_critique_verdict_readable`
   helper; REVIEW artifact-presence gate + `_review_artifact_posted` helper.

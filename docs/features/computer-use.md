@@ -1,9 +1,5 @@
 # Computer Use (macOS Desktop Control)
 
-**Issue:** [#1256](https://github.com/tomcounsell/ai/issues/1256), [#2114](https://github.com/tomcounsell/ai/issues/2114) (v0.1.0 contract migration)
-**Plan:** [`docs/plans/byob_and_computer_use.md`](../plans/byob_and_computer_use.md) (Track 2)
-**Supersedes:** `docs/plans/telegram_desktop_control.md` (status: Cancelled)
-
 ## What it is
 
 Computer-use is the agent-facing surface for native macOS app automation. The agent drives Slack, Notes, Telegram Desktop, VS Code, etc. via the macOS Accessibility API -- click buttons, type text, screenshot windows -- without moving the user's cursor or stealing focus.
@@ -31,7 +27,7 @@ The **bcu** (background-computer-use) Swift app is the key piece: it reads the A
 
 ## Decision: separate from `tools/browser/`
 
-Per spike-3 (rev1+), browser automation and desktop automation diverge fundamentally:
+Browser automation and desktop automation diverge fundamentally:
 
 - Browser uses DOM element refs and URLs.
 - Desktop uses string window IDs, AX node targets, and app queries.
@@ -154,11 +150,12 @@ valor-computer press_key <window> cmd+return          # send (chord in key strin
 - **`{"error": "timeout", ...}`** -- bcu took longer than 10s. Loopback HTTP timeouts are unusual; check that the bcu app is responsive (Activity Monitor or `pgrep -f BackgroundComputerUse`).
 - **bcu Accessibility permission revoked** (macOS upgrade or re-sign): bcu calls fail. The agent surfaces "bcu Accessibility permission revoked -- open System Settings -> Privacy & Security -> Accessibility". Operator re-grants.
 
-## Live verification status
+## Verification
 
-The contract was migrated against the tagged v0.1.0 Swift source (`RouteRegistry.swift`) and asserted with fake-server contract tests. Live smoke testing runs on the computer-use opt-in machine after `/update` (`valor-computer list_apps`).
+The contract matches the pinned v0.1.0 Swift source (`RouteRegistry.swift`) and is asserted with fake-server contract tests. Live smoke testing runs on the computer-use opt-in machine after `/update` (`valor-computer list_apps`).
 
 ## See also
 
 - [BYOB Browser Control](byob-browser-control.md) -- sibling feature for real-Chrome browser automation
+- [BYOB and Computer Use plan](../plans/byob_and_computer_use.md)
 - `.claude/skill-context/computer-use.md` -- the agent-facing usage guide

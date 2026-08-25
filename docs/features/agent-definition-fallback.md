@@ -25,14 +25,14 @@ These failures happen during deployment windows when code is updated but agent f
 Agent definition <path> unusable (<ExceptionClass>: <message>) — using fallback prompt
 ```
 
-(The missing-file branch keeps its older `"... not found ... — using fallback prompt"` format to preserve operator log-search habits and the existing test contract.)
+(The missing-file branch uses a distinct `"... not found ... — using fallback prompt"` format, preserving operator log-search habits and the existing test contract.)
 
 Exceptions outside the `(OSError, ValueError)` tree (`KeyError`, `AttributeError`, `TypeError`, etc.) propagate unchanged — those indicate programmer error in this module, not an unusable input file, and should not be silently swallowed.
 
 - **Session continues**: `get_agent_definitions()` returns a complete dict even when some or all agent files are unusable. The agent operates with degraded prompts rather than crashing.
-- **Startup validation**: `validate_agent_files()` is called during process initialization to surface unusable files early via log warnings, giving operators a chance to fix the issue before users hit it. It performs a **trial-parse**: for each expected file, it checks existence first (missing files take the legacy existence-only branch), then for files that exist it calls `_parse_agent_markdown` and inspects the returned dict for `"_is_fallback": True`. The returned `list[str]` of "problematic" paths now includes missing AND malformed/unreadable files. Reasons go to the warning log only, not the return value. The check fires from two call sites:
+- **Startup validation**: `validate_agent_files()` is called during process initialization to surface unusable files early via log warnings, giving operators a chance to fix the issue before users hit it. It performs a **trial-parse**: for each expected file, it checks existence first (missing files take the existence-only branch), then for files that exist it calls `_parse_agent_markdown` and inspects the returned dict for `"_is_fallback": True`. The returned `list[str]` of "problematic" paths includes missing AND malformed/unreadable files. Reasons go to the warning log only, not the return value. The check fires from two call sites:
   - `bridge/telegram_bridge.py::main()` — covers Telegram bridge processes.
-  - `worker/__main__.py::main()` — covers the standalone worker, which is the actual session execution engine. A worker-only deployment (or one where the worker boots before the bridge) still gets the early-warning signal.
+  - `worker/__main__.py::main()` — covers the standalone worker, which is the actual session execution engine. A worker-only deployment (or one where the worker boots before the bridge) gets the early-warning signal.
 
 ## Fallback Prompt
 
@@ -54,6 +54,5 @@ The agent's description is set to `"Fallback for unusable {name}.md: {reason}"`.
 
 ## Related
 
-- Plan: `docs/plans/sdk_graceful_agent_fallback.md` (original missing-file fallback)
-- Plan: `docs/plans/widen_agent_definition_fallback.md` (this expansion to malformed + OS errors)
-- Issues: [#539](https://github.com/tomcounsell/ai/issues/539) (original), [#1350](https://github.com/tomcounsell/ai/issues/1350) (this expansion)
+- Plan: `docs/plans/sdk_graceful_agent_fallback.md`
+- Plan: `docs/plans/widen_agent_definition_fallback.md`

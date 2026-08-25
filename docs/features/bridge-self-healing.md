@@ -4,21 +4,17 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 ## Import-Time Safety
 
-**Problem**: `TELEGRAM_API_ID` set to a non-numeric value (e.g. the `.env.example` placeholder `12345****`) used to cause a `ValueError` at module import time. This crashed the bridge before any logging or graceful error handling could run, and trapped the watchdog in a restart loop because every restart attempt would also fail during import.
+The `_parse_api_id()` helper in `bridge/telegram_bridge.py` wraps the `int()` conversion of `TELEGRAM_API_ID` and returns `0` on any invalid or missing input, logging a warning to stderr. Module import succeeds regardless of env contents, so a non-numeric placeholder (e.g. the `.env.example` value `12345****`) cannot raise a `ValueError` at import time and trap the watchdog in a restart loop. The runtime credential check (`if not API_ID or not API_HASH`) remains the authoritative "fail loudly and exit" path once the bridge actually tries to connect.
 
-**Solution**: The `_parse_api_id()` helper in `bridge/telegram_bridge.py` wraps the `int()` conversion and returns `0` on any invalid or missing input, logging a warning to stderr. Module import now always succeeds regardless of env contents. The existing runtime credential check (`if not API_ID or not API_HASH`) remains the authoritative "fail loudly and exit" path once the bridge actually tries to connect.
+`tools/valor_telegram.py` applies the same defensive `try/except ValueError` pattern around its lazy `int(os.environ.get(...))` calls.
 
-The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
-
-The same failure class — a raise at import time trapping the watchdog in a restart loop — also applied to `projects.json` parsing; see Component 19 (Guarded Config Read) below for the fix.
+The same failure class — a raise at import time trapping the watchdog in a restart loop — also applies to `projects.json` parsing; see Component 19 (Guarded Config Read) below.
 
 ## Components
 
 ### 1. Session Lock Cleanup (`bridge/telegram_bridge.py`)
 
-**Problem**: Stale processes from prior restarts can block the bridge from starting.
-
-**Solution**: Before attempting to connect, the bridge:
+Before attempting to connect, the bridge:
 1. Uses `lsof` to find processes holding session-related files
 2. Terminates stale processes (>60 seconds old) that aren't the current process using SIGTERM/SIGKILL escalation:
    - Sends SIGTERM first to request graceful shutdown
@@ -27,7 +23,7 @@ The same failure class — a raise at import time trapping the watchdog in a res
 3. Clears orphaned lock/journal files
 4. Adds jitter to prevent thundering herd on restart
 
-**Retry Logic**: General connection retry with exponential backoff and jitter (2s to 256s cap, 8 attempts max). Covers all Telethon errors, not just SQLite locks. See [Bridge Resilience](bridge-resilience.md) for details.
+**Retry Logic**: General connection retry with exponential backoff and jitter (2s to 256s cap, 8 attempts max). Covers all Telethon errors. See [Bridge Resilience](bridge-resilience.md) for details.
 
 ### 2. Crash Tracker (`monitoring/crash_tracker.py`)
 
@@ -37,7 +33,7 @@ Logs bridge start/crash events with:
 - Commit age in seconds
 - Crash reason (if available)
 
-Events are stored in Redis via the crash tracker module. Previous JSONL file (`data/crash_history.jsonl`) was replaced as part of the Redis migration (2026-02-24).
+Events are stored in Redis via the crash tracker module.
 
 **Pattern Detection**: Identifies when 3+ crashes occur within 30 minutes after a recent commit (<1 hour old), suggesting code-caused crashes.
 
@@ -57,16 +53,13 @@ should_revert, commit_sha = detect_crash_pattern()
 
 A separate process that monitors bridge health and executes recovery. Runs via launchd every 60 seconds.
 
-**Log isolation (issue #2643).** Logging configuration (`_configure_logging()`: mkdir + the rotating
+**Log isolation.** Logging configuration (`_configure_logging()`: mkdir + the rotating
 file handler + formatter) runs only from the `if __name__ == "__main__":` guard, never at import.
-Importing this module — including transitively, via `scripts.update.service` → `scripts.log_rotate`,
-which had the same defect — has zero logging side effects. Every line the watchdog writes to
-`logs/watchdog.log` now comes from a real entry-point invocation and appears **once** rather than
-twice (the plist previously doubled every record: once via the module's `RotatingFileHandler`, once
-via a `propagate = True` leak to root's `StreamHandler` → stderr → the plist's redirect of both
-streams into the same file). Submodule records that used to ride root's handler now arrive unformatted
-via `logging.lastResort` (WARNING+) or not at all (INFO — dropped at the call site). See
-[Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data Flow table and the
+Importing this module — including transitively, via `scripts.update.service` → `scripts.log_rotate` —
+has zero logging side effects. Every line the watchdog writes to
+`logs/watchdog.log` comes from a real entry-point invocation and appears once. Submodule records
+arrive unformatted via `logging.lastResort` (WARNING+) or not at all (INFO — dropped at the call
+site). See [Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data Flow table and the
 `scripts/log_rotate.py` counterpart.
 
 **Health Checks**:
@@ -87,7 +80,7 @@ Claude Code CLI subprocesses can become orphaned when their parent session ends 
 
 The `--check-only` output includes zombie count, PIDs, memory usage, and active instance count.
 
-**4-Level Recovery Escalation, plus a decoupled crash-storm signal** (issue #2396):
+**4-Level Recovery Escalation, plus a decoupled crash-storm signal:**
 
 | Level | Condition | Action |
 |-------|-----------|--------|
@@ -96,28 +89,21 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to `_recovery_exhausted()`, which logs `CRITICAL` and records `log_crash("Recovery exhausted")` |
 
-`recovery_level` never reaches 5 — level 5 ("alert human") used to be a silent no-op action level that permanently overrode any lower level once a crash-count threshold was crossed, which livelocked the ladder (the wedge detector's own capped, known-safe restart never got to run). It has been replaced by two independent signals computed alongside `recovery_level`, both on `HealthStatus`:
+`recovery_level` has no level 5. Two independent signals are computed alongside `recovery_level`, both on `HealthStatus`:
 
 - **`human_alert_needed`** — set when `get_recent_crashes(1800)` (30 min window) returns `>= CRASH_STORM_THRESHOLD` (default 5, env-overridable) crashes. It is a **diagnostic flag only**: it drives the `--check-only` output line and nothing else. Nothing pushes a notification anywhere.
 
-**The watchdog records; it does not deliver.** `human_alert_needed` used to fire `_alert_human_of_crash_storm()`, which enqueued an `AgentSession` carrying a pre-composed "send this exact Telegram message to Eng: Valor" instruction (the `send_hibernation_notification()` pattern), deduplicated by a 30-minute file sentinel, with `_file_crash_storm_issue()` opening a GitHub issue as the fallback for machines that did not own the target `project_key`. All of it was removed. Two independent production incidents showed the delivery path could not survive the incidents it existed to report:
+**The watchdog records; it does not deliver.** The durable crash-storm signal is the `CRITICAL` line in `logs/watchdog.log` and `log_crash()`, written synchronously in the watchdog process on every tick regardless of the state of Redis, the worker, or the bridge. Read it with `python monitoring/bridge_watchdog.py --check-only` or `tail logs/watchdog.log`. Any push notification must originate from a transport that does not depend on the worker or an LLM turn.
 
-- **75 stranded sessions over three days** (07-27 → 07-30) on *Valor the Bald*, which owns only `cyndra` while the alert hardcoded `valor` — unrunnable by construction. The ownership gate added in response only narrowed the failure.
-- **22 stranded sessions over ~16 hours** on the `valor`-owning machine itself, where the gate passed and the enqueue was legitimate, but nothing drained the queue. The cooldown sentinel is stamped at *enqueue* time, not delivery time, so each undelivered alert still suppressed the next window.
-
-The mechanism was a `claude` session spawned to transmit a string that was already fully rendered before the session existed, over a transport whose health is correlated with the failure being reported. The durable record — the `CRITICAL` line in `logs/watchdog.log` and `log_crash()` — is written synchronously in the watchdog process on every tick regardless of the state of Redis, the worker, or the bridge, and is now the only crash-storm signal. Read it with `python monitoring/bridge_watchdog.py --check-only` or `tail logs/watchdog.log`.
-
-Any future push notification must originate from a transport that does not depend on the worker or an LLM turn.
-
-- **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely. A **wedge-dominated** storm always leaves this False, so the wedge detector's already-capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling — throttling it would recreate the exact livelock this fix removes. The exemption rests on a wedge verdict being trustworthy, which is why the detector now requires positive recovery evidence and resets its silence clock on restart (#2475): each restart is a SIGKILL plus a full startup dialog scan, so an un-throttled loop over a *false* verdict is anything but cheap.
+- **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely. A **wedge-dominated** storm always leaves this False, so the wedge detector's capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling. The exemption rests on a wedge verdict being trustworthy: the detector requires positive recovery evidence and resets its silence clock on restart. Each restart is a SIGKILL plus a full startup dialog scan, so an un-throttled loop over a *false* verdict is not cheap.
 
 Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
-### 3a. Update-Loop Wedged Detector (issue #1712)
+### 3a. Update-Loop Wedged Detector
 
-**Problem**: Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is manually restarted.
+Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is restarted.
 
-**Solution**: Three liveness signals written to Redis, read by the watchdog on every 60-second tick:
+Three liveness signals written to Redis, read by the watchdog on every 60-second tick:
 
 | Redis Key | Writer | Meaning |
 |-----------|--------|---------|
@@ -139,25 +125,25 @@ The PRIMARY rule fires when all of these hold:
 A SECONDARY accelerator applies the same shape at `UPDATE_STALENESS_WARN`, requiring the recovery evidence to be that recent too.
 
 **Key design decisions**:
-- **Silence is not evidence** (#2475). Conditions 2–4 alone describe a quiet account just as well as a wedged one: the reconciler refreshes `last_probe_ok` every 180s, so it is always fresh on a connected bridge, and four hours with nobody sending anything is routine. The detector ran on exactly that shape and produced 36 crash-tracker events in 72h on one machine and 164 in 24h on another, all the same reason.
-- **The corroborating signal must come from outside the handler under suspicion.** `bridge:last_update_received` and the per-chat `bridge:last_event:*` keys are both written by the `NewMessage` handler, so neither can testify that the handler has stopped — their silence is equally consistent with an idle account. (The per-chat scan the secondary accelerator used for corroboration was circular for this reason and has been removed.) The reconciler reaches Telegram over an independent API path, so a message it recovers is proof the live path missed one, and a genuinely quiet account produces no such evidence.
+- **Silence is not evidence.** Conditions 2–4 alone describe a quiet account just as well as a wedged one: the reconciler refreshes `last_probe_ok` every 180s, so it is always fresh on a connected bridge, and four hours with nobody sending anything is routine.
+- **The corroborating signal must come from outside the handler under suspicion.** `bridge:last_update_received` and the per-chat `bridge:last_event:*` keys are both written by the `NewMessage` handler, so neither can testify that the handler has stopped — their silence is equally consistent with an idle account. The reconciler reaches Telegram over an independent API path, so a message it recovers is proof the live path missed one, and a genuinely quiet account produces no such evidence.
 - **The evidence is bounded to this process too.** The evidence window and the silence window are the same length, so a stamp made just before a routine restart would stay admissible for a full ceiling afterwards. That matters because every restart *creates* a gap and catchup plus the reconciler recover it on the way back up — a restart reliably stamps this key inside its own grace window. Four quiet hours after any restart would then yield one spurious verdict. Requiring the stamp to postdate `start_ts + STARTUP_GRACE_SECONDS` excludes the restart's own backfill, on the same principle as the silence clock: bound the verdict to the process it accuses.
-- **Measuring silence from process start.** Nothing seeds `bridge:last_update_received` on restart, so a verdict measured from the beacon alone survives the restart meant to cure it and re-fires on the first tick past the grace window — one SIGKILL every ~6 minutes (5-minute grace, 60-second tick), indefinitely. That cadence, not a recurring Telethon fault, is what the storm's own "every 5 minutes" log signature recorded. Taking the later of the beacon and process start means a restart clears the accusation and a real recurrence still re-fires after another full ceiling of silence.
+- **Measuring silence from process start.** Nothing seeds `bridge:last_update_received` on restart, so a verdict measured from the beacon alone survives the restart meant to cure it and re-fires on the first tick past the grace window — one SIGKILL every ~6 minutes (5-minute grace, 60-second tick), indefinitely. Taking the later of the beacon and process start means a restart clears the accusation and a real recurrence still re-fires after another full ceiling of silence.
 - **`last_probe_ok` as disconfirmation guard**: if the probe itself is stale, the bridge may be disconnected. A disconnect should be recovered by level 1 (process dead) or resolved by Telethon's reconnect — not treated as a wedge. Restarting on disconnect when Telethon is mid-reconnect would interrupt the reconnection attempt. The wedge detector only fires when probe is fresh.
 - **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
-- **What this detector can no longer see, and why we took that trade.** Requiring positive evidence buys the end of the storm at the cost of a real blind spot, and the old text here claimed the opposite ("avoids false negatives on quiet-but-monitored bridges"), so it is worth stating plainly.
+- **What this detector cannot see, and why that trade is accepted.** Requiring positive evidence buys the end of the storm at the cost of a real blind spot.
 
-  `record_probe_ok()` fires at `bridge/reconciler.py:149`, straight after `get_dialogs()` and **before** the per-chat scan loop at `:151`, whose body ends in `except Exception ... continue` (`:403-405`). So a **half-wedged client** — dialogs resolve, but every per-chat history fetch throws — keeps `last_probe_ok` fresh, recovers nothing, and stamps no evidence. The detector sees fresh probe + silence + no evidence, which is byte-identical to a quiet account, and stays quiet. `test_quiet_account_past_ceiling_is_not_wedged` passes on that state for exactly that reason. Before #2475 that state restarted at the 4-hour mark; now it never does.
+  `record_probe_ok()` fires at `bridge/reconciler.py:149`, straight after `get_dialogs()` and **before** the per-chat scan loop at `:151`, whose body ends in `except Exception ... continue` (`:403-405`). So a **half-wedged client** — dialogs resolve, but every per-chat history fetch throws — keeps `last_probe_ok` fresh, recovers nothing, and stamps no evidence. The detector sees fresh probe + silence + no evidence, which is byte-identical to a quiet account, and stays quiet. `test_quiet_account_past_ceiling_is_not_wedged` passes on that state for exactly that reason.
 
-  No cleverer detector removes this. Any signal the wedged component itself produces is circular, and the only independent observer we have is the reconciler — when *it* is the thing failing, there is nothing left to ask. Some false negative is the unavoidable price of refusing to treat silence as evidence, and a blind spot in one failure mode is a better trade than a SIGKILL every six minutes across every quiet night. Note also that the pre-#2475 behavior in this state was not a working recovery: the restart re-armed the same verdict six minutes later, so unless the restart happened to cure the fault it produced the storm rather than a fix.
+  No cleverer detector removes this. Any signal the wedged component itself produces is circular, and the only independent observer is the reconciler — when *it* is the thing failing, there is nothing left to ask. Some false negative is the unavoidable price of refusing to treat silence as evidence, and a blind spot in one failure mode is a better trade than a SIGKILL every six minutes across every quiet night. A restart in this state re-arms the same verdict six minutes later, so unless the restart happens to cure the fault it produces the storm rather than a fix.
 
-  What bounds the exposure today: **nothing does, automatically.** Nothing monitors the scan loop, so the state persists for as long as the fault does — until some unrelated cause happens to restart the bridge, which is luck rather than a mechanism. The failure is loud but unwatched: `[reconciler] Error scanning %s` at ERROR with a traceback, once per chat per 180-second scan, which means the evidence is sitting in the logs the whole time with nothing reading it. Treat that as the honest status, not as a safety net. Turning that log signal into a monitored one is [#2691](https://github.com/tomcounsell/ai/issues/2691), which also holds the open design question of whether persistent all-chat scan failure should re-enter the restart rule as positive evidence in its own right, or should only page. That question deserves deliberate treatment rather than being folded in here.
+  What bounds the exposure: **nothing does, automatically.** Nothing monitors the scan loop, so the state persists for as long as the fault does — until some unrelated cause happens to restart the bridge, which is luck rather than a mechanism. The failure is loud but unwatched: `[reconciler] Error scanning %s` at ERROR with a traceback, once per chat per 180-second scan, which means the evidence is sitting in the logs the whole time with nothing reading it. Treat that as the honest status, not as a safety net. Turning that log signal into a monitored one is an open design question (whether persistent all-chat scan failure should re-enter the restart rule as positive evidence in its own right, or should only page) that deserves deliberate treatment.
 
-  The evidence floor in the bullet above narrows the admissible window further, so it is worth being honest about its cost on this side too: in practice it is small. A genuinely wedged bridge that is still receiving traffic gets its evidence re-stamped by every 180-second scan, so the floor only discards the first stamp and evidence returns within a scan or two of the grace window closing. The floor delays nothing in the half-wedge case, where no stamp is ever written at all.
+  The evidence floor in the bullet above narrows the admissible window further; in practice the cost is small. A genuinely wedged bridge that is still receiving traffic gets its evidence re-stamped by every 180-second scan, so the floor only discards the first stamp and evidence returns within a scan or two of the grace window closing. The floor delays nothing in the half-wedge case, where no stamp is ever written at all.
 
 - **Unreadable process age = fail-safe**: if there is no bridge pid, or `get_process_start_ts()` returns `None`, the detector treats the verdict as inconclusive and suppresses the restart. Process age is not merely the grace window — it is the floor for the silence measurement, so without it the verdict cannot be bounded to the current process.
 
-**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window. This level-2 cap is now honored end to end: previously, a wedge that recurred faster than the crash-count window could re-cross while the crash-count check was still active, silently overriding this capped restart with the level-5 no-op (issue #2396). Because that override no longer exists, a recurring wedge always gets its capped restart on every tick — the crash-count storm this produces (all `bridge_update_loop_wedged`-reason crashes) is wedge-dominated, so `restart_circuit_open` stays False and the restart is never throttled.
+**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window. A recurring wedge always gets its capped restart on every tick — the crash-count storm this produces (all `bridge_update_loop_wedged`-reason crashes) is wedge-dominated, so `restart_circuit_open` stays False and the restart is never throttled.
 
 **Log signals**:
 ```
@@ -178,22 +164,16 @@ python monitoring/bridge_watchdog.py --check-only
 
 ### 4. Session Watchdog Duplicate Key Guard (`monitoring/session_watchdog.py`)
 
-**Problem**: The session watchdog calls `session.save()` in `fix_unhealthy_session()` to mark stuck sessions as abandoned. When a session has been concurrently deleted or modified by another process, popoto raises a `ModelException` (duplicate key / unique constraint violation). These errors accounted for 98% of all error log entries (~22,400 occurrences).
-
-**Solution**: The `_safe_abandon_session()` helper wraps each `session.save()` call in `fix_unhealthy_session()` with a `ModelException` catch. When the save fails due to a stale/duplicate key:
+The `_safe_abandon_session()` helper wraps each `session.save()` call in `fix_unhealthy_session()` with a `ModelException` catch. When a save fails due to a stale/duplicate key (a session concurrently deleted or modified by another process):
 1. The error is logged at WARNING level (visible in `bridge.log` for monitoring, but not spamming `bridge.error.log`)
 2. The watchdog continues processing the next session instead of propagating the error up to the loop-level handler
 3. The outer `check_all_sessions()` still has a `ModelException` catch as a safety net for any other save paths
 
 This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
 
-### 4a. Session Liveness Tick Counter (`monitoring/session_watchdog.py`, issue #2716)
+### 4a. Session Liveness Tick Counter (`monitoring/session_watchdog.py`)
 
-**Problem**: a human watching a long-running session cannot tell "still working" from "wedged" without asking. The one mechanism built to close that gap — the ⏳ stall reaction from #1313 — never worked: ⏳ is not a legal Telegram reaction, so all eleven of its production enqueues failed at the API.
-
-**Solution**: `_publish_liveness_ticks()` advances a counter on the session's originating Telegram message every `HEARTBEAT_TICK_INTERVAL_SECONDS`, and at a hard ceiling refuses to advance and steers the session to publish a progress message instead. The counter is pure wall-clock duration: it asserts that the watchdog has eyes on the session and makes no stall claim.
-
-The ⏳ path and its machinery (`STALL_REACTION_EMOJI`, `_apply_stall_reaction`, `_clear_stall_reaction_dedup`, the `watchdog:stall_reaction_applied:` key, the `WATCHDOG_STALL_REACTION_ENABLED` gate) were deleted in the same change — one reaction slot means one writer.
+`_publish_liveness_ticks()` advances a counter on the session's originating Telegram message every `HEARTBEAT_TICK_INTERVAL_SECONDS`, and at a hard ceiling refuses to advance and steers the session to publish a progress message instead. The counter is pure wall-clock duration: it asserts that the watchdog has eyes on the session and makes no stall claim. A single reaction slot has a single writer.
 
 Full design, precedence table, Redis keys, and degradation path: [Session Liveness Tick Counter](session-liveness-tick-counter.md).
 
@@ -208,25 +188,21 @@ Log rotation uses a three-layer approach: Python-managed rotation for applicatio
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
 - `bridge.error.log`, `reflections_error.log`
 
-**User-space LaunchAgent safety net** (`com.valor.log-rotate.plist` + `scripts/log_rotate.py`): runs every 30 minutes under the user's launchd session and rotates any `logs/*.log` file over 10 MB (3 backups retained). Covers all launchd-managed logs between service restarts — no root needed. Replaces the previous newsyslog config that required `sudo` to install.
+**User-space LaunchAgent safety net** (`com.valor.log-rotate.plist` + `scripts/log_rotate.py`): runs every 30 minutes under the user's launchd session and rotates any `logs/*.log` file over 10 MB (3 backups retained). Covers all launchd-managed logs between service restarts — no root needed.
 
 ### 6. Startup Redis Key Cleanup (`worker/__main__.py`)
 
-**Problem**: Stale Redis entries with non-standard 60-character `agent_session_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
-
-**Solution**: On worker startup, `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) purges Redis set entries that point to missing or invalid objects. This is the first step in the worker's startup sequence. The bridge does not call `rebuild_indexes()` — index management is the worker's exclusive responsibility. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
+On worker startup, `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) purges Redis set entries that point to missing or invalid objects. This is the first step in the worker's startup sequence. The bridge does not call `rebuild_indexes()` — index management is the worker's exclusive responsibility. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
 
 ### 7. Agent Session Cleanup (`agent/session_health.py`)
 
-**Problem**: Sessions with corrupted IDs (e.g., length 60 instead of expected 32 for uuid4) or invalid fields cause `ModelException` on every health check and startup recovery cycle, spamming error logs and potentially blocking worker startup.
+`cleanup_corrupted_agent_sessions()` runs at worker startup (before recovery), during `/update` (before stale cleanup), and hourly as the `agent-session-cleanup` reflection. It detects invalid sessions via `is_valid()` and deletes them via the ORM; healthy rows are left field-untouched, receiving only a targeted `EXPIRE` keepalive. It also performs a cross-process orphan reap pass against the OS process table at the end of each call, returning `{"corrupted": int, "orphans": int}` for both legs of work; reaper failures are logged at WARNING and reported as `orphans=0` so they never abort the corrupted-record pass. See also [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated index rebuild that supplements this, and [Cross-Process Orphan Reap](#cross-process-orphan-reap) below for the reap mechanics.
 
-**Solution**: `cleanup_corrupted_agent_sessions()` runs at worker startup (before recovery), during `/update` (before stale cleanup), and hourly as the `agent-session-cleanup` reflection. It detects invalid sessions via `is_valid()` and deletes them via the ORM; since #2660 healthy rows are left field-untouched, receiving only a targeted `EXPIRE` keepalive. As of issue #1271 it also performs a cross-process orphan reap pass against the OS process table at the end of each call, returning `{"corrupted": int, "orphans": int}` for both legs of work; reaper failures are logged at WARNING and reported as `orphans=0` so they never abort the corrupted-record pass. See also [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated index rebuild that supplements this, and [Cross-Process Orphan Reap (#1271)](#cross-process-orphan-reap-1271) below for the reap mechanics.
+#### Cross-Process Orphan Reap
 
-#### Cross-Process Orphan Reap (#1271)
+When a worker dies ungracefully (panic, SIGKILL, restart-without-graceful-shutdown), its `claude_agent_sdk/_bundled/claude` child and the 4+ `mcp_servers/*.py` grandchildren are reparented to launchd (PID 1) and persist indefinitely. They hold file handles, consume RAM/CPU, and keep an Anthropic API session warm.
 
-**Problem**: When a worker dies ungracefully (panic, SIGKILL, restart-without-graceful-shutdown), its `claude_agent_sdk/_bundled/claude` child and the 4+ `mcp_servers/*.py` grandchildren are reparented to launchd (PID 1) and persist indefinitely. They hold file handles, consume RAM/CPU, and keep an Anthropic API session warm. Reaping only between worker restarts allowed orphans to accumulate for hours or days at a time.
-
-**Solution**: `_reap_orphan_session_processes()` (in `agent/session_health.py`) runs hourly inside the `agent-session-cleanup` reflection (and is also the body of the worker startup shim). It scans the OS process table via psutil for processes whose `cmdline` matches `claude_agent_sdk/_bundled/claude` or `mcp_servers/*.py` AND whose `PPID == 1`, then for each candidate:
+`_reap_orphan_session_processes()` (in `agent/session_health.py`) runs hourly inside the `agent-session-cleanup` reflection (and is also the body of the worker startup shim). It scans the OS process table via psutil for processes whose `cmdline` matches `claude_agent_sdk/_bundled/claude` or `mcp_servers/*.py` AND whose `PPID == 1`, then for each candidate:
 
 1. **Self-suicide guard** — builds a skip-set from `os.getpid()` plus every value under the `worker:registered_pid:*` Redis key prefix (TTL 24h, written by `register_worker_pid()` at worker startup and refreshed every health-loop tick). Any worker whose PID is in the skip-set is never touched. This is structural — even if the cmdline regex were ever extended to match the worker pattern, live workers cannot be self-killed. Required because under `launchd KeepAlive=true` every live worker has `PPID == 1` by design.
 2. **Per-PID heartbeat gate** — looks up the owning `AgentSession` via `find_live_session_by_pid` (a bounded forward scan over the low-cardinality `status` index — there is no indexed pid field). The pid is the fenced `exec_pid` stamped at spawn; it is not cleared between turns, and staleness is detected by comparing `pid_create_time` via `agent/pid_fence.py::fence_is_live` rather than by absence. If the owning session has `last_heartbeat_at` younger than `ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS` (1800s = 30 min), the kill is skipped. MCP candidates without a direct `exec_pid` mapping inherit their parent process's session via `proc.parent().pid`.
@@ -234,21 +210,19 @@ Log rotation uses a three-layer approach: Python-managed rotation for applicatio
 4. **Two-tick SIGKILL escalation with create-time verification** — parent and descendants get SIGTERM and `(pid, create_time)` is staged on the module-level `_pending_sigkill_orphans: set[tuple[int, float]]`. At the start of the next reflection tick the set is drained: each PID's `proc.create_time()` is compared against the staged value within `1e-3` epsilon; on match `proc.kill()` (SIGKILL); on mismatch the SIGKILL is skipped because macOS recycled the PID. The staged set is always cleared after drain — a PID never lives across more than one tick.
 5. **Two-counter scheme** — when the owning session is known, increment `{project_key}:session-health:orphan_process_reaped` (project-scoped). When unknown, increment `session-health:orphan_process_reaped:{worker_hostname}` (hostname-scoped) so true unowned orphans are not falsely attributed to a project.
 
-**Kill switch**: `DISABLE_ORPHAN_PROCESS_REAP=1` short-circuits the entire pass (parity with `DISABLE_ORPHAN_REAP` for the in-process reaper from #1218 and `DISABLE_PROGRESS_KILL` for the no-progress detector).
+**Kill switch**: `DISABLE_ORPHAN_PROCESS_REAP=1` short-circuits the entire pass (parity with `DISABLE_ORPHAN_REAP` for the in-process reaper and `DISABLE_PROGRESS_KILL` for the no-progress detector).
 
 **Distinction from sibling reapers**:
-- vs. `_pending_sigkill` reap (#1218 in-process): the in-process reaper iterates `_active_sessions` (handles known to THIS worker) and asks "is the owning row terminal?". It cannot detect orphans whose parent worker is gone — that gap is exactly what the cross-process reap covers.
+- vs. the in-process reaper: the in-process reaper iterates `_active_sessions` (handles known to THIS worker) and asks "is the owning row terminal?". It cannot detect orphans whose parent worker is gone — that gap is what the cross-process reap covers.
 - vs. `monitoring/bridge_watchdog.py::kill_zombie_processes()`: the watchdog runs every 60s and kills `claude`/`pyright` processes older than 2h via raw `os.kill`. The cross-process reap runs every 60min, scopes by PPID==1 + heartbeat-stale + signature, walks descendant trees, and uses psutil for PID-reuse safety. Both swallow `ProcessLookupError`/`NoSuchProcess` so double-kill is safe.
 
 **Worker process reaping is intentionally OUT OF SCOPE.** Stranded sibling workers are reparented by launchd already; the worker-signature + PPID==1 filter would self-suicide every live worker on every reflection tick. See [agent-session-health-monitor.md](agent-session-health-monitor.md) for the canonical write-up of all three orphan reapers.
 
-**Phantom-record guard (issue #1069):** Before any iteration, results from `AgentSession.query.all()` pass through `_filter_hydrated_sessions()` to drop phantom instances — records whose fields are still Popoto `Field` descriptors, produced when orphan `$IndexF:AgentSession:*` members reference deleted hashes. Phantoms must never reach the mutation path: attribute access returns a descriptor repr (~60 chars), the length check mis-flags it as corrupt, and `.delete()` damages real records whose indexed-field values happen to match. After the mutation pass, `AgentSession.repair_indexes()` (instead of `rebuild_indexes()`) clears orphan `$IndexF` members at the source before rebuilding indexes from surviving hashes. The same filter is applied to five sibling iterators (`_recover_interrupted_agent_sessions_startup`, `_agent_session_health_check`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`) to close the blind spot across the reflection fleet. The ORM-only policy is now strict: no raw-Redis `scan_iter`/`delete` fallback exists anywhere in `session_health.py`.
+**Phantom-record guard:** Before any iteration, results from `AgentSession.query.all()` pass through `_filter_hydrated_sessions()` to drop phantom instances — records whose fields are still Popoto `Field` descriptors, produced when orphan `$IndexF:AgentSession:*` members reference deleted hashes. Phantoms must never reach the mutation path: attribute access returns a descriptor repr (~60 chars), the length check mis-flags it as corrupt, and `.delete()` damages real records whose indexed-field values happen to match. After the mutation pass, `AgentSession.repair_indexes()` (instead of `rebuild_indexes()`) clears orphan `$IndexF` members at the source before rebuilding indexes from surviving hashes. The same filter is applied to five sibling iterators (`_recover_interrupted_agent_sessions_startup`, `_agent_session_health_check`, `session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`) to close the blind spot across the reflection fleet. The ORM-only policy is strict: no raw-Redis `scan_iter`/`delete` fallback exists anywhere in `session_health.py`.
 
 ### 8. Health-Check Delivery Guard (`agent/agent_session_queue.py`)
 
-**Problem**: When a worker crashes or is cancelled mid-execution, the session stays in `running` state for startup recovery. After `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s), the health check resets it to `pending` and the worker re-runs the session from scratch — including delivering a duplicate response. If each re-run also fails to complete cleanly, this repeats indefinitely, producing 6+ duplicate Telegram messages per session (#918).
-
-**Solution**: `send_to_chat` now stamps `response_delivered_at` (a `DatetimeField` on `AgentSession`) when a response is successfully delivered to Telegram. The `_agent_session_health_check` inspects this field before recovering a session: if `response_delivered_at` is set, the session already delivered its final response and re-queuing would cause a duplicate. Instead, it calls `finalize_session(entry, "completed")` to mark it done.
+`send_to_chat` stamps `response_delivered_at` (a `DatetimeField` on `AgentSession`) when a response is successfully delivered to Telegram. The `_agent_session_health_check` inspects this field before recovering a session: if `response_delivered_at` is set, the session already delivered its final response and re-queuing would cause a duplicate. Instead, it calls `finalize_session(entry, "completed")` to mark it done.
 
 Both the delivery stamp and the health-check guard are wrapped in `try/except` so that failures are logged but never crash the worker or health-check loop.
 
@@ -256,21 +230,19 @@ Both the delivery stamp and the health-check guard are wrapped in `try/except` s
 - `AgentSession.response_delivered_at` — nullable `DatetimeField`, set once on successful delivery
 - Health-check path: `_agent_session_health_check()` → `should_recover` → delivery guard → `finalize_session()`
 
-#### 8a. No-Progress Recovery for Shared-Worker-Key Sessions (#944)
+#### 8a. No-Progress Recovery for Shared-Worker-Key Sessions
 
-**Problem**: A slugless dev session shares `worker_key` with any co-running PM session under the same project (both resolve to `project_key` via `AgentSession.worker_key`). `_agent_session_health_check` determined liveness via `worker_alive = _active_workers.get(worker_key) is not None and not worker.done()`. When a PM was alive under the same project, `worker_alive = True` even though the stuck dev session was not actually being handled — so the `not worker_alive` branch was skipped, and the dev session was only recovered after the wall-clock cap fired (since retired by issue #1172). The fix below — own-progress fields evaluated under `_has_progress` — remains the canonical answer; with the wall-clock cap gone, the no-progress path is the only inference-free recovery branch and runs at the 5-minute health-check cadence.
-
-**Solution**: A new `elif` branch in `_agent_session_health_check` recovers sessions that are `worker_alive=True`, past the `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) startup guard, AND have no progress signal. Progress is evaluated by `_has_progress(entry)` which returns True if ANY of three fields is set: `turn_count > 0`, a non-empty `log_path`, or a non-empty `claude_session_uuid`. Together these cover the full SDK subprocess warmup arc:
+A slugless dev session shares `worker_key` with any co-running PM session under the same project (both resolve to `project_key` via `AgentSession.worker_key`). Liveness is determined by `worker_alive = _active_workers.get(worker_key) is not None and not worker.done()`. A no-progress `elif` branch in `_agent_session_health_check` recovers sessions that are `worker_alive=True`, past the `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) startup guard, AND have no progress signal, so a stuck dev session sharing a key with a live PM is still recovered rather than skipped. Progress is evaluated by `_has_progress(entry)` which returns True if ANY of three fields is set: `turn_count > 0`, a non-empty `log_path`, or a non-empty `claude_session_uuid`. Together these cover the full SDK subprocess warmup arc:
 
 - `claude_session_uuid` — set when the SDK subprocess authenticates with the Claude API (seconds after launch)
 - `log_path` — set once the session writes its first log entry (first tool call)
 - `turn_count` — incremented on each full agent turn completion
 
-**Note (#1614):** these own-progress fields are now **gated on heartbeat freshness** — they are only evaluated when `last_heartbeat_at` is within `NO_OUTPUT_BUDGET_SECONDS` (1800s). A session whose `_heartbeat_loop` has exited (heartbeat frozen) will no longer pass this check via a sticky `claude_session_uuid` alone.
+These own-progress fields are **gated on heartbeat freshness** — they are only evaluated when `last_heartbeat_at` is within `NO_OUTPUT_BUDGET_SECONDS` (1800s). A session whose `_heartbeat_loop` has exited (heartbeat frozen) does not pass this check via a sticky `claude_session_uuid` alone.
 
-A legitimately slow-starting BUILD session that takes 600s before its first turn will still have `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire (the heartbeat is fresh during legitimate long-running turns). The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker will pop and execute the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
+A legitimately slow-starting BUILD session that takes 600s before its first turn still has `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire (the heartbeat is fresh during legitimate long-running turns). The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker pops and executes the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
 
-**Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `tool_timeout` (the previous `timeout` reason was retired by #1172; `tool_timeout` was added by #1270 for the per-tool timeout sub-loop, routed through the shared `_apply_recovery_transition` helper). The counter write is wrapped in `try/except` — failure cannot block recovery.
+**Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `tool_timeout`. `tool_timeout` covers the per-tool timeout sub-loop and is recorded by the shared `_apply_recovery_transition` helper. The counter write is wrapped in `try/except` — failure cannot block recovery.
 
 **Diagnosing no-progress recoveries**:
 
@@ -282,9 +254,7 @@ A legitimately slow-starting BUILD session that takes 600s before its first turn
 
 ### 9. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 
-**Problem**: The Perplexity search provider had a bare `except Exception` that silently swallowed all errors, including 401 Unauthorized responses from expired API keys.
-
-**Solution**: Added explicit `httpx.HTTPStatusError` handling before the generic catch. 401 errors now log a clear warning message directing the operator to refresh credentials in `.env`. Other HTTP errors are also logged with their status code.
+`tools/web/providers/perplexity.py` handles `httpx.HTTPStatusError` explicitly before its generic catch. 401 errors log a clear warning message directing the operator to refresh credentials in `.env`. Other HTTP errors are also logged with their status code.
 
 ### 10. Service Installation
 
@@ -302,9 +272,7 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 ### 11. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
 
-**Problem**: When the bridge hits a Telegram `FloodWaitError` with a long duration, launchd restarts compound the problem. Each restart triggers a new connection attempt, which increments Telegram's flood counter, escalating the wait from seconds to hours.
-
-**Solution**: On `FloodWaitError`, the bridge writes a `data/flood-backoff` JSON file containing the expiry timestamp. On startup, before attempting to connect, the bridge checks this file and sleeps until the flood period clears. This makes launchd restarts harmless.
+On `FloodWaitError`, the bridge writes a `data/flood-backoff` JSON file containing the expiry timestamp. On startup, before attempting to connect, the bridge checks this file and sleeps until the flood period clears, so launchd restarts do not compound the wait.
 
 **File format** (`data/flood-backoff`):
 ```json
@@ -320,9 +288,7 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 ### 12. Dynamic Catchup Lookback (`bridge/catchup.py`)
 
-**Problem**: The fixed 60-minute `CATCHUP_LOOKBACK_MINUTES` means that after a multi-hour outage, messages older than 60 minutes are silently missed forever.
-
-**Solution**: The bridge persists a `data/last_connected` ISO 8601 timestamp file. On startup, catchup reads this timestamp and uses it to compute the lookback window dynamically instead of using the fixed 60-minute default. The lookback is capped at 24 hours to avoid scanning excessive history.
+The bridge persists a `data/last_connected` ISO 8601 timestamp file. On startup, catchup reads this timestamp and uses it to compute the lookback window dynamically, capped at 24 hours to avoid scanning excessive history.
 
 **Timestamp updates**:
 - Written on successful Telegram connect
@@ -337,35 +303,27 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 ### 12a. Silent Telethon Update Gap Handling (`bridge/dedup.py`, `bridge/catchup.py`, `bridge/reconciler.py`, `bridge/silent_stream.py`)
 
-**Problem** (issue #1408): Telethon can stop delivering `NewMessage` events for a specific chat with no error and no disconnect — the bridge believes it is connected, but the event handler simply stops firing for that chat (known unresolved upstream bugs; the Telethon library was archived 2026-02-21). Three compounding failures previously turned this into permanent message loss:
-
-1. **Catchup dead zone** — Section 12's catchup cutoff is `data/last_connected`, which advances on every 5-minute heartbeat. A message sent *inside* the connection window but silently dropped by Telethon falls *before* the cutoff on restart and is excluded from catchup.
-2. **Reconciler lookback too short** — The reconciler's fixed 10-minute lookback aged out messages before they could be recovered across multiple restarts while the worker was down.
-3. **Silent failure invisibility** — No log, no alert; the gap was undetectable until a human noticed a dropped message.
-
-**Solution** — three coordinated mechanisms, all best-effort (failures log a WARNING and fall back to prior behavior; they never crash the live handler, reconciler, or catchup):
+Telethon can stop delivering `NewMessage` events for a specific chat with no error and no disconnect — the bridge believes it is connected, but the event handler stops firing for that chat. Four coordinated mechanisms, all best-effort (failures log a WARNING and fall back to prior behavior; they never crash the live handler, reconciler, or catchup), cover this gap:
 
 1. **Per-chat last-processed cursor** (`models/last_processed.py` `LastProcessedRecord`, `bridge/dedup.py` `record_last_processed` / `get_last_processed`). A Redis-backed Popoto model (30-day TTL) tracks the latest message ID + timestamp the bridge actually *dispatched* for each chat. It is distinct from `DedupRecord` (a *set* of recent IDs for membership checks) — this is a monotonic *cursor*. Written by the live handler (via `bridge/dispatch.py::dispatch_telegram_session`), the reconciler, and catchup on every successful dispatch. The cursor advances monotonically: an older message ID is a no-op, so concurrent writes from the live handler and the reconciler cannot regress it.
 
-2. **Smarter catchup cutoff** (`bridge/catchup.py`). For each chat, catchup computes `per_chat_cutoff = min(global_cutoff, last_processed_dt - 60s)`. It uses `min()` — never `max()` — so the scan looks back *at least* as far as the global `last_connected` cutoff, and *further* when the per-chat cursor is older (closing the dead zone). The 60-second safety margin guards against off-by-a-message edges. Note the 24-hour cap (Section 12) applies only to the `lookback_override` path and does **not** bound the cursor-extended reach — time reach is unbounded; recovery *depth* is bounded instead: catchup pages backwards to the per-chat cutoff via the shared `bridge/history_fetch.py::fetch_messages_back_to`, hard-capped at `CATCHUP_MAX_MESSAGES_PER_CHAT` with a `TRUNCATED` WARNING when the cap binds, exactly like the reconciler (issues #2476/#2477). If the cursor read fails or no cursor exists, catchup falls back to the global cutoff.
+2. **Smarter catchup cutoff** (`bridge/catchup.py`). For each chat, catchup computes `per_chat_cutoff = min(global_cutoff, last_processed_dt - 60s)`. It uses `min()` — never `max()` — so the scan looks back *at least* as far as the global `last_connected` cutoff, and *further* when the per-chat cursor is older. The 60-second safety margin guards against off-by-a-message edges. The 24-hour cap (Component 12) applies only to the `lookback_override` path and does **not** bound the cursor-extended reach — time reach is unbounded; recovery *depth* is bounded instead: catchup pages backwards to the per-chat cutoff via the shared `bridge/history_fetch.py::fetch_messages_back_to`, hard-capped at `CATCHUP_MAX_MESSAGES_PER_CHAT` with a `TRUNCATED` WARNING when the cap binds, exactly like the reconciler. If the cursor read fails or no cursor exists, catchup falls back to the global cutoff.
 
-3. **Extended reconciler lookback** (`bridge/reconciler.py`). `RECONCILE_LOOKBACK_MINUTES` (30) is a *floor*: the per-chat cutoff extends back to the last-dispatched cursor when that cursor is older (`5d9515671`). The scan pages backwards to reach that cutoff, bounded by `RECONCILE_MAX_MESSAGES_PER_CHAT` and by `DedupRecord._MAX_IDS` retention, and logs a `TRUNCATED` WARNING when the bound binds (issue #2476). A quiet chat still costs one `get_messages()` call per scan — no increase in steady-state API call *rate*. See [Message Reconciler](message-reconciler.md#fetch-depth-is-bounded-by-dedup-retention-issue-2476).
+3. **Extended reconciler lookback** (`bridge/reconciler.py`). `RECONCILE_LOOKBACK_MINUTES` (30) is a *floor*: the per-chat cutoff extends back to the last-dispatched cursor when that cursor is older. The scan pages backwards to reach that cutoff, bounded by `RECONCILE_MAX_MESSAGES_PER_CHAT` and by `DedupRecord._MAX_IDS` retention, and logs a `TRUNCATED` WARNING when the bound binds. A quiet chat still costs one `get_messages()` call per scan — no increase in steady-state API call *rate*. See [Message Reconciler](message-reconciler.md#fetch-depth-is-bounded-by-dedup-retention-issue-2476).
 
-4. **Silent-stream check** (`bridge/silent_stream.py` `check_silent_chat` / `check_silent_streams`, `SilentStreamState`). The silent-gap check **rides the reconciler's existing dialog pass** — it does *not* run its own loop. The reconciler already calls `client.get_dialogs()` every 180s and iterates every monitored group; `reconcile_once` invokes `check_silent_chat` for each dialog it already fetched, threading a shared `SilentStreamState` (bridge start timestamp + per-chat warning timestamps) across passes. This adds **no** recurring `get_dialogs()` call beyond the reconciler's existing one — a deliberate constraint of issue #1408 (must not increase the steady-state Telegram API call rate). The check compares the per-chat `bridge:last_event:{chat_id}` Redis key (set on *every* incoming event, before dedup/routing) against the silence threshold and logs a single `[silent-stream] WARNING` when a `respond_to_unaddressed: true` chat has had no events for 15+ minutes while the bridge has been continuously connected and the chat had prior activity in the session. **Observability only** — it does not re-dispatch (the reconciler and catchup own recovery), and a failure in the check is caught so it never interrupts the reconciler's recovery scan. False-positive suppression: only `respond_to_unaddressed` chats are watched; a chat with no `last_event` baseline is skipped; no warning fires within the first 15 minutes after startup; each chat warns at most once per 30-minute window.
+4. **Silent-stream check** (`bridge/silent_stream.py` `check_silent_chat` / `check_silent_streams`, `SilentStreamState`). The silent-gap check **rides the reconciler's existing dialog pass** — it does *not* run its own loop. The reconciler calls `client.get_dialogs()` every 180s and iterates every monitored group; `reconcile_once` invokes `check_silent_chat` for each dialog it already fetched, threading a shared `SilentStreamState` (bridge start timestamp + per-chat warning timestamps) across passes. This adds **no** recurring `get_dialogs()` call beyond the reconciler's existing one. The check compares the per-chat `bridge:last_event:{chat_id}` Redis key (set on *every* incoming event, before dedup/routing) against the silence threshold and logs a single `[silent-stream] WARNING` when a `respond_to_unaddressed: true` chat has had no events for 15+ minutes while the bridge has been continuously connected and the chat had prior activity in the session. **Observability only** — it does not re-dispatch (the reconciler and catchup own recovery), and a failure in the check is caught so it never interrupts the reconciler's recovery scan. False-positive suppression: only `respond_to_unaddressed` chats are watched; a chat with no `last_event` baseline is skipped; no warning fires within the first 15 minutes after startup; each chat warns at most once per 30-minute window.
 
 **Recovery latency**: a message sent 25 minutes before a restart is recovered within 30 minutes — either the extended reconciler lookback catches it during live connection, or the per-chat catchup cutoff catches it on the next restart.
 
-**Observable in `logs/bridge.log`** via the existing `[catchup] Found missed message` / `[reconciler] Recovered` lines and the new `[silent-stream]` WARNING lines.
+**Observable in `logs/bridge.log`** via the `[catchup] Found missed message` / `[reconciler] Recovered` lines and the `[silent-stream]` WARNING lines.
 
 These mechanical scanners address message **ingestion** gaps (a message that was never enqueued). For the complementary **response-failure** case — a message that *was* enqueued but whose session hung or was killed without replying — see [Agent-Judgment Catchup](agent-judgment-catchup.md), an LLM-driven recovery layer (`valor-catchup`) that reads the actual thread and decides which messages genuinely need a reply.
 
 ### 13. Update Polling (`com.valor.update`)
 
-**Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
-
-**Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
+The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates. Each invocation runs `scripts/remote-update.sh`, which:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
-2. Fast-forwards `main` directly in bash (`git fetch origin main` + `git merge --ff-only origin/main`, never a bare `git pull` — see #2650), so the orchestrator and all update scripts are loaded fresh from disk
+2. Fast-forwards `main` directly in bash (`git fetch origin main` + `git merge --ff-only origin/main`, never a bare `git pull`), so the orchestrator and all update scripts are loaded fresh from disk
 3. Invokes `scripts/update/run.py --cron --no-pull` (the `--no-pull` flag skips the redundant internal pull since bash already pulled)
 4. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
 5. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
@@ -386,18 +344,17 @@ tail -f logs/update.log
 
 ### 14. Bridge Hibernation (`bridge/hibernation.py`)
 
-**Problem**: The bridge has no distinction between two fundamentally different failure modes:
+The bridge classifies connection failures into two modes:
+
 1. **Auth expiry** — Telegram session token expired or revoked; requires human intervention (`python scripts/telegram_login.py`). The bridge cannot self-recover.
 2. **Transient connectivity** — network blip, DC migration, short Telegram outage. Launchd restart + Telethon reconnect handles this automatically.
 
-Without this distinction, auth expiry hits the same 8-attempt retry loop, exits with code 1, and causes the watchdog to restart the bridge indefinitely — making the situation worse and producing no actionable signal.
-
-**Solution**: `bridge/hibernation.py` classifies errors and implements a hibernation state:
+`bridge/hibernation.py` classifies errors and implements a hibernation state:
 
 **Permanent auth errors → hibernation**:
 `AuthKeyUnregisteredError`, `AuthKeyError`, `AuthKeyInvalidError`, `AuthKeyPermEmptyError`, `SessionExpiredError`, `SessionRevokedError`, `UnauthorizedError`
 
-**Transient errors → existing retry loop**:
+**Transient errors → retry loop**:
 `NetworkMigrateError`, `ConnectionError`, `OSError`, `FloodWaitError`
 
 **Hibernation sequence** (auth expiry detected):
@@ -448,11 +405,7 @@ python scripts/telegram_login.py  # re-authenticate
 
 ### 15. Graceful Shutdown Task Cancellation (`bridge/telegram_bridge.py`)
 
-**Problem**: When the bridge receives SIGTERM, `_graceful_shutdown()` disconnects the Telegram client and `main()` returns. However, `asyncio.run()` then tries to clean up remaining tasks — six background tasks with infinite `while True` loops that are never cancelled. The process hangs indefinitely, preventing launchd from restarting the bridge.
-
-**Solution**: All background tasks created in `main()` are tracked in a module-level `_background_tasks` list. During `_graceful_shutdown()`, all tracked tasks are explicitly cancelled and awaited before disconnecting the Telegram client. A `sys.exit(1)` safety net after `run_until_disconnected()` guarantees process termination.
-
-This follows the proven cancellation pattern from the worker graceful shutdown (PR #742) and the exit-code-1 pattern for launchd ThrottleInterval (PR #789).
+All background tasks created in `main()` are tracked in a module-level `_background_tasks` list. During `_graceful_shutdown()`, all tracked tasks are explicitly cancelled and awaited before disconnecting the Telegram client. A `sys.exit(1)` safety net after `run_until_disconnected()` guarantees process termination.
 
 **Tracked tasks** (6 total):
 - `_run_catchup()` — startup message catchup scan
@@ -473,9 +426,7 @@ This follows the proven cancellation pattern from the worker graceful shutdown (
 
 ### 16. Bridge Env Var Injection (`scripts/valor-service.sh` + `bridge/telegram_bridge.py`)
 
-**Problem**: The bridge launchd plist only provided `PATH` and `HOME` in `EnvironmentVariables`. At startup, `load_dotenv()` followed the repo `.env` symlink to `~/Desktop/Valor/.env` on iCloud Drive. macOS TCC blocks `open()` on iCloud Drive files from launchd agents, causing a silent indefinite hang before any bridge code could run.
-
-**Solution**: `scripts/valor-service.sh` (and `scripts/install_worker.sh`) now inject all `.env` variables directly into the installed plist at install time using Python's `dotenv_values()` parser. The bridge and worker detect `VALOR_LAUNCHD=1` in their environment and skip `load_dotenv()` entirely — env vars are already present in the process environment.
+`scripts/valor-service.sh` (and `scripts/install_worker.sh`) inject all `.env` variables directly into the installed plist at install time using Python's `dotenv_values()` parser. The bridge and worker detect `VALOR_LAUNCHD=1` in their environment and skip `load_dotenv()` entirely — env vars are already present in the process environment.
 
 ```python
 # bridge/telegram_bridge.py
@@ -487,28 +438,26 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 
 ### 17. Worker Status Heartbeat Check (`scripts/valor-service.sh`)
 
-**Problem**: After the worker shuts down or hangs, `worker-status` reports `RUNNING` because the old PID still exists in the process table (zombie/sleeping state). `worker-start` refuses to launch a new process, leaving the queue silently unattended.
-
-**Solution**: `status_worker()` now reads the `data/last_worker_connected` heartbeat file (written by `_write_worker_heartbeat()` on every health loop tick). If the heartbeat age exceeds 360 seconds (matching the dashboard threshold), the status is reported as `STALE` instead of `RUNNING`, with exit code 2. This distinguishes a healthy worker (exit 0), a stopped worker (exit 1), and a hung/zombie worker (exit 2).
+`status_worker()` reads the `data/last_worker_connected` heartbeat file (written by `_write_worker_heartbeat()` on every health loop tick). If the heartbeat age exceeds 360 seconds (matching the dashboard threshold), the status is reported as `STALE` instead of `RUNNING`, with exit code 2. This distinguishes a healthy worker (exit 0), a stopped worker (exit 1), and a hung/zombie worker (exit 2).
 
 ### 18. Worker Watchdog (`monitoring/worker_watchdog.py`)
 
-**Problem**: A worker process can appear alive (PID exists, launchd does not restart it) but have a frozen asyncio event loop — for example, when a reflection callable calls `subprocess.run()` without `await`, blocking the loop indefinitely. The bridge watchdog only monitors the bridge; no equivalent existed for the worker.
+A worker process can appear alive (PID exists, launchd does not restart it) but have a frozen asyncio event loop — for example, when a reflection callable calls `subprocess.run()` without `await`, blocking the loop indefinitely.
 
-**Solution**: `monitoring/worker_watchdog.py` runs as a separate launchd service (`com.valor.worker-watchdog`, `StartInterval: 300`) alongside the worker. It checks the `data/last_worker_connected` heartbeat file on every tick:
+`monitoring/worker_watchdog.py` runs as a separate launchd service (`com.valor.worker-watchdog`, `StartInterval: 300`) alongside the worker. It checks the `data/last_worker_connected` heartbeat file on every tick:
 
 | Heartbeat age | Status | Action |
 |--------------|--------|--------|
 | < threshold | `ok` | Log debug, exit. Reset down-tick counter if present. |
 | Missing (file absent) | `starting` | Skip — worker may be initializing |
-| Worker PID absent | `down` | **Active recovery via 4-level escalation (issue #1311)** — see below |
-| ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5 (issue #1767)** — see below |
+| Worker PID absent | `down` | **Active recovery via 4-level escalation** — see below |
+| ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5** — see below |
 
-**Stale-heartbeat threshold (issue #1767):** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable for conservative rollout (e.g. `HEARTBEAT_THRESHOLD=300` on first deploy). The ≥6× multiplier is the new false-positive guard: because the heartbeat is now written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, thread-pool exhaustion can no longer starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy), justifying a lower threshold and an aggressive kill ladder.
+**Stale-heartbeat threshold:** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable. The ≥6× multiplier is the false-positive guard: the heartbeat is written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, so thread-pool exhaustion cannot starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy).
 
-**Heartbeat thread isolation (issue #1767):** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started at worker startup and is stopped via `_heartbeat_stop_event` on worker shutdown. Prior to issue #1767 the heartbeat write happened inside `_agent_session_health_loop()` (inside the event loop), so thread-pool saturation could delay or skip writes entirely — the stale-heartbeat signal was unreliable. The dedicated thread removes that dependency: the only way the heartbeat can go stale now is if the worker process itself is hung.
+**Heartbeat thread isolation:** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started at worker startup and is stopped via `_heartbeat_stop_event` on worker shutdown. The only way the heartbeat can go stale is if the worker process itself is hung.
 
-**Verified-kill escalation ladder** (when heartbeat is stale — issue #1767):
+**Verified-kill escalation ladder** (when heartbeat is stale):
 
 When the watchdog detects `status == "stale"`, it calls `recover(status)`, which runs a five-rung escalation ladder. Every rung verifies the kill via `_poll_pid_dead(pid, timeout, interval=0.5)`, which loops `os.kill(pid, 0)` and treats `ProcessLookupError` or `PermissionError` as confirmed dead — the kill is never assumed.
 
@@ -525,25 +474,11 @@ When the watchdog detects `status == "stale"`, it calls `recover(status)`, which
 redis-cli GET worker:watchdog:critical:$(hostname)
 ```
 
-W4 no longer writes a separate `pty_close_required` side-channel key — that
-signal existed to prompt operator PTY-fd cleanup, which has no analog for a
-`claude -p` subprocess (a session-execution turn is a short-lived, self-reaping
-child; there is no long-lived PTY master fd for a U-state hang to be blocked
-on in the first place, issue #1924).
+W4 writes no separate `pty_close_required` side-channel key — a session-execution turn is a short-lived, self-reaping child; there is no long-lived PTY master fd for a U-state hang to be blocked on.
 
-**Confirmed KEPT, unchanged (#1926 post-teardown scar-tissue removal):** the
-W1-W5 verified-kill ladder above and its issue-#1767 U-state rationale carry
-no PTY-specific narrative (`grep -ni "pty master|master fd"
-monitoring/worker_watchdog.py` == 0) — the mechanism is substrate-agnostic. A
-headless `claude -p` subprocess can still wedge in uninterruptible sleep on a
-blocking syscall exactly as any process can, so the ladder is a confirmation
-surface, not an edit target. Likewise the bridge watchdog's 5-level
-escalation ladder + revert-commit (Component 3 above) is kept unchanged —
-orthogonal to PTY, it supervises the bridge process (Telethon connectivity,
-hibernation). See the [Removed Defenses Ledger](../removed-defenses.md) for
-what #1926 actually removed elsewhere (the stall-recovery dry-run flag).
+The W1-W5 verified-kill ladder is substrate-agnostic. A headless `claude -p` subprocess can wedge in uninterruptible sleep on a blocking syscall exactly as any process can. The bridge watchdog's escalation ladder + revert-commit (Component 3 above) supervises the bridge process (Telethon connectivity, hibernation) and is orthogonal to PTY.
 
-**Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs as **Step 3a** in `worker/__main__.py`, **before** `_recover_interrupted_agent_sessions_startup` (Step 3b). The ordering is critical: Step 3b transitions all remaining `running` sessions → `pending` without checking PID liveness; if the sweep ran after, there would be no `running` sessions left to inspect. The sweep handles the dead-worker subset (dead fenced `exec_pid`) first, finalizing those sessions to `killed`; Step 3b then re-queues the remaining genuinely-interruptible sessions (alive PID or no PID yet). The sweep:
+**Post-restart dead-worker session sweep:** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs as **Step 3a** in `worker/__main__.py`, **before** `_recover_interrupted_agent_sessions_startup` (Step 3b). The ordering is critical: Step 3b transitions all remaining `running` sessions → `pending` without checking PID liveness; if the sweep ran after, there would be no `running` sessions left to inspect. The sweep handles the dead-worker subset (dead fenced `exec_pid`) first, finalizing those sessions to `killed`; Step 3b then re-queues the remaining genuinely-interruptible sessions (alive PID or no PID yet). The sweep:
 
 1. Enumerates all sessions with `status="running"`.
 2. Skips sessions with no `exec_pid` (not yet assigned a subprocess).
@@ -554,9 +489,7 @@ what #1926 actually removed elsewhere (the stall-recovery dry-run flag).
 
 Returns the count of sessions swept. A non-zero result is logged at INFO.
 
-**Active recovery escalation** (when worker process is missing — issue #1311):
-
-Prior to issue #1311 the watchdog only logged `Worker not running — launchd handles restart` and exited, relying on launchd `KeepAlive=true` to bring the worker back. On 2026-05-06 the worker died at 08:37 UTC and KeepAlive failed to restart it for 7+ hours, leaving every layer logging the failure but none recovering. The watchdog now actively escalates.
+**Active recovery escalation** (when worker process is missing):
 
 A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive missing-worker ticks using `POPOTO_REDIS_DB.incr` + `expire(3600)` (atomic by Redis semantics, no file-lock needed). Each watchdog tick is a fresh launchd invocation so the counter must survive outside the process — Redis is the natural fit. TTL of 1h auto-clears stale state (e.g. after a prolonged outage where the counter was never explicitly cleared).
 
@@ -564,19 +497,19 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 |-------|---------|--------|
 | L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
 | L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
-| L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists (issue #1407) | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the case where `start_worker()` registered the service via `launchctl load`, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
+| L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the case where the service was registered via `launchctl load`, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
 | L3 | L2/L2.5 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
 | L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Reason string includes `bootstrap+kickstart+enable all failed` when L2.5 was attempted, otherwise `kickstart+enable both failed`. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
 
-**Why L2.5 was needed (issue #1407)**: prior to the fix, `scripts/valor-service.sh::start_worker()` used `launchctl load` which registered the worker in a domain outside `gui/<uid>/`. After any `worker-stop && worker-start` cycle, `KeepAlive` no longer fired and the watchdog's `kickstart gui/<uid>/...` returned rc=113. `start_worker()` was also modernized to use `bootout + bootstrap gui/<uid> <plist>` so the registration always lands in the gui domain on day one. L2.5 is the defense-in-depth — if any future code path regresses, the watchdog now self-heals.
+L2.5 heals the case where `scripts/valor-service.sh::start_worker()` registered the worker via `launchctl load` in a domain outside `gui/<uid>/`; `start_worker()` registers via `bootout + bootstrap gui/<uid> <plist>` so the registration lands in the gui domain. L2.5 is defense-in-depth — if any code path regresses, the watchdog self-heals.
 
 **Operator-disable short-circuit**: the watchdog detects sticky-disable via `launchctl print-disabled gui/<uid>` at the very top of `main()`. If `"com.valor.worker" => disabled` appears in the output, it logs `Worker disabled by operator (launchctl print-disabled) — skipping check`, clears the down-tick counter (so a future re-enable starts fresh), and returns without touching launchctl. This is the only authoritative source — `worker-disable` in `valor-service.sh` calls `launchctl disable` directly; no sidecar flag file exists. Operator check precedes the down-counter increment so a disabled worker never accumulates ticks.
 
-**Single-handler logger**: the previous module called `logging.basicConfig()` AND attached a rotating file handler to a named logger that propagated to root, while the launchd plist redirected stdout/stderr to the same log file. Net result: every line written twice. The fix configures the named logger explicitly with `propagate = False` and exactly one rotating file handler. Since #2643 that configuration happens in `_configure_logger()`, called from the `__main__` guard only, so a bare import attaches no handler at all — the invariant is "exactly one *owned* handler after `_configure_logger()` runs", not "one handler always". Regression test: `tests/unit/test_worker_watchdog.py::TestLoggerConfiguration::test_logger_no_duplicate_handlers`, which calls `_configure_logger()` and asserts exactly one handler tagged `_watchdog_owned`.
+**Single-handler logger**: the watchdog configures a named logger explicitly with `propagate = False` and exactly one rotating file handler. That configuration happens in `_configure_logger()`, called from the `__main__` guard only, so a bare import attaches no handler at all — the invariant is "exactly one *owned* handler after `_configure_logger()` runs", not "one handler always". Regression test: `tests/unit/test_worker_watchdog.py::TestLoggerConfiguration::test_logger_no_duplicate_handlers`, which calls `_configure_logger()` and asserts exactly one handler tagged `_watchdog_owned`.
 
 **Check status**:
 ```bash
-./scripts/valor-service.sh worker-status   # surfaces watchdog recovery state inline (Task 4b)
+./scripts/valor-service.sh worker-status   # surfaces watchdog recovery state inline
 python monitoring/worker_watchdog.py --check   # standalone: print status, exit 0=ok, 1=stale/down
 tail -f logs/worker_watchdog.log
 
@@ -587,15 +520,13 @@ redis-cli GET worker:watchdog:critical:$(hostname)
 redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 ```
 
-**`worker-status` watchdog surface** (Task 4b): `./scripts/valor-service.sh worker-status` now reads the Redis down-tick counter (`worker:watchdog:down_ticks:{hostname}`) and critical-state key (`worker:watchdog:critical:{hostname}`) and prints a one-line summary alongside the process/heartbeat info. Best-effort — Redis unavailability is silently ignored so `worker-status` always completes.
+**`worker-status` watchdog surface**: `./scripts/valor-service.sh worker-status` reads the Redis down-tick counter (`worker:watchdog:down_ticks:{hostname}`) and critical-state key (`worker:watchdog:critical:{hostname}`) and prints a one-line summary alongside the process/heartbeat info. Best-effort — Redis unavailability is silently ignored so `worker-status` always completes.
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
-### 19. Guarded Config Read (`bridge/routing.py`, issue #1817 workstream C4)
+### 19. Guarded Config Read (`bridge/routing.py`)
 
-**Problem**: `load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both parsed `projects.json` with a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/truncated file. The bare parse raised `JSONDecodeError` (or, on a partial read, `OSError`/`UnicodeDecodeError`) straight out of `_get_active_projects()`, which runs at `telegram_bridge.py` import time (`ACTIVE_PROJECTS = _get_active_projects()`) — crashing the bridge before any logging or recovery could run and trapping the watchdog in the same restart-loop failure mode described under Import-Time Safety above.
-
-**Solution**: `bridge/routing.py::_guarded_json_load()` wraps the parse in a `try/except (json.JSONDecodeError, OSError, UnicodeDecodeError)`. On success it caches the parsed config to a last-known-good sidecar (`data/projects.last_known_good.json`), written atomically via temp-file + `os.replace` — the same idiom used by `data/flood-backoff` (Component 11) and `agent/session_health.py`. On a parse failure it logs an ERROR and serves the last-known-good sidecar instead of raising; if no sidecar exists yet, it falls back to empty defaults (`{"projects": {}, "defaults": {}}`). `_guarded_json_load()` never raises. Both `load_config()` and `telegram_bridge.py::_get_active_projects()` (including its import-time module-level call) route through this shared helper, so a transiently corrupt config no longer crash-loops either the bridge or the worker's config reads.
+`bridge/routing.py::_guarded_json_load()` wraps `projects.json` parsing in a `try/except (json.JSONDecodeError, OSError, UnicodeDecodeError)`. On success it caches the parsed config to a last-known-good sidecar (`data/projects.last_known_good.json`), written atomically via temp-file + `os.replace` — the same idiom used by `data/flood-backoff` (Component 11) and `agent/session_health.py`. On a parse failure it logs an ERROR and serves the last-known-good sidecar instead of raising; if no sidecar exists yet, it falls back to empty defaults (`{"projects": {}, "defaults": {}}`). `_guarded_json_load()` never raises. Both `load_config()` and `telegram_bridge.py::_get_active_projects()` (including its import-time module-level call) route through this shared helper, so a transiently corrupt config does not crash-loop either the bridge or the worker's config reads.
 
 **Files**:
 - `data/projects.last_known_good.json` — last successfully-parsed config, refreshed on every successful read
@@ -604,15 +535,13 @@ redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 
 See [Config Architecture](config-architecture.md) for how `projects.json` fits into the broader config system.
 
-### 20. Update Release Verification (issue #1898)
+### 20. Update Release Verification
 
-**Problem**: The Telegram `/update` command (and the 30-minute polling cron, both routed through `scripts/remote-update.sh`) reported `✅ update OK @ {sha}` from the shell's exit code and `git rev-parse --short HEAD` alone. Nothing restarted the bridge on this path (only the worker had a kickstart block), and nothing verified that the running processes were actually executing the pulled code. A bridge that booted once and then survived every later pull kept reporting `✅` on each cycle while running commits old, because no restart and no verification ever touched it.
-
-**Solution**: Four coordinated pieces close the gap: a boot-SHA beacon each process writes at startup, a shared classifier that reads both beacons, a bridge restart block in the shell (mirroring the pre-existing worker block), and a report path that survives the bridge's own restart.
+Four coordinated pieces verify that the running processes actually execute the pulled code: a boot-SHA beacon each process writes at startup, a shared classifier that reads both beacons, a bridge restart block in the shell, and a report path that survives the bridge's own restart.
 
 **Boot-SHA beacon** (`monitoring/boot_beacon.py::write_boot_beacon`): at startup the bridge writes `data/bridge_boot_sha` and the worker writes `data/worker_boot_sha`, each a two-line file containing the short git SHA (via `scripts/update/git.py::get_short_sha`, the same helper the classifier compares against) and an ISO 8601 timestamp. The write is best-effort: any failure logs a warning and never crashes startup. A missing or malformed beacon can only ever downgrade classification to `unknown`, never invert into a false failure.
 
-**Relevant-range classifier** (`scripts/update/service.py::verify_running_release`): for each in-role process, `_classify_process()` reads its beacon, gets the process's absolute start time via `get_process_start_ts(pid)` (a `ps -o lstart` parser, generalized from the bridge watchdog's `get_bridge_process_start_ts`), and classifies:
+**Relevant-range classifier** (`scripts/update/service.py::verify_running_release`): for each in-role process, `_classify_process()` reads its beacon, gets the process's absolute start time via `get_process_start_ts(pid)` (a `ps -o lstart` parser), and classifies:
 
 | Classification | Condition |
 |---|---|
@@ -620,11 +549,11 @@ See [Config Architecture](config-architecture.md) for how `projects.json` fits i
 | `stale` | beacon belongs to the current image AND that relevant-range log is non-empty |
 | `unknown` | beacon missing/malformed, no PID, `process_start_ts` unavailable, an orphaned beacon (`beacon_ts <= process_start_ts`), or `boot_sha` unresolvable by git |
 
-Staleness is positive-only and scoped to each process's own relevant path set (bridge: `bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml`; worker: `worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`), the same sets the restart gates diff, so classifier and restart gate agree by construction. A raw `boot_sha == HEAD` comparison is deliberately never used: docs-only or plan-migration commits advance HEAD past a healthy, correctly-un-restarted process, and a literal-equality check would false-fail on the majority of this repo's commit stream. `unknown` never fails a run and never triggers a restart. Only a positive, confirmed staleness escalates.
+Staleness is positive-only and scoped to each process's own relevant path set (bridge: `bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml`; worker: `worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`), the same sets the restart gates diff, so classifier and restart gate agree by construction. A raw `boot_sha == HEAD` comparison is never used: docs-only or plan-migration commits advance HEAD past a healthy, correctly-un-restarted process, and a literal-equality check would false-fail on the majority of this repo's commit stream. `unknown` never fails a run and never triggers a restart. Only a positive, confirmed staleness escalates.
 
-**Bridge kickstart in `remote-update.sh`** (the core fix: a bridge restart on this path did not exist before). After the pull and the existing worker kickstart, the shell computes `NEED_BRIDGE_RESTART` from a `BEFORE_SHA..AFTER_SHA` diff of the bridge-relevant paths, gated on the bridge plist being installed on this machine (`[ -f "$BRIDGE_DST" ]`; a skills-only machine has no bridge plist and skips the block entirely). When true, it runs `launchctl kickstart -k {prefix}.bridge` as the **last** thing the script does. This is safe because the bridge holds no agent sessions (the worker is the sole session executor) and its Telethon `catch_up=True` scan backfills anything missed during the brief restart. It is the last act because the kickstart SIGKILLs the whole bridge launchd job, including `handle_update_command` and the `remote-update.sh` child it spawned, since they share the job's process group. Nothing in the shell runs after a successful kickstart. Both worker and bridge kickstart failures now surface as a distinct `RESTART FAILED` line and a non-zero terminal exit (`RESTART_FAILED || VERIFY_FAILED`), replacing the previous swallowed `echo ERROR`.
+**Bridge kickstart in `remote-update.sh`**: After the pull and the worker kickstart, the shell computes `NEED_BRIDGE_RESTART` from a `BEFORE_SHA..AFTER_SHA` diff of the bridge-relevant paths, gated on the bridge plist being installed on this machine (`[ -f "$BRIDGE_DST" ]`; a skills-only machine has no bridge plist and skips the block entirely). When true, it runs `launchctl kickstart -k {prefix}.bridge` as the **last** thing the script does. This is safe because the bridge holds no agent sessions (the worker is the sole session executor) and its Telethon `catch_up=True` scan backfills anything missed during the brief restart. It is the last act because the kickstart SIGKILLs the whole bridge launchd job, including `handle_update_command` and the `remote-update.sh` child it spawned, since they share the job's process group. Nothing in the shell runs after a successful kickstart. Both worker and bridge kickstart failures surface as a distinct `RESTART FAILED` line and a non-zero terminal exit (`RESTART_FAILED || VERIFY_FAILED`).
 
-**Worker restart primitive selection and the EIO-recovery fallback.** The worker restart block picks its primitive from `launchctl list | grep -q "$WORKER_LABEL"`. When the label is listed it uses the race-free `launchctl kickstart -k` (with a `bootout` + `sleep 2` + `bootstrap` fallback). When the grep reports the label absent it treats it as a first install and `bootstrap`s. That grep can **false-negative** — the label is in fact still registered in the gui domain (e.g. a stale worker process still holding it) while `launchctl list` momentarily omits it — in which case the bare `bootstrap` fails with `Bootstrap failed: 5: Input/output error` (errno 5 = the service is already bootstrapped in the target domain). Because that EIO *proves* the service is loaded, the not-loaded branch recovers with `launchctl kickstart -k` — the same primitive the loaded branch prefers — and only declares `RESTART FAILED` when **both** the bootstrap and the kickstart fail. On success it sets `VERIFY_SINCE=$RESTART_TS` exactly like the loaded branch, so the terminal release verify still runs once against the restart moment. Recoverable bootstrap stderr is suppressed so a transient EIO does not leak the raw launchd error into the update summary; on the genuine both-fail path the captured launchd errno/message is appended to the `RESTART FAILED` line for diagnosability. Regression tests live in `tests/unit/test_remote_update_shell.py` (`test_worker_bootstrap_eio_recovers_via_kickstart`, `test_worker_bootstrap_and_kickstart_both_fail_reports_failure`). This fixed a real `/update` failure on the "Valor the Bald" machine where a 17-hour-old worker held the label, the grep false-negatived, and the bare bootstrap EIO left the stale worker running code 8 commits behind HEAD.
+**Worker restart primitive selection and the EIO-recovery fallback.** The worker restart block picks its primitive from `launchctl list | grep -q "$WORKER_LABEL"`. When the label is listed it uses the race-free `launchctl kickstart -k` (with a `bootout` + `sleep 2` + `bootstrap` fallback). When the grep reports the label absent it treats it as a first install and `bootstrap`s. That grep can **false-negative** — the label is in fact still registered in the gui domain (e.g. a stale worker process still holding it) while `launchctl list` momentarily omits it — in which case the bare `bootstrap` fails with `Bootstrap failed: 5: Input/output error` (errno 5 = the service is already bootstrapped in the target domain). Because that EIO *proves* the service is loaded, the not-loaded branch recovers with `launchctl kickstart -k` — the same primitive the loaded branch prefers — and only declares `RESTART FAILED` when **both** the bootstrap and the kickstart fail. On success it sets `VERIFY_SINCE=$RESTART_TS` exactly like the loaded branch, so the terminal release verify still runs once against the restart moment. Recoverable bootstrap stderr is suppressed so a transient EIO does not leak the raw launchd error into the update summary; on the genuine both-fail path the captured launchd errno/message is appended to the `RESTART FAILED` line for diagnosability. Regression tests live in `tests/unit/test_remote_update_shell.py` (`test_worker_bootstrap_eio_recovers_via_kickstart`, `test_worker_bootstrap_and_kickstart_both_fail_reports_failure`).
 
 Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "$LOCK_DIR"`), because the `trap cleanup_lock EXIT` that normally releases it never fires on SIGKILL. Without the explicit release, every bridge-relevant update would orphan the lock for up to 600 seconds, and any retry or the next cron cycle in that window would hit the "already running" skip branch with no pull and no verify.
 
@@ -632,22 +561,22 @@ Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "
 
 **Report path splits on whether the bridge restarts this cycle** (the survivable-channel design: a bridge kickstart kills the process that ran `/update`, so it cannot always be the reporter):
 
-- **Worker-only or no-op update (no bridge restart)**: `handle_update_command` (`bridge/update.py`) survives. It re-verifies via `verify_running_release()` after the shell returns, gates `✅` on `returncode == 0 AND` no in-role `stale`, and appends per-process reload state (e.g. `(bridge current, worker restarted)`). A stale process reports `❌ update FAILED @ {sha}: {process} running {short} but HEAD is {short}` and still spawns the existing fix session. All stdout lines are scanned for `warning`/`ERROR` (previously only the first line was checked).
+- **Worker-only or no-op update (no bridge restart)**: `handle_update_command` (`bridge/update.py`) survives. It re-verifies via `verify_running_release()` after the shell returns, gates `✅` on `returncode == 0 AND` no in-role `stale`, and appends per-process reload state (e.g. `(bridge current, worker restarted)`). A stale process reports `❌ update FAILED @ {sha}: {process} running {short} but HEAD is {short}` and still spawns the fix session. All stdout lines are scanned for `warning`/`ERROR`.
 - **Bridge-relevant update (bridge restart triggered)**: `handle_update_command` will be SIGKILLed, so before the kickstart the shell stages the originating chat id, reply-to message id, pulled HEAD short-SHA, and worker reload state to `data/update-pending-report` (only when a Telegram chat context is present; the pure 30-minute cron cycle has none, so nothing is staged). The **fresh bridge**, at startup right after writing its own boot-SHA beacon, calls `run_boot_release_check()` (`bridge/update.py`), which unconditionally verifies its own release, then, if the pending report exists, reuses that check to compose the `✅`/FAILED reply, sends it to the staged chat, and deletes the file.
 - On a bridge-plist machine, `handle_update_command` also sends a best-effort interim notice before invoking the shell, so the human is not left staring at a bare 👀 reaction for the multi-minute window between the bridge's self-kill and the fresh bridge's boot flush. A send failure here never blocks the update.
 
 **`--full` verify** (`scripts/update/run.py::run_release_verify`): the synchronous `/update --full` path calls `verify_running_release()` as the terminal step of the `do_service_restart=True` branch, after `install_service`'s restart. Any in-role `stale` sets `result.success = False` (non-zero exit) and names both short-SHAs; `unknown` only warns. A clean pass that finds the bridge positively `matches` clears any earlier failure sentinel (below).
 
-**Worker self-heal before alerting (issues #2400/#2220)**: the full path's Step 5 worker install (`service.install_worker`) is content-idempotent — it returns early without restarting when the plist is unchanged, which is the case for any code-only pull. So a manual `/update` run right after merging worker-relevant code did NOT restart the worker (unlike the cron path, `remote-update.sh`, which kickstarts on a worker-relevant diff *before* verifying): the worker kept serving the old SHA and the terminal verify correctly classified it `stale` and fired the "update release verify FAILED" Sentry alert on **every** post-merge `/update`, with no path to recover. `run_release_verify` now self-heals a `stale` worker in place before alerting: drain (parity with `install_worker`'s #2141 gate) → `service.kickstart_worker()` (`launchctl kickstart -k`) → bounded poll (`WORKER_SELF_HEAL_POLL_ATTEMPTS` × `WORKER_SELF_HEAL_POLL_INTERVAL_S`, default 15 × 2s, env-overridable) for a worker beacon fresher than the restart moment (the same Race-1 mitigation as the shell path's `--since` poll). Outcomes: `healed` re-verifies (the worker is now on new code — no alert); a busy-drain `deferred` warns only and drops the worker from alert consideration (never kill an in-flight PM turn — the 30-min cron restarts it next tick); `failed` (restart ran but no fresh beacon) falls through to the hard-fail + Sentry path, which is now a genuine "worker won't come up on new code" signal rather than expected post-merge drift. The bridge is never self-restarted here — a bridge kickstart would SIGKILL the `/update` process itself.
+**Worker self-heal before alerting**: the full path's Step 5 worker install (`service.install_worker`) is content-idempotent — it returns early without restarting when the plist is unchanged, which is the case for any code-only pull. So a manual `/update` run right after merging worker-relevant code does NOT restart the worker (unlike the cron path, `remote-update.sh`, which kickstarts on a worker-relevant diff *before* verifying). `run_release_verify` self-heals a `stale` worker in place before alerting: drain → `service.kickstart_worker()` (`launchctl kickstart -k`) → bounded poll (`WORKER_SELF_HEAL_POLL_ATTEMPTS` × `WORKER_SELF_HEAL_POLL_INTERVAL_S`, default 15 × 2s, env-overridable) for a worker beacon fresher than the restart moment. Outcomes: `healed` re-verifies (the worker is on new code — no alert); a busy-drain `deferred` warns only and drops the worker from alert consideration (never kill an in-flight PM turn — the 30-min cron restarts it next tick); `failed` (restart ran but no fresh beacon) falls through to the hard-fail + Sentry path, a genuine "worker won't come up on new code" signal. The bridge is never self-restarted here — a bridge kickstart would SIGKILL the `/update` process itself.
 
-**Out-of-band signals for a bridge that never comes back**: the report path above depends on the fresh bridge coming up. If it crash-loops or launchd fails to relaunch it, there is no live channel to report on, reproducing the original #1898 symptom. Two backstops, both read by `monitoring/bridge_watchdog.py::check_update_release_signals()` on its normal 60-second cycle:
+**Out-of-band signals for a bridge that never comes back**: the report path above depends on the fresh bridge coming up. If it crash-loops or launchd fails to relaunch it, there is no live channel to report on. Two backstops, both read by `monitoring/bridge_watchdog.py::check_update_release_signals()` on its normal 60-second cycle:
 
 - A fresh bridge that boots but self-classifies its own beacon `stale` writes `data/update-release-failed` (SHA lag + timestamp) via the unconditional self-check in `run_boot_release_check()`. This runs at every bridge boot regardless of whether a pending report exists, so the pure-cron trigger path (which stages nothing) still gets the backstop. A subsequent healthy boot (`matches`) clears the sentinel.
 - A `data/update-pending-report` left undrained past `UPDATE_REPORT_TTL_SECONDS` (`STARTUP_GRACE_SECONDS + 60`, i.e. the watchdog's 5-minute startup grace plus one 60-second watchdog cycle, defined once in `scripts/update/service.py` and re-imported by the watchdog), measured against the report's own staged timestamp, signals that the fresh bridge never came up to flush it.
 
 Both checks are logged at `logger.critical("[update-release] ...")` on every watchdog tick while the condition holds.
 
-**Watchdog suppression for the planned restart**: the bridge kickstart is the first *deliberate* SIGKILL of the bridge process, and without a suppression the independent 60-second watchdog would log a crash and could itself call `restart_bridge()` mid-window. `remote-update.sh` writes `data/update-restart-in-progress` (a timestamp) immediately before the kickstart. `run_health_check()` checks the marker's age against `UPDATE_RESTART_MARKER_TTL_SECONDS` (the same `STARTUP_GRACE_SECONDS + 60` formula as the report TTL, so the suppression window can never expire before the boot window it protects) and early-returns healthy while the marker is fresh, before `check_bridge_health()` runs, so neither the crash log nor the recovery-level bump fires. The fresh bridge's boot self-check clears the marker; an aged-out marker resumes normal health checking.
+**Watchdog suppression for the planned restart**: the bridge kickstart is a *deliberate* SIGKILL of the bridge process, and without a suppression the independent 60-second watchdog would log a crash and could itself call `restart_bridge()` mid-window. `remote-update.sh` writes `data/update-restart-in-progress` (a timestamp) immediately before the kickstart. `run_health_check()` checks the marker's age against `UPDATE_RESTART_MARKER_TTL_SECONDS` (the same `STARTUP_GRACE_SECONDS + 60` formula as the report TTL, so the suppression window can never expire before the boot window it protects) and early-returns healthy while the marker is fresh, before `check_bridge_health()` runs, so neither the crash log nor the recovery-level bump fires. The fresh bridge's boot self-check clears the marker; an aged-out marker resumes normal health checking.
 
 **Files**:
 - `data/bridge_boot_sha`, `data/worker_boot_sha`: boot-SHA beacons (SHA + ISO timestamp), written at startup
@@ -662,88 +591,31 @@ python -m scripts.update.verify_release          # manual classification against
 cat data/update-release-failed 2>/dev/null       # present only after a stale boot
 ```
 
-**Corrected docstrings**: `agent/agent_session_queue.py`'s `_trigger_restart()` and the `_check_restart_flag()` log line previously said "restarting bridge," but both actually SIGTERM the **worker** process (launchd respawns the worker, not the bridge). These are documentation-only corrections; the SIGTERM target is unchanged. The worker's deferred `data/restart-requested` flag remains independent of the bridge kickstart described above. This feature does not add bridge consumption of that flag.
+`_trigger_restart()` in `agent/agent_session_queue.py` and the `_check_restart_flag()` log line SIGTERM the **worker** process (launchd respawns the worker, not the bridge). The worker's deferred `data/restart-requested` flag is independent of the bridge kickstart described above; this feature does not add bridge consumption of that flag.
 
-### 21. Hardened `launchctl bootstrap` Call Sites (`scripts/lib/launchctl.sh`, issue #2013)
+### 21. Hardened `launchctl bootstrap` Call Sites (`scripts/lib/launchctl.sh`)
 
-**Problem**: The worker-restart EIO recovery described in Component 20 above (issue #1898)
-hardened one `launchctl bootstrap` call site: the not-loaded branch of the worker restart
-block in `remote-update.sh`. Every other bare `launchctl bootstrap` call in the codebase
-still had no recovery. On machine "Valor the Bald," a `/update` run hit the same errno-5
-race on a bare bootstrap in `scripts/valor-service.sh` and aborted mid-service-install with
-`Bootstrap failed: 5: Input/output error` and no further `[update]` output.
-`scripts/valor-service.sh` runs under `set -e`, so a single transient errno 5 on any of its
-three bare `launchctl bootstrap` calls terminated the whole `install`/`restart`/`worker-start`
-invocation, leaving remaining services uninstalled and the machine on stale code. The
-`scripts/install_*.sh` helper scripts shared the identical bare-bootstrap shape.
+`scripts/lib/launchctl.sh` exports one shared function, `launchctl_bootstrap_fail_soft <domain> <plist> <label>`, implementing bootstrap-then-`kickstart -k` recovery: `launchctl bootstrap` first, and only on bootstrap failure a `launchctl kickstart -k` fallback against the same label. The helper deliberately does NOT bootout the label itself — an unconditional internal bootout would kill and recreate an already-loaded, healthy service on every call. Any preceding bootout is owned by the call site: `bootstrap_plist_idempotent` and `worker-start` in `scripts/valor-service.sh` each boot out before calling the helper, as does `remote-update.sh` before its own bootstrap. `kickstart -k` is the correct recovery here because an errno-5 bootstrap failure specifically means the label is already registered in the domain. The function returns 0 as soon as the service ends up loaded (first-try bootstrap, or kickstart recovery) and returns 1 with a distinct, greppable `WARNING: launchctl bootstrap+kickstart failed for <label>` to stderr only on a genuine double-failure, so a truly dead service is never silently masked.
 
-**Solution**: `scripts/lib/launchctl.sh` exports one shared function,
-`launchctl_bootstrap_fail_soft <domain> <plist> <label>`, implementing the same
-bootstrap-then-`kickstart -k` recovery already proven in Component 20: `launchctl bootstrap`
-first, and only on bootstrap failure a `launchctl kickstart -k` fallback against the same
-label. The helper deliberately does NOT bootout the label itself — an unconditional internal
-bootout would kill and recreate an already-loaded, healthy service on every call. Any
-preceding bootout is owned by the call site, matching the `remote-update.sh` pattern:
-`bootstrap_plist_idempotent` and `worker-start` in `scripts/valor-service.sh` each already
-boot out before calling the helper, exactly as `remote-update.sh` boots out before its own
-bootstrap. `kickstart -k` is the correct recovery here because an errno-5 bootstrap failure
-specifically means the label is already registered in the domain, the same reasoning as the
-worker-restart fallback in Component 20. The function returns 0 as soon as the service ends
-up loaded (first-try bootstrap, or kickstart recovery) and returns 1 with a distinct,
-greppable `WARNING: launchctl bootstrap+kickstart failed for <label>` to stderr only on a
-genuine double-failure, so a truly dead service is never silently masked.
-
-`scripts/valor-service.sh` (three call sites: `bootstrap_plist_idempotent`, the bridge
-install, and `worker-start`) and five `install_*.sh` helpers
-(`install_worker.sh`: main and watchdog, plus `install_reflection_worker.sh`,
-`install_nightly_tests.sh`, `install_email_bridge.sh`, `install_sdlc_reflection.sh`) now
-source the shared helper and call it instead of a bare `launchctl bootstrap`. In
-`valor-service.sh`, a genuine double-failure warns and lets the install continue rather than
-hard-aborting under `set -e`: the fix's core behavior change. The happy path (bootstrap
-succeeds on the first try) is observably identical to before: the helper returns 0 with no
-`kickstart` call.
-
-This is the sibling hardening to Component 20's `remote-update.sh` fix (issue #1898): that
-work covered the worker-restart not-loaded branch of `remote-update.sh` only; issue #2013
-closes the gap across the remaining bare-bootstrap call sites in `valor-service.sh` and the
-`install_*.sh` helpers, using the same `kickstart -k` recovery primitive.
+`scripts/valor-service.sh` (three call sites: `bootstrap_plist_idempotent`, the bridge install, and `worker-start`) and five `install_*.sh` helpers (`install_worker.sh`: main and watchdog, plus `install_reflection_worker.sh`, `install_nightly_tests.sh`, `install_email_bridge.sh`, `install_sdlc_reflection.sh`) source the shared helper and call it instead of a bare `launchctl bootstrap`. In `valor-service.sh`, a genuine double-failure warns and lets the install continue rather than hard-aborting under `set -e`. The happy path (bootstrap succeeds on the first try) is identical: the helper returns 0 with no `kickstart` call.
 
 **Files**:
 - `scripts/lib/launchctl.sh`: shared `launchctl_bootstrap_fail_soft` helper
 
-**Tests**: `tests/unit/test_valor_service_bootstrap.py` and
-`tests/unit/test_install_scripts_bootstrap.py` are stubbed-`launchctl` harnesses asserting
-the errno-5 recovery path, the genuine double-failure WARNING, and the unchanged happy path.
-
-## Idle SDK Teardown (issue #1128) — Retired in #2000
-
-The Claude Agent SDK's persistent `ClaudeSDKClient` connections used to
-die silently after roughly 48 hours of idle (fleet-ops research, #1104),
-so the worker ran an idle sweeper (`worker/idle_sweeper.py::run_idle_sweep`)
-that proactively tore down those clients and rebuilt them via `--resume`
-on the next query. Every production session (PM / Dev / Teammate) has
-run through the short-lived `claude -p stream-json` subprocess-per-turn
-harness path for some time, which never held a persistent connection —
-so the sweeper always found nothing to tear down there and was
-dead-by-consequence. #2000 deleted the sweeper, its `worker/__main__.py`
-supervision wiring, the `_active_clients` registry it inspected, and the
-rest of the dead Claude Agent SDK path wholesale (see
-[HarnessAdapter Seam](harness-adapter.md)). There is no idle-teardown
-concern on the harness path — a fresh `claude -p` subprocess is spawned
-per turn regardless of how long the session was dormant.
+**Tests**: `tests/unit/test_valor_service_bootstrap.py` and `tests/unit/test_install_scripts_bootstrap.py` are stubbed-`launchctl` harnesses asserting the errno-5 recovery path, the genuine double-failure WARNING, and the unchanged happy path.
 
 ## Two-tier no-progress detector
 
 The periodic `_agent_session_health_check` (every 5 minutes) decides whether a
 long-running session is making progress. To minimize **false-negatives**
 (killing a working session) while still reaping genuinely wedged sessions, the
-detector uses two independent tiers. (Issues #1036 and #1046.)
+detector uses two independent tiers.
 
 ### Tier 1 — per-turn signals (sub-check A) + bounded startup-window heartbeat (sub-check B)
 
 `_has_progress()` evaluates two sub-checks. Either passing → progress.
 
-**Sub-check A — per-turn SDK progress (issue #1226).**
+**Sub-check A — per-turn SDK progress.**
 
 | Field | Writer | When |
 |-------|--------|------|
@@ -755,7 +627,7 @@ counts as progress. `last_sdk_heartbeat_at` (the BackgroundTask watchdog
 tick) is intentionally NOT a progress signal — it proves only that the
 subprocess exists.
 
-**Sub-check B — startup-window executor-alive fallback (issue #1036, narrowed by #1226 / #1724 / #1905).**
+**Sub-check B — startup-window executor-alive fallback.**
 
 | Field | Writer | When |
 |-------|--------|------|
@@ -763,9 +635,9 @@ subprocess exists.
 
 When `sdk_ever_output` is False (neither per-turn field has ever been set),
 `last_heartbeat_at` fresh within `HEARTBEAT_FRESHNESS_WINDOW` (90s) counts
-as progress, **subject to the D0 never-started gate (issue #1724)**. The
+as progress, **subject to the D0 never-started gate**. The
 gate (`_never_started_past_grace`, called with the same trusted `now_utc`
-clock sub-check B uses — issue #1905) is the authoritative never-started
+clock sub-check B uses) is the authoritative never-started
 bound: it returns True once `running_seconds > NEVER_STARTED_GRACE_SECS
 (120) + NEVER_STARTED_CONFIRM_MARGIN_SECS (30)` (150s), and sub-check B
 returns False immediately when it fires. For gate survivors, the function
@@ -778,51 +650,33 @@ silently re-enter the original fast-path:
 | both `started_at` and `created_at` are None (phantom record from older format) | fresh heartbeat passes |
 | `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes — unconditional for D0-gate survivors, since a survivor's `running_seconds` (<= 150s) is always below this 300s window |
 
-The #1356 grace-to-budget band (`STARTUP_GRACE_SECONDS <=
-running_seconds <= NO_OUTPUT_BUDGET_SECONDS`) and its `tier1_falloff`
-budget-exceeded telemetry counter that used to fire beyond it were removed
-in issue #1905: once the D0 gate and this leg share one clock, every gate
-survivor unconditionally satisfies the 300s leg above, so the old band was
-provably unreachable.
+Once the D0 gate and this leg share one clock, every gate survivor
+unconditionally satisfies the 300s leg above.
 
-The D0 gate bounds the previously-unbounded fresh-heartbeat fast-path that
-allowed cwd-disappearance and similar wedges (parent investigation #1246) to
-hold Tier 1 open indefinitely. Sessions that have produced any SDK output
-(`sdk_ever_output=True`) are not subject to sub-check B at all — sub-check A
-is authoritative for them.
+The D0 gate bounds the fresh-heartbeat fast-path, so cwd-disappearance and
+similar wedges cannot hold Tier 1 open indefinitely. Sessions that have produced
+any SDK output (`sdk_ever_output=True`) are not subject to sub-check B at all —
+sub-check A is authoritative for them.
 
-**Own-progress fields and child-activity check (#1614):** `turn_count > 0`, non-empty `log_path`, and non-empty
+**Own-progress fields and child-activity check:** `turn_count > 0`, non-empty `log_path`, and non-empty
 `claude_session_uuid` are evaluated only when `sdk_ever_output` is False
 AND `last_heartbeat_at` is within the last `NO_OUTPUT_BUDGET_SECONDS`
-(1800s). These fields are sticky once set, but are now **gated on
+(1800s). These fields are sticky once set, but are **gated on
 heartbeat freshness** — a stale or absent heartbeat means the executor
 loop has likely exited, so own-progress fields must not keep the session
-alive indefinitely (#1614 Branch 2 fix). The #963 child-activity check
+alive indefinitely. The child-activity check
 (a PM session with any non-terminal child is not stuck) is unconditional
 and evaluated regardless of heartbeat freshness.
-
-> **Retired by issue #1172:** the stdout-stale Tier 1 extension from #1046
-> (`STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`) has been removed
-> along with the per-session wall-clock cap (`AGENT_SESSION_TIMEOUT_*`,
-> `_get_agent_session_timeout`). Stdout silence is no longer a kill signal
-> — long-thinking turns and large tool outputs produce legitimate stdout
-> silence. See [PM Session Liveness](pm-session-liveness.md) for the
-> evidence-only philosophy and cost-monitoring backstop.
->
-> **Retired by issue #1226:** the symmetric "dual heartbeat" Tier 1
-> (either `last_heartbeat_at` or `last_sdk_heartbeat_at` fresh = progress)
-> was rewritten as sub-check A above. `last_sdk_heartbeat_at` is now
-> watchdog-only.
 
 **Constants:**
 
 | Constant | Default | Env var | Purpose |
 |----------|---------|---------|---------|
-| `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` (issue #1226) |
-| `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` (issues #1226 / #1356) |
-| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Outside sub-check B's scope (its grace-to-budget band was pruned in issue #1905, subsumed by the D0 gate); still used by the #1614 own-progress heartbeat gate and the Tier-2 reprieve cap |
-| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional for D0-gate survivors (issue #1356, gate added by #1724) |
-| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
+| `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` |
+| `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` |
+| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Used by the own-progress heartbeat gate and the Tier-2 reprieve cap |
+| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional for D0-gate survivors |
+| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill |
 
 **Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is
 escalated from `INFO` to `WARNING`, signaling that the session may be in an
@@ -832,12 +686,11 @@ indefinite alive-but-silent reprieve loop.
 
 When Tier 1 flags a session, the health check calls `_tier2_reprieve_signal()`
 which evaluates three gates — one compaction-aware and two OS-level liveness
-checks via `psutil`. The previous fourth `stdout` gate was retired by issue
-#1172 along with `STDOUT_FRESHNESS_WINDOW`.
+checks via `psutil`.
 
 | Gate | Check | Return |
 |------|-------|--------|
-| compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook` (PR #1135). Added by issue #1099 Mode 3. | `"compacting"` |
+| compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook`. | `"compacting"` |
 | children   | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred over `"alive"`) |
 | alive      | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
 
@@ -850,9 +703,7 @@ Any **one** passing gate reprieves the kill. The reprieve signal is logged and
 kill path — there is no live worker to deliver any future progress signal,
 so an "active children" reprieve would only prolong a hung session.
 
-> The previous `timeout` recovery branch (and its skip-Tier-2 carve-out)
-> was retired by issue #1172 along with the wall-clock cap. Only
-> `no_progress` and `worker_dead` reason kinds remain.
+Only `no_progress` and `worker_dead` reason kinds remain.
 
 The pid is populated via the `on_sdk_started` callback that the messenger
 invokes once the SDK subprocess spawns; see "Messenger callbacks" below.
@@ -886,33 +737,27 @@ behavior before enabling kills during rollout.
 Redis counters keyed by `<project_key>:session-health:`:
 
 * `tier1_flagged_total` — every time `_has_progress` returned False (no
-  fresh heartbeats AND no own-progress AND no live children). The
-  previous `tier1_flagged_stdout_stale` counter was retired by issue
-  #1172 with the stdout-stale path itself.
-* `tier2_reprieve_total:{compacting|alive|children}` — reprieve by signal. The `compacting` gate was added by issue #1099 Mode 3; the two OS-level gates were introduced in #1036. The previous fourth `stdout` gate was retired by #1172.
+  fresh heartbeats AND no own-progress AND no live children).
+* `tier2_reprieve_total:{compacting|alive|children}` — reprieve by signal.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
 * `recoveries:{worker_dead|no_progress|tool_timeout}` — recoveries by reason
-  kind. The previous `timeout` reason was retired by #1172. `tool_timeout`
-  was added by #1270 for the per-tool timeout sub-loop and is recorded by
+  kind. `tool_timeout` covers the per-tool timeout sub-loop and is recorded by
   the shared `_apply_recovery_transition` helper.
 * `recoveries:zombie_uuid_no_output` — subset of `recoveries:no_progress`:
   emitted when the recovered session matches the zombie profile
   (`claude_session_uuid` set but `sdk_ever_output=False`, heartbeat stale
   past `NO_OUTPUT_BUDGET_SECONDS`). Distinguishes stale-zombie recoveries
-  from normal startup-window recoveries (#1614).
+  from normal startup-window recoveries.
 * `tool_timeouts:{internal|mcp|default}` — per-tier hits from the per-tool
-  timeout sub-loop (#1270, parallel 30s loop). Internal tier: lightweight
+  timeout sub-loop (parallel 30s loop). Internal tier: lightweight
   built-ins (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`NotebookEdit`/`ToolSearch`,
   30s budget). MCP tier: any `mcp__*` tool (120s budget). Default tier:
   everything else, including `Bash`/`Task`/`Skill` (300s budget, flat
   age-only kill). Each tier budget is env-tunable via
   `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`,
   `TOOL_TIMEOUT_DEFAULT_SEC`. Sub-loop is gated by `TOOL_TIMEOUT_TIERS_DISABLED`
-  (parity with `DISABLE_PROGRESS_KILL`). The `mid_run_quiescent_since`
-  screen-liveness deferral that used to gate the default tier for granite PTY
-  sessions (issue #1784) was deleted with the PTY substrate (issue #1924) —
-  there is no screen to defer on for a `claude -p` subprocess turn, so the
-  flat age-only kill now applies uniformly to every session.
+  (parity with `DISABLE_PROGRESS_KILL`). The flat age-only kill applies
+  uniformly to every session.
 
 **Distinguishing kill causes in dashboards:**
 - `tier1_flagged_total` high → heartbeat writers are dying (clock/event-loop issue) OR sessions are genuinely stuck
@@ -924,16 +769,14 @@ Redis counters keyed by `<project_key>:session-health:`:
 |-------|------|---------|
 | `last_heartbeat_at` | DatetimeField | Queue-layer heartbeat |
 | `last_sdk_heartbeat_at` | DatetimeField | Messenger watchdog heartbeat |
-| `last_stdout_at` | DatetimeField | Last SDK stdout event — informational only since #1172 (no longer a kill or reprieve signal) |
+| `last_stdout_at` | DatetimeField | Last SDK stdout event — informational only |
 | `started_at` | DatetimeField | Session start time |
 | `recovery_attempts` | IntField | Kills only; finalizes at `MAX_RECOVERY_ATTEMPTS` |
 | `reprieve_count` | IntField | Tier 2 saves — diagnostic only; triggers WARNING log after 3 |
-| `current_tool_name` | Field (str, null) | Pillar A (#1172): name of the tool currently in flight, or None between tools |
-| `last_tool_use_at` | DatetimeField | Pillar A (#1172): bumped at every tool boundary by pre/post tool-use hooks |
-| `last_turn_at` | DatetimeField | Pillar A (#1172): bumped on every SDK `result` event |
-| `recent_thinking_excerpt` | Field (str, null) | Pillar A (#1172): last 280 chars of extended-thinking content |
-
-Pillar B's `self_report_sent_at` frequency-cap field was deleted by the schema diet (#1927) — the PM mid-work self-report it gated (`_emit_pm_self_report`) was retired 2026-05-06 and had no live writer.
+| `current_tool_name` | Field (str, null) | Name of the tool currently in flight, or None between tools |
+| `last_tool_use_at` | DatetimeField | Bumped at every tool boundary by pre/post tool-use hooks |
+| `last_turn_at` | DatetimeField | Bumped on every SDK `result` event |
+| `recent_thinking_excerpt` | Field (str, null) | Last 280 chars of extended-thinking content |
 
 Every model field round-trips through the delete-and-recreate paths (retry,
 orphan-fix, continuation fallback): both payloads derive their field set from
@@ -945,9 +788,7 @@ immediately. See [Two contracts, two field payloads](agent-session-queue.md#two-
 `BossMessenger` defines three optional callback slots (`on_sdk_started`,
 `on_heartbeat_tick`, `on_stdout_event`) with `notify_*` wrappers that catch
 callback exceptions and log at WARNING, but only `on_sdk_started` and
-`on_heartbeat_tick` are wired at its construction site — `on_stdout_event`'s
-prior wiring was a dead, unlanded attempt at the headless-runner stdout
-liveness signal and was removed by issue #1935; `last_stdout_at` is now
+`on_heartbeat_tick` are wired at its construction site. `last_stdout_at` is
 written by `SessionRunner._stamp_stdout_liveness` instead (see
 [Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935)).
 The messenger imports nothing from `models/`; the queue layer
@@ -975,7 +816,7 @@ The lock auto-expires after 5 minutes.
 ./scripts/valor-service.sh restart
 ```
 
-The web UI leg is verified, not assumed (#2123): `restart_webui` kills *all*
+The web UI leg is verified, not assumed: `restart_webui` kills *all*
 listeners on the UI port, respawns `ui.app`, then bounded-polls until a PID is
 bound on the port **and** `/health` answers before printing
 `Web UI restarted (PID: ...)`. Serving is the primary success signal; if the
@@ -1014,19 +855,19 @@ rm data/auto-revert-enabled
 ./scripts/auto-revert.sh
 ```
 
-## Hierarchy Health Check — Terminal Parent Skip (#1208)
+## Hierarchy Health Check — Terminal Parent Skip
 
 The periodic `_agent_session_hierarchy_health_check()` in `agent/session_health.py` walks parents matched by `AgentSession.query.filter(status="waiting_for_children")` and finalizes any whose children are all terminal (delivering a Telegram summary on the success path via `schedule_pipeline_completion`).
 
-**Stale-index defense**: index entries can lag behind the authoritative hash status. If a parent was killed but its `waiting_for_children` index entry was not srem'd at kill time, the parent will still appear in the candidate list. Without a guard, the check would draft and ship a final summary to the operator's chat for an already-killed session — the exact failure mode tracked in #1208.
+**Stale-index defense**: index entries can lag behind the authoritative hash status. If a parent was killed but its `waiting_for_children` index entry was not srem'd at kill time, the parent will still appear in the candidate list. Without a guard, the check would draft and ship a final summary to the operator's chat for an already-killed session.
 
-The fix re-reads the parent's hash status (`get_authoritative_session(session_id)`) **at the top of every loop iteration**. If the hash status is in `TERMINAL_STATUSES`, the loop logs at INFO and `continue`s. This is defense-in-depth analogous to the running-index fix in #1006 — the underlying index corruption is a separate Popoto-layer concern, but the operational symptom (Telegram-spam after kill) is masked by the re-read.
+The check re-reads the parent's hash status (`get_authoritative_session(session_id)`) **at the top of every loop iteration**. If the hash status is in `TERMINAL_STATUSES`, the loop logs at INFO and `continue`s. This is defense-in-depth: the underlying index corruption is a separate Popoto-layer concern, but the operational symptom (Telegram-spam after kill) is masked by the re-read.
 
 ```text
 [session-health] Skipping terminal parent <agent_session_id> (status=killed) — index entry stale
 ```
 
-If you see this line repeatedly for the same parent, the underlying index entry is stuck and warrants investigation. The plan tracks this as a follow-up to #1208.
+If you see this line repeatedly for the same parent, the underlying index entry is stuck and warrants investigation.
 
 The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_completion` and `schedule_pipeline_completion`) is the second layer of the same defense — even if a stale-index call slips past the health-check guard, the runner short-circuits on the same terminal-status check before drafting or queuing any message. See [Session Lifecycle: Kill-is-Terminal Invariant](session-lifecycle.md#kill-is-terminal-invariant) for the full layered-defense write-up.
 

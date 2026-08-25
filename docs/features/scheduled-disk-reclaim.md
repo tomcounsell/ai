@@ -1,10 +1,8 @@
 # Scheduled Disk Reclaim
 
-Three categories of on-disk state grew without bound because their teardown code
-had no scheduled caller. `tools/disk_reclaim.py` is that caller. It reports by
+Three categories of on-disk state grow without bound because their teardown code
+has no scheduled caller. `tools/disk_reclaim.py` is that caller. It reports by
 default and deletes only when explicitly armed.
-
-Issue #2517.
 
 ## What it sweeps
 
@@ -44,11 +42,11 @@ Aging a whole project directory couples two unrelated lifetimes — curated
 permanent memory and disposable transcripts — and the directory's recency is
 driven almost entirely by transcript writes, so either a live project's
 month-old transcripts are kept forever or a quiet project's memory is deleted
-along with them. The second is what actually happens: measured on this machine,
-one project directory read 22.2 days idle while its memory subtree read 30.6
-days idle, so a directory-level check selects precisely the projects whose
-memory is oldest and most curated. `CLAUDE_PROJECTS_DIR` is global and
-independent of `--repo-root`, so that blast radius crosses repositories.
+along with them. The second is what actually happens: on this machine, one
+project directory reads 22.2 days idle while its memory subtree reads 30.6 days
+idle, so a directory-level check selects precisely the projects whose memory is
+oldest and most curated. `CLAUDE_PROJECTS_DIR` is global and independent of
+`--repo-root`, so that blast radius crosses repositories.
 
 `removed` names are reported as `<project>/<entry>`; each project also reports a
 one-line skip reason counting what it kept (`too_young:N, preserved:N`).
@@ -64,14 +62,14 @@ DISK_RECLAIM_APPLY=true python -m tools.disk_reclaim --apply  # remove
 
 `--repo-root` scopes the **worktree sweep only** — it selects the checkout whose
 `.worktrees/` lanes are considered and whose open PRs `gh` is asked about. The
-`owner/name` slug is derived from that checkout's own `origin` remote and
-passed as an explicit `gh pr list --repo <slug>`, and `GH_REPO` is scrubbed
-from the child process's environment — `cwd` alone is not sufficient, because
-`GH_REPO` outranks the working directory in `gh`'s repo-resolution chain and
-would otherwise let the query answer successfully about the wrong repository.
-The transcript sweep always reads `~/.claude/projects/`, and the snapshot
-sweep always reads the module-relative `SESSION_LOGS_DIR` of the `agent`
-package that was imported.
+`owner/name` slug is derived from that checkout's own `origin` remote and passed
+as an explicit `gh pr list --repo <slug>`, and `GH_REPO` is scrubbed from the
+child process's environment — `cwd` alone is not sufficient, because `GH_REPO`
+outranks the working directory in `gh`'s repo-resolution chain and would
+otherwise let the query answer successfully about the wrong repository. The
+transcript sweep always reads `~/.claude/projects/`, and the snapshot sweep
+always reads the module-relative `SESSION_LOGS_DIR` of the `agent` package that
+was imported.
 
 `--apply` alone is refused with exit 2. Both the flag and the environment
 variable are required, so a destructive sweep cannot happen from shell history
@@ -99,10 +97,9 @@ A worktree lane is removed only when all of these hold:
 | ...and `gh` could answer at all | `pr_state_unavailable` (skips *every* lane) |
 | Its branch has landed on main | `unmerged` |
 
-Removal then delegates to `cleanup_after_merge`, which re-checks the busy guard
-(#1357), preserves uncommitted changes (#2137), refuses to delete an unmerged
-branch (#1646), and enforces path containment (#880). `force=True` is never
-passed.
+Removal then delegates to `cleanup_after_merge`, which re-checks the busy guard,
+preserves uncommitted changes, refuses to delete an unmerged branch, and
+enforces path containment. `force=True` is never passed.
 
 ### The busy-check posture, and why there are two functions
 
@@ -135,30 +132,14 @@ Registering it is safe on its own: the reflection reports and deletes nothing
 until `DISK_RECLAIM_APPLY=true` is in the host environment. Read a few days of
 dry-run findings in `logs/reflections.log` before arming.
 
-## What this replaces
-
-`scripts/worktree-gc.sh` is deleted. It selected candidates on PR state alone
-and then ran `git worktree remove --force` plus an unguarded `git branch -D`,
-with no check for uncommitted changes, live sessions, live processes, branch
-merged-ness, or age. A failed `gh` call collapsed to an empty string, so an auth
-blip made *every* worktree a prune candidate.
-
-A plan critique flagged this in 2026-05 (`docs/archive/plans-completed/dev_session_cleanup_unmerged_branch_guard.md`)
-and the remedy was deferred as an out-of-scope follow-up. Meanwhile
-`docs/runbooks/backlog-parallel-execution.md` recommended running it during
-parallel execution — the one situation where the machine is fullest of live
-lanes. On 2026-08-07, with six agents working, its dry-run listed **10 active
-worktrees** as prune candidates and reported zero as locked.
-
 ## Note on the disk numbers
 
 `du` over `.worktrees/` is an upper bound, not a disk-pressure figure. On
 macOS/APFS uv clones packages copy-on-write from its global cache, so a worktree
-`.venv` reports full size while sharing blocks. Measured 2026-08-07 across a real
-`uv sync`: `du` 541 MB, actual `df` delta **9 MB**.
+`.venv` reports full size while sharing blocks. A real `uv sync` reads `du`
+541 MB but an actual `df` delta of ~9 MB.
 
-So the headline "4.4 GB of worktrees" is roughly 90% clone illusion, and the real
-per-lane reclaim is the source checkout (~50 MB) plus a few MB of venv. The
+The per-lane reclaim is the source checkout (~50 MB) plus a few MB of venv. The
 reason to reap lanes is inode pressure and `git worktree list` legibility, not
 gigabytes. The largest genuine reclaim of the three categories is
 `~/.claude/projects/` (~900 MB of real files, no clones), essentially all of it

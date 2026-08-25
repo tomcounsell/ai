@@ -1,13 +1,5 @@
 # Telegram History & Link Collection
 
-**Status**: Implemented
-**Created**: 2026-01-19
-**Implemented**: 2026-01-20
-**Backend migrated to Redis**: 2026-02-24
-**Storage gated to owned chats**: 2026-07 (issue #2020)
-
----
-
 ## Overview
 
 The Telegram History & Link Collection feature provides:
@@ -20,21 +12,21 @@ The Telegram History & Link Collection feature provides:
 
 Redis is a **working-set cache** for machine-owned chats, not a durable archive of every Telegram message this machine ever sees. Telegram itself remains the complete, durable source of truth for chats this machine doesn't own.
 
-- **Machine-owned chats** (any chat resolving to a project this machine serves, per [Single-Machine Ownership](single-machine-ownership.md)) have every inbound message written to `TelegramMessage` as before.
-- **Registered bots** (`projects.<key>.telegram.bots[]`) are also stored even when they resolve no owned project, because `valor-telegram send --await-reply` polls recorded history to detect a bot's settled reply (issue #1574).
-- **Unowned chats** — large group chats with no project configured on this machine — are no longer written to Redis at all. `valor-telegram read` falls back live to the Telegram/Telethon API for these chats, so history is still available, just not cached locally.
+- **Machine-owned chats** (any chat resolving to a project this machine serves, per [Single-Machine Ownership](single-machine-ownership.md)) have every inbound message written to `TelegramMessage`.
+- **Registered bots** (`projects.<key>.telegram.bots[]`) are also stored even when they resolve no owned project, because `valor-telegram send --await-reply` polls recorded history to detect a bot's settled reply.
+- **Unowned chats** — large group chats with no project configured on this machine — are not written to Redis at all. `valor-telegram read` falls back live to the Telegram/Telethon API for these chats, so history is still available, just not cached locally.
 
-The gating predicate is `should_store_inbound(early_project_key, sender_id)` in `bridge/telegram_bridge.py`: it returns `True` if the chat already resolved to an owned project (`early_project_key is not None`), or if the sender is a registered bot (`find_project_for_bot(sender_id) is not None`). Otherwise the message is processed (responses, reactions, etc. still work) but never persisted to `TelegramMessage`. See issue #2020 for the gating rationale and #1574 for the bot carve-out.
+The gating predicate is `should_store_inbound(early_project_key, sender_id)` in `bridge/telegram_bridge.py`: it returns `True` if the chat already resolved to an owned project (`early_project_key is not None`), or if the sender is a registered bot (`find_project_for_bot(sender_id) is not None`). Otherwise the message is processed (responses, reactions, etc. still work) but never persisted to `TelegramMessage`.
 
-### Retention unchanged
+### Retention
 
-Gating storage collapses the volume of stored messages to just the machine's owned chats, which is what makes the existing 90-day TTL and the daily `redis-ttl-cleanup` sweep sensible again — TTL sweep cost and memory footprint now scale with owned-chat volume, not with every chat this machine happens to observe. The TTL value itself was **not** changed by this work; see Data Retention below.
+Gating storage collapses the volume of stored messages to just the machine's owned chats, so the 90-day TTL and the daily `redis-ttl-cleanup` sweep scale with owned-chat volume, not with every chat this machine happens to observe. The TTL value itself is unchanged; see Data Retention below.
 
 ## Architecture
 
 ### Backend
 
-All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 2026-02-24.
+All data is stored in **Redis** via Popoto ORM models.
 
 ### Models
 
@@ -42,7 +34,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `msg_id` - Auto-generated key
 - `chat_id` - Telegram chat ID (KeyField, used for filtering)
 - `message_id` - Telegram message ID (KeyField(null=True), enables O(1) indexed filter for reverse lookup)
-- `direction` - "in" or "out" (KeyField). Writer-determined: each `store_message` call site passes it explicitly; it is never inferred from the sender string (#2496)
+- `direction` - "in" or "out" (KeyField). Writer-determined: each `store_message` call site passes it explicitly; it is never inferred from the sender string
 - `sender` - Message sender name (KeyField)
 - `content` - Full message content (up to 50,000 chars, no truncation)
 - `timestamp` - Unix timestamp (SortedField, partitioned by chat_id)
@@ -70,8 +62,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 
 ### Data Retention
 
-- Redis models: 90-day TTL, cleaned by the `redis-ttl-cleanup` reflection (`reflections.maintenance.run_redis_ttl_cleanup`) — **unchanged** by the storage-gating work in #2020; only the volume of chats eligible for storage changed
-- No SQLite backup after 2026-02-24 migration
+- Redis models: 90-day TTL, cleaned by the `redis-ttl-cleanup` reflection (`reflections.maintenance.run_redis_ttl_cleanup`)
 
 ## Configuration
 
@@ -135,7 +126,7 @@ register_chat(chat_id="12345", chat_name="Dev: Valor", chat_type="group")
 # List all known chats with message counts
 chats = list_chats()
 
-# Resolve chat name to candidate list (issue #1163)
+# Resolve chat name to candidate list
 # Runs a 3-stage cascade (exact → case-insensitive exact → normalized
 # substring), collects ALL matches per stage, returns them as
 # ChatCandidate(chat_id, chat_name, last_activity_ts) sorted by
@@ -170,7 +161,7 @@ except AmbiguousChatError as e:
 # redis.RedisError / popoto.ModelException / popoto.QueryException,
 # logs a warning, and returns []. It does NOT swallow arbitrary exceptions.
 
-# Resolve a project_key to its set of chats (issue #1169).
+# Resolve a project_key to its set of chats.
 # Scans Chat.query.all() and filters by Chat.project_key == project_key
 # (project_key is a plain Field, not a KeyField — no indexed lookup).
 # Returns list[ChatCandidate] sorted by last_activity_ts desc with
@@ -272,4 +263,3 @@ Tests use Redis db=1 (isolated via the `redis_test_db` autouse fixture) and cove
 - Export to Notion/bookmarks
 - Automatic categorization with AI
 - Link health checking (detect dead links)
-- ~~Session tagging automation~~ — shipped, see [Session Tagging](session-tagging.md)

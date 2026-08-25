@@ -2,10 +2,6 @@
 
 Short re-grounding nudge delivered to the agent immediately after context compaction, directing it to re-read the plan, check SDLC stage progress, review any PROGRESS.md scratchpad, and check the TodoWrite task list.
 
-## Status
-
-Shipped — issue [#1139](https://github.com/tomcounsell/ai/issues/1139).
-
 ## Problem
 
 After context compaction, dev sessions resume against a compacted summary that rarely preserves working-state precision. Without a targeted nudge, multi-hour builds routinely drift from plan, repeat already-completed steps, or abandon in-progress work because the agent has no signal that a compaction just happened.
@@ -43,8 +39,8 @@ The minimal nudge (header + TodoWrite) is universally useful — even in one-off
 
 The Claude SDK's `HookEvent` type does not include `PostCompact`. Registering this hook in `build_hooks_config()` (used by bridge/SDK-based sessions) would require SDK changes that are out of scope and unnecessary — bridge sessions rely on:
 
-1. The existing `defer_post_compact` nudge guard in `agent/output_router.py` (shipped in #1127/#1135).
-2. Issue #1130's prompt instructions in `builder.md` directing the agent to re-read `PROGRESS.md` after compaction.
+1. The existing `defer_post_compact` nudge guard in `agent/output_router.py`.
+2. The prompt instructions in `builder.md` directing the agent to re-read `PROGRESS.md` after compaction.
 
 This hook is scoped purely to local interactive Claude Code CLI sessions.
 
@@ -85,7 +81,7 @@ This hook is scoped purely to local interactive Claude Code CLI sessions.
 
 The `|| true` ensures the CLI is never blocked if the hook process exits non-zero. Timeout is 10 seconds — generous enough for a Redis lookup on a cold connection.
 
-## Relationship to Compaction Hardening (#1127/#1135)
+## Relationship to Compaction Hardening
 
 [Compaction Hardening](compaction-hardening.md) handles the *before-compaction* side:
 - PreCompact hook takes a JSONL backup
@@ -96,16 +92,15 @@ This feature handles the *after-compaction* side: the agent's re-grounding at th
 
 The two features are complementary and independent. Disabling either does not affect the other.
 
-## Relationship to Long-Task Checkpointing (#1130)
+## Relationship to Long-Task Checkpointing
 
-Issue #1130 adds prompt instructions in `builder.md` directing the agent to write `PROGRESS.md` during long tasks and to re-read it after compaction. This hook is the CLI-level enforcement of the same re-grounding intent — it fires automatically without requiring the agent to remember.
+The prompt instructions in `builder.md` direct the agent to write `PROGRESS.md` during long tasks and to re-read it after compaction. This hook is the CLI-level enforcement of the same re-grounding intent — it fires automatically without requiring the agent to remember.
 
-If `PROGRESS.md` exists in `cwd`, the hook includes it as item 3 in the nudge. Issue #1130 need not have merged for this hook to be useful.
+If `PROGRESS.md` exists in `cwd`, the hook includes it as item 3 in the nudge.
 
 ## Cross-References
 
 - Plan: [`docs/plans/postcompact-regrounding-hook.md`](../plans/postcompact-regrounding-hook.md)
-- Issue: [#1139](https://github.com/tomcounsell/ai/issues/1139)
 - Hook: `.claude/hooks/post_compact.py`
 - Registration: `.claude/settings.json` (PostCompact key)
 - Tests: `tests/unit/hooks/test_post_compact_hook.py`

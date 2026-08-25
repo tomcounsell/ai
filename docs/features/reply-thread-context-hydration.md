@@ -1,42 +1,17 @@
 # Reply-Thread Context Hydration
 
 **Status:** Shipped
-**Tracking:** [#949](https://github.com/tomcounsell/ai/issues/949) (original), [#1064](https://github.com/tomcounsell/ai/issues/1064) (fresh-session extension)
+**Tracking:** [#949](https://github.com/tomcounsell/ai/issues/949), [#1064](https://github.com/tomcounsell/ai/issues/1064)
 **Plans:** [`docs/plans/reply_thread_context_hydration.md`](../plans/reply_thread_context_hydration.md), [`docs/plans/reply_chain_fresh_session.md`](../plans/reply_chain_fresh_session.md)
 
 ## Problem
 
-Telegram replies — either via the native Reply feature or by referencing
-prior state ("did we get that fixed?", "the bug is still broken") —
-sometimes reached the agent stripped of their context. Four paths lost
-information silently:
-
-1. **Resume-completed branch.** When a reply resolved to a `completed`
-   session, `_build_completed_resume_text` injected only `context_summary`.
-   The reply-chain messages were never fetched, and `telegram_message_key`
-   was omitted from the re-enqueue so the worker's deferred enrichment
-   (media, YouTube, links, reply chain) silently skipped.
-2. **Deferred enrichment pre-condition.** `enrich_message` keys off
-   `TelegramMessage.query.filter(msg_id=session.telegram_message_key)`.
-   Any enqueue path that forgot to set the key dropped every enrichment
-   step with a DEBUG log.
-3. **Implicit context.** Messages without `reply_to_msg_id` that clearly
-   referenced prior state ("we fixed", "last time", "as I mentioned") got
-   no special treatment — the `build_conversation_history` docstring said
-   the agent *should* reach for `valor-telegram`, but nothing in the
-   prompt prompted it to.
-4. **Fresh session + reply to non-Valor message** (issue #1064). Two
-   overlapping gating predicates — `is_reply_to_valor` in the bridge
-   and `not message.reply_to_msg_id` in the `[CONTEXT DIRECTIVE]`
-   block — created an unintended dead zone: a Telegram user replying
-   to **another user's** message (not Valor's) that created a fresh
-   session got neither the resume-completed pre-hydration (scoped to
-   `is_reply_to_valor=True`) nor the implicit-context directive (gated
-   off for reply-to messages). The agent received only the reply
-   itself, with no trace of the thread it was replying to.
-
-Result: the agent asked for clarification on a topic that was literally
-ten messages up in the same chat.
+Telegram replies — either via the native Reply feature or by referencing prior state
+("did we get that fixed?", "the bug is still broken") — must reach the agent with their
+thread context intact, or the agent re-asks for information already visible earlier in
+the chat. The system carries this context through four paths: the resume-completed
+branch, deferred message enrichment, implicit context references, and fresh sessions
+created from a reply to a non-Valor message.
 
 ## Solution Overview
 
@@ -46,9 +21,9 @@ Four coordinated changes across `bridge/context.py`,
 | Change | Scope | Effect |
 |--------|-------|--------|
 | **A** | Resume-completed branch | Always fetches the reply thread and appends it to the summary preamble. Short 3-second sync timeout with clean fallback. |
-| **B** | Layered preamble | `_build_completed_resume_text` accepts an optional `reply_chain_context` parameter and places it between the summary and the follow-up text. Empty/None is a no-op so prior call sites continue to emit the single-line preamble. |
+| **B** | Layered preamble | `_build_completed_resume_text` accepts an optional `reply_chain_context` parameter and places it between the summary and the follow-up text. Empty/None is a no-op, so call sites that omit the parameter emit the single-line preamble. |
 | **C** | Implicit-context directive | `references_prior_context(text)` predicate + a `[CONTEXT DIRECTIVE]` block prepended when the predicate matches and the message has no `reply_to_msg_id`. |
-| **D** (#1064) | Fresh-session non-Valor reply | Reply-to a non-Valor message that misses semantic routing and creates a fresh session now pre-hydrates the reply chain synchronously (same 3s timeout pattern as Change A). Stamps `extra_context["reply_chain_hydrated"]=True` on success so the worker-side idempotency guard skips the deferred fetch. Controlled by `REPLY_CHAIN_PREHYDRATION_DISABLED` kill-switch. |
+| **D** | Fresh-session non-Valor reply | Reply-to a non-Valor message that misses semantic routing and creates a fresh session pre-hydrates the reply chain synchronously (same 3s timeout pattern as Change A). Stamps `extra_context["reply_chain_hydrated"]=True` on success so the worker-side idempotency guard skips the deferred fetch. Controlled by `REPLY_CHAIN_PREHYDRATION_DISABLED` kill-switch. |
 
 ## The Canonical Header
 
@@ -91,7 +66,7 @@ bridge/telegram_bridge.py  handler
         │
         ├── enqueue_agent_session(
         │       message_text=augmented_text,
-        │       telegram_message_key=stored_msg_id,   # <-- was missing
+        │       telegram_message_key=stored_msg_id,
         │       ...)
         │
         └── record_message_processed(chat_id, msg_id)
@@ -102,18 +77,16 @@ already present in `session.message_text` the reply-chain fetch is
 skipped — media, YouTube, and link summaries still run normally. This is
 the idempotency guard for Race 1.
 
-### Fresh-Session Non-Valor Reply Arrives (Issue #1064)
+### Fresh-Session Non-Valor Reply Arrives
 
 When a Telegram user replies to **another user's** message and the
 bridge cannot match that reply to an existing session (semantic-route
-miss, no root-cache entry), a fresh session is created. Prior to
-issue #1064 this path had NEITHER the `[CONTEXT DIRECTIVE]` (gated off
-for reply-to messages) NOR the resume-completed pre-hydration
-(scoped to `is_reply_to_valor=True`). The agent received the raw
-`clean_text` with no thread context, and the deferred worker-side
-enrichment had several fragile preconditions (`telegram_message_key`
-indexed, `reply_to_msg_id` populated, `telegram_client` resolvable at
-worker time) that could silently no-op.
+miss, no root-cache entry), a fresh session is created. The handler
+pre-hydrates the reply chain synchronously, rather than relying on the
+`[CONTEXT DIRECTIVE]` (gated off for reply-to messages) or the
+resume-completed pre-hydration (scoped to `is_reply_to_valor=True`).
+The deferred worker-side enrichment remains the fallback when the
+handler-side fetch cannot run.
 
 ```
 Telegram reply (reply_to_msg_id=42, is_reply_to_valor=False,
@@ -150,7 +123,7 @@ bridge/telegram_bridge.py  handler
                 ...)
 ```
 
-Placement is the correctness mechanism: the new block sits **after**
+Placement is the correctness mechanism: the block sits **after**
 the resume-completed branch (which returns earlier), **after** the
 semantic-routing decision (no-match), and **after** the
 `[CONTEXT DIRECTIVE]` block (gated off here), so by reaching it,
@@ -189,8 +162,8 @@ the reference*. False positives cost at most one tool call.
 
 | Path | Who adds the chain block? | Idempotency |
 |------|---------------------------|-------------|
-| Resume-completed branch (reply-to-Valor, completed prior session) | Handler pre-hydrates synchronously (PR #953) | Handler stamps `extra_context["reply_chain_hydrated"]=True`; worker checks flag first, then falls back to `REPLY_THREAD_CONTEXT_HEADER in message_text` scan |
-| Fresh-session branch (reply-to non-Valor, semantic-route miss) | Handler pre-hydrates synchronously (#1064) | Same as above — handler stamps the flag, worker's guard at `agent/session_executor.py:1045-1055` skips the deferred fetch |
+| Resume-completed branch (reply-to-Valor, completed prior session) | Handler pre-hydrates synchronously | Handler stamps `extra_context["reply_chain_hydrated"]=True`; worker checks flag first, then falls back to `REPLY_THREAD_CONTEXT_HEADER in message_text` scan |
+| Fresh-session branch (reply-to non-Valor, semantic-route miss) | Handler pre-hydrates synchronously | Same as above — handler stamps the flag, worker's guard at `agent/session_executor.py:1045-1055` skips the deferred fetch |
 | Normal new session (no reply-to, just a new thread) | Worker's deferred enrichment (`enrich_message` step 4) | Handler never pre-hydrates here, so no conflict |
 | Implicit-context (no reply-to, heuristic match) | Neither adds a chain block; only the `[CONTEXT DIRECTIVE]` is prepended | N/A |
 
@@ -199,7 +172,7 @@ per prompt, regardless of which handler branch hydrated.** Regression
 is prevented by
 `test_no_double_hydration_when_handler_prehydrates` in
 `tests/integration/test_steering.py` (parametrized across both
-call sites per Implementation Note C5).
+call sites).
 
 ## Failure Paths
 
@@ -223,25 +196,17 @@ call sites per Implementation Note C5).
 - `bridge/telegram_bridge.py` — `_build_completed_resume_text`
   (accepts `reply_chain_context`), resume-completed handler branch,
   implicit-context directive injection, fresh-session non-Valor
-  pre-hydration block (issue #1064).
+  pre-hydration block.
 - `agent/session_executor.py` — Deferred-enrichment idempotency guard
   (skips reply-chain fetch when either `extra_context["reply_chain_hydrated"]`
   is truthy or the canonical header is present in `message_text`).
-  Moved here from `agent/agent_session_queue.py` in the PR #1023 split.
 
-## Rollback
+## Kill Switches
 
-All four changes are additive. Rollback path:
+The feature is fully kill-switchable without a deploy:
 
-1. Set `REPLY_CONTEXT_DIRECTIVE_DISABLED=1` to turn off Change C (implicit-context directive) without a deploy.
-2. Set `REPLY_CHAIN_PREHYDRATION_DISABLED=1` to turn off the fresh-session pre-hydration (issue #1064) without a deploy.
-3. Revert `_build_completed_resume_text` and its caller in the handler
-   to restore summary-only hydration (Changes A + B).
-4. The constant, `references_prior_context`, and the idempotency guard
-   can stay — they are inert without the handler call sites.
-
-No schema changes, no migrations. A full revert restores pre-PR behavior
-bit-for-bit.
+1. Set `REPLY_CONTEXT_DIRECTIVE_DISABLED=1` to turn off the implicit-context directive.
+2. Set `REPLY_CHAIN_PREHYDRATION_DISABLED=1` to turn off the fresh-session pre-hydration; the worker-side deferred enrichment remains as the fallback.
 
 ## Tests
 
@@ -250,8 +215,7 @@ bit-for-bit.
   negative guards (None/empty/whitespace/non-string), and
   `_build_completed_resume_text` layering.
 - `tests/integration/test_steering.py::TestResolveRootSessionId` —
-  covers both the PR #953 resume-completed branch and the issue #1064
-  fresh-session branch:
+  covers both the resume-completed branch and the fresh-session branch:
     - `test_reply_to_completed_session_fallback_without_summary`
     - `test_resume_completed_carries_reply_chain`
     - `test_no_double_hydration_when_handler_prehydrates`
@@ -260,10 +224,10 @@ bit-for-bit.
       (parametrized: `resume_completed` / `RESUME_REPLY_CHAIN_FAIL`,
       `fresh_session_non_valor` / `FRESH_REPLY_CHAIN_FAIL`)
     - `test_implicit_context_directive_injected`
-    - `test_fresh_session_non_valor_reply_prehydrates_chain` (#1064)
-    - `test_fresh_session_non_valor_reply_timeout_falls_back` (#1064)
-    - `test_fresh_session_reply_to_valor_skips_new_block` (#1064)
-    - `test_fresh_session_prehydration_kill_switch` (#1064)
+    - `test_fresh_session_non_valor_reply_prehydrates_chain`
+    - `test_fresh_session_non_valor_reply_timeout_falls_back`
+    - `test_fresh_session_reply_to_valor_skips_new_block`
+    - `test_fresh_session_prehydration_kill_switch`
 
 ## Related Features
 

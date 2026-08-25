@@ -22,7 +22,7 @@ Every reflection is a no-argument callable named `run()` that returns a dict:
 
 ## File Layout (One File Per Reflection)
 
-Since issue #1028, each reflection lives in its own file at `reflections/{group}/<name>.py` and exposes a single `run()` entry point. Current groups (`ls reflections/`): `agents/`, `audits/`, `housekeeping/`, `memory/`, `pm_briefings/`.
+Each reflection lives in its own file at `reflections/{group}/<name>.py` and exposes a single `run()` entry point. Groups (`ls reflections/`): `agents/`, `audits/`, `housekeeping/`, `memory/`, `pm_briefings/`.
 
 The canonical example, `reflections/housekeeping/disk_space_check.py`, follows a standardized module-docstring header:
 
@@ -44,7 +44,7 @@ Give every new reflection this same five-line header — What it does / Cadence 
 
 ### The Compatibility Re-Export Shim
 
-Before #1028, reflections were bundled into group-level modules (`reflections/maintenance.py`, `reflections/auditing.py`, `reflections/task_management.py`, `reflections/memory_management.py`). Those files now exist only as **compatibility re-export shims**: each imports the relocated `run()` from its per-file module and re-exports it under its historical `run_<name>` symbol, so `config/reflections.yaml`'s pre-#1028 dotted paths (e.g. `reflections.maintenance.run_disk_space_check`) keep resolving without a registry edit.
+`reflections/maintenance.py`, `reflections/auditing.py`, `reflections/task_management.py`, and `reflections/memory_management.py` exist only as **compatibility re-export shims**: each imports the relocated `run()` from its per-file module and re-exports it under a `run_<name>` symbol, so registry dotted paths written in the older group-module style (e.g. `reflections.maintenance.run_disk_space_check`) keep resolving without a registry edit.
 
 `reflections/maintenance.py` in full:
 
@@ -55,7 +55,7 @@ from reflections.housekeeping.disk_space_check import run as run_disk_space_chec
 __all__ = ["run_disk_space_check", ...]
 ```
 
-**Do not add new code to `reflections/maintenance.py` (or its `auditing.py` / `task_management.py` / `memory_management.py` siblings).** They are generated-by-convention shims for old registry entries, not a place to register new reflections. A new reflection registers its per-file dotted path (`reflections.housekeeping.<name>.run`) directly in the YAML — see the next section.
+**Do not add new code to `reflections/maintenance.py` (or its `auditing.py` / `task_management.py` / `memory_management.py` siblings).** They are generated-by-convention shims for registry entries written against the group-module layout, not a place to register new reflections. A new reflection registers its per-file dotted path (`reflections.housekeeping.<name>.run`) directly in the YAML — see the next section.
 
 ## YAML Registration
 
@@ -71,7 +71,7 @@ Register the reflection in `config/reflections.yaml` (see [Registry Format](refl
   enabled: true
 ```
 
-- `every: <N>s` (or `<N>m` / `<N>h` / `<N>d`) is the schedule grammar — never the legacy `interval` key. The old `interval` field was collapsed into `every:` by issue #1273; a stale header comment at the top of `config/reflections.yaml` still shows the legacy field name in its field-reference table — don't copy it.
+- `every: <N>s` (or `<N>m` / `<N>h` / `<N>d`) is the schedule grammar — never the legacy `interval` key. A stale header comment at the top of `config/reflections.yaml` still shows the legacy field name in its field-reference table — don't copy it.
 - `priority` is one of `urgent`, `high`, `normal`, `low`.
 - `callable` is the dotted path to the per-file `run` — point it at the new module directly, not at a compatibility shim.
 

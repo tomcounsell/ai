@@ -16,17 +16,10 @@ that the drafter alone cannot see:
 3. **Stale offhand mention** — someone dropped a "Valor" mention mid-chit-chat,
    the room moved on, and the socially-correct response is a quiet 👀 reaction
    on the original message, not a late text reply that interrupts the current
-   topic (issue [#2199](https://github.com/tomcounsell/ai/issues/2199)).
+   topic.
 
 The drafter has no view of the *room state* at send time; the drafter only
 sees the agent's tool outputs. Read-the-Room (RTR) is the explicit catch-all.
-
-Sources:
-- Path A — issue [#1193](https://github.com/tomcounsell/ai/issues/1193), implementation in
-  PR [#1204](https://github.com/tomcounsell/ai/pull/1204) at commit `531e8f4e`.
-- Path B (`valor-telegram send`) — issue [#1203](https://github.com/tomcounsell/ai/issues/1203).
-- Stale-mention staleness signal + no-anchor reaction target + group-only
-  gate — issue [#2199](https://github.com/tomcounsell/ai/issues/2199).
 
 ## Where it lives
 
@@ -34,7 +27,7 @@ Sources:
 |------|---------|
 | `bridge/read_the_room.py` | The RTR module. `RoomVerdict` dataclass, `read_the_room()` entry point, system prompt, snapshot fetcher. |
 | `agent/output_handler.py` | **Path A** call site. `TelegramRelayOutputHandler.send` calls RTR between the drafter and the outbox `rpush`. |
-| `tools/valor_telegram.py` | **Path B** call site. `cmd_send` calls RTR after linkify+truncate, before the outbox `rpush` (issue #1203). Caller-type gate auto-detects agent vs. human invocations. |
+| `tools/valor_telegram.py` | **Path B** call site. `cmd_send` calls RTR after linkify+truncate, before the outbox `rpush`. Caller-type gate auto-detects agent vs. human invocations. |
 | `tests/unit/test_read_the_room.py` | Unit tests for verdict parsing, snapshot construction, fail-open paths. |
 | `tests/unit/output_handler/test_output_handler_filters.py::TestReadTheRoomWiring` | Path A handler-level wiring tests (trim coercion, queue alignment). |
 | `tests/unit/test_valor_telegram.py::TestCmdSendRTR` | Path B CLI wiring tests (caller-type gate, flag overrides, verdict branching, fail-open). |
@@ -49,7 +42,7 @@ Sources:
 | `send` | Write the original `delivery_text` to the outbox unchanged. |
 | `trim` (`len(revised_text) >= 20`) | Substitute `verdict.revised_text` for `delivery_text` and write that. |
 | `trim` (`len(revised_text) < 20`) | **Coerced to suppress** — too-short trims are exactly the failure mode the feature exists to prevent (a one-emoji message landing in a personal exchange). |
-| `suppress` (reply anchor OR triggering message id available) | Skip the text write. Queue a 👀 reaction (`RTR_SUPPRESS_EMOJI`) on the reply anchor if present, else on the **triggering message** (`session.telegram_message_id`, #2199) so the human still gets a "received" signal. An offhand mid-chit-chat mention is rarely a threaded reply, so the trigger id is what lets the reaction land at all. |
+| `suppress` (reply anchor OR triggering message id available) | Skip the text write. Queue a 👀 reaction (`RTR_SUPPRESS_EMOJI`) on the reply anchor if present, else on the **triggering message** (`session.telegram_message_id`) so the human still gets a "received" signal. An offhand mid-chit-chat mention is rarely a threaded reply, so the trigger id is what lets the reaction land at all. |
 | `suppress` (no reply anchor AND no triggering message id) | **Fall through to send the original text.** With no reaction target at all, silent suppression breaks the I-heard-you contract — fall-through preserves the audit signal (`reason="no_reaction_target"`). |
 
 ## Snapshot defaults
@@ -59,13 +52,13 @@ Sources:
 * Whichever cap fires first applies.
 * The snapshot is **passed through unfiltered**: entries from `sender ∈
   {Valor, system}` are the agent's own prior turns (Path A messages flow
-  in through two recording sites, see Risk 3 of the plan); the prompt
+  in through two recording sites); the prompt
   tells the model to treat them as agent-authored context, not as
   competing input.
 
 Tune via the `DEFAULT_K` and `DEFAULT_MAX_AGE_SECONDS` module constants.
 
-## Staleness signal (issue #2199)
+## Staleness signal
 
 Detecting "the room moved on" from topic drift in message *content* alone is
 unreliable, so RTR threads the triggering message's **true age** into the
@@ -76,7 +69,7 @@ decision:
   looks up the triggering message by `session.telegram_message_id` and computes
   `age = now - timestamp`. This is deliberately *not* window-bounded (unlike the
   5-minute snapshot): a day-old catch_up replay reports a day-old age, which is
-  exactly the staleness we want to catch.
+  exactly the staleness to catch.
 * **Deterministic short-circuit.** If the trigger is older than
   `RTR_STALE_TRIGGER_SECONDS` (default **3600s = 1 hour**, env-overridable), RTR
   returns `suppress` (reason `stale_trigger`) **without calling Haiku** — the
@@ -91,7 +84,7 @@ decision:
   is available (age unknown) the block is omitted and the pass runs
   snapshot-only.
 
-## Enablement decision (issue #2199)
+## Enablement decision
 
 RTR is a **group-chat** feature. A DM always deserves a reply — suppressing one
 to leave a silent reaction would read as the bot ignoring the person — so RTR
@@ -99,14 +92,13 @@ to leave a silent reaction would read as the bot ignoring the person — so RTR
 (`_is_group_chat`: groups/supergroups/channels are negative, user DMs positive;
 an unclassifiable id is treated as non-group and short-circuits to `send`).
 
-The master `READ_THE_ROOM_ENABLED` flag remains **off by default**. The decision
-for this issue is: ship the full mechanism (staleness signal + no-anchor
-reaction target) group-scoped behind the existing kill switch, then flip the
-flag for groups once a canary shows a low false-suppression rate. **Flip
-criterion:** sample `rtr.suppressed` `session_events` in a low-stakes group for a
-day; if genuinely on-topic mentions are not being suppressed (false-suppression
-rate is low) and no human reports a missed reply, flip `READ_THE_ROOM_ENABLED`
-in production. The kill switch is the same flag set back to `false`.
+The master `READ_THE_ROOM_ENABLED` flag is **off by default**. The mechanism
+(staleness signal + no-anchor reaction target) ships group-scoped behind the
+existing kill switch. **Flip criterion:** sample `rtr.suppressed`
+`session_events` in a low-stakes group for a day; if genuinely on-topic
+mentions are not being suppressed (false-suppression rate is low) and no human
+reports a missed reply, flip `READ_THE_ROOM_ENABLED` in production. The kill
+switch is the same flag set back to `false`.
 
 ## Bypass conditions (no Haiku call)
 
@@ -117,7 +109,7 @@ RTR short-circuits to `send` without calling Haiku in any of:
 * `draft_text` is empty / whitespace-only.
 * `chat_id` is `None` (file-only delivery, etc.).
 * `chat_id` is a DM (positive id) or unclassifiable — RTR only room-reads group
-  chats (#2199).
+  chats.
 * `len(draft_text) < SHORT_OUTPUT_THRESHOLD` — aligns with the drafter's
   bypass band (200 chars) so we don't pay RTR latency in the same range
   the drafter already skipped.
@@ -139,7 +131,7 @@ The RTR call is wrapped in a fail-open guard. Any error returns `send` with
 * `ValueError` — malformed `room_verdict` tool_use response.
 * Last-resort `Exception` — anything else.
 
-The post-#1055 hotfix pattern is mandatory: `semaphore_slot()` for
+The hotfix pattern is mandatory: `semaphore_slot()` for
 concurrency gating + an inner `async with anthropic.AsyncAnthropic(timeout=3.0)`
 for httpx-level cleanup on cancellation. **Do not** wrap with
 `asyncio.wait_for` — that leaks httpx connections.
@@ -165,7 +157,7 @@ Event types:
 
 | Type | When |
 |------|------|
-| `rtr.suppressed` | Suppress verdict applied (with reaction emitted, coerced-from-short-trim, or the deterministic `stale_trigger` short-circuit of #2199). |
+| `rtr.suppressed` | Suppress verdict applied (with reaction emitted, coerced-from-short-trim, or the deterministic `stale_trigger` short-circuit). |
 | `rtr.suppress_fallthrough` | Suppress verdict but no reaction target at all (no reply anchor AND no triggering message id, `reason="no_reaction_target"`) — original text was sent and this event records why. |
 | `rtr.trimmed` | Long-form trim verdict applied. |
 | `rtr.bypassed` | RTR short-circuited (currently emitted only for SDLC sessions). |
@@ -256,7 +248,7 @@ observable; if RTR is firing on >90% of sends, the heuristic is wrong.
 
 ## Adjacent layers
 
-**Drafter Redundancy Suppression** (`bridge/redundancy_filter.py`, issue #1205) runs before RTR in the Path A funnel, but only for SDLC sessions. It uses deterministic bigram-Jaccard similarity (no LLM call) to suppress near-verbatim PM status repeats within a configurable time window. When it suppresses, RTR is not called (early return). When it passes, RTR runs as normal.
+**Drafter Redundancy Suppression** (`bridge/redundancy_filter.py`) runs before RTR in the Path A funnel, but only for SDLC sessions. It uses deterministic bigram-Jaccard similarity (no LLM call) to suppress near-verbatim PM status repeats within a configurable time window. When it suppresses, RTR is not called (early return). When it passes, RTR runs as normal.
 
 The two layers compose cleanly:
 - SDLC sessions: redundancy filter first → RTR after (though RTR's SDLC bypass means RTR is effectively a no-op for SDLC sessions today).
@@ -264,7 +256,7 @@ The two layers compose cleanly:
 
 See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) for full details.
 
-**PM Completion Runner Haiku Judge** (`agent/session_completion.py::_judge_completion_novelty`, issue #1262) is a *separate* Haiku call site distinct from RTR. It runs only inside `_deliver_pipeline_completion` for the borderline band of the post-draft suppression check (Jaccard `[0.55, 0.75)`), with its own tool schema (`completion_novelty_verdict` with `restate`/`new` enum) and 3-second timeout. It deliberately does NOT share code with RTR: RTR judges room context against a candidate draft; the completion-novelty judge compares two specific message strings (prior mid-session send vs. drafted final summary). Both follow the same fail-open pattern (`semaphore_slot()` + inline `anthropic.AsyncAnthropic(timeout=3.0)`); if the RTR Haiku model identifier or timeout changes, audit `_judge_completion_novelty` for parallel updates. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression).
+**PM Completion Runner Haiku Judge** (`agent/session_completion.py::_judge_completion_novelty`) is a *separate* Haiku call site distinct from RTR. It runs only inside `_deliver_pipeline_completion` for the borderline band of the post-draft suppression check (Jaccard `[0.55, 0.75)`), with its own tool schema (`completion_novelty_verdict` with `restate`/`new` enum) and 3-second timeout. It deliberately does NOT share code with RTR: RTR judges room context against a candidate draft; the completion-novelty judge compares two specific message strings (prior mid-session send vs. drafted final summary). Both follow the same fail-open pattern (`semaphore_slot()` + inline `anthropic.AsyncAnthropic(timeout=3.0)`); if the RTR Haiku model identifier or timeout changes, audit `_judge_completion_novelty` for parallel updates. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression).
 
 ## Related documentation
 

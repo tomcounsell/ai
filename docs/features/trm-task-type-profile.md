@@ -6,7 +6,7 @@ Task-Relevant Maturity (TRM) registry for Grove-style delegation decisions. The 
 
 ## Problem
 
-Before this feature, the PM session used identical step-by-step SDLC scaffolding for every dev session, regardless of whether the task type was well-practiced or novel. A bug we've fixed dozens of times got the same scaffolding as a greenfield feature the system had never attempted.
+The PM session varies delegation granularity by task type rather than using identical step-by-step SDLC scaffolding for every dev session. A task type completed many times gets a different delegation style than a greenfield feature the system has not attempted.
 
 ## How It Works
 
@@ -97,7 +97,7 @@ TASK_TYPE_VOCABULARY = {
 
 ## AgentSession Fields
 
-Two new additive fields on `AgentSession`:
+Two additive fields on `AgentSession`:
 
 - `task_type = IndexedField(null=True)` — task category from vocabulary; queryable via `AgentSession.query.filter(task_type="sdlc-build")`
 - `rework_triggered = Field(null=True)` — `"true"` or `"false"` string; set when a session retries prior output
@@ -140,5 +140,5 @@ Profile updates are eventually-consistent. Two concurrent completions of the sam
 | `agent/sdk_client.py` | TRM consultation in PM dispatch, `_infer_task_type_from_message()` |
 | `tests/unit/test_task_type_profile.py` | Unit tests: recommendation derivation, safe defaults, metrics |
 | `tests/unit/test_session_lifecycle.py` | Unit tests: hook ordering, skip guard, failure safety |
-| `tests/unit/test_session_tags.py` | Unit tests: Rule 7 task_type derivation (added to existing file) |
+| `tests/unit/test_session_tags.py` | Unit tests: Rule 7 task_type derivation |
 | `tests/integration/test_session_finalize.py` | Integration: full pipeline from session completion to profile update |

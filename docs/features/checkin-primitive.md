@@ -1,8 +1,5 @@
 # Check-in Primitive
 
-**Issue:** [#2139](https://github.com/tomcounsell/ai/issues/2139)
-**Status:** Shipped
-
 ## What it does
 
 `python -m tools.agent_session_scheduler checkin` lets a running session register a
@@ -11,11 +8,10 @@ session and delivers its result back to the originating chat. The call returns a
 `schedule_id` that the [promise gate](promise-gate.md) accepts as a verifiable
 autonomous-delivery reference.
 
-This is the *fulfillment* half of the promise gate. The gate already blocked unevidenced
-forward promises ("I'll report back when it lands") unless the draft cited a scheduled-delivery
-mechanism — but no runtime primitive existed for a session to *create* one. `checkin` closes
-that gap: a session that legitimately cannot finish its work in-turn can schedule a real
-follow-up and cite it, instead of blocking in-turn or going silent.
+This is the *fulfillment* half of the promise gate. The gate blocks unevidenced
+forward promises ("I'll report back when it lands") unless the draft cites a scheduled-delivery
+mechanism. `checkin` is that mechanism: a session that legitimately cannot finish its work
+in-turn can schedule a real follow-up and cite it, instead of blocking in-turn or going silent.
 
 ## Usage
 
@@ -67,7 +63,7 @@ otherwise-blocked forward promise.
 
 ## How it fires
 
-`checkin` reuses the durable future-fire substrate that already powers `schedule --after`:
+`checkin` reuses the durable future-fire substrate that powers `schedule --after`:
 
 1. It creates an `AgentSession` (`session_type=eng`, `status=pending`, `scheduled_at=T`,
    `chat_id=<originating chat>`, `message_text=<prompt>`).
@@ -84,8 +80,8 @@ otherwise-blocked forward promise.
 The primitive is one-shot by design. "Wake at T, check, reschedule if not done" is emergent,
 not a code feature: the woken session inspects the work and, if it is still incomplete, calls
 `checkin` again for a later T. This keeps the primitive deterministic and avoids new session
-states, completion-triggered wakeups, parent-attached children (#1633), and nudge-loop content
-inspection (#1058).
+states, completion-triggered wakeups, parent-attached children, and nudge-loop content
+inspection.
 
 ## Abuse limits
 
@@ -99,6 +95,6 @@ inspection (#1058).
 
 ## Related
 
-- [Promise Gate](promise-gate.md) — the detection half; its recovery template now names this
+- [Promise Gate](promise-gate.md) — the detection half; its recovery template names this
   primitive as the sanctioned deferral path.
 - [Reflections](reflections.md) — the `at:` schedule grammar and agent-reflection engine.

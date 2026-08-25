@@ -1,19 +1,14 @@
 # Agent Reply Terminus Detection
 
-**Status:** Shipped  
-**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2), [#1318](https://github.com/tomcounsell/ai/issues/1318) (imperative Fast-Path 0 + few-shot prompt), [#1836](https://github.com/tomcounsell/ai/issues/1836) (link/pointer Fast-Path 1.5)
-
 ## Problem
 
 When Valor and another AI agent (e.g., a third-party bot) are both active in the same Telegram group, they can get trapped in an endless reply loop. Each agent receives the other's message as a "reply to themselves," which triggers a response unconditionally — before any passive-listener or persona rules fire.
 
-**Before:** Agent A replies to Valor → Valor responds → Agent A responds → infinite loop. Must be broken manually.
-
-**After:** Valor classifies each reply-to-Valor message as `RESPOND`, `REACT`, or `SILENT` before deciding whether to reply, breaking bot loops naturally.
+Valor classifies each reply-to-Valor message as `RESPOND`, `REACT`, or `SILENT` before deciding whether to reply, breaking bot loops naturally.
 
 ## How It Works
 
-The entry point is `should_respond_async()` in `bridge/routing.py`. When a message arrives that is a reply to Valor's own message (`replied_msg.out == True`), the function now calls `classify_conversation_terminus()` before returning.
+The entry point is `should_respond_async()` in `bridge/routing.py`. When a message arrives that is a reply to Valor's own message (`replied_msg.out == True`), the function calls `classify_conversation_terminus()` before returning.
 
 ### Three-State Decision
 
@@ -42,25 +37,23 @@ async def classify_conversation_terminus(
 Fast-paths are checked before any LLM call, in this exact order:
 
 0. **Human sender + imperative continuation verb at start of any line** → `RESPOND`  
-   Added in [#1318](https://github.com/tomcounsell/ai/issues/1318). Short-circuits explicit action directives ("Continue to finish all stage of SDLC", "Go ahead and merge", "Proceed with the plan") to RESPOND before any LLM call. Bot-only — never fires for bot senders, so loop suppression is unaffected. See [Fast-Path 0: Imperative Verbs](#fast-path-0-imperative-verbs) below.
+   Short-circuits explicit action directives ("Continue to finish all stage of SDLC", "Go ahead and merge", "Proceed with the plan") to RESPOND before any LLM call. Bot-only — never fires for bot senders, so loop suppression is unaffected. See [Fast-Path 0: Imperative Verbs](#fast-path-0-imperative-verbs) below.
 
 1. **Bot sender + no standalone `?`** → `SILENT`  
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
 1.5. **Human sender + reply that is essentially just a bare link/pointer** → `RESPOND`  
-   Added in [#1836](https://github.com/tomcounsell/ai/issues/1836). Runs after Fast-Path 1 (bot-sender bare URLs are already silenced by then) and — load-bearing — before Fast-Path 2's `word_count` computation, since a bare URL is a single token and would otherwise hit Fast-Path 2's ≤1-word `SILENT` branch first. See [Fast-Path 1.5: Link/Pointer Replies](#fast-path-15-linkpointer-replies) below.
+   Runs after Fast-Path 1 (bot-sender bare URLs are already silenced by then) and — load-bearing — before Fast-Path 2's `word_count` computation, since a bare URL is a single token and would otherwise hit Fast-Path 2's ≤1-word `SILENT` branch first. See [Fast-Path 1.5: Link/Pointer Replies](#fast-path-15-linkpointer-replies) below.
 
 2. **Acknowledgment token or ≤1 word** → `SILENT`  
-   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies. Also skipped entirely when `thread_messages` contains a question: if Valor's prior message in the thread contained a standalone `?` (per `_STANDALONE_QUESTION_RE`), the ≤1-word check is bypassed so a human short answer like "Yes" / "No" falls through to the LLM (or the RESPOND default). See [#1090](https://github.com/tomcounsell/ai/issues/1090).
+   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies. Also skipped entirely when `thread_messages` contains a question: if Valor's prior message in the thread contained a standalone `?` (per `_STANDALONE_QUESTION_RE`), the ≤1-word check is bypassed so a human short answer like "Yes" / "No" falls through to the LLM (or the RESPOND default).
 
 3. **Standalone `?` in text** → `RESPOND`  
    Fast exit before any LLM call. Uses regex `(?<![=&\w])\?|(?<![=&])\?(?!\w+=)` to exclude URL query-string parameters like `?q=1`.
 
 #### Fast-Path 0: Imperative Verbs
 
-Added in [#1318](https://github.com/tomcounsell/ai/issues/1318) to fix a recurring SILENT misclassification: when a human replied to a Valor message with an explicit directive ("Continue to finish all stage of SDLC"), the zero-shot Ollama prompt frequently returned SILENT and the message was dropped.
-
-The fix is a module-scope compiled regex `_IMPERATIVE_LINE_RE` that matches a deliberately narrow set of high-precision continuation imperatives at the start of any line:
+A module-scope compiled regex `_IMPERATIVE_LINE_RE` matches a deliberately narrow set of high-precision continuation imperatives at the start of any line:
 
 ```
 continue, proceed, resume, retry, redo,
@@ -68,7 +61,7 @@ go ahead, ship it, do it, send it, try again,
 keep going, finish it, do this, handle it, move on
 ```
 
-**Anchor:** `(?:^|\n)\s*<verb>\b` — the imperative must lead a line (start of message or after a newline). Mid-sentence usage like "I would just continue this automatically" does NOT match, because there is no preceding newline-or-start. This is critical for the May 7 motivating incident, where the directive appeared on line 2 of a multi-line reply:
+**Anchor:** `(?:^|\n)\s*<verb>\b` — the imperative must lead a line (start of message or after a newline). Mid-sentence usage like "I would just continue this automatically" does NOT match, because there is no preceding newline-or-start. This is critical when the directive appears on line 2 of a multi-line reply:
 
 ```
 I left a comment on PR 1316
@@ -84,14 +77,14 @@ A regex anchored only to message start (`^\s*`) would have missed this — the i
 
 #### Fast-Path 1.5: Link/Pointer Replies
 
-Added in [#1836](https://github.com/tomcounsell/ai/issues/1836) after a real dropped
-message: a human reply that was essentially "look here: `<url>`" — no `?`, no
-imperative verb (Fast-Path 0's narrow verb list doesn't cover "look"), and not
-an acknowledgment token — fell through to the LLM classifier, which plausibly
-returned `REACT` (the "adds nothing new or is redundant" rule). `should_respond_async`
-maps `REACT` to `should_respond=False`, so the message was silently dropped
-(👍 emoji reaction only, no reply). A human sharing a new link is new
-information, not a conversation closer, and should never be silenced this way.
+A human reply that is essentially "look here: `<url>`" — no `?`, no imperative
+verb (Fast-Path 0's narrow verb list doesn't cover "look"), and not an
+acknowledgment token — otherwise falls through to the LLM classifier, which
+can return `REACT` (the "adds nothing new or is redundant" rule).
+`should_respond_async` maps `REACT` to `should_respond=False`, which would
+silently drop the message (👍 emoji reaction only, no reply). A human sharing
+a new link is new information, not a conversation closer, and is never
+silenced this way.
 
 **Condition:** `not sender_is_bot` AND the text contains a URL (`_URL_RE`) AND,
 after stripping the URL(s), the remainder is not an acknowledgment token and is
@@ -106,10 +99,9 @@ and pre-empt the fix.
 
 **Deliberately narrow — no LLM prompt change.** Prose/non-URL pointer replies
 (e.g. "see the PR description") are explicitly out of scope and continue to
-the LLM classifier unchanged; they were considered and rejected during
-planning as unverifiable without a deterministic test (see [#1836](https://github.com/tomcounsell/ai/issues/1836)'s
-resolved Open Question 3). If prose-pointer drops recur in practice, they get
-a separate issue with their own LLM-path test strategy.
+the LLM classifier unchanged; they are unverifiable without a deterministic
+test. If prose-pointer drops recur in practice, they get a separate issue with
+their own LLM-path test strategy.
 
 **Bot-sender guard:** gated on `not sender_is_bot` — Fast-Path 1 already
 routes bot-sender bare URLs to `SILENT` before this branch is ever reached,
@@ -117,9 +109,9 @@ so loop-break behavior is unaffected.
 
 #### Few-Shot LLM Prompt
 
-The previous zero-shot prompt produced SILENT for explicit imperatives that didn't hit Fast-Path 0 (e.g., "merge it", "run it again"). The local Ollama classifier (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`) benefits from the few-shot examples to reliably distinguish continuation imperatives from conversation closers.
+The local Ollama classifier (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`) uses few-shot examples to reliably distinguish continuation imperatives from conversation closers, covering imperatives that do not hit Fast-Path 0 (e.g., "merge it", "run it again").
 
-The prompt now includes 14 labeled few-shot examples drawn from real misclassified messages and canonical patterns:
+The prompt includes 14 labeled few-shot examples drawn from real misclassified messages and canonical patterns:
 
 ```
 "Continue to finish all stage of SDLC" → RESPOND
@@ -192,7 +184,7 @@ Reply to Valor: terminus=SILENT, not responding
 
 ## Thread Context
 
-Only the already-fetched `replied_msg` is used as thread context (one message). Full multi-turn thread fetching was deliberately excluded (see Rabbit Holes in the plan) to avoid additional API calls. Richer context can be added in a follow-up if detection quality proves insufficient.
+Only the already-fetched `replied_msg` is used as thread context (one message). Full multi-turn thread fetching is deliberately excluded (see Rabbit Holes in the plan) to avoid additional API calls. Richer context can be added in a follow-up if detection quality proves insufficient.
 
 ## Testing
 
@@ -207,17 +199,17 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_empty_text_returns_respond` — empty text → RESPOND
 - `test_classify_terminus_bot_react_collapses_to_silent` — LLM REACT + bot sender → SILENT
 
-**Question-aware Fast-Path 2 tests** (issue [#1090](https://github.com/tomcounsell/ai/issues/1090)):
+**Question-aware Fast-Path 2 tests**:
 
 - `test_classify_terminus_human_short_reply_to_valor_question_returns_respond` — human "Yes" + Valor question in thread → RESPOND
 - `test_classify_terminus_human_short_reply_no_question_still_silent` — human "Yes" + declarative thread → SILENT (regression guard)
 - `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — bot "Yes" + Valor question → SILENT via Fast-Path 1 (pins fast-path ordering)
 - `test_classify_terminus_url_query_in_thread_not_treated_as_question` — URL `?q=1` in thread_messages → SILENT (URL query strings stay excluded)
 
-**Fast-Path 0 imperative tests** (issue [#1318](https://github.com/tomcounsell/ai/issues/1318)):
+**Fast-Path 0 imperative tests**:
 
 - `test_classify_terminus_imperative_single_line_returns_respond` — "Continue to finish all stage of SDLC" → RESPOND
-- `test_classify_terminus_imperative_multi_line_returns_respond` — multi-line, imperative on line 2 → RESPOND (the May 7 incident)
+- `test_classify_terminus_imperative_multi_line_returns_respond` — multi-line, imperative on line 2 → RESPOND
 - `test_classify_terminus_imperative_go_ahead_returns_respond` — "Go ahead and merge it" → RESPOND
 - `test_classify_terminus_imperative_proceed_returns_respond` — "Proceed with the plan" → RESPOND
 - `test_classify_terminus_imperative_single_word_returns_respond` — single-word "continue" → RESPOND (overrides Fast-Path 2 ≤1-word silencing)
@@ -226,7 +218,7 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_bot_imperative_still_silent` — bot saying "Continue with deployment" → SILENT (Fast-Path 1 wins)
 - `test_imperative_line_re_does_not_match_mid_sentence` — "I would just continue this automatically" must not match (mid-line falls through to LLM)
 
-**Fast-Path 1.5 link/pointer tests** (issue [#1836](https://github.com/tomcounsell/ai/issues/1836)):
+**Fast-Path 1.5 link/pointer tests**:
 
 - `test_classify_terminus_human_bare_url_returns_respond` — bare URL, no other text → RESPOND
 - `test_classify_terminus_human_look_here_url_returns_respond` — the motivating "look here: `<url>`" case → RESPOND

@@ -1,10 +1,10 @@
 # Test Baseline Verification
 
-Verified classification of test failures as regressions vs pre-existing by running failing tests against `main`. Replaces unverified LLM claims with deterministic evidence.
+Verified classification of test failures as regressions vs pre-existing by running failing tests against `main`.
 
 ## Problem
 
-During `/do-test`, when tests fail on a feature branch, the agent would claim "these failures are pre-existing on main" without ever verifying the claim. This led to regressions slipping through, low reviewer confidence, and flaky tests getting free passes.
+A feature-branch test failure is classified as regression vs pre-existing by running the failing tests against `main`, rather than trusting an unverified claim. This prevents regressions slipping through and keeps flaky tests from getting free passes.
 
 ## How It Works
 
@@ -18,7 +18,7 @@ During `/do-test`, when tests fail on a feature branch, the agent would claim "t
 6. **Parse results deterministically** -- `xml.etree.ElementTree` parses the junitxml file; no LLM interpretation of console output
 7. **Completeness validation (Step 5.5)** -- ensures every input test ID appears in exactly one classification bucket; missing IDs go to `inconclusive`, duplicates resolve by severity (regression > pre_existing > inconclusive)
 8. **Return structured JSON** -- `regressions`, `pre_existing`, `inconclusive` arrays plus `baseline_commit`
-9. **do-test integrates results** -- verified classification table replaces vague claims
+9. **do-test integrates results** -- a verified classification table
 
 ### Classification Rules
 
@@ -56,7 +56,7 @@ To prevent infinite test-patch-test loops when regression fixes are not convergi
 - **junitxml over console parsing**: Pytest's `--junitxml` flag produces structured XML that is parsed with `xml.etree.ElementTree`. This eliminates vulnerabilities to output truncation, test ID format mismatches, status keywords in test names, and traceback interleaving
 - **Flaky filter pre-step**: A single retry on the feature branch catches the most common intermittent failures before incurring the cost of baseline verification (worktree creation + test re-run on main)
 - **Completeness validation**: Every input test ID must appear in exactly one classification bucket. Missing or duplicate IDs are caught and resolved deterministically
-- **Additive OUTCOME fields**: New artifact fields (`regressions`, `pre_existing`, etc.) are additive to the existing OUTCOME contract. Consumers that do not read these fields are unaffected
+- **Additive OUTCOME fields**: The artifact fields (`regressions`, `pre_existing`, etc.) are additive to the OUTCOME contract. Consumers that do not read these fields are unaffected
 
 ## Files
 

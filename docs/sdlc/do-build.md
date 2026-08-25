@@ -18,8 +18,7 @@ The leaned body describes these abstractly; here are the concrete invocations.
 Always pass `--issue-number {issue_number}` on every `sdlc-tool` write — it is the
 authoritative session selector (the `VALOR_SESSION_ID`/`AGENT_SESSION_ID` env-var
 session is only a last-resort fallback). A forked build subagent must still pass
-`--issue-number` so its writes are not diverted to the parent's session
-(#1671/#1672).
+`--issue-number` so its writes are not diverted to the parent's session.
 
 **Step 0 substrate probe / BUILD in_progress marker:**
 
@@ -27,7 +26,7 @@ session is only a last-resort fallback). A forked build subagent must still pass
 sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number} --run-id {run_id}
 ```
 
-Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+Run identity: every state-mutating `sdlc-tool` call in this addendum
 carries `--run-id {run_id}` — the run_id is supplied by the invoking supervisor
 (`/do-sdlc` or `/sdlc` carries it from `session-ensure`). When this skill is
 invoked standalone (no supervisor), run
@@ -35,9 +34,9 @@ invoked standalone (no supervisor), run
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
 stop and report). Read-only calls `stage-query`, `verdict get`, and `dispatch get` take no
 run-id. `next-skill` *accepts* an optional `--run-id` as a read-only identity
-assertion for its issue-lock peek (issue #2766) -- always pass it so the peek
+assertion for its issue-lock peek -- always pass it so the peek
 runs under this run's own stated identity instead of a session lookup that can
-legitimately miss and produce a false self-block. Under a live supervised run (#2026), a bare `session-ensure` instead returns
+legitimately miss and produce a false self-block. Under a live supervised run, a bare `session-ensure` instead returns
 `{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": ...}` — that is
 inheritance, not a block: use the returned `run_id` and continue; only a foreign
 `ISSUE_LOCKED` (no live supervised signal) means stop and report.
@@ -101,7 +100,7 @@ sdlc-tool meta-set --key pr_number --value {PR} --issue-number {issue_number} --
 ```
 
 `meta-set` exits non-zero on an ownership refusal, so check it on both calls rather than suppressing
-with `2>/dev/null || true` (issue #2675). A foreign-owner `ISSUE_LOCKED` is a stop condition —
+with `2>/dev/null || true`. A foreign-owner `ISSUE_LOCKED` is a stop condition —
 swallow it and you leave `plan_hash_at_build_start` unset (disarming the G7 guard) or `pr_number`
 unrecorded, with the build reporting success either way. The plan-hash call needs the explicit
 `|| { ...; exit 1; }` above because it sits mid-block with no `set -e`: without it the block's
@@ -181,14 +180,14 @@ prevent.
 ```bash
 # scripts/validate_build.py and the inline verification-table runner below share one
 # table definition and one expectation evaluator (agent/verification_parser.py) --
-# validate_build.py carries no table parser or evaluator of its own (#2836, #2843).
+# validate_build.py carries no table parser or evaluator of its own.
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_build.py $PLAN_PATH)   # exit 1 → /do-patch, ≤3 iters
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)   # exit 2 → bundle FAILs to /do-patch, ≤2 iters; 3 = no criteria; 1 = non-blocking
 # Verification table runner:
 python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
 # A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it, or a
 # pipe-block with rows but no Command column), not a finding about the code. Write
-# pipes in the table as `\|`. See #2570, #2836. A row in `t.skipped` is a non-check
+# pipes in the table as `\|`. A row in `t.skipped` is a non-check
 # table (a summary, a findings recap) -- named in the report but never counted toward
 # the exit code.
 ```

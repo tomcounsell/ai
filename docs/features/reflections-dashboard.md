@@ -42,7 +42,7 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 
 ## Model Extension
 
-The `Reflection` model was extended with a `run_history` ListField that stores serialized run dicts:
+The `Reflection` model stores a `run_history` ListField of serialized run dicts:
 
 ```python
 {
@@ -54,7 +54,7 @@ The `Reflection` model was extended with a `run_history` ListField that stores s
 }
 ```
 
-`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method accepts an optional `projects: list[dict] | None = None` kwarg for per-project audits — existing callers omitting the kwarg get an empty `projects: []` on the run record with no behavior change. See [Per-Project Audit Iteration](reflections.md#per-project-audit-iteration) for the full breakdown.
+`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method accepts an optional `projects: list[dict] | None = None` kwarg for per-project audits — callers omitting the kwarg get an empty `projects: []` on the run record. See [Per-Project Audit Iteration](reflections.md#per-project-audit-iteration) for the full breakdown.
 
 ## HTMX Endpoints
 

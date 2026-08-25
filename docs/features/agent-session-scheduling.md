@@ -1,7 +1,5 @@
 # Session Self-Scheduling: Agent-Initiated Queue Operations
 
-**Status**: Shipped
-
 ## Overview
 
 The agent can programmatically schedule SDLC runs for GitHub issues, enqueue arbitrary Q&A sessions, and manage queue state -- all mid-conversation via the `tools/agent_session_scheduler.py` CLI tool.
@@ -90,7 +88,7 @@ Usage: `python -m tools.agent_session_scheduler schedule --issue 113 --after "20
 
 ## Priority Model
 
-Four-tier priority system replacing the old binary high/low:
+Four-tier priority system:
 
 | Priority | Rank | Use Case |
 |----------|------|----------|
@@ -99,7 +97,7 @@ Four-tier priority system replacing the old binary high/low:
 | `normal` | 2 | Default for all new sessions (Telegram messages, scheduled) |
 | `low` | 3 | Catchup messages, revival, reflections |
 
-Within the same priority tier, sessions are processed **FIFO** (oldest first), replacing the previous FILO ordering.
+Within the same priority tier, sessions are processed **FIFO** (oldest first).
 
 ## Safety Mechanisms
 
