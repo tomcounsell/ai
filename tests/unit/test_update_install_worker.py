@@ -183,7 +183,7 @@ class TestInjectEnvIntoPlist:
         This documents the failure mode the C2 empty-string defense in the
         recovery code mitigates: a misconfigured ``VALOR_PROJECT_KEY=`` line
         would land an empty string in the plist, but the reader code at
-        ``agent.sustainability._get_project_key()`` strips and falls back
+        ``reflections.redis_access.get_project_key()`` strips and falls back
         to ``"valor"``.
         """
         plist_path = tmp_path / "worker.plist"
