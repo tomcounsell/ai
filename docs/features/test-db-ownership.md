@@ -28,7 +28,7 @@ would be load-bearing on every worker's first test forever.
 | this process's db | `tests.db_claim.claim_test_db()` |
 | a URL for a raw client or a `REDIS_URL` env | the `redis_test_url` fixture |
 | a **second** db, for a test whose subject is divergence between two | the `scratch_test_db` fixture |
-| a subprocess that must see the same data | `tests.db_claim.subprocess_env()` |
+| a subprocess that must see the same data | inherits it automatically — `pytest_configure` exports `REDIS_URL` process-wide; `tests.db_claim.subprocess_env()` survives only as an opt-in `PYTHONPATH` pinner, not the inheritance channel |
 
 Never derive a db number yourself. Not from `PYTEST_XDIST_WORKER`, not from a literal, and
 not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs` — that last
