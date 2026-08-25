@@ -556,7 +556,22 @@ document. See the Prerequisites note on why the global `tests/unit` total is not
 | No `bridge` in a session-ensure filename | `ls tests/unit/sdlc_session_ensure/ \| grep -c bridge` | match count == 0 |
 | Lint clean | `python -m ruff check tests/unit` | exit code 0 |
 | Format clean | `python -m ruff format --check tests/unit` | exit code 0 |
-| No line-number-keyed exemption reintroduced | `grep -rn 'ALLOWLIST' tests/ tools/ \| wc -l \| tr -d ' '` | output contains 0 |
+| No line-number-keyed exemption reintroduced | `.venv/bin/python -c "import dataclasses, tests.db_derivation_guard as g; print([f.name for f in dataclasses.fields(g.Exemption)])"` | output does not contain line |
+
+The last row deserves a note, because the obvious version of it is wrong. An earlier draft
+checked `grep -rn 'ALLOWLIST' tests/ tools/ | wc -l` == 0. That returns **25** on a perfectly
+healthy tree and would have failed the build: `tests/db_derivation_guard.py` has its own
+`ALLOWLIST`, and it is keyed by `path :: expr` — an *expression*, not a line number. It is the
+**replacement** for the line-keyed guard #2805 deleted, not a survival of it. `tests/README.md`
+even contributes one hit by naming the `path:line`-keyed guard in the sentence recording its
+deletion, which is the classic anti-criterion failure mode: a "this string must not appear" gate
+tripping on the prose that documents the removal.
+
+The property that actually matters is that no exemption is *keyed by line number*, so the check
+inspects the `Exemption` dataclass's fields (`path`, `expr`, `reason`, `blocked_on`, `expires` —
+no line field) rather than grepping for a word. Confirmed alongside: no `ALLOWLIST` entry names
+any of the four target files, so the split orphans nothing, and `tests/unit/test_db_derivation_guard.py`
+passes 49/49 on this branch.
 
 The `messaging` figure is **115, not 97**: the package absorbs the three existing siblings
 (`_await` 10, `_chat_log` 5, `_voice_flag` 3 = 18) alongside the 97 from the monolith. That also
