@@ -1,22 +1,20 @@
 ---
 tracking: https://github.com/tomcounsell/ai/issues/18
 status: Implemented
-implemented: 2026-02-04
 ---
 
 # Feature: Review Workflow with Screenshots
 
-> **Surface note (post-#1256):** Screenshot capture runs through BYOB MCP
+> **Surface note:** Screenshot capture runs through BYOB MCP
 > (`mcp__byob__browser_*`) — the user's real, logged-in Chrome. Public
 > preview deploys and authenticated staging URLs are screenshotted the
-> same way; the legacy `agent-browser` and `bowser` surfaces were
-> retired. See [`byob-browser-control.md`](byob-browser-control.md).
+> same way. See [`byob-browser-control.md`](byob-browser-control.md).
 
 ## Overview
 
 The `/do-pr-review` command validates implementations against specifications and captures visual proof via screenshots.
 
-**Status:** ✅ Implemented (BYOB-only since #1256)
+**Status:** ✅ Implemented
 **Implementation files:**
 - `.claude/commands/do-pr-review.md` - Review workflow command
 - Repo `## Running` README section — server startup instructions per-project

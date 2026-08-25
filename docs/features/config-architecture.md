@@ -105,7 +105,7 @@ Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.j
 
 ### Guarded config read
 
-`bridge/routing.py::load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both read `projects.json` through a shared guarded loader (`_guarded_json_load()`) instead of a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/corrupt file; the guarded loader catches `JSONDecodeError`/`OSError`/`UnicodeDecodeError`, logs, and serves the `data/projects.last_known_good.json` sidecar (refreshed atomically on every successful read) instead of raising. This closes an import-time crash-loop, since `_get_active_projects()` used to raise directly out of module import. See [Bridge Self-Healing: Guarded Config Read](bridge-self-healing.md#19-guarded-config-read-bridgeroutingpy-issue-1817-workstream-c4) for the full failure mode and fix.
+`bridge/routing.py::load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both read `projects.json` through a shared guarded loader (`_guarded_json_load()`) instead of a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/corrupt file; the guarded loader catches `JSONDecodeError`/`OSError`/`UnicodeDecodeError`, logs, and serves the `data/projects.last_known_good.json` sidecar (refreshed atomically on every successful read) instead of raising. The sidecar prevents an import-time crash-loop when `_get_active_projects()` reads a corrupt file during module import. See [Bridge Self-Healing](bridge-self-healing.md) (Guarded Config Read) for the full failure mode.
 
 Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 

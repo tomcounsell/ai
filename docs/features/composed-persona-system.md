@@ -1,42 +1,23 @@
 # Composed Persona System
 
-> **Persona delivered via prime commands (issue #1692):** The `compose_system_prompt`
-> composition model described here is not the production persona delivery
-> mechanism. All sessions (Eng, Teammate) receive persona entirely via the role
-> prime commands (`.claude/commands/roles/prime-{pm,dev,teammate}-role.md`),
+> **Persona delivery:** All sessions (Eng, Teammate) receive persona entirely via
+> the role prime commands (`.claude/commands/roles/prime-{pm,dev,teammate}-role.md`),
 > prepended by the headless runner's role driver on the first turn — no
 > `--append-system-prompt` flag is set at spawn. `compose_system_prompt` and the
-> preserved `load_system_prompt` / `load_eng_system_prompt` wrappers remain for
-> the byte-stability baseline and backward compat.
+> `load_system_prompt` / `load_eng_system_prompt` wrappers serve the
+> byte-stability baseline and backward compatibility.
 
-Single composer (`compose_system_prompt`) that assembles the agent's system
+Single composer (`compose_system_prompt`) assembles the agent's system
 prompt from three orthogonal axes — **persona**, **access level**, and
-(reserved) **channel** — replacing the hand-coded picker ladders that used to
-live in two parallel sites. Its live use is the byte-stability baseline and the
-preserved `load_system_prompt` / `load_eng_system_prompt` wrappers.
+(reserved) **channel**. Its live use is the byte-stability baseline and the
+`load_system_prompt` / `load_eng_system_prompt` wrappers.
 
-## Problem this solves
+## Rationale
 
-Before this feature, system-prompt assembly was scattered across:
-
-- Two prompt-builder functions with hard-baked behavior — `load_system_prompt`
-  (engineer + WORKER_RULES + principal + criteria) and
-  `load_eng_system_prompt` (engineer + WORKER rails + work-vault `CLAUDE.md`).
-- Two parallel pickers that branched on `SessionType` plus an inline
-  `transport == "email"` override:
-  `agent/sdk_client.py` (the `get_response_via_harness` path) and
-  `agent/session_executor.py` (the harness-route persona resolution). The two
-  had drifted independently.
-- Telegram-specific format rules embedded in the working-agent persona
-  segments (`tools.md`, the engineer overlay) — channel concerns leaking
-  into the working agent where they don't belong.
-- Drafter system prompt assembled separately from the working-agent prompt
-  (`bridge/message_drafter.py:DRAFTER_SYSTEM_PROMPT`), with no shared
-  composer.
-
-Adding any new (persona × access × channel) combination meant another branch
-in two files. The picker drift between the two sites was the most expensive
-failure mode — a fix to one site silently bypassed the other.
+Persona, access level, and channel are orthogonal dimensions. Composing them
+from a single function keeps the picker logic in one place, and channel-specific
+concerns live in the message drafter rather than leaking into the working-agent
+persona segments.
 
 ## Design
 
@@ -46,7 +27,7 @@ failure mode — a fix to one site silently bypassed the other.
 |------|------|------------|---------|
 | Persona | `PersonaType` enum (3 members) | [`config/enums.py`](../../config/enums.py) | Voice and identity — `engineer`, `teammate`, `customer-service`. |
 | Access level | `AccessLevel` enum (3 members) | [`config/enums.py`](../../config/enums.py) | Prompt rails — `WORKER` (full + WORKER_RULES + principal + criteria + work-vault CLAUDE.md), `TEAMMATE` (conversational, no rails), `CUSTOMER_SERVICE` (action-oriented, no code writes, no rails). |
-| Channel | `str \| None` | reserved | Output medium — currently no working-agent cell consumes this; channel-specific concerns live in the message drafter. |
+| Channel | `str \| None` | reserved | Output medium — no working-agent cell consumes this; channel-specific concerns live in the message drafter. |
 
 `AccessLevel` is **prompt-only**. Runtime tool restrictions (Write/Edit
 blocking, teammate write-path scoping) are enforced separately by
@@ -82,9 +63,9 @@ prompt = compose_system_prompt(
    `working_directory` is provided, and the file exists at
    `Path(working_directory) / "CLAUDE.md"`.
 
-No new segments were added to `manifest.json`. Voice consolidation (banned
-phrases, "no empty promises", tone) is **deferred** to a follow-up plan to
-keep the byte-stability mitigation clean (see "Byte stability" below).
+`manifest.json` carries no voice-consolidation segments. Voice consolidation
+(banned phrases, "no empty promises", tone) is **deferred** to a follow-up plan
+to keep the byte-stability mitigation clean (see "Byte stability" below).
 
 ### Single-source-of-truth resolver
 
@@ -116,7 +97,7 @@ Mapping rules (evaluated in this order):
 - Unknown session type → resolved via `_resolve_persona(project, chat_title, is_dm)` →
   `(<persona>, <access level for that persona>, None)`.
 
-Persona → access-level mapping (today's 1:1, in `_access_level_for_persona`;
+Persona → access-level mapping (a 1:1 mapping in `_access_level_for_persona`;
 the orthogonality is preserved in the type system so future per-project rails
 don't need new SessionType members):
 
@@ -126,18 +107,16 @@ don't need new SessionType members):
 | `CUSTOMER_SERVICE` | `CUSTOMER_SERVICE` |
 | `ENGINEER` (and any other) | `WORKER` |
 
-### Backward-compatible wrappers
+### Compatibility wrappers
 
 `load_system_prompt()` and `load_eng_system_prompt(working_directory)` are
-preserved as thin wrappers over `compose_system_prompt`. `load_system_prompt()`
+thin wrappers over `compose_system_prompt`. `load_system_prompt()`
 delegates to `compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)`;
 `load_eng_system_prompt(working_directory)` adds the work-vault `CLAUDE.md`
-appendix under WORKER access. All existing call sites continue to work without
-change. New code is encouraged to call the composer directly.
+appendix under WORKER access. Existing call sites work through these wrappers;
+new code calls the composer directly.
 
 ## Drafter (medium-aware split)
-
-> **Updated (drafter_passthrough_validation):** The Haiku LLM rewrite path was removed from the drafter. `_draft_with_haiku`, `_draft_with_openrouter`, `_compose_drafter_prompt`, `BASE_DRAFTER_PROMPT`, and `MEDIUM_RULES` are all deleted. The `medium` parameter on `draft_message` is still active — it now routes to deterministic validators (`_validate_for_medium`) rather than to an LLM system prompt composer.
 
 The `medium` parameter on `draft_message` discriminates which wire-format validator runs:
 
@@ -145,14 +124,14 @@ The `medium` parameter on `draft_message` discriminates which wire-format valida
 - `"email"` → `validate_email(text)` — checks for any Markdown on the wire (plain prose only)
 
 The naming convention is **`medium`** (not `channel`) on the drafter's public
-surface because that's the existing parameter name and it ties through to
+surface because that's the parameter name it ties through to
 `_validate_for_medium(text, medium)` in `bridge/message_drafter.py`.
 
-## Byte stability (issue #1227)
+## Byte stability
 
 The Anthropic prompt cache is byte-keyed: a one-character drift in the
 ~74K-char engineer prompt prefix evicts the cached entry and pushes eng-session
-TTFT from < 90s (warm) to 15-20min (cold). This refactor preserves the
+TTFT from < 90s (warm) to 15-20min (cold). The composer preserves the
 byte-stable prefix invariant for the production WORKER cells.
 
 ### One baseline, guarding the repo's contribution
@@ -195,12 +174,6 @@ pure function of repo-tracked inputs, so a stale baseline and a drifted persona
 are the same red, and a change to a segment must carry a re-recorded baseline in
 the same commit.
 
-The guard was previously keyed to `tests/fixtures/{socket.gethostname()}/` and
-**skipped** when no directory matched. Only `Mac-local` was ever committed,
-which matches no host in the fleet, so the guard was inert everywhere and a
-passing run was indistinguishable from a running one. Renaming a machine moved
-it between running and not running silently (#2555).
-
 ### Rejected strategies
 
 - **Token normalization**: replacing machine-specific paths with sentinels
@@ -211,11 +184,11 @@ it between running and not running silently (#2555).
   bytes. Rejected because the prompt cache hits on byte equality, not
   structural equality.
 
-## What did **not** change
+## Unchanged surface
 
-- `manifest.json` — no new segments added (voice consolidation is deferred).
-- `WORKER_RULES` constant — kept inline next to the composer.
-- `_load_persona_overlay_with_log` — kept as a logging adapter for the
+- `manifest.json` — carries no voice-consolidation segments (voice consolidation is deferred).
+- `WORKER_RULES` constant — lives inline next to the composer.
+- `_load_persona_overlay_with_log` — a logging adapter for the
   TEAMMATE / CUSTOMER_SERVICE cells; it emits the canonical
   `Persona overlay loaded:` log line that test-cuttlefish-* skills grep on.
 - The `--exclude-dynamic-system-prompt-sections` argv flag — passed
@@ -248,20 +221,19 @@ it between running and not running silently (#2555).
 ## Open follow-ups
 
 - **Voice consolidation** — banned phrases, no-empty-promises, tone, and
-  good/bad examples are still scattered across per-persona overlays and
+  good/bad examples are scattered across per-persona overlays and
   `DRAFTER_SYSTEM_PROMPT`. Consolidating them into a shared `voice.md`
-  segment would change the assembled prompt bytes for the existing
-  cells, breaking byte-stability. A follow-up plan will move voice content
-  into a single source after this composer ships and stabilizes; that plan
-  can negotiate the one-time cache bust on its own terms.
+  segment would change the assembled prompt bytes for the current cells,
+  breaking byte-stability. A follow-up plan moves voice content into a single
+  source and negotiates the one-time cache bust.
 - **Channel parameter** — `compose_system_prompt(..., channel=None)` is
-  reserved for forward-compat. No working-agent cell consumes it today; it
-  stays in the signature with a TODO note. Drop or formalize once a concrete
-  need surfaces.
+  reserved for forward-compat. No working-agent cell consumes it; it remains
+  in the signature with a TODO note. Drop or formalize once a concrete need
+  surfaces.
 - **Source label propagation** — the `_persona_source` label
   (`session_type=eng`, `project.email.persona`, `email-default`,
   `session_type=teammate`) used in
-  `agent/session_executor.py` log lines is still derived locally rather than
+  `agent/session_executor.py` log lines is derived locally rather than
   returned from `_resolve_compose_args`. If a third call site emerges, fold
   the source label into the resolver's return value.
 
@@ -276,7 +248,7 @@ it between running and not running silently (#2555).
 | `load_system_prompt` (wrapper) | [`agent/sdk_client.py`](../../agent/sdk_client.py) |
 | `load_eng_system_prompt` (wrapper) | [`agent/sdk_client.py`](../../agent/sdk_client.py) |
 | Picker call sites | `agent/sdk_client.py` and `agent/session_executor.py` |
-| Drafter medium split | [`bridge/message_drafter.py`](../../bridge/message_drafter.py) (`BASE_DRAFTER_PROMPT`, `MEDIUM_RULES`, `_compose_drafter_prompt`) |
+| Drafter medium split | [`bridge/message_drafter.py`](../../bridge/message_drafter.py) (`_validate_for_medium`) |
 | Baseline capture script | [`scripts/capture_persona_baseline.py`](../../scripts/capture_persona_baseline.py) |
 | Byte-stability baseline | `tests/fixtures/persona/eng_worker_repo_baseline.txt` |
 | Principal stand-in for the baseline | `tests/fixtures/persona/principal.md` |
@@ -284,12 +256,7 @@ it between running and not running silently (#2555).
 
 ## See also
 
-- Issue [#1268](https://github.com/tomcounsell/ai/issues/1268) — the
-  composer ask.
-- Issue [#1227](https://github.com/tomcounsell/ai/issues/1227) — the
-  prompt-cache stability invariant this composer preserves.
 - [`docs/features/eng-session-architecture.md`](eng-session-architecture.md)
   — the Eng session architecture that drives the access-level mapping.
 - [`docs/plans/composed-persona-system.md`](../plans/composed-persona-system.md)
-  — the plan, including the seven resolved architectural questions and the
-  per-machine fixture mitigation rationale.
+  — the plan behind the composer and its byte-stability baseline.

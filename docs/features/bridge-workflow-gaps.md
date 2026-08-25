@@ -1,27 +1,18 @@
 # Bridge Workflow Gaps
 
-Three features that close workflow gaps in the Telegram bridge: **output classification**, **auto-continue for status updates**, and **session log snapshots**. Together they reduce unnecessary Telegram noise, keep agents working autonomously, and preserve full session history for debugging.
-
-## Problem
-
-Before these changes, every piece of agent output was sent to Telegram regardless of whether it was a question needing human input or a routine status update. This created two problems:
-
-1. **Noisy chat** -- Status updates like "running tests..." cluttered the Telegram group and demanded attention when none was needed.
-2. **Lost context** -- When sessions crashed or were abandoned, there was no persistent record of what the agent had been doing. Debugging required reconstructing state from scattered log files.
+Three features close workflow gaps in the Telegram bridge: **output classification**, **auto-continue for status updates**, and **session log snapshots**. Together they reduce unnecessary Telegram noise, keep agents working autonomously, and preserve full session history for debugging.
 
 ## Output Classification
 
-> **Updated**: Output classification is now handled by the [Observer Agent](observer-agent.md) (PR #321). The `classify_output()` function and its five-type `OutputType` enum have been removed from the routing path. The Observer makes unified STEER/DELIVER decisions with full session context instead of isolated output classification. This section is retained for historical reference.
-
-The old system categorized output into five types (`QUESTION`, `STATUS_UPDATE`, `COMPLETION`, `BLOCKER`, `ERROR`) using a two-tier approach: Haiku LLM classification with a regex heuristic fallback. This was replaced because the classifier had no session context — it couldn't know which pipeline stage was active or whether stages remained.
+The [Observer Agent](observer-agent.md) makes unified STEER/DELIVER decisions with full session context instead of isolated output classification. The `classify_output()` function and its five-type `OutputType` enum are not part of the routing path.
 
 ## Auto-Continue
 
 The bridge uses a two-path auto-continue strategy based on whether the session is an SDLC pipeline session or a casual/ad-hoc session.
 
-### Nudge Loop Routing (Current)
+### Nudge Loop Routing
 
-All output routing decisions are made by `agent/output_router.py` (extracted from `agent/agent_session_queue.py`):
+All output routing decisions are made by `agent/output_router.py`:
 
 1. Worker agent produces output
 2. **Pipeline State Machine** (`agent/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
@@ -68,7 +59,7 @@ logs/sessions/
 
 | Event | When Saved | What Is Captured |
 |---|---|---|
-| `resume` | Session starts or resumes | Session ID, session ID, sender, message preview |
+| `resume` | Session starts or resumes | Session ID, sender, message preview |
 | `auto_continue` | Status update triggers auto-continue | Classification result, continue count, message preview |
 | `error` | Agent encounters an error | Error details, session ID |
 | `complete` | Job finishes successfully | Job ID, sender |
@@ -78,9 +69,8 @@ logs/sessions/
 `cleanup_old_snapshots(max_age_hours=168)` removes session log directories older
 than 7 days. It is called by the daily `disk-reclaim` sweep, and deletes nothing
 until that sweep is armed with `DISK_RECLAIM_APPLY=true` — see
-[Scheduled Disk Reclaim](scheduled-disk-reclaim.md). Between the deletion of the
-reflections monolith and #2517 the function had no caller at all, so a machine
-that has not registered `disk-reclaim` still accumulates `logs/sessions/`.
+[Scheduled Disk Reclaim](scheduled-disk-reclaim.md). A machine that has not
+registered `disk-reclaim` still accumulates `logs/sessions/`.
 
 ## Completion Signal
 

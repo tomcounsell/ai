@@ -2,19 +2,6 @@
 
 JSONL backup, 5-minute cooldown, and 30-second post-compact nudge guard for Claude Code SDK context compaction events.
 
-## Status
-
-Shipped — issue [#1127](https://github.com/tomcounsell/ai/issues/1127).
-
-## Problem
-
-The Claude Code SDK silently compacts a session's conversation history when it approaches the context window limit. Two failure modes surfaced before this work:
-
-1. **No JSONL backup before compaction.** A mid-compaction SDK crash left the session unrecoverable — the prior turn's working context was simply lost. The watchdog could only restart with zero history.
-2. **No timing guard between `/compact` and the next nudge.** After compaction, `agent/session_executor.py`'s nudge path could fire "continue" within milliseconds. If that nudge interrupted the SDK's compaction write, the session entered an undefined state requiring a full restart.
-
-Neither failure mode was observable: there was no `last_compaction_ts` anywhere on `AgentSession` to gate against or to count.
-
 ## Behavior
 
 ### 1. JSONL backup on every PreCompact event
@@ -44,11 +31,11 @@ After each successful snapshot, the hook scans `backups/{uuid}-*.jsonl.bak`, sor
 - The one before that, in case the most recent is itself corrupted.
 - One safety margin.
 
-Time-based TTL was rejected (see [spike-2 in the plan](../plans/compaction-hardening.md)): backups for crashed sessions are already cleaned up by `cleanup --age 30`, so count-based retention loses no recovery capability.
+Count-based retention is used rather than time-based TTL: backups for crashed sessions are cleaned up by `cleanup --age 30`, so count-based retention loses no recovery capability.
 
 ### 4. 30-second post-compact nudge guard
 
-`agent/output_router.py::determine_delivery_action` accepts a `last_compaction_ts: float | None` parameter. When set and within `POST_COMPACT_NUDGE_GUARD_SECONDS = 30` of `now`, it returns the new action `"defer_post_compact"` instead of any nudge action.
+`agent/output_router.py::determine_delivery_action` accepts a `last_compaction_ts: float | None` parameter. When set and within `POST_COMPACT_NUDGE_GUARD_SECONDS = 30` of `now`, it returns the action `"defer_post_compact"` instead of any nudge action.
 
 - The session executor's `"defer_post_compact"` branch (in `agent/session_executor.py`) is a pure no-op: it does NOT call `_enqueue_nudge`, does NOT set `chat_state.completion_sent = True`, and does NOT increment `auto_continue_count`.
 - The next SDK idle tick naturally re-invokes the callback. If the 30s window has expired, the normal nudge flow fires; if real SDK output arrived first, it routes via `"deliver"`.
@@ -72,11 +59,9 @@ One field on `AgentSession`:
 
 | Field | Type | Writer | Reader |
 |-------|------|--------|--------|
-| `last_compaction_ts` | `FloatField` (Unix ts) | `pre_compact_hook` (primary), `_tick_backstop_check_compaction` (defense-in-depth) | `determine_delivery_action` (30s post-compact nudge guard), `_tier2_reprieve_signal` (600s compacting reprieve gate, issue #1099 Mode 3) |
+| `last_compaction_ts` | `FloatField` (Unix ts) | `pre_compact_hook` (primary), `_tick_backstop_check_compaction` (defense-in-depth) | `determine_delivery_action` (30s post-compact nudge guard), `_tier2_reprieve_signal` (600s compacting reprieve gate) |
 
-This write uses `save(update_fields=[...])` (Popoto partial save) so it never clobbers concurrent writes to other fields. This is the same idiom used by `nudge-stomp-append-event-bypass.md` (issue #898).
-
-The three companion observability counters (`compaction_count`, `compaction_skipped_count`, `nudge_deferred_count`) were write-only — dashboard/post-hoc analysis was their only reader, and nothing consumed them in production decision-making. The schema diet (#1927) deleted all three; see [AgentSession Model](agent-session-model.md).
+This write uses `save(update_fields=[...])` (Popoto partial save) so it never clobbers concurrent writes to other fields. This is the same idiom used by `nudge-stomp-append-event-bypass.md`.
 
 ## Failure Modes
 
@@ -90,8 +75,6 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 
 ## Cross-References
 
-- Plan: [`docs/plans/compaction-hardening.md`](../plans/compaction-hardening.md) (migrated to `docs/archive/plans-completed/` by `/do-merge` post-merge)
-- Issue: [#1127](https://github.com/tomcounsell/ai/issues/1127)
 - Hook: `agent/hooks/pre_compact.py`
 - Router guard: `agent/output_router.py::determine_delivery_action` (`last_compaction_ts` parameter, `"defer_post_compact"` action)
 - Executor branch: `agent/session_executor.py::_tick_backstop_check_compaction` and the `"defer_post_compact"` action handler
@@ -104,15 +87,13 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 
 ## Related Features
 
-- **[Post-Compact Re-Grounding](post-compact-regrounding.md)** — the after-compaction complement: a CLI PostCompact hook that emits a short re-grounding nudge directing the agent to re-read the plan, check SDLC stage progress, and review PROGRESS.md. Shipped as issue #1139.
-- **[Bridge Self-Healing](bridge-self-healing.md)** — the watchdog escalation path is the recovery layer above this hook. Compaction hardening reduces the frequency of escalations by preserving session state across SDK crashes. Issue #1099 Mode 3 added a second reader of `last_compaction_ts` — the Tier 2 `compacting` reprieve gate in `_tier2_reprieve_signal` uses the same timestamp (within `COMPACT_REPRIEVE_WINDOW_SEC`, default 600s) to prevent post-compaction idle periods from being killed as stuck. See [Agent Session Health Monitor](agent-session-health-monitor.md) for the gate definition.
-- **[Stop Hook JSONL Backup](agent-message-delivery.md)** — sibling pattern: the Stop hook also opens `transcript_path` and reads the JSONL. The PreCompact hook borrowed the same approach for snapshots.
-- **[Externalized Session Steering](session-steering.md)** — the `output_router.py` extraction (issue #743) made the 30s guard possible by turning `determine_delivery_action` into a pure function.
+- **[Post-Compact Re-Grounding](post-compact-regrounding.md)** — the after-compaction complement: a CLI PostCompact hook that emits a short re-grounding nudge directing the agent to re-read the plan, check SDLC stage progress, and review PROGRESS.md.
+- **[Bridge Self-Healing](bridge-self-healing.md)** — the watchdog escalation path is the recovery layer above this hook. Compaction hardening reduces the frequency of escalations by preserving session state across SDK crashes. The Tier 2 `compacting` reprieve gate in `_tier2_reprieve_signal` is a second reader of `last_compaction_ts` — it uses the same timestamp (within `COMPACT_REPRIEVE_WINDOW_SEC`, default 600s) to prevent post-compaction idle periods from being killed as stuck. See [Agent Session Health Monitor](agent-session-health-monitor.md) for the gate definition.
+- **[Stop Hook JSONL Backup](agent-message-delivery.md)** — sibling pattern: the Stop hook also opens `transcript_path` and reads the JSONL. The PreCompact hook uses the same approach for snapshots.
+- **[Externalized Session Steering](session-steering.md)** — `determine_delivery_action` is a pure function in `agent/output_router.py`, which the 30s guard keys on.
 
-## Open Items
+## Known Limitations
 
-The plan documented three open questions with deliberate answers shipped here:
-
-1. **Per session-type guard tuning?** A single 30s constant covers PM/Teammate/Dev. Differentiated tuning is deferred until production data shows a real difference.
-2. **Nightly defense-in-depth backup cleanup?** Out of scope for this plan. In-line retention (last 3 per session UUID) plus existing `cleanup --age 30` are sufficient for current volume.
-3. **Defer enforcement: re-enqueue vs in-place sleep?** Re-enqueue (no nudge call, no `completion_sent` flip, no auto-continue increment). The next SDK tick naturally re-invokes the callback. Inline `asyncio.sleep(30)` was rejected because it would starve concurrent sessions on the same event loop.
+- **Single constant across session types.** One 30s constant covers PM/Teammate/Dev; there is no per-session-type tuning.
+- **No nightly defense-in-depth backup cleanup.** In-line retention (last 3 per session UUID) plus `cleanup --age 30` are the retention mechanisms.
+- **Deferral is re-enqueue, not in-place sleep.** Deferral makes no nudge call, does not flip `completion_sent`, and does not increment auto-continue; the next SDK tick re-invokes the callback. Inline `asyncio.sleep(30)` is not used because it would starve concurrent sessions on the same event loop.

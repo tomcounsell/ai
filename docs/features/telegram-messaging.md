@@ -4,7 +4,7 @@ Unified interface for reading and sending Telegram messages via the `valor-teleg
 
 ## Overview
 
-Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from Redis (Popoto ORM) populated by the bridge, while sending routes through the Redis outbox relay (requires bridge to be running).
+Messages are read from Redis (Popoto ORM) populated by the bridge; sending routes through the Redis outbox relay (requires the bridge to be running).
 
 ## CLI Reference
 
@@ -29,7 +29,7 @@ valor-telegram read --chat "Dev: Valor" --limit 5 --json
 # Explicit numeric chat ID — bypasses the name resolver
 valor-telegram read --chat-id -1001234567 --limit 10
 
-# DM user by whitelisted username (replaces the removed bridge-IPC script)
+# DM user by whitelisted username
 valor-telegram read --user tom --limit 10
 
 # Cross-chat project read — unions every chat tagged with project_key="psyoptimal"
@@ -84,8 +84,7 @@ Ambiguous chat name. 2 candidates (most recent first):
 Re-run with --chat-id <id> or a more specific --chat string.
 ```
 
-This replaces the previous silent first-match behavior (issue #1163). The
-resolver now collects all candidates through a 3-stage cascade (exact →
+The resolver collects all candidates through a 3-stage cascade (exact →
 case-insensitive exact → normalized substring) and sorts them by last
 activity desc; the default path picks the head of that sorted list and
 warns, while `--strict` raises `AmbiguousChatError`. `--strict` is only on
@@ -199,11 +198,10 @@ Error: --strict has no effect with --project; remove one of them.
 #### Project tagging
 
 `Chat.project_key` is written by the bridge on every message receipt, so
-any active chat will have a current value. Chats with `project_key=None`
-(never tagged, or registered before the bridge gained the writes) are
-**never** matched by `--project` — they appear only in unfiltered
-`chats` output. No cleanup script is needed; inactive stale rows naturally
-fall out of the project set.
+any active chat has a current value. Chats with `project_key=None`
+(never tagged) are **never** matched by `--project` — they appear only in
+unfiltered `chats` output. No cleanup script is needed; inactive stale rows
+naturally fall out of the project set.
 
 ### Sending Messages
 
@@ -257,17 +255,15 @@ sends in a turn share one visible reply chain in Telegram.
 
 Precedence: explicit `--reply-to` always wins. Empty, missing, or non-numeric
 `TELEGRAM_REPLY_TO` silently falls through to no-reply behavior. Invocations
-from outside an AgentSession (no env var set) preserve the original
-no-default behavior. Issue #1191.
+from outside an AgentSession (no env var set) have no default reply-to.
 
-#### Read-the-Room Pre-Send Pass (Path B Coverage)
+#### Read-the-Room Pre-Send Pass
 
-Issue #1203 wires the existing Read-the-Room (RTR) guard into `cmd_send`
-so agent-invoked `valor-telegram send` calls get the same redundancy /
-crossing-streams protection that the worker drafter (Path A) gained in
-PR #1204. Human-invoked CLI runs bypass RTR by default — the human
-authored the message intentionally and shouldn't be second-guessed by
-Haiku.
+The Read-the-Room (RTR) guard runs on `cmd_send`, so agent-invoked
+`valor-telegram send` calls get the same redundancy / crossing-streams
+protection as the worker drafter. Human-invoked CLI runs bypass RTR by
+default — the human authored the message intentionally and shouldn't be
+second-guessed by Haiku.
 
 Caller-type detection uses `VALOR_SESSION_ID` (the canonical agent-
 context env var the worker injects). When set + non-empty, RTR runs

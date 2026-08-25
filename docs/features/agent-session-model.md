@@ -1,6 +1,6 @@
 # AgentSession Model
 
-Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `AgentSession` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
+Unified Redis model tracking agent work from enqueue through completion, defined in `models/agent_session.py`.
 
 ## Status Lifecycle
 
@@ -16,9 +16,9 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 
 **Identity:** `id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField). `agent_session_id` is a backward-compatible property alias for `id`.
 
-**Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField — UTC-stamped by `save()` override; see #1645), `completed_at` (DatetimeField), `auto_continue_count`
+**Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField — UTC-stamped by `save()` override), `completed_at` (DatetimeField), `auto_continue_count`
 
-**Telegram origin (consolidated):** `initial_telegram_message` (DictField) — contains `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title`. Replaces the previous six separate fields. Property accessors (`sender_name`, `sender_id`, `message_text`) read from this dict for backward compatibility.
+**Telegram origin (consolidated):** `initial_telegram_message` (DictField) — contains `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title`. Property accessors (`sender_name`, `sender_id`, `message_text`) read from this dict for backward compatibility.
 
 **Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `branch_name`, `tags`, `context_summary`
 
@@ -30,17 +30,17 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
-**Resume:** `claude_session_uuid`, `resume_handles`. `resume_session()` (`tools/valor_session.py`) gates every `valor-session resume` on `claude_session_uuid` being non-null. The SDK-client path populates it via `_store_claude_session_uuid` (`agent/sdk_client.py`). Granite sessions populate it from the **PM** role handle in `BridgeAdapter._persist_resume_handles` (issue #1836): the PM handle's `claude_session_id` is mirrored onto `claude_session_uuid` so the gate passes. This is **PTY-PM only** (headless-PM is deferred to #1843) and is **rewritten with a fresh UUID on every run** — it reflects only the most recent run's PM transcript, not a durable resume anchor. `resume_handles` (the per-role list added by #1842) is the anchor #1721's cold→warm re-entry consumer reads; the scalar exists only to satisfy the gate.
+**Resume:** `claude_session_uuid`, `resume_handles`. `resume_session()` (`tools/valor_session.py`) gates every `valor-session resume` on `claude_session_uuid` being non-null. The SDK-client path populates it via `_store_claude_session_uuid` (`agent/sdk_client.py`). Granite sessions populate it from the **PM** role handle in `BridgeAdapter._persist_resume_handles`: the PM handle's `claude_session_id` is mirrored onto `claude_session_uuid` so the gate passes. This is **PTY-PM only** (headless-PM is a separate deferred path) and is **rewritten with a fresh UUID on every run** — it reflects only the most recent run's PM transcript, not a durable resume anchor. `resume_handles` is the per-role list anchor the cold→warm re-entry consumer reads; the scalar exists only to satisfy the gate.
 
 **Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged eng sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes)). The session role is carried by the `session_type` discriminator (`"eng"`/`"teammate"`/`"granite"`), not a separate `role` field.
 
-**Watchdog:** `unhealthy_reason` — reason string set when the PostToolUse health check (consecutive-failure breaker or Haiku judge; see [Session Health Check](session-health-check.md)) flags a session unhealthy, `None` when healthy. Renamed from `watchdog_unhealthy` by the schema diet (#1927) below.
+**Watchdog:** `unhealthy_reason` — reason string set when the PostToolUse health check (consecutive-failure breaker or Haiku judge; see [Session Health Check](session-health-check.md)) flags a session unhealthy, `None` when healthy.
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
 
 ### Defensive coercion for `response_delivered_at`
 
-`response_delivered_at` receives additional defensive coercion beyond the standard `int | float → datetime` conversion. This guards against Popoto's `is_valid()` coercion failure when sessions loaded from Redis (created before PR #923) have the field absent or holding a non-datetime value (e.g. the field descriptor object).
+`response_delivered_at` receives additional defensive coercion beyond the standard `int | float → datetime` conversion. This guards against Popoto's `is_valid()` coercion failure when sessions loaded from Redis have the field absent or holding a non-datetime value (e.g. the field descriptor object).
 
 Coercion is applied in two places for defence-in-depth:
 
@@ -55,11 +55,11 @@ Normalization rules for `response_delivered_at`:
 - `str` (unparseable) → `None` (logged at DEBUG level)
 - any other non-`datetime`, non-`None` type → `None` (logged at DEBUG level)
 
-**Why this matters:** Without coercion, a `DatetimeField` holding a non-datetime value causes `is_valid()` to return `False`, silently aborting `save()`. This causes `append_event("lifecycle", ...)` to drop the PM session status transition, leaving the session stuck at `status=running` in Redis and stalling the SDLC pipeline permanently (issue #929).
+**Why this matters:** Without coercion, a `DatetimeField` holding a non-datetime value causes `is_valid()` to return `False`, silently aborting `save()`. This causes `append_event("lifecycle", ...)` to drop the PM session status transition, leaving the session stuck at `status=running` in Redis and stalling the SDLC pipeline permanently.
 
 ## SessionEvent (Structured Event Log)
 
-`session_events` is a `ListField` of serialized `SessionEvent` Pydantic model dicts, replacing the old flat-string `history` field. Each event captures a lifecycle moment with typed fields.
+`session_events` is a `ListField` of serialized `SessionEvent` Pydantic model dicts. Each event captures a lifecycle moment with typed fields.
 
 `SessionEvent` (defined in `models/session_event.py`) has:
 - `event_type` — `EventType` enum: `lifecycle`, `summary`, `delivery`, `stage`, `checkpoint`, `classify`, `system`, `user`
@@ -73,7 +73,7 @@ Factory methods: `SessionEvent.lifecycle()`, `.summary()`, `.delivery()`, `.stag
 
 ### Derived Properties
 
-Several fields that were previously stored as independent model fields are now derived from the event log:
+Several fields are derived from the event log rather than stored independently:
 
 | Property | Reads from | Write behavior |
 |----------|-----------|----------------|
@@ -123,7 +123,7 @@ To look up an `AgentSession` from a raw string id (CLI arg, parent reference, Re
 session = AgentSession.get_by_id(agent_session_id)
 ```
 
-**Why not `query.get(string)`?** Popoto's `query.get()` requires a key object (`db_key=` / `redis_key=` kwargs), not a positional string. Passing a bare string raises `AttributeError: 'str' object has no attribute 'redis_key'`. Historically these errors were swallowed by silent `except` blocks, causing lookups to silently return `None` even when the session existed (issue #765). The `get_by_id` helper handles `None`/empty/whitespace input gracefully and logs `WARNING`-level messages on backend failures — surfacing regressions instead of hiding them.
+**Why not `query.get(string)`?** Popoto's `query.get()` requires a key object (`db_key=` / `redis_key=` kwargs), not a positional string. Passing a bare string raises `AttributeError: 'str' object has no attribute 'redis_key'`. The `get_by_id` helper handles `None`/empty/whitespace input gracefully and logs `WARNING`-level messages on backend failures — surfacing regressions instead of hiding them.
 
 ### Session Lookup Chain
 
@@ -193,9 +193,7 @@ Four fields change during continuation: `status` (reset to "pending"), `initial_
 `model` (`Field(null=True)`) stores the Claude model alias (e.g. `"opus"`,
 `"sonnet"`, `"haiku"`) or full name (e.g. `"claude-opus-4-7"`) to use for this
 session. The value flows end-to-end to the `claude -p` subprocess via the
-CLI harness live path. The `ValorAgent → ClaudeAgentOptions` path from PR #909
-was deleted wholesale in #2000 (see [HarnessAdapter Seam](harness-adapter.md));
-there is no parallel SDK path to select between anymore.
+CLI harness live path. There is no parallel SDK path to select between.
 
 ### Precedence Cascade (D1)
 
@@ -283,10 +281,9 @@ a quality + reliability gate. It runs independently of the session cascade:
   this is passive isolation, not an active guard: the drafter path never
   reads or branches on `claude_session_uuid`; it simply declines to write by
   passing `session_id=None`. It therefore neither protects nor collides with
-  the granite PM-handle mirror added in #1836.
-- **Ollama fallback deferred** — see issue #1137. Until that lands,
-  Anthropic-down manifests as a visible degraded-fallback message + ERROR
-  log + Redis counter
+  the granite PM-handle mirror.
+- **Ollama fallback deferred** — Anthropic-down manifests as a visible
+  degraded-fallback message + ERROR log + Redis counter
   `completion_runner:degraded_fallback:daily:<YYYYMMDD>` (7-day TTL) so
   operators can detect outage spikes.
 
@@ -307,8 +304,7 @@ stage table.
 
 `tests/unit/test_harness_model_coverage.py` AST-walks `agent/*.py` and
 fails any `get_response_via_harness(...)` call site that lacks a `model=`
-kwarg — prevents the re-regression pattern that made PR #909's wiring
-dormant on the worker path.
+kwarg — prevents the model wiring from going dormant on the worker path.
 
 ## BUILD Session Retention (`retain_for_resume`)
 
@@ -316,11 +312,8 @@ dormant on the worker path.
 cleanup so the parent eng session can resume it later via `python -m tools.valor_session resume`.
 
 **Lifecycle:**
-1. The flag would be set on a completed BUILD child session to mark it for retention.
-   **No code currently sets `retain_for_resume=True`.** The old setter,
-   `_handle_dev_session_completion()`, was deleted in the PM+Dev → unified
-   `eng` session merge, and no replacement setter was wired in. As of that
-   merge the field is only ever read or cleared — see the flag below.
+1. The flag is set on a completed BUILD child session to mark it for retention.
+   **No code currently sets `retain_for_resume=True`.** The field is only ever read or cleared — see the flag below.
 2. `tools/agent_session_scheduler.py cleanup` skips sessions where `retain_for_resume=True` and `status="completed"`.
    A log message is emitted each time a session is skipped so operators can audit retention.
 3. PR merges/closes → the eng session calls `python -m tools.valor_session release --pr <N>` to clear the flag
@@ -334,66 +327,45 @@ defaults to `False` and is eligible for scheduler cleanup (bounded by the TTL).
 The release path and the cleanup-skip guard remain in place for when a setter
 is reintroduced, but the retain-on-completion behavior is presently inert.
 
-**Default for pre-existing sessions:** `False` (backward-compatible — old BUILD sessions are not retained and will be
+**Default for pre-existing sessions:** `False` (backward-compatible — pre-existing BUILD sessions are not retained and are
 cleaned up by the TTL when they next touch Redis).
 
 ## Non-Executable Anchor (`is_ledger`)
 
-`is_ledger` (`Field(default=False)`) marks a `sdlc-local-{N}` anchor session — created by `tools/sdlc_session_ensure.py` to give local `/do-sdlc` supervision somewhere to record stage markers and verdicts — as a non-executable ledger record. Eight worker recovery/pickup/scanner code paths check this flag and skip past the row instead of requeuing, finalizing, or running it, preventing a live worker from mistaking the anchor for orphaned work and racing the local supervisor on the same issue. See [Eng Session Architecture §sdlc-local session `is_ledger` non-executable flag (issue #2042)](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
+`is_ledger` (`Field(default=False)`) marks a `sdlc-local-{N}` anchor session — created by `tools/sdlc_session_ensure.py` to give local `/do-sdlc` supervision somewhere to record stage markers and verdicts — as a non-executable ledger record. Eight worker recovery/pickup/scanner code paths check this flag and skip past the row instead of requeuing, finalizing, or running it, preventing a live worker from mistaking the anchor for orphaned work and racing the local supervisor on the same issue. See [Eng Session Architecture §sdlc-local session `is_ledger` non-executable flag](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
 
 ## Backward Compatibility
 
-- `_normalize_kwargs()` maps constituent field names into their consolidated DictFields: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`. It also back-aliases `watchdog_unhealthy` -> `unhealthy_reason` (schema diet, #1927) and discards `agent_session_id` (an `AutoKeyField`).
-- `_normalize_kwargs()` maps **nothing else**. The legacy paths for `work_item_slug`, `last_activity`, `scheduled_after`, `parent_job_id`, `job_id`, `history`, `stage_states`, `commit_sha`, `summary`, and the dead-field pop list were removed in #2873, along with the `.sender` and `.history` property aliases and the `get_parent_chat_session()` / `get_dev_sessions()` / `get_history_list()` wrappers. Pass the canonical field names (`slug`, `updated_at`, `scheduled_at`, `parent_agent_session_id`, `session_events`) instead. Render an event log for display with `models.session_event.format_event_lines()`.
+- `_normalize_kwargs()` maps constituent field names into their consolidated DictFields: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`. It also back-aliases `watchdog_unhealthy` -> `unhealthy_reason` and discards `agent_session_id` (an `AutoKeyField`).
+- `_normalize_kwargs()` maps **nothing else**. Pass the canonical field names (`slug`, `updated_at`, `scheduled_at`, `parent_agent_session_id`, `session_events`) instead; the legacy field names and the `.sender` / `.history` property aliases are not mapped. Render an event log for display with `models.session_event.format_event_lines()`.
 - Unknown kwargs are harmless: Popoto's `Model.__init__` does `self.__dict__.update(kwargs)`, so an unrecognized key lands in the instance dict and never raises, and encoding iterates `_meta.fields` only, so it is never persisted.
 - `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
 - Property accessors provide read access to old field names (`sender_name`, `message_text`, etc.) for backward compatibility
 - `models/agent_session.py` exports `AgentSession = AgentSession` (shim)
-- No Redis data migration needed for new sessions; existing sessions can be migrated with `scripts/migrate_datetime_fields.py`
+- No Redis data migration needed for new sessions
 
-## Schema Diet (#1927)
+## Schema Diet
 
-By the time #1924 (PTY teardown) and #2000 (HarnessAdapter convergence onto a
-single `claude -p` transport) had both landed, `AgentSession` still carried
-roughly 2x the field surface its post-teardown meaning justified: fields with
-no live writer kept around "to dodge a migration", write-only observability
-counters with no production reader, and a metered/total token-accounting
-split that existed only because a since-deleted PTY transcript-tailer and the
-headless runner once wrote disjoint field sets concurrently. #1927 pruned
-that surface down to fields with a live reader or writer (or a documented
-keep-rationale) and applied one precision rename.
+`AgentSession` carries only fields with a live reader or writer (or a documented keep-rationale). The disposition below records which fields are deleted, cut, collapsed, or renamed, and which are kept.
 
 ### Disposition table
 
 | Field(s) | Disposition | Rationale |
 |---|---|---|
-| `self_report_sent_at` | **DELETE** | PM mid-work self-report retired 2026-05-06; no live writer |
-| `sdk_connection_torn_down_at` | **DELETE** | Idle-sweeper substrate deleted by #2000; no live writer |
-| `session_mode` | **DELETE** | Deprecated no-op since `session_type` became the discriminator |
+| `self_report_sent_at` | **DELETE** | No live writer |
+| `sdk_connection_torn_down_at` | **DELETE** | No live writer |
+| `session_mode` | **DELETE** | No-op; `session_type` is the discriminator |
 | `pm_transcript_path`, `dev_transcript_path` | **DELETE** | No live writer; dashboard-only reads |
-| `startup_failure_kind`, `startup_captured_frame` | **DELETE** | Historical PTY-era startup diagnostics; the entire `crash_signature.py` `ceiling` plumbing chain that read `startup_failure_kind` was removed too — see [Removed Defenses Ledger](../removed-defenses.md) |
+| `startup_failure_kind`, `startup_captured_frame` | **DELETE** | PTY-era startup diagnostics with no live writer — see [Removed Defenses Ledger](../removed-defenses.md) |
 | `compaction_count`, `compaction_skipped_count`, `nudge_deferred_count` | **CUT** | Write-only observability counters with no production reader — see [Compaction Hardening](compaction-hardening.md) |
 | `metered_input_tokens`, `metered_output_tokens`, `metered_cache_read_tokens`, `metered_cost_usd` | **COLLAPSE** into `total_*` | See "Metered/total accounting collapse" below |
-| `watchdog_unhealthy` | **RENAME** -> `unhealthy_reason` | Held a reason string, not a bool; the old name implied a flag — see [Session Health Check](session-health-check.md) and [Session Watchdog](session-watchdog.md) |
+| `watchdog_unhealthy` | **RENAME** -> `unhealthy_reason` | Holds a reason string, not a bool; the name implies a flag — see [Session Health Check](session-health-check.md) and [Session Watchdog](session-watchdog.md) |
 | `user_facing_routed` | **KEPT** (frozen scope) | Popoto's lazy-load bypasses `_normalize_kwargs`, so renaming it is unsafe: an in-flight session crossing a deploy boundary would read the renamed field as its `False` default and mis-fire the delivery emoji |
 | `total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cost_usd` | **KEPT** | High read fan-out (analytics, watchdog, tool budget, PM briefings) — renaming would be pure churn |
 
 ### Metered/total accounting collapse
 
-`agent/sdk_client.py::accumulate_session_tokens` used to branch on a
-`metered: bool` parameter: `metered=False` wrote the `total_*` scalars
-(every non-session-runner caller), `metered=True` wrote a disjoint
-`metered_*` field set for session-runner role turns (plan #1842) and emitted
-a `session.metered_cost_usd` ledger metric. That split existed only to keep
-the headless leg's additive writes from clobbering the PTY transcript
-tailer's absolute `total_*` writes on a mixed-transport session. #2000
-deleted the tailer, so every caller has written the same `total_*` fields
-for the lifetime of a session since — the disjointness was already
-vestigial. #1927 removed the `metered` parameter and both branches: there is
-now exactly one write path, and every caller (the headless session-runner,
-the completion drafter, probes) accumulates onto `total_*`. The dropped
-`session.metered_cost_usd` ledger metric has no `total_*` replacement — an
-accepted loss of longitudinal comparability, not an oversight.
+`agent/sdk_client.py::accumulate_session_tokens` has exactly one write path: every caller (the headless session-runner, the completion drafter, probes) accumulates onto the `total_*` fields. There is no `metered` parameter, no disjoint `metered_*` field set, and no `session.metered_cost_usd` ledger metric.
 
 ### Migration
 
@@ -410,32 +382,19 @@ pipeline, and a second run reports zero stripped records. **Live rows are
 deferred, not aged out.** Every popoto `save()` re-issues `EXPIRE`, so the
 30-day TTL backstop only fires on a record nothing writes for 30 days — and
 `cleanup_corrupted_agent_sessions` holds every healthy row's TTL at that
-ceiling on each pass. Since #2660 it does so without writing any field
-value: a targeted `EXPIRE` via `AgentSession.refresh_ttl()`, not the
-whole-row re-save it used to issue as its corruption probe. #2698 owns the
-decision to stop and let the expiry activate. A deferred row therefore
-keeps its stale fields until a later run of the migration finds it
+ceiling on each pass. It does so without writing any field value: a targeted
+`EXPIRE` via `AgentSession.refresh_ttl()`, not a whole-row re-save. Letting
+the expiry activate is a separate retention-policy decision. A deferred row
+therefore keeps its stale fields until a later run of the migration finds it
 terminal.
 
 Registered in `scripts/update/migrations.py` under the `schema_diet_fields`
-key, and again under `schema_diet_fields_v2` (#2524) so every machine
-re-runs it once now that it has the zero-record guard: migrations are
-skipped by name, so a rename is the auditable way to re-run one already
-recorded complete. Pre-cutover records that are never migrated remain fully
-readable — Popoto ignores unknown hash fields on load — so this migration
-reclaims storage; it is not required for correctness.
-
-## Migration
-
-For existing Redis data with float timestamps or flat history strings:
-
-```bash
-# Preview changes
-python scripts/migrate_datetime_fields.py --dry-run
-
-# Run migration
-python scripts/migrate_datetime_fields.py
-```
+key, and again under `schema_diet_fields_v2` so every machine re-runs it once
+now that it has the zero-record guard: migrations are skipped by name, so a
+rename is the auditable way to re-run one already recorded complete.
+Pre-cutover records that are never migrated remain fully readable — Popoto
+ignores unknown hash fields on load — so this migration reclaims storage; it
+is not required for correctness.
 
 ## Related
 

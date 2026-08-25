@@ -1,10 +1,10 @@
 # Claude Child Keychain/TLS Diagnostics & Containment
 
-Operator runbook for issue #2100. This feature makes a worker-spawned Claude
-Code CLI child process **attributable, classifiable, and containable** when it
-triggers a macOS Keychain/Security trust-evaluation failure — the kind that
-surfaces a *destructive* operator dialog whose `Reset to Defaults` action would
-delete the login keychain.
+Operator runbook. This feature makes a worker-spawned Claude Code CLI child
+process **attributable, classifiable, and containable** when it triggers a macOS
+Keychain/Security trust-evaluation failure — the kind that surfaces a
+*destructive* operator dialog whose `Reset to Defaults` action would delete the
+login keychain.
 
 > **DANGER — read this first.** If a macOS dialog appears saying
 > *"a keychain cannot be found to store `<username>`"* (or any Keychain
@@ -24,8 +24,8 @@ process by its executable basename, the OS logs, Activity Monitor, `securityd`
 audit trails, and the destructive Keychain dialog all show the child as the bare
 process name **`2.1.202`** — with no obvious link back to Claude Code.
 
-This feature closes that attribution gap. Whenever the harness resolves the
-binary it renders a bare-version basename (matched by `^\d+\.\d+\.\d+`) as
+The harness closes this attribution gap. Whenever it resolves the binary it
+renders a bare-version basename (matched by `^\d+\.\d+\.\d+`) as
 `Claude Code CLI 2.1.202` alongside the symlink and realpath, so `2.1.202` in a
 macOS dialog is immediately recognizable as the Claude Code child.
 
@@ -50,7 +50,7 @@ It contains:
 | `worker_label` | Which worker spawned the child (from `VALOR_WORKER_MODE` / hostname). |
 | `working_dir` | The child's cwd. |
 | `session_id` | The in-flight session id. |
-| `auth_mode` | `oauth` when `CLAUDE_CODE_OAUTH_TOKEN` is present, `api_key` when `ANTHROPIC_API_KEY` is present (should never happen post-strip), else `unknown`. **Presence only — never the value.** |
+| `auth_mode` | `oauth` when `CLAUDE_CODE_OAUTH_TOKEN` is present, `api_key` when `ANTHROPIC_API_KEY` is present (unreachable under the env-strip guarantee below), else `unknown`. **Presence only — never the value.** |
 | `trust_env` | Presence + value of the TLS trust-material env vars `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `NODE_TLS_REJECT_UNAUTHORIZED` (these are filesystem paths / a `0|1` flag, not secrets). |
 
 **No secret ever appears in the record.** The prompt (`cmd[-1]`), API keys, and
@@ -83,9 +83,9 @@ checked in this order:
 | `BINARY_MISSING` | `returncode is None` (FileNotFoundError path — `claude` not on PATH). |
 | `TLS_TRUST` | stderr matches a TLS/trust token (`MissingIntermediate`, `AnchorTrusted`, `unable to get local issuer`, `self-signed certificate`, `certificate verify failed`, `tls`, …). This is the **destructive-dialog class**. |
 | `AUTH_UNAVAILABLE` | stderr matches an auth token (`invalid api key`, `authentication`, `oauth`, `401`, `unauthorized`, `credit balance`) **and not** a TLS token. |
-| `SIGNAL_KILLED` | `returncode > HARNESS_SIGNAL_EXIT_FLOOR` (128) with no TLS/auth match (issue #2341) — the child was *killed by a signal* (POSIX `128 + n`: SIGTERM → 143, SIGKILL → 137), not crashed. Dominant cause is a worker restart/deploy SIGTERMing the process group mid-turn, or an external reaper. Checked **before** `STALE_UUID` so a signal-killed pre-init turn is attributed to the kill, not misread as a bad resume pointer; cannot collide with `CLEAN_NO_OUTPUT` (rc 0 is never `> 128`). |
+| `SIGNAL_KILLED` | `returncode > HARNESS_SIGNAL_EXIT_FLOOR` (128) with no TLS/auth match — the child was *killed by a signal* (POSIX `128 + n`: SIGTERM → 143, SIGKILL → 137), not crashed. Dominant cause is a worker restart/deploy SIGTERMing the process group mid-turn, or an external reaper. Checked **before** `STALE_UUID` so a signal-killed pre-init turn is attributed to the kill, not misread as a bad resume pointer; cannot collide with `CLEAN_NO_OUTPUT` (rc 0 is never `> 128`). |
 | `STALE_UUID` | no `system/init` seen and no TLS/auth/signal match (a stale resume UUID) — returncode-independent for non-signal exits, so this claims a `returncode=0` exit too. |
-| `CLEAN_NO_OUTPUT` | `returncode == 0`, `init` was seen, no TLS/auth match (issue #2219) — a benign exit-0 empty turn, not a failure. Checked **after** `STALE_UUID` so an `init_seen=False` exit-0 still classifies as the error-level `STALE_UUID`, never gets silently downgraded. |
+| `CLEAN_NO_OUTPUT` | `returncode == 0`, `init` was seen, no TLS/auth match — a benign exit-0 empty turn, not a failure. Checked **after** `STALE_UUID` so an `init_seen=False` exit-0 still classifies as the error-level `STALE_UUID`, never gets silently downgraded. |
 | `GENERIC_NONZERO` | nonzero exit (`1 ≤ rc ≤ 128`), none of the above — a genuine CLI crash. |
 
 ### TLS wins over auth (load-bearing precedence)
@@ -100,35 +100,31 @@ On a `TLS_TRUST` classification the harness emits a WARNING that names the class
 and points at the `[harness-spawn]` diagnostic and the certificate chain, and
 **never** mentions Keychain reset/repair.
 
-## Sentry bucket split by exit class (issue #2219)
+## Sentry bucket split by exit class
 
 BRANCH C in `claude.py` (no result event and no accumulated text — the
-terminal case after classification) used to emit one bare
-`logger.error("Harness exited without a result event and no accumulated
-text")` for every exit class. Sentry's `LoggingIntegration` turned that into a
-single un-tagged, un-fingerprinted issue (VALOR-2M) that collapsed every root
-cause — a killed CLI child, a TLS-trust failure, an empty drafter turn — into
-one un-triageable 682-event bucket.
+terminal case after classification) is the Sentry-visibility decision point.
+Each exit class maps to a distinct log level and Sentry fingerprint, so a killed
+CLI child, a TLS-trust failure, and an empty drafter turn each land in their own
+issue rather than collapsing into a single un-triageable bucket.
 
 `claude_diagnostics.py::describe_harness_exit_for_sentry(exit_class,
 returncode, init_seen, stderr_snippet)` is a pure helper that returns
 `(log_level, sentry_payload)` for BRANCH C:
 
 - **`CLEAN_NO_OUTPUT` → `logging.WARNING`.** A benign exit-0 empty turn sits
-  below Sentry's error threshold, so it produces no Sentry event at all —
-  removing the dominant noise source from the bucket. The caller still
-  returns `text=None` and handles the empty turn exactly as before; only the
-  log level and Sentry visibility change.
-- **`SIGNAL_KILLED` → `logging.WARNING` (issue #2341).** A signal death
-  (`rc > 128`) mid-turn is an operationally *expected* event — the worker
-  process group is SIGTERMed on every `/update` and `valor-service.sh restart`
-  that lands while a turn is in flight, and external reapers kill orphans.
-  Paging on it would recreate the VALOR-2M noise problem one class down, so it
-  drops below Sentry's error threshold like `CLEAN_NO_OUTPUT`. The runner
-  already degrades gracefully: `text=None` → empty turn → wrap-up guard →
-  persona-safe user message, so the human never sees a raw error. This is the
-  one real post-#2219 event (Sentry VALOR-F5, `rc=143` SIGTERM) that was
-  previously misfiled as `GENERIC_NONZERO`.
+  below Sentry's error threshold, so it produces no Sentry event at all. The
+  caller still returns `text=None` and handles the empty turn; only the log
+  level and Sentry visibility change.
+- **`SIGNAL_KILLED` → `logging.WARNING`.** A signal death (`rc > 128`)
+  mid-turn is an operationally *expected* event — the worker process group is
+  SIGTERMed on every `/update` and `valor-service.sh restart` that lands while a
+  turn is in flight, and external reapers kill orphans. Paging on it would
+  recreate the noise one class down, so it drops below Sentry's error threshold
+  like `CLEAN_NO_OUTPUT`. The runner degrades gracefully: `text=None` → empty
+  turn → wrap-up guard → persona-safe user message, so the human never sees a
+  raw error. A `rc=143` SIGTERM death classifies as `SIGNAL_KILLED`, not
+  `GENERIC_NONZERO`.
 - **Every other class → `logging.ERROR`**, emitted inside an isolated
   `sentry_sdk.new_scope()` carrying:
   - tags `harness_exit_class` (the class value) and `harness_returncode`;
@@ -136,18 +132,15 @@ returncode, init_seen, stderr_snippet)` is a pure helper that returns
     `stderr_snippet`);
   - `fingerprint = ["harness-exit-no-result", str(exit_class)]`.
 
-The per-class fingerprint is what actually splits the bucket: Sentry groups
-events by fingerprint, so `harness-exit-no-result:tls_trust`,
-`…:generic_nonzero`, `…:stale_uuid`, etc. each become their own issue,
-resolvable/ignorable independently. VALOR-2M itself stops accruing new events
-once the fix ships — that's expected, not a regression, since the split *is*
-the fix.
+The per-class fingerprint splits the bucket: Sentry groups events by
+fingerprint, so `harness-exit-no-result:tls_trust`, `…:generic_nonzero`,
+`…:stale_uuid`, etc. each become their own issue, resolvable/ignorable
+independently.
 
 The scope/tagging is best-effort: it runs inside a `try/except` so a Sentry
 import or tagging failure can never suppress the underlying `logger.error`
 call. The BRANCH-C return tuple (`text=None`, `returncode`, `usage`, …) is
-byte-for-byte unchanged — no caller behavior changes, only what Sentry
-receives.
+unaffected — only what Sentry receives changes.
 
 ## Per-session TLS streak + consecutive suppression
 
@@ -235,9 +228,8 @@ Re-enabling a still-broken worker just re-trips the breaker.
 
 `scripts/install_worker.sh` refuses to install the global `com.valor.worker`
 launchd service when `PROJECT_DIR` contains `.worktrees/` — a worktree checkout
-silently becoming the global worker install target was correlated with the
-incident's plist-rewrite. The guard prints a loud multi-line WARNING and
-`exit 1`.
+must not silently become the global worker install target. The guard prints a
+loud multi-line WARNING and `exit 1`.
 
 Override for the rare intentional case (only if the main checkout is
 unavailable):
@@ -258,16 +250,15 @@ only by `install_worker.sh` — never a persistent worker runtime var.
   synthetic stderr strings only.
 - **No secret logging.** Prompts, API keys, and OAuth token values never appear
   in a diagnostic — auth mode is presence/absent only.
-- **No attempt to identify the failing TLS endpoint** (redacted in the incident,
-  unrecoverable from repo config). The failure *class* is what gets classified.
+- **No attempt to identify the failing TLS endpoint** (not recoverable from repo
+  config). The failure *class* is what gets classified.
 
 ## Related
 
 - `agent/session_runner/harness/claude_diagnostics.py` — attribution +
-  classification primitives, plus `describe_harness_exit_for_sentry`
-  (issue #2219).
+  classification primitives, plus `describe_harness_exit_for_sentry`.
 - `agent/session_runner/harness/claude.py` — spawn diagnostic emission,
-  per-session TLS streak, BRANCH-C Sentry scope/tagging (issue #2219).
+  per-session TLS streak, BRANCH-C Sentry scope/tagging.
 - `monitoring/worker_watchdog.py` — respawn circuit breaker.
 - `worker/__main__.py` — start beacon + startup binary attribution.
 - `scripts/install_worker.sh`, `scripts/valor-service.sh` — install guard +

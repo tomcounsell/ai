@@ -1,4 +1,4 @@
-# Bridge prompt-injection inspection (#1630)
+# Bridge Prompt-Injection Inspection
 
 A pre-execution screen for **untrusted bridge input** (Telegram messages,
 emails). It sits between "a stranger typed this" and "the full-access agent acts
@@ -22,8 +22,7 @@ high-stakes tool calls) can layer on once the live flag-rate is observed.
    `bridge/email_bridge.py::_process_inbound_email` (after subject/body/from
    unpack, before the coalesce decision), the bridge calls
    `bridge.injection_inspection.inspect_untrusted_input(...)`. This is a
-   standalone pre-step — it does **not** touch the dispatch-decision logic that
-   issues #2159/#2160 refactor.
+   standalone pre-step — it does **not** touch the dispatch-decision logic.
 2. **Pre-gate (`should_inspect`).** Stateless. Skips the LLM call for the
    dominant traffic — a **trusted** sender (whitelisted DM contact / exact named
    email contact) continuing a conversation with no URLs. Inspects when the
@@ -61,7 +60,7 @@ block (mirroring the tool-budget counters):
 - `{project_key}:injection-inspector:errors` — inspector failed open.
 
 `flagged / inspected` is the flag rate; a future graduated-response decision
-would read it (same instrument-then-decide discipline as #1886).
+would read it.
 
 ## Configuration (provisional, env-overridable)
 
@@ -82,20 +81,20 @@ MVP covers the two bridge **text** surfaces (Telegram + email body/subject).
 Explicitly deferred to follow-ups:
 
 - **Web-fetch / file-ingest content** (`tools/web/fetch.py`, knowledge watcher)
-  — a different seam (`PreToolUse`), noted in #1630 Open Question 5.
+  — a different seam (`PreToolUse`).
 - **Telegram edit-handler path** and **live steering messages** — secondary
-  surfaces on distinct code paths; the initial message is screened, edits/steers
-  are not yet. Annotating them needs a different attach mechanism.
+  surfaces on distinct code paths; the initial message is screened, edits and
+  live steering messages are not. Annotating them requires a different attach
+  mechanism.
 
 ## Known tradeoff: per-message cost on busy monitored groups
 
 The screen runs at the **raw-intake seam**, deliberately upstream of the
-should-respond / dispatch decision so it stays collision-free with the in-flight
-intake-decision extraction (#2159/#2160). A consequence: an owned **group**
+should-respond / dispatch decision so it stays collision-free with the
+intake-decision extraction. A consequence: an owned **group**
 message that clears the pre-gate triggers a (6s-capped, `MODEL_FAST`) inspection
 even when the bridge ultimately ignores it. For low-volume monitored groups this
-is negligible; for a busy group it is recurring cost. Mitigations today:
+is negligible; for a busy group it is recurring cost. Mitigations:
 `INJECTION_INSPECT_MIN_CHARS`, and the `INJECTION_INSPECTOR_ENABLED` kill-switch.
-The clean fix — gating inspection on "will actually dispatch" — becomes available
-for free once #2159 extracts the dispatch decision into an importable function;
-at that point the inspector can move to that seam without re-coupling the bridge.
+Gating inspection on "will actually dispatch" requires the dispatch decision to
+be an importable function, so the inspector runs at the raw-intake seam instead.

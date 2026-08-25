@@ -37,33 +37,20 @@ The Anthropic circuit breaker in `agent/sdk_client.py` protects against sustaine
 
 ## Unified Recovery Loop
 
-The six competing recovery mechanisms from the old system were replaced with one:
-
 **`_agent_session_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` sessions:
 
 - **Running sessions**: If the worker for `session.worker_key` is dead/missing and the session has been running longer than the minimum threshold, recover it (reset to pending)
-- **Running sessions with no progress (#944, extended by #1036, #1226, #1724, #1905, #1935)**: If the worker appears alive but the session has been running past `AGENT_SESSION_HEALTH_MIN_RUNNING` with no progress, the two-tier detector fires. Tier 1 sub-check A treats per-turn signals (`last_tool_use_at`, `last_turn_at`) fresher than `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s) as progress; `last_sdk_heartbeat_at` is no longer a progress signal (#1226). Tier 1 sub-check B, only consulted when `sdk_ever_output` is False — i.e. `agent.session_runner.liveness.derive_sdk_ever_output(entry)` is False because none of `last_tool_use_at`, `last_turn_at`, or `last_stdout_at` has ever been set (issue #1935 added `last_stdout_at`, the headless stream's per-event signal, as the third OR-input, closing the toolless-streaming zombie wedge) — treats a fresh `last_heartbeat_at` (queue-layer, 90s window) as progress, but the D0 never-started gate (`running_seconds > NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS` = 150s, issue #1724, clock-consistent with sub-check B's own `running_seconds` as of #1905) denies the fast-path for never-started sessions — superseding the prior #1356 grace-to-budget band and its telemetry counter, both pruned in #1905 as unreachable. Tier 2 then checks `compacting` / `children` / `alive` via `psutil`; any passing gate reprieves the kill. See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design.
+- **Running sessions with no progress**: If the worker appears alive but the session has been running past `AGENT_SESSION_HEALTH_MIN_RUNNING` with no progress, the two-tier detector fires. Tier 1 sub-check A treats per-turn signals (`last_tool_use_at`, `last_turn_at`) fresher than `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s) as progress; `last_sdk_heartbeat_at` is not a progress signal. Tier 1 sub-check B, only consulted when `sdk_ever_output` is False — i.e. `agent.session_runner.liveness.derive_sdk_ever_output(entry)` is False because none of `last_tool_use_at`, `last_turn_at`, or `last_stdout_at` has ever been set — treats a fresh `last_heartbeat_at` (queue-layer, 90s window) as progress, but the D0 never-started gate (`running_seconds > NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS` = 150s) denies the fast-path for never-started sessions. Tier 2 then checks `compacting` / `children` / `alive` via `psutil`; any passing gate reprieves the kill. See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design.
 - **Pending sessions**: If no live worker exists for `session.worker_key` and the session has been pending longer than the minimum threshold, start a worker
 - **Key invariant**: Sessions with a live worker AND at least one progress signal are never touched
 
 ### Startup Recovery
 
-`_recover_interrupted_agent_sessions_startup()` runs once synchronously at **worker startup** (`worker/__main__.py`) before the session processing loop. It resets stale running sessions to pending. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may belong to a worker that started in the current process before this function fired. Sessions with `started_at=None` are always recovered. This matches the same timing guard used by the periodic health check (issue #727).
-
-### What Was Removed
-
-| Old Mechanism | Location | Why Removed |
-|--------------|----------|-------------|
-| `_recover_stalled_pending()` | session_watchdog.py | Used `project_key` instead of `chat_id` |
-| `_kill_stalled_worker()` | session_watchdog.py | Looked up workers by wrong key |
-| `_enqueue_stall_retry()` | session_watchdog.py | Delete-and-recreate lost sessions |
-| `_recover_orphaned_sessions()` | agent_session_queue.py | Complex Redis-level scanning |
-| `_reset_running_sessions()` | agent_session_queue.py | Replaced by startup recovery |
-| `_notify_stall_failure()` | session_watchdog.py | Retry mechanism removed |
+`_recover_interrupted_agent_sessions_startup()` runs once synchronously at **worker startup** (`worker/__main__.py`) before the session processing loop. It resets stale running sessions to pending. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may belong to a worker that started in the current process before this function fired. Sessions with `started_at=None` are always recovered. This matches the same timing guard used by the periodic health check.
 
 ## Startup Retry
 
-The bridge's Telegram connection retry (`bridge/telegram_bridge.py`) now covers all Telethon errors with exponential backoff and jitter (2s to 256s cap, 8 attempts max). Previously only SQLite lock errors were retried.
+The bridge's Telegram connection retry (`bridge/telegram_bridge.py`) covers all Telethon errors with exponential backoff and jitter (2s to 256s cap, 8 attempts max).
 
 ## Structured Logging
 
@@ -71,7 +58,7 @@ The bridge's Telegram connection retry (`bridge/telegram_bridge.py`) now covers 
 
 ## SDK Heartbeat
 
-`BackgroundTask._watchdog` in `agent/messenger.py` emits periodic heartbeat logs every 60 seconds during SDK subprocess execution, replacing the single check at 180 seconds.
+`BackgroundTask._watchdog` in `agent/messenger.py` emits periodic heartbeat logs every 60 seconds during SDK subprocess execution.
 
 ## Session Status CLI
 
@@ -94,9 +81,8 @@ the current callable + per-file architecture.
 
 When a Telegram message arrives, the bridge enqueues an `AgentSession` for the
 worker to drain. If this machine's worker process is dead, that session sits in
-`pending` forever — yet the user still sees the normal "seen" reaction (👀), so
-the outage looks like work-in-progress. On 2026-05-06 this silent-failure mode
-turned a 30-second worker outage into a 7-hour one (issue #1312).
+`pending` indefinitely — yet the user still sees the normal "seen" reaction (👀), so
+the outage looks like work-in-progress.
 
 To make a paused pipeline visible, the bridge checks worker liveness at
 ingestion time and applies a distinct **⚠ reaction** (`REACTION_WORKER_DOWN`)
@@ -125,9 +111,9 @@ when the worker is not alive:
 - **Detection window.** The beacon refreshes every 30s and reads fresh for up to
   90s, so a message in the ~90s immediately after the worker dies may still get 👀
   rather than ⚠. For the multi-hour outages this targets, 90s is negligible.
-- **Recovery-time clear (#2178).** When ⚠ is set, the helper calls
+- **Recovery-time clear.** When ⚠ is set, the helper calls
   `agent.worker_down_reactions.record_worker_down_reaction(...)` so the
-  already-merged worker-recovery path can clear the ⚠ once the worker returns. This
+  worker-recovery path can clear the ⚠ once the worker returns. This
   ingestion-time signal is the companion to the recovery machinery documented in
   [Worker Liveness Recovery](worker-liveness-recovery.md).
 

@@ -25,9 +25,9 @@ sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$IS
 
 `ISSUE_NUMBER` MUST be assigned unconditionally (never `${ISSUE_NUMBER:-…}`) and
 asserted to be a positive integer before any recorder call — a stale inherited
-value would divert recorder writes to the wrong session (#1731).
+value would divert recorder writes to the wrong session.
 
-Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+Run identity: every state-mutating `sdlc-tool` call in this addendum
 carries `--run-id "$RUN_ID"` — supplied by the invoking supervisor (`/do-sdlc`
 or `/sdlc` carries it from `session-ensure`). When this skill is invoked
 standalone (no supervisor), run
@@ -35,7 +35,7 @@ standalone (no supervisor), run
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
 stop and report). Read-only calls `stage-query`, `verdict get`, and `dispatch get` take no
 run-id. `next-skill` *accepts* an optional `--run-id` as a read-only identity
-assertion for its issue-lock peek (issue #2766) -- always pass it so the peek
+assertion for its issue-lock peek -- always pass it so the peek
 runs under this run's own stated identity instead of a session lookup that can
 legitimately miss and produce a false self-block.
 
@@ -105,13 +105,13 @@ If the plan touches any Popoto model, the critique must verify:
 - The migration is registered in `MIGRATIONS`
 - The plan avoids raw Redis operations
 
-## Artifact-Based Roster Barrier (#1690, supersedes the #1654 wait-and-collect)
+## Artifact-Based Roster Barrier
 
 The war-room critics (1 for LITE, 3 for FULL — per the Step 2.6 triage) write their findings to **per-critic result files** rather than relying on a prose await-all instruction. This barrier is observable on the filesystem and verifiable by a test — it does not depend on the LLM driver choosing to block.
 
 ### How the barrier works
 
-**Step 3a — Frozen `_roster.json` manifest.** Before any critic is dispatched, the skill fixes the roster from the triage depth (LITE → `["Consolidated Critic"]`; FULL → `["Risk & Robustness", "Scope & Value", "History & Consistency"]`) and writes `${CRITIQUE_RUN_DIR}/_roster.json` — a JSON object listing the expected critic names and count. This manifest is the **membership set** the Step 3.5 gate checks against. Because the manifest is frozen before dispatch, the gate cannot be satisfied by dispatching fewer critics than expected (the under-dispatch loophole from the prior prose-await design).
+**Step 3a — Frozen `_roster.json` manifest.** Before any critic is dispatched, the skill fixes the roster from the triage depth (LITE → `["Consolidated Critic"]`; FULL → `["Risk & Robustness", "Scope & Value", "History & Consistency"]`) and writes `${CRITIQUE_RUN_DIR}/_roster.json` — a JSON object listing the expected critic names and count. This manifest is the **membership set** the Step 3.5 gate checks against. Because the manifest is frozen before dispatch, the gate cannot be satisfied by dispatching fewer critics than expected (the under-dispatch loophole).
 
 **Step 3 — Atomic per-critic result files.** Each critic writes its findings body first, then appends a **two-line terminal completion fence** as its final action: the unique delimiter `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate non-empty line, immediately followed by `STATUS: COMPLETED` as the last non-empty line. The write is **atomic**: the critic writes to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then renames it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. Because both files live inside `${CRITIQUE_RUN_DIR}` (same filesystem), the rename is atomic — the canonical path is never observed in a truncated or partial state.
 
@@ -121,7 +121,7 @@ The war-room critics (1 for LITE, 3 for FULL — per the Step 2.6 triage) write 
 critique-roster-check --run-dir "$CRITIQUE_RUN_DIR" --plan-path "$PLAN_PATH"
 ```
 
-This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. **With `--plan-path` (WS-A / issue #2124)** it ALSO verifies each result file verifiably cites the real plan — a verbatim normalized substring of at least `MIN_GROUNDING_QUOTE_LEN` characters (provisional default 24, env-overridable via `MIN_GROUNDING_QUOTE_LEN`) that appears in the plan, OR a plan section header. A fenced-but-ungrounded result (the fabricated-critique signal from #2124) is reported in an `ungrounded` list and counted as an incomplete member — bounded re-dispatch, then the `MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP. `$PLAN_PATH` is the ABSOLUTE path resolved in Plan Resolution (WS-B), so the grounding read never fails against a `.claude/worktrees/agent-*` cwd. Omitting `--plan-path` yields the legacy fence-only gate (generic/foreign-repo safety). It prints a JSON gate decision and exits 0 when the full roster is complete:
+This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. **With `--plan-path` (WS-A)** it ALSO verifies each result file verifiably cites the real plan — a verbatim normalized substring of at least `MIN_GROUNDING_QUOTE_LEN` characters (provisional default 24, env-overridable via `MIN_GROUNDING_QUOTE_LEN`) that appears in the plan, OR a plan section header. A fenced-but-ungrounded result (the fabricated-critique signal) is reported in an `ungrounded` list and counted as an incomplete member — bounded re-dispatch, then the `MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP. `$PLAN_PATH` is the ABSOLUTE path resolved in Plan Resolution (WS-B), so the grounding read never fails against a `.claude/worktrees/agent-*` cwd. Omitting `--plan-path` yields the fence-only gate (generic/foreign-repo safety). It prints a JSON gate decision and exits 0 when the full roster is complete:
 
 ```json
 {"complete": true, "missing": [], "present": ["Risk & Robustness","Scope & Value","History & Consistency"], "roster_count": 3, "completed_count": 3}
@@ -149,7 +149,7 @@ through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6).
 
 **Cleanup gated on `complete: true`.** After Step 5.5/5.6, `${CRITIQUE_RUN_DIR}` is deleted **only on the `complete: true` path**. On the incomplete / `CRITIQUE INCOMPLETE` path the run dir is **preserved** as forensic evidence of which critics never reported.
 
-### Step 5.5 — mandatory finalize (findings table + verdict, #2447)
+### Step 5.5 — mandatory finalize (findings table + verdict)
 
 **Step 5.5 is mandatory and reached on every exit path.** Every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK, or CRITIQUE INCOMPLETE) flows through a single self-contained block. The ordering below is **load-bearing** — the findings table is written and committed BEFORE the verdict is recorded, so the `verdict record` fail-closed gate (`CRITIQUE_FINDINGS_MISSING`, see `docs/features/sdlc-verdict-fail-closed-persistence.md`) sees the populated table:
 
@@ -177,11 +177,6 @@ Write the rendered `## Critique Results` table into `$PLAN_MAIN`, then commit + 
 **4. On a READY TO BUILD verdict ONLY,** write the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed ... --run-id "$RUN_ID"`) **co-located in the same block** so the verdict and marker can never desync.
 
 **Orphaned-table recovery (concern 3):** if `verdict record` fails after the table commit (e.g. a lease taken between commit and record), the plan carries a findings table with no substrate verdict. This state is **self-healing, never a half-written verdict**: the table is idempotently overwritten by the next critique pass (same section, replaced wholesale in step 1), and the router never advances past CRITIQUE without a recorded verdict, so a re-dispatch re-records. The recovery is re-running the critique to completion (or reverting the orphaned table commit on `main`); no hand-repair of a partial verdict is ever needed.
-
-### Context: prior fixes
-
-- **#1654** (v1.3.0) added Step 3.5 "Wait and Collect" as a prose barrier: the driver was instructed to block on all background critics before aggregating. The barrier lived only in prose aimed at an LLM and failed when the driving subagent returned early, dropping a BLOCKER finding from a late-arriving Adversary critic in the #1681 run.
-- **#1690** (v1.4.0, this fix) replaces the prose-await with the artifact-based roster barrier described above. The `critique-roster-check` helper is independently verifiable: a test can create and omit result files and assert the gate behaves — the barrier is checkable, not merely asserted. The `docs/sdlc/` addendum and the `tests/unit/test_do_plan_critique_barrier.py` regression test both reference #1690.
 
 ## Multi-Machine Deployment
 

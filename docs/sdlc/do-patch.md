@@ -84,7 +84,7 @@ If the patch touches any Redis operation, double-check it is project-scoped. Raw
 
 ## Shared-.venv Health Probe (Warn-Only, Stage Entry)
 
-Issue #2050: worktrees share the repo-root `.venv`. Before applying a patch,
+Worktrees share the repo-root `.venv`. Before applying a patch,
 probe it so a stripped shared environment surfaces as a warning rather than a
 confusing test failure mid-patch:
 

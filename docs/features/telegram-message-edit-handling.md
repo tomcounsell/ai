@@ -6,13 +6,11 @@ When a Telegram user edits a message after sending it, the bridge intercepts the
 
 ## Problem Solved
 
-Previously, the bridge only registered `events.NewMessage`. Telegram's `MessageEdited` events were silently dropped. A user who sent an incomplete message and quickly edited it would receive no response to the corrected version — the edit was invisible to the system.
-
-**Concrete failure (2026-04-16):** A user sent an incomplete draft, the bridge immediately queued a session, then the user edited the message to add the real content. The session ran against the incomplete draft; the edit was never seen.
+A message edited after sending routes to the correct destination rather than being silently dropped. Without edit handling, a user who sends an incomplete draft and quickly edits it receives a response computed from the incomplete version — the edit is invisible to the system.
 
 ## How It Works
 
-The bridge registers `@client.on(events.MessageEdited)` alongside the existing `events.NewMessage` handler.
+The bridge registers `@client.on(events.MessageEdited)` alongside the `events.NewMessage` handler.
 
 ### Session lookup
 

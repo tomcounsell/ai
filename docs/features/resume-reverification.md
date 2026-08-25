@@ -1,6 +1,6 @@
 # Resume Re-Verification
 
-**Issue:** [#2138](https://github.com/tomcounsell/ai/issues/2138) · **Status:** Shipped
+**Status:** Shipped
 
 A rails rule requiring a resumed or interrupted session to re-derive any claim
 about previously-completed side-effectful work from **live evidence** — and cite
@@ -8,23 +8,21 @@ the artifact it checked — before asserting that work is done.
 
 ## Problem
 
-Completion verification used to be **forward-only**. Every SDLC gate fires
-*before* a session first claims "done," but nothing required a session that was
-interrupted or resumed (worker restart, kill, mid-dispatch break) to re-derive
-prior completion state from live evidence before *re-asserting* it.
+Completion verification is **bidirectional**. Every SDLC gate fires *before* a session
+first claims "done", and a session that is interrupted or resumed (worker restart, kill,
+mid-dispatch break) must re-derive prior completion state from live evidence before
+re-asserting it.
 
-In a production incident, a PM session whose dispatch was interrupted first told
-the user *"nothing actually shipped this session"*, then after a resume asserted
-the opposite — *"the confirm email + episode setup were already complete"* —
-citing no evidence for either claim. One statement was false and the user had no
-way to know which. The orchestrator reconstructed state solely from a
-possibly-truncated transcript, and the persona actively biased toward asserting
-from memory (`work-patterns.md`: *"When resuming a prior session, I do not
-announce it… I just respond to the current message naturally"*).
+A resumed PM session can otherwise assert contradictory completion claims — first
+*nothing actually shipped this session*, then *the confirm email + episode setup were
+already complete* — citing no evidence for either, with no way for the user to tell
+which is true. The persona actively biases toward asserting from memory
+(`work-patterns.md`: *"When resuming a prior session, I do not announce it… I just
+respond to the current message naturally"*).
 
-The only evidence gate that existed (`bridge/promise_gate.py`) runs on the
-agent→user delivery path. Dev→PM reports and a PM's internal "already complete"
-reasoning pass through no gate.
+`bridge/promise_gate.py` gates the agent→user delivery path. Dev→PM reports and a PM's
+internal "already complete" reasoning pass through no gate, so the rule below supplies
+the check.
 
 ## The Rule
 
@@ -52,16 +50,16 @@ dense (≤ 8 body lines — rails are paid on every headless turn):
 
 ## Persona Reconciliation
 
-The rule had to coexist with the deliberate ethos in
+The rule coexists with the deliberate ethos in
 `config/personas/segments/work-patterns.md` ("Do or do not — there is no try";
-"don't announce resuming"). The reconciliation is **additive**, not a revert:
+"don't announce resuming"). The reconciliation is **additive**:
 
-- **`work-patterns.md`** — the resume sentence now carries a caveat: not
+- **`work-patterns.md`** — the resume sentence carries a caveat: not
   announcing the resume does **not** mean asserting prior work from memory;
   before claiming any prior side-effectful step completed, the session silently
   re-derives it from live evidence and names the artifact checked. The
   re-derivation is silent; the *citation* is not.
-- **`config/personas/engineer.md`** — the Stage Artifact Verification section now
+- **`config/personas/engineer.md`** — the Stage Artifact Verification section
   notes its checks also apply when *re-asserting* a stage complete after a
   resume, not only before the first advance, and cross-links the rails rule.
 
@@ -70,9 +68,7 @@ reader of either lands on the full rule.
 
 ## Recorded Decision: prompt-only, no step-outcome ledger
 
-The issue asked whether side-effectful sub-steps should get durable outcome
-records (e.g. extending `PipelineLedger`, #2012) so a resumed orchestrator has
-something authoritative to consult. **Decision: no — enforce via the rule alone.**
+Side-effectful sub-steps do not get durable outcome records (e.g. extending `PipelineLedger`) that a resumed orchestrator consults. **Decision: enforce via the rule alone.**
 
 1. **A step-outcome ledger reproduces the exact gap it claims to close.** A
    record written *before* the side effect is forward-only (the failure mode of
@@ -114,19 +110,19 @@ as its own issue at that time.
   - *Uninterrupted scope*: within one uninterrupted session, same-session work is
     reported normally with no redundant re-verification hedging — judged PASS.
 
-### Negative-control finding (CONCERN 2)
+### Negative-control finding
 
-The plan critique specified an "identical fixture, rails present vs stripped,
-assert the stripped run is judged FAIL" contrast to prove the rails text (not
-just the judge) changes behavior. **Empirically, modern Sonnet already
-re-verifies on this fixture even with the rule stripped** — across samples, and
-even with a transcript that explicitly reads "SENT at 12:03, delivery accepted",
-the stripped-rails model still declined to assert completion and deferred to a
-live-evidence check ("the transcript could have been written optimistically
-before actual confirmation"). A "stripped-must-FAIL" gate therefore tests a
-premise this base model refutes, and forcing it would mean gaming the fixture.
+A "stripped-must-FAIL" contrast (identical fixture, rails present vs stripped,
+assert the stripped run is judged FAIL) would prove the rails text changes
+behavior, but modern Sonnet re-verifies on this fixture even with the rule
+stripped — across samples, and even with a transcript that explicitly reads
+"SENT at 12:03, delivery accepted", the stripped-rails model still declines to
+assert completion and defers to a live-evidence check ("the transcript could
+have been written optimistically before actual confirmation"). A
+"stripped-must-FAIL" gate therefore tests a premise this base model refutes,
+and forcing it means gaming the fixture.
 
-The negative control was redesigned honestly: the real behavioral gate is the
+The negative control is designed honestly: the real behavioral gate is the
 present-rails PASS, and the judge is validated as non-vacuous by the synthetic
 grounded-vs-ungrounded discrimination test. The identical stripped fixture is
 still exercised as an observation. The rule's value is a **durable,
@@ -135,11 +131,9 @@ persona-narration reconciliation — not a behavior-flipping delta on Sonnet.
 
 ## Scope
 
-Text-only change to three already-loaded prompt files plus two test files. No
-code changes, no new dependencies, no new durable state, no migration. Reverting
-the prompt edits restores prior behavior. `promise_gate.py`,
-`pipeline_ledger.py`, and `sdlc_dispatch.py` were read for context only and are
-unchanged.
+The rule lives in three prompt files, with two accompanying test files. It adds no code
+changes, no new dependencies, no new durable state, and no migration. `promise_gate.py`,
+`pipeline_ledger.py`, and `sdlc_dispatch.py` are unchanged.
 
 ## See Also
 
@@ -147,4 +141,3 @@ unchanged.
 - `config/personas/segments/work-patterns.md` — resume caveat
 - `config/personas/engineer.md` — Stage Artifact Verification cross-reference
 - `docs/archive/plans-completed/sdlc-2138.md` — full plan and recorded decision
-- #2136 — resume goal re-injection (sibling resume gap, tracked separately)

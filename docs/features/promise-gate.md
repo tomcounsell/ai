@@ -1,9 +1,5 @@
 # Promise Gate
 
-**Issue:** [#1219](https://github.com/tomcounsell/ai/issues/1219)
-**Plan:** [docs/plans/sdlc-1219.md](../plans/sdlc-1219.md)
-**Status:** Active
-
 ## What it does
 
 The promise gate is the centralised honesty gate for every agent-to-user
@@ -47,13 +43,13 @@ option `(c)`.
 The gate runs at every send-path call site that writes to the Redis
 outbox:
 
-| Send path | Gate state before #1219 | Gate state after #1219 |
-|---|---|---|
-| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_evaluate_drafter_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path (#2421 closed the short-output reachability hole); `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
-| Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | Bypassed | **Gated** via `_gate_terminal_promise` (#2423): a promise-flagged deferred draft is substituted with an honest fallback (never suppressed, never delivered verbatim); audits with `source="terminal_flush"` |
-| `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
-| `tools/valor_telegram.py send` | Bypassed | **Gated** |
-| `tools/valor_email.py cmd_send` | Bypassed | **Gated** |
+| Send path | Gate state |
+|---|---|
+| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated via `_evaluate_drafter_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path; `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
+| Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | **Gated** via `_gate_terminal_promise`: a promise-flagged deferred draft is substituted with an honest fallback (never suppressed, never delivered verbatim); audits with `source="terminal_flush"` |
+| `tools/send_message.py` (telegram or email) | **Gated** |
+| `tools/valor_telegram.py send` | **Gated** |
+| `tools/valor_email.py cmd_send` | **Gated** |
 
 The gate is implemented in [`bridge/promise_gate.py`](../../bridge/promise_gate.py).
 Each CLI tool calls `cli_check_or_exit(text, transport, session_id)`
@@ -65,9 +61,9 @@ text on the full path — honors `PROMISE_GATE_ENABLED`, and writes a
 `source="promise_gate_drafter"` audit entry) as part of the pass-through
 validation flow — no Haiku call, no double-charge.
 `evaluate_promise` still accepts an optional `classifier_verdict` parameter
-(kept for backward compatibility) but the drafter no longer populates it.
+(kept for backward compatibility) but the drafter does not populate it.
 
-### Terminal flush (#2423)
+### Terminal flush
 
 `flush_deferred_self_draft_sync` (and its async email sibling
 `_deliver_deferred_self_draft_fallback`) deliver a deferred self-draft when a
@@ -77,11 +73,11 @@ option. `agent/session_health._gate_terminal_promise` therefore evaluates the
 exact text about to ship and, on a block, **substitutes** the honest fallback
 `TERMINAL_PROMISE_FALLBACK_MESSAGE` ("I couldn't complete that follow-up
 before this session ended — please send the request again if you still need
-it."). Suppression was rejected because it reintroduces the #1796
-swallowed-reply class. The gate is fail-open for delivery: an evaluation error
-delivers the original text rather than swallowing the reply.
+it."). Suppression is not used, because it reintroduces the swallowed-reply
+class. The gate is fail-open for delivery: an evaluation error delivers the
+original text rather than swallowing the reply.
 
-## Advisory flow: revise-or-override (durability M3, #2494)
+## Advisory flow: revise-or-override
 
 On the drafter path the gate is **advisory to the PM**, not merely a block.
 A promise-blocked draft carries a revise-or-override suggestion
@@ -106,10 +102,9 @@ advisory carries the **goal-authoring nudge** — the second enforcement point
 of the PM's goal mandate (the `prime-pm-role` priming is the first).
 
 Expectations are PM-authored and PM-discharged only — no mechanical
-trigger ever discharges one (Risk 4 of the durability plan, carried into
-#2708). The backstop is the `agent/session_health.py` sweep's
-`_check_jobs_at_rest_with_open_expectations`, which surfaces Jobs at rest
-with open expectations to the operator log along with the
+trigger ever discharges one. The backstop is the `agent/session_health.py`
+sweep's `_check_jobs_at_rest_with_open_expectations`, which surfaces Jobs at
+rest with open expectations to the operator log along with the
 `metrics:promise_advisories_issued` vs `metrics:expectations_authored`
 counters. See [`durability-model.md`](durability-model.md).
 
@@ -123,19 +118,13 @@ backstop is the **fail-closed-only** last line that fires solely on
 the heuristic-fallback branch (no API key / SDK exception / parse
 failure). The heuristic does NOT override an LLM `ALLOW`.
 
-This split honors both the issue's stated mandate (*"widen what the
-LLM drafter judges and keep heuristics as the unambiguous fail-closed
-last line"*) and the user-memory record `feedback_llm_drafter_over_regex`
-(*"strengthen the LLM classifier prompt before adding heuristic regex
-patterns to anti-pattern gates"*).
+### What the gate actually keys on
 
-### What the gate actually keys on (#2664)
-
-Measured directly against the live LLM layer on 2026-08-08, 8 samples
-per phrasing. The discriminator is **the presence of a forward-looking
-clause, not the presence of evidence.** Adding a file count, a commit
-hash, or a bare `#102` does not rescue "still running", "is on it", or
-"I'll report back"; only a URL-shaped autonomous-delivery reference does.
+Measured directly against the live LLM layer. The discriminator is **the
+presence of a forward-looking clause, not the presence of evidence.**
+Adding a file count, a commit hash, or a bare `#102` does not rescue "still
+running", "is on it", or "I'll report back"; only a URL-shaped
+autonomous-delivery reference does.
 
 | Phrasing | LLM verdict |
 |---|---|
@@ -166,13 +155,12 @@ Two consequences worth knowing before you touch either layer:
 
 ### Why the heuristic is fail-closed (vs. RTR's fail-open)
 
-`bridge/read_the_room.py` is heavily cited as the architectural
-precedent for this gate's async/sync contract, env-var enable
-pattern, and SDK timeout. But RTR is **fail-open** (any error returns
-`action="send"`), and this gate's heuristic branch is **fail-closed**
-(regex match without evidence returns BLOCK). The two postures look
-contradictory; they are not — they are intentionally inverted because
-the cost of false-positive is inverted between the two gates.
+`bridge/read_the_room.py` is the architectural precedent for this gate's
+async/sync contract, env-var enable pattern, and SDK timeout. But RTR is
+**fail-open** (any error returns `action="send"`), and this gate's heuristic
+branch is **fail-closed** (regex match without evidence returns BLOCK). The
+two postures are intentionally inverted because the cost of false-positive
+is inverted between the two gates.
 
 | Gate | What false-positive means | Cost | Correct posture |
 |------|---------------------------|------|-----------------|
@@ -209,10 +197,8 @@ always passes.
 The recovery template intentionally does **not** mention the kill
 switch (`PROMISE_GATE_ENABLED=false`) or any other bypass mechanism.
 The agent reads its own stderr to recover; teaching the bypass syntax
-in the template would defeat the gate on the first BLOCK. This was
-the cycle-2 Blocker B-NEW-2 finding that retired the cycle-1 design's
-`--no-promise-gate` per-call flag entirely. There is no per-call
-bypass — operators rephrase blocked messages just like the agent
+in the template would defeat the gate on the first BLOCK. There is no
+per-call bypass — operators rephrase blocked messages just like the agent
 does. One honesty contract for all senders.
 
 The anti-leak is enforced by tests in
@@ -229,8 +215,7 @@ the audit JSONL so the disabled state remains observable.
 This is the **only** escape hatch. It is not advertised in the
 recovery template, not exposed as a per-call flag, and is intended
 solely for incident response (e.g. a regression rolling out a 100%
-block rate). Adding a per-message bypass was rejected on review — see
-"Why the template never names the kill switch" above.
+block rate).
 
 ### Env-var contract
 
@@ -263,7 +248,7 @@ via the `_write_promise_audit` helper. The entry shape:
 
 ```json
 {
-  "ts": "2026-04-30T12:00:00+00:00",
+  "ts": "<iso-8601 timestamp>",
   "kind": "promise_gate",
   "text_preview": "I'll come back with X",
   "action": "block",
@@ -283,7 +268,7 @@ The `source` discriminator takes one of:
 | `promise_gate_heuristic` | LLM unavailable / parse failure → fell through to regex |
 | `promise_gate_timeout` | LLM SDK 3-second timeout fired |
 | `promise_gate_disabled` | Kill switch was on |
-| `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter no longer populates this) |
+| `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter does not populate this) |
 | `promise_gate_drafter` | Drafter-path decision (`_evaluate_drafter_promise`, both length regimes); on the kill-switch it records `action="allow" / reason="gate_disabled"` under this same source |
 | `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
@@ -301,7 +286,7 @@ per CLAUDE.md). On real-session hit, the event is appended to
 (synthetic `cli-{epoch}` ID, stale ID, lookup error), session_events
 emission is silently skipped — only the audit JSONL fires.
 
-This preserves the §Race Conditions stateless-judgment claim: the
+This preserves the stateless-judgment claim: the
 gate makes **no** AgentSession state-driven decision; the existence
 check on the explicit input is for telemetry routing only.
 
@@ -331,11 +316,11 @@ The SDK-level 3-second timeout is enforced via the RTR-correct
 pattern: `async with semaphore_slot(): async with
 anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:`.
 Coroutine-level timeouts (`asyncio.wait_for`) are forbidden — they
-leak httpx connections under cancellation (PR #1055 invariant).
+leak httpx connections under cancellation.
 
 `RTR_SDK_TIMEOUT` is **imported** from `bridge.read_the_room` rather
-than redefined locally — both gates share the same SDK invariant
-from PR #1055; copying the literal value would risk drift.
+than redefined locally — both gates share the same SDK invariant;
+copying the literal value would risk drift.
 
 On timeout, the gate falls through to the heuristic (sub-millisecond)
 and writes the audit entry with `source="promise_gate_timeout"`.
@@ -353,17 +338,18 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 | `cli_check_or_exit` swallows unexpected raise | Fail-open (infrastructure branch) | Logs warning; writes audit `source="promise_gate_cli_exception"`; CLI proceeds to outbox write |
 | LLM path reached while an event loop is already running | Heuristic fallthrough | `_run_async_safely` cannot use `asyncio.run` inside a running loop; it **closes** the coroutine and returns `None` (heuristic takes over). Only reachable under a test harness / async caller — production reaches the sync API from a CLI context with no running loop. |
 
-### The `_run_async_safely` running-loop guard (#2120)
+### The `_run_async_safely` running-loop guard
 
 `evaluate_promise` is a sync API; on the CLI Haiku path it runs
 `_run_async_safely(_evaluate_promise_async(text))`. `_run_async_safely` calls
 `asyncio.run(coro)`, which raises `RuntimeError` if an event loop is already running —
 **before** it ever touches the coroutine. Because the `_evaluate_promise_async(text)`
 argument was eagerly created, it would be neither awaited nor closed, leaking
-`coroutine '_evaluate_promise_async' was never awaited` at GC/teardown (the full-suite
-teardown wedge, #2118/#2120). The running-loop branch therefore calls `coro.close()` before
-returning `None`. Behavior is unchanged: in production there is no running loop so
-`asyncio.run` really awaits the coroutine; the close-branch is only exercised under tests.
+`coroutine '_evaluate_promise_async' was never awaited` at GC/teardown. The
+running-loop branch therefore calls `coro.close()` before returning `None`.
+Behavior is unchanged: in production there is no running loop so
+`asyncio.run` really awaits the coroutine; the close-branch is only exercised
+under tests.
 
 ## Tests
 
@@ -374,19 +360,19 @@ returning `None`. Behavior is unchanged: in production there is no running loop 
   recovery template anti-leak, and `cli_check_or_exit`
   exception-swallow semantics.
 * [`tests/unit/test_promise_gate_audit.py`](../../tests/unit/test_promise_gate_audit.py) — covers the
-  forked `_write_promise_audit` helper (cycle-2 C-NEW-2) and the drafter-path
-  `source="promise_gate_drafter"` audit entries (#2421).
+  forked `_write_promise_audit` helper and the drafter-path
+  `source="promise_gate_drafter"` audit entries.
 * [`tests/unit/test_message_drafter.py`](../../tests/unit/test_message_drafter.py) —
   `TestShortOutputPromiseGate` covers the short-output reachability fix with the
   exact 172-char incident text, the benign false-positive guard, and the
-  kill-switch contract (#2421).
+  kill-switch contract.
 * [`tests/unit/test_deferred_self_draft_completed.py`](../../tests/unit/test_deferred_self_draft_completed.py) —
   `TestTerminalFlushPromiseGate` covers the terminal-flush substitution,
   `source="terminal_flush"` audit, kill switch, and the guard that the
-  substitute itself passes the heuristic (#2423).
+  substitute itself passes the heuristic.
 * [`tests/unit/test_promise_gate_session_events.py`](../../tests/unit/test_promise_gate_session_events.py) — covers
   conditional session_events emission with real and synthetic
-  session_ids (cycle-2 C-NEW-1, C-NEW-4).
+  session_ids.
 * `tests/unit/test_send_message.py`,
   `test_valor_telegram.py`, `test_valor_email.py` — each adds a
   `--help` anti-leak test asserting the help output never advertises
@@ -421,8 +407,8 @@ sed -i '' '/^PROMISE_GATE_ENABLED=/d' ~/Desktop/Valor/.env
 ### Tuning the LLM prompt
 
 The forward-deferral and behavioral-change few-shot examples live in
-`bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter no longer
-has its own classifier system prompt — empty-promise detection runs via
+`bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter does not
+have its own classifier system prompt — empty-promise detection runs via
 `_evaluate_drafter_promise` (a regex/heuristic helper), not a Haiku call.
 If telemetry shows a class of false-positives the LLM cannot catch from
 text alone, the `PROMISE_GATE_SYSTEM_PROMPT` in `bridge/promise_gate.py`

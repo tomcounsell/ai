@@ -1,7 +1,5 @@
 # TTS (Text-to-Speech)
 
-Tracking issue: [#1136](https://github.com/tomcounsell/ai/issues/1136)
-
 ## What it is
 
 A two-layer feature plus one composite skill, each siloed so any layer can be upgraded without changing the others:
@@ -59,9 +57,9 @@ tts.kokoro_unavailable falling back to cloud; cause=<reason>
 
 ## Voice-message delivery (bridge integration)
 
-Telethon's default `send_file()` delivers OGG/Opus as a generic audio document, not a voice bubble. The relay's voice-note branch fixes this:
+Telethon's default `send_file()` delivers OGG/Opus as a generic audio document, not a voice bubble. The relay's voice-note branch delivers native voice messages:
 
-- `tools/valor_telegram.py` `send` subcommand now accepts `--voice-note` and `--cleanup-after-send`. With `--voice-note`, the CLI sets `voice_note: True` and `duration: <float>` on the Redis outbox payload (duration is computed once via `tools.tts._compute_duration_opus`, which probes via `ffprobe`).
+- `tools/valor_telegram.py` `send` subcommand accepts `--voice-note` and `--cleanup-after-send`. With `--voice-note`, the CLI sets `voice_note: True` and `duration: <float>` on the Redis outbox payload (duration is computed once via `tools.tts._compute_duration_opus`, which probes via `ffprobe`).
 - `bridge/telegram_relay.py:_send_queued_message` honors `voice_note` by calling `client.send_file(..., voice_note=True, attributes=[DocumentAttributeAudio(duration=N, voice=True, waveform=b"")])`. On any voice-send exception it falls back to the document-send path and logs a warning — the relay never crashes.
 - `cleanup_file: True` tells the relay to `os.unlink(path)` after a successful send **or** after dead-letter placement on retry exhaustion. Wrapped in try/except so missing-file is harmless.
 
@@ -144,7 +142,7 @@ The agent invokes this skill when the user asks for a spoken update.
 ## Future work
 
 - Enroll the optional `tests/integration/test_tts_debrief.py` (gated on `LIVE_TELEGRAM=1`) into `scripts/nightly_regression_tests.py` once the feature has been stable in production for one week — catches Telethon upgrade drift on the voice-note API without blocking feature merge.
-- Optional `--voice-preview` flag on `valor-tts` to play back locally before sending (deferred from v1).
+- Optional `--voice-preview` flag on `valor-tts` to play back locally before sending.
 
 ## Related files
 

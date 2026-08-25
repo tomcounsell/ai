@@ -2,23 +2,19 @@
 
 The reflection scheduler runs in its own supervised launchd subprocess
 (`python -m reflections`, `com.valor.reflection-worker`), separate from the worker.
-This is the continuation of [Worker Fault Containment](worker-fault-containment.md)
-(#1816): "Fix #5", the highest-leverage decoupling, deferred until Stages A–C shipped
-and were observed in production.
 
 ## Why
 
 The scheduler's 31 reflection jobs (repo audits, memory dedup, crash recovery, PM
-briefings, sentry triage, docs auditing …) used to run as a long-lived asyncio task on
-the worker's event loop. That coupled every reflection to the loop that also owns
-session execution: a reflection memory leak, CPU spin, or synchronous freeze could
-degrade the worker that runs customer-facing sessions.
+briefings, sentry triage, docs auditing …) run in a dedicated subprocess rather than as
+a long-lived asyncio task on the worker's event loop. Running them in-process would
+couple every reflection to the loop that also owns session execution: a reflection
+memory leak, CPU spin, or synchronous freeze could degrade the worker that runs
+customer-facing sessions.
 
-#1816 Fixes #1–#4 removed the acute critical-path starvation risk (bounded reflection
-thread pool + `supervise()` respawn). This change closes the residual structural gap:
-true crash-domain and freeze isolation. The scheduler no longer shares the worker's
-event loop, memory space, or crash domain. The worker only executes the `AgentSession`
-records the scheduler enqueues.
+The subprocess provides true crash-domain and freeze isolation. The scheduler does not
+share the worker's event loop, memory space, or crash domain. The worker only executes
+the `AgentSession` records the scheduler enqueues.
 
 ## How it works
 
@@ -34,12 +30,11 @@ launchd (com.valor.reflection-worker, KeepAlive=true, ThrottleInterval)
 ```
 
 The scheduler↔worker seam is the existing Redis `Reflection` / `AgentSession` records.
-Moving the scheduler to a sibling process changes *who ticks*, not *how work is enqueued
-or executed*. `ReflectionScheduler` is unchanged; the process-specific heartbeat I/O is a
-thin wrap in `reflections/__main__.py`, never threaded into the shared class.
+The sibling process runs the ticks, while how work is enqueued or executed is unchanged.
+`ReflectionScheduler` is the shared class; the process-specific heartbeat I/O is a thin
+wrap in `reflections/__main__.py`, never threaded into the shared class.
 
-launchd `KeepAlive` is the supervisor (it replaces the in-worker `supervise()` respawn).
-There is deliberately no bespoke watchdog process.
+launchd `KeepAlive` is the supervisor. There is deliberately no bespoke watchdog process.
 
 ## Operator visibility
 
@@ -79,31 +74,26 @@ qualifies as soon as any project's `machine` matches this host, regardless of Te
 config, with the same fail-open contract and self-skip + stale-plist removal a bridge-role
 gate uses — unlike a bridge-role gate, it drops the Telegram-block requirement.
 `scripts/install_nightly_tests.sh` carries an identical `has_worker_role()` gate for the
-same reason (issue #2823).
+same reason.
 
-Gating on bridge-role would strand reflections on worker-only (non-Telegram) machines —
-the [#1379](https://github.com/tomcounsell/ai/issues/1379) over-narrow-gating failure
-class (which gated calendar work on `session.slug` and dropped all non-slug work).
-`reflection_machine_filter` still scopes project-specific audits so a machine runs only
-the reflections it owns.
+Gating on bridge-role would strand reflections on worker-only (non-Telegram) machines.
+`reflection_machine_filter` scopes project-specific audits so a machine runs only the
+reflections it owns.
 
-## Cutover ordering
+## Update ordering
 
-`/update` restarts the worker first (new code, no in-process scheduler), then bootstraps
-the reflection plist. `restart_worker` uses `launchctl kickstart -k` — a hard
-kill-and-relaunch — so the old in-process scheduler dies atomically before the new plist
-loads. The zero-scheduler window is a handful of seconds (worker-restart to
-plist-bootstrap); reflections are periodic (tick ≥ 60s, job intervals hours/days), so no
-reflection misses its due window. Because the old scheduler is hard-killed rather than
-drained in parallel, two schedulers never tick at once by construction; `is_reflection_running`
-+ `reap_stale_running()` are idempotency defense-in-depth.
+`/update` restarts the worker first, then bootstraps the reflection plist.
+`restart_worker` uses `launchctl kickstart -k` — a hard kill-and-relaunch. Reflections
+are periodic (tick ≥ 60s, job intervals hours/days), so the brief restart window does not
+miss a reflection's due window. Two schedulers never tick at once by construction;
+`is_reflection_running` + `reap_stale_running()` are idempotency defense-in-depth.
 
 ## Config ownership
 
-The `config/reflections.yaml` copy + `reflection_machine_filter` step moved from
-`install_worker.sh` into `install_reflection_worker.sh` (single owner). The `projects.json`
-copy stays in `install_worker.sh` (the worker needs it; the reflection installer's
-machine-filter reads that copy).
+The `config/reflections.yaml` copy and `reflection_machine_filter` step live in
+`install_reflection_worker.sh` (single owner). The `projects.json` copy lives in
+`install_worker.sh` (the worker needs it; the reflection installer's machine-filter reads
+that copy).
 
 ## Commands
 

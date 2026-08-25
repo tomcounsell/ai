@@ -15,7 +15,7 @@ through `Model.query.filter()`.
 Reads are in scope for the same reason writes are: direct reads bypass Popoto's
 field-aware decoding, and a client with `decode_responses=True` raises
 `UnicodeDecodeError` on any hash carrying a binary field such as an
-`EmbeddingField` (float32 vector bytes). See issue #1038.
+`EmbeddingField` (float32 vector bytes).
 
 `.claude/hooks/validators/validate_no_raw_redis_delete.py` enforces it as a
 PreToolUse Bash guard. It is in-process predicate 4 of
@@ -33,18 +33,16 @@ token list.
 The rule is an ai-repo rule. Raw Redis on Popoto-managed keys is wrong *here*
 because Popoto is this repo's ORM. It carries no meaning in `~/src/popoto`,
 where Popoto is the library under development and its own tests legitimately
-need raw Redis to construct states the ORM cannot produce. Blocking there is
-what issue #2638 reported, after the guard blocked popoto work for #2636.
+need raw Redis to construct states the ORM cannot produce. Blocking there
+would break those tests.
 
-**Project scope does not mean cwd scope.** The manifest already declares this
-validator `scope = "project"`, and the issue's premise that a stale global
-registration was to blame turned out to be wrong. Scope governs which
+**Project scope does not mean cwd scope.** The manifest declares this
+validator `scope = "project"`. Scope governs which
 `settings.json` carries the registration, so the hook fires for every Bash call
 an ai-repo *session* makes. It says nothing about where that call's working
-directory points. The dispatcher had always extracted `cwd` from the payload and
-passed it to every validator; this one took it as `_cwd` and discarded it. That
-is the whole mechanism, and it is worth knowing before writing any new
-path-sensitive validator.
+directory points. The dispatcher extracts `cwd` from the payload and
+passes it to every validator; this validator uses it to decide whether the
+guard applies.
 
 `_guard_applies(cwd)` walks up from `cwd`, and whichever it meets first decides:
 
@@ -82,10 +80,9 @@ unresolvable path.
 
 ### Gate 2: executable context
 
-Matching on command text means prose describing the rule trips the rule. Filing
-issue #2638 was itself blocked, because the issue body quoted the offending
-call. A command with no interpreter in it cannot execute a Redis call, so there
-is nothing to block.
+Matching on command text means prose describing the rule trips the rule. A
+command with no interpreter in it cannot execute a Redis call, so there is
+nothing to block.
 
 `_EXECUTABLE_CONTEXT` requires one of `python`, `python3`, `ipython`, `pytest`,
 `redis-cli`, `uvx`, `uv run`, or a bare `.py` path (`./scripts/thing.py`
@@ -121,22 +118,17 @@ so `"SortedField".strip("Field")` is `"Sort"`. The emitted prefix is `$SortF`,
 and `$SortedF` is a spelling Popoto never produces. Guarding the latter guarded
 nothing: a live production read returns
 `$SortF:FencedMemory:importance:<id>` and zero `$SortedF:` keys exist. Both
-`$SortF:` and `$DecayingSortF:` are guarded now (#2641).
+`$SortF:` and `$DecayingSortF:` are guarded.
 
 This is a general Popoto gotcha, not a one-off typo. Any code deriving a prefix
 from a field class name hits the same `str.strip` behavior.
 
 ### Model names are pinned by a completeness test
 
-The model-name list drifted silently twice before it had a test. `Job` was
-missing while `Room` was present, and widening the probe past the issue's claim
-turned up four more that had slipped the gate: `CorpusSizeBaseline`,
-`CrashSignature`, `LastProcessedRecord`, and `PipelineLedger`.
-
 `tests/unit/test_validate_no_raw_redis_delete.py::test_model_list_is_complete`
 enumerates `popoto.Model` subclasses across the first-party packages and fails
-naming any that is absent, so the seventh omission is visible rather than quiet.
-Adding six names was not the fix; the test is.
+naming any that is absent, so a missing model is visible rather than quiet. The
+test is the guard against drift, not the list itself.
 
 ## Fail posture
 
@@ -152,13 +144,12 @@ logged and the dispatcher moves to the next validator.
 Prose that names an interpreter still blocks even when the interpreter is only
 quoted as an example rather than executed. A heredoc writing a doc file that
 quotes a path-invoked interpreter next to a blocked call shape is the shape that
-does it. Issue #2638 concedes that matching on command text will always carry
-some false positives. Tracked in #2736, with the fix direction recorded there:
-drop heredoc bodies whose consuming command is not itself an interpreter.
+does it. Matching on command text always carries some false positives; the fix
+direction is to drop heredoc bodies whose consuming command is not itself an
+interpreter.
 
 ## Related
 
 - [Hook Manifest](hook-manifest.md) — the dispatcher, first-block-wins ordering, and per-validator fail posture.
 - [Hooks Best Practices](hooks-best-practices.md) — validator conventions and the `/audit-hooks` reflection.
 - [uv-sync Worktree Guard](uv-sync-worktree-guard.md) — the sibling cwd-sensitive Bash validator.
-- Issues #1038 (the decode failure that motivated the read patterns), #2636, #2638, #2641, #2736.

@@ -1,36 +1,18 @@
 # `valor` CLI: The Agent-Session Wrapper
 
-**Status**: Shipped (PR #1612, on `session/granite-pty-production-cutover`)
+`valor` is a thin delegation wrapper around the `valor-session` CLI. It lives at
+`tools/valor_cli.py` and is installed as `valor` in `pyproject.toml`
+`[project.scripts]`. Every subcommand forwards to the matching `cmd_*` function
+in `tools.valor_session` and exits with the same return code — no new
+abstractions, no duplicated state, no schema changes.
 
-## Problem
-
-`valor-session` is the canonical interface for managing AgentSessions, but its
-CLI is verbose for the common case. Spinning up a session that "just does this
-thing" requires:
-
-```bash
-valor-session create --role eng --message "fix the typo in app.py"
-```
-
-Three flags and a subcommand for the most frequent operation. The shell also
-ships a stale `valor` alias that points to a deleted `./scripts/telegram_run.sh`,
-so the natural name for the tool is already taken by a broken link.
-
-## What Shipped
-
-A thin wrapper at `tools/valor_cli.py` (267 lines, ruff-formatted) installed as
-`valor` in `pyproject.toml [project.scripts]`. It is a **pure delegation layer**:
-every subcommand calls into the matching `cmd_*` in `tools.valor_session` and
-exits with the same return code. No new abstractions, no duplicated state, no
-schema changes.
-
-The interface:
+## Interface
 
 ```bash
-# Create — single positional prompt, defaults to eng role.
-# Eng sessions REQUIRE a slug: pass --slug, or include
+# Create — single positional prompt, defaults to the eng role.
+# Eng and PM sessions require a slug: pass --slug, or include
 # "issue #N" in the prompt so the slug auto-derives to sdlc-N
-# (issues #1109 / #1272 — slugless invocations exit 1).
+# (slugless invocations exit 1).
 valor "plan issue #1615"
 valor "fix the typo in app.py" --slug typo-fix
 valor agent-session --role eng --model sonnet --slug feature-x "build the feature"
@@ -42,251 +24,111 @@ valor status <id>                   # one session
 valor status <id> --full-message    # without 100-char truncation
 valor steer <id> "stop after critique"
 valor kill <id>
-valor kill --all                    # nuclear
+valor kill --all                    # kill every session
 
 # Inspection / repair
 valor inspect <id>                  # raw fields
-valor progress <id>                 # is it still working? read-only verdict
+valor progress <id>                 # read-only liveness verdict
 valor children <id>                 # child sessions
-valor resume <id> "new message"     # hard-PATCH resume
+valor resume <id> "new message"     # resume a session
 valor release --pr 1615             # clear retain_for_resume after PR merge/close
 ```
 
-Two equivalent invocations for create:
+Two equivalent ways to create a session:
 
 - `valor "fix the bug" --slug fix-bug` — positional shortcut (preferred for humans and agents)
-- `valor agent-session "fix the bug" --slug fix-bug` — explicit subcommand (preferred for scripts that need tab-completion or unambiguous error messages)
+- `valor agent-session "fix the bug" --slug fix-bug` — explicit subcommand (preferred for scripts)
 
-The wrapper detects the shortcut by sniffing argv: if the first token is not a
-known subcommand or a flag, it is prepended with `agent-session` before
-argparse runs. The first token is checked against the module-level
-`KNOWN_SUBCOMMANDS` set (10 names; anything starting with `-` is already
-excluded by the flag check), so an accidental prompt that starts with
-`--kill-the-bug` doesn't get mangled. A unit test asserts the set stays in
-sync with the subparser declarations.
+## How It Works
 
-## How It Works Well
+### Positional-shortcut detection
 
-### 1. Zero new behavior, zero new state
-
-The wrapper does not persist anything, does not parse or interpret the prompt,
-does not invent flags. It re-shapes argparse input and forwards to the
-existing `cmd_create`, `cmd_status`, `cmd_list`, `cmd_steer`, `cmd_kill`,
-`cmd_resume`, `cmd_inspect`, `cmd_progress`, `cmd_children`, `cmd_release`
-functions. Bug
-surfaces, help text, and JSON output formats stay in one place.
-
-This means every fix to `valor-session` automatically applies to `valor`. And
-every quirk of `valor-session` is preserved — including the project-key
-resolution from `projects.json`, the auto-slug derivation from `issue #N` in
-the message, the role-typed Model writes, and the worker pre-flight check.
-
-### 2. Argparse namespace translation is a one-line mapping per subcommand
-
-Each subcommand has a `_to_<cmd>_namespace` helper that copies fields from the
-`valor` argparse Namespace into the shape `valor-session` expects. The helpers
-are mechanical (8 functions, 4-9 lines each), so the translation cost is paid
-once and stays there. If a flag is renamed on the underlying CLI, the diff
-shows up in exactly one helper.
-
-### 3. Smoke-testable in 10 lines
-
-```bash
-valor "smoke test: confirm the valor CLI wrapper is on the cutover branch" --role eng --slug valor-smoke
-```
-
-The dev session appears on the dashboard, the worker picks it up, and the
-session is observable through `valor status <id>`. No new test harness needed
-to verify end-to-end behavior.
-
-### 4. Project-key and slug resolution still inherited from cwd
-
-`valor` does not take a `--cwd` or `--worktree` flag. The session's
-`working_dir` is still derived from `projects.json[project_key].working_directory`,
-exactly as in `valor-session create`. This means an agent in any worktree
-transparently runs the session in the right repo, and the slug-based worktree
-isolation (issue #887) still applies when `--slug` is passed.
-
-### 5. Compatible with both human and agent invocation
-
-The wrapper is `user-invocable`-equivalent: humans reach for it by muscle
-memory, and PM/Teammate sessions can call it the same way. No need to teach
-agents a second interface — the agent-facing pattern in `pyproject.toml`
-(`valor-foo = "tools.foo:main"`) already covers this.
-
-## Where It Falls Short
-
-### 1. The `valor` shell alias shadowing the venv binary — fixed
-
-The stale `alias valor=…` line that pointed to the deleted
-`./scripts/telegram_run.sh` has been removed from the origin machine. The
-`/update` verify step now runs `check_valor_alias_shadow()` in
-`scripts/update/verify.py` on every machine. It performs a warn-only static
-scan of `~/.zshrc` for any non-comment line matching `^\s*alias\s+valor\s*=`,
-and emits a copy-paste fix in the warning message when found. No machine
-should encounter the stale alias going forward.
-
-### 2. The positional-shortcut disambiguation is a literal allowlist — resolved (#1620)
-
-`KNOWN_SUBCOMMANDS` is no longer a hand-maintained literal set. It is now
-DERIVED at import time from the registered subparsers via
-`_derive_known_subcommands()`, which reads `_SubParsersAction.choices.keys()`.
-`_build_parser()` is decorated with `@functools.lru_cache` so the import-time
-derivation and every runtime `main()` call share a single parser build.
-
-Adding a new subparser to `_build_parser` now automatically extends the
+If the first token is not a known subcommand or a flag, it is prepended with
+`agent-session` before argparse runs. The first token is checked against the
+module-level `KNOWN_SUBCOMMANDS` set (anything starting with `-` is excluded by
+the flag check first). `KNOWN_SUBCOMMANDS` is derived at import time from the
+registered subparsers via `_derive_known_subcommands()`, which reads
+`_SubParsersAction.choices.keys()`; `_build_parser()` is decorated with
+`@functools.lru_cache` so the import-time derivation and every runtime `main()`
+call share a single parser build. Adding a subparser automatically extends the
 allowlist — there is no parallel literal to keep in sync.
 
-`tests/unit/test_valor_cli.py::TestKnownSubcommandsParity` was updated to
-verify the derivation (the public constant equals the subparser registry and
-equals `_derive_known_subcommands()`), not a literal-vs-registry parity check.
+### Argparse namespace translation
 
-### 3. Worker pre-flight false negatives — fixed
+Each subcommand has a `_to_<cmd>_namespace` helper that copies fields from the
+`valor` argparse `Namespace` into the shape `valor-session` expects. The helpers
+are mechanical, so a renamed flag on the underlying CLI shows up in exactly one
+helper.
 
-The false warnings had two root causes, both now resolved:
+### Help short-circuit
 
-1. **Worktree path divergence.** `_check_worker_health()` resolved the
-   heartbeat file path relative to its own `__file__` location. When called
-   from a worktree, that resolved to a path that either didn't exist or pointed
-   at a stale copy, making the worker appear down even when healthy.
+`main()` runs a help short-circuit on the pre-rewrite argv (before positional
+injection). It fires when the first token is a bare prompt (not a flag, not a
+known subcommand) and a standalone `-h`/`--help` token appears anywhere in
+`argv`. It then prints top-level `valor --help` and raises `SystemExit(0)`.
+"Standalone token" means an exact `argv` element equal to `-h` or `--help`, not
+a substring — `valor "document the --help flag"` is a single element and does
+not trigger the guard.
 
-2. **Thin threshold margin.** The worker writes its heartbeat every 300 seconds;
-   the CLI threshold was 360 seconds — a 60-second margin that any minor
-   scheduling jitter could blow through.
+### Worker pre-flight
 
-The fix: `_resolve_heartbeat_path()` now resolves the heartbeat file via
+`_check_worker_health()` resolves the heartbeat file via
 `git rev-parse --path-format=absolute --git-common-dir` (with a
 `__file__`-relative fallback), so the correct file is found from any worktree.
-The threshold is now a single constant `WORKER_DOWN_THRESHOLD_S = 600` (2×
-write cadence) in `agent/constants.py`, shared by both `valor-session` and
-`tools/agent_session_scheduler.py`. The warning text never claims a created
-session won't run.
+The down threshold is `WORKER_DOWN_THRESHOLD_S = 600` (2× the write cadence) in
+`agent/constants.py`, shared by `valor-session` and
+`tools/agent_session_scheduler.py`. The `--json` output from `cmd_create` and
+`cmd_status` carries `worker_state` ("ok" or "down") and
+`worker_heartbeat_age_s` (the raw age in seconds, clamped to 0) alongside
+`worker_healthy`. The warning never claims a created session will not run.
 
-The `--json` output from `cmd_create` and `cmd_status` now carries two fields
-alongside `worker_healthy`: `worker_state` ("ok" or "down") and
-`worker_heartbeat_age_s` (the raw age in seconds, clamped to 0). See
-[Session Steering](session-steering.md) for the full worker pre-flight check
-semantics.
+### Alias-shadow check
 
-### 4. No help text on the positional shortcut — resolved (#1620)
+`check_valor_alias_shadow()` in `scripts/update/verify.py` runs on every
+machine during `/update` and warns if `~/.zshrc` contains a non-comment line
+matching `^\s*alias\s+valor\s*=`, with a copy-paste fix in the message.
 
-`main()` now has a help short-circuit that runs on the PRE-REWRITE argv —
-before the positional injection that would turn `valor "fix the bug"` into
-`valor agent-session "fix the bug"`. The guard fires when all three
-conditions hold:
-
-1. `argv` is non-empty.
-2. `argv[0]` does not start with `-` (it is a bare prompt, not a flag).
-3. `argv[0]` is not in `KNOWN_SUBCOMMANDS`.
-4. A standalone `-h` or `--help` token appears anywhere in `argv` (exact
-   element match, not substring — see below).
-
-When it fires the top-level `valor --help` text is printed and
-`SystemExit(0)` is raised.
-
-Concretely: `valor "fix the bug" --help` now prints top-level help instead
-of the `agent-session` create sub-help that argparse would have shown after
-positional injection. `valor list --help` is unaffected — `list` is a known
-subcommand and the guard does not fire.
-
-**One accepted edge case.** "Standalone token" means an exact `argv` element
-equal to `-h` or `--help`, not a substring. `valor "document the --help
-flag"` is a single `argv` element and does NOT trigger the guard — the
-prompt is delivered verbatim. The rare collision (`valor "some prompt"
---help` when the user genuinely wanted to create a session) is an accepted
-tradeoff consistent with argparse's greedy-help convention.
-
-### 5. Execution substrate selection is a worker concern (design boundary)
+## Design Boundary
 
 The CLI's job is to enqueue a session. The worker selects the execution
 substrate (the [headless session runner](headless-session-runner.md),
-`agent/session_runner/`) — not the CLI. This is the correct separation: the
-CLI knows nothing about how sessions are executed, and the worker knows
-nothing about how sessions are created.
+`agent/session_runner/`) — not the CLI. The headless session runner is the only
+execution substrate; `valor "do the thing"` guarantees a session is enqueued and
+run through it.
 
-Post-cutover (#1924) the headless session runner is the only execution
-substrate — all sessions route through it, and no alternate path remains. A
-"force-the-other-substrate" env knob is therefore not applicable: there is
-nothing to switch to. This is not a reserved future idea; it is a closed
-question.
+## Known Limitations
 
-`valor "do the thing"` guarantees a session is enqueued and will be run
-through the session runner. It does not need to name the substrate to
-deliver that guarantee.
+### Eng and PM sessions require a slug
 
-### 6. Pre-commit hook guard #1288 — resolved (#1620)
+The default role is `pm`, and `cmd_create` rejects slugless PM/dev sessions. The
+shortest honest create is `valor "plan issue #1615"` (slug auto-derives from
+`issue #N` in the prompt) or `valor "do the thing" --slug thing`. Only
+`--role teammate` works with a bare prompt. The failure is `exit 1` with a
+stderr explanation.
 
-The `.githooks/pre-commit` Phase 0.5 guard now implements option (a),
-**allow-when-no-worktree**. On a `session/{slug}` branch committed from
-outside the owning worktree, the guard checks whether `.worktrees/{slug}/`
-exists on disk:
+### Per-session `--model` is not applied by the session runner
 
-- **Worktree does NOT exist** → the main checkout is the only workspace for
-  this slug; there is nothing to contaminate. The commit is ALLOWED with an
-  informational note on stderr referencing #1620.
-- **Worktree DOES exist** → the commit is BLOCKED exactly as before. The
-  operator must commit from inside the worktree (cd `.worktrees/{slug}/` and
-  commit there).
+`valor agent-session --model sonnet ...` stores `model` on the AgentSession and
+the executor resolves it (`_resolve_session_model`), but each turn spawns via
+`SessionRunnerSettings.pm_model` / `dev_model` (fixed per-process config), so the
+per-session value is never applied.
 
-This is zero operator friction: the guard self-detects — no environment
-variable to remember, no manual `git worktree add` dance needed when no
-worktree exists. It never bypasses an existing worktree, so the
-agent-contamination case that #887 and #1288 guard against stays blocked.
+`valor resume` persists the four resume scalars (`claude_session_uuid`,
+`dev_agent_id`, `runner_cwd`, `claude_version`) and a resumed session continues
+the same Claude session with its prior transcript intact. See
+[Headless Session Runner](headless-session-runner.md).
 
-### 7. The slug requirement contradicts the "no boilerplate" pitch
-
-The wrapper's whole point is `valor "do the thing"` — but the default role
-is `pm`, and `cmd_create` rejects slugless PM/dev sessions (issues #1109,
-#1272). So the shortest honest create is `valor "plan issue #1615"` (slug
-auto-derives) or `valor "do the thing" --slug thing`. Only `--role teammate`
-truly works with a bare prompt. This is the underlying CLI's (correct)
-isolation policy showing through the wrapper, not a wrapper bug — but the
-wrapper's help text and this doc must keep saying it loudly, because the
-failure (`exit 1` with a stderr explanation) is the FIRST experience most
-users will have with the bare-prompt form.
-
-### 8. Per-session `--model` is currently ignored by the session runner
-
-`valor agent-session --model sonnet ...` stores `model` on the AgentSession,
-and the executor resolves it (`_resolve_session_model`) — but each turn
-spawns via `SessionRunnerSettings.pm_model` / `dev_model`, fixed per-process
-config rather than a per-session override. The resolved per-session model is
-never applied. This is a substrate gap, not a wrapper gap.
-
-`valor resume` is no longer a gap: the runner persists the four resume
-scalars (`claude_session_uuid`, `dev_agent_id`, `runner_cwd`,
-`claude_version`) and a resumed session continues the same `--resume`d
-Claude session — including the same `dev` subagent — with its prior
-transcript intact. See [Headless Session Runner](headless-session-runner.md).
-
-### 9. Wrapper test coverage
+## Test Coverage
 
 `tests/unit/test_valor_cli.py` covers the positional-shortcut rewrite, the
-allowlist/parser parity, the per-subcommand namespace translation (every
-`cmd_*` attribute the underlying CLI reads), the missing-prompt error, and
-the help paths. End-to-end behavior (enqueue, worker pickup) is still
-covered only by the `valor-session` integration tests plus manual smoke
+allowlist/parser parity, the per-subcommand namespace translation, the
+missing-prompt error, and the help paths. End-to-end behavior (enqueue, worker
+pickup) is covered by the `valor-session` integration tests plus manual smoke
 tests.
-
-## Tests Run on the Branch
-
-Historical record from this doc's originating PR (#1612), predating the
-granite-pty-teardown cutover (#1924) — the `granite_container` paths this
-section previously listed no longer exist; see [Headless Session
-Runner](headless-session-runner.md) for current test coverage.
-
-| Scope | Result |
-|-------|--------|
-| `tests/unit/test_agent_session_queue.py` | green |
-| Wider unit suite | 36 pre-existing failures (memory model, work request classifier, media handling) — confirmed on main, out of scope for this branch |
-
-The wrapper is a 267-line change with no runtime behavior change, so the only
-test signal that matters is the smoke test. The pre-existing 36 failures are
-flagged in the wider suite for a future cleanup pass.
 
 ## Related Documentation
 
 - [Session Steering](session-steering.md) — `valor-session` CLI for create/steer/status/list/kill
-- [Agent Session Queue](agent-session-queue.md) — Queue dispatch surface underneath the wrapper
-- [Headless Session Runner](headless-session-runner.md) — The execution substrate the new sessions run on
-- [Eng Session Architecture](eng-session-architecture.md) — How PM and Dev sessions interact
+- [Agent Session Queue](agent-session-queue.md) — queue dispatch surface underneath the wrapper
+- [Headless Session Runner](headless-session-runner.md) — the execution substrate new sessions run on
+- [Eng Session Architecture](eng-session-architecture.md) — how PM and Dev sessions interact

@@ -1,11 +1,9 @@
 # Agent Session Queue
 
-**Status**: Complete
+## Module Structure
 
-## Module Structure (Post-Refactor)
-
-`agent/agent_session_queue.py` was split from 5545 lines into six focused modules in PR #1051
-(issue #1023). The file now sits at ~1709 lines and owns only the queue dispatch surface.
+`agent/agent_session_queue.py` owns the queue dispatch surface. Its implementation is
+split across six focused modules:
 
 ### Extracted Modules
 
@@ -32,9 +30,8 @@ worker/__main__.py
             └── session_completion.py   (finalization + continuation-PM; imports session_state)
 ```
 
-All six modules re-export their public symbols from `agent_session_queue.py` for backward
-compatibility — existing callers (bridge, tools, tests) continue to import from
-`agent.agent_session_queue` without change.
+All six modules re-export their public symbols from `agent_session_queue.py` — callers
+(bridge, tools, tests) import from `agent.agent_session_queue`.
 
 ### Import Rules
 
@@ -44,15 +41,19 @@ compatibility — existing callers (bridge, tools, tests) continue to import fro
   to break circular dependencies with `session_executor.py`
 - Bridge hooks (`bridge.telegram_bridge`) always use inline deferred imports in all modules
 
-## KeyField Index Corruption Fix
+## KeyField Index Corruption
 
-Popoto's `KeyField.on_save()` only adds the object key to the new status index set -- it never removes from the old one. This means in-place status mutations like `job.status = "running"; await job.async_save()` leave stale entries in the previous index set, causing ghost sessions and double-processing.
+Popoto's `KeyField.on_save()` only adds the object key to the new status index set — it
+never removes from the old one. In-place status mutations like `job.status = "running";
+await job.async_save()` leave stale entries in the previous index set, causing ghost sessions
+and double-processing.
 
-### Delete-and-Recreate Pattern (Historical)
+### KeyField Changes Require Delete-and-Recreate
 
-> **Note**: This section describes the original design. Status transitions now use in-place `IndexedField` mutation via `transition_status()` in `models/session_lifecycle.py` for all non-KeyField status changes. Delete-and-recreate is only required when a KeyField (e.g., `parent_agent_session_id`) must change, since Popoto cannot mutate KeyFields in-place. See `models/session_lifecycle.py` and issue #783 for the migration history.
-
-The original delete-and-recreate pattern was:
+Status transitions use in-place `IndexedField` mutation via `transition_status()` in
+`models/session_lifecycle.py` for all non-KeyField status changes. Delete-and-recreate is
+required only when a `KeyField` (e.g., `parent_agent_session_id`) must change, since Popoto
+cannot mutate KeyFields in-place:
 
 ```python
 fields = clone_agent_session_fields(job)
@@ -61,34 +62,62 @@ fields["status"] = "running"
 new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
 ```
 
-### Two contracts, two field payloads (#2563)
+### Two Contracts, Two Field Payloads
 
-The surviving delete-and-recreate sites split into two groups that no single field payload can serve:
+The delete-and-recreate sites split into two groups that no single field payload can serve:
 
 | Helper | Contract | Call sites |
 |---|---|---|
 | `clone_agent_session_fields` | The recreated row **is** the same session; copy everything, fence included | `agent/session_health.py` orphan repair, `tools/agent_session_scheduler.py` priority bump |
 | `continuation_agent_session_fields` | The recreated row is a **new execution** of the same `session_id`; copy history, reset the fence | `retry_agent_session`, `agent/session_executor.py` auto-continue fallback |
 
-Both derive their field set from `AgentSession._meta` at runtime via `_copyable_agent_session_fields()`. The hand-maintained 38-entry list they replace had drifted 50 fields behind the model, silently destroying `issue_number`, `pr_number`, `model`, `retain_for_resume`, the token/cost accounting and the thread counters on every clone. Deriving retires that drift class rather than re-freezing it.
+Both derive their field set from `AgentSession._meta` at runtime via
+`_copyable_agent_session_fields()`, so the payload always matches the model's current
+fields (`issue_number`, `pr_number`, `model`, `retain_for_resume`, the token/cost accounting,
+and the thread counters are all preserved on every clone).
 
-`continuation_agent_session_fields` additionally resets `_EXECUTION_FENCE_RESET_FIELDS` — `exec_pid`, `pid_create_time`, `exec_cwd`, `exec_harness`, `spawn_history`, `active_run_id`, `owned_run_ids`, `worker_pid` — to each field's declared default. A continuation row is `pending` and therefore non-terminal, so it is visible to `find_live_session_by_pid`'s ownership scan; copying a fence onto it would make it claim a process that never ran for it, the forged-liveness failure the [execution fence](agent-session-fenced-execution-record.md) exists to prevent. That set is deliberately the fence and run identity, not a general freshness reset: the heartbeat and liveness timestamps carry, as they always have.
+`continuation_agent_session_fields` additionally resets `_EXECUTION_FENCE_RESET_FIELDS` —
+`exec_pid`, `pid_create_time`, `exec_cwd`, `exec_harness`, `spawn_history`, `active_run_id`,
+`owned_run_ids`, `worker_pid` — to each field's declared default. A continuation row is
+`pending` and therefore non-terminal, so it is visible to `find_live_session_by_pid`'s
+ownership scan; copying a fence onto it would make it claim a process that never ran for it,
+the forged-liveness failure the [execution fence](agent-session-fenced-execution-record.md)
+exists to prevent. That set is deliberately the fence and run identity, not a general
+freshness reset: the heartbeat and liveness timestamps carry through.
 
-The `status` field is copied by both for defense-in-depth, so orphan repair preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly afterward.
+The `status` field is copied by both for defense-in-depth, so orphan repair preserves the
+original status instead of defaulting to `"pending"`. Callers that intentionally override
+status (retry, nudge fallback) set `fields["status"]` explicitly afterward.
 
 ## Worker Drain Guard (Event-Based)
 
-The worker loop uses an Event-based drain strategy to reliably pick up pending sessions after completing each job. This replaces the original 100ms sleep-and-retry approach which was insufficient to handle the thread-pool race between Popoto's `async_create` index writes and `async_filter` reads.
+The worker loop uses an Event-based drain strategy to reliably pick up pending sessions
+after completing each job.
 
 ### How It Works
 
-1. **asyncio.Event notification**: `enqueue_agent_session()` signals a per-chat `asyncio.Event` after pushing a session. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
+1. **asyncio.Event notification**: `enqueue_agent_session()` signals a per-chat
+   `asyncio.Event` after pushing a session. The event is level-triggered (stays set until
+   cleared), so signals during job execution are not lost.
 
-2. **Event-based wait**: After completing a session, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next session via `_pop_agent_session()`.
+2. **Event-based wait**: After completing a session, `_worker_loop()` clears the event and
+   waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event
+   fires, the worker pops the next session via `_pop_agent_session()`.
 
-3. **Sync Popoto fallback**: If the timeout expires without an event, `_pop_agent_session_with_fallback()` runs a synchronous `AgentSession.query.filter()` call that bypasses `to_thread()` scheduling. This eliminates the thread-pool race that caused the original index visibility bug.
+3. **Sync Popoto fallback**: If the timeout expires without an event,
+   `_pop_agent_session_with_fallback()` runs a synchronous `AgentSession.query.filter()` call
+   that bypasses `to_thread()` scheduling. This avoids the thread-pool race between Popoto's
+   `async_create` index writes and `async_filter` reads.
 
-4. **Exit-time safety check**: Before exiting with "Queue empty", the worker runs one final `_pop_agent_session_with_fallback()` and logs a WARNING if orphaned pending jobs are found.
+4. **Exit-time safety check**: Before exiting with "Queue empty", the worker runs one final
+   `_pop_agent_session_with_fallback()` and logs a WARNING if orphaned pending jobs are found.
+
+### Why the Sync Fallback
+
+`async_create` writes the hash and index entries via multiple Redis commands in a thread,
+and `async_filter` reads the index intersection in a separate thread. A short sleep-and-retry
+window is too short, and both calls share the same `to_thread()` race. The synchronous
+`AgentSession.query.filter()` fallback bypasses the thread pool entirely.
 
 ### Key Functions
 
@@ -98,42 +127,131 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending s
 | `DRAIN_TIMEOUT` | Module constant (1.5s) controlling the Event wait timeout |
 | `_active_events` | Dict mapping worker_key to asyncio.Event for worker notification |
 
-### Why the Original Drain Guard Failed
-
-The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the session on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
-
 ## Pop-Loop Exception Resilience
 
-No exception raised while popping/transitioning a **single** session may terminate the whole `_worker_loop` task — if it did, every other pending session for that `worker_key` would be stranded until the next restart or the ~5-min session-health sweep. The primary pop site (`_pop_agent_session()`, which drives `pending → running`) has two typed skip-and-continue handlers before the final `except BaseException: raise`:
+No exception raised while popping/transitioning a **single** session may terminate the whole
+`_worker_loop` task — if it did, every other pending session for that `worker_key` would be
+stranded until the next restart or the ~5-min session-health sweep. The primary pop site
+(`_pop_agent_session()`, which drives `pending → running`) has two typed skip-and-continue
+handlers before the final `except BaseException: raise`:
 
-| Exception | Issue | Trigger | Handling |
-|-----------|-------|---------|----------|
-| `StatusConflictError` | #1803 | A session is killed/transitioned out from under the pop (race between reading `status=pending` and `transition_status(→running)` finding it terminal). | Log, bounded per-`session_id` escalation (delete stale terminal duplicate, then last-resort cancel), release slot, `continue`. |
-| `ModelException` (Popoto) | #2088 | A **corrupted** record (all fields `None` except `status="pending"`) fails the `pending → running` `save()` — Popoto raises `"Model instance parameters invalid. Failed to save."` from `pre_save()` when `is_valid()` is `False`. | Log, best-effort route to `cleanup_corrupted_agent_sessions()` (return value ignored), release slot **before** the backoff `await`, bounded per-`worker_key` spin guard, `await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)`, `continue`. |
+| Exception | Trigger | Handling |
+|-----------|---------|----------|
+| `StatusConflictError` | A session is killed/transitioned out from under the pop (race between reading `status=pending` and `transition_status(→running)` finding it terminal). | Log, bounded per-`session_id` escalation (delete stale terminal duplicate, then last-resort cancel), release slot, `continue`. |
+| `ModelException` (Popoto) | A **corrupted** record (all fields `None` except `status="pending"`) fails the `pending → running` `save()` — Popoto raises `"Model instance parameters invalid. Failed to save."` from `pre_save()` when `is_valid()` is `False`. | Log, best-effort route to `cleanup_corrupted_agent_sessions()` (return value ignored), release slot **before** the backoff `await`, bounded per-`worker_key` spin guard, `await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)`, `continue`. |
 
-`ModelException` is the **base** of Popoto's save/transition family (`KeyMutationError`, `SkipSaveException` subclass it), so the single clause covers the whole class of Popoto save/transition failures without swallowing fatal signals (`KeyboardInterrupt`/`CancelledError`) or broad logic bugs — those still crash loudly. The catch is deliberately **not** `except Exception`.
+`ModelException` is the **base** of Popoto's save/transition family (`KeyMutationError`,
+`SkipSaveException` subclass it), so the single clause covers the whole class of Popoto
+save/transition failures without swallowing fatal signals (`KeyboardInterrupt`/`CancelledError`)
+or broad logic bugs — those still crash loudly. The catch is deliberately **not** `except Exception`.
 
-Key design points of the #2088 handler:
+Key design points of the `ModelException` handler:
 
-- **Reaper return value is ignored.** `cleanup_corrupted_agent_sessions()` is called opportunistically as best-effort head-of-queue cleanup; on the common path it deletes the corrupted record so the next pop returns a healthy co-tenant session. The periodic session-health sweep remains the **authoritative** backstop for anything the reaper cannot delete this tick — the same mechanism that self-heals these records in production today. Interpreting the reaper's `{"corrupted", ...}` return value was the source of four failed critique rounds and was removed at the root. The reaper call is wrapped in `try/except Exception` so a reaper failure degrades to a no-op instead of escaping the clause (a sibling `except` does not catch it).
-- **Reaper is cooldown-gated (issue #2101).** `cleanup_corrupted_agent_sessions()` runs an **unconditional** `AgentSession.repair_indexes()` rebuild (issue #1361), and that rebuild re-adds every identity-less `AgentSession:*` hash to the `$IndexF:AgentSession:status:pending` index (`status` defaults to `"pending"`). A record stuck at the queue head raises `ModelException` on every ~2s pop, so calling the reaper on **every** corrupted pop re-drove a full index rebuild every 2s and re-inflated the pending index into a runaway leak + worker crash-loop. The handler now gates the reaper behind a per-`worker_key` cooldown (`CORRUPTED_POP_REAP_COOLDOWN_S`, default 300s, env-overridable): the **first** corrupted pop reaps immediately, but subsequent pops within the cooldown skip the rebuild and rely on the periodic sweep. The cooldown timestamp (`_corrupted_pop_last_reap`) is loop-local and reset on any successful pop. This is the accelerant fix — the deeper `repair_indexes` re-inflation and the popoto delete-ordering `srem` asymmetry that manufactures the phantoms are tracked separately under #2101.
-- **Core re-inflation fix — A1 (issue #2101, generalized in #2207).** The `repair_indexes()` rebuild installs a transient guard, for the duration of the `rebuild_indexes()` call, on the `on_save` of **every** `IndexedField` (`status`, `task_type`, `claude_session_uuid` today — enumerated at runtime from `cls._meta`, never hardcoded): identity-less (`session_id`-less) hashes are refused re-add to any of those fields' `$IndexF:AgentSession:*` sets (counted via `AgentSession._last_quarantined_identityless`, summed across fields, + WARNING log), while healthy records delegate to unmodified popoto. The guard is scoped to the rebuild path only — live `AgentSession(...).save()` still indexes a legitimate new pending session (inverse-bug guard) — and install is wrapped in a non-reentrant `_repair_lock` so overlapping `repair_indexes()` calls can't race the shim install/restore. Gone-hash orphans are cleared by the whole-`$IndexF`-key delete-and-rebuild, not by A1. Solution B (popoto delete-ordering `srem` fix) is deferred: A1 converges the index in one pass. See [AgentSession Pending-Index Phantom Leak](agentsession-pending-index-leak.md) and [Popoto Index Hygiene](popoto-index-hygiene.md#a1-rebuild-guard-identity-less-phantom-re-inflation).
-- **Slot released before the backoff.** `release_unbound()` runs after the reaper call and before the `asyncio.sleep`, honoring the release-before-`await` invariant so the backoff never holds the global concurrency slot.
-- **Spin guard is keyed by `worker_key`, coarser than #1803's `session_id` keying by necessity** — a `ModelException` carries no `session_id`, and a fully-corrupted record may have none. It is a plain consecutive-corrupted-pop counter (loop-local `_corrupted_pop_count` / `_corrupted_pop_escalated`, reset on any successful pop) that emits a one-shot `logger.error` naming the stuck `worker_key` after `CORRUPTED_POP_ESCALATE_N` consecutive corrupted pops. The handler never dereferences `session_id`.
+- **Reaper return value is ignored.** `cleanup_corrupted_agent_sessions()` is called
+  opportunistically as best-effort head-of-queue cleanup; on the common path it deletes the
+  corrupted record so the next pop returns a healthy co-tenant session. The periodic
+  session-health sweep remains the **authoritative** backstop for anything the reaper cannot
+  delete this tick. The reaper call is wrapped in `try/except Exception` so a reaper failure
+  degrades to a no-op instead of escaping the clause (a sibling `except` does not catch it).
+- **Reaper is cooldown-gated.** `cleanup_corrupted_agent_sessions()` runs an **unconditional**
+  `AgentSession.repair_indexes()` rebuild, and that rebuild re-adds every identity-less
+  `AgentSession:*` hash to the `$IndexF:AgentSession:status:pending` index (`status` defaults
+  to `"pending"`). A record stuck at the queue head raises `ModelException` on every ~2s pop,
+  so calling the reaper on **every** corrupted pop re-drives a full index rebuild every 2s and
+  re-inflates the pending index into a runaway leak + worker crash-loop. The handler gates the
+  reaper behind a per-`worker_key` cooldown (`CORRUPTED_POP_REAP_COOLDOWN_S`, default 300s,
+  env-overridable): the **first** corrupted pop reaps immediately, but subsequent pops within
+  the cooldown skip the rebuild and rely on the periodic sweep. The cooldown timestamp
+  (`_corrupted_pop_last_reap`) is loop-local and reset on any successful pop. The
+  `repair_indexes` re-inflation is covered in [AgentSession Pending-Index Phantom
+  Leak](agentsession-pending-index-leak.md).
+- **Index-rebuild re-inflation guard (A1).** The `repair_indexes()` rebuild installs a
+  transient guard, for the duration of the `rebuild_indexes()` call, on the `on_save` of
+  **every** `IndexedField` (`status`, `task_type`, `claude_session_uuid` — enumerated at
+  runtime from `cls._meta`, never hardcoded): identity-less (`session_id`-less) hashes are
+  refused re-add to any of those fields' `$IndexF:AgentSession:*` sets (counted via
+  `AgentSession._last_quarantined_identityless`, summed across fields, + WARNING log), while
+  healthy records delegate to unmodified popoto. The guard is scoped to the rebuild path only —
+  live `AgentSession(...).save()` still indexes a legitimate new pending session (inverse-bug
+  guard) — and install is wrapped in a non-reentrant `_repair_lock` so overlapping
+  `repair_indexes()` calls can't race the shim install/restore. Gone-hash orphans are cleared
+  by the whole-`$IndexF`-key delete-and-rebuild, not by A1. Solution B (popoto delete-ordering
+  `srem` fix) is not built: A1 converges the index in one pass. See [AgentSession Pending-Index
+  Phantom Leak](agentsession-pending-index-leak.md) and [Popoto Index
+  Hygiene](popoto-index-hygiene.md#a1-rebuild-guard-identity-less-phantom-re-inflation).
+- **Slot released before the backoff.** `release_unbound()` runs after the reaper call and
+  before the `asyncio.sleep`, honoring the release-before-`await` invariant so the backoff
+  never holds the global concurrency slot.
+- **Spin guard is keyed by `worker_key`, coarser than the `StatusConflictError` handler's
+  `session_id` keying by necessity** — a `ModelException` carries no `session_id`, and a
+  fully-corrupted record may have none. It is a plain consecutive-corrupted-pop counter
+  (loop-local `_corrupted_pop_count` / `_corrupted_pop_escalated`, reset on any successful pop)
+  that emits a one-shot `logger.error` naming the stuck `worker_key` after
+  `CORRUPTED_POP_ESCALATE_N` consecutive corrupted pops. The handler never dereferences
+  `session_id`.
 
-`CORRUPTED_POP_ESCALATE_N`, `CORRUPTED_POP_BACKOFF_SECONDS`, and `CORRUPTED_POP_REAP_COOLDOWN_S` are provisional/tunable module constants. Regression coverage lives in `tests/unit/test_worker_persistent.py` (`test_model_exception_during_pop_does_not_crash_loop`, `test_repeated_corrupted_pop_escalates_without_crash`, `test_corrupted_pop_reaper_throttled_by_cooldown`, and the reaper-failure / guard-reset cases).
+`CORRUPTED_POP_ESCALATE_N`, `CORRUPTED_POP_BACKOFF_SECONDS`, and
+`CORRUPTED_POP_REAP_COOLDOWN_S` are tunable module constants. Regression coverage lives in
+`tests/unit/test_worker_persistent.py` (`test_model_exception_during_pop_does_not_crash_loop`,
+`test_repeated_corrupted_pop_escalates_without_crash`,
+`test_corrupted_pop_reaper_throttled_by_cooldown`, and the reaper-failure / guard-reset cases).
 
 ## Startup Session Cleanup and Recovery
 
-At startup, three cleanup passes run before session processing begins. These are called exclusively from `worker/__main__.py` — the bridge does not call them.
+At startup, three cleanup passes run before session processing begins. These are called
+exclusively from `worker/__main__.py` — the bridge does not call them.
 
-0. **Future-dated timestamp heal** (`AgentSession._heal_future_updated_at()`): Scans all sessions for `updated_at` values in the future (written by the pre-#1645 `auto_now=True` producer on non-UTC hosts) and clamps them to `max(created_at, now)`. Idempotent — a re-run clamps only still-future records. Fail-soft: wrapped in `try/except` so a Redis hiccup cannot abort the startup sequence. The heal count is logged at INFO level even when zero (confirms the heal ran cleanly). See [Session Lifecycle → Timestamp Convention](session-lifecycle.md#timestamp-convention--updated_at-is-explicit-utc) for details.
+0. **Future-dated timestamp heal** (`AgentSession._heal_future_updated_at()`): Scans all
+   sessions for `updated_at` values in the future and clamps them to `max(created_at, now)`.
+   Idempotent — a re-run clamps only still-future records. Fail-soft: wrapped in `try/except`
+   so a Redis hiccup cannot abort the startup sequence. The heal count is logged at INFO level
+   even when zero (confirms the heal ran cleanly). See [Session Lifecycle → Timestamp
+   Convention](session-lifecycle.md#timestamp-convention--updated_at-is-explicit-utc) for
+   details.
 
-1. **Corrupted session cleanup** (`cleanup_corrupted_agent_sessions()`): Detects sessions with invalid IDs (e.g., length 60 instead of expected 32 for uuid4) or sessions whose `.is_valid()` returns False. Since #2660 the classification is an `is_valid()` call that writes nothing to Redis, not the whole-row `.save()` probe it used to be — that probe restamped `updated_at` on every hydrated row, forging the liveness signal the dashboard orders on. Healthy rows now receive only a targeted `EXPIRE` keepalive (`AgentSession.refresh_ttl()`), which writes no field value. See [AgentSession Liveness Field Authorship](agent-session-liveness-authorship.md) for why `is_valid()` is nonetheless not "read-only" with respect to the in-memory instance. Before iteration, `query.all()` results pass through `_filter_hydrated_sessions()` to drop phantom records — instances whose fields are still Popoto `Field` descriptors (orphan `$IndexF` members pointing to deleted hashes). Real corrupt records are deleted via the ORM (no raw-Redis fallback), then `AgentSession.repair_indexes()` clears orphan `$IndexF:AgentSession:*` members at the source before rebuilding indexes. Also runs hourly as the `agent-session-cleanup` reflection and during `/update`. As of issue #1271 the same call also performs the cross-process orphan reap pass before returning, so the function's signature is `() -> dict[str, int]` (`{"corrupted": int, "orphans": int}`); `worker/__main__.py` and `scripts/update/run.py` keep an `isinstance(result, dict)` defensive fallback for the older `int` return shape. **As of issue #1361, `repair_indexes()` runs unconditionally on every tick** (the previous `cleaned > 0 or phantoms_filtered > 0` gate from PR #1078 has been removed) and a per-status drift pre-scan emits `agent_session.indexed_field.stale_members` analytics with `dimensions={"status": <status>}` so operators can observe drift accumulation in indexed fields like `waiting_for_children`. The pre-scan covers the `status` index only; other `$IndexF:AgentSession:*` indexes are still cleaned by `repair_indexes()` itself but do not get a per-field drift metric. See [Bridge Self-Healing §7](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) for the phantom-filter rationale (issue #1069) and the cross-process reap details.
+1. **Corrupted session cleanup** (`cleanup_corrupted_agent_sessions()`): Detects sessions with
+   invalid IDs (e.g., length 60 instead of expected 32 for uuid4) or sessions whose
+   `.is_valid()` returns False. The classification is an `is_valid()` call that writes nothing
+   to Redis, not a whole-row `.save()` probe. Healthy rows receive only a targeted `EXPIRE`
+   keepalive (`AgentSession.refresh_ttl()`), which writes no field value. See [AgentSession
+   Liveness Field Authorship](agent-session-liveness-authorship.md) for why `is_valid()` is
+   nonetheless not "read-only" with respect to the in-memory instance. Before iteration,
+   `query.all()` results pass through `_filter_hydrated_sessions()` to drop phantom records —
+   instances whose fields are still Popoto `Field` descriptors (orphan `$IndexF` members
+   pointing to deleted hashes). Real corrupt records are deleted via the ORM (no raw-Redis
+   fallback), then `AgentSession.repair_indexes()` clears orphan `$IndexF:AgentSession:*`
+   members at the source before rebuilding indexes. Also runs hourly as the
+   `agent-session-cleanup` reflection and during `/update`. The same call performs the
+   cross-process orphan reap pass before returning, so the function's signature is
+   `() -> dict[str, int]` (`{"corrupted": int, "orphans": int}`); `worker/__main__.py` and
+   `scripts/update/run.py` keep an `isinstance(result, dict)` defensive fallback for the older
+   `int` return shape. `repair_indexes()` runs unconditionally on every tick, and a per-status
+   drift pre-scan emits `agent_session.indexed_field.stale_members` analytics with
+   `dimensions={"status": <status>}` so operators can observe drift accumulation in indexed
+   fields like `waiting_for_children`. The pre-scan covers the `status` index only; other
+   `$IndexF:AgentSession:*` indexes are cleaned by `repair_indexes()` itself but do not get a
+   per-field drift metric. See [Bridge Self-Healing
+   §7](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) for the
+   phantom-filter rationale and the cross-process reap details.
 
-2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets stale running sessions to pending with high priority. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked up by a worker in the current process before startup recovery fired. Sessions with `started_at=None` (missing or corrupt) are always recovered. Uses the same timing guard as the periodic health check to prevent orphaning SDK subprocesses (issue #727).
+2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets
+   stale running sessions to pending with high priority. Sessions started within the last
+   `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked
+   up by a worker in the current process before startup recovery fired. Sessions with
+   `started_at=None` (missing or corrupt) are always recovered. Uses the same timing guard as
+   the periodic health check to prevent orphaning SDK subprocesses.
 
-3. **Orphaned process cleanup** (`_cleanup_orphaned_claude_processes()`): One-line shim retained for backward compatibility with the worker startup wiring; delegates entirely to `_reap_orphan_session_processes()` (issue #1271). Defined in `agent/session_health.py` (re-exported from `agent_session_queue.py`). The reaper scans the OS process table for `claude_agent_sdk/_bundled/claude` and `mcp_servers/*.py` processes whose `PPID == 1`, gates each candidate on a 30-min `last_heartbeat_at` freshness check via `AgentSession.find_live_session_by_pid()` (a bounded forward scan over the low-cardinality `status` index), and self-protects every live worker via the `worker:registered_pid:*` Redis skip-set. The same reaper also fires hourly inside the `agent-session-cleanup` reflection (item 1 above) — startup is no longer the only call site. See [Agent Session Health Monitor → Cross-Process Orphan Reap](agent-session-health-monitor.md) for the full design.
+3. **Orphaned process cleanup** (`_cleanup_orphaned_claude_processes()`): One-line shim retained
+   for compatibility with the worker startup wiring; delegates entirely to
+   `_reap_orphan_session_processes()`. Defined in `agent/session_health.py` (re-exported from
+   `agent_session_queue.py`). The reaper scans the OS process table for
+   `claude_agent_sdk/_bundled/claude` and `mcp_servers/*.py` processes whose `PPID == 1`, gates
+   each candidate on a 30-min `last_heartbeat_at` freshness check via
+   `AgentSession.find_live_session_by_pid()` (a bounded forward scan over the low-cardinality
+   `status` index), and self-protects every live worker via the `worker:registered_pid:*` Redis
+   skip-set. The same reaper also fires hourly inside the `agent-session-cleanup` reflection
+   (item 1 above) — startup is not the only call site. See [Agent Session Health Monitor →
+   Cross-Process Orphan Reap](agent-session-health-monitor.md) for the full design.
 
 ### Caller: Worker Only
 
@@ -141,20 +259,26 @@ The following execution functions are called exclusively from `worker/__main__.p
 - `_ensure_worker(worker_key, is_project_keyed)` — spawns per-worker-key worker loops
 - `_recover_interrupted_agent_sessions_startup()` — startup session recovery
 - `_agent_session_health_loop()` — background health monitor (safety net: every 5 min)
-- `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency); creates a dedicated `redis.Redis` connection with `socket_timeout=None` to avoid the global pool's `socket_timeout=settings.timeouts.redis_socket_s` (default 5s, `.env`-overridable via `TIMEOUTS__REDIS_SOCKET_S` — see [Config Timeout Catalog](config-timeout-catalog.md)) (issue #824); verifies `PUBSUB NUMSUB >= 1` after subscribe (up to 3 retries, ~300 ms) and returns early on persistent failure so the outer loop re-subscribes after its 5 s backoff (issue #1804)
-- `_cleanup_orphaned_claude_processes()` — startup shim that delegates to `_reap_orphan_session_processes()` (issue #1271)
-- `register_worker_pid()` — write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper never SIGKILLs a live worker
+- `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency);
+  creates a dedicated `redis.Redis` connection with `socket_timeout=None` to avoid the global
+  pool's `socket_timeout=settings.timeouts.redis_socket_s` (default 5s, `.env`-overridable via
+  `TIMEOUTS__REDIS_SOCKET_S` — see [Config Timeout Catalog](config-timeout-catalog.md));
+  verifies `PUBSUB NUMSUB >= 1` after subscribe (up to 3 retries, ~300 ms) and returns early on
+  persistent failure so the outer loop re-subscribes after its 5 s backoff
+- `_cleanup_orphaned_claude_processes()` — startup shim that delegates to
+  `_reap_orphan_session_processes()`
+- `register_worker_pid()` — write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the
+  cross-process reaper never SIGKILLs a live worker
 - `AgentSession.rebuild_indexes()` — repair Redis index entries
 
-The bridge only calls `enqueue_agent_session()` and `register_callbacks()`. See [Bridge/Worker Architecture](bridge-worker-architecture.md).
+The bridge only calls `enqueue_agent_session()` and `register_callbacks()`. See
+[Bridge/Worker Architecture](bridge-worker-architecture.md).
 
-## Revival Chat Scoping Fix
+## Revival Chat Scoping
 
-`check_revival()` was rewritten to scope revival detection strictly to the originating Telegram chat. The previous implementation listed all `session/*` git branches across the entire repository (via `git branch --list "session/*"`), which caused revival notifications to bleed across unrelated Telegram chats whenever any project had an open session branch.
-
-### New Approach
-
-Instead of scanning git branches globally, `check_revival()` queries Redis (Popoto) for jobs filtered by `project_key` + `status` (pending or running), then filters by `chat_id` in Python:
+`check_revival()` scopes revival detection strictly to the originating Telegram chat. It
+queries Redis (Popoto) for jobs filtered by `project_key` + `status` (pending or running),
+then filters by `chat_id` in Python:
 
 ```python
 for status in ("pending", "running"):
@@ -165,15 +289,8 @@ for status in ("pending", "running"):
             branches.append(branch)
 ```
 
-Branch existence is then verified individually in git (`git branch --list <specific-branch>`), rather than enumerating all branches. Redis is the sole source of truth for session state.
-
-### Behavioral Change
-
-| Before | After |
-|--------|-------|
-| All `session/*` branches visible to any chat | Only branches belonging to the calling `chat_id` |
-| Revival could notify wrong chat | Revival only notifies the chat that owns the session |
-| File-based state checked as fallback | Redis is the sole source of truth |
+Branch existence is then verified individually in git (`git branch --list <specific-branch>`),
+rather than enumerating all branches. Redis is the sole source of truth for session state.
 
 ## Deferred Execution (`scheduled_at`)
 
@@ -199,7 +316,6 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 |-------|------|-------------|
 | `parent_agent_session_id` | `KeyField(null=True)` | Links child to parent session. Indexed for efficient queries. |
 | `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
-| ~~`depends_on`~~ | ~~`ListField(null=True)`~~ | Removed. Dependency tracking was removed from the model. |
 | `commit_sha` | `@property` | HEAD commit SHA for checkpoint/restore. Derived from the latest `checkpoint` event in `session_events` — not a stored Popoto field. |
 
 ### Status Values
@@ -226,7 +342,7 @@ See [Agent Session Scheduling](agent-session-scheduling.md) for usage details an
 
 ## See Also
 
-- `docs/features/scale-agent-session-queue-with-popoto-and-worktrees.md` -- Original agent session queue architecture
+- `docs/features/scale-agent-session-queue-with-popoto-and-worktrees.md` -- Agent session queue architecture
 - `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
 - `docs/features/agent-session-model.md` -- AgentSession model fields and lifecycle
 - `docs/features/session-lifecycle.md` -- Session state machine, zombie loop prevention

@@ -1,10 +1,10 @@
 # Reflections: Autonomous Maintenance System
 
-> **Single source of truth (post #1273 / #1342):** This document defines the unified Reflection schema, schedule grammar, output sinks, failure tracking, and migration path. Sibling docs (`agent-session-scheduling.md`, `reflections-dashboard.md`, `pm-briefings.md`, the `README.md` index) defer to this page for the canonical model and grammar.
+> **Single source of truth:** This document defines the unified Reflection schema, schedule grammar, output sinks, and failure tracking. Sibling docs (`agent-session-scheduling.md`, `reflections-dashboard.md`, `pm-briefings.md`, the `README.md` index) defer to this page for the canonical model and grammar.
 
-The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis (`Reflection` + `ReflectionRun` Popoto models), and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks, ad-hoc `--after`-style one-shots).
+The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis (`Reflection` + `ReflectionRun` Popoto models), and executes reflections on schedule.
 
-**Not every audit belongs here.** If a candidate reflection is a pure cloud-API-audit — it only reads a cloud API and files a GitHub issue when something's actionable, with no dependency on Redis, local files, or the worker's in-process state — it's a candidate for a Claude Code Routine ("Cowork") instead of a local reflection. See [Cowork Tasks](cowork-tasks.md) for the decision rule and the `sentry-issue-triage` pilot migration.
+**Not every audit belongs here.** If a candidate reflection is a pure cloud-API-audit — it only reads a cloud API and files a GitHub issue when something's actionable, with no dependency on Redis, local files, or the worker's in-process state — it's a candidate for a Claude Code Routine ("Cowork") instead of a local reflection. See [Cowork Tasks](cowork-tasks.md) for the decision rule and the `sentry-issue-triage` pilot.
 
 `tools/agent_session_scheduler.py --after <ISO>` enqueues a `at:`-grammar Reflection alongside its primary AgentSession write so scheduled work is visible on the dashboard, and the helper-skill `/loop` and `/schedule` are documented as the harness-side fallback for one-off self-pacing within a single conversation. Both surfaces are first-class but reach the same backing data.
 
@@ -55,7 +55,7 @@ reflections:
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
 | `params` | dict | Optional arbitrary kwargs forwarded to the callable when it declares a `params` keyword argument. The scheduler uses `inspect.signature` to detect whether the callable accepts `params`; if not, it is called without it. Use for feature flags and per-reflection tunables (e.g., `stall_advisory_telegram_enabled: false`). |
 
-**Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
+**Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are not used in source, comments, or docs.
 
 ### Code-Registered Reflections
 
@@ -65,17 +65,17 @@ Each registration function (`register_crash_recovery`, `register_memory_distill_
 
 This is the mechanism behind the current registrations:
 
-- `crash-recovery` (issue #1917)
-- `memory-distill-backfill` (issue #2202 — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3))
-- `sdlc-upvote-pickup` (issue #2717, `register_sdlc_upvote_pickup` in `scripts/update/reflection_register.py`) — cron-scheduled (`0 6-22/2 * * *`, PT), project-scoped, function-type reflection running `reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes`. Picks up the oldest open `upvote`-labeled issue per project and starts an autonomously anchored SDLC lane. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
+- `crash-recovery`
+- `memory-distill-backfill` — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3)
+- `sdlc-upvote-pickup` (`register_sdlc_upvote_pickup` in `scripts/update/reflection_register.py`) — cron-scheduled (`0 6-22/2 * * *`, PT), project-scoped, function-type reflection running `reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes`. Picks up the oldest open `upvote`-labeled issue per project and starts an autonomously anchored SDLC lane. See [Autonomous SDLC Pickup on Upvote Issues](upvote-autonomous-sdlc-pickup.md).
 
-The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`). `test-baseline-refresh` (issues #1933/#2004) was retired this way when the merge-gate baseline ecosystem was deleted (#2376).
+The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`).
 
 A reflection that an operator is expected to add by hand on a per-machine basis (most of the registry) still just lives in the YAML directly — this mechanism is reserved for reflections that must be live on every machine as a consequence of merging code, with no separate manual step.
 
 ### Schedule Grammar
 
-The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into a string-typed schedule key. Exactly one must be present per reflection.
+The unified Reflection schema uses a string-typed schedule key. Exactly one must be present per reflection.
 
 | Key | Shape | Example | Semantics |
 |-----|-------|---------|-----------|
@@ -86,7 +86,7 @@ The unified Reflection schema (issue #1273) collapses the prior `interval:` inte
 
 The runtime parser lives in `agent/reflection_schedule.py::compute_next_due()` and depends on `croniter` (declared in `pyproject.toml`).
 
-**Exactly one, enforced by test (#2734).** `load_registry()` resolves a multi-key entry
+**Exactly one, enforced by test.** `load_registry()` resolves a multi-key entry
 deterministically by precedence — `schedule` > `every` > `cron` > `at` — rather than refusing
 it, so an entry declaring two keys would load with one declaration silently discarded.
 `tests/unit/test_reflection_scheduler.py::required_field_violations` is therefore
@@ -95,14 +95,6 @@ cannot schedule such an entry at all) *and* two-or-more (a lint the loader does 
 It also counts a key as declared when **present**, while the loader counts it when **truthy**.
 Both divergences are intentional; a future loader change that formalizes multi-key support is
 a decision to re-make there, not a bug in the test.
-
-#### Migration from `interval:` (issue #1273)
-
-The `interval: <int>` field is now `every: <int>s`. The migration is one-shot and idempotent:
-
-- `scripts/migrate_reflections_yaml.py` rewrites `interval: N` → `every: Ns` in place. Running it on an already-migrated YAML is a no-op.
-- The `/update` skill invokes the migration on every pull (`scripts/update/run.py` Step 3.65) so machines that haven't migrated yet pick up the change automatically. The wrapper lives in `scripts/update/reflections_yaml.py`.
-- The vault copy (`~/Desktop/Valor/reflections.yaml`) is the canonical target; the in-repo `config/reflections.yaml` is a real-file copy of it, written on every update, on live machines.
 
 ### Registry Location (Vault-First)
 
@@ -125,21 +117,19 @@ and only in the **primary checkout**. A linked git worktree (`.worktrees/{slug}/
 [Worktree Manager](worktree-manager.md)) never receives its own copy: install-time
 artifacts are not duplicated per worktree, both because per-worktree copies would go
 stale independently and because linking each worktree straight into the vault would
-reintroduce the June 2026 worker wedge (the incident that motivated the real-file form
-noted just below). Level 3 is therefore always
-absent in a worktree, and level 4 — reading the *owning* checkout's real-file copy
-instead — is what makes the registry resolvable from `.worktrees/{slug}/` under
-`VALOR_LAUNCHD=1`. When every level is exhausted, the resolver logs one deduplicated
-error naming all four candidates and still returns the local (level-3) in-repo path,
-unchanged from its legacy behavior, so no new exception type escapes into production.
+re-trip the macOS TCC hazard described below. Level 3 is therefore always absent in a
+worktree, and level 4 — reading the *owning* checkout's real-file copy instead — is
+what makes the registry resolvable from `.worktrees/{slug}/` under `VALOR_LAUNCHD=1`.
+When every level is exhausted, the resolver logs one deduplicated error naming all four
+candidates and returns the local (level-3) in-repo path.
 
 On live machines, `config/reflections.yaml` in the primary checkout is a **real file** —
 a plain copy of `~/Desktop/Valor/reflections.yaml`, not a symlink into it. The copy is
 written by `sync_reflections_yaml()` in `scripts/update/env_sync.py` during each update
 run. This ensures the scheduler always reads a current snapshot of the vault version.
 The real-file form matters: reading that path directly from `~/Desktop` under launchd
-was the June 2026 worker wedge, and the resolver's worktree-fallback level 4 depends on
-the primary copy staying a real file so it never re-trips that hazard one layer removed.
+trips a macOS TCC hazard, and the resolver's worktree-fallback level 4 depends on the
+primary copy staying a real file so it never re-trips that hazard one layer removed.
 
 Under launchd (`VALOR_LAUNCHD=1`), the worker reads that same real copy at
 `config/reflections.yaml` (macOS TCC blocks launchd agents from reading `~/Desktop`
@@ -150,11 +140,10 @@ directly). That copy step is where repo-specific ownership is applied — see be
 The registry is **one iCloud-synced file shared verbatim across every machine**. Reflections
 that audit a single repo — chiefly the `audits` group, which file GitHub issues against
 `tomcounsell/ai` — would therefore run on all N machines and each file its own copy of every
-finding. This is what produced the recurring `documentation`-label duplicate flood (and the
+finding. This produces the recurring `documentation`-label duplicate flood (and the
 same hazard applies to every other issue-filing audit).
 
-The fix extends [single-machine ownership](single-machine-ownership.md) to reflections, and
-applies it at **update time, not run time**:
+Repo-specific ownership extends [single-machine ownership](single-machine-ownership.md) to reflections and applies it at **update time, not run time**:
 
 1. A reflection declares `project_key: <key>` in the shared registry (e.g. `project_key: valor`).
 2. `install_reflection_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
@@ -175,12 +164,10 @@ Ownership semantics (`tools/reflection_machine_filter.py`):
 | `project_key` not in `projects.json` | Fail-open (left as-is) with a warning — a typo never silently disables an audit everywhere |
 
 The filter only **disables**; it never re-enables (so an owned-but-authored-`enabled: false`
-reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink — a
-defensive check against the pre-June-2026 layout, not a claim that `config/reflections.yaml`
-is one today — so a manual run against `config/reflections.yaml` can never corrupt the shared
-vault: it only ever rewrites the real per-machine copy produced by
-`install_reflection_worker.sh`, `install_email_bridge.sh`, and
-`scripts/update/env_sync.py::sync_reflections_yaml`.
+reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink, so
+a manual run against `config/reflections.yaml` can never corrupt the shared vault: it only
+ever rewrites the real per-machine copy produced by `install_reflection_worker.sh`,
+`install_email_bridge.sh`, and `scripts/update/env_sync.py::sync_reflections_yaml`.
 
 > **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
 > files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
@@ -191,37 +178,19 @@ vault: it only ever rewrites the real per-machine copy produced by
 
 ### Registered Reflections
 
-> **Removed: `session-liveness-check` (issue #2439).** This reflection used to run the same
-> health-check callable (`_agent_session_health_check`) both in-process (the worker's own
-> `_agent_session_health_loop`) and out-of-process, inside `python -m reflections`
-> (`com.valor.reflection-worker`). Every detection branch in that callable keys off
-> **process-local** registries (`_active_workers`/`_active_sessions`) that are populated only
-> inside the owning worker — in the reflection process they are always empty. Before a guard
-> was added, that made the reflection copy false-positive on every running session (`worker_dead`)
-> and spawn a **competing** queue worker for every pending one, the confirmed root cause of the
-> #2091 double-owner incident (see [Agent Session Health Monitor § Single-owner
-> actuation](agent-session-health-monitor.md#single-owner-actuation-issue-2098) for the guard that
-> was added at the time). Spike-3 of #2439 established that this isn't fixable by "trying harder"
-> in the reflection process — actuating recovery/spawn decisions from empty process-local state is
-> unsafe by design, not a bug to patch. The reflection was therefore **removed outright** rather
-> than re-guarded again. The worker's in-process `_agent_session_health_loop` (~300s tick) remains
-> the **sole** backstop for recovering stuck running sessions and picking up orphaned pending ones.
-> A genuinely independent out-of-process backstop, if ever wanted, would need to be a read-only
-> *alerter* (never an actuator) — a separate design, not attempted here.
-
 **Infrastructure / health:**
 
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
-| `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records, run `AgentSession.repair_indexes()` unconditionally on every tick (issue #1361 — gate removed), emit per-status `agent_session.indexed_field.stale_members` drift metrics, AND reap cross-process orphan `claude`/MCP processes (phantom-filter guarded — see [bridge self-healing](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) and [Cross-Process Orphan Reap (#1271)](bridge-self-healing.md#cross-process-orphan-reap-1271)) |
+| `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records, run `AgentSession.repair_indexes()` unconditionally on every tick, emit per-status `agent_session.indexed_field.stale_members` drift metrics, AND reap cross-process orphan `claude`/MCP processes (phantom-filter guarded — see [bridge self-healing](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) and [Cross-Process Orphan Reap](bridge-self-healing.md#cross-process-orphan-reap-1271)) |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours (disabled) |
 | `redis-index-cleanup` | daily | low | function | Rebuild Redis model indexes to remove orphaned entries |
-| `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically. Re-enabled (issue #2439) now that its hibernation-notification path publishes a session-notify on save — see [Bridge Self-Healing](bridge-self-healing.md). |
+| `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically. Its hibernation-notification path publishes a session-notify on save — see [Bridge Self-Healing](bridge-self-healing.md). |
 | `session-count-throttle` | 1 hour | normal | function | Count sessions in last hour; write throttle level |
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
 | `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |
 | `system-health-digest` | daily | low | agent | Daily Telegram health summary **(disabled — spawns agent)** |
-| `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_DEDUP_APPLY` env kill-switch wins when set (issue #2203) |
+| `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_DEDUP_APPLY` env kill-switch wins when set |
 | `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues across projects (disabled) |
 
 **Maintenance:**
@@ -264,24 +233,22 @@ vault: it only ever rewrites the real per-machine copy produced by
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Retire zero-access memories: tier-1 (importance < 0.15) hard-deletes (opt-in only via `MEMORY_DECAY_PRUNE_APPLY=true`, never inherits shared `params.apply`), tier-2 (0.15–1.0) tombstones via `superseded_by` (`MEMORY_NOISE_PRUNE_APPLY`/`params.apply` fallback); corpus-fraction guardrail aborts + alerts before any tier-1 delete exceeding `MAX_PRUNE_FRACTION`/`MAX_PRUNE_ABSOLUTE` (issue #2203, decoupled apply + guardrail issue #2438) |
-| `memory-outcome-resolve` | `reflections.memory.memory_outcome_resolve.run` | Crash-safe outcome attribution: sweeps orphaned session sidecars past `INJECTION_RESOLVE_TTL`, resolves unresolved injections to `deferred` (neutral no-op), compare-and-deletes the sidecar only if unchanged, quarantines malformed sidecars (`outcome_resolve_malformed_count`) (issue #2203) |
-| `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3) + corpus-size baseline/drop alert (issue #2438); files investigation issues for Layer-2/3 candidates and corpus-collapse anomalies |
+| `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Retire zero-access memories: tier-1 (importance < 0.15) hard-deletes (opt-in only via `MEMORY_DECAY_PRUNE_APPLY=true`, never inherits shared `params.apply`), tier-2 (0.15–1.0) tombstones via `superseded_by` (`MEMORY_NOISE_PRUNE_APPLY`/`params.apply` fallback); corpus-fraction guardrail aborts + alerts before any tier-1 delete exceeding `MAX_PRUNE_FRACTION`/`MAX_PRUNE_ABSOLUTE` |
+| `memory-outcome-resolve` | `reflections.memory.memory_outcome_resolve.run` | Crash-safe outcome attribution: sweeps orphaned session sidecars past `INJECTION_RESOLVE_TTL`, resolves unresolved injections to `deferred` (neutral no-op), compare-and-deletes the sidecar only if unchanged, quarantines malformed sidecars (`outcome_resolve_malformed_count`) |
+| `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3) + corpus-size baseline/drop alert; files investigation issues for Layer-2/3 candidates and corpus-collapse anomalies |
 | `embedding-orphan-sweep` | `reflections.memory.embedding_orphan_sweep.run` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
-| `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker, issue #1904) once the provider is healthy again; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_EMBEDDING_BACKFILL_APPLY` env kill-switch wins when set (issue #2203); caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
-| `memory-distill-backfill` | `reflections.memory.memory_distill_backfill.run` | Distill provisional Claude Code hook-ingest records (verbatim content, flat provisional importance) into standalone facts with content-derived importance (issue #2202); runs every `300s`; **apply-on by default** (kill switch, not opt-in), `MEMORY_DISTILL_BACKFILL_APPLY=false` to force dry-run; attempt-capped with a terminal `distill_abandoned` state — see [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) |
+| `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker) once the provider is healthy again; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_EMBEDDING_BACKFILL_APPLY` env kill-switch wins when set; caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
+| `memory-distill-backfill` | `reflections.memory.memory_distill_backfill.run` | Distill provisional Claude Code hook-ingest records (verbatim content, flat provisional importance) into standalone facts with content-derived importance; runs every `300s`; **apply-on by default** (kill switch, not opt-in), `MEMORY_DISTILL_BACKFILL_APPLY=false` to force dry-run; attempt-capped with a terminal `distill_abandoned` state — see [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) |
 
-### Daily PM-facing slots (consolidated)
+### Daily PM-facing slots
 
-The two daily reflections that used to run separately — `daily-log-review`
-and `daily-report-and-notify` — are now slot types under the single
-`pm-briefings` dispatcher (issue #1276 consolidation; issue #1292 cutover).
-They answer different questions and ship via different output channels but
-live in one code path.
+`daily-log-review` and `daily-report-and-notify` are slot types under the single
+`pm-briefings` dispatcher. They answer different questions and ship via different output
+channels but live in one code path.
 
 | Slot type | Surface scanned | Output channel | Consumer |
 |-----------|-----------------|----------------|----------|
-| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` (previous default was `Dev: Valor`) | Engineer triage of error-rate spikes / regressions |
+| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` | Engineer triage of error-rate spikes / regressions |
 | `daily_log` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` (gated by per-slot `vault_writer: true`) plus a `~70-word` audio brief to the slot's first configured PM Telegram chat | Knowledge search ("what happened on day X?") + spoken executive update |
 
 **Why both exist:** they answer different questions. `log_audit` answers
@@ -325,7 +292,7 @@ by the time the slot runs at the next scheduler tick after 00:00 UTC.
 
 ### State Model (`models/reflection.py`)
 
-Each reflection gets a `Reflection` record in Redis tracking definition + last-run summary. Per-run history rows live separately in `ReflectionRun` (`models/reflection_run.py`) so the size of a Reflection record is bounded — the previous 200-cap embedded `run_history` list is gone.
+Each reflection gets a `Reflection` record in Redis tracking definition + last-run summary. Per-run history rows live separately in `ReflectionRun` (`models/reflection_run.py`) so the size of a Reflection record is bounded.
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -336,8 +303,8 @@ Each reflection gets a `Reflection` record in Redis tracking definition + last-r
 | `auto_delete_after_run` | Field(bool) | One-shot self-clean on success (default false) |
 | `enabled` | Field(bool) | Whether the scheduler dispatches this reflection (default true) |
 | `last_run_summary` | DictField | `{timestamp, status, duration, error}` — fast dashboard read |
-| `ran_at` | FloatField | Unix timestamp of last execution start (kept for compatibility) |
-| `run_count` | IntField | Total number of executions (kept for compatibility) |
+| `ran_at` | FloatField | Unix timestamp of last execution start |
+| `run_count` | IntField | Total number of executions |
 | `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped`, `stale_running` |
 | `last_error` | Field | Error message from last failure |
 | `last_duration` | FloatField | Duration of last run in seconds |
@@ -414,9 +381,9 @@ Every reflection execution includes resource monitoring:
 
 **Timeout enforcement**: Each reflection has a configurable timeout (via `timeout` field in YAML, or type-based defaults: 30 min for function, 60 min for agent). Function-type reflections are wrapped in `asyncio.wait_for()`. For async callables, this provides true cancellation. For sync callables running via `run_in_executor()`, the `TimeoutError` is raised but the thread cannot be cancelled (detection-only). Timeout errors are logged and the reflection is marked with error status.
 
-**Bulkhead pool**: sync reflections are dispatched on a dedicated `ThreadPoolExecutor` (`_reflection_pool`, `REFLECTION_POOL_WORKERS` workers, default `2`) owned by `agent/reflection_scheduler.py`, not the shared default executor. This isolates wedged reflections from critical-path `run_in_executor` work (Telegram message classification, media transcription), so N stuck reflections cannot starve the rest of the worker. See [Worker Fault Containment](worker-fault-containment.md) (Fix #3, issue #1816).
+**Bulkhead pool**: sync reflections are dispatched on a dedicated `ThreadPoolExecutor` (`_reflection_pool`, `REFLECTION_POOL_WORKERS` workers, default `2`) owned by `agent/reflection_scheduler.py`, not the shared default executor. This isolates wedged reflections from critical-path `run_in_executor` work (Telegram message classification, media transcription), so N stuck reflections cannot starve the rest of the worker. See [Worker Fault Containment](worker-fault-containment.md).
 
-**Startup-batch concurrency throttle**: after a worker restart, every function-type reflection that accumulated overdue time during the downtime becomes due simultaneously on the first tick. Without a cap, dispatching all of them as concurrent `asyncio.create_task(...)` in one pass saturates the single event loop and can starve time-sensitive coroutines — for example, the granite `_deliver_sync` delivery future (issue #1805). `tick()` caps the number of function-type reflections dispatched per tick at `REFLECTION_STARTUP_MAX_CONCURRENT` (default `4`, env-overridable). Between each dispatch it calls `await asyncio.sleep(0)` to yield the event loop. Excess overdue reflections defer naturally to the next tick (~60 s later). Agent-type reflections, which are already awaited serially, are unaffected by this cap.
+**Startup-batch concurrency throttle**: after a worker restart, every function-type reflection that accumulated overdue time during the downtime becomes due simultaneously on the first tick. Without a cap, dispatching all of them as concurrent `asyncio.create_task(...)` in one pass saturates the single event loop and can starve time-sensitive coroutines — for example, the granite `_deliver_sync` delivery future. `tick()` caps the number of function-type reflections dispatched per tick at `REFLECTION_STARTUP_MAX_CONCURRENT` (default `4`, env-overridable). Between each dispatch it calls `await asyncio.sleep(0)` to yield the event loop. Excess overdue reflections defer naturally to the next tick (~60 s later). Agent-type reflections, which are already awaited serially, are unaffected by this cap.
 
 **Auth probe (docs auditor)**: The `docs-auditor` substrate runs a startup auth probe against the Anthropic API. On invalid keys it returns `status="disabled"` and skips the run; on transient network errors it logs a warning and proceeds. Optional embedding auth (`OPENAI_API_KEY`) is probed separately — when unavailable, the substrate degrades gracefully to lexical-only matching. See [Docs Auditor](docs-auditor.md).
 
@@ -457,7 +424,7 @@ The package is organized into group directories, with one file per reflection. E
 
 | Directory | Files | Description |
 |-----------|-------|-------------|
-| `reflections/agents/` | `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` | Session health and Anthropic circuit management (relocated from `agent/sustainability.py`) |
+| `reflections/agents/` | `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` | Session health and Anthropic circuit management |
 | `reflections/housekeeping/` | `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` | Routine maintenance: expiry, branch cleanup, disk, analytics |
 | `reflections/audits/` | `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` | Code quality, data quality, and task tracking audits |
 | `reflections/memory/` | `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py`, `memory_embedding_backfill.py` | Memory lifecycle: pruning, quality audit, orphan sweep, vectorless-record backfill |
@@ -468,7 +435,7 @@ The package is organized into group directories, with one file per reflection. E
 |--------|-------------|
 | `reflections/utilities.py` | Shared helpers: `load_local_projects()`, `run_per_project_audit()`, `run_llm_reflection()`, `is_ignored()`, `load_ignore_entries()`, `has_existing_github_work()`, `is_high_confidence()`, `extract_structured_errors()`, `PROJECT_ROOT`, `CORRECTION_PATTERNS` |
 
-**Unchanged modules (not part of this refactor):**
+**Other modules:**
 
 | Module | Description |
 |--------|-------------|
@@ -476,8 +443,8 @@ The package is organized into group directories, with one file per reflection. E
 | `reflections.pm_briefings` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
 | `reflections.docs_auditor` | Unified docs auditor substrate (see [Docs Auditor](docs-auditor.md)) |
 
-> **Registry compatibility:** The old bundle module names (`reflections.maintenance`, `reflections.auditing`, `reflections.task_management`, `reflections.memory_management`) remain as thin re-export shims. Each re-exports the relocated reflections under their original `run_*` names so `config/reflections.yaml`'s historical dotted callable paths still resolve without a vault edit.
-> **Migrating a registry callable:** `config/reflections.yaml` is gitignored, so a rename cannot ship as a file edit — a hand-edit never reaches other machines and is clobbered by the next vault→config sync. Ship it as a tracked, idempotent rewrite step instead: `scripts/migrate_reflections_callables.py`, wired at `scripts/update/run.py` Step 1.659, is the worked example (issue #2875). It rewrites **both** the vault original and the `config/` copy, because `env_sync.sync_reflections_yaml` refreshes the config copy only when it is *older* than the vault — a newer config copy otherwise masks a vault-only edit indefinitely. The step also import-checks every migration target before writing, since `ReflectionEntry.validate` only asserts the callable string is non-empty and a bad path fails silently at execution time inside `run_reflection`'s broad `except`.
+> **Registry compatibility:** The bundle module names (`reflections.maintenance`, `reflections.auditing`, `reflections.task_management`, `reflections.memory_management`) exist as thin re-export shims. Each re-exports the reflections under their `run_*` names so `config/reflections.yaml`'s dotted callable paths resolve without a vault edit.
+> **Renaming a registry callable:** `config/reflections.yaml` is gitignored, so a rename cannot ship as a file edit — a hand-edit never reaches other machines and is clobbered by the next vault→config sync. Ship it as a tracked, idempotent rewrite step instead: `scripts/migrate_reflections_callables.py`, wired at `scripts/update/run.py` Step 1.659, is the reference implementation. It rewrites **both** the vault original and the `config/` copy, because `env_sync.sync_reflections_yaml` refreshes the config copy only when it is *older* than the vault — a newer config copy otherwise masks a vault-only edit indefinitely. The step also import-checks every migration target before writing, since `ReflectionEntry.validate` only asserts the callable string is non-empty and a bad path fails silently at execution time inside `run_reflection`'s broad `except`.
 
 ## State & Persistence
 
@@ -521,21 +488,19 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 
 **Cleanup**: Records older than 90 days are pruned via `cleanup_expired()` during Redis TTL cleanup.
 
-`pr-review-audit` is mid-migration to a Claude Code Routine (issue #2068,
-code-complete but not yet deployed) — see
+`pr-review-audit` runs locally, dry-run. A Claude Code Routine implementation of the same
+audit is code-complete but not yet deployed — see
 [`docs/infra/cowork-pr-review-audit.md`](../infra/cowork-pr-review-audit.md).
-It still runs here, locally, dry-run, as before, until that migration's
-cutover step lands.
 
 ### docs-auditor State
 
-The unified `docs-auditor` substrate (`reflections/docs_auditor.py`, issue #1247) tracks per-file rotation state in a Redis hash:
+The unified `docs-auditor` substrate (`reflections/docs_auditor.py`) tracks per-file rotation state in a Redis hash:
 
 ```python
 redis.Redis.from_url(settings.REDIS_URL).hgetall("docs_audit:last_run")
 ```
 
-Each field is a doc path; each value is the unix timestamp of its most recent audit. The hash form replaces both the prior `docs_auditor:last_audit_date` plain-key and avoids a per-file Redis key explosion. See [`docs/features/docs-auditor.md`](./docs-auditor.md) for the substrate design.
+Each field is a doc path; each value is the unix timestamp of its most recent audit. The hash form avoids a per-file Redis key explosion. See [`docs/features/docs-auditor.md`](./docs-auditor.md) for the substrate design.
 
 ### Docs Auditor Authentication
 
@@ -570,19 +535,6 @@ Queries Redis for recent sessions and computes quality metrics.
 - **BridgeEvent** — error events correlated to sessions
 
 The runner caps analysis at the 20 most interesting sessions (sorted by turn count).
-
-> **Removed: thrash-ratio detection (#1414).** A prior heuristic flagged
-> sessions as "thrashing" when `1 - (turn_count / tool_call_count) > 0.5`.
-> Because `turn_count` is *total assistant turns* (not *successful* turns),
-> any session averaging more than ~2 tool calls per turn tripped the
-> threshold — roughly 50% of healthy, completed SDLC runs. The detector was
-> removed entirely rather than left emitting false positives that auto-filed
-> duplicate bug issues. Neither candidate replacement signal (repeated
-> identical tool calls, repeated tool errors) is cheaply derivable from the
-> available data: `AgentSession` exposes only scalar aggregates, and the
-> transcript format records tool inputs/results as truncated summary strings
-> with no structured args or `is_error` flag. A missing detector is strictly
-> better than one with a 50% false-positive rate.
 
 ### Correction Detection
 
@@ -629,12 +581,9 @@ one supporting signal (`is_high_confidence()` in `reflections/utilities.py`):
 | Prevention | `prevention` field is non-empty | Supporting (either suffices) |
 | Pattern length | `pattern` field is at least 10 characters | Supporting (either suffices) |
 
-This tightened the prior **2-of-3** rule (#1414). Under 2-of-3, a non-code-bug
-reflection (e.g. `category="poor_planning"`) could clear the gate on prevention
-+ pattern length alone — which is how #1414, an agent-behaviour claim rather
-than a code defect, reached "high-confidence" and auto-filed itself. The gate
-now hard-requires `code_bug`, so only genuine code defects reach the auto-fix
-path.
+The gate hard-requires `code_bug`; a non-code-bug reflection (e.g.
+`category="poor_planning"`) cannot clear the gate on prevention + pattern length
+alone. Only genuine code defects reach the auto-fix path.
 
 ### Ignore Log
 
@@ -678,7 +627,7 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 
 ### Per-Project Audit Iteration
 
-Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation/feature-doc audits were consolidated into the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utilities.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
+Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation and feature-doc audits run through the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utilities.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
 
 1. Loads `load_local_projects()` (filtered to repos present on disk)
 2. For each project, evaluates `skip_if(repo_root)` first; silently skipped projects are recorded with `status="skipped"` and excluded from `findings`
@@ -715,7 +664,7 @@ The reflection modal at `localhost:8500` renders a per-project sub-table when `r
 | `badge-skipped` (gray) | `skipped` | Skip predicate matched silently |
 | `badge-disabled` (amber) | `disabled` | Cost cap exhausted (e.g. global API cap) |
 
-The sparkline color is driven by the aggregate `run.status`, independent of per-project badges. Run records without a `projects` field (older entries or non-audit reflections) render as before — the per-project block is gated by `{% if run.projects %}`.
+The sparkline color is driven by the aggregate `run.status`, independent of per-project badges. Run records without a `projects` field (non-audit reflections) render without the per-project block — it is gated by `{% if run.projects %}`.
 
 ## Redis TTL Cleanup (`redis-ttl-cleanup`)
 
@@ -753,7 +702,7 @@ Scans merged PRs for unaddressed review findings and files GitHub issues.
 
 ## Memory Management Reflections
 
-Memory management reflections (originally three, issue #748; expanded since):
+Memory management reflections:
 
 ### `memory-decay-prune`
 
@@ -762,13 +711,13 @@ Prunes zero-access memories below the weak-forgetting threshold:
 - `PRUNE_AGE_DAYS = 30` — memory must be at least 30 days old
 - `IMPORTANCE_EXEMPT_THRESHOLD = 7.0` — importance >= 7.0 exempt from pruning
 - `MAX_PRUNE_PER_RUN = 50` — safety cap per run (shared across both tiers)
-- **Per-tier removal mechanism (issue #2203)**: popoto's `WriteFilterMixin` rejects any `save()` below the 0.15 write floor, so a `superseded_by` tombstone can't persist on a below-floor record. Therefore **tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor — while **tier-2 (0.15 ≤ importance ≤ 1.0) tombstones** (`superseded_by` + `save()`, reversible). `prune_count` increments only after the removal succeeds (never phantom-counts a filtered save).
-- **Apply mode (decoupled, issue #2438)**: tier-1 hard-delete requires an explicit `MEMORY_DECAY_PRUNE_APPLY=true` opt-in and never inherits `reflections.yaml`'s shared `params={"apply": true}` — the dangerous, unrecoverable removal path defaults off regardless of config. Tier-2 tombstoning (reversible) keeps the original env-as-kill-switch precedence: an explicitly-set `MEMORY_NOISE_PRUNE_APPLY` wins, otherwise it falls back to `params`.
-- **Corpus-collapse guardrails (issue #2438)**: before any tier-1 delete, the run aborts (deletes nothing) and files a de-duplicated GitHub alert issue if the candidate set exceeds `MAX_PRUNE_FRACTION` (of the durable corpus) or `MAX_PRUNE_ABSOLUTE` — forward-looking defense-in-depth for a larger future corpus. `importance`/`access_count` fields that are `None` are exempt from tier-1/tier-2 selection rather than coerced to a deletable `0`. Separately, `memory-quality-audit` tracks a durable corpus-size baseline across runs and files its own alert on a large drop — see [Corpus-collapse guardrails](subconscious-memory.md#corpus-collapse-guardrails-issue-2438).
+- **Per-tier removal mechanism**: popoto's `WriteFilterMixin` rejects any `save()` below the 0.15 write floor, so a `superseded_by` tombstone can't persist on a below-floor record. Therefore **tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor — while **tier-2 (0.15 ≤ importance ≤ 1.0) tombstones** (`superseded_by` + `save()`, reversible). `prune_count` increments only after the removal succeeds (never phantom-counts a filtered save).
+- **Apply mode**: tier-1 hard-delete requires an explicit `MEMORY_DECAY_PRUNE_APPLY=true` opt-in and never inherits `reflections.yaml`'s shared `params={"apply": true}` — the dangerous, unrecoverable removal path defaults off regardless of config. Tier-2 tombstoning (reversible) keeps the original env-as-kill-switch precedence: an explicitly-set `MEMORY_NOISE_PRUNE_APPLY` wins, otherwise it falls back to `params`.
+- **Corpus-collapse guardrails**: before any tier-1 delete, the run aborts (deletes nothing) and files a de-duplicated GitHub alert issue if the candidate set exceeds `MAX_PRUNE_FRACTION` (of the durable corpus) or `MAX_PRUNE_ABSOLUTE` — forward-looking defense-in-depth for a larger future corpus. `importance`/`access_count` fields that are `None` are exempt from tier-1/tier-2 selection rather than coerced to a deletable `0`. Separately, `memory-quality-audit` tracks a durable corpus-size baseline across runs and files its own alert on a large drop — see [Corpus-collapse guardrails](subconscious-memory.md#corpus-collapse-guardrails-issue-2438).
 
 ### `memory-outcome-resolve`
 
-Crash-safe outcome attribution (issue #2203; full design in [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203)). Recall injections are journaled in a per-session sidecar; the clean-stop path judges outcomes then deletes the sidecar, so crashed/killed sessions used to lose their injection signal. This reflection sweeps the orphans:
+Crash-safe outcome attribution (full design in [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203)). Recall injections are journaled in a per-session sidecar; the clean-stop path judges outcomes then deletes the sidecar, so a crashed or killed session leaves the sidecar orphaned. This reflection sweeps the orphans:
 
 - **TTL-only gating**: resolves only sidecars whose mtime exceeds `INJECTION_RESOLVE_TTL` (`config/memory_defaults.py`, 6h, provisional/tunable). A live session refreshes its sidecar mtime on every recall injection, so it stays ineligible — no cross-process liveness primitive needed.
 - **Neutral resolution**: unresolved injections resolve to `deferred` (a no-op ObservationProtocol outcome — pressure builds, never a false positive), keyed by each record's `db_key.redis_key`.
@@ -784,11 +733,11 @@ Crash-safe outcome attribution (issue #2203; full design in [Outcome-Loop Harden
 - **Layer 2** — heuristic anomaly detection (no model). Four signals: `category-default-skew`, `importance-1.0-skew`, `agent-id-cluster`, `html-escape-rate`. Cross-threshold signals become candidates.
 - **Layer 3** — granite classification (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
 - **Issue surfacing** — Layer-2/3 candidates → `gh issue create --label memory --label investigation`, deduped via title-prefix search. Layer 0/1 never file issues.
-- **Cluster re-filing suppression (issue #2016)** — the dup-check (`_find_recent_audit_issue` in `reflections/memory/memory_quality_audit.py`) used to search only `--state open`, so closing an anomaly issue provided no protection: the very next daily run would re-file a fresh issue for the same signal. That produced a recurring pattern of the same cluster being opened, closed, and immediately re-opened (#1497, #1786, #1931). The dup-check now queries `gh issue list --state all`, and closing (acknowledging) a memory-audit anomaly issue suppresses re-filing of that same signal — matched by the `[memory-audit] {signal}:` title prefix — for `CLUSTER_REFILE_SUPPRESSION_DAYS = 14` days. A matching OPEN issue always suppresses, as before; a matching CLOSED issue suppresses only while inside the 14-day window. If the anomaly persists past the window, a fresh issue is filed on the next run.
+- **Cluster re-filing suppression** — the dup-check (`_find_recent_audit_issue` in `reflections/memory/memory_quality_audit.py`) queries `gh issue list --state all`. Closing (acknowledging) a memory-audit anomaly issue suppresses re-filing of that same signal — matched by the `[memory-audit] {signal}:` title prefix — for `CLUSTER_REFILE_SUPPRESSION_DAYS = 14` days. A matching OPEN issue always suppresses; a matching CLOSED issue suppresses only while inside the 14-day window. If the anomaly persists past the window, a fresh issue is filed on the next run.
 
 ### `embedding-orphan-sweep`
 
-Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Memory/`) against live Memory records (issue #1214). Calls Popoto's `EmbeddingField.garbage_collect(Memory)` to remove `.npy` files whose SHA-256-hashed names are no longer in `$Class:Memory`, plus `EmbeddingField.sweep_stale_tempfiles(Memory)` to remove leaked `tmp*.npy` atomic-write tempfiles older than 1 hour.
+Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Memory/`) against live Memory records. Calls Popoto's `EmbeddingField.garbage_collect(Memory)` to remove `.npy` files whose SHA-256-hashed names are no longer in `$Class:Memory`, plus `EmbeddingField.sweep_stale_tempfiles(Memory)` to remove leaked `tmp*.npy` atomic-write tempfiles older than 1 hour.
 
 - **Dry-run default**: set `EMBEDDING_ORPHAN_SWEEP_APPLY=true` to enable actual deletion (matches the `MEMORY_DECAY_PRUNE_APPLY` pattern).
 - **Popoto-stub guard**: a runtime capability probe (`hasattr(EmbeddingField, "sweep_stale_tempfiles")`) detects pre-1.6.0 installs and short-circuits with status `"skipped"` and finding `"popoto<1.6 — gc not implemented yet"` rather than silently appearing to succeed.
@@ -799,7 +748,7 @@ For one-shot reconciliation against an existing backlog, the operator script `sc
 
 ### `memory-embedding-backfill`
 
-The inverse of `embedding-orphan-sweep`: heals active Memory records that persisted **without** a `.npy` at all — the `GracefulEmbeddingField` degradation marker (`embedding = None`) written when the embedding provider timed out or was unreachable mid-save (issue #1904; see [Embedding Degradation](subconscious-memory.md#embedding-degradation-persist-without-vector)). Finds records with a falsy `embedding`, skips `superseded_by` records, and — once `OllamaEmbeddingProvider().is_available()` — re-embeds them so they regain the fourth (semantic-similarity) RRF signal.
+The inverse of `embedding-orphan-sweep`: heals active Memory records that persisted **without** a `.npy` at all — the `GracefulEmbeddingField` degradation marker (`embedding = None`) written when the embedding provider timed out or was unreachable mid-save (see [Embedding Degradation](subconscious-memory.md#embedding-degradation-persist-without-vector)). Finds records with a falsy `embedding`, skips `superseded_by` records, and — once `OllamaEmbeddingProvider().is_available()` — re-embeds them so they regain the fourth (semantic-similarity) RRF signal.
 
 - **Dry-run default**: set `MEMORY_EMBEDDING_BACKFILL_APPLY=true` (also accepts `1`/`yes`) to enable actual re-embedding (matches the `EMBEDDING_ORPHAN_SWEEP_APPLY` / `MEMORY_DECAY_PRUNE_APPLY` pattern).
 - **Per-run cap**: `MAX_BACKFILL_PER_RUN = 500` — a long-outage backlog drains over several daily runs instead of re-saturating a just-recovered provider in one shot.
@@ -809,7 +758,7 @@ The inverse of `embedding-orphan-sweep`: heals active Memory records that persis
 
 ### `memory-distill-backfill`
 
-Distills Claude Code hook-ingest records out of band (issue #2202; full design in [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3)). The hook path (`ingest()`) persists a **provisional** record synchronously (verbatim content, no LLM call); this reflection scans `distill_status == "provisional"` records ascending by last-attempt timestamp, distills each into a standalone fact via Haiku, and computes content-derived importance.
+Distills Claude Code hook-ingest records out of band (full design in [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3)). The hook path (`ingest()`) persists a **provisional** record synchronously (verbatim content, no LLM call); this reflection scans `distill_status == "provisional"` records ascending by last-attempt timestamp, distills each into a standalone fact via Haiku, and computes content-derived importance.
 
 - **Apply-on by default**: unlike the dry-run-default reflections above, `MEMORY_DISTILL_BACKFILL_APPLY` defaults to `"true"` — distillation is this feature's steady-state operating mode, so the toggle is an operator kill switch (set `false`/`0`/`no` to force dry-run), not an opt-in gate.
 - **Terminal states**: every provisional record reaches `distilled` or the attempt-capped terminal `distill_abandoned` (`MAX_DISTILL_ATTEMPTS = 5`) — no infinite retry loop, no poison-pill starvation.
@@ -825,7 +774,7 @@ The reflection scheduler runs in its own supervised launchd subprocess
 (`python -m reflections`, `com.valor.reflection-worker`, `KeepAlive`+`ThrottleInterval`),
 installed by `scripts/install_reflection_worker.sh`. It ticks every 60 seconds. See
 [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md) for the lifecycle,
-worker-role install gate, cutover ordering, and the `/dashboard.json`
+worker-role install gate, update ordering, and the `/dashboard.json`
 `reflection_scheduler_*` health surface.
 
 | Component | Detail |
@@ -865,12 +814,12 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
-| `scripts/reflections_report.py` | GitHub issue creation module (was used by retired `daily_report`) |
+| `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/update/env_sync.py` | `sync_reflections_yaml()`: writes the real-file vault copy on update |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |
 
-`ReflectionIgnore` and `PRReviewAudit` each live in exactly one module (`models/reflection_ignore.py`, `models/pr_review_audit.py`); there is no `models/reflections.py` compatibility shim. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import these function-locally, straight from their canonical modules. Removing the shim also removes an import-order hazard it created for tests: patching `models.reflections.ReflectionIgnore` only affected code paths that happened to import the shim fresh after the patch, so whether a `unittest.mock.patch` took effect depended on xdist worker import order rather than on the patch target being correct. A wrong patch target now fails loudly (there is only one module object holding each model) instead of silently falling through to an unintended real-Redis integration test.
+`ReflectionIgnore` and `PRReviewAudit` each live in exactly one module (`models/reflection_ignore.py`, `models/pr_review_audit.py`); there is no `models/reflections.py` compatibility shim. The three production call sites (`reflections/housekeeping/redis_ttl_cleanup.py`, `reflections/utilities.py`, `reflections/audits/pr_review_audit.py`) import these function-locally, straight from their canonical modules. With a single module object holding each model, a wrong `unittest.mock.patch` target fails loudly instead of silently falling through to an unintended real-Redis integration test.
 
 ## Dependencies
 
@@ -900,10 +849,10 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 
 ## See Also
 
-- [Docs Auditor](docs-auditor.md) — unified `docs-auditor` substrate (replaces the prior `documentation-audit`, `feature-docs-audit`, and `knowledge-reindex` reflections)
+- [Docs Auditor](docs-auditor.md) — unified `docs-auditor` substrate
 - [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks-audit` unit deep dive
 - [Skills Audit](audit-skills.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation
-- [Subconscious Memory](subconscious-memory.md#embedding-degradation-persist-without-vector) — `GracefulEmbeddingField` and the `memory-embedding-backfill` reflection it feeds (issue #1904)
+- [Subconscious Memory](subconscious-memory.md#embedding-degradation-persist-without-vector) — `GracefulEmbeddingField` and the `memory-embedding-backfill` reflection it feeds
 - [Cowork Tasks](cowork-tasks.md) — which reflections can migrate to cloud-scheduled execution and why most can't (the Candidate Re-Triage table)
 - [Cowork PR-Review-Audit routine-spec](../infra/cowork-pr-review-audit.md) — the in-progress `pr-review-audit` cloud migration (code-complete, not yet deployed)

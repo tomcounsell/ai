@@ -113,7 +113,7 @@ Each code session gets `data/sessions/{session_id}/sdlc_state.json`:
 
 The `modified_on_branch` field tracks where code was first written. It is updated dynamically:
 - **First code edit**: Records the current git branch (may be `main` if code is edited before branching)
-- **Branch switch**: `git checkout -b session/*` or `git switch -c session/*` updates the field to the new session branch, fixing stale "main" recording (issue #261)
+- **Branch switch**: `git checkout -b session/*` or `git switch -c session/*` updates the field to the new session branch, so a stale `"main"` recording does not persist
 - **PR merge**: `gh pr merge` clears both `code_modified` and `modified_on_branch` to prevent stale state
 
 ## Troubleshooting
@@ -128,7 +128,7 @@ Then end the session normally.
 Set `SKIP_SDLC=1` to unblock, then file a GitHub issue with the session ID and `sdlc_state.json` contents. Do not patch the classification inline.
 
 **Stop hook infinite loop ("SDLC VIOLATION" fires repeatedly):**
-This occurs when code was edited on `main` before creating a feature branch, leaving `modified_on_branch: "main"` in the state file. The stop hook blocks, the agent responds, the hook fires again — an unrecoverable loop. **Fixed in issue #261** with three defenses:
+This occurs when code was edited on `main` before creating a feature branch, leaving `modified_on_branch: "main"` in the state file. The stop hook blocks, the agent responds, the hook fires again — an unrecoverable loop. Three defenses prevent it:
 1. Branch switch detection updates `modified_on_branch` when `git checkout -b session/*` is run
 2. Live git diff check verifies actual uncommitted changes before reporting violations
 3. `SKIP_SDLC=1` escape hatch is available at the SDK layer for manual recovery
@@ -144,7 +144,7 @@ A second layer of SDLC enforcement operates at the Claude Agent SDK level, indep
 
 ### System Prompt Injection (SDLC_WORKFLOW)
 
-Every agent session receives the mandatory pipeline rules injected into the system prompt. Note: this section predates #2000, which deleted `ValorAgent` (the SDK-era class formerly named here) along with the rest of the dead Claude Agent SDK path; the `SDLC_WORKFLOW` constant it describes was itself already removed independently in #356 (2026-03-11). Flagged for a separate documentation-accuracy pass — see the tracking issue linked from this PR's docs cascade.
+Every agent session receives the mandatory pipeline rules injected into the system prompt.
 
 The system prompt structure assembled by `load_system_prompt()`:
 
@@ -169,7 +169,7 @@ The `SDLC_WORKFLOW` block tells the agent:
 
 `agent/sdk_client.py` provides `_check_no_direct_main_push(session_id, repo_root)` which:
 
-1. If `SKIP_SDLC=1` env var is set: passes immediately (escape hatch for recovery — issue #261)
+1. If `SKIP_SDLC=1` env var is set: passes immediately (escape hatch for recovery)
 2. Reads `data/sessions/{session_id}/sdlc_state.json`
 3. If no state file exists: passes (non-code session)
 4. If `code_modified: false`: passes (docs/ops session)
@@ -177,7 +177,7 @@ The `SDLC_WORKFLOW` block tells the agent:
 6. If branch is not `main`: passes (inside a `/do-build` worktree on `session/{slug}`)
 7. If branch IS `main` and `modified_on_branch` starts with `session/`: passes (arrived via merge)
 8. If branch IS `main`: cross-checks live `git diff` for actual uncommitted code files
-9. If no actual uncommitted code changes: passes (stale state — issue #261)
+9. If no actual uncommitted code changes: passes (stale state)
 10. If actual code changes uncommitted on `main`: returns a hard-block error
 
 **Fail-open on errors.** If the state file is corrupt, git fails, or the diff check errors, the check fails open (returns None) and logs a warning. The check never crashes a session.
@@ -196,7 +196,7 @@ Sessions on `session/{slug}` branches — all `/do-build` builder agents — alw
 
 ### Persona Segment Cleanup
 
-The persona segments (`config/personas/segments/`) contain only behavioral content -- identity, work patterns, and tool references. SDLC workflow instructions were previously stripped from the monolithic SOUL.md (now retired). Pipeline rules live exclusively in `agent/sdk_client.py`.
+The persona segments (`config/personas/segments/`) contain only behavioral content -- identity, work patterns, and tool references. Pipeline rules live exclusively in `agent/sdk_client.py`.
 
 ### Two-Layer Summary
 
@@ -220,15 +220,16 @@ The 3 user-scope SDLC hooks are declared as `scope = "global"` entries in `.clau
 
 Running the update script on any machine automatically installs the hooks.
 
-### Pre-requisite Bug 1 — user-scope Stop hook was missing `|| true`
+### User-scope Stop hook `|| true` guard
 
-Before the manifest existed, `_SDLC_HOOK_DEFS` (the hardcoded predecessor to the manifest) built every user-scope command as bare `python {hooks_dir}/{script}` with **no `|| true` guard** — including the Stop entry. The project-scope twin *did* carry the guard, so the two scopes had drifted: on every machine that had run `/update`, a non-zero exit from the user-scope `validate_sdlc_on_stop.py` (an exception, a timeout SIGKILL) **blocked the agent's turn-end** instead of being swallowed, fleet-wide.
-
-The manifest declares `validate_sdlc_on_stop_fork` with `blocking = false`, so the generator now always emits the guard. A one-time migration (`scripts/update/migrations.py::_migrate_hook_registration_manifest_ids()`) rewrote the already-deployed unguarded entry in place on every machine's first post-manifest `/update` — see [Hook Manifest → Migration for the 3 Deployed Legacy Entries](hook-manifest.md#migration-for-the-3-deployed-legacy-entries).
+The manifest declares `validate_sdlc_on_stop_fork` with `blocking = false`, so
+the generator always emits the `|| true` guard on the user-scope Stop command. A
+non-zero exit from `validate_sdlc_on_stop.py` (an exception, a timeout SIGKILL)
+is swallowed rather than blocking the agent's turn-end.
 
 ### Both-Scope Audit
 
-`reflections/audits/hooks_audit.py` (the daily `hooks-audit` reflection) used to read only the project-scope `.claude/settings.json` — the very bug above was structurally invisible to the audit meant to catch a missing `|| true`. It now validates **both** `.claude/settings.json` and `~/.claude/settings.json`, prefixing findings `[project]`/`[user]`, so a regression in either scope's Stop-hook guard is caught.
+`reflections/audits/hooks_audit.py` (the daily `hooks-audit` reflection) validates **both** `.claude/settings.json` and `~/.claude/settings.json`, prefixing findings `[project]`/`[user]`, so a regression in either scope's Stop-hook guard is caught.
 
 ### Shared Context Module
 
@@ -263,7 +264,7 @@ The manifest declares these entries (`scope = "global"`), merged into `~/.claude
 | PostToolUse | `Write\|Edit` | sdlc_reminder.py | 10s |
 | Stop | (all) | validate_sdlc_on_stop.py | 15s |
 
-**Historical note:** before the manifest, `_SDLC_HOOK_DEFS` declared `sdlc_reminder.py` as two separate tuples (`Write` and `Edit`), but both emitted a byte-identical command string; the old command-string dedupe silently collapsed them to a single `Edit`-only block on every deployed machine, so the intended `Write` coverage was never actually installed. The manifest declares it **once** with the alternation matcher `Write|Edit` (the form the project scope already used), and the migration upgraded the deployed `Edit`-only block to `Write|Edit` in place — restoring the long-missing `Write` coverage fleet-wide.
+The manifest declares `sdlc_reminder.py` **once** with the alternation matcher `Write|Edit`, covering both `Write` and `Edit` events.
 
 ## Merge Guard
 
@@ -271,11 +272,11 @@ A PreToolUse hook (`.claude/hooks/validators/validate_merge_guard.py`) blocks `g
 
 MERGE is a formal pipeline stage routed after DOCS completes. See [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) for full details.
 
-**Cross-repo detection** (#2003, extended by #2422): the merge predicate is inherently local, so the guard refuses to judge a PR belonging to a different repository. It recognizes both an explicit `-R`/`--repo` flag and a directory change — a literal `cd`/`pushd` chain preceding the merge is resolved to an effective working directory whose origin slug is compared against the local one. A positively-foreign slug blocks with the cross-repo message (which never offers the `data/merge_authorized_{pr}` break-glass, since that file cannot authorize a foreign PR). Same-slug and unresolvable directories (shell variables, quoted or substituted targets, non-checkout paths) fall through to the normal predicate path, so ambiguity never false-blocks a local merge. `git -C` is deliberately not a cross-repo signal: it does not change the process cwd that `gh` resolves its base repo from.
+**Cross-repo detection**: the merge predicate is inherently local, so the guard refuses to judge a PR belonging to a different repository. It recognizes both an explicit `-R`/`--repo` flag and a directory change — a literal `cd`/`pushd` chain preceding the merge is resolved to an effective working directory whose origin slug is compared against the local one. A positively-foreign slug blocks with the cross-repo message (which never offers the `data/merge_authorized_{pr}` break-glass, since that file cannot authorize a foreign PR). Same-slug and unresolvable directories (shell variables, quoted or substituted targets, non-checkout paths) fall through to the normal predicate path, so ambiguity never false-blocks a local merge. `git -C` is deliberately not a cross-repo signal: it does not change the process cwd that `gh` resolves its base repo from.
 
 ## Related
 
-- [Hook Manifest](hook-manifest.md) — the manifest declaration, generators, both-scope audit, and legacy-entry migration referenced throughout this doc
+- [Hook Manifest](hook-manifest.md) — the manifest declaration, generators, and both-scope audit
 - [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) — session hardening, URL validation, merge guard, MERGE stage
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
 - `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)

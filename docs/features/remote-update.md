@@ -2,13 +2,10 @@
 status: Implemented
 appetite: Small: 1-2 days
 owner: Valor
-created: 2026-02-02
 tracking: https://github.com/tomcounsell/ai/issues/24
 ---
 
 # Remote Update: Telegram Command + Auto-Sync Cron
-
-> **Update (issue #1898)**: the design below predates release verification. `remote-update.sh` now also restarts the **bridge** (mirroring the worker kickstart described here) on bridge-relevant changes, and both `/update` and the cron path verify the running release before reporting `✅`. See [Bridge Self-Healing #20](bridge-self-healing.md#20-update-release-verification-issue-1898) for the current design.
 
 ## Problem
 
@@ -84,13 +81,13 @@ The check is **surface only**: it never auto-merges, never mutates files, and ne
 - **In sync or either file absent (fresh machine):** silent, no warning. Logs `PM persona overlay: in sync (or files absent)` in verbose mode.
 - **Drift detected:** appends a warning of the form `PM persona overlay drift: N lines differ. Run 'diff <repo_template> <overlay>' to review.` to `result.warnings`. The operator resolves drift manually — typically by reconciling the vault overlay into the repo template or vice versa.
 
-The check matches the same pattern as the Steps 4.8/4.9 memory and BYOB MCP drift checks. Implements Phase 2 of [issue #1396](https://github.com/tomcounsell/ai/issues/1396); Phase 1 (dynamic MCP loading) is deferred.
+The check matches the same pattern as the Steps 4.8/4.9 memory and BYOB MCP drift checks.
 
 ### Technical Approach
 
 #### 1. `scripts/remote-update.sh`
 
-This is a **new standalone shell script** — not a wrapper around the existing `/update` Claude Code skill. The `/update` skill (`.claude/commands/update.md`) is a set of instructions for Claude to follow interactively (Ollama model check, SDK auth verification, calendar config, MCP audit, CLI tool verification). Those are `/setup`-level concerns that require Claude intelligence. This script handles the narrow, automatable subset: pull code, sync deps if needed, restart bridge.
+This is a **standalone shell script** — not a wrapper around the `/update` Claude Code skill. The `/update` skill (`.claude/commands/update.md`) is a set of instructions for Claude to follow interactively (Ollama model check, SDK auth verification, calendar config, MCP audit, CLI tool verification). Those are `/setup`-level concerns that require Claude intelligence. This script handles the narrow, automatable subset: pull code, sync deps if needed, restart bridge.
 
 ```bash
 #!/bin/bash
@@ -109,7 +106,7 @@ cd "$PROJECT_DIR"
 
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
 # The lock dir records its holder PID in a `pid` file so a collision can tell a
-# running update from a crashed one (issue #2169). Decision order on collision:
+# running update from a crashed one. Decision order on collision:
 #   1. Age backstop first — lock older than 600s TTL → reclaim regardless of PID.
 #   2. Young lock + recorded PID alive (kill -0) → genuine concurrent run → skip.
 #   3. Young lock + recorded PID dead → crashed run → reclaim immediately.
@@ -149,7 +146,7 @@ fi
 |----------|-----------|
 | `set -euo pipefail` | Strict mode — fail on any error, undefined var, or broken pipe |
 | `mkdir`-based lockfile | Atomic on POSIX, no `flock` dependency. `trap EXIT` ensures cleanup even on failure |
-| Lock stores holder PID + liveness check (#2169) | On collision the guard checks the recorded PID with `kill -0`. A crashed run (SIGKILL/OOM/power loss, EXIT trap never fired) leaves a *dead*-PID lock that is reclaimed immediately instead of green-skipping every run for up to 600s. Age backstop (600s TTL) stays the ultimate authority — it wins first, covering PID reuse and wedged-but-alive holders. Release is `rm -rf` since the dir now holds a `pid` file |
+| Lock stores holder PID + liveness check | On collision the guard checks the recorded PID with `kill -0`. A crashed run (SIGKILL/OOM/power loss, EXIT trap never fired) leaves a *dead*-PID lock that is reclaimed immediately instead of green-skipping every run for up to 600s. Age backstop (600s TTL) stays the ultimate authority — it wins first, covering PID reuse and wedged-but-alive holders. Release is `rm -rf` since the dir holds a `pid` file |
 | Pull in bash before Python | `run.py` and all update scripts are loaded from disk after the pull, so fixes to the update system take effect immediately (not on the next run). `run.py` receives `--no-pull` to skip the redundant internal pull |
 | `--ff-only` | Prevents surprise merges. If branches diverged, fail loudly and let the operator handle it |
 | Delegate to `run.py --cron` | Dep sync, restart flag, and Telegram summary logic live in the Python orchestrator (`scripts/update/run.py`). The shell script stays thin — pull + invoke |
@@ -323,9 +320,9 @@ Install/uninstall via `valor-service.sh`:
 
 ## Rabbit Holes & Risks
 
-### Risk 1: Bridge restarts itself mid-response (RESOLVED by design)
+### Risk 1: Bridge restarts itself mid-response
 **Impact:** If the bridge is mid-response to a user message when `/update` triggers a restart, that response is lost.
-**Mitigation:** Eliminated by design. The update script no longer restarts the bridge directly. It writes a restart flag file. The session queue worker checks the flag between sessions and only triggers a restart when all projects have no running sessions. The bridge finishes its current work before restarting. Worst case: if the bridge is perpetually busy, the restart is deferred until a quiet moment. A very long-running session (2+ hours) would delay the update — acceptable tradeoff vs losing a response.
+**Mitigation:** The update script does not restart the bridge directly; it writes a restart flag file. The session queue worker checks the flag between sessions and only triggers a restart when all projects have no running sessions. The bridge finishes its current work before restarting. Worst case: if the bridge is perpetually busy, the restart is deferred until a quiet moment. A very long-running session (2+ hours) delays the update — acceptable tradeoff vs losing a response.
 
 ### Risk 2: Cron and manual trigger race
 **Impact:** If someone types `/update` at the same moment the cron fires, two fast-forward + restart sequences run simultaneously.
@@ -333,15 +330,17 @@ Install/uninstall via `valor-service.sh`:
 
 ### Risk 3: the fast-forward fails on a dirty working tree
 **Impact:** If the machine has uncommitted local changes (e.g., from a running agent session), the merge refuses.
-**Mitigation:** The script auto-stashes before updating and restores after. The restore is keyed on the stash's **commit sha**, never `stash@{0}` (#2650): `refs/stash` is a per-repository stack shared by every worktree, so a concurrent lane's stash landing on top would otherwise be restored into this checkout instead of ours. If our entry is gone, nothing is restored rather than a stranger's work. If stash pop has conflicts, the code is still updated but the warning is surfaced. Agent sessions commit and push before completing, so dirty trees should be rare. Worst case: operator sees "stash pop conflict" in the output and resolves manually.
+**Mitigation:** The script auto-stashes before updating and restores after. The restore is keyed on the stash's **commit sha**, never `stash@{0}`: `refs/stash` is a per-repository stack shared by every worktree, so a concurrent lane's stash landing on top would otherwise be restored into this checkout instead of ours. If our entry is gone, nothing is restored rather than a stranger's work. If stash pop has conflicts, the code is still updated but the warning is surfaced. Agent sessions commit and push before completing, so dirty trees should be rare. Worst case: operator sees "stash pop conflict" in the output and resolves manually.
 
 ### Risk 4: `uv` not installed on all machines
 **Impact:** New machines might not have `uv` yet.
 **Mitigation:** Fall back to `pip install -e .` if `uv` is not found. Add a check at the top of the script.
 
-### Risk 5: Silent worker bootstrap failure reports success (RESOLVED — #2089)
-**Impact:** `install_worker()` in the Python orchestrator (`scripts/update/service.py`) ran `launchctl bootout` then `bootstrap` but never inspected the bootstrap exit code (`run_cmd` defaults `check=False`), so a transient bootstrap failure (EIO / "service already loaded", #2013/#2018) left the worker **down** while `/update` reported `Worker service installed` / `Worker running` against a stale pre-restart PID. All queued session execution halts until a human notices.
-**Mitigation:** `install_worker()` now checks the bootstrap returncode, recovers via `launchctl kickstart -k` (per #2018 the correct recovery when the label is still registered), and verifies the label is running with a **live numeric PID** (`_launchctl_label_running()` — a bare label match with a `-` PID is not enough) before returning `True`. On failure it returns `False`, and the orchestrator (`run.py`) surfaces that as a loud `ERROR` with `result.success = False` rather than a warning. The sibling `install_caffeinate()` bootstrap and the PATH-heal reload got the same returncode check.
+### Risk 5: Silent worker bootstrap failure
+
+**Impact:** A bootstrap whose exit code is not inspected can fail transiently (EIO / "service already loaded") and leave the worker down while `/update` reports success against a stale pre-restart PID, halting all queued session execution until a human notices.
+
+**Mitigation:** `install_worker()` checks the bootstrap returncode, recovers via `launchctl kickstart -k` (the correct recovery when the label is still registered), and verifies the label is running with a **live numeric PID** (`_launchctl_label_running()` — a bare label match with a `-` PID is not enough) before returning `True`. On failure it returns `False`, and the orchestrator (`run.py`) surfaces that as a loud `ERROR` with `result.success = False`. The sibling `install_caffeinate()` bootstrap and the PATH-heal reload use the same returncode check.
 
 ## No-Gos (Out of Scope)
 

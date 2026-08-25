@@ -10,7 +10,7 @@ generic steps as follows:
   pipeline state: `sdlc-tool stage-query --issue-number N` → `_meta.pr_number`.
 - **Step 0 stage marker.** Probe the substrate and write the in_progress marker.
   `{run_id}` is the run identity emitted by the invoking supervisor's
-  `sdlc-tool session-ensure` output (issue #2003) — stage-marker is
+  `sdlc-tool session-ensure` output — stage-marker is
   state-mutating and requires it:
   ```bash
   sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number} --run-id {run_id}
@@ -21,7 +21,7 @@ generic steps as follows:
   report the stderr diagnostic and proceed.
 - **Steps 1–3 deterministic gate — the shared merge predicate.** Evaluate the
   single deterministic predicate. It is the SAME helper the merge-guard hook
-  enforces at the choke point, so skill and hook cannot drift (#1944 class):
+  enforces at the choke point, so skill and hook cannot drift:
   ```bash
   python -m tools.merge_predicate --pr-number {PR} --run-id {run_id} --json
   ```
@@ -33,23 +33,23 @@ generic steps as follows:
   - **(a) PR state**: OPEN, MERGEABLE, mergeStateStatus CLEAN, CI green
     (FAILURE/ERROR fail; pending is not-green), and a word-boundary
     `Closes/Fixes/Resolves #N` issue link in the body.
-  - **(b) DOCS stage gate** (the #1944 Step 2b semantics): `stages.DOCS ==
+  - **(b) DOCS stage gate**: `stages.DOCS ==
     completed` passes; `in_progress` hard-fails (the sole affirmative "DOCS
-    unfinished" signal — cuttlefish #577 shape); `pending`/empty stages degrade
+    unfinished" signal); `pending`/empty stages degrade
     to a `docs/features/{slug}.md` existence check, slug derived from the PR
     head ref (main/master/HEAD/empty → no usable slug → FAIL).
-  - **(c) REVIEW verdict freshness** (#2003 BLOCKER 2): a recorded verdict must
+  - **(c) REVIEW verdict freshness**: a recorded verdict must
     exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
     latest commit — via the head SHA the verdict attributes to
-    (`head_sha_of_record()`: the record's `head_sha` field, else a legacy
+    (`head_sha_of_record()`: the record's `head_sha` field, else a
     `REVIEW_CONTEXT head_sha=` trailer in the verdict text) when resolvable,
     else recorded-at timestamp vs latest-commit committer date. A stale
     APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`. The
     PR's current head SHA is resolved git-first via
     `tools/pr_head_resolver.py::resolve_pr_head_sha` (`git ls-remote
     refs/pull/N/head`, no shared cache with `gh`), so a stale `gh` head read
-    cannot match the trailer and pass a stale approval (#2404).
-  - **(d) Single-owner MERGE lease** (issue #2026, WS1): the merge actor's
+    cannot match the trailer and pass a stale approval.
+  - **(d) Single-owner MERGE lease**: the merge actor's
     `run_id` must hold the current per-issue SDLC lease. This refuses a
     parallel fork/lineage that never held the lease from merging past a
     supervisor's still-blocked gate (Race 2). Enforced only when `--run-id` is
@@ -67,7 +67,7 @@ generic steps as follows:
   verdict legs). Do NOT re-implement any of these checks inline in this file —
   the helper is the single source; the parity test
   (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
-  - **Tracked-issue resolution for (b)/(c) (#2034).** Groups (b) and (c) key
+  - **Tracked-issue resolution for (b)/(c).** Groups (b) and (c) key
     on the SDLC-tracked issue looked up in the durable `PipelineLedger` by PR
     number (`PipelineLedger.query.filter(pr_number=...)`, scoped to the repo
     resolved by `gh repo view`), not the first `Closes #N` in the PR body. A PR
@@ -87,12 +87,12 @@ generic steps as follows:
   predicate (`tools.merge_predicate`) when the merge command runs. On the happy
   path `/do-merge` does NOT create or delete any authorization file — the hook
   allows the merge because the predicate passes. The
-  `data/merge_authorized_{PR}` file survives only as an explicit **break-glass
+  `data/merge_authorized_{PR}` file is used only as an explicit **break-glass
   override** for a human operator when the substrate is down: it must contain a
-  line `override: <reason>` (non-empty reason). Empty or legacy touch-files are
+  line `override: <reason>` (non-empty reason). Empty touch-files are
   ignored (treated as absent), and so is a **spent** override — one whose PR is
   already merged or closed — so a file left behind after use cannot authorize
-  anything later (#2577). Every accepted override is logged at WARNING and
+  anything later. Every accepted override is logged at WARNING and
   emits the `merge_guard.override_used` metric, so uses surface on the
   dashboard. Delete the override file immediately after use anyway.
 - **Step 5 completion marker.** Same run identity as Step 0:
@@ -159,8 +159,8 @@ python scripts/migrate_completed_plan.py --issue <closed-issue-number> --apply
 This resolves the plan by reading its `tracking:` frontmatter (not by guessing a
 filename from the branch slug — a slug≠filename mismatch never bites) and does a
 guarded `git mv` into `docs/archive/plans-completed/`. The plan stays on `main` (not the
-branch) throughout the lifecycle — migrate it on `main` post-merge, the same as
-before, just via this command instead of a hand `git mv`.
+branch) throughout the lifecycle — migrate it on `main` post-merge via this
+command (not a hand `git mv`).
 
 The command is evidence-gated in code, so it is safe to run after **every**
 merge: it checks the issue's live state and prints `Verdict: skipped-open`
@@ -219,9 +219,9 @@ python scripts/post_merge_cleanup.py {slug}
 
 The branch `session/{slug}` is deleted automatically by GitHub on merge if "delete branch on merge" is enabled.
 
-### Busy Guard (issue #1357)
+### Busy Guard
 
-`post_merge_cleanup.py` refuses to delete a worktree while a non-terminal `AgentSession` still references it as `working_dir`. This protects against the macOS cwd-vanished wedge (investigation #1246): deleting a directory out from under a live SDK subprocess does not signal that subprocess; `getcwd(3)` returns ENOENT, the harness hangs forever in `proc.communicate()`, and the session row sits at `status=running` for hours.
+`post_merge_cleanup.py` refuses to delete a worktree while a non-terminal `AgentSession` still references it as `working_dir`. This protects against the macOS cwd-vanished wedge: deleting a directory out from under a live SDK subprocess does not signal that subprocess; `getcwd(3)` returns ENOENT, the harness hangs forever in `proc.communicate()`, and the session row sits at `status=running` for hours.
 
 The script's exit codes:
 
@@ -263,7 +263,7 @@ above) and the Lockfile Sync Check below. They each emit `GATES_FAILED` on
 failure; if any prints `GATES_FAILED`, report the specific blocker and do NOT
 merge.
 
-**The merge gate runs no tests** (#2376). Every gate command completes in
+**The merge gate runs no tests.** Every gate command completes in
 seconds and cannot wedge. Test responsibility lives elsewhere:
 
 - The **TEST stage** owns the final full-suite run before REVIEW (see
@@ -276,20 +276,21 @@ seconds and cannot wedge. Test responsibility lives elsewhere:
   result, and installs on any machine that owns a project (worker-role, not
   bridge-role) — see `docs/features/nightly-regression-tests.md`.
 
-  The wrapper is referred to obliquely on purpose: a #2376 guard forbids the
+  The wrapper is referred to obliquely on purpose: a guard forbids the
   runner's literal name anywhere in this section, so that merge-time test
   execution cannot creep back in even as prose. The bright line covers the
   whole section, not just live commands.
 
-Do not add a pytest invocation to this gate stack. The previous merge-time
+Do not add a pytest invocation to this gate stack. A merge-time
 full-suite gate (shape classifier, per-SHA verdict cache, categorised
-baseline comparison) wedged routinely — xdist bringup deadlocks, worker
-crashes, Redis DB pollution from concurrent suites — and was removed wholesale.
+baseline comparison) wedges routinely — xdist bringup deadlocks, worker
+crashes, Redis DB pollution from concurrent suites — so the gate stack
+carries no such step.
 
-### Review Verdict Freshness (moved into the shared predicate)
+### Review Verdict Freshness
 
-The stale-approval protection (#1932/#1941 class — an APPROVED verdict left
-over from before a force-push or new commits) is enforced as group (c) of the
+The stale-approval protection (an APPROVED verdict that predates a force-push
+or new commits) is enforced as group (c) of the
 shared predicate (`python -m tools.merge_predicate --pr-number {PR} --json`,
 already run in Steps 1–3 above): the recorded REVIEW verdict must be APPROVED
 AND fresh against the PR's latest commit, preferring the

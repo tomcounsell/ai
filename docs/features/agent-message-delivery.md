@@ -4,19 +4,18 @@
 
 Gives the agent final say over its own output before it reaches the user. Instead of raw text flowing blindly through the message drafter to Telegram, the agent reviews a draft of its response and chooses how to deliver it.
 
-**Vocabulary (Decision D, `docs/plans/consolidate_delivery_paths.md`):** the gate concept is the **delivery review gate** (matching the module docstring in `agent/hooks/stop.py` and the `── DELIVERY REVIEW GATE ──` UI label). The classifier's four outcome verbs are **send / react / silent / continue**. Handler-level results use the `DeliveryOutcome` enum (`sent | suppressed_redundant | suppressed_rtr | deferred_self_draft | dropped_empty`) — see [`DeliveryOutcome`](#deliveryoutcome-handler-result-values) below. "Send as-is" and "edit and send" are retired as distinct terms: both classify as `send`, since the drafter is verbatim pass-through and there is no server-side rewrite to distinguish an "edit" from.
+**Vocabulary (Decision D, `docs/plans/consolidate_delivery_paths.md`):** the gate concept is the **delivery review gate** (matching the module docstring in `agent/hooks/stop.py` and the `── DELIVERY REVIEW GATE ──` UI label). The classifier's four outcome verbs are **send / react / silent / continue**. Handler-level results use the `DeliveryOutcome` enum (`sent | suppressed_redundant | suppressed_rtr | deferred_self_draft | dropped_empty`) — see [`DeliveryOutcome`](#deliveryoutcome-handler-result-values) below. "Send as-is" and "edit and send" are not distinct terms: both classify as `send`, since the drafter is verbatim pass-through and there is no server-side rewrite to distinguish an "edit" from.
 
-**Correction (2026-07-09, issues #1955 / #1370):** the `agent/hooks/stop.py` "Stop Hook Review Gate" described below is **dead code for every session executed through `agent/session_runner/`** — both `session_type="eng"` (PM/Dev roles) and `session_type="teammate"` sessions. `agent/session_runner/hook_edge.py::generate_hook_settings` wires the Stop hook only to `hook_forwarder.py`, never to `agent/hooks/stop.py`; confirmed independently twice (once while building the local-file-path validator, [issue #1955](https://github.com/tomcounsell/ai/issues/1955), once during the freshness re-check of `docs/plans/consolidate_delivery_paths.md`). The section below is retained as historical/architectural documentation of the gate's design (it may still run for non-session_runner code paths), but **it is not the live violation-surfacing mechanism for production eng/teammate traffic today.** The live mechanism is the **self-draft steering path** (`_inject_self_draft_steering` in `agent/output_handler.py`, `:429-441`) described under [Filters layered on every send](#filters-layered-on-every-send) — every `Violation` the drafter computes (wire-format or, since #1955, local-file-path references) reaches the agent through that path, regardless of whether the stop-hook gate ever fires.
+The `agent/hooks/stop.py` "Stop Hook Review Gate" described below is **not wired for any session executed through `agent/session_runner/`** — neither `session_type="eng"` (PM/Dev roles) nor `session_type="teammate"` sessions. `agent/session_runner/hook_edge.py::generate_hook_settings` wires the Stop hook only to `hook_forwarder.py`, never to `agent/hooks/stop.py`. The section below is retained as architectural documentation of the gate's design (it may still run for non-session_runner code paths), but **it is not the live violation-surfacing mechanism for production eng/teammate traffic.** The live mechanism is the **self-draft steering path** (`_inject_self_draft_steering` in `agent/output_handler.py`, `:429-441`) described under [Filters layered on every send](#filters-layered-on-every-send) — every `Violation` the drafter computes (wire-format or local-file-path references) reaches the agent through that path, regardless of whether the stop-hook gate ever fires.
 
 ## Delivery paths
 
-Every remaining door into the outbound-message outbox, per the delivery-path
-registry required by `docs/plans/consolidate_delivery_paths.md` (issue
-#1370). Decision A declares `TelegramRelayOutputHandler.send` the single
-queue-side pipeline for agent-authored text (both transports) and
-`tools/send_message.py` the single agent-facing CLI wrapper; Decision B
-declares `deliver_system_notice()` the only sanctioned bypass for
-system-authored canned notices.
+Every door into the outbound-message outbox, per the delivery-path
+registry in `docs/plans/consolidate_delivery_paths.md`. Decision A declares
+`TelegramRelayOutputHandler.send` the single queue-side pipeline for
+agent-authored text (both transports) and `tools/send_message.py` the single
+agent-facing CLI wrapper; Decision B declares `deliver_system_notice()` the
+only sanctioned bypass for system-authored canned notices.
 
 | # | Path | Caller | Drafter | Self-draft steering | Redundancy filter | RTR | Promise gate / linkify | Why |
 |---|------|--------|---------|---------------------|--------------------|-----|-------------------------|-----|
@@ -28,7 +27,7 @@ system-authored canned notices.
 **Declared intentional divergences (registered, not defects):**
 
 - **`EmailOutputHandler.send` (`bridge/email_bridge.py`) — drafter-only, direct-SMTP posture.** Worker-registered email sessions route through this handler: it runs the drafter (`medium="email"`) but has no self-draft steering, no redundancy filter, and no RTR, and sends via direct SMTP rather than the `email:outbox` relay. Reconciling this with the `email:outbox` + relay mechanism is out of scope for this consolidation (see Rabbit Holes / No-Gos in the plan) — it touches retry/DLQ semantics and the email bridge lifecycle, a different blast radius.
-- **`valor-telegram send` — the human-operator CLI, not an agent delivery path.** Deliberately outside the agent delivery pipeline since issue #641 and reaffirmed by this plan. It queues via the same Redis relay (`bridge/telegram_relay.py`) but skips the canonical handler pipeline, the drafter, and summarizer-bypass recording. An agent session invoking it directly would break `has_pm_messages()` tracking; agent sessions must use `tools/send_message.py` (path 2) instead. See `.claude/skills/telegram/SKILL.md`'s PM Tool vs CLI Tool table.
+- **`valor-telegram send` — the human-operator CLI, not an agent delivery path.** Deliberately outside the agent delivery pipeline. It queues via the same Redis relay (`bridge/telegram_relay.py`) but skips the canonical handler pipeline, the drafter, and summarizer-bypass recording. An agent session invoking it directly would break `has_pm_messages()` tracking; agent sessions must use `tools/send_message.py` (path 2) instead. See `.claude/skills/telegram/SKILL.md`'s PM Tool vs CLI Tool table.
 
 **Registered, out-of-scope-for-consolidation (Rabbit Holes / No-Gos):**
 
@@ -60,12 +59,11 @@ when the pipeline reaches a terminal state (per
 dedicated "compose final summary" harness turn via
 `agent.session_completion._deliver_pipeline_completion`. The runner owns
 the final delivery end-to-end, bypassing the nudge loop and the review
-gate. See `docs/features/pm-final-delivery.md` for the full protocol
-(issue #1058 replaces the earlier `[PIPELINE_COMPLETE]` marker).
+gate. See `docs/features/pm-final-delivery.md` for the full protocol.
 
 ### Stop Hook Review Gate (`agent/hooks/stop.py`)
 
-> **Dead for session_runner sessions.** See the correction note in [Overview](#overview). `agent/session_runner/hook_edge.py::generate_hook_settings` never wires the Stop hook to this file for `eng`/`teammate` sessions — the steps below do not execute for that traffic. Read this section as the gate's design, not its current reachability.
+> **Not wired for session_runner sessions.** See the note in [Overview](#overview). `agent/session_runner/hook_edge.py::generate_hook_settings` never wires the Stop hook to this file for `eng`/`teammate` sessions — the steps below do not execute for that traffic. Read this section as the gate's design, not its current reachability.
 
 When a user-triggered session tries to stop:
 
@@ -92,7 +90,7 @@ Simple heuristic: if the agent's output is short (<500 chars) and contains promi
 
 ## Delivery Execution (tool-call path)
 
-Post-#1072 the stop hook does not write delivery fields to the `AgentSession`. The agent's delivery choice is the tool call it makes (or doesn't) during the second stop. `classify_delivery_outcome()` (`agent/hooks/stop.py:217-245`) inspects the transcript tail and maps the observed `tool_use` blocks to one of four outcomes:
+The stop hook does not write delivery fields to the `AgentSession`. The agent's delivery choice is the tool call it makes (or doesn't) during the second stop. `classify_delivery_outcome()` (`agent/hooks/stop.py:217-245`) inspects the transcript tail and maps the observed `tool_use` blocks to one of four outcomes:
 
 | Classified outcome | Agent action that produces it | Effect |
 |--------------------|-------------------------------|--------|
@@ -109,9 +107,9 @@ The synchronous SMTP path in `bridge/email_bridge.py::EmailOutputHandler.send` c
 
 Both the silent worker path and the CLI tool-call path (`tools/send_message.py`) reach `TelegramRelayOutputHandler.send`, which runs these filters in order on every invocation:
 
-0. **Transport resolution** (`_resolve_transport`) — (a) an explicit `extra_context["transport"]` always wins; (b) otherwise `system` is derived (issue #2497) when the session's Room addressee is the per-project `system` Room (chatless — reflection sessions' placeholder `chat_id="0"`, `chat_id = session_id` synthetics), the `chat_id` argument is not itself a deliverable nonzero numeric peer, and the session has a `project_key`; (c) otherwise `telegram`. A `system`-transport send short-circuits here — durable append to the system Room's inbox plus the file dual-write, skipping every filter below (there is no human audience to draft for) — so steps 1-6 apply to `telegram` and `email` only.
+0. **Transport resolution** (`_resolve_transport`) — (a) an explicit `extra_context["transport"]` always wins; (b) otherwise `system` is derived when the session's Room addressee is the per-project `system` Room (chatless — reflection sessions' placeholder `chat_id="0"`, `chat_id = session_id` synthetics), the `chat_id` argument is not itself a deliverable nonzero numeric peer, and the session has a `project_key`; (c) otherwise `telegram`. A `system`-transport send short-circuits here — durable append to the system Room's inbox plus the file dual-write, skipping every filter below (there is no human audience to draft for) — so steps 1-6 apply to `telegram` and `email` only.
 1. **Drafter** (`bridge.message_drafter.draft_message`) — pass-through with validation. The agent's own text is used verbatim after narration stripping and structural composition. No server-side LLM rewrite. Runs once, before the transport branch, with `medium="telegram"` or `medium="email"` based on `extra_context.transport`.
-2. **Self-draft steering** (PRIMARY flag-handling path, and — since #1955 — the sole live violation-surfacing mechanism for session_runner sessions; see the Overview correction) — when the drafter sets `needs_self_draft=True` (any non-empty `violations` list — wire-format violation, local file-path reference — or empty promise detected), `_inject_self_draft_steering(session, draft)` pushes a nudge back to the authoring agent asking it to rewrite. When `draft.violations` includes a `local_file_path_reference` entry, the pushed instruction gets a targeted addendum directing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` instead of re-pasting the dead local path (see [Message Drafter §Steering-first flag handling](message-drafter.md#steering-first-flag-handling)). The attempt count is tracked at `steering:attempts:{session_id}` in Redis (cap: `SELF_DRAFT_MAX_ATTEMPTS = 2`). On cap hit, falls through to the narration fallback. **Persist-at-defer-time (issue #1730):** before skipping the outbox write, the handler persists `deferred_self_draft_pending=True` and `deferred_self_draft_text=<original text>` into `AgentSession.extra_context` via a safe read-modify-write. The held text is recovered on **all** terminal paths including a clean `completed`: the synchronous helper `flush_deferred_self_draft_sync` in `agent/session_health.py` fires at the `finalize_session` chokepoint for **telegram** sessions on all terminal statuses and for **email** sessions on the `completed` path (issues #1794, #1797); the async helper `_deliver_deferred_self_draft_fallback` covers **email** sessions on `failed`/`abandoned`. See [Session Lifecycle §Deferred Self-Draft Fallback Delivery](session-lifecycle.md#deferred-self-draft-fallback-delivery-issues-1730-1794-1797).
+2. **Self-draft steering** (PRIMARY flag-handling path, and the sole live violation-surfacing mechanism for session_runner sessions; see the Overview note) — when the drafter sets `needs_self_draft=True` (any non-empty `violations` list — wire-format violation, local file-path reference — or empty promise detected), `_inject_self_draft_steering(session, draft)` pushes a nudge back to the authoring agent asking it to rewrite. When `draft.violations` includes a `local_file_path_reference` entry, the pushed instruction gets a targeted addendum directing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` instead of re-pasting the dead local path (see [Message Drafter §Steering-first flag handling](message-drafter.md#steering-first-flag-handling)). The attempt count is tracked at `steering:attempts:{session_id}` in Redis (cap: `SELF_DRAFT_MAX_ATTEMPTS = 2`). On cap hit, falls through to the narration fallback. **Persist-at-defer-time:** before skipping the outbox write, the handler persists `deferred_self_draft_pending=True` and `deferred_self_draft_text=<original text>` into `AgentSession.extra_context` via a safe read-modify-write. The held text is recovered on **all** terminal paths including a clean `completed`: the synchronous helper `flush_deferred_self_draft_sync` in `agent/session_health.py` fires at the `finalize_session` chokepoint for **telegram** sessions on all terminal statuses and for **email** sessions on the `completed` path; the async helper `_deliver_deferred_self_draft_fallback` covers **email** sessions on `failed`/`abandoned`. See [Session Lifecycle §Deferred Self-Draft Fallback Delivery](session-lifecycle.md#deferred-self-draft-fallback-delivery-issues-1730-1794-1797).
 3. **Redundancy filter** ([`bridge/redundancy_filter.py`](../../bridge/redundancy_filter.py)) — deterministic bigram-Jaccard guard for SDLC sessions, compares the drafted text against `session.recent_sent_drafts`. On `suppress` the payload is dropped; for telegram the handler queues a 👀 reaction on the anchor message.
 4. **Read-the-Room** ([`bridge/read_the_room.py`](../../bridge/read_the_room.py)) — Haiku-judged appropriateness gate (`READ_THE_ROOM_ENABLED`). Returns `send` | `trim` | `suppress`; on `suppress` for telegram the handler queues a 👀 reaction and skips the outbox.
 5. **Narration fallback** — when steering is exhausted (cap hit) or unavailable, the handler substitutes a fixed message rather than emitting pure process narration.
@@ -135,15 +133,15 @@ is no human on the other end of a chatless session), so writing it into the
 same durable Room inbox that Telegram intake shadow-writes to would pollute
 that inbox with content nobody will ever read. The debug log plus the
 `FileOutputHandler` dual-write is the audit trail instead. On the
-`telegram` path, behavior is unchanged: `react()` still derives
-`session_id = chat_id` and writes to `telegram:outbox:{chat_id}`.
+`telegram` path, `react()` derives `session_id = chat_id` and writes to
+`telegram:outbox:{chat_id}`.
 
-### Validator-aware terminal flush (local-path → attachment conversion, #2211)
+### Validator-aware terminal flush (local-path → attachment conversion)
 
 When a `local_file_path_reference` violation lands on a session's **final** message, the self-draft steering is never consumed (the turn is over, and `_reenqueue_leftover_steering` drops drafter-fallback steering), so the terminal flush owns delivery. The flush is validator-aware: before building the outbox payload it runs `bridge.message_drafter.convert_local_paths_to_attachments` on the deferred text, and the conversion runs **before** the narration gate so a narration-only sentence carrying a real path still attaches the file.
 
 - **Sync flush attaches** (`flush_deferred_self_draft_sync`, both branches): paths that exist on disk and survive the secret-exclusion gate ride the payload as real attachments — `file_paths=` is the call keyword for both builders (`build_telegram_outbox_payload` emits the `file_paths` wire key; `build_email_outbox_payload` maps the same param to the `attachments` wire key). Every detected path token — attached, dead, or secret-excluded — is scrubbed from the delivered text.
-- **Async fallback attaches too** (`_deliver_deferred_self_draft_fallback`, email failed/abandoned): `deliver_system_notice` now carries an optional `file_paths=` attachment channel (issue #2303), which the resolved send callback routes to the email outbox by transport. The fallback runs the same conversion and forwards the `attached` list, so it reaches attachment parity with the sync flush — the same two-armed empty-text guard applies (basename caption when a file attached, canned notice otherwise). No raw local path ever reaches the recipient.
+- **Async fallback attaches too** (`_deliver_deferred_self_draft_fallback`, email failed/abandoned): `deliver_system_notice` carries an optional `file_paths=` attachment channel, which the resolved send callback routes to the email outbox by transport. The fallback runs the same conversion and forwards the `attached` list, so it reaches attachment parity with the sync flush — the same two-armed empty-text guard applies (basename caption when a file attached, canned notice otherwise). No raw local path ever reaches the recipient.
 - **Secret-exclusion gate**: after the existence check, the token is resolved through `os.path.realpath` (symlinks cannot bypass the gate) and skipped if the realpath has any dot-prefixed component (`~/.ssh/id_rsa`, `~/.aws/credentials`), a sensitive extension (case-insensitive: `.env`, `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.keychain`), a known secret basename (`id_rsa`, `credentials`, `known_hosts`, …), or lives under the secrets vault (`~/Desktop/Valor/`). Skipped tokens are treated exactly like dead paths — scrubbed, never attached — and telemetry logs a count only, never the path.
 - **Empty-text guard (two-armed)**: if scrubbing empties the text, the flush captions with the attachment basename(s) when a file attached, or substitutes the canned `(the referenced file is no longer available)` notice when nothing did — so the relay's `if not text and not file_paths` guard never silently drops the payload.
 - **Never raises**: a helper exception degrades to delivering the unconverted text with a logged warning. Each conversion outcome increments a `{project_key}:session-health:deferred_flush_*` counter (`paths_attached`, `dead_paths_scrubbed`, `secret_paths_skipped`, `conversion_error`).
@@ -196,12 +194,10 @@ Failure Path Test Strategy):
 - [Config-Driven Chat Mode](config-driven-chat-mode.md) — Persona routing
 - [Eng Session Architecture](eng-session-architecture.md) — Session types
 - [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn delivery protocol (bypasses the review gate)
-- [Message Drafter](message-drafter.md) — `detect_local_file_reference` validator, violation promotion, and the violation-aware self-draft steering addendum (issue #1955); the `DeliveryOutcome` return surface
+- [Message Drafter](message-drafter.md) — `detect_local_file_reference` validator, violation promotion, and the violation-aware self-draft steering addendum; the `DeliveryOutcome` return surface
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — the bridge/worker split that registers `send_cb` and routes path 1 (end-of-turn forwarding) to the handler
 - [Read-the-Room Pre-Send Pass](read-the-room.md) — the RTR filter in the registry table above
 - [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) — the redundancy filter in the registry table above
 - [Promise Gate](promise-gate.md) — the CLI-side promise gate that runs only on path 2 (`tools/send_message.py`)
 - [Session Steering](session-steering.md) — the Redis steering list that carries self-draft steering nudges
-- `docs/plans/consolidate_delivery_paths.md` — the plan (#1370) that shipped the delivery-path registry above, `DeliveryOutcome`, `deliver_system_notice`, and the canonical vocabulary; its Freshness Check independently confirmed the stop-hook gate is dead for session_runner sessions
-- Issue [#1955](https://github.com/tomcounsell/ai/issues/1955) — local file-path flagging fix; source of the stop-hook-gate-is-dead correction above
-- Issue [#589](https://github.com/tomcounsell/ai/issues/589) — Tracking issue
+- `docs/plans/consolidate_delivery_paths.md` — the plan behind the delivery-path registry above, `DeliveryOutcome`, `deliver_system_notice`, and the canonical vocabulary

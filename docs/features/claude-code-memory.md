@@ -64,13 +64,12 @@ Claude Code CLI Session
                         (see docs/features/tui-interaction-capture.md)
 ```
 
-The Stop hook also drives **TUI interaction capture** (Pillar 3 of #1536): a
-separate, fail-silent `summarize_and_store()` call distills the session's
-human-in-the-loop interaction shape — slash-command sequence, mid-run steering,
-tool-approval tally, idle-gap interrupts — into one retrievable `pattern` Memory.
-This is an *interaction-shape* observation, distinct from the *content*
-observations Haiku extraction produces. See
-[`tui-interaction-capture.md`](tui-interaction-capture.md).
+The Stop hook also drives **TUI interaction capture**: a separate, fail-silent
+`summarize_and_store()` call distills the session's human-in-the-loop
+interaction shape — slash-command sequence, mid-run steering, tool-approval
+tally, idle-gap interrupts — into one retrievable `pattern` Memory. This is an
+*interaction-shape* observation, distinct from the *content* observations Haiku
+extraction produces. See [`tui-interaction-capture.md`](tui-interaction-capture.md).
 
 ## How It Works
 
@@ -81,13 +80,13 @@ The `user_prompt_submit.py` hook fires on every user prompt in Claude Code. It p
 1. Rejects prompts shorter than 50 characters
 2. Rejects trivial patterns ("yes", "continue", "ok", "lgtm", etc.)
 3. Checks the bloom filter for duplicate content
-4. Saves qualifying prompts as **provisional** Memory records at `PROVISIONAL_INGEST_IMPORTANCE` (no LLM call, so the hook's deadline is never at risk) -- unlike the Telegram path, which still saves verbatim at flat `importance=6.0`. A standing reflection distills the provisional record into a fact with content-derived importance out of band. See [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) for the full design.
+4. Saves qualifying prompts as **provisional** Memory records at `PROVISIONAL_INGEST_IMPORTANCE` (no LLM call, so the hook's deadline is never at risk) -- unlike the Telegram path, which saves verbatim at flat `importance=6.0`. A standing reflection distills the provisional record into a fact with content-derived importance out of band. See [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) for the full design.
 
 Registered in `.claude/settings.json` with a 15-second timeout, running after the calendar prompt hook.
 
 ### First-turn Prefetch (UserPromptSubmit Hook)
 
-After `ingest()`, the same `user_prompt_submit.py` hook calls `memory_bridge.prefetch(session_id, prompt, cwd)` (added in issue [#1180](https://github.com/tomcounsell/ai/issues/1180)). Unlike `recall()` -- which buffers tool calls and queries every `WINDOW_SIZE=3` -- prefetch runs immediately so the agent receives memory thoughts on the very first turn, before any tool fires.
+After `ingest()`, the same `user_prompt_submit.py` hook calls `memory_bridge.prefetch(session_id, prompt, cwd)`. Unlike `recall()` -- which buffers tool calls and queries every `WINDOW_SIZE=3` -- prefetch runs immediately so the agent receives memory thoughts on the very first turn, before any tool fires.
 
 The hook emits the result as a `hookSpecificOutput` JSON object on stdout. The `additionalContext` carries one or more compact stubs — the same format the PostToolUse `recall()` path uses — not full memory bodies (see [Progressive Disclosure](#progressive-disclosure-stub-injection-and-memory-mcp-tools)):
 
@@ -102,7 +101,7 @@ Claude Code prepends `additionalContext` to the agent's first system message.
 1. Strips `FROM:`/`SCOPE:`/`MESSAGE:` boilerplate from worker-spawned PM/Teammate prompts so BM25 ranks against the user payload, not the routing template.
 2. Applies the same `MIN_PROMPT_LENGTH` and `TRIVIAL_PATTERNS` gates as `ingest()`.
 3. Runs a single `_recall_with_query(prompt, project_key, exclude_ids)` call -- no clustering, since the prompt is already a coherent query.
-4. Suppresses the deja vu fallback (`bloom_check_emit_dejavu=False`) -- novel-territory thoughts on the user-visible first turn are pure noise (issue [#627](https://github.com/tomcounsell/ai/issues/627)).
+4. Suppresses the deja vu fallback (`bloom_check_emit_dejavu=False`) -- novel-territory thoughts on the user-visible first turn are pure noise.
 5. Times the call; logs a warning when elapsed exceeds `PREFETCH_LATENCY_WARN_MS = 200` (in `config/memory_defaults.py`).
 6. Appends surfaced memory IDs to the shared sidecar `injected[]` list, preserving the `count` and `buffer` fields owned by `recall()`.
 
@@ -114,12 +113,12 @@ Claude Code prepends `additionalContext` to the agent's first system message.
 
 ### Recall (PostToolUse Hook)
 
-The `post_tool_use.py` hook calls `memory_bridge.recall()` after its existing SDLC state tracking. The recall system uses a file-based sliding window since hooks run as stateless processes:
+The `post_tool_use.py` hook calls `memory_bridge.recall()` after its SDLC state tracking. The recall system uses a file-based sliding window since hooks run as stateless processes:
 
 1. Each tool call is appended to a JSON sidecar file at `data/sessions/{session_id}/memory_buffer.json`
 2. The buffer is capped at 9 entries (BUFFER_SIZE)
 3. Every 3rd tool call (WINDOW_SIZE), keywords are extracted from the buffer
-4. Keywords are checked against the Memory bloom filter; the gate requires at least `BLOOM_MIN_HITS = 2` distinct token hits before BM25 + RRF runs (the `bloom_hits == 0` deja-vu / novel-territory branch is preserved)
+4. Keywords are checked against the Memory bloom filter; the gate requires at least `BLOOM_MIN_HITS = 2` distinct token hits before BM25 + RRF runs (a `bloom_hits == 0` result takes the deja-vu / novel-territory branch)
 5. On bloom-gate pass, ContextAssembler queries Redis for relevant memories with `min_rrf_score=RRF_MIN_SCORE` so post-fusion records below the relevance floor are dropped before hydration
 6. Up to 3 matching memories are formatted as compact stub blocks `<thought id="mem_xyz">[category] title</thought>` and returned via the hook's `additionalContext` response field. The agent calls `memory_get(memory_id)` (MCP tool) to pull the full body when a stub looks worth reading.
 7. Injected memory IDs **with their full content** are recorded in the sidecar's `injected[]` for later outcome detection — the LLM outcome judge needs the full string to distinguish acted / used / dismissed
@@ -143,12 +142,12 @@ The `stop.py` hook calls `memory_bridge.extract()` after backing up the session 
 2. Truncates to 8000 characters for the Haiku API call
 3. Runs `extract_observations_async()` to save categorized observations (corrections, decisions, patterns, surprises)
 4. Reads injected thought IDs from the sidecar file
-5. Runs `detect_outcomes_async()` to classify each injected memory as `"acted"` (drove response), `"used"` (consumed but did not drive response), or `"dismissed"` (no relationship). LLM judgment (Haiku) is primary; when the LLM call fails the bigram-overlap fallback emits `"deferred"` (a neutral no-op) for **every** injection rather than guessing `acted`/`dismissed` — keyword overlap is not causal use, so a cheap heuristic must not manufacture confidence signal (issue #2203, [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203))
+5. Runs `detect_outcomes_async()` to classify each injected memory as `"acted"` (drove response), `"used"` (consumed but did not drive response), or `"dismissed"` (no relationship). LLM judgment (Haiku) is primary; when the LLM call fails the bigram-overlap fallback emits `"deferred"` (a neutral no-op) for **every** injection rather than guessing `acted`/`dismissed` — keyword overlap is not causal use, so a cheap heuristic must not manufacture confidence signal ([Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203))
 6. Cleans up all sidecar files for the session
 
-A session that crashes or is killed before reaching step 6 leaves an orphaned sidecar with unresolved injections. The `memory-outcome-resolve` reflection (issue #2203) sweeps those orphans past `INJECTION_RESOLVE_TTL` and resolves them to `deferred`, so crash-lost sessions no longer silently drop their injection signal — see [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203).
+A session that crashes or is killed before reaching step 6 leaves an orphaned sidecar with unresolved injections. The `memory-outcome-resolve` reflection sweeps those orphans past `INJECTION_RESOLVE_TTL` and resolves them to `deferred`, so crash-lost sessions do not silently drop their injection signal — see [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203).
 
-**Extraction now runs detached, off the 10-second Stop-hook wall.** `stop.py` persists the transcript synchronously, then spawns `.claude/hooks/hook_utils/stop_detach_worker.py` as a real detached subprocess (`Popen(..., start_new_session=True)`, redirected/closed streams — never a thread) and exits 0 immediately; the harness's 10s timeout no longer races the Haiku round-trips inside `extract()`. This replaced the previous inline call, which measurably timed out on the median run (126 of 131 sampled sessions) and got SIGKILLed mid-round-trip with no chance for its own `except Exception: logger.warning(...)` handler to fire. The detached worker enforces its own self-deadline (`HOOK_DETACH_DEADLINE_SECONDS`, default 120s, via a `SIGALRM`-raised `BaseException` subclass so `memory_bridge`'s broad `except Exception` can't swallow it) and a concurrency cap (`HOOK_DETACH_MAX_INFLIGHT`, default 3, via atomically-reserved lock-slot files) so an SDLC batch ending many turns at once can't fan out an unbounded number of Haiku/`gh` workers. See [Hook Manifest](hook-manifest.md#detached-stop-extraction) and [Memory Hook Performance](memory-hook-performance.md) for the full mechanism and root-cause writeup.
+**Extraction runs detached, off the 10-second Stop-hook wall.** `stop.py` persists the transcript synchronously, then spawns `.claude/hooks/hook_utils/stop_detach_worker.py` as a real detached subprocess (`Popen(..., start_new_session=True)`, redirected/closed streams — never a thread) and exits 0 immediately; the harness's 10s timeout does not race the Haiku round-trips inside `extract()`. The detached worker enforces its own self-deadline (`HOOK_DETACH_DEADLINE_SECONDS`, default 120s, via a `SIGALRM`-raised `BaseException` subclass so `memory_bridge`'s broad `except Exception` can't swallow it) and a concurrency cap (`HOOK_DETACH_MAX_INFLIGHT`, default 3, via atomically-reserved lock-slot files) so an SDLC batch ending many turns at once can't fan out an unbounded number of Haiku/`gh` workers. See [Hook Manifest](hook-manifest.md#detached-stop-extraction) and [Memory Hook Performance](memory-hook-performance.md) for the full mechanism.
 
 ## Progressive Disclosure (Stub Injection and Memory MCP Tools)
 
@@ -211,7 +210,7 @@ python scripts/update/run.py --verify
 # Repair (writes if missing or drifted)
 python scripts/update/run.py --full
 
-# Backfill titles for pre-existing records
+# Backfill titles for existing records
 python scripts/backfill_memory_titles.py --dry-run
 python scripts/backfill_memory_titles.py
 ```
@@ -220,20 +219,20 @@ python scripts/backfill_memory_titles.py
 
 Worker-spawned Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
 
-> **Note:** Direct CLI sessions (developer running `claude` at the terminal) do **not** create AgentSession records. The UserPromptSubmit hook gates creation on the presence of `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` environment variables, which are only set by `agent/session_executor.py`'s `_harness_env` for worker-spawned sessions (issue [#1001](https://github.com/tomcounsell/ai/issues/1001)). Memory extraction, transcript backup, and all other hook functionality continue to work normally for direct CLI sessions — they simply have no AgentSession record.
+> **Note:** Direct CLI sessions (developer running `claude` at the terminal) do **not** create AgentSession records. The UserPromptSubmit hook gates creation on the presence of `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` environment variables, which are only set by `agent/session_executor.py`'s `_harness_env` for worker-spawned sessions. Memory extraction, transcript backup, and all other hook functionality work normally for direct CLI sessions — they simply have no AgentSession record.
 
 1. **UserPromptSubmit hook**: On the first prompt of a session, the hook decides between two paths:
-   - **Worker-spawned subprocess (attach path, issue [#1157](https://github.com/tomcounsell/ai/issues/1157)):** if `AGENT_SESSION_ID` or `VALOR_SESSION_ID` resolves to a live (non-terminal) AgentSession, the hook writes that session's `agent_session_id` into the sidecar and returns. **No new record is created.** The worker has already created the authoritative AgentSession record before spawning the subprocess, and the env vars communicate "I already own you." Before this guard landed, the hook would mint a `local-*` phantom twin for every worker-spawned PM/Teammate subprocess, causing `wait-for-children` to terminate instantly on a self-referential phantom child.
+   - **Worker-spawned subprocess (attach path):** if `AGENT_SESSION_ID` or `VALOR_SESSION_ID` resolves to a live (non-terminal) AgentSession, the hook writes that session's `agent_session_id` into the sidecar and returns. **No new record is created.** The worker creates the authoritative AgentSession record before spawning the subprocess, and the env vars communicate "I already own you." This prevents a `local-*` phantom twin for worker-spawned PM/Teammate subprocesses.
    - **Direct-CLI fallback (create path):** if neither env var resolves, the hook falls through to the existing gate and calls `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. This path is reserved for direct-CLI users (developer running `claude` at the terminal with `SESSION_TYPE=dev` exported). The `SESSION_TYPE` env var determines the persona; `VALOR_PARENT_SESSION_ID` (if set) links to a parent.
-   - **Terminal-session safety (preserves [#1113](https://github.com/tomcounsell/ai/issues/1113)):** if the resolved env-var target is in a terminal state (killed/completed/failed/abandoned/cancelled), the hook falls through to the create path rather than re-activating. Terminal sessions are operator-resume-only.
+   - **Terminal-session safety:** if the resolved env-var target is in a terminal state (killed/completed/failed/abandoned/cancelled), the hook falls through to the create path rather than re-activating. Terminal sessions are operator-resume-only.
 2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar. Primary lookup via `AgentSession.get_by_id()` (fast path for attached worker sessions); falls back to `query.filter(session_id=f"local-{claude_session_id}")` reconstruction for direct-CLI sessions. Updates `updated_at` timestamp and increments `tool_call_count` on the resolved record.
 3. **Stop hook**: Reads `agent_session_id` from the sidecar. Same primary/fallback lookup pattern as PostToolUse. Sets `completed_at` and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash") on the resolved record.
 
-The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
+The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query`. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
 
 The `AgentSession.create_local(...)` call requires only `session_id`, `project_key`, and `working_dir`. The `session_type` defaults to `"dev"` but is overridden by the `SESSION_TYPE` env var when set. Local sessions omit all Telegram-specific fields (no `chat_id` or `parent_agent_session_id`).
 
-> **Attach-vs-create is strict prevention.** After issue #1157, worker-spawned subprocesses produce exactly ONE AgentSession row (the worker-created one). The UserPromptSubmit hook attaches via env vars; no phantom `local-*` twin is ever written to Redis. The `create_local()` method body is untouched — only the call-site precondition changed.
+> **Attach-vs-create is strict prevention.** Worker-spawned subprocesses produce exactly ONE AgentSession row (the worker-created one). The UserPromptSubmit hook attaches via env vars; no phantom `local-*` twin is written to Redis. The `create_local()` factory runs only from the direct-CLI create path.
 
 ## State Management
 
@@ -304,26 +303,7 @@ All four public functions in `memory_bridge.py` accept a `cwd` parameter:
 3. Derive from the directory basename (`Path(cwd).name`)
 4. Fall through to `config.memory_defaults.DEFAULT_PROJECT_KEY` (value: `"default"`)
 
-The fallback value `"default"` is a neutral sentinel. It was previously `"dm"`, which caused all hook-created memories to be mislabeled as Telegram DM-sourced. The change to `"default"` prevents silent cross-partition contamination when `cwd` is unavailable.
-
-### One-time Migration
-
-If you have existing Memory records under the obsolete `project_key="default"` or `project_key="dm"` partitions, run the migration script:
-
-```bash
-# Preview -- no writes
-python scripts/migrate_memory_project_key.py
-
-# Apply
-python scripts/migrate_memory_project_key.py --apply
-```
-
-The script handles BOTH legacy buckets:
-
-- `project_key="default"` — all records (legacy SDK-spawned-session writes that fell through to `config/memory_defaults.DEFAULT_PROJECT_KEY`).
-- `project_key="dm"` — only mislabeled hook-source records. Genuine Telegram DM records (identified by `source="human"` AND `agent_id="dm"`) stay under `"dm"`.
-
-All migrated records are re-keyed to `"valor"` (the canonical project_key for `~/src/ai`) via Popoto's supported `save(migrate_key=True)` path — no raw Redis. The migration is idempotent and safe to run while the bridge is running. After the issue #1171 plist deploy, this script was run once on the canonical machine: 222 records (218 default + 4 mislabeled dm) re-tagged to `valor`.
+The fallback value `"default"` is a neutral sentinel, preventing silent cross-partition contamination when `cwd` is unavailable.
 
 ## Configuration
 
@@ -360,22 +340,12 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | State management | In-memory dicts | JSON sidecar files |
 | Entry point | `agent/memory_hook.py` | `.claude/hooks/hook_utils/memory_bridge.py` |
 | Recall trigger | `check_and_inject()` in health check | `recall()` called from PostToolUse hook |
-| Extraction trigger | `_schedule_post_session_extraction()` in session_executor (fire-and-forget after `complete_transcript`; hotfix #1055) | `extract()` called from Stop hook |
+| Extraction trigger | `_schedule_post_session_extraction()` in session_executor (fire-and-forget after `complete_transcript`) | `extract()` called from Stop hook |
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
-| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession attached or created by UserPromptSubmit hook. Worker-spawned subprocesses **attach** to the worker's existing record via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no new record (issue #1157). Direct-CLI subprocesses fall through to `AgentSession.create_local(session_type=SESSION_TYPE env var, ...)` only if `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set; otherwise no AgentSession is created. |
+| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession attached or created by UserPromptSubmit hook. Worker-spawned subprocesses **attach** to the worker's existing record via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no new record. Direct-CLI subprocesses fall through to `AgentSession.create_local(session_type=SESSION_TYPE env var, ...)` only if `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set; otherwise no AgentSession is created. |
 | Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
 | Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 
 Both paths write to the same Redis Memory model. Memories created in Claude Code sessions are visible to Telegram agent sessions and vice versa. Deja vu thresholds and category recall weights are shared via `config/memory_defaults.py`.
-
-## Tracking
-
-- Issue: [#519](https://github.com/tomcounsell/ai/issues/519)
-- PR: [#525](https://github.com/tomcounsell/ai/pull/525)
-- Prerequisite: [Subconscious Memory](subconscious-memory.md) (PR #515)
-- Related: [Memory Search Tool](memory-search-tool.md) (issue #518)
-- Observability and parity: [#552](https://github.com/tomcounsell/ai/issues/552) (PR [#560](https://github.com/tomcounsell/ai/pull/560)) -- AgentSession lifecycle tracking for local sessions, deja vu parity, post-merge learning
-- Project key isolation fix: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- cwd threading through hook entry points, DEFAULT_PROJECT_KEY changed from "dm" to "default", migration script
-- Progressive disclosure + memory MCP server: [#1178](https://github.com/tomcounsell/ai/issues/1178) (PR [#1255](https://github.com/tomcounsell/ai/pull/1255)) -- compact stub injection in `recall()` / `prefetch()`, sidecar full-content invariant, `memory_get` / `memory_search` MCP tools (`mcp_servers/memory_server.py`), idempotent `~/.claude.json` registration via `scripts/update/mcp_memory.py`, async title generator wired at all 7 writer call sites

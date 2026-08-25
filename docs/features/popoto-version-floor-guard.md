@@ -3,7 +3,6 @@
 A fail-closed interlock that refuses to rebuild Popoto indexes when the running
 interpreter's popoto is below the floor declared in `pyproject.toml`.
 
-**Why it exists:** issue [#2536](https://github.com/tomcounsell/ai/issues/2536).
 Running repo code under a below-floor popoto silently destroys the AgentSession
 index. This guard makes it refuse instead.
 
@@ -35,8 +34,7 @@ unpacking to attribute access and therefore never touches the pointer fields —
 popoto. The system looks completely healthy right up to the moment a rebuild
 destroys it.
 
-This is the 2026-07-14 incident recorded in the module docstring of
-`agent/index_drift.py`. That module is the **alarm** — it detects the aftermath.
+`agent/index_drift.py` is the **alarm** — it detects the aftermath.
 This guard is the **interlock** — it prevents the cause.
 
 ## How it works
@@ -152,4 +150,3 @@ renamed or relocated, the install reports loudly and leaves the seam off; the
 
 - [`agent/index_drift.py`](../../agent/index_drift.py) — detect-only drift reconciliation; the alarm to this interlock
 - [`docs/features/popoto-descriptor-pollution-ledger.md`](popoto-descriptor-pollution-ledger.md) — the index-pointer contract this guard depends on
-- Issues [#2536](https://github.com/tomcounsell/ai/issues/2536) (this guard), [#2086](https://github.com/tomcounsell/ai/issues/2086) (same root cause, closed without code), [#2207](https://github.com/tomcounsell/ai/issues/2207) (phantom index hashes — a different problem)
