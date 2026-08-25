@@ -3,9 +3,10 @@
 Issue #2875.
 
 The five self-healing reflections moved to ``reflections/agents/*.py`` in #1028,
-and ``agent/sustainability.py`` has existed since then purely so the registry's
-historical dotted paths keep resolving. Retiring the shim requires the registry
-to name the real modules first.
+and ``agent/sustainability.py`` existed from then until #2875 purely so the
+registry's historical dotted paths kept resolving. Retiring the shim required
+the registry to name the real modules first, and keeps requiring it: a machine
+whose registry reacquires a shim path now has nothing to fall back on.
 
 **Why this is a script and not a file edit.** ``config/reflections.yaml`` is
 gitignored — deliberately untracked in c2af09602 (Apr 2026) via ``git rm
@@ -61,8 +62,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 #: Historical shim path -> canonical per-reflection module path.
 #:
-#: Mirrors the re-export table in ``agent/sustainability.py``'s docstring. Note
-#: that ``sustainability_digest`` maps to the ``system_health_digest`` module —
+#: This table is the sole surviving record of the deleted shim's re-export map,
+#: so the SOURCE-side keys must stay verbatim: they are what the rewrite matches
+#: against on a machine that has not yet run ``/update``. Note that
+#: ``sustainability_digest`` maps to the ``system_health_digest`` module —
 #: the module name does NOT match the old callable name, and the naive
 #: ``reflections.agents.sustainability_digest.run`` would be a silent
 #: ImportError at execution time.

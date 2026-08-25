@@ -140,7 +140,7 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
         """With VALOR_PROJECT_KEY=valor, recovery_drip queries project_key="valor"."""
         # Patch AgentSession.query.filter so we can capture the call args.
         from models import agent_session as agent_session_mod
-        from reflections.agents import session_recovery_drip as sust_mod
+        from reflections.agents import session_recovery_drip as drip_mod
 
         captured_filter_kwargs = []
 
@@ -158,10 +158,10 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch.object(sust_mod, "get_redis", return_value=r),
+            patch.object(drip_mod, "get_redis", return_value=r),
             patch.object(agent_session_mod, "AgentSession", _FakeAgentSession),
         ):
-            sust_mod.run()
+            drip_mod.run()
 
         # We expect at least one filter call to have been made with
         # project_key="valor". The function may make multiple filter calls

@@ -1072,6 +1072,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not rcr.success:
         log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
         _append_warning(result, f"reflection callable migration: {rcr.error}")
+        # Not fail-open: Step 4.65 turns this failure into a skipped service
+        # restart, because the deleted shim is no longer there to absorb an
+        # unmigrated registry.
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
@@ -1770,6 +1773,32 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             # Suppress restart for the rest of this run. The existing bridge
             # process keeps running on the previously validated config.
+            config = replace(config, do_service_restart=False)
+
+    # Step 4.65: Reflection-callable migration — green-light gate for service
+    # restart. Step 1.659 rewrites any registry entry that still names the
+    # deleted `agent.sustainability` shim. While the shim existed it was the
+    # backstop: a failed migration was benign because the stale dotted paths
+    # still imported. #2875 deleted the shim, so there is no backstop left —
+    # restarting the worker against an unmigrated registry means five
+    # self-healing reflections raise ImportError inside
+    # `reflection_scheduler.run_reflection`'s broad `except`, which records
+    # `state.last_error` and keeps ticking with no alert. Same gate pattern as
+    # Steps 4.6/4.7: skip the restart, leave the running worker on the registry
+    # it already resolved.
+    if config.do_service_restart and result.reflections_callables_result is not None:
+        rcr_gate = result.reflections_callables_result
+        if not rcr_gate.success:
+            log(
+                f"FAIL: reflection callable migration failed — skipping service restart\n"
+                f"  {rcr_gate.error}",
+                v,
+                always=True,
+            )
+            _append_warning(
+                result,
+                f"reflection callables unmigrated; service restart skipped: {rcr_gate.error}",
+            )
             config = replace(config, do_service_restart=False)
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.

@@ -96,7 +96,7 @@ In `config/reflections.yaml`, one-file-each under `reflections/agents/`:
 | `reflections.agents.session_recovery_drip.run` | `reflections/agents/session_recovery_drip.py::run` |
 | `reflections.agents.system_health_digest.run` | `reflections/agents/system_health_digest.py::run` |
 
-`send_hibernation_notification` lives in `reflections/agents/circuit_health_gate.py`. `get_project_key` and `get_redis` are the shared helpers in `reflections/redis_access.py`, imported by `reflections/agents/*.py` and `reflections/stall_advisory.py` (used by `agent/agent_session_queue.py` for hibernation notification).
+`send_hibernation_notification` (used by `agent/agent_session_queue.py` for hibernation notification) lives in `reflections/agents/circuit_health_gate.py`. `get_project_key` and `get_redis` are the shared helpers in `reflections/redis_access.py`, imported by `reflections/agents/*.py` and `reflections/stall_advisory.py`.
 
 ```yaml
 - name: circuit-health-gate
@@ -149,9 +149,8 @@ python -m reflections  # runs the reflection scheduler
 
 **Run a specific reflection:**
 ```python
-import asyncio
 from reflections.agents.circuit_health_gate import run
-asyncio.run(run())
+run()  # the reflection callables are synchronous
 ```
 
 ## Test Coverage
