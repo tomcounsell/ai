@@ -211,7 +211,7 @@ Use `--no-verify` on intermediate WIP commits only. Final commits must go throug
 
 ## Test Isolation
 
-Unit tests in `tests/unit/` must never touch production Redis. Use `REDIS_TEST_DB` or a separate prefix. Bulk Redis operations must always be project-scoped. See `tests/README.md` for test markers.
+Unit tests in `tests/unit/` must never touch production Redis. `tests/conftest.py::pytest_configure` claims a private db from the pool `[1..15]` per pytest process and exports it as both `POPOTO_TEST_DB` and `REDIS_URL` (#2805) — no builder action is required for a test process or its children to land on the claimed db by construction. Bulk Redis operations must always be project-scoped. See `tests/README.md` for test markers.
 
 ## Worktree Pattern
 

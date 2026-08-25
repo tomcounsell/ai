@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import fcntl
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
 import types
@@ -525,6 +527,22 @@ class TestPerProcessDbClaim:
         set — so assertions can read them.
         """
         monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+        # The synthetic registry hands back a db this process does not own, so the
+        # real export would poison the live session env for every later test in this
+        # worker. Suppress the write instead of undoing it: there is then no window
+        # in which os.environ names a foreign db (#2805 Risk 1). This helper — not
+        # each of its 23 call sites — owns the suppression, so the next direct
+        # pytest_configure() caller is protected without anyone remembering.
+        #
+        # REDIS_URL itself is deliberately NOT touched here (no delenv, no setenv):
+        # with the write suppressed at the source there is nothing to restore, and
+        # a delenv would make REDIS_URL absent for the duration of all 23 tests that
+        # use this helper -- at which point every one of the 20 lazy REDIS_URL
+        # consumers in tests/ and production modules falls back to its hardcoded
+        # "redis://localhost:6379/0" default, manufacturing the exact db0 exposure
+        # #2805 exists to remove.
+        monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
         monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
         monkeypatch.setattr(_db_claim, "_CLAIMED_SCRATCH_DB", None, raising=False)
@@ -852,6 +870,104 @@ class TestPerProcessDbClaim:
         finally:
             self._close_fds(fds)
 
+    def test_live_process_redis_url_names_its_own_claim(self):
+        """The live session's REDIS_URL names this process's claimed db.
+
+        Per-worker independence check: unlike the leak probe in
+        ``TestExportedRedisUrlSurvivesSyntheticHookCalls`` (which runs LAST and
+        proves nothing polluted this process's claim across the whole file),
+        this assertion runs under ``-n 2 --dist=each`` to prove EACH worker's
+        own process resolves its OWN claim, independent of its siblings.
+        """
+        assert os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")
+
+    def test_unguarded_child_inherits_the_parents_claimed_redis_url(self):
+        """A plain subprocess.run with NO env= resolves REDIS_URL to the same
+        value as the parent's os.environ -- byte-identical, not merely present.
+
+        This is what #2805 makes true by construction: no scanner, no
+        allowlist, nothing for a test author to remember.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", "import os; print(os.environ['REDIS_URL'])"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        child_url = result.stdout.strip()
+        assert child_url == os.environ["REDIS_URL"]
+
+    def test_nested_pytest_child_claims_its_own_db(self, tmp_path):
+        """A nested pytest child spawned WITHOUT env= inherits the parent's
+        REDIS_URL, then overwrites it with its OWN claim (#2628 invariant).
+
+        The nested target must live UNDER ``tests/``, not merely under the repo
+        root: pytest only auto-loads a ``conftest.py`` found in an ANCESTOR
+        directory of the collected file. A probe placed as a sibling of
+        ``tests/`` (e.g. directly under repo root) never picks up
+        ``tests/conftest.py``, so the child inherits the parent's env
+        unchanged and never runs its own ``pytest_configure`` -- this
+        assertion would then always fail, for a reason having nothing to do
+        with the #2628 invariant under test.
+
+        The nested dir/probe filename is worker-scoped (PID suffix): under
+        ``-n 2 --dist=each`` two workers run this test concurrently, and a
+        shared path lets one worker's ``finally``-block unlink race the
+        other's still-running nested pytest, producing a spurious
+        ``FileNotFoundError`` that has nothing to do with the #2628
+        invariant under test.
+        """
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        nested_dir = repo_root / "tests" / f".pytest_nested_probe_2805_{os.getpid()}"
+        nested_dir.mkdir(exist_ok=True)
+        probe_file = nested_dir / "test_probe.py"
+        out_file = tmp_path / "nested_redis_url.txt"
+        try:
+            probe_file.write_text(
+                "import os\n"
+                "def test_probe():\n"
+                f"    open({str(out_file)!r}, 'w').write(os.environ['REDIS_URL'])\n"
+            )
+            parent_url = os.environ["REDIS_URL"]
+            subprocess.run(
+                [sys.executable, "-m", "pytest", str(probe_file), "-p", "no:randomly", "-n0", "-q"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            nested_url = out_file.read_text()
+            assert nested_url != parent_url, (
+                "a nested pytest child must claim its own db, not inherit the parent's "
+                "(#2628) -- it overwrites the inherited REDIS_URL with its own claim"
+            )
+        finally:
+            probe_file.unlink(missing_ok=True)
+            shutil.rmtree(nested_dir, ignore_errors=True)
+
+    def test_non_splatting_env_drops_redis_url(self):
+        """DOCUMENTATION TEST, not a behavior the system provides.
+
+        The retired 688-line AST guard (``test_subprocess_test_db_isolation.py``,
+        deleted by #2805) used to flag any ``env=`` value that was not an
+        ``ast.Call``/``ast.Name`` -- including a non-splatting dict literal like
+        ``env={"PYTHONPATH": ...}``. That shape drops REDIS_URL entirely and the
+        export CANNOT rescue it, because the child never inherits ``os.environ``
+        at all. This is the coverage gap #2805's Risk 2 accepts: it is rarer
+        than writing no ``env=`` (the shape the export now handles by
+        construction), and the runtime backstops (tools/redis_flush_guard.py on
+        a db0 flush; conftest's claimed-db flush guard) still fail closed
+        underneath it.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", "import os; print('REDIS_URL' in os.environ)"],
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "False"
+
 
 # ---------------------------------------------------------------------------
 # Test D — shared-exception identity guard (Fix for #2603)
@@ -1093,7 +1209,6 @@ class TestSessionClaimHook:
         makes exhaustion fatal.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=2))
             assert _db_claim._CLAIMED_TEST_DB is None
@@ -1105,7 +1220,6 @@ class TestSessionClaimHook:
     def test_worker_claims_and_exports_popoto_test_db(self, monkeypatch, tmp_path):
         """A worker claims, and points popoto's plugin at the same db."""
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             config = self._stub_config(worker=True, numprocesses=4)
             _conftest.pytest_configure(config)
@@ -1123,7 +1237,6 @@ class TestSessionClaimHook:
         claims nothing and the fail-closed guard denies every flush.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=0))
             assert _db_claim._CLAIMED_TEST_DB is not None
@@ -1362,3 +1475,41 @@ class TestReloadedRegistryIdentity:
             index_drift.DRIFT_COVERED_MODELS = original_registry
             original_registry.clear()
             original_registry.update(original_contents)
+
+
+# ---------------------------------------------------------------------------
+# Test H — REDIS_URL export survives synthetic hook calls (#2805)
+# ---------------------------------------------------------------------------
+class TestExportedRedisUrlSurvivesSyntheticHookCalls:
+    """The permanent leak-detection probe for #2805.
+
+    Placed in its own class at the END of this file, deliberately -- NOT inside
+    ``TestPerProcessDbClaim`` (line ~452), which runs BEFORE the synthetic
+    ``pytest_configure()`` calls in ``TestSessionClaimHook`` (line ~1080+). A
+    probe collected earlier in the file is structurally incapable of observing
+    a leak that a later class's synthetic hook calls would introduce, so this
+    class runs last under ``-p no:randomly`` and reads ``os.environ`` after
+    every synthetic hook call in the file has already run.
+
+    This is a DIFFERENT property from the four behavioral assertions in
+    ``TestPerProcessDbClaim`` (live-process claim naming under per-worker
+    ``--dist=each``, unguarded-child inheritance, nested-pytest own-claim, and
+    the non-splatting-``env=`` coverage-gap documentation test): those prove
+    the export mechanism works in isolation; this one proves nothing EARLIER
+    in the file's synthetic ``pytest_configure()`` calls corrupted the live
+    session's ``REDIS_URL`` by the time collection reaches the end of the
+    file. A probe with this same body placed anywhere in ``TestPerProcessDbClaim``
+    (line 452, collected before the synthetic calls at 1098+) would be
+    structurally incapable of ever going red -- this class exists solely to
+    give that check something meaningful to observe.
+    """
+
+    def test_redis_url_unpolluted_by_synthetic_hook_calls(self):
+        """The live session's REDIS_URL still names this process's claimed db
+        after every synthetic ``pytest_configure()`` call in this file has run.
+
+        This is the permanent regression test for #2805: it fails the instant
+        the export in ``pytest_configure`` stops running, is shadowed, or is
+        left corrupted by one of this file's own synthetic hook-call tests.
+        """
+        assert os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")

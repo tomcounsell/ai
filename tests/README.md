@@ -30,7 +30,7 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 `pytest-xdist` runs tests across N worker subprocesses (one per CPU). Two patterns matter when authoring tests:
 
-1. **Per-process Redis db (claimed), and ownership is enforced.** Each pytest **process** gets a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (#2060) in `pytest_configure`, before collection and therefore before any fixture. This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run plus a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. **Never construct a `redis.Redis(db=N)` from a number you derived yourself** — not from `PYTEST_XDIST_WORKER`, not from a literal, not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. `tests.db_claim.claim_test_db()` and the `redis_test_url` fixture are the only sources; a test that genuinely needs a *second* db requests the `scratch_test_db` fixture, which claims another owned pool slot. A `flushdb()` against a db this process has not claimed now raises at its own line (#2628), and a subprocess inherits the claim through `tests.db_claim.subprocess_env`. See [`docs/features/test-db-ownership.md`](../docs/features/test-db-ownership.md).
+1. **Per-process Redis db (claimed), and ownership is enforced.** Each pytest **process** gets a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (#2060) in `pytest_configure`, before collection and therefore before any fixture. This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run plus a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. **Never construct a `redis.Redis(db=N)` from a number you derived yourself** — not from `PYTEST_XDIST_WORKER`, not from a literal, not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. `tests.db_claim.claim_test_db()` and the `redis_test_url` fixture are the only sources; a test that genuinely needs a *second* db requests the `scratch_test_db` fixture, which claims another owned pool slot. A `flushdb()` against a db this process has not claimed now raises at its own line (#2628). The process environment is correct by construction: `pytest_configure` exports the claimed db as `REDIS_URL` process-wide, so a subprocess inherits the claim without any special handling; `tests.db_claim.subprocess_env` survives as an opt-in `PYTHONPATH` pinner, not the inheritance channel (see "Subprocess Test-DB Inheritance" below). See [`docs/features/test-db-ownership.md`](../docs/features/test-db-ownership.md).
 
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
 3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
@@ -45,9 +45,9 @@ Two cross-file phantom-failure mechanisms were root-caused and fixed in `tests/c
 
 3. **A reload splits a shared exception class in two (#2603).** `importlib.reload(models.session_lifecycle)` keeps the module object and rebinds every class in it, so every module that imported `StatusConflictError` by name — including every test module, at collection time — keeps the old class and its `except`/`pytest.raises` silently stops matching. The autouse `shared_module_identity_guard` restores the original binding at teardown and warns, naming the test that reloaded (a teardown failure under `-W error::RuntimeWarning`). Exception classes are not the only casualties: a module-level **registry** is orphaned the same way, so the guard also covers `agent.index_drift`, `monitoring.bridge_watchdog`, and `monitoring.worker_watchdog` (#2628). **Do not reload a shared module in-process, and if you must, restore what it owns.** A test whose restore fixture holds a collection-time `from module import REGISTRY` binding will silently clean the orphan while the test writes into the live one — go through the module object. When you need to observe a genuinely first import, shell out to a fresh interpreter; an in-process reload cannot see one anyway, since everything is already cached.
 
-A **cross-process** family (#2060, #2605) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other, fixed by the per-process db claim described in pattern 1 above. #2605 is the subprocess corollary — a test that shells out must build its environment with `tests/db_claim.py::subprocess_env`, which reads the same claim and pins `PYTHONPATH` to the checkout under test. Re-deriving the db from `PYTEST_XDIST_WORKER` sends the child to a db this process does not own.
+A **cross-process** family (#2060, #2605) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other, fixed by the per-process db claim described in pattern 1 above. #2605 was the subprocess corollary; a process-wide `REDIS_URL` export now makes the inheritance correct by construction for any subprocess, so `tests/db_claim.py::subprocess_env` survives only as an opt-in `PYTHONPATH` pinner (see "Subprocess Test-DB Inheritance" below). Re-deriving the db from `PYTEST_XDIST_WORKER` sends the child to a db this process does not own.
 
-New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim and its consumers; `TestSharedExceptionIdentityGuard`: #2603 reload repair; `TestFlushOwnershipGuard` / `TestSessionClaimHook` / `TestReloadedRegistryIdentity`: #2628 db ownership, the popoto plugin repoint, and the registry reload leak) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
+New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim, its consumers, and the process-wide `REDIS_URL` export's behavioral assertions; `TestExportedRedisUrlSurvivesSyntheticHookCalls`: the leak-detection probe proving nothing earlier in the file's own synthetic hook calls polluted the live session's `REDIS_URL`; `TestSharedExceptionIdentityGuard`: #2603 reload repair; `TestFlushOwnershipGuard` / `TestSessionClaimHook` / `TestReloadedRegistryIdentity`: #2628 db ownership, the popoto plugin repoint, and the registry reload leak) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
 
 ### Un-awaited-coroutine leak guardrail (issue #2120)
 
@@ -530,32 +530,37 @@ Source modules with no test coverage. Priority targets for new tests.
 **Partially covered** (operational layer added in #936):
 - `bridge/email_bridge.py` — parsing, SMTP output, routing, and thread continuation have full coverage. Operational layer (`main()`, `_poll_imap()` batch cap, `_email_inbox_loop()` health timestamp) now covered via unit and integration tests.
 
-## Subprocess Test-DB Inheritance (issue #2763)
+## Subprocess Test-DB Inheritance (issue #2805)
 
-Any test that shells out to a subprocess which can reach Popoto — a Python
-interpreter running a repo module, the sdlc-tool `WRAPPER`, or an inline `-c`
-script against a repo checkout — must pass `env=subprocess_env(...)` from
-`tests.db_claim`.
+The pytest process's environment is correct by construction. `tests/conftest.py::pytest_configure`
+claims a private db from the pool `[1..15]` (`tests/db_claim.py`'s
+`fcntl.flock`) and exports it as both `POPOTO_TEST_DB` and `REDIS_URL`
+immediately after the claim. A plain `subprocess.run([...])` with **no
+`env=`** inherits `os.environ` and therefore inherits the claimed
+`REDIS_URL` — a child launched without any special handling lands on the
+claimed test db, not production db0. This holds for every process in the
+tree: a nested pytest child spawned without `env=` inherits the claimed
+`REDIS_URL`, then overwrites it with its own claim via its own
+`pytest_configure` (the #2628 invariant), and each xdist worker exports
+its own claim independently since every worker runs `pytest_configure`
+itself.
 
-**Why**: Popoto resolves `REDIS_URL` at *import time* and falls back to
-`redis://localhost:6379` — db0, production — when the variable is unset. The
-parent pytest process claims a test db from the pool `[1..15]` via
-`tests/db_claim.py`'s `fcntl.flock`, but that claim lives only in the parent's
-in-process Popoto client objects; `os.environ` is never mutated. The
-environment is therefore the only channel to a child, and `subprocess_env` is
-the bridge. A child launched without it silently reads and writes production
-db0.
+**`subprocess_env` survives as the `PYTHONPATH` pinner it also always
+was**, not as an isolation gate. `subprocess_env(*, project_root=None,
+**extra)` from `tests.db_claim` re-pins `REDIS_URL` to the same claimed
+db (redundant with the process-wide export, but states the intent at the
+call site) and, when `project_root=` is passed, prepends it to the
+child's `PYTHONPATH` so the child resolves repo modules from this
+checkout. Thread extra variables as keyword arguments
+(`subprocess_env(AI_REPO_ROOT=...)`) rather than hand-building a dict. If
+a site also needs keys removed, the accepted shape is `env =
+subprocess_env(); env.pop("NAME", None)` — assign, then mutate with
+`.pop(<literal>, None)` / `.update(...)`, never rebind.
 
-**How to use it**: `subprocess_env(*, project_root=None, **extra)`. Thread
-extra variables as keyword arguments (`subprocess_env(AI_REPO_ROOT=...)`)
-rather than hand-building a dict. If a site also needs keys removed, the
-accepted shape is `env = subprocess_env(); env.pop("NAME", None)` — assign,
-then mutate with `.pop(<literal>, None)` / `.update(...)`, never rebind.
-
-`project_root=` is **opt-in, not a default**. It prepends the path to the
-child's `PYTHONPATH`. Pass it when the child must resolve repo modules from
-this checkout; omit it when the test asserts something about import order or
-module resolution. `tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
+`project_root=` is **opt-in, not a default**. Pass it when the child must
+resolve repo modules from this checkout; omit it when the test asserts
+something about import order or module resolution.
+`tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
 is the worked example of a deliberate omission — it pins the wrapper's own
 module-resolution order against a decoy `tools/` package, so prepending
 `REPO_ROOT` to `PYTHONPATH` would resolve the import for reasons other than
@@ -563,19 +568,37 @@ the wrapper's doing.
 
 Never re-derive a db number by hand. Reading
 `POPOTO_REDIS_DB.connection_pool.connection_kwargs` to rebuild a `REDIS_URL`
-is the anti-pattern this work removed; `claim_test_db()` via `subprocess_env`
-is the only source.
+is the anti-pattern the #2628/#2763 line of fixes removed; `claim_test_db()`
+(directly, or via `subprocess_env`/the process-wide export) is the only
+source.
 
-The enforcing guard is `tests/unit/test_subprocess_test_db_isolation.py`, an
-AST scan of `tests/**/*.py`. It matches in-scope call sites on **argv**
-(`sys.executable`, a `PYTHON`-containing identifier, a `"-m"` element,
-`WRAPPER`, or a `scripts/` string); `cwd=` is deliberately not part of the
-predicate, since what determines whether a child can import popoto is what is
-executed, not where it is executed from. Exemptions exist only as
-`SKIP_ARGV0 = {"git"}` (a `git` child never imports Python) and a commented
-`ALLOWLIST` of `path:line` entries, each carrying one of exactly two reasons:
-`[#2628]` (the file is owned by open PR #2683 — fix it there when it lands)
-or `[standalone-script]` (the child imports no repo package). **When
-reachability is unclear, convert the site — do not allowlist it.**
+**A test that genuinely needs db0**, to prove a production guard fires,
+states that intent explicitly at the call site:
+`env={**subprocess_env(), "REDIS_URL": "redis://localhost:6379/0"}`.
 
-When #2683 lands, this section folds into `docs/features/test-db-ownership.md`.
+**One documented coverage gap remains by design**: a child spawned with a
+non-splatting `env=` (e.g. `env={"PATH": os.environ["PATH"]}`) drops
+`REDIS_URL` entirely — the child never inherits `os.environ` at all, so
+the process-wide export cannot rescue it. This shape is rarer than
+omitting `env=` altogether, and the runtime backstops
+(`tools/redis_flush_guard.py` on a db0 flush; the conftest claimed-db
+flush guard) still fail closed underneath it.
+`tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_non_splatting_env_drops_redis_url`
+documents this gap in code rather than only here.
+
+The enforcement layer this replaced — a 688-line AST scanner over
+`tests/**/*.py` with a `path:line`-keyed `ALLOWLIST` — was deleted in
+full. A static scanner cannot see a child spawned any other way, cannot
+see in-process code that builds its own client from `REDIS_URL`, and its
+allowlist's line-number keys were unstable under any merge that shifted
+a line. The permanent regression detector is now behavioral, split across
+two classes in `tests/unit/test_conftest_isolation_guards.py` by the
+property each checks: `TestPerProcessDbClaim` asserts that the live
+process's `REDIS_URL` names its own claim under per-worker `--dist=each`,
+that an unguarded child's resolved `REDIS_URL` is byte-identical to the
+parent's, that a nested pytest child claims its own db rather than
+leaking the parent's, and documents the non-splatting-`env=` coverage
+gap; `TestExportedRedisUrlSurvivesSyntheticHookCalls`, placed at the END
+of the file so it collects last, asserts nothing in the file's own
+synthetic `pytest_configure()` calls polluted the live session's
+`REDIS_URL` by the time collection finishes.

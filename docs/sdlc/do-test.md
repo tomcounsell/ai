@@ -90,7 +90,7 @@ Repo-specific mappings, applied before the generic `foo/bar.py -> tests/*/test_b
 
 ## Redis Isolation
 
-Unit tests must never touch production Redis. Use `REDIS_TEST_DB` or a test-specific key prefix. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
+Unit tests must never touch production Redis. `tests/conftest.py::pytest_configure` claims a private db from the pool `[1..15]` per pytest process and exports it as both `POPOTO_TEST_DB` and `REDIS_URL` (#2805) — no test-specific key prefix is needed for isolation. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
 
 Violating this rule corrupts production session data.
 
@@ -100,7 +100,7 @@ Integration tests that validate LLM outputs must use an AI judge (Haiku/Sonnet),
 
 ## Test Database State
 
-Before running integration tests, verify the bridge and worker are not running tests against the same Redis instance. Use `REDIS_TEST_DB=1` or a separate test-mode `.env`.
+Before running integration tests, verify the bridge and worker are not running tests against the same Redis instance. The pytest process's own claimed db is correct by construction (`POPOTO_TEST_DB` / `REDIS_URL`, see Redis Isolation above); a live bridge or worker process outside pytest still needs its own separate test-mode `.env` to avoid db0.
 
 ## Quality Gates
 

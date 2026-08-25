@@ -346,6 +346,14 @@ def subprocess_env(*, project_root: str | None = None, **extra) -> dict[str, str
     child — and such a child claims its own slot, so inheriting the parent's
     number would point its per-test ``flushdb()`` at the parent's database. An
     explicit caller value still wins, since ``extra`` is merged afterwards.
+
+    **Since #2805, the ``REDIS_URL`` pin below is redundant-but-harmless**:
+    ``tests/conftest.py::pytest_configure`` already exports the claimed db as
+    the process-wide ``REDIS_URL``, so ``env = {**os.environ}`` alone would
+    already carry the right value into any child. This function survives
+    anyway as the explicit-intent spelling for a call site that wants the
+    pin visible at the point of use, and as the ``PYTHONPATH`` pinner, which
+    the process-wide export does not and cannot provide.
     """
     env = {**os.environ}
     env.pop("POPOTO_TEST_DB", None)

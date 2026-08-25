@@ -4,7 +4,11 @@ Coverage:
 - Degrade-don't-die: ConnectionError from set_REDIS_DB_settings → warning logged, no raise.
 - Run-once guard: calling twice only runs setup once.
 - Pytest no-op guard: PYTEST_CURRENT_TEST set → no call to set_REDIS_DB_settings.
-- Empty/missing REDIS_URL: falls back to 127.0.0.1:6379/db=0.
+- Empty/missing ``settings.redis.url``: falls back to 127.0.0.1:6379/db=0.
+  This is a pydantic ``Field(default=...)``, not an ``os.environ["REDIS_URL"]``
+  read — ``RedisSettings`` uses ``env_nested_delimiter="__"``, so its actual
+  env seam is ``REDIS__URL``, unaffected by pytest's plain ``REDIS_URL``
+  export (#2805).
 - Retry kwargs: set_REDIS_DB_settings receives retry, retry_on_error, health_check_interval.
 """
 

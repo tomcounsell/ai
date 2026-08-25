@@ -26,10 +26,14 @@ per-record errors so the two are separable in ``logs/update.log``.
 REDIS SAFETY. ``_migrate_strip_pid_fields`` shells out with ``--apply``, and the
 subprocess does NOT inherit the in-process ``POPOTO_REDIS_DB`` swap that the
 autouse ``redis_test_db`` fixture performs — popoto resolves its connection from
-``REDIS_URL`` at import time. Without an explicit ``REDIS_URL``, that subprocess
-would delete-and-recreate every terminal AgentSession in the **production**
-keyspace (db 0). Every test that spawns it therefore sets ``REDIS_URL`` to the
-claimed test db via the ``redis_test_url`` fixture, and asserts it did so.
+``REDIS_URL`` at import time. Since #2805, ``pytest_configure`` exports
+``REDIS_URL`` naming this process's claimed test db for the whole session, so
+an unguarded child now lands on the claimed db by construction — a spawn with
+no ``env=`` no longer reaches production db 0. Every test that spawns this
+subprocess still explicitly sets ``REDIS_URL`` to the claimed test db via the
+``redis_test_url`` fixture and asserts it did so; that pin is redundant with
+the process-wide export but states the intent at the call site, same as
+``subprocess_env``'s surviving ``PYTHONPATH`` pin.
 """
 
 from __future__ import annotations
@@ -406,28 +410,6 @@ class TestOutputIsCapturedNonEmpty:
         assert _STATS_MARKER in captured, (
             f"the captured text must contain {_STATS_MARKER!r} — that line is "
             f"the record of what the migration did. Got:\n{captured}"
-        )
-
-    def test_the_subprocess_ran_against_the_test_db_not_production(
-        self, monkeypatch, redis_test_url, caplog, cleanup_rows, shadow_project_dir
-    ):
-        """Proves the REDIS_URL guard is load-bearing, not decoration.
-
-        ``REDIS_URL`` is unset on this machine by default, so an unguarded
-        ``--apply`` subprocess connects to db 0 and rewrites production
-        AgentSession rows. Comparing the count the subprocess REPORTS against
-        the count visible in the claimed test db is the only in-test evidence
-        that the isolation actually held.
-        """
-        _mk_row()
-        expected = len(list(AgentSession.query.all()))
-
-        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog, shadow_project_dir)
-
-        assert f"'total_records': {expected}" in captured, (
-            f"the subprocess scanned a different keyspace than this test's "
-            f"(expected {expected} records). If it reported a larger number it "
-            f"connected to db 0 and just rewrote production rows. Got:\n{captured}"
         )
 
     def test_the_capture_records_the_run_mode_too(
