@@ -430,17 +430,17 @@ change is invisible to the running system; it only moves test files on disk.
 
 ## Success Criteria
 
-- [ ] All four target files are gone, replaced by four packages.
-- [ ] Every resulting file is under 800 lines.
-- [ ] The four packages collect exactly **443** (114 + 107 + 115 + 107). The *global* `tests/unit`
+- [x] All four target files are gone, replaced by four packages.
+- [x] Every resulting file is under 800 lines.
+- [x] The four packages collect exactly **443** (114 + 107 + 115 + 107). The *global* `tests/unit`
       total is deliberately not asserted — it tracks the number of files in `docs/plans/`.
 - [ ] The nodeid+marker multiset is **identical** before and after (not just the total).
 - [ ] Per-marker counts unchanged: `sdlc` 2577, `git` 179, `messaging` 990, and all 20 others.
-- [ ] AST source-segment comparison shows every moved definition byte-identical, with exactly
+- [x] AST source-segment comparison shows every moved definition byte-identical, with exactly
       one documented exception (`parents[3]`).
-- [ ] The four packages pass under `scripts/pytest-clean.sh`: 443 tests (114+107+115+107).
-- [ ] `python -m ruff check` and `python -m ruff format --check` clean.
-- [ ] `tests/README.md` index updated.
+- [x] The four packages pass under `scripts/pytest-clean.sh`: 443 tests (114+107+115+107).
+- [x] `python -m ruff check` and `python -m ruff format --check` clean.
+- [x] `tests/README.md` index updated.
 
 ## Team Orchestration
 
