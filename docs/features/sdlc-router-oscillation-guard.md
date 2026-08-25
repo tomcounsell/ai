@@ -663,7 +663,7 @@ deferred until optimistic retry proves insufficient in production.
 
 ## Regression Coverage
 
-- `tests/unit/test_sdlc_router_decision.py` — pure-function tests for every
+- `tests/unit/sdlc_router_decision/` — pure-function tests for every
   dispatch rule row (1 through 10b), including `TestReviewInProgressNoVerdictDeadEnd`
   (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`).
 - `tests/unit/test_sdlc_router.py` — `TestReReviewCrashRecovery` (row 8d, both

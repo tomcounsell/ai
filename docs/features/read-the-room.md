@@ -30,7 +30,7 @@ sees the agent's tool outputs. Read-the-Room (RTR) is the explicit catch-all.
 | `tools/valor_telegram.py` | **Path B** call site. `cmd_send` calls RTR after linkify+truncate, before the outbox `rpush`. Caller-type gate auto-detects agent vs. human invocations. |
 | `tests/unit/test_read_the_room.py` | Unit tests for verdict parsing, snapshot construction, fail-open paths. |
 | `tests/unit/output_handler/test_output_handler_filters.py::TestReadTheRoomWiring` | Path A handler-level wiring tests (trim coercion, queue alignment). |
-| `tests/unit/test_valor_telegram.py::TestCmdSendRTR` | Path B CLI wiring tests (caller-type gate, flag overrides, verdict branching, fail-open). |
+| `tests/unit/valor_telegram/test_valor_telegram_rtr.py::TestCmdSendRTR` | Path B CLI wiring tests (caller-type gate, flag overrides, verdict branching, fail-open). |
 | `tests/integration/test_message_drafter_integration.py` | End-to-end Path A integration tests with RTR enabled. |
 
 ## Verdicts
