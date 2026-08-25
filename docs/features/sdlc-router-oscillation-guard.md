@@ -664,8 +664,10 @@ deferred until optimistic retry proves insufficient in production.
 ## Regression Coverage
 
 - `tests/unit/sdlc_router_decision/` — pure-function tests for every
-  dispatch rule row (1 through 10b), including `TestReviewInProgressNoVerdictDeadEnd`
-  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`).
+  dispatch rule row (1 through 10b), split by theme. Row coverage lives in
+  `test_sdlc_router_decision_dispatch_rows.py`; `TestReviewInProgressNoVerdictDeadEnd`
+  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`) is in
+  `test_sdlc_router_decision_convergence.py`.
 - `tests/unit/test_sdlc_router.py` — `TestReReviewCrashRecovery` (row 8d, both
   `completed`/`failed` terminal markers recover), `TestRow3OpenPrStepAside`,
   `TestG1OpenPrStepAside`, `TestG5OpenPrStepAside` (NEEDS_REVISION and

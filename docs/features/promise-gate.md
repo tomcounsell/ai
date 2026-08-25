@@ -374,7 +374,7 @@ under tests.
   conditional session_events emission with real and synthetic
   session_ids.
 * `tests/unit/test_send_message.py`,
-  `valor_telegram/`, `test_valor_email.py` — each adds a
+  `valor_telegram/test_valor_telegram_rtr.py`, `test_valor_email.py` — each adds a
   `--help` anti-leak test asserting the help output never advertises
   the bypass syntax.
 

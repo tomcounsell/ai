@@ -546,6 +546,10 @@ and take the first `pattern in basename` hit, exactly as `pytest_collection_modi
 does. Do this *before* writing the files; renaming afterwards is cheap, but only if you
 notice, and step 3's count check is what catches you if you didn't.
 
+This procedure is currently manual. Automating it as a standing regression guard — so a
+mistagged basename fails a test instead of relying on whoever does the split remembering
+to check — is tracked in [#3010](https://github.com/tomcounsell/ai/issues/3010).
+
 ### Feature Marker Registration
 
 New markers must be added in two places:

@@ -392,7 +392,7 @@ either substring-match all records or pass through silently.
 |------|---------|
 | `tools/valor_telegram.py` | CLI implementation |
 | `.claude/skills/telegram/SKILL.md` | Agent skill documentation |
-| `tests/unit/valor_telegram/` | Test suite |
+| `tests/unit/valor_telegram/` | Test suite (parsing, `cmd_send`, `cmd_read`, `cmd_chats`, RTR/promise gate, await, chat log, voice flag) |
 
 ## PM Tool vs CLI Tool
 
