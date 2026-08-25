@@ -349,10 +349,21 @@ removes the shim.
 a broad `except`, records `last_error`, and keeps ticking — so the loss is
 **silent**. Circuit-breaker recovery and session-count throttling stop working
 with no alert.
-**Mitigation:** This is the exact hazard PR #2944 was ordered to prevent. `/update`
-Step 1 (git pull) → Step 1.659 (migration) → Step 5 (service restart) means any
-machine that receives this code via the sanctioned path migrates its registry
-before the worker reloads. The migration is idempotent and runs every cycle.
+**Mitigation:** This is the exact hazard PR #2944 was ordered to prevent, and the
+guarantee is **pre-merge, not in-orchestrator**. `run.py`'s own Step 1 pull is not
+what saves a stale checkout: the orchestrator module is already imported by the
+time it pulls, so a checkout behind `c9a91bdad` invoking `run.py --full` directly
+would run an orchestrator that has *no* Step 1.659, then pull the shim deletion,
+then restart. What actually holds is that both sanctioned entry points
+fast-forward **before** launching any Python:
+`.claude/skills/update/SKILL.md:16` (`git checkout main && git fetch origin main
+&& git merge --ff-only origin/main`, run as a prerequisite) and
+`scripts/remote-update.sh:114-121`, whose comment states the reason outright —
+"Git pull FIRST — before invoking any Python ... Without this, a Telegram
+/update or cron run always executes the pre-pull version of the orchestrator."
+So every machine reaching Step 5 is running an orchestrator that contains Step
+1.659, and Step 4.65 gates the restart on that migration having succeeded. The
+migration is idempotent and runs every cycle.
 Verified locally: both the vault and config registries on this machine are
 already migrated, so this machine is safe regardless. The residual exposure is a
 machine that takes the code by a bare `git pull` without `/update` — which is
