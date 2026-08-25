@@ -362,8 +362,23 @@ fast-forward **before** launching any Python:
 "Git pull FIRST — before invoking any Python ... Without this, a Telegram
 /update or cron run always executes the pre-pull version of the orchestrator."
 So every machine reaching Step 5 is running an orchestrator that contains Step
-1.659, and Step 4.65 gates the restart on that migration having succeeded. The
-migration is idempotent and runs every cycle.
+1.659. The migration is idempotent and runs every cycle.
+
+Step 4.65 then gates the restart, and it gates BOTH restart paths — which is
+not automatic, because they are two different restarts in two different
+processes. Step 4.65 runs `scripts/verify_registry_without_shim.py` (the
+positive check: every `callable:` in every existing registry copy imports with
+`agent.sustainability` banned, not merely "the rewriter did not error"),
+unconditionally, without regard to `config.do_service_restart`. On the `/update`
+path it suppresses `run.py`'s own Step 5 restart. On the `remote-update.sh`
+path — where `run.py --cron` sets `do_service_restart=False` and the worker
+kickstart happens in the shell *after* `run.py` exits, gated only on the diff
+touching `agent/` — the probe's verdict is carried across the process boundary
+by the `data/registry-probe-failed` sentinel, which `remote-update.sh` checks
+before `launchctl kickstart -k`. A failed probe blocks that kickstart, logs
+`RESTART BLOCKED:`, and sets `RESTART_FAILED=1` for a non-zero terminal exit.
+The one restart deliberately left ungated is the recovery bootstrap of a worker
+that is already down: there is no working worker there to preserve.
 Verified locally: both the vault and config registries on this machine are
 already migrated, so this machine is safe regardless. The residual exposure is a
 machine that takes the code by a bare `git pull` without `/update` — which is
