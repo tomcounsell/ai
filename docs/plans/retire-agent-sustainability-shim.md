@@ -483,9 +483,16 @@ Four files carry live references. Counts verified at plan time
 - [ ] Every registry callable resolves with `agent.sustainability` banned from
       `sys.modules` (the issue's AC #2), proven by the committed
       `scripts/verify_registry_without_shim.py` run against the live registry.
-- [ ] `agent/agent_session_queue.py` changes exactly two lines, both in-place
-      replacements — which `git diff` scores as 2 added + 2 deleted, i.e. a
-      changed-line count of 4. The Verification row asserts 4, not 2.
+- [ ] `agent/agent_session_queue.py` changes exactly two locations — the import
+      at :2899 and the docstring at :948 — and nothing else. The changed-line
+      count is **6**, not 4: the docstring edit is a 1-for-1 replacement (+1/-1),
+      but the import sits at 32-space indentation inside `_worker_loop`, where
+      the single-line form `from reflections.agents.circuit_health_gate import
+      send_hibernation_notification` is 111 characters against this repo's
+      `line-length = 100`. E501 is in `select`, so ruff must wrap it into a
+      parenthesized 3-line form (+3/-1). The two-location constraint (#2876
+      coordination) is what matters and is unchanged; only the arithmetic moves.
+      The Verification row asserts 6.
 - [ ] Targeted tests pass (see Verification).
 - [ ] `ruff check` and `ruff format --check` clean.
 - [ ] Documentation updated (`/do-docs`).
@@ -623,7 +630,7 @@ first — see Task 3's final bullet.
 | Canonical module defines both helpers | `grep -c "^def get_project_key\|^def get_redis" reflections/redis_access.py` | output contains 2 |
 | All six consumers import the canonical pair | `git grep -lc "from reflections.redis_access import" -- reflections/agents/ reflections/stall_advisory.py \| wc -l` | output contains 6 |
 | Registry resolves with shim banned | `.venv/bin/python scripts/verify_registry_without_shim.py` | exit code 0 |
-| Queue file change is two lines, both replacements | `git diff origin/main -- agent/agent_session_queue.py \| grep -c '^[+-][^+-]'` | output contains 4 |
+| Queue file change is two locations only | `git diff origin/main -- agent/agent_session_queue.py \| grep -c '^[+-][^+-]'` | output contains 6 |
 | Migration self-heal still armed | `git grep -c "agent.sustainability.circuit_health_gate" -- scripts/migrate_reflections_callables.py` | output > 0 |
 | Targeted tests pass | `scripts/pytest-clean.sh tests/unit/test_sustainability.py tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py tests/unit/test_reflection_scheduler.py tests/unit/test_migrate_reflections_callables.py tests/unit/test_update_reflections_callables.py tests/unit/test_agent_session_queue.py -q` | exit code 0 |
 | Stall advisory e2e passes | `scripts/pytest-clean.sh tests/integration/test_stall_advisory_e2e.py -q` | exit code 0 |
