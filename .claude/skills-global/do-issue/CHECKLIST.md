@@ -2,6 +2,20 @@
 
 Run every check before creating the issue. Fix failures — do not skip items.
 
+## Falsification Checks
+
+Run these first. They ask whether the issue should exist at all; every other section asks only whether it is well written. A wrong issue that passes every readability check still costs the next reader a full investigation to disprove — and it reads as authoritative while doing it.
+
+- [ ] **Observed, not inferred** — The issue names what was actually seen: a command and its output, a log line, a failing test, a timeline entry. If the central claim is phrased "could", "would", or "may", it is a hypothesis. Reproduce it, or raise it in the originating discussion and file nothing.
+
+- [ ] **Counter-case checked** — If the issue claims a pattern ("systemic", "every", "always", "will recur"), name the instances you checked that could have falsified it, and what they showed. One observation is an anecdote. The cases that did *not* exhibit the behavior are the evidence that decides it.
+
+- [ ] **Reachable in a supported configuration** — The bad state is reachable without a setup the repo actively prevents or heals. If code deliberately avoids that state, the finding is usually a stale comment, not a defect.
+
+- [ ] **Not already decided** — Search for a test, code comment, or doc encoding the opposite intent (`git grep` the path, constant, or behavior in question). If one exists, this is a proposal to change a decision, not a bug report — name that reasoning and argue against it, or drop the issue.
+
+**Kill criterion:** if one of these fails, the right output is usually *no issue*. Say so where the finding came up and move on. Filing anyway transfers the cost of disproving your claim onto whoever picks it up next.
+
 ## Reconnaissance Checks
 
 - [ ] **Recon performed** — The reconnaissance routine (Step 3) was executed: broad scan completed, concerns identified, parallel fan-out agents dispatched, and findings synthesized. Skip only for trivially simple issues (typo fixes, config changes).
