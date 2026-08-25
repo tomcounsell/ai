@@ -14,7 +14,7 @@ def _stub_lane_identity(request):
     ``ensure_session`` mints the lane's identity on entry, which peeks the issue
     lock for the pinned target repo and writes a ``PipelineLedger``. That is
     correct behavior and ``TestLaneSlugMintedAtLaneStart`` asserts it -- but for
-    every other test in this file it is noise: it adds a ``touch_issue_lock``
+    every other test in this package it is noise: it adds a ``touch_issue_lock``
     call that the lock-wiring assertions count, and it leaves a real ledger
     record per test.
     """
