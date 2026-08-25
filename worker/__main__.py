@@ -684,8 +684,20 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
     # before yielding to the event loop, so asyncio.wait_for cannot apply the timeout.
     # Binary existence (shutil.which) is the only reliable check in this environment.
+    # A dry run skips it for a different reason: the smoke test is ADVISORY (every
+    # branch below logs and continues), so its result cannot change the dry-run
+    # verdict -- but it costs a live network round-trip to the Claude CLI, ~8s of
+    # a ~14s total. `TestWorkerDryRun` shells out under a 30s `subprocess.run`
+    # timeout, so two concurrent xdist workers each paying that cost exhausted the
+    # ceiling and the tests flaked. Binary existence (`shutil.which` above) is the
+    # real gate and still runs. Keeping the network out of the dry-run path also
+    # lets the suite pass offline.
     if os.environ.get("VALOR_LAUNCHD"):
         logger.info("CLI harness smoke test skipped (VALOR_LAUNCHD — TCC restriction)")
+    elif dry_run:
+        logger.info(
+            "CLI harness smoke test skipped (dry run — advisory check, binary already found)"
+        )
     else:
         try:
             from agent.sdk_client import verify_harness_health
