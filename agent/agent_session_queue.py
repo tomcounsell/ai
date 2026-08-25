@@ -945,7 +945,7 @@ def publish_session_notify(session) -> None:
     Shared, ownership-safe, notify-only wake helper for any "construct an
     AgentSession, call .save(), then hand it to the worker" call site that
     is NOT `_push_agent_session()` (e.g. hibernation-notify sessions built by
-    `reflections/agents/circuit_health_gate.py` / `agent/sustainability.py`,
+    `reflections/agents/circuit_health_gate.py`,
     and the resume-to-pending path in `tools/valor_session.py`).
 
     Without this, a construct-and-save site's new/resumed session only gets
@@ -2896,7 +2896,9 @@ async def _worker_loop(
                             )
                             # Enqueue notification asynchronously (best-effort)
                             try:
-                                from agent.sustainability import send_hibernation_notification
+                                from reflections.agents.circuit_health_gate import (
+                                    send_hibernation_notification,
+                                )
 
                                 send_hibernation_notification("hibernating", project_key=_pk)
                             except Exception as _notif_err:

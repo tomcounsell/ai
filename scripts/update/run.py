@@ -1045,8 +1045,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
         _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
 
-    # Step 1.659: Repoint the five self-healing reflections off the
-    # `agent.sustainability.*` shim onto `reflections.agents.*` (#2875).
+    # Step 1.659: Keep the five self-healing reflections pinned to their
+    # `reflections.agents.*` callable paths (#2875). The `agent.sustainability`
+    # shim they used to name no longer exists, so the registry must never
+    # reacquire those paths; this step rewrites any that it still carries.
     # config/reflections.yaml is gitignored, so this registry edit can only
     # reach machines as tracked code that rewrites the file. Runs BEFORE Step
     # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
