@@ -7,6 +7,8 @@ created: 2026-08-26
 tracking: https://github.com/tomcounsell/ai/issues/2736
 last_comment_id: none
 covers: [2779, 2736, 3021, 2715]
+revision_applied: true
+revision_applied_at: 2026-08-26T13:21:48Z
 ---
 
 # Wave 4 — Hooks, Guards, and Gate Authoring Discipline
@@ -379,17 +381,40 @@ should let a caller ask "is offset N inside an executable region?" rather than h
 pre-stripped string, because pre-stripping loses the offsets that produce accurate `file:line`
 and block messages.
 
-**Decision 3 — ambiguity posture is explicit and per-consumer.** The two donor implementations
-disagree: `destructive_git_shapes._git_tokens` returns `None` on a `shlex` ValueError (fails
-**open**, :50-51); `validate_merge_guard` fails **closed** (:505, :663-673) and has tests pinning
-that (`::test_tokenizer_failure_fails_closed` :109, `::test_tokenizer_empty_span_fails_closed`
-:120). The helper takes an explicit posture parameter. Assignments, to be stated in code comments
-with reasoning: `validate_merge_guard` keeps **fail-closed** (non-negotiable, contract-tested);
-the three Redis/kill guards adopt **fail-closed for the block decision** (an unparseable command
-is treated as executable, so the guard still fires) and **fail-closed for the escape decision**
-(an unparseable command does *not* get the escape). Note these two point the same direction:
-when in doubt, block. That is the correct default for a destructive-command guard and it is what
-closes rows 2 and 4.
+**Decision 2a — the two donors are strictly ordered, and this ordering is load-bearing.**
+`destructive_git_shapes._split_simple_commands` (:38-44) is a bare `_CONTROL_SPLIT_RE.split()`
+(:32) with **zero quote-awareness**. Applied to a raw command it severs a dangerous argv0 from its
+dangerous argument whenever an *earlier quoted argument* contains a control operator. Reproduced
+against the live tree:
+
+```
+redis-cli -n 0 --pattern "a;b" <flush>
+  today (flat regex):            BLOCK
+  naive per-fragment position check:  ALLOW   <-- a NEW fail-open
+```
+
+The splitter yields `redis-cli -n 0 --pattern "a` and `b" <flush>`; no fragment carries both the
+`redis-cli` argv0 and the flush token, so a per-fragment check passes a real flush. **That is the
+exact regression class this wave exists to close**, manufactured by the fix.
+
+Therefore: run `_extract_executed_commands` (the quote/heredoc/substitution-aware scanner) **first**
+to obtain safe spans, and call `_split_simple_commands` **only on the substring of each span** —
+never on the raw command. The quote-aware pass always precedes the operator split. This ordering
+is a documented invariant in the module docstring, carries a named regression test, and has its
+own verification row.
+
+**Decision 3 — one ambiguity posture: fail closed, everywhere.** The two donors disagree today —
+`destructive_git_shapes._git_tokens` returns `None` on a `shlex` ValueError (fails **open**,
+:50-51); `validate_merge_guard` fails **closed** (:505, :663-673) with tests pinning it
+(`::test_tokenizer_failure_fails_closed` :109, `::test_tokenizer_empty_span_fails_closed` :120).
+An earlier draft of this plan made the posture a parameter. It is not: **every consumer in scope
+resolves to fail-closed**, so a parameter would encode a distinction no call site uses and would
+offer a future author a fail-open switch on the safety layer for no benefit. The helper fails
+closed unconditionally — an unparseable command is treated as executable (so the guard still
+fires) and does *not* receive the escape. Both point the same direction: when in doubt, block.
+That is the correct default for a destructive-command guard and it is what closes rows 2 and 4.
+If a consumer ever genuinely needs fail-open, that is a deliberate change with its own review, not
+a pre-installed lever.
 
 **Decision 4 — escape and sanction tokens are position-anchored, and this is the fix for rows 2
 and 4.** `REDIS_PRODUCTION_FLUSH_OK=1` is honored only as an environment assignment prefixing the
@@ -415,10 +440,28 @@ line appears as `+` in the diff and will block. This is deliberate: the alternat
 content-matching across hunks, and a relocated bare timeout literal is a reasonable thing to ask
 an author to look at. #2779 asks for this to be decided rather than discovered; it is decided.
 
-**Decision 8 — #2715 is fixed by an agent-type pin, not a new mechanism.** Per spike-4, add a pin
-to `/do-build` following `do-docs/SKILL.md:30`'s exact precedent, and correct
-`.claude/skills-global/do-sdlc/SKILL.md:372` so BUILD is not spawned as `general-purpose`. Do
-**not** introduce a "required tools" frontmatter field: `allowed-tools:` is a ceiling, not a
+**Decision 8 — #2715 is fixed by an agent-type pin naming `builder`, not a new mechanism.** Per
+spike-4, pin `/do-build`'s stage dispatch to a **Task-capable agent type, concretely `builder`**
+(`.claude/agents/builder.md:11` declares `tools: ['*']`; `agent/agent_definitions.py:131-139`
+gives it `tools=None`, inheriting all parent tools), and correct
+`.claude/skills-global/do-sdlc/SKILL.md:372` so BUILD is not spawned as `general-purpose`.
+
+**Correction to an earlier draft:** this plan previously cited `do-docs/SKILL.md:30` as the
+precedent. It is only a *partial* one and must not be copied verbatim. That pin reads "spawn them
+ONLY on a Bash-capable agent type — `documentarian` **or** `general-purpose`" — it is about
+**Bash** capability and it explicitly sanctions `general-purpose`, the very type spike-4 shows is
+undefined in this repo and unverifiable from config. Copying its shape would re-authorize the
+cause of #2715 and would contradict this plan's own verification row. Borrow the *form* (a
+one-line agent-type pin in the skill body, citing its issue) and **not** the type list.
+
+One consequence to handle rather than ignore: `.claude/agents/builder.md:28` instructs the builder
+"Do NOT spawn other agents or coordinate work," while `/do-build` is an orchestrator. The pin must
+therefore name the type used for the **stage** dispatch, and Task 7 must confirm the resulting
+child can legitimately orchestrate — if `builder`'s instruction text forbids what the stage
+requires, the correct fix is a purpose-built Task-capable orchestrator type, not silently
+overriding a documented agent contract. Resolve this inside Task 7 and record which way it went.
+
+Do **not** introduce a "required tools" frontmatter field: `allowed-tools:` is a ceiling, not a
 floor, and a new field would need a checker, a schema, and adoption across ~28 skills — a
 disproportionate mechanism for a problem a one-line pin solves.
 
@@ -465,8 +508,11 @@ are ready-made red-state proofs and are used verbatim as rows.
 
 ### Error State Rendering
 - [ ] Block messages must keep their current `file:line` and suggested-fix formats. #2779's
-      acceptance criteria require the same message shape, and #3021 requires the escape hint in
-      the block message to name the escape that actually works.
+      acceptance criteria require the same message shape. #3021's related criterion is that the
+      `REDIS_PRODUCTION_FLUSH_OK=1` escape **still short-circuits first** — verify ordering, and
+      confirm the escape the block message quotes is the escape that actually works now that it is
+      position-anchored. (An earlier draft of this plan attributed a broader "escape hint"
+      criterion to #3021 that the issue does not contain.)
 - [ ] Test that a block message for an added timeout literal names the **added** line, not a
       pre-existing one in the same file.
 - [ ] `/do-build`'s new fail-fast diagnostic must name the missing capability explicitly and be
@@ -549,8 +595,11 @@ convert.
 destructive already happened — production Redis was wiped twice (2026-06-03 unrecoverable,
 2026-08-07 25,825 keys). A refactor that makes a guard *stop firing* is worse than the false
 positives it fixes, and would not necessarily be noticed.
-**Mitigation:** Decision 3 sets fail-closed as the posture for every ambiguity in the three
-Redis/kill guards. Decision 10 requires a two-pole proof per guard. Every validator's block
+**Mitigation:** Decision 3 sets fail-closed unconditionally, with no posture lever to get this
+wrong later. Decision 2a orders the two donors so the quote-blind splitter can never see a raw
+command — critique found this exact regression in the first draft, where a real flush carrying a
+quoted `;` would have been let through; it is now a named regression test and two verification
+rows. Decision 10 requires a two-pole proof per guard. Every validator's block
 direction gets an explicit verification row, and the adoption is one commit per validator so a
 bisect names the culprit. The two fail-open bypasses found during recon become permanent
 regression tests — this wave leaves the layer measurably tighter than it found it, not merely
@@ -708,6 +757,11 @@ consumed by the SDLC router, which already reads stage outcomes; it introduces n
       genuine local one-offs or promoted to `settings.timeouts`, with the reasoning recorded.
 - [ ] Exactly one implementation of Bash command-position parsing exists in
       `.claude/hooks/`; the duplicated copies are deleted, not left alongside.
+- [ ] **No new fail-open is introduced by the seam.** Specifically: a real flush whose earlier
+      quoted argument contains a control operator (`redis-cli -n 0 --pattern "a;b" <flush>`) still
+      blocks, and `echo "<cmd>" | sh` stays in scope. Both are named regression tests.
+- [ ] The quote-aware pass provably precedes the operator split (Decision 2a invariant), and no
+      fail-open posture parameter exists on the helper.
 - [ ] `validate_merge_guard`'s Part 1 tokenizer suite passes with **zero assertion changes**.
 - [ ] A `/do-build` dispatch to a session lacking the Task tool fails on the first attempt with a
       diagnostic naming the missing capability.
@@ -830,12 +884,20 @@ idiom for issue/PR text until task 4 lands.
   Part 1 green with zero assertion changes before generalizing.
 - Fold in `destructive_git_shapes.py`'s `_split_simple_commands` (:38) and argv0 identification
   with env-assignment skipping (`_git_tokens` :47).
+- **Order the donors per Decision 2a**: `_extract_executed_commands` first for quote/heredoc-safe
+  spans, then `_split_simple_commands` only on each span's substring — never on the raw command.
+  Add a named regression test for `redis-cli -n 0 --pattern "a;b" <flush>` (assembled by
+  concatenation) asserting it still BLOCKS. Document the ordering as an invariant in the docstring.
 - Add argument-role classification: for each text region, report **executable** (command word,
   interpreter `-c` payload, heredoc piped to an interpreter) or **inert** (heredoc redirected to a
-  file, `--body`/`--body-file` argument, `echo` argument). Expose offsets, not a pre-stripped
-  string, so callers keep accurate positions for block messages.
-- Add the explicit ambiguity posture parameter (Decision 3). Document each consumer's assignment
-  and its reasoning in the module docstring.
+  file, `--body`/`--body-file` argument). Expose offsets, not a pre-stripped string, so callers
+  keep accurate positions for block messages.
+- **`echo`/`printf` arguments are inert only when not piped into an interpreter.** Apply the same
+  piped-vs-redirected rule used for heredocs: `echo "<cmd>"` is data, but `echo "<cmd>" | sh` and
+  `printf '%s' "<cmd>" | bash` execute their argument and must stay in scope. An earlier draft
+  treated `echo` arguments as unconditionally inert, which would have been a fail-open.
+- Fail closed unconditionally on any parse ambiguity (Decision 3). Do **not** add a posture
+  parameter; document in the docstring why the single posture is deliberate.
 - Do **not** strip quoted literals (spike-2). Document why in the docstring.
 - Write `tests/unit/test_bash_structure.py` covering every case in Empty/Invalid Input Handling.
 
@@ -897,10 +959,18 @@ idiom for issue/PR text until task 4 lands.
 - **Assigned To**: dispatch-capability-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add an agent-type pin to `.claude/skills-global/do-build/SKILL.md` following
-  `.claude/skills-global/do-docs/SKILL.md:30`'s exact precedent.
+- Add an agent-type pin to `.claude/skills-global/do-build/SKILL.md` naming a **concrete
+  Task-capable type (`builder`)**. Borrow the *form* of `do-docs/SKILL.md:30` (a one-line pin
+  citing its issue) but **not** its type list — that line sanctions `general-purpose`, which is
+  the cause of #2715 (Decision 8).
+- Resolve the `builder.md:28` tension flagged in Decision 8 ("Do NOT spawn other agents") against
+  `/do-build`'s orchestrator role. If `builder`'s contract genuinely forbids orchestration, define
+  a Task-capable orchestrator type instead of silently overriding a documented agent contract.
+  **Record which way it went in the commit message** — this is a real fork, not a formality.
 - Correct `.claude/skills-global/do-sdlc/SKILL.md:372` so BUILD is not spawned as
-  `general-purpose`. **Surgical edit only** — no reflow, no reordering (Risk 4).
+  `general-purpose`. **Surgical edit only** — no reflow, no reordering (Risk 4). This is the actual
+  root cause of #2715 and it has its own verification row, because Risk 4 makes this exactly the
+  kind of one-liner that gets dropped in a cross-lane conflict resolution.
 - Add a first-instruction self-check to `/do-build`: if the Task tool is absent, exit immediately
   with a specific, machine-readable diagnostic naming the missing capability. Fail-fast, no
   sequential fallback (Decision 9).
@@ -935,8 +1005,11 @@ idiom for issue/PR text until task 4 lands.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every Verification row.
-- Confirm all Success Criteria, including the `agent/sdk_client.py` annotation disposition.
+- Confirm all Success Criteria.
 - Confirm the two-pole proofs are recorded in the PR body for #2658 to consume.
+- The `agent/sdk_client.py` annotation disposition (task 2) is **reported, not gated**: #2779 asks
+  for a deliberate decision, and either outcome — kept as one-offs or promoted to
+  `settings.timeouts` — closes it. Surface the choice and its reasoning; do not block on it.
 - Generate the final report.
 
 ## Verification
@@ -970,7 +1043,12 @@ table above is prose-only and never appears in an executable row.
 | Anti-criterion — router untouched (Wave 2 owns it) | `git diff --name-only origin/main \| grep -c "agent/sdlc_router.py"` | match count == 0 |
 | Anti-criterion — no required-tools frontmatter invented | `grep -rc "required-tools" .claude/skills-global/ 2>/dev/null \| grep -v ":0" \| wc -l` | output contains 0 |
 | Anti-criterion — the 55 files were not mass-annotated | `git diff --name-only origin/main \| xargs -I{} sh -c 'git diff origin/main -- {} \| grep -c "^+.*timeout-guard: allow"' \| paste -sd+ \| bc` | output contains 0 |
+| BLOCKER regression — quoted control operator still blocks | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'DB';print('BLOCK' if f.find_violation('redis-cli -n 0 --pattern \"a;b\" '+w) else 'ALLOW')"` | output contains BLOCK |
+| BLOCKER regression — echo piped to a shell stays in scope | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'ALL';print('BLOCK' if f.find_violation('echo \"redis-cli -n 0 '+w+'\" \| sh') else 'ALLOW')"` | output contains BLOCK |
+| Donor ordering invariant is documented | `grep -c "_extract_executed_commands" .claude/hooks/hook_utils/bash_structure.py` | output > 0 |
+| No fail-open posture lever was installed | `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` | match count == 0 |
 | #2715 — BUILD names a Task-capable agent type | `grep -c "general-purpose" .claude/skills-global/do-build/SKILL.md` | match count == 0 |
+| #2715 root cause — do-sdlc no longer pins BUILD to general-purpose | `python -c "import re,sys;t=open('.claude/skills-global/do-sdlc/SKILL.md').read();m=[l for l in t.splitlines() if 'general-purpose' in l and 'Agent tool' in l];print('FIXED' if not m else 'STILL PINNED')"` | output contains FIXED |
 | Feature doc exists and is indexed | `test -f docs/features/bash-command-position-matching.md && grep -c "bash-command-position-matching" docs/features/README.md` | output > 0 |
 | features README still sorted | `python .claude/hooks/validators/validate_features_readme_sort.py` | exit code 0 |
 | No co-author trailers | `git log origin/main..HEAD --format=%B \| grep -ci "co-authored-by"` | match count == 0 |
@@ -1005,25 +1083,30 @@ written with the `Write` tool — the same `--body-file` workaround #3004 needed
 
 ## Critique Results
 
+Round 1 critique (3 critics, FULL depth): 1 blocker, 5 concerns, 2 nits. All 8 addressed in the revision below; the blocker and both factual findings were independently reproduced before being accepted.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Task 3 folds `destructive_git_shapes._split_simple_commands` into `bash_structure.py`, but that splitter is a bare `_CONTROL_SPLIT_RE.split()` with ZERO quote-awareness (destructive_git_shapes.py:32,38-44). Applied to a raw command it severs a dangerous argv0 from its dangerous argument whenever an earlier quoted argument contains `;`/`&&`/`\|` -- e.g. `redis-cli -n 0 "arg; note" FLUSHDB` splits so that no fragment carries both a `redis-cli` argv0 and the flush token. That command blocks TODAY under the flat-string regex, so the seam would introduce a brand-new fail-open of exactly the class this wave exists to close. | pending | In `bash_structure.py`, sequence the two donors: run `validate_merge_guard._extract_executed_commands(command)` FIRST to obtain quote/heredoc/substitution-safe spans, then call `_split_simple_commands` only on the substring of each returned span -- never on the raw `command` string. Add a `test_bash_structure.py` case asserting `redis-cli -n 0 "arg; note" FLUSHDB` still blocks. |
-| CONCERN | Risk & Robustness | The Key Elements inert-region list marks "an `echo` argument" unconditionally inert, while correctly splitting heredocs into piped-to-interpreter (executable) vs redirected-to-file (inert). That asymmetry misses `echo "<dangerous cmd>" \| sh`, `\| bash`, and `\| xargs -I{} sh -c '{}'`, where identical echo-argument text is genuinely executed -- a new fail-open shape the plan never names despite having worked through the analogous heredoc case. | pending | Extend the piped-vs-not distinction already applied to heredocs to `echo`/`printf`: an echo/printf argument is inert ONLY when its stdout is not piped into a shell/interpreter. After locating an echo/printf simple command, check whether it is the left side of a `\|` whose right-side argv0 is in the interpreter set already needed for the `-c` and heredoc-to-interpreter rules; if so, classify the echoed text executable. Regression case: `echo "redis-cli -n 0 FLUSHDB" \| sh`. |
-| CONCERN | Risk & Robustness + History & Consistency (2 critics) | Decision 8 / Task 7 call `do-docs/SKILL.md:30` the "exact precedent" for the pin, but that line's real text authorizes "`documentarian` or `general-purpose`" -- it SANCTIONS the very type spike-4 calls undefined and unverifiable, and that the plan's own Verification row forbids (`grep -c "general-purpose" do-build/SKILL.md` == 0). Task 7 also never names WHICH concrete agent type to pin, and the plan leaves do-docs untouched, so after this wave do-docs and do-build carry contradictory policies on the identical problem. #2715's own solution sketch names a concretely-defined type instead. | pending | Name the concrete type in Task 7's bullet: pin `/do-build`'s spawn line to `agent_type: builder` (defined in `.claude/agents/builder.md`, carries all tools) -- not `general-purpose`. Drop the "exact precedent" framing; cite do-docs only as prior art for the MECHANISM (a one-line agent-type-pin comment beside the spawn instruction) and state explicitly that do-build's pin is stricter: a single named type, no `general-purpose` fallback. |
-| CONCERN | History & Consistency | Task 7 mandates correcting `do-sdlc/SKILL.md:372` and spike-4 names that line the ACTUAL root cause of #2715's four no-op dispatches, but the Verification table's only #2715 row greps `do-build/SKILL.md`. Success Criteria likewise say only "BUILD dispatches name an agent type that carries the Task tool." The root-cause edit is therefore unguarded -- and Risk 4 separately flags do-sdlc/SKILL.md as a hot shared file at cross-lane collision risk, exactly where a silently dropped one-line correction goes undetected. | pending | Add a Verification row scoped to the BUILD stage-dispatch block near :372 rather than a repo-wide grep (other stages may legitimately keep `general-purpose`, so a bare repo-wide grep passes even if :372 is unfixed). Assert the BUILD row of the Stage->AgentType/Stage->Model table names the pinned type, expected match count 0 for `general-purpose` within that block. |
-| CONCERN | Scope & Value | Decision 3 introduces a per-consumer "ambiguity posture parameter" on `bash_structure.py`, but by the plan's own text all four consumers resolve to the SAME value: merge_guard fail-closed (non-negotiable), and the three Redis/kill guards fail-closed for both the block decision and the escape decision. The donor disagreement that motivates the parameter is resolved into unanimity before any consumer is wired, so the parameter encodes a distinction no call site uses -- configuration surface on the repo's safety layer with no current reader. | pending | Replace the posture kwarg with a single module-level fail-closed contract ("unparseable input is treated as executable and does not receive the escape") and delete the four call-site assignment statements Decision 3 asks the builder to write; collapse any posture-parameterized `test_bash_structure.py` cases into one fail-closed contract test. If the parameter is retained for #2658's later guard audit, say so in the module docstring so it reads as forward-provisioning, not load-bearing config. |
-| CONCERN | Scope & Value | Task 7 (`build-2715`) has `Depends On: none`, `Parallel: true`, and touches only do-build/SKILL.md, do-sdlc/SKILL.md and do-build/WORKFLOW.md -- zero file overlap with Tasks 1-6, which live entirely under `.claude/hooks/`. Nothing technical binds it to the Bash-structure seam; only Open Question #1's "one PR by wave convention" default does. Risk 6 already concedes this is the layer where review matters most and that a large PR invites rubber-stamping, so the plan's own default works against its own risk mitigation. | pending | Land #2715 as its own small PR: it is a skill-authoring fix, not a safety-hook fix, and shares no seam or risk profile. Make Task 8 (`document-wave4`) depend only on `validate-guards` for the hooks-seam docs, and fold #2715's WORKFLOW.md/SKILL.md doc touch-ups into Task 7 itself so Task 7 merges on its own timeline. Keep the four-issue framing for tracking; let the PR boundary follow the dependency graph the plan already draws. |
-| NIT | Scope & Value | The `agent/sdk_client.py` `# timeout-guard: allow` annotation disposition (three annotations from `b30cc732e`) is real cleanup but is not required to close #2779, whose defect is that the guard freezes files on unrelated edits. Task 9 (`validate-all`) nonetheless lists it as a hard completion gate, risking the whole plan blocking on an unrelated promote-to-`settings.timeouts` decision. | pending | Keep the review scoped to a commit-message note as Task 2 already asks, and remove it from Task 9's hard gate -- or split it into its own follow-up issue so a reviewer can tell "guard fix" from "annotation audit" in the diff. |
-| NIT | History & Consistency | Failure Path Test Strategy states "#3021 requires the escape hint in the block message to name the escape that actually works," attributing a specific acceptance criterion to #3021. Verified via `gh issue view 3021`: the issue body contains no such requirement and no occurrence of "hint". A builder verifying against the issue would search for a criterion that does not exist. | pending | Reword to "and this plan's row-2 fix (Decision 4) requires the block message to name the escape that actually works," removing the false #3021 citation. |
+| BLOCKER | Risk & Robustness | Task 3 folds `destructive_git_shapes._split_simple_commands` into `bash_structure.py`, but that splitter is a bare `_CONTROL_SPLIT_RE.split()` with ZERO quote-awareness (destructive_git_shapes.py:32,38-44). Applied to a raw command it severs a dangerous argv0 from its dangerous argument whenever an earlier quoted argument contains `;`/`&&`/`\|` -- e.g. `redis-cli -n 0 "arg; note" FLUSHDB` splits so that no fragment carries both a `redis-cli` argv0 and the flush token. That command blocks TODAY under the flat-string regex, so the seam would introduce a brand-new fail-open of exactly the class this wave exists to close. | FIXED — Decision 2a | Reproduced empirically before accepting: `redis-cli -n 0 --pattern "a;b" <flush>` blocks today, ALLOWs under a naive per-fragment check. Donors are now strictly ordered (quote-aware scan first, operator split only within a span), stated as a docstring invariant, with 2 verification rows + a named regression test. |
+| CONCERN | Risk & Robustness | The Key Elements inert-region list marks "an `echo` argument" unconditionally inert, while correctly splitting heredocs into piped-to-interpreter (executable) vs redirected-to-file (inert). That asymmetry misses `echo "<dangerous cmd>" \| sh`, `\| bash`, and `\| xargs -I{} sh -c '{}'`, where identical echo-argument text is genuinely executed -- a new fail-open shape the plan never names despite having worked through the analogous heredoc case. | FIXED — Task 3 bullet | `echo`/`printf` arguments are now inert ONLY when not piped into an interpreter; same piped-vs-redirected rule as heredocs. Regression row added. |
+| CONCERN | Risk & Robustness + History & Consistency (2 critics) | Decision 8 / Task 7 call `do-docs/SKILL.md:30` the "exact precedent" for the pin, but that line's real text authorizes "`documentarian` or `general-purpose`" -- it SANCTIONS the very type spike-4 calls undefined and unverifiable, and that the plan's own Verification row forbids (`grep -c "general-purpose" do-build/SKILL.md` == 0). Task 7 also never names WHICH concrete agent type to pin, and the plan leaves do-docs untouched, so after this wave do-docs and do-build carry contradictory policies on the identical problem. #2715's own solution sketch names a concretely-defined type instead. | FIXED — Decision 8 + Task 7 | Draft corrected: do-docs:30 sanctions `general-purpose` and is about Bash- not Task-capability, so only its FORM is borrowed. Concrete type named (`builder`). Also surfaced the unflagged `builder.md:28` 'do NOT spawn other agents' tension for Task 7 to resolve and record. |
+| CONCERN | History & Consistency | Task 7 mandates correcting `do-sdlc/SKILL.md:372` and spike-4 names that line the ACTUAL root cause of #2715's four no-op dispatches, but the Verification table's only #2715 row greps `do-build/SKILL.md`. Success Criteria likewise say only "BUILD dispatches name an agent type that carries the Task tool." The root-cause edit is therefore unguarded -- and Risk 4 separately flags do-sdlc/SKILL.md as a hot shared file at cross-lane collision risk, exactly where a silently dropped one-line correction goes undetected. | FIXED — new Verification row | Added a row asserting do-sdlc's BUILD dispatch line no longer pins `general-purpose`, scoped to that line rather than a repo-wide grep. |
+| CONCERN | Scope & Value | Decision 3 introduces a per-consumer "ambiguity posture parameter" on `bash_structure.py`, but by the plan's own text all four consumers resolve to the SAME value: merge_guard fail-closed (non-negotiable), and the three Redis/kill guards fail-closed for both the block decision and the escape decision. The donor disagreement that motivates the parameter is resolved into unanimity before any consumer is wired, so the parameter encodes a distinction no call site uses -- configuration surface on the repo's safety layer with no current reader. | FIXED — Decision 3 rewritten | Parameter deleted rather than retained. All four consumers resolved to fail-closed, so it was a fail-open lever on the safety layer with no reader. Verification row asserts no `posture` symbol exists. |
+| CONCERN | Scope & Value | Task 7 (`build-2715`) has `Depends On: none`, `Parallel: true`, and touches only do-build/SKILL.md, do-sdlc/SKILL.md and do-build/WORKFLOW.md -- zero file overlap with Tasks 1-6, which live entirely under `.claude/hooks/`. Nothing technical binds it to the Bash-structure seam; only Open Question #1's "one PR by wave convention" default does. Risk 6 already concedes this is the layer where review matters most and that a large PR invites rubber-stamping, so the plan's own default works against its own risk mitigation. | ACCEPTED — Open Question 1 | Recommendation reversed to TWO PRs (guard seam / #2715). Left as an Open Question because PR boundaries are the PM's call, not the plan's. |
+| NIT | Scope & Value | The `agent/sdk_client.py` `# timeout-guard: allow` annotation disposition (three annotations from `b30cc732e`) is real cleanup but is not required to close #2779, whose defect is that the guard freezes files on unrelated edits. Task 9 (`validate-all`) nonetheless lists it as a hard completion gate, risking the whole plan blocking on an unrelated promote-to-`settings.timeouts` decision. | FIXED — Task 9 bullet | Moved off the hard gate; now reported with its reasoning. Either disposition closes #2779. |
+| NIT | History & Consistency | Failure Path Test Strategy states "#3021 requires the escape hint in the block message to name the escape that actually works," attributing a specific acceptance criterion to #3021. Verified via `gh issue view 3021`: the issue body contains no such requirement and no occurrence of "hint". A builder verifying against the issue would search for a criterion that does not exist. | FIXED — Failure Path section | False #2715/#3021 citation removed; reworded to #3021's actual criterion (escape still short-circuits first) plus this plan's Decision 4. |
+
 ---
 
 ## Open Questions
 
-1. **One PR or three?** The plan is one document by wave convention, but it lands three
-   separable units (#2779 · the seam + #2736/#3021/kill-guard · #2715). One PR closing all four
-   is simpler to track and matches the wave framing; three PRs would review far better in the
-   layer where review matters most (Risk 6). Default assumed: **one PR**, with strict commit
-   hygiene so it reads as a sequence. Confirm or split.
+1. **One PR or two? (recommendation changed after critique.)** The plan is one document by wave
+   convention, but critique confirmed **#2715 is fully independent** — `Depends On: none`, zero
+   file overlap with tasks 1-6 (it touches only `skills-global/` and a test; the rest touches only
+   `.claude/hooks/`). Bundling it works against this plan's own Risk 6. **Recommended: two PRs** —
+   one for the hook/guard work (tasks 1-6, 8-9) and one for #2715 (task 7), landing in either
+   order. The guard PR keeps strict commit hygiene (helper first, then one commit per validator
+   adoption) so it still reads as a sequence. Confirm, or override back to one PR.
 
 2. **Ratify Decision 9 (fail-fast, no sequential fallback for `/do-build`).** #2715 poses this as
    an explicit open question. This plan rules for fail-fast, because a fallback would have to live
