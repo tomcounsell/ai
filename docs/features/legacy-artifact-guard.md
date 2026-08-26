@@ -169,8 +169,8 @@ the qualifier matters: this repo has **no pytest CI workflow**
 (`.github/workflows/` holds only an `@claude` mention responder), and
 `/do-test` is a pipeline convention rather than a mechanical gate. A commit
 landed through the sanctioned hotfix path — direct to `main`, no pull request —
-runs `.githooks/commit-msg` and `.githooks/pre-push`, neither of which invokes
-pytest, so it never runs this guard. Closing that residual gap requires a
+runs `.githooks/pre-commit`, `.githooks/commit-msg` and `.githooks/pre-push`,
+none of which invokes pytest, so it never runs this guard. Closing that residual gap requires a
 GitHub Actions workflow with a Redis service container, which is out of scope
 for the guard itself.
 
