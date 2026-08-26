@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/2736
 last_comment_id: none
 covers: [2779, 2736, 3021, 2715]
 revision_applied: true
-revision_applied_at: 2026-08-26T13:44:00Z
+revision_applied_at: 2026-08-26T14:04:49Z
 ---
 
 # Wave 4 — Hooks, Guards, and Gate Authoring Discipline
@@ -286,9 +286,13 @@ The four spikes below were executed as code-reads and live predicate invocations
   `validate_no_inline_timeout.find_violations` gains an optional `changed_lines` parameter,
   defaulting to `None` = whole-file — matching the reference implementation's shape exactly, so
   the CLI path needs no change.
-- **Coupling**: **decreases.** Three duplicated implementations of command-splitting collapse to
-  one. The `destructive_git_shapes.py` docstring already claims to be that single place; this
-  makes the claim true.
+- **Coupling**: **decreases where this wave reaches.** The quote/heredoc/substitution scanner,
+  currently trapped inside `validate_merge_guard.py`, moves to `hook_utils/` and gains a second
+  consumer set. The three pre-existing `_split_simple_commands` copies
+  (`validate_no_uv_sync_in_worktree`, both destructive-git validators) are **explicitly out of
+  scope** — deduping them would pull three more safety-layer validators into this PR. So
+  `destructive_git_shapes.py`'s "single place that logic lives" docstring claim remains aspirational
+  after this wave; do not assert otherwise.
 - **Data ownership**: unchanged. No new state, no persistence, no Redis, no Popoto models — so
   the Popoto schema-migration requirement in `docs/sdlc/do-plan.md:77-85` does not apply.
 - **Reversibility**: high. Each validator's adoption of the helper is an independent commit and
@@ -333,13 +337,14 @@ Run via `python scripts/check_prerequisites.py docs/plans/wave4-hooks-guards-gat
 
 ### Key Elements
 
-- **`hook_utils/bash_structure.py`** (new): the single source of truth for Bash command
-  structure. Splits a command into simple commands, identifies argv0 (skipping leading environment
-  assignments), classifies each argument's role, and isolates heredoc bodies, quoted literals, and
-  command substitutions — reporting for each text region whether it is **executable** (an
-  interpreter's `-c` payload, a heredoc piped into an interpreter, a command word) or **inert**
-  (a heredoc redirected to a file, a `--body`/`--body-file` argument, an `echo` argument).
-  Fails closed on any parse ambiguity, uniformly for every consumer.
+- **`hook_utils/bash_structure.py`** (new): the single source of truth for **inert regions** of a
+  Bash command. A single-pass scanner tracks quote, heredoc, and substitution state while building
+  simple-command boundaries, and returns the byte ranges that are provably *data rather than
+  code*: a heredoc body redirected to a file, a `--body`/`--body-file`/`-m` argument, and an
+  `echo`/`printf` argument not piped to an interpreter. Per Decision 2 it **never decides what to
+  block** — callers keep their existing block patterns and use it only to suppress matches that lie
+  entirely inside inert regions. On any parse ambiguity it returns **no** inert regions, so every
+  match stands.
 - **`hook_utils/staged_diff.py`** (new): the single source of truth for commit-time diff scoping.
   Provides the staged file list and an added-lines map from `git diff --cached -U0 -M`. Lifted
   from `validate_no_module_scope_env.py`, rename-aware.
@@ -379,61 +384,84 @@ exhaustive test suite, then adopt it one validator per commit. Each adoption com
 that validator's existing test file fully green. This keeps every step revertible and makes a
 regression attributable to one validator rather than to "the refactor."
 
-**Decision 2 — argument-role classification is the abstraction.** Per spike-2, the discriminator
-is which command consumes the text, never whether the text is quoted. The helper's public surface
-should let a caller ask "is offset N inside an executable region?" rather than handing back a
-pre-stripped string, because pre-stripping loses the offsets that produce accurate `file:line`
-and block messages.
+**Decision 2 — the matcher is SUBTRACTIVE, not reconstructive. This is the wave's most important
+design decision and it was arrived at the hard way.**
 
-**Decision 2a — the two donors are strictly ordered, and this ordering is load-bearing.**
-`destructive_git_shapes._split_simple_commands` (:38-44) is a bare `_CONTROL_SPLIT_RE.split()`
-(:32) with **zero quote-awareness**. Applied to a raw command it severs a dangerous argv0 from its
-dangerous argument whenever an *earlier quoted argument* contains a control operator. Reproduced
-against the live tree:
+Three critique rounds produced three different fail-opens in the *same* class, each a real command
+that blocks today and would have been allowed by the then-current design:
 
-```
-redis-cli -n 0 --pattern "a;b" <flush>
-  today (flat regex):            BLOCK
-  naive per-fragment position check:  ALLOW   <-- a NEW fail-open
-```
+| Round | Shape that would have started passing | Cause |
+|---|---|---|
+| 1 | `redis-cli -n 0 --pattern "a;b" <flush>` | operator split was quote-blind |
+| 2 | same shape, via the "fix" | span scanner drops quoted regions, so argv0 and argument land in different spans |
+| 3 | `sudo redis-cli -n 0 <flush>`, `env …`, `nohup … &`, `(… )` | argv0 exact-match defeated by wrapper/subshell prefixes |
 
-The splitter yields `redis-cli -n 0 --pattern "a` and `b" <flush>`; no fragment carries both the
-`redis-cli` argv0 and the flush token, so a per-fragment check passes a real flush. **That is the
-exact regression class this wave exists to close**, manufactured by the fix.
+All five round-3 forms were reproduced: they BLOCK today and would ALLOW under an argv0-exact-match
+rule. The pattern is the point. **Any design that first reconstructs shell structure and then
+blocks only where it believes a dangerous command lives is fail-open by construction** — every
+shell feature the model does not know about (`sudo`, `env`, `nohup`, `command`, `exec`, `time`,
+`xargs`, subshells, process substitution, aliases, `$()` nesting…) becomes a silent bypass of the
+repo's safety layer. That is an unbounded surface, and the Rabbit Holes section already warned
+against writing a real Bash parser. Three rounds of leaks is the evidence that the warning applies
+to *this design*, not just to some hypothetical over-engineering.
 
-**The donors cannot be composed as black boxes — this was round 2's blocker.** The previous
-revision proposed running `_extract_executed_commands` first for "safe spans" and splitting only
-within each. That does not work, and it fails this plan's own regression row.
-`_extract_executed_commands` does not emit one span per simple command: it calls `flush()` on
-entering a quote and resets `cmd_start` only after the closing quote, so a quoted argument **drops
-out and leaves two disjoint spans** even when no control operator separates them. Reproduced
-against the live tree:
+**Invert it.** The block surface stays exactly as broad as it is today; the fix only ever *removes*
+specific, provably-inert matches:
 
-```
-redis-cli -n 0 --pattern "a;b" <flush>
-  spans:     (0,25) 'redis-cli -n 0 --pattern '   (31,38) '<flush>'
-  fragments: ['redis-cli -n 0 --pattern', '<flush>']
-  => argv0 and the flush token land in different fragments: ALLOW  <-- still fail-open
-```
+1. **Block patterns are unchanged.** Every current `_BLOCK_PATTERNS` regex keeps matching the raw
+   command string exactly as it does now. Nothing is re-anchored, re-scoped, or rewritten. This is
+   what makes a wrapper-prefix regression structurally impossible: `sudo redis-cli … <flush>` still
+   matches the same pattern it matches today, and no argv0 reasoning is involved.
+2. **A match is then suppressed only if EVERY occurrence of the matched text lies inside an
+   enumerated inert region.** The inert regions are a short, closed list, each defined by its
+   **consuming command** rather than by its syntax:
+   - a heredoc body whose consumer is **not an interpreter** — `cat <<EOF`, `cat <<EOF > file`,
+     `gh … --body-file -`, a bare heredoc to stdout. A heredoc consumed by `python`/`sh`/`bash`, or
+     piped into one, is **not** inert.
+   - a `--body` / `--body-file` / `-m` argument;
+   - an `echo` / `printf` argument not piped to an interpreter.
 
-The quoted region becomes a *gap*, when correctness requires it to be an *opaque token inside one
-simple command*. The scanner answers "which byte ranges are executable text," not "where are the
-simple-command boundaries." Those are different questions, and only the second one supports an
-argv0-to-argument relationship check.
+   Note the heredoc rule is keyed on the consumer, not on redirection — this is #2736's own stated
+   fix direction, and an earlier draft narrowed it wrongly to "redirected to a file." That draft
+   would have kept blocking `cat <<EOF` to stdout, which is the exact shape that blocked this
+   plan's own design-review table while it was being written.
+   If even one occurrence lies outside all inert regions, or if the scanner cannot confidently
+   classify, the match stands and the command blocks.
+3. **Escape and sanction tokens are position-anchored**, which is a *narrowing* — it makes the
+   guard fire strictly more often, so it cannot introduce a bypass. This is what closes the two
+   fail-open bugs (rows 2 and 4) found during recon.
 
-**Therefore: write a single-pass scanner in `bash_structure.py` that tracks quote, heredoc, and
-substitution state _while_ building simple-command boundaries.** Reuse the donors' *logic* —
-merge_guard's quote/heredoc/substitution state machine, and `destructive_git_shapes`'s
-env-assignment-skipping argv0 identification — but call neither as a black box.
+The asymmetry this buys is the whole point: **a bug anywhere in the scanner can only produce a
+false positive, never a bypass.** A false positive is an annoyance that shows up immediately and
+loudly. A bypass is silent and is how production Redis got wiped twice. For the repo's safety
+layer, that is the only acceptable direction for the error term.
 
-The invariant, stated in the module docstring and named in a verification row: **a quoted or
-heredoc region is a token within its simple command, never a boundary between simple commands;
-only an unquoted control operator starts a new simple command.**
+It also makes the four issues' actual complaints — prose, docs, deny-modifiers — carve-outs rather
+than re-architecture, which is precisely what they ask for. Neither #2736 nor #3021 asks for the
+block surface to be narrowed; both ask for prose to stop tripping it.
 
-This is the plan's single largest correction, and it revises spike-1's conclusion: the seam is a
-purpose-built scanner *informed by* two donors, not a composition *of* them. Budget accordingly —
-Task 3 is the wave's real work. Both boundary classes (quoted-argument and control-operator) are
-named regression tests written **before** any consumer is wired.
+**Decision 2a — the scanner still exists, but its job is smaller and its failure mode is safe.**
+`bash_structure.py` is still a single-pass scanner tracking quote, heredoc, and substitution state
+(rounds 1 and 2 established that composing the two donors as black boxes does not work — see the
+Prior Art table above). But under Decision 2 its only output is **the set of inert regions**, used
+to suppress matches. It never decides what to block.
+
+Two consequences, both stated in the module docstring and gated by verification rows:
+
+- **The boundary invariant still holds**: a quoted or heredoc region is a token within its simple
+  command, never a boundary between simple commands. Needed to attribute a heredoc body or a
+  `--body` argument to the right consuming command.
+- **Unknown or unparseable input yields NO inert regions**, so every match stands. This is the
+  fail-closed direction and it is the reason wrapper prefixes, subshells, and any future
+  unmodeled shell feature are non-issues: they are not inert regions, so they suppress nothing.
+
+**Decision 2b — a wrapper-prefix allowlist is still needed, but only for the escape check.**
+Because escape/sanction anchoring asks "is this token an environment assignment prefixing the
+*same* simple command," a wrapper (`sudo`, `env VAR=v`, `nohup`, `command`, `exec`, `time`,
+`xargs`) or a subshell `(`/`)` must be peeled before the comparison, or a legitimate
+`REDIS_PRODUCTION_FLUSH_OK=1 sudo redis-cli …` would stop being honored. Peeling here is safe in a
+way it would not be on the block path: getting it wrong refuses an escape, which fails closed.
+The five round-3 forms are verification rows regardless, as regression cover for Decision 2.
 
 **Decision 3 — one ambiguity posture: fail closed, everywhere.** The two donors disagree today —
 `destructive_git_shapes._git_tokens` returns `None` on a `shlex` ValueError (fails **open**,
@@ -814,11 +842,18 @@ consumed by the SDLC router, which already reads stage outcomes; it introduces n
 - [ ] The three `# timeout-guard: allow` annotations added under duress to `agent/sdk_client.py`
       (~:1254/1291/1298, commit `b30cc732e`) are reviewed and dispositioned deliberately — kept as
       genuine local one-offs or promoted to `settings.timeouts`, with the reasoning recorded.
-- [ ] Exactly one implementation of Bash command-position parsing exists in
-      `.claude/hooks/`; the duplicated copies are deleted, not left alongside.
-- [ ] **No new fail-open is introduced by the seam.** Specifically: a real flush whose earlier
-      quoted argument contains a control operator (`redis-cli -n 0 --pattern "a;b" <flush>`) still
-      blocks, and `echo "<cmd>" | sh` stays in scope. Both are named regression tests.
+- [ ] Exactly one implementation of the *quote/heredoc/substitution scanner* exists in
+      `.claude/hooks/` — the symbol this wave actually moves. The pre-existing
+      `_split_simple_commands` copies in the three validators the No-Gos exclude
+      (`validate_no_uv_sync_in_worktree`, both destructive-git validators) are **out of scope and
+      stay**; measured live, that grep returns 4 files today and a correct in-scope build leaves it
+      at 4.
+- [ ] **No new fail-open is introduced by the seam.** Every shape that blocks today still blocks.
+      Named regression tests, one per critique round that found the gap: a quoted argument
+      containing a control operator (`redis-cli -n 0 --pattern "a;b" <flush>`); `echo "<cmd>" | sh`;
+      and all five wrapper/subshell forms — bare, `sudo`, `env`, `nohup … &`, and `( … )`.
+- [ ] `_BLOCK_PATTERNS` in all three Bash validators are unchanged by this PR (Decision 2), which is
+      what makes the above structural rather than enumerated.
 - [ ] **A quoted argument is a token inside its simple command, not a boundary between two.**
       `redis-cli -n 0 --pattern "a;b" <flush>` still blocks — the round-2 blocker, and the case a
       donor-composition approach silently fails. Both boundary classes (quoted-argument and
@@ -983,14 +1018,19 @@ idiom for issue/PR text until task 4 lands.
 - **Domain**: security/untrusted-input
 - **Parallel**: false
 - **One commit per validator**, so a bisect names the culprit.
-- `validate_no_redis_flush`: match a flush only as a bare positional argument of a `redis-cli`
-  argv0, plus the `.flushdb(`/`.flushall(` call shapes inside executable regions. Anchor `_ESCAPE`
-  to an environment assignment prefixing the *same simple command* — this closes defect row 2 and
-  aligns the code with `docs/features/redis-flush-hardening.md:85`.
-- `validate_no_raw_redis_delete`: replace `_EXECUTABLE_CONTEXT`'s anywhere-match with the helper's
-  executable-region query. Keep gate 1 (`_guard_applies`) and `_POPOTO_CONTEXT` unchanged.
-- `validate_no_broad_process_kill`: anchor `_SANCTIONED` to the argv0 of the simple command being
-  judged — closes defect row 4 — and scope block patterns to executable regions.
+- **Leave every `_BLOCK_PATTERNS` regex byte-for-byte unchanged** in all three validators
+  (Decision 2). The diff should show no edits to those lists. This is what makes a wrapper-prefix
+  or unmodeled-shell-feature regression structurally impossible, and it is checkable in review.
+- `validate_no_redis_flush`: after a block pattern matches, suppress it only if **every** occurrence
+  of the matched text lies inside an inert region. Separately anchor `_ESCAPE` to an environment
+  assignment prefixing the *same* simple command, peeling wrapper prefixes per Decision 2b — this
+  closes defect row 2 and aligns the code with `docs/features/redis-flush-hardening.md:85`.
+- `validate_no_raw_redis_delete`: `_EXECUTABLE_CONTEXT` becomes an inert-region suppression check
+  rather than an anywhere-match gate. Keep gate 1 (`_guard_applies`) and `_POPOTO_CONTEXT`
+  unchanged.
+- `validate_no_broad_process_kill`: same suppression treatment for its block patterns, and anchor
+  `_SANCTIONED` to the argv0 (wrapper-peeled) of the simple command being judged — closes defect
+  row 4.
 - Preserve every predicate's public signature and the dispatcher's registration order so
   `test_pre_tool_use_dispatcher.py` needs no changes.
 
@@ -1052,8 +1092,8 @@ idiom for issue/PR text until task 4 lands.
 - Add a first-instruction self-check to `/do-build`: if the Task tool is absent, exit immediately
   with a specific, machine-readable diagnostic naming the missing capability. Fail-fast, no
   sequential fallback (Decision 9).
-- Correct `WORKFLOW.md:137`'s zero-commit abort message so it no longer attributes a tooling
-  failure to "builder agents produced no output."
+- Correct `.claude/skills-global/do-build/WORKFLOW.md:139`'s zero-commit abort message so it no
+  longer attributes a tooling failure to "builder agents produced no output."
 - Add a static assertion to `tests/unit/test_sdlc_fork_no_background.py` that BUILD's dispatch
   template names a Task-capable agent type.
 - Do **not** introduce a required-tools frontmatter field (Decision 8). Do **not** touch
@@ -1116,13 +1156,15 @@ table above is prose-only and never appears in an executable row.
 | GREEN — raw-Redis call still blocked | `python -c "import sys,os;sys.path.insert(0,'.claude/hooks/validators');import validate_no_raw_redis_delete as m;p='.venv/bin/py'+'thon';c='r.de'+'lete(';print('BLOCK' if m.find_violation(p+' -c \"'+c+'\\'AgentSession:1\\')\"',os.getcwd()) else 'ALLOW')"` | output contains BLOCK |
 | #2779 — no file frozen by pre-existing literals | `python -c "import sys,subprocess;sys.path.insert(0,'.claude/hooks/validators');import validate_no_inline_timeout as t;fs=[f for f in subprocess.run(['git','ls-files','*.py'],capture_output=True,text=True).stdout.split() if not t.is_test_file(f)];print(sum(1 for f in fs if t.find_violations(open(f).read(),f,changed_lines=set())))"` | output contains 0 |
 | #2779 — CLI retains whole-file semantics | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_inline_timeout as t;import inspect;p=inspect.signature(t.find_violations).parameters;print('OK' if p['changed_lines'].default is None else 'BAD')"` | output contains OK |
-| Exactly one command-splitter remains | `grep -rln "_split_simple_commands" .claude/hooks --include=*.py \| grep -v __pycache__ \| wc -l` | output contains 1 |
+| Exactly one scanner implementation remains | `grep -rln "def _extract_executed_commands\\\|def _scan_inert_regions" .claude/hooks --include=*.py \| grep -v __pycache__ \| wc -l` | output contains 1 |
 | merge_guard tokenizer contract intact | `git diff origin/main -- tests/unit/test_validate_merge_guard.py \| grep -c "^-.*assert"` | match count == 0 |
 | Anti-criterion — router untouched (Wave 2 owns it) | `git diff --name-only origin/main \| grep -c "agent/sdlc_router.py"` | match count == 0 |
 | Anti-criterion — no required-tools frontmatter invented | `grep -rc "required-tools" .claude/skills-global/ 2>/dev/null \| grep -v ":0" \| wc -l` | output contains 0 |
 | Anti-criterion — the 55 files were not mass-annotated | `git diff --name-only origin/main \| xargs -I{} sh -c 'git diff origin/main -- {} \| grep -c "^+.*timeout-guard: allow"' \| paste -sd+ \| bc` | output contains 0 |
 | BLOCKER regression — quoted control operator still blocks | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'DB';print('BLOCK' if f.find_violation('redis-cli -n 0 --pattern \"a;b\" '+w) else 'ALLOW')"` | output contains BLOCK |
 | BLOCKER regression — echo piped to a shell stays in scope | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'ALL';print('BLOCK' if f.find_violation('echo \"redis-cli -n 0 '+w+'\" \| sh') else 'ALLOW')"` | output contains BLOCK |
+| r3 regression — wrapper and subshell prefixes still block | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'ALL';forms=['redis-cli -n 0 '+w,'sudo redis-cli -n 0 '+w,'(redis-cli -n 0 '+w+')','nohup redis-cli -n 0 '+w+' &','env redis-cli -n 0 '+w];print('OK' if all(f.find_violation(c) for c in forms) else 'FAIL-OPEN')"` | output contains OK |
+| Decision 2 — block patterns were not narrowed | `git diff origin/main -- .claude/hooks/validators/validate_no_redis_flush.py .claude/hooks/validators/validate_no_raw_redis_delete.py .claude/hooks/validators/validate_no_broad_process_kill.py \| grep -c "^-.*_BLOCK_PATTERNS\\\|^-\s*re\.compile\\\|^-\s*r\"" ` | match count == 0 |
 | Boundary invariant is documented, not just imported | `grep -ci "never a boundary\|always precedes\|never.*raw command" .claude/hooks/hook_utils/bash_structure.py` | output > 0 |
 | No fail-open ambiguity lever was installed | `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` | match count == 0 |
 | BLOCKER r2 regression — quoted arg is a token, not a boundary | `python -c "import sys;sys.path.insert(0,'.claude/hooks');from hook_utils import bash_structure as b;w='FLUSH'+'DB';cmds=b.simple_commands('redis-cli -n 0 --pattern \"a;b\" '+w);print('OK' if any(c.argv0=='redis-cli' and w in ' '.join(c.args).upper() for c in cmds) else 'SPLIT')"` | output contains OK |
@@ -1131,6 +1173,7 @@ table above is prose-only and never appears in an executable row.
 | #2715 — non-BUILD stages keep their existing dispatch type (no collateral change) | `python -c "t=open('.claude/skills-global/do-sdlc/SKILL.md').read();print('OK' if 'general-purpose' in t else 'OVERREACHED')"` | output contains OK |
 | #2715 — pinned agent type is permitted to orchestrate | `python -c "import glob,re;f=[p for p in glob.glob('.claude/agents/*.md') if 'build' in p and 'orchestrat' in open(p).read().lower()];print('OK' if f and not any(re.search(r'do NOT spawn\|not a manager',open(p).read(),re.I) for p in f) else 'MISSING')"` | output contains OK |
 | Feature doc exists and is indexed | `test -f docs/features/bash-command-position-matching.md && grep -c "bash-command-position-matching" docs/features/README.md` | output > 0 |
+| Parse cost within the dispatcher budget | `python -c "import sys,time;sys.path.insert(0,'.claude/hooks');from hook_utils import bash_structure as b;c='gh issue create --body \"x\" && redis-cli -n 3 DBSIZE';t0=time.perf_counter();[b.inert_regions(c) for _ in range(1000)];us=(time.perf_counter()-t0)*1000;print(f'{us:.3f}ms per 1000 -> {us/1000:.4f}ms per call');print('OK' if us < 500 else 'TOO SLOW')"` | output contains OK |
 | features README still sorted | `python .claude/hooks/validators/validate_features_readme_sort.py` | exit code 0 |
 | No co-author trailers | `git log origin/main..HEAD --format=%B \| grep -ci "co-authored-by"` | match count == 0 |
 
@@ -1168,10 +1211,10 @@ written with the `Write` tool — the same `--body-file` workaround #3004 needed
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness (driver-reproduced) | **Command-wrapper and subshell prefixes defeat the new argv0-exact-match rule, creating a NEW fail-open that today's flat regex does not have.** Task 4 (:986-989) pins `validate_no_redis_flush` to matching a flush "only as a bare positional argument of a `redis-cli` argv0", and Decision 2a's argv0 identification (borrowed from `destructive_git_shapes._git_tokens` :47-61) skips only *environment assignments*. Reproduced live: today `redis-cli -n 0 FLUSHALL`, `sudo redis-cli ...`, `(redis-cli ... )`, `nohup redis-cli ... &`, and `env redis-cli ...` **all BLOCK**; under the stated rule `shlex.split` yields argv0 = `sudo` / `(redis-cli` / `nohup` / `env` respectively, so all four wrapper forms would **ALLOW**. That is a regression relative to current behavior in the exact direction Risk 1 calls "the worst outcome available". The plan mentions `sudo`, `nohup`, and subshell grouping **zero times** across all 1205 lines. | pending | Argv0 resolution must peel a *wrapper allowlist* before the exact-match compare, not just env assignments: strip a leading `sudo` (and its flags), `env` (and its `VAR=val` args), `nohup`, `command`, `exec`, `time`, `xargs`, and strip leading/trailing `(`/`)` from subshell grouping -- then compare. Equivalently, state the test as "the flush token is a positional argument of a simple command whose *effective* argv0 is `redis-cli`". Add the five reproduced wrapper forms as named regression rows in the Verification table (all must BLOCK) and extend the "No new fail-open is introduced by the seam" criterion (:819-825), which currently names only two cases. The same peel applies to `validate_no_broad_process_kill`'s argv0-anchored `_SANCTIONED` check (Task 4, :992): a wrapper-prefixed broad kill must still block. |
-| BLOCKER | History & Consistency (driver-reproduced, elevated from CONCERN) | **The "exactly one implementation" Success Criterion and its Verification row are unsatisfiable inside the plan's own declared scope.** Success Criteria :817-818 requires "Exactly one implementation of Bash command-position parsing exists in `.claude/hooks/`; the duplicated copies are deleted", Architectural Impact :289-291 claims "Three duplicated implementations of command-splitting collapse to one", and Verification row :1119 gates on the `_split_simple_commands` file count being 1. But Rabbit Holes :624-627 explicitly puts `validate_no_uv_sync_in_worktree` and the two destructive-git validators **out of scope**, and Test Impact :596-597 marks that dedup "**Optional**". No task step repoints or deletes `destructive_git_shapes.py`'s own `_split_simple_commands`. Measured live: that grep returns **4** files today (`destructive_git_shapes.py`, `validate_no_uv_sync_in_worktree.py`, `validate_no_destructive_git_in_worktree.py`, `validate_no_destructive_git_in_shared_checkout.py`). A correct in-scope build therefore leaves the count at 4 and **fails the gate**; the only ways to pass are to expand scope into three more safety-layer validators (contradicting the No-Gos) or to quietly drop the row. | pending | Pick one and make all four sites agree. Recommended: keep the No-Gos as written and retarget the criterion to the four in-scope consumers -- replace row :1119 with a row asserting the symbol actually being moved has exactly one definition site (`grep -rln "def _extract_executed_commands" .claude/hooks --include=*.py` == 1), since the 3 other `_split_simple_commands` occurrences are out-of-scope by design. If the full dedup IS wanted, promote it from "Optional" to a numbered task with its own commit, move `test_validate_no_uv_sync_in_worktree.py` and the two destructive-git test files into Test Impact as required rather than optional, and widen the Appetite and roster accordingly. Either way, delete or correct the "three duplicated implementations collapse to one" claim at :289-291. |
-| CONCERN | Risk & Robustness (driver-confirmed) | **The parse-cost measurement is declared "a required verification row" four times but no such row exists.** :302 ("A parse-cost measurement is a required verification row"), :669 (Risk 3 mitigation), :835 (Success Criterion "Parse cost measured and the manifest's 20s budget re-confirmed"), and :1010 (Task 5 bullet) all assert the obligation; the Verification table (:1101-1136) contains **no** row that measures or gates on timing -- confirmed by grepping the table for `perf_counter`, `parse cost`, `measure`, `budget`, and `20s` (zero hits). Task 9 (`validate-all`, "Run every Verification row") therefore has nothing to run for it, so the build can go fully green with the hot-path obligation silently unmet. This is the same "stated mandatory, not gated" shape round 2 fixed for the invariant row. | pending | Add an executable Verification row with a concrete ceiling, e.g. time 1000 `bash_structure` parses of a representative command with `time.perf_counter()` and print `OK` below a named threshold, `SLOW <ms>` above it. Derive the threshold as per-call budget times ~10 predicates against the manifest's 20s dispatcher ceiling, name it as a provisional env-overridable constant, and have Task 5 write the *measured* number into the `.claude/hooks/manifest.toml:74-101` comment block rather than leaving "re-confirmed" unquantified. |
-| NIT | History & Consistency (driver-confirmed) | Task 7 (:1055) says to correct "`WORKFLOW.md:137`". There is no `WORKFLOW.md` at the repo root; the only one in the tree is `.claude/skills-global/do-build/WORKFLOW.md`, and the "builder agents produced no output" string is at **line 139**, not 137. A builder following the citation literally looks in the wrong place. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness (driver-reproduced) | **Command-wrapper and subshell prefixes defeat the new argv0-exact-match rule, creating a NEW fail-open that today's flat regex does not have.** Task 4 (:986-989) pins `validate_no_redis_flush` to matching a flush "only as a bare positional argument of a `redis-cli` argv0", and Decision 2a's argv0 identification (borrowed from `destructive_git_shapes._git_tokens` :47-61) skips only *environment assignments*. Reproduced live: today `redis-cli -n 0 FLUSHALL`, `sudo redis-cli ...`, `(redis-cli ... )`, `nohup redis-cli ... &`, and `env redis-cli ...` **all BLOCK**; under the stated rule `shlex.split` yields argv0 = `sudo` / `(redis-cli` / `nohup` / `env` respectively, so all four wrapper forms would **ALLOW**. That is a regression relative to current behavior in the exact direction Risk 1 calls "the worst outcome available". The plan mentions `sudo`, `nohup`, and subshell grouping **zero times** across all 1205 lines. | FIXED — Decision 2 inverted | Reproduced all five forms: they BLOCK today and ALLOW under argv0-exact-match. Rather than enumerate a wrapper allowlist on the block path, the design is inverted (Decision 2): block patterns stay byte-for-byte unchanged and the scanner only SUPPRESSES matches proven to lie entirely inside inert regions. `sudo redis-cli … <flush>` therefore still blocks with no argv0 reasoning involved. A wrapper peel is retained only for the escape check (Decision 2b), where getting it wrong fails closed. All five forms added as a verification row plus a row asserting _BLOCK_PATTERNS were not edited. |
+| BLOCKER | History & Consistency (driver-reproduced, elevated from CONCERN) | **The "exactly one implementation" Success Criterion and its Verification row are unsatisfiable inside the plan's own declared scope.** Success Criteria :817-818 requires "Exactly one implementation of Bash command-position parsing exists in `.claude/hooks/`; the duplicated copies are deleted", Architectural Impact :289-291 claims "Three duplicated implementations of command-splitting collapse to one", and Verification row :1119 gates on the `_split_simple_commands` file count being 1. But Rabbit Holes :624-627 explicitly puts `validate_no_uv_sync_in_worktree` and the two destructive-git validators **out of scope**, and Test Impact :596-597 marks that dedup "**Optional**". No task step repoints or deletes `destructive_git_shapes.py`'s own `_split_simple_commands`. Measured live: that grep returns **4** files today (`destructive_git_shapes.py`, `validate_no_uv_sync_in_worktree.py`, `validate_no_destructive_git_in_worktree.py`, `validate_no_destructive_git_in_shared_checkout.py`). A correct in-scope build therefore leaves the count at 4 and **fails the gate**; the only ways to pass are to expand scope into three more safety-layer validators (contradicting the No-Gos) or to quietly drop the row. | FIXED — 3 sites | Measured live: the grep returns 4 and an in-scope build leaves it at 4. Took the recommended option — kept the No-Gos, retargeted the row at the symbol actually being moved (the scanner), corrected the success criterion to say the three excluded copies stay, and removed the 'three duplicated implementations collapse to one' claim from Architectural Impact. |
+| CONCERN | Risk & Robustness (driver-confirmed) | **The parse-cost measurement is declared "a required verification row" four times but no such row exists.** :302 ("A parse-cost measurement is a required verification row"), :669 (Risk 3 mitigation), :835 (Success Criterion "Parse cost measured and the manifest's 20s budget re-confirmed"), and :1010 (Task 5 bullet) all assert the obligation; the Verification table (:1101-1136) contains **no** row that measures or gates on timing -- confirmed by grepping the table for `perf_counter`, `parse cost`, `measure`, `budget`, and `20s` (zero hits). Task 9 (`validate-all`, "Run every Verification row") therefore has nothing to run for it, so the build can go fully green with the hot-path obligation silently unmet. This is the same "stated mandatory, not gated" shape round 2 fixed for the invariant row. | FIXED — row added | Added an executable row timing 1000 `inert_regions` parses via `perf_counter` against a provisional 0.5ms/call ceiling, and Task 5 already writes the measured number into manifest.toml:74-101. |
+| NIT | History & Consistency (driver-confirmed) | Task 7 (:1055) says to correct "`WORKFLOW.md:137`". There is no `WORKFLOW.md` at the repo root; the only one in the tree is `.claude/skills-global/do-build/WORKFLOW.md`, and the "builder agents produced no output" string is at **line 139**, not 137. A builder following the citation literally looks in the wrong place. | FIXED — path and line | Corrected to `.claude/skills-global/do-build/WORKFLOW.md:139`. |
 
 ---
 
