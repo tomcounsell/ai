@@ -13,6 +13,7 @@ and therefore cannot carry the change as a file edit.
 from __future__ import annotations
 
 import importlib
+import json
 
 import pytest
 
@@ -20,6 +21,7 @@ from scripts.migrate_reflections_callables import (
     CALLABLE_MIGRATIONS,
     MigrationError,
     PartialMigrationError,
+    main,
     migrate_targets,
     migrate_yaml_callables,
     rewrite_callable_lines,
@@ -384,3 +386,37 @@ def test_dry_run_abort_is_never_a_partial(tmp_path, monkeypatch):
 
     assert not isinstance(exc.value, PartialMigrationError)
     assert "agent.sustainability" in vault.read_text(), "dry run must not write"
+
+
+def test_main_json_abort_reports_the_partial_write(tmp_path, monkeypatch, capsys):
+    """The CLI abort payload is the operator-facing artifact, so pin it directly.
+
+    Without this, reverting the abort branch to a bare
+    ``{"rewrote": False, "rewrites_count": 0}`` keeps every other test green —
+    and that payload is precisely what Step 1.659 surfaces to the human running
+    the #2876 propagation check.
+    """
+    vault = _write_registry(tmp_path / "vault.yaml", ["agent.sustainability.circuit_health_gate"])
+    config = _write_registry(
+        tmp_path / "config.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+    monkeypatch.setitem(
+        CALLABLE_MIGRATIONS,
+        "agent.agent_session_queue.cleanup_stale_branches_all_projects",
+        "agent.no_such_module_xyz.nope",
+    )
+
+    rc = main(["--target", str(vault), "--target", str(config), "--json"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    payload = json.loads(err.splitlines()[0])
+    assert payload["rewrote"] is True, "abort must not claim nothing was written"
+    assert payload["partial"] is True
+    assert payload["rewrites_count"] == 1
+    assert payload["targets"] == [str(vault)]
+
+    # The plain-text summary must be LAST: the Step 1.659 wrapper keeps only
+    # stderr[-500:], which truncates the JSON's leading partial-write evidence.
+    assert err.rstrip().endswith(f"ALREADY WRITTEN: {vault} (1 line(s))")

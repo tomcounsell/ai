@@ -240,7 +240,8 @@ def migrate_yaml_callables(
 def default_targets() -> list[Path]:
     """Both registry copies: the iCloud vault original and the local materialization.
 
-    Order matters only cosmetically. Missing paths are filtered by
+    Order determines only which copy is written first on a partial abort; both
+    writes are independently correct. Missing paths are filtered by
     :func:`migrate_targets` — a fresh machine may have no vault, and a checkout
     that has never run ``/update`` may have no config copy.
     """
@@ -277,8 +278,8 @@ class PartialMigrationError(MigrationError):
     """
 
     def __init__(self, cause: MigrationError, completed: list[CallableMigrationResult]) -> None:
+        # `raise ... from e` in migrate_targets sets __cause__; no second copy.
         super().__init__(str(cause))
-        self.cause = cause
         self.completed = completed
 
 
@@ -349,8 +350,8 @@ def main(argv: list[str] | None = None) -> int:
     except MigrationError as e:
         # Report what actually reached disk before the abort. A bare
         # `rewrote: false` would be factually wrong about a partial run, and
-        # Step 1.659 forwards this payload verbatim as its only record.
-        completed = getattr(e, "completed", [])
+        # Step 1.659 forwards this stderr as its only record.
+        completed = e.completed if isinstance(e, PartialMigrationError) else []
         written = [r for r in completed if r.rewrote]
         if args.json:
             print(
