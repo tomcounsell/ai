@@ -49,7 +49,8 @@ def _injection_call_count() -> int:
 
     Counted as AST call nodes rather than by regex: a regex over source also
     matches the pattern inside comments and docstrings, which is exactly the
-    self-defeating-gate shape this PR had to repair on the Redis ACL row.
+    self-defeating-gate shape this PR had to repair on the report-only drift
+    row this PR deletes.
 
     Residual gap, accepted: the walk requires the receiver to be the bare
     name `result`, so `self.result.warnings.append(...)` or an aliased

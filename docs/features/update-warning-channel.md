@@ -9,7 +9,7 @@ Four independent defects conspired so a real warning from `/update` reliably wen
 1. **`_queue_fix_session` truncated the fix-session brief at `stdout[:500]`.** The npm/git-pull preamble ate most of that budget, so the warning list — the entire reason the session exists — was cut mid-word.
 2. **`has_warnings` couldn't see the cron summary.** `run.py --cron` renders `up to date at <sha> (N warnings)` plus `  ⚠️ <text>` bullets, or `update failed at <sha>` plus `  - <text>` bullets. The old detector matched only four legacy line prefixes (`"[update] WARN"`, `"WARNING:"`, `"ERROR"`, `"RESTART FAILED"`) — none of which match either cron form.
 3. **`env-completeness` flooded operators with noise dominated by keys with in-code defaults**, and its documented remediation (copy the declaration into the shared vault) broke `Settings()` construction fleet-wide for empty-valued declarations.
-4. **Human-gated warnings (`gws auth`, Redis ACL drift) re-emitted every 30-minute cycle forever**, with no way to see what was suppressed once a warning finally stopped repeating.
+4. **Human-gated warnings (`gws auth`) re-emitted every 30-minute cycle forever**, with no way to see what was suppressed once a warning finally stopped repeating.
 
 ## The warning grammar `run.py` emits
 
@@ -47,10 +47,10 @@ The non-cron `--verify` path additionally emits four legacy line-anchored prefix
 
 ## Suppression: `warn_state`
 
-Three checks are genuinely unresolvable without a human action outside `/update`'s control: `gws auth` (browser OAuth consent), Redis ACL drift (a human-signed apply runbook), and `env-completeness` (a human editing the vault). `scripts/update/warn_state.py` collapses each to one emission per state transition:
+Two checks are genuinely unresolvable without a human action outside `/update`'s control: `gws auth` (browser OAuth consent) and `env-completeness` (a human editing the vault). `scripts/update/warn_state.py` collapses each to one emission per state transition:
 
 - **`should_emit(key, signature, project_dir) -> bool`** — `True` iff `signature` differs from the last-stored value for `key`. An empty `signature` means "resolved": the stored entry clears and the transition itself emits once.
-- Signatures encode content, not just presence, so a *changed* drift re-warns: the Redis ACL signature is a digest of the planned commands (which already carry the `<REDIS_APP_PASSWORD>` placeholder, never a real secret); the gws signature is the auth-method string; `env-completeness`'s signature is `f"unresolved:{tool.error}"` — the capped summary string, so any change to the first five keys or the missing count re-warns. The uncapped enumeration lives at `python -m scripts.update.verify`.
+- Signatures encode content, not just presence, so a *changed* condition re-warns: the gws signature is the auth-method string; `env-completeness`'s signature is `f"unresolved:{tool.error}"` — the capped summary string, so any change to the first five keys or the missing count re-warns. The uncapped enumeration lives at `python -m scripts.update.verify`.
 - `env-completeness`'s resolution branch is gated on the check having actually passed (`not (tool.version or "").startswith("skipped")`) — a transient vault-symlink outage must never clear the stored signature, or the next healthy run re-emits the whole report.
 
 ## Retrieval: the suppressed conditions stay discoverable
@@ -59,14 +59,14 @@ Suppression without retrieval is how a real condition goes dark. Four surfaces a
 
 1. **`warn_state.active(project_dir) -> dict[str, str]`** — the currently-suppressed key → signature map, fail-soft (`{}` on any error).
 2. **`python -m scripts.update.warn_state`** — prints the state file path it read (first line, always — this is what makes a wrong-root call visibly wrong rather than a silent empty map), then every suppressed key and its signature.
-3. **`python -m tools.doctor`** (full run, not `--quick`) — a `gws` result (`_check_gws_auth`, mirroring `_check_redis_acl`) alongside the existing `redis_acl` result. `gws` is registered inside the `if not quick:` block, not the unconditional list, because this repo has no WARN tier (`CheckResult.passed` is binary) — `passed=False` plus exclusion from `--quick` *is* the WARN idiom, and `--quick` backs the opt-in pre-push hook that must never block an unauthenticated machine's pushes on a condition only a human at a browser can clear. `env-completeness` has no doctor counterpart by design — `python -m scripts.update.verify` already prints its full report on demand.
+3. **`python -m tools.doctor`** (full run, not `--quick`) — a `gws` result (`_check_gws_auth`). `gws` is registered inside the `if not quick:` block, not the unconditional list, because this repo has no WARN tier (`CheckResult.passed` is binary) — `passed=False` plus exclusion from `--quick` *is* the WARN idiom, and `--quick` backs the opt-in pre-push hook that must never block an unauthenticated machine's pushes on a condition only a human at a browser can clear. `env-completeness` has no doctor counterpart by design — `python -m scripts.update.verify` already prints its full report on demand.
 4. **The `suppressed:` trailer** — an always-on line, emitted whenever `warn_state.active()` minus this run's own emissions (`result.warn_keys_emitted`) is non-empty:
 
    ```
-   suppressed (unchanged since first warning): gws-auth, redis-acl-drift — details: python -m scripts.update.warn_state
+   suppressed (unchanged since first warning): gws-auth, env-completeness — details: python -m scripts.update.warn_state
    ```
 
-   The **emitted-subtracted** map matters: `should_emit` writes its signature the instant it returns `True`, so a trailer built from raw `active()` would call a key "unchanged since first warning" on the very run it first warned. `result.warn_keys_emitted` records six of the eight `should_emit` sites: the four that pass a non-empty signature (`gws-auth` needs-auth, `redis-acl-drift` drift, and the `env-completeness` / `calendar-config` unresolved branches), plus the `env-completeness` and `calendar-config` resolution branches, which record per the flat "every site that returns True" rule even though an empty signature pops the key and makes the subtraction a no-op there. The two that do not record are the `gws-auth` and `redis-acl-drift` resolution branches, harmless for that same reason. The trailer names `active() - warn_keys_emitted`.
+   The **emitted-subtracted** map matters: `should_emit` writes its signature the instant it returns `True`, so a trailer built from raw `active()` would call a key "unchanged since first warning" on the very run it first warned. `result.warn_keys_emitted` records five of the six `should_emit` sites for these three checks: the three that pass a non-empty signature (`gws-auth` needs-auth, and the `env-completeness` / `calendar-config` unresolved branches), plus the `env-completeness` and `calendar-config` resolution branches, which record per the flat "every site that returns True" rule even though an empty signature pops the key and makes the subtraction a no-op there. The one that does not record is the `gws-auth` resolution branch, harmless for that same reason. The trailer names `active() - warn_keys_emitted`.
 
    The trailer is composed at the summary-render site in `run.py`, **outside** the success/failure `if/elif/else` — the modal suppressed case is a run with nothing else wrong (the `else` branch), so composing it inside `elif result.warnings:` would make it silently disappear on exactly the run this exists to cover.
 
@@ -94,4 +94,4 @@ Pull-only on the unattended path is deliberate, not a gap: pushing there would n
 - `tests/unit/test_update_append_warning.py` — the newline-collapse helpers and the README N² dedup fix.
 - `tests/unit/test_doctor.py` — `_check_gws_auth`'s four branches and its `--quick` absence.
 
-See also [`env-completeness-validation.md`](env-completeness-validation.md) for the required/optional split and the reader-recurrence guard, and [`redis-flush-hardening.md`](redis-flush-hardening.md) for the ACL drift check itself.
+See also [`env-completeness-validation.md`](env-completeness-validation.md) for the required/optional split and the reader-recurrence guard, and [`redis-flush-hardening.md`](redis-flush-hardening.md) for the flush-guard layers.

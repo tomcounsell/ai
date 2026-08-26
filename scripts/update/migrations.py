@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from scripts.update import warn_state
+
 logger = logging.getLogger(__name__)
+
+# The only literal occurrence of the retired warn_state key permitted in the
+# repo (issue #3004's acceptance grep is bounded on exactly this file, exactly
+# once). Every other module refers to the key only through this name.
+_ORPHANED_WARN_KEY = "redis-acl-drift"
 
 
 @dataclass
@@ -1163,6 +1170,34 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_clear_orphaned_warn_state_key(project_dir: Path) -> str | None:
+    """Pop the orphaned warn_state key left by the deleted server-side
+    access-control layer (issue #3004).
+
+    Nothing emits or clears this key anymore, so without this one-shot sweep
+    it would sit in ``data/update_warn_state.json`` forever and relay to
+    Telegram on every ``--cron`` run's suppressed-trailer -- the exact
+    permanent-noise symptom issue #3004 exists to remove.
+
+    Uses ``warn_state``'s own documented resolved-path
+    (``should_emit(key, "", project_dir)``): pops the key if present, rewrites
+    the state file through ``_save``, and is a no-op on a machine that never
+    warned. Fail-soft and idempotent by construction -- ``warn_state``'s
+    ``_load``/``_save`` already swallow ``OSError``.
+
+    Returns None unconditionally; a bookkeeping cleanup must never fail
+    ``/update``. A failure is logged, never swallowed silently, because
+    ``run_pending_migrations`` records a ``None`` return as permanently
+    completed -- a silently-swallowed exception here would never retry.
+    """
+    try:
+        warn_state.should_emit(_ORPHANED_WARN_KEY, "", project_dir)
+        return None
+    except Exception as e:
+        logger.warning("clear_orphaned_warn_state_key: %s", e)
+        return None
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -1282,6 +1317,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_backfill_job_last_active_scores,
         "Repair tz-skewed Job.last_active_at sorted-set scores via field-scoped "
         "ORM re-saves (issue #2636)",
+    ),
+    "clear_orphaned_warn_state_key": (
+        _migrate_clear_orphaned_warn_state_key,
+        "Clear the orphaned warn_state key left by the deleted server-side "
+        "access-control layer (issue #3004)",
     ),
 }
 
