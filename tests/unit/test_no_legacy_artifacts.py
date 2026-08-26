@@ -237,14 +237,22 @@ def test_banned_module_file_path_matches_dotted_path(row: BannedModule):
     the check would be querying a path that was never the real one. This
     assertion keeps the two fields locked together so a future row can't
     drift that way silently.
+
+    This assumes a single-file module: the translation is dots-to-slashes
+    plus a ``.py`` suffix. A future row for a deleted *package* (an
+    ``__init__.py`` under a directory) would not satisfy this shape, and the
+    failure message below would misdiagnose that case. If that ever happens,
+    this assertion needs to be relaxed deliberately for that row, not
+    silently.
     """
     expected = row.dotted_path.replace(".", "/") + ".py"
-    assert row.file_path == expected, (
-        f"BANNED_MODULES row {row.dotted_path!r} has file_path {row.file_path!r}, "
-        f"but the mechanical translation of its import path is {expected!r}. "
-        f"A mismatch here means the file-absence check queries the wrong path "
-        f"and would stay green even if the real file reappeared."
-    )
+    if row.file_path != expected:
+        raise AssertionError(
+            f"BANNED_MODULES row {row.dotted_path!r} has file_path {row.file_path!r}, "
+            f"but the mechanical translation of its import path is {expected!r}. "
+            f"A mismatch here means the file-absence check queries the wrong path "
+            f"and would stay green even if the real file reappeared."
+        )
 
 
 @pytest.mark.parametrize(

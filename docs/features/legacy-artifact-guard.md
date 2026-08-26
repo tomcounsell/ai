@@ -27,7 +27,7 @@ Seven artifacts, in two tables.
 
 **`BANNED_MODULES` — two rows.** The bridge-side session-log shim and the
 reflections model shim, both deleted by #2872. Each row carries the module's
-import path, its file path, and its own exemption set. Each row drives two
+import path, its file path, and its own exemption set. Each row drives three
 independent checks:
 
 1. **File absence.** The path is not present in `git ls-files`. This catches a
@@ -35,9 +35,16 @@ independent checks:
 2. **Import absence.** No tracked `.py` outside the row's exemption set
    contains the module's fully-qualified import path as a literal. This catches
    a reintroduced caller.
+3. **Path/import agreement.** A row's file path must be the mechanical
+   translation of its import path (dots to slashes, plus the `.py` suffix).
+   The file-absence check only ever queries the path field, and a path that
+   was mistyped in a row reads as "absent" exactly like a path that is
+   genuinely gone — there is no way to tell those apart from the check's
+   result alone. This third check locks the two fields together so a typo in
+   one can't make check 1 permanently green while checking nothing.
 
-Both checks are needed. Either one alone would pass on half the reintroduction
-shapes.
+All three are needed. Dropping any one would pass on some reintroduction
+shape, or on a row that was miscopied in the first place.
 
 **`BANNED_SYMBOLS` — five rows.** Three `AgentSession` attributes removed by
 #2873, plus the retired session-type member and the retired settings helper
@@ -89,7 +96,11 @@ pathspec or a mistyped pattern still exits "clean" — git has no way to
 distinguish "found nothing because the artifact is gone" from "found nothing
 because the argument doesn't match anything real" — so that residual gap is
 closed only by keeping the tables and paths correct, not by the exit-status
-check.
+check. For the module table's file-path field specifically, the third check
+described above (path/import agreement) closes half of that gap mechanically
+instead of relying on care alone; nothing plays the same role for a mistyped
+import path or a mistyped symbol name, so those still depend on getting the
+table right.
 
 ## Scope: tracked Python only
 
