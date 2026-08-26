@@ -438,8 +438,14 @@ def test_check_idempotent_rejects_dry_run():
     assert exc.value.code == 2, "argparse.error() exits 2"
 
 
-def test_check_idempotent_verifies_against_a_target_copy(tmp_path):
-    """The sanctioned safe form: --target a copy, no --dry-run."""
+def test_check_idempotent_verifies_against_a_target_copy(tmp_path, capsys):
+    """The sanctioned safe form: --target a copy, no --dry-run.
+
+    The `idempotence OK` assertion is the one that owns this test's name. Exit 0
+    plus a rewritten file both still hold with the `--check-idempotent` block
+    deleted entirely, so asserting only those would leave the test green while
+    the feature it names is gone — the same hollow shape this PR exists to kill.
+    """
     target = _write_registry(
         tmp_path / "refl.yaml",
         ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
@@ -447,3 +453,4 @@ def test_check_idempotent_verifies_against_a_target_copy(tmp_path):
 
     assert main(["--target", str(target), "--check-idempotent"]) == 0
     assert "agent.session_revival.cleanup_stale_branches_all_projects" in target.read_text()
+    assert "idempotence OK" in capsys.readouterr().out

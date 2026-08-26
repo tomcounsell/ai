@@ -55,6 +55,11 @@ CLI:
     python scripts/migrate_reflections_callables.py [--target PATH ...] [--dry-run]
         [--check-idempotent] [--json]
 
+``--dry-run`` and ``--check-idempotent`` are mutually exclusive and passing both
+is a hard error: idempotence is a property of the post-write state, so it cannot
+be checked without writing. To check without touching a real registry, copy one
+and pass ``--target``.
+
 Invoked from ``scripts/update/run.py`` Step 1.659, which runs BEFORE Step 1.66's
 vault->config copy so a freshly-rewritten vault also propagates on the same
 cycle.
@@ -352,7 +357,8 @@ def main(argv: list[str] | None = None) -> int:
             "property of the post-write state. To check without touching a real "
             "registry, copy one and pass --target: "
             "cp config/reflections.yaml /tmp/refl.yaml && "
-            f"{parser.prog} --target /tmp/refl.yaml --check-idempotent"
+            "python scripts/migrate_reflections_callables.py "
+            "--target /tmp/refl.yaml --check-idempotent"
         )
 
     targets = args.target or default_targets()
