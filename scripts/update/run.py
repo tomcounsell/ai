@@ -1755,11 +1755,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # in-process `service.install_*` calls, including
     # `install_reflection_worker`, which is the one that reloads the registry.
     # It does NOT universally mean "nothing restarts" — on `--full` with commits
-    # pulled, Step 8's `git.set_restart_requested()` still fires and the worker
-    # self-exits into a launchd relaunch, ungated. That is harmless here because
-    # `com.valor.worker` never loads the reflections registry; the process that
-    # does is `com.valor.reflection-worker`, and its (re)install is exactly what
-    # this flag suppresses. Steps 4.6/4.7 share the shape.
+    # pulled, Step 5's `elif` branch calls `git.set_restart_requested()` and the
+    # worker self-exits into a launchd relaunch, ungated. That is harmless here
+    # because `com.valor.worker` never loads the reflections registry; the
+    # process that does is `com.valor.reflection-worker`, and its (re)install is
+    # exactly what this flag suppresses. Steps 4.6/4.7 share the shape.
+    #
+    # Known gap, tracked as #3029: `install_reflection_worker` is the ONLY site
+    # that restarts `com.valor.reflection-worker`, and it sits under
+    # `do_service_restart`, which `UpdateConfig.cron()` sets False. On the
+    # routine cron path the registry is therefore migrated and probed green
+    # while the live scheduler — which calls `load()` once at start and never
+    # reloads — keeps whatever it read at process start. The probe gate is
+    # correct about what it blocks; it just has no restart to gate there.
     log("Probing reflections-registry callables for importability...", v)
     result.registry_probe_result = reflections_callables.run_registry_probe(project_dir)
     probe_gate = result.registry_probe_result
@@ -1778,6 +1786,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             f"{probe_gate.detail}",
         )
         config = replace(config, do_service_restart=False)
+        # One fault, one terminal signal. Through `remote-update.sh` this
+        # failure already exits 1 (REGISTRY_PROBE_OK=false -> RESTART_FAILED=1);
+        # without this line `run.py --full` reported the identical fault and
+        # exited 0, so whether a caller could detect it depended on the entry
+        # point. Set directly rather than relying on the `if v:` summary block,
+        # which is skipped under --quiet/--json.
+        result.success = False
 
     # A failing probe whose sentinel did not reach disk is the one shape that
     # cannot be handled with a warning. `remote-update.sh` reads `[ -f ]`, so an

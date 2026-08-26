@@ -238,6 +238,39 @@ def test_writable_failure_sentinel_reports_recorded(tmp_path, monkeypatch):
     assert (fake_repo / PROBE_SENTINEL).exists()
 
 
+def test_probe_subprocess_forces_launchd_candidate_set(tmp_path, monkeypatch):
+    """Step 4.65 must probe the copies the reflection worker resolves, not the vault.
+
+    `/update`'s own deployment vehicle is a launchd agent whose plist exports
+    only PATH and HOME, so an inherited environment leaves `VALOR_LAUNCHD`
+    unset and the probe reaches for `~/Desktop/Valor/reflections.yaml` — the
+    path this repo documents as TCC-blocked (and hang-prone) from launchd. That
+    copy is loaded by nothing: the reflection worker runs under
+    `VALOR_LAUNCHD=1` and reads `config/reflections.yaml`. Probing it can only
+    manufacture a fail-closed verdict about a file nothing imports.
+    """
+    import subprocess as _subprocess
+
+    monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+    captured: dict[str, object] = {}
+
+    def _fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return _subprocess.CompletedProcess(argv, 0, stdout="OK: probed\n", stderr="")
+
+    monkeypatch.setattr("scripts.update.reflections_callables.subprocess.run", _fake_run)
+
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    result = run_registry_probe(fake_repo)
+
+    assert result.success is True
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env.get("VALOR_LAUNCHD") == "1"
+    assert "PATH" in env, "the override must extend os.environ, not replace it"
+
+
 def test_remote_update_shell_ignores_a_sentinel_older_than_this_cycle():
     """Pin the freshness backstop: the shell must not honor an out-of-band stamp.
 

@@ -27,6 +27,7 @@ The migration is idempotent, so running it on every ``/update`` is cheap.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +43,11 @@ _PROBE_SCRIPT = "scripts/verify_registry_without_shim.py"
 # restarts the worker AFTER `run.py` has exited (see Step 4.65's comment), so
 # a file is the only channel by which it can consult the probe's verdict.
 # Present == the probe FAILED on the most recent run; absent == it passed.
-# Fail-closed direction: the sentinel is written before it is ever read and
-# removed only on a positive pass.
+# Note which way that cuts: since the shell's read is `[ -f ]`, ABSENCE is its
+# green light. Nothing about the file itself is therefore fail-closed — the
+# fail-closed property comes from `run.py` escalating a failing probe whose
+# sentinel did not reach disk to a non-zero exit, so `set -e` stops the shell
+# before it ever performs the read. See `_write_probe_sentinel`.
 PROBE_SENTINEL = "data/registry-probe-failed"
 
 
@@ -261,6 +265,21 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
 
         python = sys.executable
 
+    # VALOR_LAUNCHD=1 is mandatory, not incidental — it selects the candidate
+    # set. Without it the probe takes `verify_registry_without_shim.py`'s
+    # not-under-launchd branch and stat()s `~/Desktop/Valor/reflections.yaml`.
+    # `/update`'s own deployment vehicle IS a launchd agent (com.valor.update
+    # runs remote-update.sh, and its plist exports only PATH and HOME), where
+    # macOS TCC blocks ~/Desktop and `exists()` can hang outright. The vault is
+    # also not a copy any process loads: the reflection worker runs under
+    # VALOR_LAUNCHD=1 and reads `config/reflections.yaml`. So probing it can
+    # only produce a fail-closed verdict about a file nothing imports —
+    # a permanent restart block from a lost Full Disk Access grant, which is a
+    # documented recurring condition on this machine. Setting it here makes
+    # the probed set identical to the resolved set, and identical to what
+    # `scripts/install_reflection_worker.sh` already passes for the same script.
+    probe_env = {**os.environ, "VALOR_LAUNCHD": "1"}
+
     try:
         proc = subprocess.run(
             [python, str(script)],
@@ -268,6 +287,7 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
             capture_output=True,
             text=True,
             timeout=120,
+            env=probe_env,
         )
     except subprocess.TimeoutExpired:
         return _probe_failure(project_dir, "registry probe timed out after 120s")

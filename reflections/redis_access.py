@@ -1,9 +1,10 @@
 """Canonical Redis access helpers for the self-healing reflection modules.
 
-``get_project_key()`` and ``get_redis()`` used to exist as seven byte-identical
-private copies: one in the now-deleted ``agent/sustainability.py`` shim, one in
-each of the five ``reflections/agents/*.py`` reflection modules, and one in
-``reflections/stall_advisory.py``. Copies drift, and
+``get_project_key()`` and ``get_redis()`` used to exist as six byte-identical
+private copies — one in the now-deleted ``agent/sustainability.py`` shim and one
+in each of the five ``reflections/agents/*.py`` reflection modules — plus a pair
+of shim-delegating wrappers in ``reflections/stall_advisory.py`` that did
+nothing but forward to the shim's copy. Copies drift, and
 ``tests/unit/test_default_project_key_consistency.py`` was written specifically
 as a guardrail against that drift — it asserts the writer-side
 ``DEFAULT_PROJECT_KEY`` still agrees with the reader-side fallback. That test

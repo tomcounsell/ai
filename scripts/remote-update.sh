@@ -179,6 +179,32 @@ fi
 UPDATE_RUN_STARTED_AT=$(date +%s)
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
 
+# ── Reflections-registry probe verdict (issue #2875) ─────────────────
+# Latched HERE, immediately after run.py, not at the point of use several
+# hundred lines below. run.py Step 4.65 imports every `callable:` in every
+# registry copy the reflection worker could resolve and stamps
+# data/registry-probe-failed on failure; that file is the only channel across
+# the process boundary. Reading it at the point of use leaves a multi-minute
+# window (dep sync, plist installs, the drain poll) in which an out-of-band
+# `run.py --verify` — which also runs Step 4.65 and does not honor this
+# script's lockfile — could clear this cycle's failing verdict on its way past.
+# Latching collapses that window to the next statement.
+#
+# Freshness bound: a sentinel older than this cycle's run.py is residue from
+# some other run, not a verdict about the code we just pulled. An unreadable
+# stat() on a file `[ -f ]` just proved exists is itself anomalous, so it fails
+# CLOSED (far-future mtime => treated as fresh => blocking) rather than open.
+REGISTRY_PROBE_OK=true
+REGISTRY_PROBE_SENTINEL="$PROJECT_DIR/data/registry-probe-failed"
+if [ -f "$REGISTRY_PROBE_SENTINEL" ]; then
+    REGISTRY_PROBE_MTIME=$(stat -f %m "$REGISTRY_PROBE_SENTINEL" 2>/dev/null || echo 9999999999)
+    if [ "$REGISTRY_PROBE_MTIME" -ge "$UPDATE_RUN_STARTED_AT" ]; then
+        REGISTRY_PROBE_OK=false
+    else
+        echo "[update] Ignoring registry-probe sentinel from before this cycle's run.py (stale)"
+    fi
+fi
+
 # ── Unload legacy reflections launchd service (issue #748) ───────────
 # The com.valor.reflections launchd service has been deleted (scripts/reflections.py
 # monolith removed). Unload and remove the plist if still installed on this machine.
@@ -231,41 +257,20 @@ RESTART_FAILED=0
 WORKER_STATE="worker current"
 VERIFY_SINCE=0
 
-# ── Reflections-registry probe verdict (issue #2875) ─────────────────
-# run.py Step 4.65 probes every registry copy for importability and stamps
-# data/registry-probe-failed when a `callable:` entry does not resolve. We read
-# that verdict off disk because the step ran in a process that has already
-# exited by the time we get here.
+# REGISTRY_PROBE_OK (issue #2875) was latched right after run.py, above. Its
+# exact reach, since the obvious reading is wrong: it gates the WORKER_LABEL
+# kickstart below and nothing else. It does NOT gate the bridge kickstart later
+# in this script, and the process that actually loads the reflections registry
+# is neither of those — it is com.valor.reflection-worker, whose only
+# (re)install is run.py Step 5's service.install_reflection_worker, suppressed
+# in-process by Step 4.65's own do_service_restart=False.
 #
-# What this gate actually buys — read it precisely, because the obvious reading
-# is wrong. The process that loads the reflections registry is
-# com.valor.reflection-worker (the scheduler is constructed in
-# reflections/__main__.py); WORKER_LABEL below is com.valor.worker, which never
-# reads the registry. Suppressing THIS kickstart therefore does not, by itself,
-# prevent the ImportError-swallowed-into-state.last_error failure mode. The gate
-# that does is Step 4.65's own do_service_restart=False, which makes run.py Step
-# 5 skip service.install_reflection_worker.
-#
-# So what this is: a deliberately conservative freeze of the whole service
-# cycle. A machine whose registry does not import is a machine in an unknown
-# config state, and the sanctioned response is to leave every service on the
-# code it already resolved and make an operator look, rather than to advance
-# the one service we can argue is unaffected. It also gives the failure a loud
-# line and a non-zero terminal exit, same posture as RESTART_FAILED above.
-#
-# Freshness: an out-of-band `run.py --verify` also runs Step 4.65 and is not
-# covered by this script's lockfile, so a sentinel older than this cycle's own
-# run.py invocation is stale state, not a verdict about the code we just pulled.
-REGISTRY_PROBE_OK=true
-REGISTRY_PROBE_SENTINEL="$PROJECT_DIR/data/registry-probe-failed"
-if [ -f "$REGISTRY_PROBE_SENTINEL" ]; then
-    REGISTRY_PROBE_MTIME=$(stat -f %m "$REGISTRY_PROBE_SENTINEL" 2>/dev/null || echo 0)
-    if [ "$REGISTRY_PROBE_MTIME" -ge "$UPDATE_RUN_STARTED_AT" ]; then
-        REGISTRY_PROBE_OK=false
-    else
-        echo "[update] Ignoring registry-probe sentinel from before this cycle's run.py (stale)"
-    fi
-fi
+# So this particular gate buys one narrow thing: a machine whose registry does
+# not import is in an unknown config state, so we decline to advance the worker
+# onto newly pulled code and instead give the failure a loud line and a
+# non-zero terminal exit, same posture as RESTART_FAILED above. The bridge is
+# deliberately exempt — it neither reads the registry nor shares the config
+# surface, and freezing chat I/O is the wrong response to a registry fault.
 
 # ── Reload worker plist if present ───────────────────────────────────
 # Only restart the worker when the pull actually landed new commits that touch
