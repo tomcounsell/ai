@@ -149,6 +149,15 @@ scope = "project"
 exit_policy = "propagate"
 
 [[hook]]
+manifest_id = "validate_verification_section"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_verification_section.py"
+timeout = 10
+scope = "project"
+exit_policy = "propagate"
+
+[[hook]]
 manifest_id = "validate_no_gos_justification"
 event = "PostToolUse"
 matcher = "Write"
