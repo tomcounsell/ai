@@ -23,13 +23,19 @@ object graph cannot show — the **git index** and the **tracked source text**.
 
 ## What it pins
 
-Two tables. Row counts and exemption-set sizes are deliberately absent from
-every prose surface that describes this guard — this document, the
+Two tables. Values a reader could instead derive from the tree are deliberately
+absent from every prose surface that describes this guard — this document, the
 `docs/features/README.md` index row, and the pull-request body that ships a
-change to it. They live in the tables themselves, they change whenever the
-guard is extended, and prose does not. Do not reintroduce them anywhere: a
-count a reader can get from the code is a count that will eventually be wrong,
-and the wrong copy is the one people trust.
+change to it. That covers row counts and exemption-set sizes, and equally file
+line counts and commit SHAs: the axis is not "is it a count" but "does anything
+update this when the tree moves". Nothing does, because prose has no build step.
+Do not reintroduce such a value anywhere. A number or SHA a reader can get from
+the code is one that will eventually be wrong, and the stale copy is the one
+people trust, because it reads as though someone checked.
+
+Where a derived value genuinely helps, state the expression rather than its
+result — `len(BANNED_MODULES)` explains itself and cannot drift, while `2`
+silently stops being true.
 
 **`BANNED_MODULES`.** The bridge-side session-log shim and the reflections model
 shim, both deleted by #2872. Each row carries the module's import path, its file
