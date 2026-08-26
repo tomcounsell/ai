@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-08-26
 tracking: https://github.com/tomcounsell/ai/issues/2894
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-08-26T11:57:02Z
 ---
 
 # Wave 2: SDLC router terminal state and verdict integrity
@@ -286,10 +288,21 @@ Direction:
    alone is insufficient: lane `sdlc-2853`'s ledger has since **emptied** (`pr_number: null`,
    `plan_exists: false`) and now routes to row 1 `/do-plan` on a merged lane. The predicate
    should treat a lane as terminal on `MERGE == completed` **or** a resolvable PR in a merged
-   state — so a lost ledger does not resurrect a shipped lane. `agent/pipeline_complete.py::is_pipeline_complete`
-   (`:35-86`) already returns `(True, "merge_success")` on `MERGE == completed` and is not
-   wired to the router; reuse its logic rather than writing a second predicate, subject to the
-   no-`tools`-import constraint.
+   state — so a lost ledger does not resurrect a shipped lane.
+
+   **`is_pipeline_complete` is NOT a drop-in — do not call it directly.** Its signature is
+   `is_pipeline_complete(psm_states, outcome, pr_open=None) -> tuple[bool, str]`
+   (`agent/pipeline_complete.py:35`), and it returns `(False, "outcome_not_success")` unless
+   `outcome == "success"`. `decide_next_dispatch` has no `outcome` argument and no honest
+   value to synthesize for one — its existing consumer
+   `agent/session_runner/completion_guard.py:155` hardcodes `"success"` precisely because it
+   already knows the transition succeeded, which the router does not. It also has **no
+   "resolvable merged PR" branch**, which is the other half of the terminal predicate this
+   plan needs. Reuse its *`MERGE == completed` logic* by extracting a shared pure helper, or
+   write the router's predicate independently — but do not wire the existing function in and
+   assume it covers the case. The module imports only stdlib, so either route is safe against
+   the no-`tools`-import constraint. Any extraction must keep `completion_guard.py:155`'s
+   behavior identical.
 4. **Teach the `primary is None` fallback** that merged-and-done is success, so the
    misconfiguration message is reserved for genuine misconfiguration.
 5. **Surface terminal in `tools/sdlc_next_skill.py`** as a third output shape, and teach
@@ -519,6 +532,21 @@ for both lanes because their plan docs were archived to `docs/archive/plans-comp
 document silently makes a lane's CRITIQUE retroactively skippable.** That is an undesigned
 escape hatch through the invariant #2851 exists to protect, and it is strictly more dangerous
 than the deadlock the issue reports. It must be closed in the same change.
+
+**The refusal cannot key on "empty stages map" alone — critique round 1 caught this.**
+`_recover_stage_states_from_durable_signals` (`tools/sdlc_next_skill.py:526`, called at
+`:712-718`) runs **before** `decide_next_dispatch` at `:722` and fires only when
+`stage_states == {}` exactly. So by the time the router sees an empty map, recovery has
+already run and failed, and the router **cannot distinguish a brand-new issue from an evicted
+mid-pipeline lane** — both present as empty. A bare refusal on emptiness would reject every
+fresh lane at ISSUE.
+
+The refusal must therefore key on positive evidence of mid-pipeline entry, not on absence:
+a dispatch **at a non-ISSUE stage** combined with a recorded artifact that implies skipped
+predecessors (a plan document, or a recorded verdict with no corresponding marker). That is
+the same fail-closed-on-evidence discipline WS-1 and WS-2 apply. Place the check where
+recovery's outcome is known, and make the detector report *which* signal was missing so an
+evicted ledger is diagnosable rather than merely refused.
 
 The verdict invariant (#2415) and the #2554 precedence rule stay enforced on every existing
 write path; regression tests must prove a verdict-less REVIEW/CRITIQUE still cannot be
@@ -790,6 +818,15 @@ end-to-end and must be extended for the terminal decision and the widened verdic
       detector flags the shape. The verdict invariant (#2415) and #2554 precedence still hold
       — proven by a test that a verdict-less REVIEW/CRITIQUE cannot be force-completed. (#2851)
 - [ ] Archiving a plan document no longer makes a lane's CRITIQUE retroactively skippable.
+- [ ] **Replay against the lanes recon actually measured** (added in critique round 1 — every
+      other criterion above is synthetic). For each of the four real post-merge lanes whose
+      ledgers recon read at `fc97f7318` — **#2734** (PR #2844, merged; currently routes row 8f
+      `/do-pr-review`), **#2741** (PR #2842, merged; same), **#2853** (PR #2884, merged; ledger
+      emptied, routes row 1 `/do-plan`), and **#2636** (PR #2833, merged) — `sdlc-tool next-skill`
+      returns a terminal decision after the fix. These are the observed failures; a fix that
+      only satisfies constructed fixtures has not been shown to solve the reported problem.
+- [ ] A fresh lane at ISSUE with an empty stages map still routes to `/do-plan` (row 1) and is
+      **not** refused by WS-7's mid-pipeline-entry check.
 - [ ] Tests pass (`/do-test`, narrow scope)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -808,9 +845,26 @@ end-to-end and must be extended for the terminal decision and the widened verdic
 
 **Fan-out constraint:** this session owns exactly one worktree
 (`.worktrees/wave2-router-verdict-integrity`). Builders run against that single worktree with
-**disjoint file sets** so their commits never interleave. WS-1 and WS-2 both touch
-`agent/sdlc_router.py` and therefore **must not run concurrently** — they are sequenced into
-the same PR, WS-1 first. Every subagent spawn passes `run_in_background: false`.
+**disjoint file sets** so their commits never interleave. Every subagent spawn passes
+`run_in_background: false`.
+
+**Three workstreams touch `agent/sdlc_router.py` and must be strictly serialized:**
+
+| WS | Router surface |
+|---|---|
+| WS-1 | `Terminal` type, terminal guard, `evaluate_guards`, `primary is None` fallback |
+| WS-2 | `_review_verdict_head_is_stale` and its three inheritors (G6, row 8f, row 10) |
+| WS-3 | G2 (`:359-382`) — its arming condition changes when the bound moves to the verdict trail |
+
+**WS-3 is the correction from critique round 1.** It was originally marked
+`Parallel: true` / `Depends On: none` and grouped into a PR described as "disjoint from PR 1's
+files." That was wrong: a verdict-trail bound necessarily lives in the router, so WS-3 shares
+`agent/sdlc_router.py` with WS-1 and WS-2. It is now sequenced after both, and Open Question 1
+records that **PR 2 must merge after PR 1** rather than being independent of it. The remaining
+PR-2 workstreams (WS-5, WS-6) are genuinely disjoint and stay parallel.
+
+Serialization order on the router: **WS-1 → WS-2 → WS-3.** WS-4 and WS-7 touch no router file
+and remain freely parallel.
 
 ## Step by Step Tasks
 
@@ -855,8 +909,8 @@ the same PR, WS-1 first. Every subagent spawn passes `run_in_background: false`.
 - **Fix the bare `gh` head read at `.claude/skills-global/do-pr-review/sub-skills/code-review.md:22,30`.** Measured red by this plan's anti-criterion: `HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid --jq .headRefOid)` is the SHA the review embeds in its `REVIEW_CONTEXT head_sha=` marker, so a stale `gh` read here matches the recorded trailer and flips this very gate from fail-closed to fail-open. Route it through `resolve_pr_head_sha`.
 - Confirm the red test from task 1 now passes; paste before/after into the PR.
 
-### 4. Validate PR-1
-- **Task ID**: validate-pr1
+### 4. Validate the router seam
+- **Task ID**: validate-router-seam
 - **Depends On**: build-terminal, build-staleness
 - **Assigned To**: wave2-validator
 - **Agent Type**: validator
@@ -865,11 +919,11 @@ the same PR, WS-1 first. Every subagent spawn passes `run_in_background: false`.
 
 ### 5. WS-3 — critique loop bound
 - **Task ID**: build-critique-bound
-- **Depends On**: none
-- **Validates**: `tests/unit/test_pipeline_state_machine.py`, `tests/unit/test_pipeline_graph.py`, `tests/unit/test_sdlc_router_oscillation.py`
+- **Depends On**: build-staleness *(shares `agent/sdlc_router.py` — G2's arming condition. Do NOT run concurrently with WS-1/WS-2.)*
+- **Validates**: `tests/unit/test_pipeline_state_machine.py`, `tests/unit/test_pipeline_graph.py`, `tests/unit/test_sdlc_router_oscillation.py`, `tests/unit/test_sdlc_router.py`
 - **Assigned To**: critique-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - Bound on the verdict trail; retire or rewire the vestigial counter deliberately.
 - Name the bound as an env-overridable constant with a provisional/tunable comment.
 - Update or delete `test_fail_critique_increments_critique_cycle_count` deliberately.
@@ -953,7 +1007,7 @@ the same PR, WS-1 first. Every subagent spawn passes `run_in_background: false`.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Router still imports nothing from tools | `grep -c "^from tools\|^import tools" agent/sdlc_router.py` | match count == 0 |
 | **Anti-criterion:** no bare `gh` head read on the review gating path | `grep -rn 'gh pr view' .claude/skills-global/ \| grep -c headRefOid` | match count == 0 |
-| **Anti-criterion:** ambient issue env fully removed | `grep -rnc "SDLC_ISSUE_NUMBER\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/` | match count == 0 |
+| **Anti-criterion:** ambient issue env fully removed | `grep -rn "SDLC_ISSUE_NUMBER\|SDLC_TRACKING_ISSUE" agent/ tools/ .claude/skills-global/ docs/sdlc/ \| wc -l` | match count == 0 |
 | **Anti-criterion:** #3017 boundary respected (Wave 3) | `git diff origin/main -- models/agent_session.py \| grep -c SDLC_STAGES` | match count == 0 |
 | Terminal decision reachable | `python -c "from agent.sdlc_router import decide_next_dispatch as d; print(d({'MERGE':'completed'},{}).__class__.__name__)"` | output contains Terminal |
 
@@ -996,8 +1050,11 @@ do not reintroduce it here.
    - **PR 1 — router seam (#2894, #2817, #2895, #2850).** WS-1 + WS-2. The two genuine shared
      seams, both in `agent/sdlc_router.py`, both wedging live lanes now. Must ship first and
      together.
-   - **PR 2 — critique machinery (#2885, #2832, #2886).** WS-3 + WS-5 + WS-6. Disjoint from
-     PR 1's files; can be built in parallel and merged in any order relative to PR 3.
+   - **PR 2 — critique machinery (#2885, #2832, #2886).** WS-3 + WS-5 + WS-6. **Must merge
+     after PR 1** — corrected in critique round 1, which caught that WS-3 changes G2 in
+     `agent/sdlc_router.py` and so is *not* disjoint from PR 1 as this question originally
+     claimed. WS-5 and WS-6 are genuinely disjoint and could be split out if PR 2 proves too
+     large. Order relative to PR 3 is free.
    - **PR 3 — substrate hygiene (#2849, #2851).** WS-4 + WS-7. The two orphans. WS-4 in
      particular is independently shippable and arguably the highest-severity single item in
      the wave (it silently attributes verdicts to the wrong lane).
