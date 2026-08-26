@@ -30,6 +30,11 @@ printed tally against zero. The helpers below branch on the exit status and
 treat any status other than "matched" or "clean" as a hard failure — a broken
 invocation must never read as "nothing found".
 
+A fourth rule: every git subprocess call below carries a bounded timeout. A
+wedged git invocation (index-lock contention, a stalled filesystem) must
+surface as a named failure, not hang the run indefinitely, so a timeout is
+never caught here — it propagates.
+
 Deliberately not guarded here by name matching: three of the removed
 ``AgentSession`` aliases are ordinary English words or strict substrings of an
 already-listed name, so a fixed-string search for them has an unbounded
@@ -76,7 +81,7 @@ class BannedSymbol(NamedTuple):
 
 BANNED_MODULES: tuple[BannedModule, ...] = (
     # Only the bridge-side copy was deleted. There is a live, separate module of
-    # the same base name under agent/ that three production modules import, so
+    # the same base name under agent/ that several production modules import, so
     # the banned pattern is the fully-qualified dotted path and never the bare
     # module name.
     BannedModule(
@@ -139,6 +144,7 @@ def _tracked_python_matches(pattern: str) -> set[str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if result.returncode == 0:
         return set(result.stdout.strip().splitlines())
@@ -159,6 +165,7 @@ def _is_tracked(file_path: str) -> bool:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -169,13 +176,14 @@ def _is_tracked(file_path: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def _remedies(artifact: str, row_name: str) -> str:
+def _remedies(artifact: str, table_name: str) -> str:
+    """Render the two-remedy message shared by the content-search-backed checks."""
     return (
         f"Two legitimate remedies, and only these two:\n"
         f"  1. Remove the reference to {artifact!r}.\n"
         f"  2. If the reference is genuinely warranted, add the offending "
         f"repo-relative file path to that row's exemption set in "
-        f"{GUARD_FILE} ({row_name}), in the same pull request. "
+        f"{GUARD_FILE} ({table_name}), in the same pull request. "
         f"Paths only — never a position within a file (#2805)."
     )
 

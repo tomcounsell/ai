@@ -132,8 +132,9 @@ a `.py` file.
 ## Adding an exemption
 
 The exemption list is a record of deliberate exceptions, not a wall. It is
-meant to grow when growth is justified. When the guard fails, exactly two
-resolutions are legitimate, and the failure message states both:
+meant to grow when growth is justified. The two content-search-backed checks —
+import absence and symbol absence — fail with a message that states exactly
+two legitimate resolutions:
 
 1. **Remove the reference.** This is the default and is correct almost every
    time. The artifact was deleted on purpose.
@@ -141,6 +142,12 @@ resolutions are legitimate, and the failure message states both:
    guard that must name the symbol, or a migration helper that must recognize
    the old import path. Add the offending **repo-relative file path** to that
    row's exemption set, **in the same pull request** as the reference itself.
+
+The file-absence check is different: it ignores the row's exemption set
+entirely, so "add an exemption" is never one of its options. Its failure
+message states its own pair instead — delete the reintroduced file, or, if it
+is genuinely a new module that happens to share the path, revisit that row's
+entry deliberately, in the same pull request.
 
 Rules for a new exemption:
 
