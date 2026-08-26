@@ -70,6 +70,17 @@ class UpdateConfig:
     do_mcp: bool = False  # Only in full mode
     do_log_cleanup: bool = True  # Deletes oversized log backups — off under --verify
 
+    # The authoritative "--verify promises no changes" flag (issues #2898,
+    # #3026). Every step that mutates state outside this process must consult
+    # it. The per-behavior booleans above are about WHICH steps a mode runs;
+    # this one is about whether the run is allowed to leave a trace at all.
+    #
+    # It exists because the opt-out-per-behavior shape kept failing open: a
+    # newly added mutating step defaults to running, so --verify quietly broke
+    # its contract twice (warn_state persistence, then ~/.claude hardlinking
+    # and migrations) before anyone noticed.
+    read_only: bool = False
+
     # Options
     verbose: bool = False
     json_output: bool = False
@@ -119,6 +130,7 @@ class UpdateConfig:
             do_ollama=True,
             do_mcp=True,
             do_log_cleanup=False,  # --verify promises no changes; sweep deletes files
+            read_only=True,
             verbose=True,
         )
 
@@ -817,6 +829,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     result = UpdateResult()
     v = config.verbose
 
+    # Honor the read-only contract in the suppression-state module before any
+    # step can call should_emit (#2898). Set unconditionally, so a non-verify
+    # run in the same process re-enables persistence rather than inheriting a
+    # previous verify run's switch.
+    warn_state.set_read_only(config.read_only)
+
     # Step 1: Git pull
     if config.do_git_pull:
         log("Pulling latest changes...", v)
@@ -858,10 +876,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("hooks: ~/.claude/hooks is a real user directory", v)
 
     # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
-    log("Syncing .claude hardlinks...", v)
-    result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+    #
+    # Writes into ~/.claude and can migrate the hooks dir-symlink, so it is a
+    # real mutation of machine-global state and is off under --verify (#3026).
+    # An empty result stands in so the reporting below still runs and honestly
+    # reports zero rather than needing its own skip branch.
+    if config.read_only:
+        log("Skipping .claude hardlink sync — --verify makes no changes (#3026)", v, always=True)
+        result.hardlink_result = hardlinks.HardlinkSyncResult()
+    else:
+        log("Syncing .claude hardlinks...", v)
+        result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
 
-    if hooks_alias is not None:
+    if hooks_alias is not None and not config.read_only:
         # The predicate lives beside its emitter in hardlinks so the two cannot
         # drift; matching a bare "dir-symlink" substring here once reported a
         # hooks migration that the skills migration had actually performed.
@@ -1400,8 +1427,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     _append_warning(result, "Dep bump succeeded but commit/push failed")
 
     # Step 3.6: Run pending data migrations (after git pull, before service restart)
-    log("Checking pending migrations...", v)
-    result.migration_result = migrations.run_pending_migrations(project_dir)
+    #
+    # Migrations rewrite persistent data and are irreversible, which makes them
+    # the single least appropriate thing for a mode advertised as safe to run
+    # from a scratch worktree (#3026). Off under --verify.
+    if config.read_only:
+        log("Skipping pending migrations — --verify makes no changes (#3026)", v, always=True)
+        result.migration_result = migrations.MigrationResult()
+    else:
+        log("Checking pending migrations...", v)
+        result.migration_result = migrations.run_pending_migrations(project_dir)
     mig = result.migration_result
     if mig.ran:
         for name in mig.ran:
@@ -1417,44 +1452,63 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 3.65: Migrate reflections.yaml (interval: -> every:) on every pull.
     # Idempotent — issue #1273 unified Reflection grammar. Runs after Step 3
     # `uv sync` so the migration's schema-validation phase can import croniter.
-    log("Migrating reflections.yaml schedule grammar...", v)
-    result.reflections_yaml_result = reflections_yaml.run_reflections_yaml_migration(project_dir)
-    ry = result.reflections_yaml_result
-    if ry.success:
-        if ry.action == "rewrote":
-            log(
-                f"  reflections.yaml: rewrote {ry.rewrites_count} interval line(s) -> every:",
-                v,
-                always=True,
-            )
-        elif ry.action == "noop":
-            log("  reflections.yaml: already migrated", v)
-        elif ry.action == "skipped":
-            log(
-                f"  reflections.yaml: skipped ({ry.error or 'target missing'})",
-                v,
-            )
+    # Rewrites the reflections.yaml in the iCloud vault — off under --verify
+    # (#3026). "Idempotent" is not the same as "no changes": it still writes.
+    if config.read_only:
+        log(
+            "Skipping reflections.yaml grammar migration — --verify makes no changes (#3026)",
+            v,
+            always=True,
+        )
     else:
-        log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
-        _append_warning(result, f"reflections.yaml migration: {ry.error}")
+        log("Migrating reflections.yaml schedule grammar...", v)
+        result.reflections_yaml_result = reflections_yaml.run_reflections_yaml_migration(
+            project_dir
+        )
+        ry = result.reflections_yaml_result
+        if ry.success:
+            if ry.action == "rewrote":
+                log(
+                    f"  reflections.yaml: rewrote {ry.rewrites_count} interval line(s) -> every:",
+                    v,
+                    always=True,
+                )
+            elif ry.action == "noop":
+                log("  reflections.yaml: already migrated", v)
+            elif ry.action == "skipped":
+                log(
+                    f"  reflections.yaml: skipped ({ry.error or 'target missing'})",
+                    v,
+                )
+        else:
+            log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
+            _append_warning(result, f"reflections.yaml migration: {ry.error}")
 
     # Step 3.66: Arm the merged-branch-cleanup plan-migration backstop
     # (issue #1900, Tier 0). Runs after the reflections.yaml copy (Step 1.66)
     # and grammar migration (Step 3.65) so it flips the CURRENT vault + repo
     # copies. Guarded on the vault file existing and this machine owning the
     # 'valor' project -- a no-op everywhere else.
-    log("Arming plan-migration backstop reflection...", v)
-    result.reflection_arm_result = reflection_arm.arm_merged_branch_cleanup(project_dir)
-    ar = result.reflection_arm_result
-    if ar.action == "armed":
-        log(f"  merged-branch-cleanup: {ar.detail}", v, always=True)
-    elif ar.action == "noop":
-        log(f"  merged-branch-cleanup: {ar.detail}", v)
-    elif ar.action == "skipped":
-        log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
-    if not ar.success:
-        log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
-        _append_warning(result, f"merged-branch-cleanup arm: {ar.detail}")
+    # Flips the current vault + repo reflections copies — off under --verify (#3026).
+    if config.read_only:
+        log(
+            "Skipping plan-migration backstop arming — --verify makes no changes (#3026)",
+            v,
+            always=True,
+        )
+    else:
+        log("Arming plan-migration backstop reflection...", v)
+        result.reflection_arm_result = reflection_arm.arm_merged_branch_cleanup(project_dir)
+        ar = result.reflection_arm_result
+        if ar.action == "armed":
+            log(f"  merged-branch-cleanup: {ar.detail}", v, always=True)
+        elif ar.action == "noop":
+            log(f"  merged-branch-cleanup: {ar.detail}", v)
+        elif ar.action == "skipped":
+            log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
+        if not ar.success:
+            log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
+            _append_warning(result, f"merged-branch-cleanup arm: {ar.detail}")
 
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)
@@ -2387,13 +2441,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log(f"  {tool.name}: resolved", v, always=True)
                     result.warn_keys_emitted.add(tool.name)
 
-        # Migrate legacy Desktop/claude_code paths in settings.json
-        log("Migrating settings.json paths...", v)
-        settings_migration = verify.migrate_settings_json_paths()
-        if settings_migration.get("migrated"):
-            log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
+        # Migrate legacy Desktop/claude_code paths in settings.json.
+        # Rewrites a settings.json outside this checkout — off under --verify (#3026).
+        if config.read_only:
+            log(
+                "  Settings: skipped path migration — --verify makes no changes (#3026)",
+                v,
+                always=True,
+            )
         else:
-            log(f"  Settings: {settings_migration.get('reason')}", v)
+            log("Migrating settings.json paths...", v)
+            settings_migration = verify.migrate_settings_json_paths()
+            if settings_migration.get("migrated"):
+                log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
+            else:
+                log(f"  Settings: {settings_migration.get('reason')}", v)
 
         # Sync Claude OAuth credentials
         log("Syncing Claude OAuth credentials...", v)
