@@ -5,12 +5,12 @@ appetite: Medium
 owner: valor
 created: 2026-08-26
 revision_applied: true
-revision_applied_at: 2026-08-26T08:19:16Z
+revision_applied_at: 2026-08-26T11:40:00Z
 tracking: https://github.com/tomcounsell/ai/issues/3001
 last_comment_id: 5420202999
 ---
 
-# Run-boundary LLM-stack compatibility gate + coupled-set dependency bumping
+# Import-safe LLM stack + run-boundary compat gate + coupled-set bumping
 
 ## Problem
 
@@ -32,8 +32,7 @@ again.
 That second event is the shape of the defect. **The incompatible pin does not
 arrive through one path, so the check cannot live on one path.** Two of the three
 times the bad pair reached a running process, `auto_bump_deps` was nowhere in the
-picture — the pin arrived through `git add pyproject.toml`. A gate scoped inside
-`auto_bump_deps` would have watched both of those go by.
+picture — the pin arrived through `git add pyproject.toml`.
 
 **Current behavior:**
 
@@ -42,39 +41,52 @@ picture — the pin arrived through `git add pyproject.toml`. A gate scoped insi
   startup. A process can boot cleanly on a stack where every non-harness LLM call
   raises `TypeError` at argument binding, and does not find out until a caller
   tries — which on 2026-08-24 was six hours later.
+- Worse: the stack can fail in a way where the process **cannot boot at all**.
+  `agent/llm/wrapper.py:44-50` imports the entire third-party stack
+  (`anthropic` plus five `pydantic_ai` symbols) at module scope, and
+  `agent/anthropic_client.py:44` (which wrapper imports) imports `anthropic` at
+  module scope too. `agent.llm` has **five module-scope consumers**
+  (`bridge/routing.py:21`, `bridge/job_router.py:46`, `bridge/agent_catchup.py:59`,
+  `agent/memory_extraction.py:34`, `tools/email_cs/triage.py:21`).
+  `bridge/telegram_bridge.py:130` imports `bridge.routing` at module scope,
+  ~1070 lines before `main()`. An ImportError anywhere in the stack (the exact
+  mode spike-5 reproduced) therefore kills the bridge at import time and launchd
+  crash-loops it. **No startup gate placed inside `main()` can ever observe this
+  failure class** — this is round-2 critique blocker B-a, and it is the reason
+  this plan's shape changed.
 - `scripts/update/deps.py::run_smoke_test` phase 1 is
-  `import anthropic; import claude_agent_sdk`, phase 2 is one fast pytest file
-  (`tests/unit/test_docs_auditor_substrate.py`). Neither makes an LLM call, so
-  neither can catch an argument-binding break in the LLM layer.
+  `import anthropic; import claude_agent_sdk`, phase 2 is one fast pytest file.
+  Neither makes an LLM call, so neither can catch an argument-binding break.
 - `scripts/update/deps.py::auto_bump_deps` iterates `AUTO_BUMP_PACKAGES`
   (`deps.py:329`, currently `["claude-agent-sdk"]`) one package at a time. There
-  is no notion of packages that must move together, so a member of a coupled set
-  can advance alone. `anthropic` is excluded by the `d0c02bde5` stopgap, which
-  deliberately leaves us stale.
-- `agent/llm/wrapper.py:48` has an **unguarded module-scope**
-  `from pydantic_ai.models.openai import OpenAIChatModel`. Since
-  `agent/llm/__init__.py` re-exports from `wrapper`, that import runs on every
-  `import agent.llm`. It is a self-inflicted coupling — see Spike Results spike-5.
-- The pin-editing helpers cannot even express a coupled set correctly:
+  is no notion of packages that must move together. `anthropic` is excluded by
+  the `d0c02bde5` stopgap, which deliberately leaves us stale.
+- The pin-editing helpers cannot express a coupled set correctly:
   `get_pinned_version("openai")` returns a version scraped out of a *comment*,
   and `bump_pin_in_pyproject("pydantic-ai-slim", ...)` silently returns `False`
   because the pin carries an extras marker. Both verified in spike-2.
 
 **Desired outcome:**
 
-- A single standalone predicate, `check_llm_stack_compat()`, answers "is the
-  installed LLM stack a pair we can actually call?" — and it is invoked at the
-  **run boundary**: `/update` verify, bridge startup, worker startup, *and*
+- **`agent.llm` becomes import-safe by contract.** `import agent.llm` cannot
+  fail on any stack state; every failure of the LLM stack — ImportError and
+  signature break alike — becomes a call-time event, where degraded handling
+  can actually live. This is one enforcement point replacing discipline across
+  an unbounded consumer set, and it is what makes every other piece of this
+  plan reachable.
+- A single standalone predicate, `agent/llm/compat.py::check_llm_stack_compat()`,
+  answers "is the installed LLM stack a pair we can actually call?" — invoked at
+  the **run boundary**: `/update` verify, bridge startup, worker startup, *and*
   auto-bump. Whatever route a bad pin takes, the next thing that starts sees it.
 - On an incompatible stack, services **start degraded and alert loudly**.
   Telegram keeps receiving and queueing. LLM-dependent paths fail fast with a
-  typed error instead of a provider `TypeError`. The condition is alarmed on
-  channels that do not touch the broken LLM path.
+  typed error. The alert fires from the degraded-flag *resolution itself*, not
+  from any process's startup sequence, so no entry path can reach the broken
+  stack silently.
 - `anthropic` + `pydantic-ai-slim` are declared as one coupled set and are bumped
-  atomically or not at all — a partial advance is structurally impossible.
-  `openai` is **not** in the set (spike-5).
-- `anthropic` is back in `AUTO_BUMP_PACKAGES` (as a member of its set), landing in
-  the same change as the gate that makes it safe.
+  atomically or not at all. `openai` is **not** in the set (spike-5). The LLM set
+  carries a **hold** so re-enrolling `anthropic` cannot auto-execute the Step 2
+  upgrade on the next cron tick.
 - The rollback behavior is verified by observation on a deliberately staged
   known-bad pair, not asserted in a mock.
 
@@ -85,97 +97,65 @@ gate first, upgrade second. The dependency upgrade itself (including the
 
 ## Freshness Check
 
-**Baseline commit:** `9a8df7039` (re-verified at revision time, 2026-08-26).
-Original planning baseline was `d0c02bde54ddb187ea9a536767f257907f5258fc`.
+**Baseline commit:** `d5d08615a` (re-verified at round-3 reshape, 2026-08-26).
 **Issue filed at:** 2026-08-25T05:16:36Z
-**Disposition:** **Minor drift** at revision time. The original **Major drift**
-(main pinned to the known-bad pair) was surfaced to the supervisor and has since
-been **resolved on main by hotfix `7a30b88f7`**. The narrative below is retained
-because Prior Art and Risk 1 depend on it; it is superseded, not deleted.
+**Disposition:** No drift. `pyproject.toml:12` reads `"anthropic==0.125.0"`
+(restored by hotfix `7a30b88f7` after the second bad-pin arrival via
+`d0c02bde5`), the venv resolves 0.125.0, and the spike-1 probe passes. The
+two-arrivals history is retained in Problem and Prior Art because it is the
+evidence for the run-boundary placement.
 
-### The original drift, and its resolution
+### File:line references re-verified at reshape
 
-*Recorded 2026-08-26, superseded the same day.* The issue and the stopgap commit
-message both describe `7db5b82bb` as having reverted `anthropic` to `0.125.0`.
-`d0c02bde5` ("stop auto-bumping anthropic — it is half of a coupled set") swept
-the already-staged auto-bump re-application into its own commit, putting
-`anthropic==1.0.0` back on `main`:
-
-```
-$ git show d0c02bde5 -- pyproject.toml
--    "anthropic==0.125.0",
-+    "anthropic==1.0.0",
-```
-
-Verified live against the venv at that baseline:
-
-```
-anthropic 1.0.0 / pydantic-ai-slim 2.9.0 / openai 2.30.0
-temperature in AsyncMessages.create signature: False
-FAIL LLMCallError run_typed failed for model=claude-haiku-4-5-20251001:
-     AsyncMessages.create() got an unexpected keyword argument 'temperature'
-```
-
-**Resolution:** `7a30b88f7 fix(deps): re-revert anthropic to 0.125.0 — bad pin
-rode into d0c02bde5` landed on `main`. `pyproject.toml:12` now reads
-`"anthropic==0.125.0"` and the venv resolves 0.125.0. Original Open Question 1
-recommended exactly this hotfix; it is answered.
-
-**Consequence for this plan:** Phase 0 is now a **verification step, not an
-edit** — task 1 asserts the good pin and a passing probe, and makes no commit.
-More importantly, this second bad-pin arrival is now first-class evidence in the
-Problem statement: it reached `main` through a hand-staged `git add`, which is
-why the compatibility check belongs at the run boundary rather than inside
-`auto_bump_deps`.
-
-### File:line references re-verified
-
-| Reference | Issue's claim | Status |
+| Reference | Claim | Status |
 |---|---|---|
-| `scripts/update/deps.py:329` | `AUTO_BUMP_PACKAGES` excludes `anthropic` | **Holds** — `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]` |
-| `scripts/update/deps.py:414` | `run_smoke_test` is import-only + one pytest file | **Holds** |
-| `scripts/update/deps.py:474` | `auto_bump_deps` iterates packages independently | **Holds** (`for package in AUTO_BUMP_PACKAGES:`) |
-| `scripts/update/run.py:1304` | `/update` Step 3.5 calls `auto_bump_deps`, maintainer-only | **Holds** (gate at `run.py:1169`, `is_lockfile_maintainer`) |
-| `agent/llm/wrapper.py::run_typed` | the single funnel for non-harness LLM calls | **Holds** |
-| `agent/llm/wrapper.py:48` | — (found during revision) | **New** — unguarded `from pydantic_ai.models.openai import OpenAIChatModel` at module scope |
-| `agent/llm/wrapper.py:213` | — (found during revision) | **New** — the single `OpenAIChatModel(...)` use site, inside `run_typed_local`, against `OllamaProvider` |
-| `pyproject.toml:12` | `anthropic` pinned to the reverted 0.125.0 | **RESOLVED by `7a30b88f7`** (was DRIFTED at first planning pass) |
+| `agent/llm/wrapper.py:44-50` | full third-party stack imported at module scope | **Holds** (verified 2026-08-26) |
+| `agent/anthropic_client.py:44` | `import anthropic` at module scope, imported by wrapper | **Holds** |
+| module-scope consumers of `agent.llm` | routing:21, job_router:46, agent_catchup:59, memory_extraction:34, email_cs/triage:21 | **Holds** (grep-verified; six more import function-scope) |
+| `bridge/telegram_bridge.py:130` | `from bridge.routing import ...` at module scope; `main()` at `:1203` | **Holds** |
+| `scripts/update/deps.py:329` | `AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]` | **Holds** |
+| `scripts/update/deps.py:474` | `auto_bump_deps` iterates packages independently | **Holds** |
+| `scripts/update/run.py:1304` / `:1169` | Step 3.5 calls `auto_bump_deps`, maintainer-only | **Holds** |
+| `pyproject.toml:12` | `anthropic==0.125.0` | **Holds** |
+| `tests/unit/test_llm_wrapper_local.py:52` | tests monkeypatch `wrapper_mod.OpenAIChatModel` as the network-isolation seam | **Holds** (round-2 B-b) |
+| `bridge/telegram_bridge.py:70-77` | `_sentry_before_send` drops all events while hibernating | **Holds** (round-2 B-d) |
+| `ui/app.py:373` / `:511` / `:906` | dashboard health fields derive from filesystem artifacts, served by a separate process | **Holds** (round-2 blocker) |
 
-### Cited sibling issues/PRs re-checked
+### Cited sibling issues/PRs
 
-- **#2932** — closed, folded into #3001. Its scope lands in Work Item 3, deferred out of this lane.
-- **#2960–#2999** — all closed as duplicates. Their shared-root-cause diagnosis of the worker-key failures is wrong; not relied on here.
-- **#2949** / `69dc69568` — merged; owns Work Item 2. Deferred out of this lane.
-- **#3016** — the independent `test_promise_gate_real_api` failure, separately filed. Not in scope.
-- **#2334** — deliberately left open, separate scope.
+- **#2932** — closed, folded into #3001; its scope is Work Item 3, out of this lane.
+- **#2960–#2999** — closed duplicates; their shared-root-cause diagnosis not relied on.
+- **#2949** / `69dc69568` — merged; owns Work Item 2, out of this lane.
+- **#3016** — independent `test_promise_gate_real_api` failure, separately filed.
 
-### Commits on main since the issue was filed (touching referenced files)
+### Active plans overlapping this area
 
-- `7db5b82bb` — reverted anthropic to 0.125.0. Superseded by `d0c02bde5`, then re-established.
-- `53cec47de` — removed the valor CLI wrapper; touched `pyproject.toml` scripts table only. Irrelevant.
-- `d0c02bde5` — the stopgap. Also re-shipped the bad pin (the second arrival).
-- `7a30b88f7` — the re-revert. Restores a working pair; retires original Open Question 1.
-
-### Active plans in `docs/plans/` overlapping this area
-
-None. `grep -l "auto_bump\|anthropic" docs/plans/*.md` matches only
-`docs-auditor-review-gate.md` and `overclaim-guard-greps-whole-worktree.md`,
-both incidental mentions with no overlap on `scripts/update/deps.py`.
+None. `grep -l "auto_bump\|anthropic" docs/plans/*.md` matches only incidental
+mentions with no overlap on `scripts/update/deps.py` or `agent/llm/`.
 
 ## Prior Art
 
-- **#3001 stopgap `d0c02bde5`** — removed `anthropic` from `AUTO_BUMP_PACKAGES`. Bought time; is the thing this plan replaces. It also *itself* re-shipped the bad pin, making it the strongest single argument for a run-boundary check.
-- **`7db5b82bb`** and **`7a30b88f7`** — two separate emergency reverts of the same pin, eleven commits apart. Direct evidence that a one-off manual revert is not a durable fix and that a *standing* check is the real deliverable.
-- **`9d1488ccb`** — `chore(deps): commit auto-bump anthropic 1.0.0`. The breaking bump. Landed through the existing smoke gate cleanly, which is the whole indictment.
-- **`884302861`** — "Harden dependency management with tiered pinning and two-speed updates". Introduced `AUTO_BUMP_PACKAGES`, the `CRITICAL — pin exact` tier, and the smoke-test-then-rollback shape. The scaffolding is right; it only lacks coupling and a call-level gate.
-- **PR #1696** — `deps(#1653): bump popoto >=1.7.1`. A hand-driven dependency bump through the SDLC pipeline. Confirms the repo's normal posture is exact pins moved deliberately, which is what coupled sets formalize.
-- **`docs/archive/plans-completed/sdlc-1091.md`** — documents that `auto_bump_deps` commits and pushes *during* the cron `/update` run, and that the restart gate reads HEAD after `run.py --cron` returns. Any change to auto-bump's commit behavior must preserve that ordering.
-- **`agent/index_drift.py:224`** — the repo's existing `sentry_sdk.capture_message` pattern, including the "capture failed" fallback log. The degraded-start alert follows this shape rather than inventing one.
+- **#3001 stopgap `d0c02bde5`** — removed `anthropic` from `AUTO_BUMP_PACKAGES`.
+  Bought time; is the thing this plan replaces. It also *itself* re-shipped the
+  bad pin, making it the strongest single argument for a run-boundary check.
+- **`7db5b82bb`** and **`7a30b88f7`** — two separate emergency reverts of the same
+  pin, eleven commits apart. A one-off manual revert is not a durable fix.
+- **`9d1488ccb`** — the breaking bump; landed through the existing smoke gate
+  cleanly, which is the whole indictment.
+- **`884302861`** — introduced `AUTO_BUMP_PACKAGES` and the smoke-then-rollback
+  shape. The scaffolding is right; it lacks coupling and a call-level gate.
+- **`docs/archive/plans-completed/sdlc-1091.md`** — auto-bump commits and pushes
+  *during* the cron run; the restart gate reads HEAD after `run.py --cron`
+  returns. That ordering must be preserved.
+- **`agent/index_drift.py:224`** — the repo's existing `sentry_sdk.capture_message`
+  pattern, including the "capture failed" fallback log. The degraded alert
+  follows this shape.
+- **`feedback_single_authoritative_liveness`** (repo doctrine) — the module that
+  owns a lifecycle exposes the health API. This is why the compat predicate
+  lives in `agent/llm/`, beside the stack it judges.
 
-No prior attempt at a run-boundary compatibility check, coupled-set bumping, or a
-call-level gate exists. There is no "Why Previous Fixes Failed" section because
-the only prior fixes were scoped as holding actions and are not claimed to have
-addressed the shape of the defect.
+No prior attempt at import-safety, a run-boundary compat check, or coupled-set
+bumping exists.
 
 ## Research
 
@@ -184,111 +164,117 @@ addressed the shape of the defect.
 
 **Key findings:**
 
-- **`pydantic-ai-slim>=2.33.0` is the first release that supports `anthropic>=1.0.0`.** Every release before it — including 2.32.2, cut hours earlier — allowed `anthropic 1.0.0` in its metadata without supporting it. The fix landed as "Use httpx2 for Anthropic clients". Sources: [pydantic-ai changelog](https://ai.pydantic.dev/changelog), [Anthropic Python SDK v1.0 migration](https://www.digitalapplied.com/blog/anthropic-python-sdk-v1-breaking-change-migration). **Informs the plan:** this is the exact version boundary the coupled set exists to enforce, and it is the number Step 2 will target. It also confirms the upper-bound hole is upstream metadata we do not control — a local check is the only remedy available to us.
-- **anthropic 1.0.0 (2026-08-20) also moved its HTTP layer from `httpx` to `httpx2`**, and `AnthropicProvider(http_client=...)` now rejects legacy `httpx.AsyncClient`. **Informs the plan:** a future coupled bump can break `run_typed` through the transport as well as through argument binding — another failure mode an import check cannot see, and one a real call does catch. `agent/llm/wrapper.py` constructs `anthropic.AsyncAnthropic(...)` directly and does not pass its own `http_client`, so it is not exposed to that specific break today.
-- **Anthropic additionally deprecated non-default `temperature`/`top_p`/`top_k` server-side on Opus 4.7+**, returning HTTP 400. **Informs the plan:** the compat predicate must treat a provider-side 400 as a genuine failure, not an environmental blip — but see Risk 3 on distinguishing that from network flakiness.
+- **`pydantic-ai-slim>=2.33.0` is the first release supporting `anthropic>=1.0.0`.**
+  Every earlier release allowed `anthropic 1.0.0` in metadata without supporting
+  it. Sources: [pydantic-ai changelog](https://ai.pydantic.dev/changelog),
+  [Anthropic Python SDK v1.0 migration](https://www.digitalapplied.com/blog/anthropic-python-sdk-v1-breaking-change-migration).
+  This is the exact boundary the coupled set enforces; the upper-bound hole is
+  upstream metadata we do not control, so a local check is the only remedy.
+- **anthropic 1.0.0 also moved its HTTP layer to `httpx2`**, and
+  `AnthropicProvider(http_client=...)` now rejects legacy `httpx.AsyncClient`.
+  A future bump can break `run_typed` through the transport as well as argument
+  binding — which is why the auto-bump gate makes a real call, not just a
+  signature check. (`wrapper.py` constructs `AsyncAnthropic` directly without a
+  custom `http_client`, so it is not exposed to that specific break today.)
+- **Anthropic deprecated non-default `temperature`/`top_p`/`top_k` server-side on
+  Opus 4.7+** (HTTP 400). The gate must treat a provider-side 400 as a genuine
+  failure; see Risk 3 on distinguishing it from flakiness.
 
 Saved to memory as `9716dcf2cf4a46eda06bd480554ea1ff`.
 
 ## Spike Results
 
 ### spike-1: Does the known-bad pair actually fail through `run_typed`?
-- **Assumption**: "the break described in #3001 is reproducible"
-- **Method**: prototype (live call in the repo venv, at baseline `d0c02bde5`)
+- **Method**: live call in the repo venv at the incident baseline
 - **Finding**: **Yes.** `run_typed` raises `LLMCallError` wrapping
   `TypeError: AsyncMessages.create() got an unexpected keyword argument 'temperature'`.
-  Failure occurs at argument binding — no network I/O, no API cost, sub-second.
-  (It was live on `main` at the time of the spike; `7a30b88f7` has since fixed it.)
-- **Confidence**: high
-- **Impact on plan**: proves the check's negative case is **cheap and
-  deterministic** — the known-bad pair fails in under a second with no token
-  spend. That is what makes a compat predicate viable at *bridge and worker
-  startup*, not just in a maintenance script: it costs nothing to run at boot.
+  Failure at argument binding — no network I/O, no API cost, sub-second.
+- **Impact**: the check's negative case is cheap and deterministic, which is what
+  makes a compat predicate affordable at bridge/worker startup.
 
 ### spike-2: Can the existing pin helpers express a coupled set?
-- **Assumption**: "adding `pydantic-ai-slim` to `AUTO_BUMP_PACKAGES` is a one-line change"
-- **Method**: prototype (called the helpers directly against the real `pyproject.toml` and a temp copy)
-- **Finding**: **No — three defects, each of which would silently produce exactly the half-bump this plan exists to prevent.**
-
-  ```
-  get_pinned_version(repo, 'anthropic')        -> '1.0.0'   OK (by line order)
-  get_pinned_version(repo, 'pydantic-ai-slim') -> '2.9.0'   OK (by luck)
-  get_pinned_version(repo, 'openai')           -> '2.9.0'   WRONG
-  bump_pin_in_pyproject(tmp, 'pydantic-ai-slim', '2.34.0')  -> False
-  bump_pin_in_pyproject(tmp, 'openai', '3.0.0')             -> False
-  bump_pin_in_pyproject(tmp, 'anthropic', '1.2.3')          -> True
-  ```
-
-  1. **`get_pinned_version` matches comment text.** It scans for `package in line and "==" in line`. `"openai"` appears inside the `pydantic-ai-slim` line's comment (*"avoids openai/google/mcp/logfire..."*), so it returns that line's `2.9.0`. The real declaration is `"openai>=1.0.0"` — a **floor, not an exact pin**, with no `==` anywhere.
-  2. **The same substring matching makes `anthropic` correct only by line order** — the `pydantic-ai-slim[anthropic]==2.9.0` line also contains `anthropic` and `==`. Reordering `pyproject.toml` would silently change what `get_pinned_version("anthropic")` returns.
-  3. **`bump_pin_in_pyproject` cannot match an extras pin.** Its regex is `"{package}==[^"]*"`; the real line is `"pydantic-ai-slim[anthropic]==2.9.0"`. It returns `False`, which `auto_bump_deps` records as a per-package `error` and then **continues** — bumping the other set members. That is the incident shape reproduced exactly.
-- **Confidence**: high
-- **Impact on plan**: the coupled-set work is not a data-structure change; it requires making the pin reader/writer *declaration-aware* (extras-tolerant, comment-blind). Each of the three defects gets its own regression test. Note that defect 1 is a real bug independent of whether `openai` is in any set — see spike-5.
+- **Finding**: **No — three defects, each of which silently produces exactly the
+  half-bump this plan exists to prevent:**
+  1. **`get_pinned_version` matches comment text.** `"openai"` appears inside the
+     `pydantic-ai-slim` line's comment, so it returns that line's `2.9.0`. The
+     real declaration is `"openai>=1.0.0"` — a floor, with no `==` anywhere.
+  2. **`anthropic` resolves correctly only by line order** — the
+     `pydantic-ai-slim[anthropic]==2.9.0` line also contains `anthropic` and `==`.
+  3. **`bump_pin_in_pyproject` cannot match an extras pin** (`"{package}==[^"]*"`
+     vs `"pydantic-ai-slim[anthropic]==2.9.0"`). It returns `False`, which
+     `auto_bump_deps` records as an error and then **continues** — bumping the
+     other members. The incident shape, reproduced exactly.
+- **Impact**: the helpers must become declaration-aware (extras-tolerant,
+  comment-blind, refuse-loudly). Each defect gets its own regression test.
 
 ### spike-3: Is a real `run_typed` call viable from the update process?
-- **Assumption**: "the lockfile-maintainer machine can make a live Anthropic call during `/update`"
-- **Method**: code-read + prototype
-- **Finding**: Yes. `utils/api_keys.py::get_anthropic_api_key` resolves a key on this machine (checked presence only, no value echoed), falling back to `~/Desktop/Valor/.env` when the launchd environment is thin — which is the relevant path, since `/update --cron` runs headless. `run_typed` defaults to `MODEL_FAST` (Haiku) with `settings.timeouts.anthropic_sdk_s` / `anthropic_hard_s` double timeouts already wired.
-- **Confidence**: high
-- **Impact on plan**: the predicate can call `run_typed` directly rather than re-implementing a raw client. From `auto_bump_deps` it must run **inside the target venv** (`{project_dir}/.venv/bin/python`), never in the update process's own interpreter, because the update process imported its modules before the sync. This mirrors the existing `_markitdown_importable` probe pattern already in `deps.py`. From bridge/worker startup the opposite is true — the process *is* the target venv, so it calls the predicate in-process.
+- **Finding**: Yes. `utils/api_keys.py::get_anthropic_api_key` resolves a key on
+  the maintainer machine (presence checked, no value echoed), including on the
+  headless cron path. From `auto_bump_deps` the call must run **inside the
+  target venv** (`{project_dir}/.venv/bin/python`), never the update process's
+  own interpreter — it imported its modules before the sync. Mirrors the
+  existing `_markitdown_importable` subprocess pattern.
 
 ### spike-4: What does `auto_bump_deps` rollback restore today?
-- **Assumption**: "rollback is per-package"
-- **Method**: code-read (`scripts/update/deps.py:463-547`)
-- **Finding**: Rollback is **whole-file**: `original_content` is snapshotted once before the loop and rewritten wholesale on any sync or smoke failure. With one auto-bumped package that is indistinguishable from per-package. With sets it means one bad set reverts every other set's good bump in the same cycle. The restore's own `sync_dependencies` return value is discarded.
-- **Confidence**: high
-- **Impact on plan**: per-set snapshot/restore, sequential set evaluation, and an explicit `restore_failed` flag (see Concern-2 handling in Technical Approach).
+- **Finding**: whole-file — `original_content` snapshotted once before the loop,
+  rewritten wholesale on any failure. With sets, one bad set would revert every
+  other set's good bump. The restore's own `sync_dependencies` result is
+  discarded.
+- **Impact**: per-set snapshot/restore, sequential set evaluation, an explicit
+  `restore_failed` flag.
 
-### spike-5: Is `openai` actually coupled to `anthropic` + `pydantic-ai-slim`? (owner-verified during revision)
-- **Assumption**: "openai is the third member of the coupled set" (the original plan's claim)
-- **Method**: code-read of `uv.lock` locked dependencies + the real import graph
-- **Finding**: **No packaging coupling, but a real self-inflicted import coupling.** Three separate facts, all verified:
-  1. **No declared coupling.** `pydantic-ai-slim`'s locked dependencies in `uv.lock` are `genai-prices`, `griffe`, `httpx`, `opentelemetry-api`, `pydantic`, `pydantic-graph`, `typing-inspection`. **No `openai`.** `openai>=3.0.0` is declared only under `pydantic-ai`'s `[openai]` extra, which we do not install — the `pyproject.toml` comment on the `pydantic-ai-slim[anthropic]` pin says so explicitly.
-  2. **The ImportError is nevertheless real and reproducible.** `agent/llm/wrapper.py:48` has an unguarded module-scope `from pydantic_ai.models.openai import OpenAIChatModel`. Under `pydantic-ai 2.34.0` that module requires an `openai` API our pinned `openai 2.30.0` does not provide, so the **entire wrapper fails at import** — taking down `run_typed` (the Anthropic path) along with it, because `agent/llm/__init__.py` re-exports from `wrapper`.
-  3. **The decisive fact:** `OpenAIChatModel` is used at exactly **one** site, `wrapper.py:213`, inside `run_typed_local`, where it is constructed against `OllamaProvider(base_url=...)`. It talks to a **local Ollama server** over an OpenAI-compatible endpoint. It never talks to OpenAI. Nothing about that call path requires the `openai` package to be at any particular version relative to `anthropic`.
-- **Confidence**: high (owner-verified both sides)
-- **Impact on plan**: **Do not weld `openai` into the coupled set.** Doing so would enroll it in unattended auto-bump and auto-execute the `openai 2.x → 3.x` major bump that this plan's own No-Gos defer to Step 2 — all-or-nothing with `anthropic`, unattended, on a cron tick. The coupled set is **`anthropic` + `pydantic-ai-slim` only**. Fix the coupling where it actually lives: at the import in `wrapper.py`, so the Ollama path's dependency cannot take down the Anthropic path. `openai` still gets an exact pin (spike-2 defect 1 is genuine) but joins no set. And the compat predicate must still exercise the **real wrapper import graph**, because that graph is precisely what catches this class of break.
+### spike-5: Is `openai` coupled to `anthropic` + `pydantic-ai-slim`?
+- **Finding**: **No packaging coupling; a real self-inflicted import coupling.**
+  1. `pydantic-ai-slim`'s locked dependencies include no `openai`. `openai>=3.0.0`
+     is declared only under the `[openai]` extra, which we do not install.
+  2. The ImportError is nevertheless real: `wrapper.py:48`'s module-scope
+     `from pydantic_ai.models.openai import OpenAIChatModel` fails under
+     `pydantic-ai 2.34.0` + our pinned `openai 2.30.0`, taking down `run_typed`
+     (the Anthropic path) with it via the `__init__` re-export.
+  3. `OpenAIChatModel` is used at exactly one site (`wrapper.py:213`, inside
+     `run_typed_local`), constructed against `OllamaProvider`. It talks to local
+     Ollama, never OpenAI.
+- **Impact**: `openai` joins **no** coupled set. The coupling is fixed where it
+  lives: at the import. Under this plan's import-safety contract that fix is not
+  a special case — the *entire* third-party stack goes lazy, `OpenAIChatModel`
+  included. There is no per-symbol option menu.
 
 ## Data Flow
 
 ### Today: how a bad pin reaches a running process (three routes, zero checks)
 
-1. **Auto-bump route** — `scripts/update/run.py:1302` Step 3.5, gated on
-   `config.do_auto_bump and is_lockfile_maintainer` (`run.py:1169`) →
-   `deps.auto_bump_deps` → `get_pinned_version` → `get_pypi_latest` →
-   `bump_pin_in_pyproject` → `sync_dependencies(frozen=False)` →
-   `run_smoke_test` (import check + one pytest file — **the layer that failed to
-   observe the break**) → commit + push (`run.py:1325-1345`).
-2. **Hand-staged route** — a human or agent edits `pyproject.toml`, runs
-   `uv sync`, and commits. **No check at all.** This is how `9d1488ccb`'s pin got
-   back onto `main` via `d0c02bde5`.
-3. **Follower route** — every non-maintainer machine runs `uv sync --frozen`
-   against the pushed `uv.lock` on its next `/update`. **No check at all.**
+1. **Auto-bump route** — `run.py:1302` Step 3.5 (maintainer-only, `run.py:1169`)
+   → `auto_bump_deps` → pin rewrite → sync → `run_smoke_test` (import check +
+   one pytest file — **the layer that failed to observe the break**) → commit +
+   push.
+2. **Hand-staged route** — a human or agent edits `pyproject.toml`, syncs,
+   commits. **No check at all.** This is how `d0c02bde5` re-shipped the pin.
+3. **Follower route** — every non-maintainer machine runs `uv sync --frozen` on
+   its next `/update`. **No check at all.**
 
-All three converge on the same terminal state: a bridge or worker process boots
-on the bad stack and every `run_typed` caller starts raising —
-`bridge/routing.py`, `bridge/job_router.py`, `bridge/context_recall.py`,
-`bridge/injection_inspection.py`, `bridge/agent_catchup.py`,
-`agent/memory_extraction.py`, `agent/intent_classifier.py`,
-`tools/classifier.py`, `tools/email_cs/triage.py`. On 2026-08-24 that state was
-invisible for six hours.
+All three converge on a bridge or worker process booting on the bad stack — or,
+in the ImportError mode, failing to boot and crash-looping under launchd.
 
-### After this plan: one predicate, four call sites
+### After this plan: one import-safe module, one predicate, four call sites
 
 ```
-utils/llm_stack_compat.py::check_llm_stack_compat() -> CompatResult
+agent/llm/  (import-safe by contract: module scope holds no third-party imports)
+  wrapper.py   — lazy memoized stack loader; run_typed / run_typed_local call it
+  compat.py    — check_llm_stack_compat() -> CompatResult; degraded flag;
+                 alert emitter (bound to flag resolution, not startup);
+                 `python -m agent.llm.compat --json` for subprocess callers
    |
-   +-- /update verify (scripts/update/verify.py)  ... every run, bump or no bump
-   +-- bridge startup (bridge/telegram_bridge.py::main)
-   +-- worker startup (worker/__main__.py)
-   +-- auto-bump gate (scripts/update/deps.py::run_smoke_test, "llm" phase)
+   +-- /update verify (scripts/update/verify.py) ... subprocess, every run
+   +-- bridge startup (bridge/telegram_bridge.py::main) ... force early resolution
+   +-- worker startup (worker/__main__.py)             ... force early resolution
+   +-- auto-bump gate (scripts/update/deps.py, "llm" phase) ... subprocess, target venv
 ```
 
-Routes 2 and 3 above are now covered: the hand-staged pin is caught by the next
-`/update` verify and by the next bridge/worker start; the follower machine is
-caught at its own `/update` verify and at service start. Route 1 additionally
-keeps its rollback, which is now *one caller of the predicate* rather than the
-whole safety story.
+Routes 2 and 3 are now covered at the next `/update` verify and the next service
+start. Route 1 keeps its rollback, which becomes *one caller of the predicate*
+rather than the whole safety story. And because `import agent.llm` can no longer
+fail, the startup call sites are reachable in **every** failure class — the
+round-2 B-a defect is dissolved structurally, not patched.
 
 ## Failure Posture
 
@@ -297,26 +283,33 @@ build may re-open.
 
 ### At the run boundary: start degraded, alert loudly
 
-`check_llm_stack_compat()` returning incompatible at bridge or worker startup
-**does not exit the process.**
+An incompatible stack at bridge or worker startup **does not exit the process.**
 
 - The process **comes up**. Telegram intake continues: messages are received,
-  AgentSessions are enqueued to Redis, nothing is dropped on the floor. Whatever
-  can be done without an LLM keeps being done.
-- A process-wide degraded flag is set. LLM-dependent entry points —
-  `agent/llm/wrapper.py::run_typed` and, through it, every caller listed in Data
-  Flow — **fail fast with a typed `LLMStackIncompatible`** (a subclass of the
-  existing `LLMCallError`, so every existing call site's fail-safe posture keeps
-  working unchanged) instead of surfacing a raw provider `TypeError` from deep in
-  the SDK. Each site's own conservative default (respond / escalate / send / skip)
-  still applies.
-- The condition is **alarmed**.
+  AgentSessions are enqueued to Redis, nothing is dropped.
+- A degraded flag is set. `run_typed` / `run_typed_local` **fail fast with a
+  typed `LLMStackIncompatible`** (a subclass of the existing `LLMCallError`, so
+  every existing call site's fail-safe posture keeps working unchanged) instead
+  of a raw provider `TypeError`. Each site's own conservative default still
+  applies.
+- The condition is **alarmed** — from the flag resolution itself (see below).
 
 Rationale, in the owner's terms: degraded-but-running is precisely the state that
 hid this incident for six hours. Exiting would trade a six-hour silent LLM outage
-for an immediate total outage plus a launchd crash-loop, which is worse. So the
-alert is not a nicety — **the alert is the entire safety property.** If the alert
-does not fire, this plan has shipped nothing.
+for an immediate total outage plus a launchd crash-loop, which is worse. So
+**the alert is the entire safety property.** If the alert does not fire, this
+plan has shipped nothing.
+
+### The alert is bound to flag resolution, not to startup
+
+The degraded flag is **lazily self-resolving and memoized**: the first read —
+whether from a startup hook or from a `run_typed` call in a process that never
+ran one — evaluates the predicate, and **the first transition to degraded emits
+the alert, from inside the resolver**. Startup hooks in bridge and worker do
+nothing but force resolution early, so the alert fires at boot rather than at
+first call. This closes both round-2 findings at once: no entry path can reach
+the broken stack without the alert firing (B-e), and no ordering race between
+boot and first call exists (Race 3 is designed away rather than mitigated).
 
 ### Alert independence constraint
 
@@ -324,84 +317,80 @@ Because the thing being alarmed *is the LLM stack*, the alert must not route
 through it. Explicitly forbidden in the alert path:
 
 - **No `run_typed` / `run_typed_local`.** They are exactly what is broken.
-- **No message drafter, no LLM summarization, no persona pass.** The drafter is
-  itself a `run_typed` caller.
-- **No dynamic body composition of any kind.** The alert body is a **static
-  string** plus the two resolved version numbers and the captured exception type
-  and message. Nothing else is interpolated.
+- **No message drafter, no LLM summarization, no persona pass.**
+- **No dynamic body composition.** The alert body is a **static string** plus
+  the two resolved version numbers and the captured exception type and message.
 
-This is a deliberate, named exception to the repo's standing "never let raw text
-speak to chat" convention (`feedback_drafter_comms_layer`). The convention exists
-so chat output reads as a person; here the drafter is unavailable by
-construction, and a silent alert is the failure being prevented. The feature doc
-must state this exception explicitly so a future reader does not "fix" it by
-routing the alert back through the drafter.
+This is a deliberate, named exception to the standing "never let raw text speak
+to chat" convention (`feedback_drafter_comms_layer`): the drafter is unavailable
+by construction, and a silent alert is the failure being prevented. The feature
+doc must state this so a future reader does not "fix" it.
 
-### Alert channels, and why each is unmissable
+### Alert channels, and why each actually fires
 
-Three channels, fired unconditionally on a degraded start. All three, not one —
-"unmissable" is a property of redundancy across independent transports, not an
-adjective.
+Three channels, fired unconditionally on the first transition to degraded.
+"Unmissable" is a property of redundancy across independent transports.
 
-| Channel | Mechanism | Independence argument |
+| Channel | Mechanism | Why it actually fires |
 |---|---|---|
-| Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following the existing `agent/index_drift.py:224` pattern including its capture-failed fallback log. `monitoring/sentry_config.py` already initializes Sentry in both bridge and worker. | Sentry's transport is `sentry-sdk`'s own HTTP client. Shares no code with `anthropic`, `pydantic-ai`, or `openai`. |
-| Logs | `logger.critical` with a fixed, greppable sentinel token in the message. | No dependency beyond stdlib `logging`. Survives even a Sentry DSN outage. |
-| Dashboard | A health field on `/dashboard.json` (`ui/app.py:906`) that `localhost:8500` renders red. | Read path; the FastAPI app does not import the LLM stack to serve it. |
+| Sentry | `sentry_sdk.capture_message(<static body>, level="fatal")`, following `agent/index_drift.py:224` including its capture-failed fallback log. | `sentry-sdk`'s own HTTP transport; shares no code with the LLM stack. **Hibernation exemption required:** `bridge/telegram_bridge.py:70-77`'s `_sentry_before_send` drops every event while `is_hibernating()` — a persistent flag, not a brief window. The hook must pass events whose message carries the degraded sentinel token. Hibernation means "we cannot reach Telegram", which is exactly when a broken LLM stack most needs to be visible elsewhere. |
+| Logs | `logger.critical` with a fixed, greppable sentinel token. | stdlib only. Survives a Sentry DSN outage. |
+| Dashboard | The resolver writes a marker file `data/llm-stack-degraded` (versions + `exc_type`); `dashboard_json` (`ui/app.py:906`) reads it with the siblings' fail-quiet `try/except OSError` and renders red. | `/dashboard.json` is served by a **separate uvicorn process** — an in-process flag can never reach it. Every existing health field derives from a filesystem/Redis artifact (`_get_bridge_health` stats `data/last_connected`, `ui/app.py:373`); this follows that pattern. **The marker must be cleared on a healthy resolution** — a stuck-red dashboard equals no dashboard channel; the clear leg gets its own test. |
 
-A direct Telegram push was considered and **rejected**: there is no raw Bot-API
-send path in tracked code (the bridge is Telethon-only), so it would mean
-introducing a new outbound credential and transport inside a failure handler.
-Telethon's own `send_message` is LLM-free and would satisfy independence, but it
-lives inside the bridge process only — it cannot alarm a degraded *worker*, and
-the whole point is that the check runs in both. If operational experience shows
-the three channels above are missed in practice, adding a Telethon send in the
-bridge is a small follow-up; it is not the load-bearing part.
+A direct Telegram push was considered and **rejected**: no raw Bot-API send path
+exists in tracked code, and Telethon's send lives only in the bridge — it cannot
+alarm a degraded worker. If experience shows the three channels are missed, a
+Telethon send in the bridge is a small follow-up.
 
 ### At the auto-bump boundary: fail-closed rollback (a separate axis)
 
-`auto_bump_deps` keeps fail-closed semantics: if its `llm` gate phase fails **or
-cannot run** (no key, no venv python, subprocess timeout), the set is rolled back
-and a distinct warning is emitted. This does not contradict the degraded-start
-decision above — they are different questions. "Should a running service refuse
-to start?" is answered *no*. "Should an unattended script push a new pin to the
-whole fleet without having verified it?" is answered *no* as well. Declining to
-bump costs one stale cycle.
+If the auto-bump `llm` gate phase fails **or cannot run** (no key, no venv
+python, subprocess timeout), the set is rolled back and a distinct warning is
+emitted. This does not contradict degraded-start — "should a running service
+refuse to start?" is answered *no*; "should an unattended script push a new pin
+fleet-wide without having verified it?" is also answered *no*. Declining to bump
+costs one stale cycle.
 
 ## Architectural Impact
 
-- **New dependencies**: none. `sentry-sdk` is already a declared dependency.
-- **New module**: `utils/llm_stack_compat.py`. **Named deviation from the
-  critique's suggestion**, which proposed `scripts/update/compat_gate.py`: the
-  predicate is imported by `bridge/` and `worker/`, and making runtime services
-  import from `scripts/update/` inverts the dependency direction. `utils/` is the
-  existing neutral home — `scripts/update/` already imports `utils.utc`
-  (`git.py:116`, `run.py:288`) and `utils/api_keys.py` is already shared by both
-  sides. `utils/llm_stack_compat.py` imports nothing from `scripts/`.
+- **New dependencies**: none.
+- **New module**: `agent/llm/compat.py`. **Named deviation from round-2's
+  accepted placement** (`utils/llm_stack_compat.py`): the predicate is a
+  statement about `agent.llm`'s own stack, and repo doctrine
+  (`feedback_single_authoritative_liveness`) says the module that owns a
+  lifecycle exposes its health API. Placing it inside the package also
+  eliminates the bidirectional `utils/` ⇄ `agent/` coupling round 2 flagged as
+  B-f (there is no `utils/` → `agent/` import edge anywhere today, and this
+  plan no longer creates the first one), and `python -m agent.llm.compat --json`
+  serves the subprocess callers identically — which works precisely *because*
+  the package `__init__` becomes import-safe. `verify.py` and `deps.py` never
+  import it in-process (subprocess only), so no runtime→scripts or
+  scripts→runtime edge is created in either direction.
+- **The import-safety contract is the load-bearing change**: `agent/llm/`
+  (wrapper, compat, and `agent/anthropic_client.py` as its dependency) holds no
+  third-party LLM-stack imports at module scope. A memoized loader inside the
+  call paths owns them. One architectural test enforces it; no consumer is
+  touched and no consumer can regress it.
 - **Interface changes**: `AUTO_BUMP_PACKAGES` (a `list[str]`) is replaced by
-  `AUTO_BUMP_SETS` (a list of `CoupledSet`). `run_smoke_test` grows a `phases`
-  argument and returns a phase marker. `AutoBumpResult` gains per-set bookkeeping
-  and `restore_failed`. `LLMCallError` gains a subclass.
-- **Behavior change at startup**: bridge and worker gain a boot-time check. It is
-  a sub-second local operation on the happy path (see Technical Approach for why
-  it does not add a network call at every boot).
-- **Coupling**: deliberately **increases** coupling from `scripts/update/deps.py`
-  to the LLM stack — but only across a subprocess boundary into the target venv,
-  so the update process itself does not import it. That direction is correct: the
-  gate must exercise the thing it protects.
-- **Data ownership**: unchanged. `pyproject.toml` remains the single source of pin
-  truth; `uv.lock` remains maintainer-authored and follower-consumed.
-- **Reversibility**: high. The predicate is additive and its call sites are
-  one-liners; removing them restores today's behavior exactly.
+  `AUTO_BUMP_SETS` (a list of `CoupledSet`, carrying `members`, `import_names`,
+  `gates`, `reason`, `hold`). `run_smoke_test` grows a `phases` argument and
+  returns a phase marker. `AutoBumpResult` gains per-set bookkeeping and
+  `restore_failed`. `LLMCallError` gains a subclass.
+- **Behavior change at startup**: bridge and worker force flag resolution at
+  boot — a sub-second local operation, no network.
+- **Data ownership**: unchanged. `pyproject.toml` remains the single source of
+  pin truth; `uv.lock` remains maintainer-authored, follower-consumed.
+- **Reversibility**: high. Laziness and the predicate are additive; call sites
+  are one-liners.
 
 ## Appetite
 
 **Size:** Medium
 
-**Team:** Solo dev, PM, code reviewer
+**Team:** Solo dev pair (runtime + update-scripts), test engineer, documentarian
 
 **Interactions:**
-- PM check-ins: 1 (alert-channel shape, if operational judgment is needed)
+- PM check-ins: 1 (only if alert-channel judgment is needed)
 - Review rounds: 1
 
 ## Prerequisites
@@ -417,313 +406,435 @@ bump costs one stale cycle.
 
 ### Key Elements
 
-- **`check_llm_stack_compat()` — a standalone predicate at the run boundary.**
-  Lives in `utils/llm_stack_compat.py`, returns a `CompatResult`
-  (`compatible: bool`, `anthropic_version: str`, `pydantic_ai_version: str`,
-  `reason: str`, `exc_type: str | None`). It knows nothing about auto-bump,
-  `pyproject.toml`, or `uv`. It answers exactly one question about the
-  *installed* stack.
-- **Four call sites.** `/update` verify (unconditional, every run — not only when
-  a bump happened), bridge startup, worker startup, and the auto-bump gate.
-  Auto-bump is demoted from "the gate" to "one caller of the gate".
-- **Degraded start + loud alert** on the run-boundary sites, per Failure Posture.
-- **`LLMStackIncompatible(LLMCallError)`** raised by `run_typed` when the degraded
-  flag is set, so callers get a typed, legible error instead of a provider
-  `TypeError` — and their existing `except LLMCallError` fail-safes keep working.
-- **Fix the self-inflicted `openai` import coupling** at `wrapper.py:48` (spike-5).
-  Two honest options; the builder picks one and records why:
-  (a) declare the `[openai]` extra in `pyproject.toml` — we genuinely do import
-  that module, so declaring it is truthful, but it enrolls us in openai's release
-  cadence; or (b) make the import **lazy inside `run_typed_local`** and guarded,
-  so an `openai`/`pydantic-ai` mismatch degrades the Ollama path alone and cannot
-  take down the Anthropic path. **(b) is preferred** — it matches the actual
-  dependency shape (one call site, local Ollama server, never OpenAI) and keeps
-  the blast radius of a third-party break proportional to what actually uses it.
-- **Coupled-set declaration** — `AUTO_BUMP_SETS = [CoupledSet(["anthropic",
-  "pydantic-ai-slim"], reason=...), CoupledSet(["claude-agent-sdk"], reason=...)]`.
-  A set is the atomic unit of bump, sync, gate, and rollback, and carries prose
-  saying *why* its members are welded together.
-- **`openai` is explicitly NOT a set member** (spike-5). It gets an exact pin
-  because spike-2's defect 1 is real, but it joins no set, and an assertion plus
-  a docstring note record why so a future reader does not re-add it.
-- **Declaration-aware pin helpers** — the reader and writer stop substring-matching
-  whole lines (comments included) and stop assuming a bare `name==version` shape.
-  They locate a package's actual dependency declaration, tolerate extras
-  (`pydantic-ai-slim[anthropic]`), and refuse rather than silently no-op.
-- **Per-set gate phases** — `CoupledSet.gates` defaults to `("import", "pytest")`,
-  so a newly added set never silently inherits a billed API call or a dependency
-  on Anthropic being up. The LLM set opts into `("llm", "import", "pytest")`.
-- **Atomic per-set rollback**, with the restore's own sync result captured
-  (`restore_failed`) so a failed restore cannot leave `uv.lock` and
-  `pyproject.toml` describing different worlds.
-- **`anthropic` returns to auto-bump** — re-added as a member of the LLM set, in
-  the same commit as the gate. Never before it.
+- **Import-safety contract on `agent/llm/`.** All third-party stack imports
+  (`anthropic`, `pydantic_ai.*`) move out of module scope in `wrapper.py` and
+  `agent/anthropic_client.py` into one memoized loader (`_load_stack()`),
+  invoked by `run_typed` / `run_typed_local` / the predicate. Module scope keeps
+  stdlib and our own code only. Enforced by an architectural test: with
+  `anthropic` and `pydantic_ai` stubbed to raise on import,
+  `import agent.llm` **and** `import bridge.telegram_bridge` both succeed,
+  `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire.
+  That single test is the invariant; consumer discipline is not.
+- **`check_llm_stack_compat()` in `agent/llm/compat.py`**, returning
+  `CompatResult` (`compatible`, `anthropic_version`, `pydantic_ai_version`,
+  `reason`, `exc_type`). Local mode: run the loader (catches the ImportError
+  class), then verify the installed `anthropic` message-create signature
+  accepts what the installed `pydantic_ai` passes — **derived by
+  introspection**, not hardcoded: bind
+  `pydantic_ai.models.anthropic.AnthropicModelSettings.__annotations__` keys
+  against `inspect.signature(anthropic.resources.messages.AsyncMessages.create).parameters`,
+  flagging any key absent and not absorbed by `**kwargs`. Introspection
+  failures (an internals rename) return `compatible=False` — a silently-passing
+  predicate whose target moved is the same failure as no gate. A module-level
+  literal fallback tuple carries the pydantic-ai version in a comment plus a
+  test asserting it is a subset of the introspected keys.
+  `allow_network=True` additionally makes one minimal `run_typed` call (catches
+  the transport class). `python -m agent.llm.compat --json` is the subprocess
+  entry point; no imports from `scripts/`.
+- **Degraded flag + alert in the resolver** (see Failure Posture). Startup hooks
+  in `bridge/telegram_bridge.py::main` and `worker/__main__.py` force early
+  resolution; neither may exit on incompatibility.
+- **`LLMStackIncompatible(LLMCallError)`** raised by `run_typed` /
+  `run_typed_local` under a degraded stack; subclassing preserves every
+  existing `except LLMCallError` fail-safe unchanged (asserted, not assumed).
+- **Coupled-set declaration** —
+  `AUTO_BUMP_SETS = [CoupledSet(members=["anthropic", "pydantic-ai-slim"], import_names=("anthropic", "pydantic_ai"), gates=("llm", "import", "pytest"), reason=..., hold="#3001 Step 2"), CoupledSet(members=["claude-agent-sdk"], import_names=("claude_agent_sdk",), reason=...)]`.
+  A set is the atomic unit of bump, sync, gate, and rollback. `gates` defaults
+  to `("import", "pytest")` so a new set never silently inherits a billed API
+  call. The `import` phase imports the set's own `import_names` — the hardcoded
+  `import anthropic; import claude_agent_sdk` string is gone.
+- **`hold`** — a held set is skipped by `auto_bump_deps`, recording
+  `BumpResult(bumped=False, error=f"held: {set.hold}")` so `run.py:1317`'s log
+  stays legible. This is how `anthropic` returns to the auto-bump *structure*
+  without the first post-merge cron tick auto-executing the Step 2 upgrade
+  (`anthropic 1.0.0` + `pydantic-ai-slim 2.35.0` would pass the gate and push
+  fleet-wide, unattended). Step 2's lane removes the hold as its final act.
+  Deliberately **not** an upper version bound — `get_pypi_latest` returns only
+  the latest version, and a bound needs the resolver Rabbit Holes forbid.
+- **`openai` is in no set** (spike-5), asserted in code with the reasoning in
+  the docstring. Its declaration keeps the existing `openai>=1.0.0` floor —
+  the round-2 concern is accepted: an exact pin was scope creep that also
+  masked its own regression test's target. Defect 1 is fixed by the
+  declaration-aware reader regardless, tested against a fixture that preserves
+  the floor-plus-comment shape.
+- **Declaration-aware pin helpers** — locate the actual dependency declaration
+  (comment-blind), tolerate extras (`pydantic-ai-slim[anthropic]`), refuse
+  loudly rather than silently no-op.
+- **Atomic per-set rollback** with the restore's own sync result captured
+  (`restore_failed`) and the `run.py` commit branch guarded by it.
 
 ### Flow
 
 **Run boundary (every `/update`, every bridge start, every worker start):**
 
 ```
-startup / verify
-  → check_llm_stack_compat()
-      → compatible?  → proceed normally
-      → incompatible? → set degraded flag
-                        → run_typed raises LLMStackIncompatible from here on
-                        → ALERT: sentry fatal + logger.critical + dashboard red
-                        → PROCESS CONTINUES (Telegram intake keeps queueing)
+startup → force degraded-flag resolution
+  resolver (first read, any entry path):
+    → check_llm_stack_compat()  [local: loader + signature introspection]
+        → compatible?   → memoize healthy; clear data/llm-stack-degraded
+        → incompatible? → memoize degraded
+                          → ALERT from resolver: sentry fatal (hibernation-exempt)
+                                                + logger.critical sentinel
+                                                + write data/llm-stack-degraded
+                          → run_typed raises LLMStackIncompatible from here on
+                          → PROCESS CONTINUES (Telegram intake keeps queueing)
 ```
 
 **Auto-bump (`/update --cron`, maintainer machine only):**
 
 ```
 for each coupled set:
+  → held?                                   → skip, record "held: <reason>"
   → resolve latest for EVERY member         → any unresolvable? skip whole set
-  → rewrite ALL member pins (set snapshot taken first)
-  → uv sync --all-extras (unfrozen)         → fail? restore set snapshot, re-sync, next set
+  → any pin actually changing? no → skip set (no sync on quiet cycles)
+  → rewrite ALL member pins (set snapshot taken first; any rewrite failure
+    restores snapshot and abandons the set immediately)
+  → uv sync --all-extras (unfrozen)         → fail? restore snapshot, re-sync, next set
   → for each phase in set.gates:
-       llm    → check_llm_stack_compat() in the target venv subprocess
-       import → import anthropic; import claude_agent_sdk
+       llm    → {venv}/bin/python -m agent.llm.compat --json --allow-network
+       import → import each of set.import_names (in the target venv)
        pytest → tests/unit/test_docs_auditor_substrate.py
-  → any phase fails? restore set snapshot, re-sync, record rolled_back + phase
+  → any phase fails? restore snapshot, re-sync, record rolled_back + phase
   → restore itself failed? record restore_failed, git checkout -- uv.lock
 any set survived AND not restore_failed? commit + push pyproject.toml + uv.lock
 ```
 
 ### Technical Approach
 
-- **The predicate's happy path must be cheap enough for boot.** At bridge/worker
-  startup it performs a **local signature check only** — import the wrapper module
-  (which is the real import graph, per spike-5) and verify that
-  `anthropic.resources.messages.AsyncMessages.create` accepts the parameters
-  `pydantic_ai`'s Anthropic model passes. That is the exact failure mode of the
-  incident, it is sub-second, and it makes **no network call and spends no
-  tokens**. Spike-1 confirms the bad pair fails at argument binding before any
-  I/O, so a local check is sufficient for this class.
-- **The auto-bump `llm` phase additionally makes a real call**, because a bump can
-  break the transport (see Research: `httpx` → `httpx2`) in ways a signature check
-  cannot see. Same predicate, an `allow_network=True` argument. Boot pays nothing;
-  the once-a-day bump pays a handful of Haiku tokens only on cycles where
-  something actually bumped.
-- **The predicate exercises the real wrapper import graph.** `import agent.llm`
-  (not a hand-rolled probe), because `agent/llm/__init__.py` re-exports from
-  `wrapper` and that is precisely the graph spike-5 showed can break. An
-  `ImportError` from that import is a compat failure with the exception text
-  carried through verbatim.
-- **From auto-bump, the predicate runs in the target venv, not in-process.**
-  `{project_dir}/.venv/bin/python -m utils.llm_stack_compat --json`, following the
-  existing `_markitdown_importable` pattern. In-process would exercise the
-  *pre-sync* imports the update process already holds. Bounded by a subprocess
-  timeout in addition to `run_typed`'s own double timeout.
-- **Set semantics are all-or-nothing at every stage.** If any member's latest
-  version cannot be resolved, the set does not move at all. Same for the rewrite:
-  any failed member rewrite restores the snapshot and abandons the set
-  *immediately* rather than continuing — today's code records an error and carries
-  on, which spike-2 shows is exactly how the incident happened.
-- **Capture the restore sync's result.** `restore = sync_dependencies(project_dir,
-  frozen=False)`; on `not restore.success`, set `AutoBumpResult.restore_failed =
-  True` and `run_cmd(["git", "checkout", "--", "uv.lock"], cwd=project_dir,
-  check=False)`. Guard `run.py` Step 3.5's commit branch with
-  `and not bump.restore_failed` — otherwise a later successful bump does
-  `git add pyproject.toml uv.lock` and pushes a poisoned lockfile fleet-wide.
-- **Skip a set's sync entirely when no member's pin actually changed**, so the
-  per-set fan-out does not multiply `uv sync` calls on quiet cycles.
-- **Distinguish gate phases in the result.** The operator reading a `/update`
-  warning needs to tell "the LLM pair is incompatible" from "an unrelated unit
-  test is flaky". Carry a phase marker (`llm` / `import` / `pytest`) alongside the
-  output and surface it in the warning detail.
-- **Do not touch the commit/push path in `run.py`.**
-  `docs/archive/plans-completed/sdlc-1091.md` documents that the restart gate
-  depends on auto-bump's commit landing in local HEAD synchronously before
-  `auto_bump_deps` returns. That ordering stays exactly as-is; the only change is
-  the added `restore_failed` guard on the commit branch.
-- **Keep the `pyproject.toml` comment constraint, add the pointer.** With
-  `7a30b88f7` landed, "Do NOT move to 1.x while pydantic-ai-slim is on 2.9.0" is a
-  *correct, load-bearing* warning sitting above a correct pin — deleting it would
-  strip the only in-file guard against a hand-edit repeating `9d1488ccb` while
-  this lane is in flight. Replace the four-line block with two lines that keep the
-  constraint and add the pointer:
+- **Boot pays nothing.** The resolver's local check is loader + introspection —
+  sub-second, no network, no tokens. Only the auto-bump `llm` phase makes a real
+  call (transport-class breaks), and only on cycles where something bumped.
+- **From auto-bump, the predicate runs in the target venv, not in-process**
+  (`{project_dir}/.venv/bin/python -m agent.llm.compat --json`), following
+  `_markitdown_importable`. In-process would exercise the pre-sync imports the
+  update process already holds. Bounded by a subprocess timeout.
+- **`verify.py` uses the same subprocess shape.** `check_python_import`
+  (`verify.py:104`) and `check_venv_tool` (`verify.py:125`) already build
+  `{venv}/bin/python` and shell out via `run_cmd`. Run the `--json` entry with
+  `check=False`, map onto
+  `ToolCheck(name=..., available=result["compatible"], detail=result["reason"])`,
+  carrying both resolved versions in `detail` (printed even on pass, #2541) so
+  a silently stale venv is visible. Unconditional — every `/update`, bump or no
+  bump.
+- **Import-cycle discipline inside the package**: `compat.py` reaches the stack
+  only through the loader, inside function bodies. `wrapper.py` may import
+  `compat`'s flag accessor at module scope (both are our own import-safe code).
+  The direction matters: the predicate must be able to *report* an ImportError,
+  so nothing on `compat.py`'s module-scope path may raise one.
+- **Test seam preserved deliberately** (round-2 B-b): moving imports into the
+  loader removes `wrapper_mod.OpenAIChatModel` as a module attribute, which is
+  the monkeypatch seam `tests/unit/test_llm_wrapper_local.py:52` documents as
+  its network isolation. The loader returns a namespace object that tests patch
+  instead (`monkeypatch.setattr(wrapper_mod, "_load_stack", fake_loader)`); the
+  module docstring's isolation claim is updated, and a test asserts no real
+  network call is reachable from that file.
+- **Set semantics are all-or-nothing at every stage** — resolve, rewrite, sync,
+  gate, rollback. Today's record-error-and-continue is exactly how the incident
+  happened (spike-2 defect 3).
+- **Capture the restore sync's result** → `restore_failed = True` +
+  `git checkout -- uv.lock`; guard `run.py` Step 3.5's commit branch with
+  `not bump.restore_failed` — otherwise a later successful bump pushes a
+  poisoned lockfile fleet-wide. The commit/push/restart ordering documented in
+  `sdlc-1091.md` is otherwise untouched.
+- **Distinguish gate phases in the result** (`llm` / `import` / `pytest`),
+  surfaced in the `/update` warning detail, so "the LLM pair is incompatible"
+  is legible against "an unrelated unit test is flaky".
+- **`verify_critical_versions` (`deps.py:277`) is the helper rewrite's silent
+  blast radius** — it calls `get_pinned_version` for
+  `["telethon", "anthropic", "claude-agent-sdk"]`. Assert it returns the same
+  three `VersionInfo` results across the rewrite.
+- **Keep the `pyproject.toml` comment constraint, add the pointer.** Replace the
+  four-line stopgap block above the `anthropic` pin with two lines:
   `# CRITICAL — coupled set: anthropic + pydantic-ai-slim move together.` /
   `# anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. See AUTO_BUMP_SETS in scripts/update/deps.py.`
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- `deps.py::get_pypi_latest` has two bare `except Exception` blocks (method-1 fallthrough, method-2 return `None`). Both are pre-existing and stay; the set logic must treat a `None` latest as "skip the whole set", asserted directly.
-- `deps.py::_markitdown_importable` swallows `TimeoutExpired`/`OSError` → `False`. Untouched.
-- `check_llm_stack_compat` must **not** add a bare `except Exception: pass`. Every failure path returns a `CompatResult` with `compatible=False` and a non-empty `reason` carrying the exception type and message verbatim. Tested on each path.
-- The **alert** path itself must be exception-tolerant in the other direction: a Sentry capture failure must not prevent the `logger.critical` or the dashboard field, and must not crash startup. Follow `agent/index_drift.py:229`'s "capture failed" fallback log. Tested by making `capture_message` raise and asserting the process still starts and the log line still appears.
-- No exception handler introduced by this work may swallow a rollback failure — a failed restore-and-resync surfaces as `restore_failed` plus a warning, not silence.
+- `check_llm_stack_compat` must **not** contain a bare `except Exception: pass`.
+  Every failure path returns `CompatResult(compatible=False, ...)` with the
+  exception type and message verbatim — including introspection failures and
+  loader ImportErrors. Tested per path.
+- The **alert** path is exception-tolerant the other way: a Sentry capture
+  failure must not suppress the sentinel log or the marker file, and must not
+  crash the resolver. Follow `agent/index_drift.py:229`'s fallback-log shape.
+  Tested by making `capture_message` raise.
+- The marker-file write and clear are wrapped in fail-quiet `OSError` handling
+  on the dashboard's read side only; the resolver's write failure logs, never
+  raises.
+- No handler introduced by this work may swallow a rollback failure — a failed
+  restore surfaces as `restore_failed` plus a warning, never silence.
 
 ### Empty/Invalid Input Handling
-- `get_pinned_version` returning `None` (package absent from `pyproject.toml`) → set skipped, tested.
+- `get_pinned_version` returning `None` (member absent) → set skipped, tested.
 - `get_pypi_latest` returning `None` (network down) → set skipped, tested.
-- A `pyproject.toml` with no dependency block at all → helpers refuse, no rewrite, no crash.
-- `check_llm_stack_compat` on a venv where `agent.llm` cannot be imported at all → `compatible=False` with the `ImportError` text, not an unhandled raise.
-- Empty/whitespace prompt is already rejected by `run_typed` with `ValueError`; the network-mode probe's prompt is a literal, so this is unreachable, and is covered generically by "any exception is a compat failure".
+- A `pyproject.toml` with no dependency block → helpers refuse, no rewrite, no crash.
+- The predicate on a venv where the loader raises → `compatible=False` with the
+  `ImportError` text, not an unhandled raise (this **is** the spike-5 class).
 
 ### Error State Rendering
-- The degraded-start alert is the primary operator-visible artifact. Assert all three channels fire from one degraded start, and assert the body is the **static** string plus versions — a test that asserts no LLM call occurred during alert emission.
-- Assert a rolled-back set produces the `"Auto-bump rolled back"` warning **and** that the phase marker appears in the logged detail — a rollback whose reason is not legible is the same failure as no rollback at all.
-- Assert the success path still logs `"Smoke test passed after bump"` so the existing `extract_update_warnings` parsing is not disturbed.
+- Assert all three channels fire from one degraded resolution, that the body is
+  the static string plus versions, and that no LLM call occurred during
+  emission.
+- Assert a healthy resolution clears `data/llm-stack-degraded` (the stuck-red
+  leg).
+- Assert a rolled-back set's warning names the failed phase.
+- Assert the success path still logs `"Smoke test passed after bump"` so
+  `extract_update_warnings` parsing is undisturbed.
 
 ## Test Impact
 
-- [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest` — UPDATE: fixture `pyproject.toml` lists `anthropic` and `claude-agent-sdk` as flat siblings. Rewrite against `AUTO_BUMP_SETS`; keep the assertion that nothing bumps when all members are at latest.
-- [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_rollback_on_smoke_failure` — UPDATE: it patches `scripts.update.deps.run_smoke_test` to return a 2-tuple. Adjust to the new phase-carrying return shape and assert the **set's** snapshot is restored (all members), not just the file.
-- [ ] `tests/integration/test_remote_update.py::TestGetPinnedVersion::test_reads_pinned_version` — UPDATE: extend with the extras form and the comment-collision case from spike-2. This test currently passes against a one-line fixture that cannot expose either defect.
-- [ ] `tests/unit/test_agent_llm_wrapper.py` (or the nearest existing wrapper test module) — UPDATE: add coverage for `LLMStackIncompatible` being raised when the degraded flag is set, and assert it is a `LLMCallError` subclass so existing `except LLMCallError` sites are unaffected. If no such module exists, create it.
-- [ ] `tests/integration/test_remote_update.py` — ADD: `test_partial_resolve_skips_whole_set`, `test_extras_pin_is_bumped`, `test_openai_pin_not_read_from_comment`, `test_openai_is_not_in_any_coupled_set`, `test_default_gates_exclude_llm_phase`, `test_llm_gate_failure_rolls_back_set`, `test_unrelated_set_survives_failed_set`, `test_gate_unavailable_is_fail_closed`, `test_restore_failure_blocks_commit`, `test_worktree_clean_after_every_rollback_path`.
-- [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): predicate returns compatible on the good pair; incompatible with verbatim reason on a simulated bad signature; incompatible on `ImportError`; local mode makes no network call.
-- [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): all three alert channels fire on a degraded start; the alert fires **while `run_typed` raises** (the independence proof); a raising `capture_message` does not suppress the other two channels or crash startup; the process does not exit.
-- [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the gate's pytest phase; this plan does not repurpose it.
+- [ ] `tests/unit/test_llm_wrapper_local.py` — UPDATE (round-2 B-b): the
+  `wrapper_mod.OpenAIChatModel` monkeypatch seam at `:52` is replaced by the
+  loader seam; update the module docstring's isolation claim; add an assertion
+  that no real network call is reachable from the file.
+- [ ] `tests/unit/test_llm_wrapper.py` — UPDATE: add `LLMStackIncompatible`
+  raised under the degraded flag, and the `issubclass(..., LLMCallError)`
+  assertion.
+- [ ] `tests/unit/test_llm_import_safety.py` — ADD (new file): the contract
+  test — with `anthropic`/`pydantic_ai` stubbed to raise on import,
+  `import agent.llm` and `import bridge.telegram_bridge` succeed, `run_typed`
+  raises `LLMStackIncompatible`, all three channels fire; plus the
+  no-startup-hook path (first `run_typed` call resolves, alerts, raises typed).
+- [ ] `tests/unit/test_llm_stack_compat.py` — ADD (new file): compatible on the
+  good pair; incompatible with verbatim reason on a simulated bad signature;
+  incompatible on loader ImportError; introspection-failure → incompatible;
+  fallback tuple ⊆ introspected keys; local mode makes no network call.
+- [ ] `tests/unit/test_llm_stack_degraded_start.py` — ADD (new file): alert
+  fires **while `run_typed` raises** (independence proof); raising
+  `capture_message` suppresses nothing else; marker file written on degraded,
+  cleared on healthy; hibernation `before_send` passes the sentinel event while
+  dropping others; process does not exit; degraded intake (inbound message
+  still enqueues an AgentSession).
+- [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_no_bump_when_already_latest`
+  — UPDATE: rewrite against `AUTO_BUMP_SETS`; keep the nothing-bumps assertion.
+- [ ] `tests/integration/test_remote_update.py::TestAutoBumpDeps::test_rollback_on_smoke_failure`
+  — UPDATE: new phase-carrying return shape; assert the **set's** snapshot is
+  restored (all members).
+- [ ] `tests/integration/test_remote_update.py::TestGetPinnedVersion::test_reads_pinned_version`
+  — UPDATE: extend with the extras form and the comment-collision case, against
+  a fixture preserving the **floor-plus-comment** shape (`"openai>=1.0.0"` with
+  `openai` inside the `pydantic-ai-slim` comment) — not the repo's live file.
+- [ ] `tests/integration/test_remote_update.py` — ADD:
+  `test_partial_resolve_skips_whole_set`, `test_extras_pin_is_bumped`,
+  `test_openai_pin_not_read_from_comment`, `test_openai_is_not_in_any_coupled_set`,
+  `test_default_gates_exclude_llm_phase`, `test_held_set_is_skipped_and_legible`,
+  `test_llm_gate_failure_rolls_back_set`, `test_unrelated_set_survives_failed_set`,
+  `test_gate_unavailable_is_fail_closed`, `test_restore_failure_blocks_commit`,
+  `test_worktree_clean_after_every_rollback_path`,
+  `test_verify_critical_versions_unchanged_by_helper_rewrite`,
+  `test_verify_runs_compat_check_without_bump`.
+- [ ] No changes to `tests/unit/test_docs_auditor_substrate.py` — it stays the
+  gate's pytest phase.
 
 ## Rabbit Holes
 
-- **Do not build a general dependency-compatibility solver.** The remedy for the missing upper bound in pydantic-ai's metadata is a local predicate, not a constraint engine or a vendored override file. Two packages, one declared set, one check.
-- **Do not rewrite `pyproject.toml` parsing onto `tomlkit`/`tomllib`.** Tempting after spike-2, and genuinely more correct — but the writer must preserve the `CRITICAL — pin exact` comments verbatim, and round-tripping comments is where this swallows a day. Make the regex declaration-aware (anchored to the quoted dependency string, extras-tolerant) and move on. Revisit only if a fourth defect appears.
-- **Do not make the boot-time check do network I/O.** A per-boot billed API call turns every worker restart into a token spend and makes service startup depend on provider availability. Signature check locally; real call only in auto-bump.
-- **Do not make the gate run the full test suite.** A ~20-minute unit run inside `/update --cron` is not a gate, it is an outage.
-- **Do not build a general degraded-mode framework.** One flag, one typed exception, one alert. The second subsystem that wants degraded start can justify the abstraction.
-- **Do not attempt the upgrade "while we're in here."** `pydantic-ai-slim` 2.35.0 and `openai` 3.3.1 are sitting on PyPI and the temptation is real. That is Step 2, behind this gate. A three-way major bump with the gate landing in the same PR gives you no way to tell which half is at fault.
-- **Do not route the alert through the drafter to make it read nicer.** See Failure Posture — that is the one thing the alert must never do.
+- **Do not build a general dependency-compatibility solver.** Two packages, one
+  declared set, one check.
+- **Do not rewrite `pyproject.toml` parsing onto `tomlkit`/`tomllib`.** The
+  writer must preserve the `CRITICAL` comments verbatim, and round-tripping
+  comments swallows a day. Declaration-aware regex, move on.
+- **Do not make the boot-time check do network I/O.** Signature check locally;
+  real call only in auto-bump.
+- **Do not make the gate run the full test suite.** ~20 minutes inside
+  `/update --cron` is an outage, not a gate.
+- **Do not build a general degraded-mode framework.** One flag, one typed
+  exception, one alert. The second subsystem that wants degraded start can
+  justify the abstraction.
+- **Do not implement `hold` as a version upper bound.** It needs a resolver;
+  a skip-with-reason is one `if`.
+- **Do not attempt the upgrade "while we're in here."** That is Step 2, behind
+  this gate, in its own lane. A gate landing in the same PR as the bump it
+  gates gives you no way to tell which half is at fault.
+- **Do not route the alert through the drafter.** See Failure Posture.
 
 ## Risks
 
-### Risk 1: The boot-time check is wrong and blocks a healthy fleet
-**Impact:** A false negative in the signature check would put every bridge and worker on the fleet into degraded mode simultaneously, disabling all LLM paths on a stack that actually works.
-**Mitigation:** Degraded start is *not* a hard failure — Telegram intake and queueing continue, so a false negative degrades capability rather than causing an outage, and the loud alert makes it immediately visible and one revert away. The check is also narrow by construction: it asserts the specific parameters `pydantic_ai`'s Anthropic model passes are accepted by the installed `anthropic` signature, plus that `import agent.llm` succeeds. Test the positive case against the real pinned pair in CI so a false negative fails the suite before it ships.
+### Risk 1: The compat check is wrong and degrades a healthy fleet
+**Impact:** A false negative puts every bridge and worker into degraded mode
+simultaneously.
+**Mitigation:** Degraded is not down — intake and queueing continue, the alert
+makes it immediately visible, and it is one revert away. The introspection
+derivation makes the check track the installed pair rather than the 2026-08-24
+incident specifically; the positive case runs against the real pinned pair in
+CI so a false negative fails the suite before shipping.
 
-### Risk 2: The auto-bump gate makes `/update` depend on the Anthropic API being up
-**Impact:** A provider outage or a lapsed key turns every maintainer-machine auto-bump cycle into a rollback + warning, and the fleet silently stops receiving dependency updates.
-**Mitigation:** Accepted, with visibility, and now **scoped to one set**: `gates` defaults to `("import", "pytest")`, so only the LLM set carries the Anthropic dependency and `claude-agent-sdk` keeps advancing during an outage. Auto-bump is a convenience path restricted to one machine; a skipped cycle costs staleness. The distinct fail-closed warning makes a persistent outage legible in the `/update` summary. Boot-time checks are unaffected — they make no network call.
+### Risk 2: The auto-bump gate makes `/update` depend on Anthropic being up
+**Impact:** A provider outage turns maintainer auto-bump cycles into rollbacks.
+**Mitigation:** Accepted, scoped to one set (gates default excludes `llm`), and
+while the LLM set is held the exposure is zero. A skipped cycle costs
+staleness; the distinct fail-closed warning keeps a persistent outage legible.
+Boot-time checks are unaffected — no network.
 
 ### Risk 3: A genuine provider-side error is misread as an incompatible pin
-**Impact:** A 400 from the deprecated-sampling-params change (see Research) or a 529 overload rolls back a perfectly good bump, and the operator chases a dependency ghost.
-**Mitigation:** `CompatResult.exc_type` carries the exception class verbatim, so `TypeError` (binding — a real incompatibility) is distinguishable from `APIStatusError` (provider) at a glance in the warning. Deliberately **not** adding retry logic or error classification in this lane: rolling back on a transient is the safe direction. Note this risk applies only to the auto-bump `llm` phase; the boot-time check is local and cannot see a provider error at all.
+**Impact:** A transient 400/529 rolls back a good bump.
+**Mitigation:** `CompatResult.exc_type` distinguishes `TypeError` (binding) from
+`APIStatusError` (provider) at a glance. No retry logic in this lane — rolling
+back on a transient is the safe direction. Applies only to the auto-bump `llm`
+phase; the local check cannot see a provider error.
 
 ### Risk 4: The alert is emitted and still missed
-**Impact:** This is the failure the whole plan is built to prevent. If the three channels are all ignored, degraded mode is indistinguishable from the six-hour silence of 2026-08-24.
-**Mitigation:** Redundancy across three independent transports (Sentry fatal, `logger.critical` with a greppable sentinel, dashboard red) plus the typed `LLMStackIncompatible` that every failing call site now raises — so the symptom is legible at the point of failure too, not only at boot. The dashboard field in particular is a *standing* signal rather than a one-shot notification, so it survives a missed alert. Accepted residual: no channel here is a phone-buzzing page. Named as a follow-up candidate rather than silently assumed away.
+**Impact:** The failure the plan exists to prevent.
+**Mitigation:** Three independent transports, one of them (the dashboard marker)
+a *standing* signal rather than a one-shot; plus the typed exception makes the
+symptom legible at every failing call site. Accepted residual: none of these is
+a phone-buzzing page — named as a follow-up candidate, not assumed away.
 
-### Risk 5: `openai` gaining an exact pin changes resolution for someone
-**Impact:** `openai>=1.0.0` currently floats; pinning it exactly could conflict with a transitive requirement.
-**Mitigation:** Pin at the currently-installed version (2.30.0 in this checkout) so the resolution is provably unchanged, and verify with a clean `uv sync --all-extras` producing no `uv.lock` diff beyond the pin line. This is deliberately **not** the 2.x → 3.x move, and `openai` joins **no** coupled set (spike-5), so nothing auto-bumps it.
-
-### Risk 6: The lazy-import fix to `wrapper.py` hides a real break until runtime
-**Impact:** Making `OpenAIChatModel` a lazy import inside `run_typed_local` (the preferred spike-5 option) means an `openai`/`pydantic-ai` mismatch stops being an import-time error and becomes a first-call error on the Ollama path.
-**Mitigation:** That is the intended trade — it is precisely how the Anthropic path stops being collateral damage. The break does not become invisible: `run_typed_local` wraps it in `LLMCallError` with the exception text, and the import phase of the auto-bump gate still imports `agent.llm`. Add a test that `run_typed_local` surfaces an import failure as a legible `LLMCallError` rather than an opaque `AttributeError`.
+### Risk 5: Laziness moves our own import-time bugs to first call
+**Impact:** A typo-grade regression in wrapper code surfaces at first call
+instead of at boot.
+**Mitigation:** Every bridge/worker boot force-resolves the flag within seconds
+of start, running the full loader — so detection latency stays boot-time in
+practice. Only a process that never runs a startup hook learns at first call,
+and the resolver-bound alert covers that path too.
 
 ## Race Conditions
 
 ### Race 1: Concurrent `/update` runs on the maintainer machine
-**Location:** `scripts/update/run.py:1302-1345`, `scripts/update/deps.py::auto_bump_deps`
-**Trigger:** A cron `/update` and a manually-triggered `/update` overlap. Both snapshot `pyproject.toml`, both edit it, and one's rollback restores a snapshot taken before the other's edit — resurrecting a pin that was deliberately moved.
-**Data prerequisite:** The snapshot must reflect the state at the moment the set's edits begin.
-**State prerequisite:** Single-writer on `pyproject.toml` for the duration of a set's bump-sync-gate-rollback cycle.
-**Mitigation:** Pre-existing and **unchanged by this plan** — per-set snapshots narrow the window relative to today's single whole-run snapshot but do not close it. Not introduced here and not fixed here; `/update` runs are already serialized by the update lock in practice. Recorded so a reviewer does not mistake it for new.
+**Location:** `run.py:1302-1345`, `deps.py::auto_bump_deps`
+**Trigger:** Overlapping runs snapshot/edit `pyproject.toml`; one's rollback
+resurrects a pin the other moved.
+**Mitigation:** Pre-existing and unchanged — per-set snapshots narrow the window
+but do not close it; `/update` runs are already serialized by the update lock in
+practice. Recorded so a reviewer does not mistake it for new.
 
 ### Race 2: The gate observes a half-synced venv
-**Location:** `scripts/update/deps.py::sync_with_uv` → `run_smoke_test`
-**Trigger:** `uv sync` returns before `uv pip install -e .` completes, or the gate's subprocess starts against a venv mid-rewrite.
-**Data prerequisite:** The gate must import the *new* pins.
-**State prerequisite:** `sync_dependencies` fully returned.
-**Mitigation:** Already structurally satisfied — `sync_with_uv` runs both commands synchronously via `run_cmd` and the gate is called after it returns a success result. `CompatResult` additionally carries the resolved `anthropic` and `pydantic-ai` versions, so a stale-venv read is visible in the output rather than silent.
+**Location:** `deps.py::sync_with_uv` → gate subprocess
+**Mitigation:** Structurally satisfied — `sync_with_uv` runs synchronously via
+`run_cmd` and the gate runs after it returns success. `CompatResult` carries
+both resolved versions, so a stale-venv read is visible, not silent.
 
-### Race 3: A degraded-flag read races the boot-time check
-**Location:** `utils/llm_stack_compat.py` module state, read by `agent/llm/wrapper.py::run_typed`
-**Trigger:** A worker task begins before startup finishes evaluating the predicate, reads an unset flag, and reaches the provider directly — getting the raw `TypeError` the typed exception exists to replace.
-**Data prerequisite:** The flag must be resolved before any `run_typed` call in the process.
-**State prerequisite:** The check runs synchronously in startup, before the event loop accepts work.
-**Mitigation:** Make the flag **lazily self-resolving** rather than write-once: `run_typed` reads it through an accessor that evaluates the predicate on first read if startup has not already set it, memoized thereafter. That makes the ordering irrelevant and keeps the local check cheap enough to afford. Assert it with a test that calls `run_typed` without any startup hook having run.
+### Race 3: A `run_typed` call races the boot-time check
+**Status:** **Designed away**, not mitigated. The flag is lazily self-resolving
+and the alert is bound to resolution (Failure Posture), so ordering between
+startup and first call is irrelevant by construction. The contract test covers
+the no-startup-hook path explicitly.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #3001] **The dependency upgrade itself** — `pydantic-ai-slim` → 2.33.0+, `anthropic` → 1.x, `openai` 2.x → 3.x, and exercising the modules that import `openai` directly (`tools/impact_finder_core.py`, `tools/cross_vendor_judge.py`, `tools/selfie/__init__.py`). This is Step 2 of the sequencing agreed in issue comment 5420111955 and must run *behind* the gate this plan builds, in its own lane.
-- [SEPARATE-SLUG #3001] **Work Item 2 — the dead `worker_key` regression guard.** Root-caused in the issue comments to `69dc69568`/#2949: `_make_session` passes `stage_states=` as a constructor kwarg that Popoto now silently drops. The human's sequencing note marks it explicitly not urgent and to be sequenced after Step 1. It shares no files with this lane (`tests/unit/test_agent_session.py`, `models/agent_session.py` vs. `scripts/update/deps.py`), so it is cleanly separable. The issue comments already carry the implementation gotchas (widen the `save` stub to `lambda self, **kwargs: None`; the blast radius is 11 tests not 9; do not restore the kwarg mapping — #2949 pinned its removal).
-- [SEPARATE-SLUG #3001] **Work Item 3 — duplicate/noisy triage filing.** Idempotent issue filing, root-cause collapsing, environmental-failure classification. Also marked not urgent, also file-disjoint from this lane.
-- [SEPARATE-SLUG #3016] **The `test_promise_gate_real_api` failure** — independent root cause, already filed.
-- [SEPARATE-SLUG #3001] **Auditing the remaining `CRITICAL — pin exact` deps for staleness** (`telethon`, `claude-agent-sdk`). It is an acceptance criterion of #3001 but belongs with Step 2's upgrade work, where the findings can actually be acted on.
-- **A paging alert channel** (PagerDuty, SMS, phone push). Risk 4 names this as accepted residual. The three channels shipped here are the mechanism; escalating one of them to a page is a follow-up if experience shows it is needed.
-- **Extending the compat predicate to other subsystems.** One predicate for the LLM stack. See Rabbit Holes.
-- *(Removed in revision: the previous `[ORDERED]` entry deferring "gating the non-auto-bump paths" is **no longer out of scope** — per the owner's decision it is this lane's primary deliverable. See Failure Posture and tasks 2-4.)*
+- [SEPARATE-SLUG #3001] **The dependency upgrade itself** — `pydantic-ai-slim`
+  → 2.33.0+, `anthropic` → 1.x, `openai` 2.x → 3.x, and exercising the modules
+  that import `openai` directly. Step 2, behind this gate, in its own lane;
+  removing the LLM set's `hold` is that lane's final act.
+- [SEPARATE-SLUG #3001] **Work Item 2 — the dead `worker_key` regression guard**
+  (`69dc69568`/#2949). File-disjoint from this lane; implementation gotchas are
+  in the issue comments.
+- [SEPARATE-SLUG #3001] **Work Item 3 — duplicate/noisy triage filing.**
+- [SEPARATE-SLUG #3016] **The `test_promise_gate_real_api` failure.**
+- [SEPARATE-SLUG #3001] **Auditing remaining `CRITICAL — pin exact` deps for
+  staleness** — belongs with Step 2, where findings can be acted on.
+- **An exact `openai` pin.** Dropped at round-2's recommendation: scope creep, a
+  resolution-semantics change deferred to Step 2, and it masked its own
+  regression test's target. The floor stays.
+- **A paging alert channel.** Risk 4 names this as accepted residual.
+- **Extending the compat predicate to other subsystems.**
 
 ## Update System
 
-This work **is** an update-system change — it modifies `scripts/update/deps.py`
-and `scripts/update/verify.py`, both of which `/update` drives.
+This work **is** an update-system change.
 
-- `utils/llm_stack_compat.py` — **new**, the standalone predicate. Shared by the update scripts and the runtime services.
-- `scripts/update/verify.py` — **new call site**: `check_llm_stack_compat()` runs unconditionally on every `/update` (and `/update --cron`), reporting as a `ToolCheck` alongside the existing checks. Not gated on whether a bump happened.
-- `scripts/update/deps.py` — the substantive change (coupled sets, declaration-aware pin helpers, per-set gate phases, per-set rollback with `restore_failed`, the `llm` gate phase calling the predicate in the target venv).
-- `scripts/update/run.py` — minimal: surface the gate's phase marker in the rolled-back warning detail, and guard the commit branch with `not bump.restore_failed`. The commit/push/restart ordering documented in `sdlc-1091.md` is **not** touched.
-- `.claude/skills/update/SKILL.md` lines 66-72 describe the auto-bump flow ("checks PyPI for newer `anthropic` and `claude-agent-sdk` versions... runs a smoke test (import check + pytest)"). That description becomes wrong on both counts and must be updated in the same change, along with a note that verify now includes an LLM-stack compatibility check.
-- **No new config files or env keys.** `ANTHROPIC_API_KEY` and `SENTRY_DSN` are already declared.
-- **No migration for existing installations.** Follower machines never run auto-bump (`is_lockfile_maintainer` gate at `run.py:1169`), but they **do** now get the verify-time check and the startup check — which is the point: the follower route (Data Flow route 3) was previously unguarded.
-- `pyproject.toml` pin changes (the `openai` exact pin, and possibly the `[openai]` extra if the builder picks spike-5 option (a)) propagate to the fleet through the normal `uv sync --frozen` path on the next `/update`. Pin-only; no new packages.
+- `agent/llm/compat.py` — **new**, the predicate + degraded flag + alert; shared
+  by runtime services (in-process) and update scripts (subprocess only).
+- `scripts/update/verify.py` — **new call site**: subprocess `--json` run mapped
+  to a `ToolCheck`, unconditional on every `/update` and `/update --cron`.
+- `scripts/update/deps.py` — the substantive change: `CoupledSet` (+`hold`),
+  declaration-aware pin helpers, per-set gate phases (set-derived imports),
+  per-set rollback with `restore_failed`, the `llm` phase subprocess.
+- `scripts/update/run.py` — minimal: surface the failed phase in the rolled-back
+  warning; guard the commit branch with `not bump.restore_failed`. The
+  commit/push/restart ordering per `sdlc-1091.md` is untouched.
+- `.claude/skills/update/SKILL.md` lines 66-72 — the auto-bump description
+  ("anthropic and claude-agent-sdk... import check + pytest") becomes wrong on
+  both counts; correct it and note the new verify-time check.
+- `ui/app.py` — reads `data/llm-stack-degraded` into `/dashboard.json`.
+- **No new config files or env keys.** `ANTHROPIC_API_KEY` and `SENTRY_DSN` are
+  already declared.
+- **No migration.** Followers never auto-bump but now get the verify-time and
+  startup checks — which is the point: route 3 was previously unguarded.
 
 ## Agent Integration
 
-**No new agent-facing surface** — no CLI entry point in `[project.scripts]`, no MCP
-tool, no new bridge command. But this is **not** a purely internal change, because
-it alters what the agent's runtime does at boot and how LLM failures present:
+**No new agent-facing surface** — no `[project.scripts]` entry, no MCP tool, no
+bridge command. But the runtime's boot and failure presentation change:
 
-- `bridge/telegram_bridge.py::main` and `worker/__main__.py` both gain a startup
-  call to `check_llm_stack_compat()`. Both are agent-runtime entry points.
-- `agent/llm/wrapper.py::run_typed` raises `LLMStackIncompatible` under a degraded
-  stack. Every non-harness caller — `bridge/routing.py`, `bridge/job_router.py`,
-  `bridge/context_recall.py`, `bridge/injection_inspection.py`,
-  `bridge/agent_catchup.py`, `agent/memory_extraction.py`,
-  `agent/intent_classifier.py`, `tools/classifier.py`, `tools/email_cs/triage.py`
-  — sees it. Because it subclasses `LLMCallError`, every existing
-  `except LLMCallError` fail-safe keeps working with no edit; that inheritance is
-  asserted in a test rather than assumed.
-- **Telegram intake must keep working in degraded mode.** The integration test
-  that matters: with the degraded flag set, an inbound message still enqueues an
-  AgentSession. This is the acceptance property of the owner's "keep receiving
-  and queueing" decision.
-- `utils/llm_stack_compat.py` also exposes `python -m utils.llm_stack_compat
-  --json`, used by `deps.py` across the subprocess boundary into the target venv.
-  That is a tooling entry point, not an agent surface.
+- `bridge/telegram_bridge.py::main` and `worker/__main__.py` force degraded-flag
+  resolution at startup. Neither may exit on incompatibility.
+- `run_typed` / `run_typed_local` raise `LLMStackIncompatible` under a degraded
+  stack. Every non-harness caller sees it; because it subclasses `LLMCallError`,
+  every existing `except LLMCallError` fail-safe works with no edit (asserted).
+- **Telegram intake must keep working in degraded mode**: with the flag set, an
+  inbound message still enqueues an AgentSession. This is the acceptance
+  property of the owner's "keep receiving and queueing" decision.
+- `python -m agent.llm.compat --json` is a tooling entry point (subprocess
+  callers), not an agent surface.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/llm-stack-compat-gate.md` — the run-boundary predicate and its four call sites; the degraded-start contract and why not fail-closed; the alert's three channels and the independence constraint (including the named exception to the drafter convention); the coupled-set model and why `anthropic`/`pydantic-ai-slim` are welded together (with the `pydantic-ai-slim>=2.33.0` boundary from Research); **why `openai` is deliberately not in the set** (spike-5); what the gate checks and what it cannot check, naming the uncovered ground explicitly; how to add a new coupled set and why `gates` defaults to `("import", "pytest")`.
-- [ ] Add a row to `docs/features/README.md` index table.
+- [ ] Create `docs/features/llm-stack-compat-gate.md` — the import-safety
+  contract and its single enforcement test; the predicate and its four call
+  sites; the resolver-bound degraded/alert contract and why not fail-closed;
+  the three channels, the hibernation exemption, the marker-file clear leg, and
+  the named drafter-convention exception; the coupled-set model, the
+  `pydantic-ai-slim>=2.33.0` boundary, the `hold` and who removes it; why
+  `openai` is in no set; what the gate checks and cannot check.
+- [ ] Add a row to `docs/features/README.md`.
 
 ### Existing Docs to Correct
-- [ ] `.claude/skills/update/SKILL.md` lines 66-72 — the auto-bump description names only `anthropic` + `claude-agent-sdk` and describes the smoke test as "import check + pytest". Both become wrong; also note the new verify-time check.
-- [ ] `pyproject.toml` — replace the four-line `anthropic` comment block with the two-line form that keeps the constraint and points at `AUTO_BUMP_SETS`.
-- [ ] `docs/features/remote-update.md` — add a cross-reference to the new feature doc.
-- [ ] `docs/features/nonharness-llm-wrapper.md` — document `LLMStackIncompatible`, the degraded flag, and the lazy `OpenAIChatModel` import (spike-5 fix).
+- [ ] `.claude/skills/update/SKILL.md` lines 66-72 (see Update System).
+- [ ] `pyproject.toml` — the two-line comment above the `anthropic` pin.
+- [ ] `docs/features/remote-update.md` — cross-reference.
+- [ ] `docs/features/nonharness-llm-wrapper.md` — the import-safety contract,
+  the lazy loader and its test seam, `LLMStackIncompatible`, the degraded flag.
 
 ### Inline Documentation
-- [ ] Each `CoupledSet` carries a prose `reason`, replacing the stopgap comment block currently above `AUTO_BUMP_PACKAGES`.
-- [ ] `AUTO_BUMP_SETS`' docstring records why `openai` is excluded, citing spike-5's three facts, so a future reader does not re-add it.
-- [ ] Docstring on the auto-bump `llm` phase stating that it makes a real, billed API call, and on the boot-time path stating that it deliberately does not.
-- [ ] The alert emitter carries a comment naming the independence constraint and the forbidden paths (`run_typed`, drafter, any LLM summarization).
+- [ ] Each `CoupledSet` carries a prose `reason`; the LLM set's `hold` names
+  the blocking issue. The `AUTO_BUMP_SETS` docstring records why `openai` is
+  excluded (spike-5's three facts).
+- [ ] Docstrings: the `llm` phase makes a real billed call; the local path
+  deliberately does not.
+- [ ] The alert emitter names the independence constraint and the forbidden
+  paths.
+- [ ] `wrapper.py` module docstring states the import-safety contract and
+  points at the enforcement test.
 
 ## Success Criteria
 
-- [ ] `check_llm_stack_compat()` exists as a standalone predicate in `utils/llm_stack_compat.py`, importing nothing from `scripts/`.
-- [ ] It is called from all four sites: `/update` verify (unconditionally, bump or no bump), bridge startup, worker startup, and the auto-bump `llm` gate phase.
-- [ ] On an incompatible stack, bridge and worker **start** — the process does not exit — and an inbound Telegram message still enqueues an AgentSession.
-- [ ] A degraded start fires all three alert channels (Sentry `level="fatal"`, `logger.critical` with the sentinel token, dashboard health field), with a static body plus versions.
-- [ ] **The alert fires in a test where `run_typed` raises.** This is the independence proof; without it the plan has shipped nothing.
-- [ ] A raising `sentry_sdk.capture_message` neither suppresses the other two channels nor prevents startup.
-- [ ] `run_typed` raises `LLMStackIncompatible`, a `LLMCallError` subclass, under a degraded stack — asserted, so existing `except LLMCallError` sites are provably unaffected.
-- [ ] `agent/llm/wrapper.py` no longer takes down the Anthropic path on an `openai`/`pydantic-ai` mismatch (spike-5 fix applied, with the chosen option recorded).
-- [ ] `AUTO_BUMP_SETS` contains `{"anthropic", "pydantic-ai-slim"}` as one set, and `anthropic` is back in the auto-bump path.
-- [ ] `openai` appears in **no** coupled set, asserted in code, and carries an exact pin at its currently-resolved version with no other `uv.lock` change.
-- [ ] `CoupledSet.gates` defaults to `("import", "pytest")` — asserted, so a new set never silently inherits a billed call.
-- [ ] The three spike-2 pin-helper defects each have a regression test that fails against the current implementation.
-- [ ] **Rollback verified in two named legs** (see task 8), with both transcripts in the PR description:
-      - **Leg (a), unmocked:** a throwaway checkout staged with `anthropic==1.0.0` + `pydantic-ai-slim[anthropic]==2.9.0`, synced for real, with the gate subprocess invoked directly — exits non-zero and reports `unexpected keyword argument 'temperature'`.
-      - **Leg (b), resolution-stubbed:** `get_pypi_latest` monkeypatched to return the known-bad pair, then a full `auto_bump_deps` run asserting `rolled_back is True` and both pins restored. This leg **stubs version resolution**; that is stated rather than claimed as unmocked, because PyPI's real latest pair is currently compatible and would never roll back.
-- [ ] A failed LLM set does not roll back a successful `claude-agent-sdk` bump in the same cycle.
-- [ ] A gate that cannot run (no key / no venv / timeout) rolls back the set and emits a distinct warning.
-- [ ] After every rollback path, `git status --porcelain pyproject.toml uv.lock` is empty; a failed restore sets `restore_failed` and blocks the commit.
-- [ ] `/update`'s rolled-back warning names which gate phase failed.
+- [ ] **Import-safety contract holds**: with `anthropic`/`pydantic_ai` broken at
+  import, `import agent.llm` and `import bridge.telegram_bridge` succeed,
+  `run_typed` raises `LLMStackIncompatible`, and all three alert channels fire
+  — one test proves all four.
+- [ ] `check_llm_stack_compat()` exists in `agent/llm/compat.py`, importing
+  nothing from `scripts/`, with `python -m agent.llm.compat --json` working.
+- [ ] The predicate is exercised from all four sites: `/update` verify
+  (unconditional, subprocess), bridge startup, worker startup, auto-bump `llm`
+  phase (subprocess, target venv).
+- [ ] On an incompatible stack, bridge and worker **start**, and an inbound
+  Telegram message still enqueues an AgentSession.
+- [ ] **The alert fires in a test where `run_typed` raises** (independence
+  proof) and fires on the no-startup-hook path (resolver-bound proof).
+- [ ] A raising `capture_message` suppresses nothing else; the hibernation
+  `before_send` passes the sentinel event; `data/llm-stack-degraded` is written
+  on degraded and **cleared on healthy** resolution.
+- [ ] `LLMStackIncompatible` is a `LLMCallError` subclass — asserted.
+- [ ] The signature check derives its parameter set by introspection, with the
+  fallback-tuple-subset test.
+- [ ] `AUTO_BUMP_SETS` declares `{anthropic, pydantic-ai-slim}` as one set with
+  a truthy `hold`; `claude-agent-sdk` as its own unheld set; `openai` in no set
+  (asserted in code); `CoupledSet.gates` defaults exclude `llm`.
+- [ ] The three spike-2 defects each have a regression test that fails against
+  the pre-fix helper (red-state proof recorded); `verify_critical_versions`
+  returns identical results across the rewrite.
+- [ ] **Rollback verified in two named legs** (task 7), both transcripts in the
+  PR description — leg (a) unmocked on a throwaway checkout, leg (b)
+  resolution-stubbed (stated as such: PyPI's real latest pair is compatible and
+  would never roll back).
+- [ ] A failed LLM set does not roll back a successful `claude-agent-sdk` bump;
+  a gate that cannot run rolls back with a distinct warning; after every
+  rollback path `git status --porcelain pyproject.toml uv.lock` is empty; a
+  failed restore sets `restore_failed` and blocks the commit.
+- [ ] `openai` keeps its `>=1.0.0` floor — no resolution-semantics change ships
+  in this lane.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -731,33 +842,33 @@ it alters what the agent's runtime does at boot and how LLM failures present:
 
 ### Team Members
 
-- **Builder (compat)**
+- **Builder (runtime)**
   - Name: `compat-builder`
-  - Role: the `check_llm_stack_compat` predicate, its four call sites, the degraded flag, `LLMStackIncompatible`, the alert emitter, the `wrapper.py` import fix
+  - Role: import-safety contract (lazy loader, `anthropic_client`), `compat.py`
+    (predicate, flag, alert, `--json`), `LLMStackIncompatible`, startup hooks,
+    hibernation exemption, dashboard marker read side
   - Agent Type: builder
   - Resume: true
 
-- **Builder (deps)**
+- **Builder (update scripts)**
   - Name: `deps-builder`
-  - Role: coupled-set declaration, declaration-aware pin helpers, per-set gate phases and rollback, `restore_failed`
+  - Role: declaration-aware pin helpers, `CoupledSet`/`AUTO_BUMP_SETS` (+hold),
+    per-set gates and rollback, `restore_failed`, `verify.py` call site
   - Agent Type: builder
   - Resume: true
 
-- **Test engineer (deps)**
+- **Test engineer**
   - Name: `deps-tester`
-  - Role: alert-independence tests, degraded-intake test, regression tests for the three pin-helper defects, set-atomicity tests, and driving the two-leg rollback verification
+  - Role: contract/independence/degraded-intake tests, spike-2 regression tests
+    with red-state proofs, set-atomicity tests, the two-leg rollback
+    verification, and running the Verification table as final validation
   - Agent Type: test-engineer
-  - Resume: true
-
-- **Validator (deps)**
-  - Name: `deps-validator`
-  - Role: verifies the four call sites, degraded-start posture, alert independence, set atomicity, and that `openai` is in no set
-  - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: `deps-documentarian`
-  - Role: feature doc, README index row, `update/SKILL.md` correction, wrapper doc, `pyproject.toml` comment repair
+  - Role: feature doc, README row, SKILL.md correction, wrapper doc,
+    `pyproject.toml` comment
   - Agent Type: documentarian
   - Resume: true
 
@@ -767,219 +878,207 @@ it alters what the agent's runtime does at boot and how LLM failures present:
 - **Task ID**: `verify-phase0-pin`
 - **Depends On**: none
 - **Validates**: `grep -q '"anthropic==0.125.0"' pyproject.toml` plus the spike-1 probe printing `OK`
-- **Informed By**: Freshness Check (drift resolved by `7a30b88f7`)
 - **Assigned To**: `compat-builder`
-- **Agent Type**: builder
 - **Parallel**: false
-- Confirm `pyproject.toml` reads `"anthropic==0.125.0"` and the venv resolves it.
-- Re-run the spike-1 `run_typed` probe; it must print `OK`.
-- **Make no edit, no commit, and no push.** `7a30b88f7` already landed this. If the probe fails, stop and report — the premise has moved again.
+- Confirm the pin and that the venv resolves it; re-run the spike-1 probe.
+- **No edit, no commit.** If the probe fails, stop and report — the premise moved.
 
-### 2. The compat predicate
-- **Task ID**: `build-compat-predicate`
+### 2. Import-safety contract on `agent/llm/`
+- **Task ID**: `build-import-safety`
 - **Depends On**: `verify-phase0-pin`
-- **Validates**: `tests/unit/test_llm_stack_compat.py`
-- **Informed By**: spike-1 (bad pair fails at binding, no I/O), spike-5 (must exercise the real `agent.llm` import graph)
+- **Validates**: `tests/unit/test_llm_import_safety.py` (contract test),
+  `tests/unit/test_llm_wrapper_local.py` (seam preserved)
+- **Informed By**: round-2 B-a/B-b/B-c; spike-5
 - **Assigned To**: `compat-builder`
-- **Agent Type**: builder
 - **Parallel**: false
-- Create `utils/llm_stack_compat.py` with `CompatResult` and `check_llm_stack_compat(allow_network: bool = False) -> CompatResult`.
-- Local mode: `import agent.llm` (the real graph), then verify the installed `anthropic` message-create signature accepts what `pydantic_ai`'s Anthropic model passes. No network, no tokens.
-- `allow_network=True`: additionally make one minimal `run_typed` call with a one-field output model.
-- Carry both resolved versions, a verbatim `reason`, and `exc_type` on every failure path. No bare `except Exception: pass`.
-- Add a `python -m utils.llm_stack_compat --json` entry point for the subprocess caller.
-- Import nothing from `scripts/`.
+- Move all third-party stack imports in `wrapper.py` and
+  `agent/anthropic_client.py` into a memoized `_load_stack()` invoked from the
+  call paths. Module scope: stdlib + our own code only. No per-symbol
+  exceptions — `OpenAIChatModel` is not a special case, it is one of the
+  symbols.
+- Replace the `wrapper_mod.OpenAIChatModel` test seam with the loader seam;
+  update `test_llm_wrapper_local.py` and its docstring; assert no real network
+  call is reachable.
+- Write the contract test's import half now (broken-stack stubs →
+  `import agent.llm` and `import bridge.telegram_bridge` succeed); the
+  alert/typed-exception half lands with task 4.
 
-### 3. Degraded-start posture and the alert
+### 3. The compat predicate
+- **Task ID**: `build-compat-predicate`
+- **Depends On**: `build-import-safety`
+- **Validates**: `tests/unit/test_llm_stack_compat.py`
+- **Informed By**: spike-1, spike-3; round-2 introspection concern
+- **Assigned To**: `compat-builder`
+- **Parallel**: false
+- Create `agent/llm/compat.py`: `CompatResult`,
+  `check_llm_stack_compat(allow_network: bool = False)`. Local mode: run the
+  loader, then the introspection-derived signature check (with the guarded
+  fallback tuple + subset test). `allow_network=True` adds one minimal
+  `run_typed` call.
+- Every failure path returns `compatible=False` with verbatim `reason` and
+  `exc_type`. No bare `except Exception: pass`.
+- Add the `python -m agent.llm.compat --json` entry point. Import nothing from
+  `scripts/`; reach the stack only through the loader, inside function bodies.
+
+### 4. Degraded flag, resolver-bound alert, startup hooks
 - **Task ID**: `build-degraded-posture`
 - **Depends On**: `build-compat-predicate`
-- **Validates**: `tests/unit/test_llm_stack_degraded_start.py`, and the degraded-intake integration test
-- **Informed By**: Failure Posture (owner decision), `agent/index_drift.py:224` (existing capture pattern)
+- **Validates**: `tests/unit/test_llm_stack_degraded_start.py`, the completed
+  contract test, the degraded-intake integration test
+- **Informed By**: Failure Posture (owner decision); round-2 B-d/B-e and the
+  dashboard-transport blocker
 - **Assigned To**: `compat-builder`
-- **Agent Type**: builder
 - **Parallel**: false
-- Add `LLMStackIncompatible(LLMCallError)` and the lazily-self-resolving degraded flag (Race 3); `run_typed` raises it when set.
-- Wire the startup call into `bridge/telegram_bridge.py::main` and `worker/__main__.py`. **Neither may exit** on incompatibility.
-- Implement the alert emitter: Sentry `capture_message(level="fatal")`, `logger.critical` with a fixed sentinel token, and the `/dashboard.json` health field. Static body plus the two versions and the exception text — no `run_typed`, no drafter, no summarization.
-- A Sentry capture failure must not suppress the other two channels or crash startup.
-- Prove independence: a test asserting the alert fires while `run_typed` raises.
-- Prove intake survives: with the flag set, an inbound Telegram message still enqueues an AgentSession.
+- Lazily self-resolving memoized flag in `compat.py`; **the alert fires from
+  the first transition to degraded inside the resolver** — Sentry fatal,
+  `logger.critical` sentinel, `data/llm-stack-degraded` marker (versions +
+  `exc_type`). Healthy resolution clears the marker.
+- `LLMStackIncompatible(LLMCallError)`; `run_typed`/`run_typed_local` raise it
+  when degraded.
+- Startup calls in `bridge/telegram_bridge.py::main` and `worker/__main__.py`
+  force resolution; neither exits on incompatibility.
+- Exempt the sentinel from `_sentry_before_send`'s hibernation drop.
+- Dashboard read side in `ui/app.py::dashboard_json`, fail-quiet like its
+  siblings.
+- Tests: independence (alert while `run_typed` raises), no-startup-hook path,
+  Sentry-failure tolerance, marker clear leg, hibernation exemption, intake
+  survives degraded.
 
-### 4. `/update` verify call site
-- **Task ID**: `build-verify-callsite`
-- **Depends On**: `build-compat-predicate`
-- **Validates**: a verify-level test asserting the check runs on a `/update` with no bump
-- **Informed By**: Data Flow (routes 2 and 3 were unguarded)
-- **Assigned To**: `compat-builder`
-- **Agent Type**: builder
-- **Parallel**: false
-- Add `check_llm_stack_compat()` to `scripts/update/verify.py` as a `ToolCheck`, run **unconditionally** on every `/update` and `/update --cron` — explicitly not gated on whether a bump happened.
-
-### 5. Fix the self-inflicted `openai` import coupling
-- **Task ID**: `build-wrapper-import-fix`
-- **Depends On**: `build-compat-predicate`
-- **Validates**: a test that an `OpenAIChatModel` import failure surfaces as a legible `LLMCallError` from `run_typed_local` and does **not** break `run_typed`
-- **Informed By**: spike-5
-- **Assigned To**: `compat-builder`
-- **Agent Type**: builder
-- **Parallel**: false
-- Apply the preferred option (b): make `from pydantic_ai.models.openai import OpenAIChatModel` **lazy and guarded inside `run_typed_local`**, so the Ollama path's dependency cannot take down the Anthropic path.
-- If option (a) is chosen instead (declare the `[openai]` extra), record the reason in the commit body and in the wrapper doc.
-- Do **not** add `openai` to any coupled set — see task 6.
-
-### 6. Coupled sets, per-set gates, and atomic rollback
-- **Task ID**: `build-coupled-sets`
-- **Depends On**: `build-wrapper-import-fix`
-- **Validates**: the set-atomicity, default-gates, `openai`-exclusion, and rollback-cleanliness tests in `tests/integration/test_remote_update.py`
-- **Informed By**: spike-2 (three helper defects), spike-4 (whole-file rollback), spike-5 (`openai` excluded)
+### 5. Declaration-aware pin helpers
+- **Task ID**: `build-pin-helpers`
+- **Depends On**: `verify-phase0-pin`
+- **Validates**: the three spike-2 regression tests (red-state proofs recorded)
+  and `test_verify_critical_versions_unchanged_by_helper_rewrite`
 - **Assigned To**: `deps-builder`
-- **Agent Type**: builder
-- **Parallel**: false
-- Make the pin reader locate a package's actual dependency declaration rather than substring-matching whole lines including comments; make the writer tolerate extras markers; make both refuse loudly rather than silently no-op.
-- Give `openai` an exact pin at its currently-resolved version; confirm `uv.lock` shows no change beyond that line.
-- Replace `AUTO_BUMP_PACKAGES` with `AUTO_BUMP_SETS = [CoupledSet(["anthropic", "pydantic-ai-slim"], reason=...), CoupledSet(["claude-agent-sdk"], reason=...)]`. Assert in code that `openai` is in no set, with spike-5's reasoning in the docstring.
-- `CoupledSet.gates` defaults to `("import", "pytest")`; the LLM set opts into `("llm", "import", "pytest")`.
-- All-or-nothing resolve and all-or-nothing rewrite; abandon the set immediately on any member failure.
-- Per-set snapshot/restore replacing the whole-run `original_content` snapshot; skip a set's sync when no pin actually changed.
-- Capture the restore sync's result → `restore_failed` + `git checkout -- uv.lock`; guard `run.py`'s commit branch with `not bump.restore_failed`.
-- Extend `AutoBumpResult` with per-set bookkeeping and the phase marker; surface the phase in `run.py`'s rolled-back warning. Do not touch the commit/push/restart ordering.
-- Re-add `anthropic` to the auto-bump path **in this same task** — never as a separate earlier commit.
+- **Parallel**: true (with tasks 2-4 — no shared files)
+- Reader locates the actual declaration (comment-blind, extras-tolerant);
+  writer handles extras; both refuse loudly. Fixture preserves the
+  floor-plus-comment shape. `openai` keeps its floor — no pin change.
 
-### 7. Tests
-- **Task ID**: `build-tests`
-- **Depends On**: `build-degraded-posture`, `build-verify-callsite`, `build-coupled-sets`
-- **Validates**: `tests/integration/test_remote_update.py`, `tests/unit/test_llm_stack_compat.py`, `tests/unit/test_llm_stack_degraded_start.py`
-- **Assigned To**: `deps-tester`
-- **Agent Type**: test-engineer
+### 6. Coupled sets, per-set gates, hold, atomic rollback
+- **Task ID**: `build-coupled-sets`
+- **Depends On**: `build-pin-helpers`, `build-compat-predicate`
+- **Validates**: the set-atomicity, default-gates, hold, `openai`-exclusion,
+  rollback-cleanliness, and verify-callsite tests in
+  `tests/integration/test_remote_update.py`
+- **Informed By**: spike-2, spike-4, spike-5; round-2 hold blocker and
+  verify-subprocess concern
+- **Assigned To**: `deps-builder`
 - **Parallel**: false
-- Update the four existing tests per Test Impact; add the new files and cases named there.
-- For each of the three spike-2 defects, confirm the new test **fails** against the pre-fix helper before it passes against the fixed one; record that red-state proof.
-- Do not mock the LLM stack in leg (a) of task 8.
+- `CoupledSet` (members, `import_names`, `gates` defaulting to
+  `("import", "pytest")`, `reason`, `hold`); `AUTO_BUMP_SETS` replacing
+  `AUTO_BUMP_PACKAGES`, with the LLM set held on `#3001 Step 2` and the
+  `openai`-in-no-set assertion.
+- All-or-nothing resolve/rewrite/sync/gate per set; skip on hold (legible
+  `BumpResult`); skip sync when no pin changed; per-set snapshot/restore;
+  `restore_failed` + `git checkout -- uv.lock`; guard `run.py`'s commit branch.
+- Gate phases: `llm` → subprocess `--json --allow-network` in the target venv;
+  `import` → the set's own `import_names`; `pytest` unchanged. Surface the
+  failed phase in the warning. Commit/push/restart ordering untouched.
+- `verify.py`: the unconditional subprocess `ToolCheck` (both versions in
+  `detail`).
+- Replace the `pyproject.toml` stopgap comment with the two-line form.
+- Re-add `anthropic` (as a held-set member) **in this same task** — never as a
+  separate earlier commit.
 
-### 8. Two-leg rollback verification
+### 7. Two-leg rollback verification
 - **Task ID**: `verify-known-bad-rollback`
-- **Depends On**: `build-tests`
-- **Validates**: the two captured transcripts — leg (a) unmocked, leg (b) resolution-stubbed
+- **Depends On**: `build-degraded-posture`, `build-coupled-sets`
+- **Validates**: the two captured transcripts
 - **Assigned To**: `deps-tester`
-- **Agent Type**: test-engineer
 - **Parallel**: false
-- **Leg (a), genuinely unmocked:** on a throwaway copy of the repo (never the shared checkout), write `anthropic==1.0.0` + `pydantic-ai-slim[anthropic]==2.9.0`, run `uv sync --all-extras`, invoke the gate subprocess directly, and assert non-zero exit with `unexpected keyword argument 'temperature'` in the output.
-- **Leg (b), resolution-stubbed:** `monkeypatch.setattr(deps, "get_pypi_latest", lambda p, **k: {"anthropic": "1.0.0", "pydantic-ai-slim": "2.9.0"}[p])`, run `auto_bump_deps`, assert `result.rolled_back is True` and both pins restored. **State in the transcript that this leg stubs version resolution** — PyPI's real latest pair (`anthropic 1.0.0` + `pydantic-ai-slim 2.35.0`) is compatible, so an unstubbed run would pass the gate and roll nothing back.
-- Assert the converse on a good pair: the gate passes and the bump survives.
+- **Leg (a), unmocked:** on a throwaway copy of the repo (never the shared
+  checkout), write `anthropic==1.0.0` + `pydantic-ai-slim[anthropic]==2.9.0`,
+  `uv sync --all-extras`, invoke the gate subprocess directly; assert non-zero
+  exit with `unexpected keyword argument 'temperature'`.
+- **Leg (b), resolution-stubbed:** monkeypatch `get_pypi_latest` to the
+  known-bad pair, temporarily clear the hold in the fixture, run
+  `auto_bump_deps`, assert `rolled_back is True` and both pins restored.
+  **State in the transcript that this leg stubs resolution and clears the
+  hold** — PyPI's real latest pair is compatible and a held set never bumps.
+- Assert the converse on a good pair (hold cleared): gate passes, bump survives.
 - Paste both transcripts into the PR description.
 
-### 9. Documentation
+### 8. Documentation
 - **Task ID**: `document-feature`
 - **Depends On**: `verify-known-bad-rollback`
-- **Validates**: `docs/features/llm-stack-compat-gate.md` exists and is indexed in `docs/features/README.md`
+- **Validates**: `docs/features/llm-stack-compat-gate.md` exists and is indexed
 - **Assigned To**: `deps-documentarian`
-- **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/llm-stack-compat-gate.md` and add the `docs/features/README.md` index row.
-- Correct `.claude/skills/update/SKILL.md` lines 66-72.
-- Cross-reference from `docs/features/remote-update.md`; update `docs/features/nonharness-llm-wrapper.md`.
-- Note the expected `/update --cron` wall-clock delta from per-set syncing.
+- Everything under Documentation above, including the expected `/update --cron`
+  wall-clock delta from per-set syncing.
 
-### 10. Final validation
+### 9. Final validation
 - **Task ID**: `validate-all`
 - **Depends On**: `document-feature`
 - **Validates**: the Verification table
-- **Assigned To**: `deps-validator`
-- **Agent Type**: validator
+- **Assigned To**: `deps-tester`
 - **Parallel**: false
-- Run every Verification row.
-- Confirm each Success Criterion, including that both task-8 transcripts are in the PR description.
-- Confirm the PR body says `Refs #3001`, **not** `Closes #3001` — Work Items 2 and 3 keep the issue open.
+- Run every Verification row; confirm each Success Criterion, both transcripts
+  in the PR description, and that the PR body says `Refs #3001`, **not**
+  `Closes #3001` — Work Items 2 and 3 keep the issue open.
 
 ## Verification
 
-Rows assert *declarations and executed paths*, not file text. A `grep -c` that
-counts mentions cannot distinguish an invocation from a comment — the round-1
-critique caught exactly that, where `grep -c "anthropic" scripts/update/deps.py`
-returned **9** on unmodified main (the stopgap comment block at `deps.py:313-328`)
-and so could never fail.
+Rows assert *declarations and executed paths*, not file text.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Live LLM call works on the branch's pins | `.venv/bin/python -c "import asyncio;from pydantic import BaseModel;from agent.llm.wrapper import run_typed;O=type('O',(BaseModel,),{'__annotations__':{'answer':str}});print(asyncio.run(run_typed('Reply with answer=hi',O)))"` | exit code 0 |
-| Predicate exists and reports compatible | `.venv/bin/python -m utils.llm_stack_compat --json` | exit 0, JSON `"compatible": true` |
-| Predicate does not import from `scripts/` | `.venv/bin/python -c "import ast,sys;t=ast.parse(open('utils/llm_stack_compat.py').read());assert not [n for n in ast.walk(t) if isinstance(n,(ast.Import,ast.ImportFrom)) and 'scripts' in (getattr(n,'module','') or '')+''.join(a.name for a in getattr(n,'names',[]))]"` | exit code 0 |
-| Coupled set membership is declared | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS; ms={m for s in AUTO_BUMP_SETS for m in s.members}; assert {'anthropic','pydantic-ai-slim'} <= ms, ms"` | exit code 0 |
+| Predicate exists and reports compatible | `.venv/bin/python -m agent.llm.compat --json` | exit 0, JSON `"compatible": true` |
+| Predicate does not import from `scripts/` | `.venv/bin/python -c "import ast;t=ast.parse(open('agent/llm/compat.py').read());assert not [n for n in ast.walk(t) if isinstance(n,(ast.Import,ast.ImportFrom)) and 'scripts' in (getattr(n,'module','') or '')+''.join(a.name for a in getattr(n,'names',[]))]"` | exit code 0 |
+| Import-safety contract | `./scripts/pytest-clean.sh tests/unit/test_llm_import_safety.py -q` | exit code 0 |
+| No module-scope third-party stack imports in `agent/llm/` | `.venv/bin/python -c "import ast,sys;bad={'anthropic','pydantic_ai'};files=['agent/llm/wrapper.py','agent/llm/compat.py','agent/anthropic_client.py'];hits=[(f,n.lineno) for f in files for n in ast.walk(ast.parse(open(f).read())) if isinstance(n,(ast.Import,ast.ImportFrom)) and n.col_offset==0 and any((getattr(n,'module','') or a.name).split('.')[0] in bad for a in n.names)];assert not hits,hits"` | exit code 0 |
+| Coupled set declared with hold | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS as S; s=[x for x in S if 'anthropic' in x.members][0]; assert set(s.members)=={'anthropic','pydantic-ai-slim'} and s.hold"` | exit code 0 |
 | `openai` is in no coupled set | `.venv/bin/python -c "from scripts.update.deps import AUTO_BUMP_SETS; assert 'openai' not in {m for s in AUTO_BUMP_SETS for m in s.members}"` | exit code 0 |
-| New sets do not inherit the billed llm phase | `.venv/bin/python -c "from scripts.update.deps import CoupledSet; assert CoupledSet(['x'], reason='t').gates == ('import','pytest')"` | exit code 0 |
-| Gate invocation is real, not a mention | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_gate" -q` (monkeypatches `deps.run_cmd`, asserts the llm phase argv reaches the predicate and that failure returns phase `"llm"`) | exit code 0 |
-| Import-only gate is gone | `grep -c "import anthropic; import claude_agent_sdk" scripts/update/deps.py` | match count == 0 |
-| Verify runs the check unconditionally | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_compat" -q` | exit code 0 |
-| Startup is degraded, not fatal | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
-| Alert is independent of the LLM path | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -k "independence" -q` (alert fires while `run_typed` raises) | exit code 0 |
+| New sets do not inherit the billed llm phase | `.venv/bin/python -c "from scripts.update.deps import CoupledSet; assert CoupledSet(members=['x'], import_names=('x',), reason='t').gates == ('import','pytest')"` | exit code 0 |
+| Import phase is set-derived, not hardcoded | `grep -c "import anthropic; import claude_agent_sdk" scripts/update/deps.py` | match count == 0 (the literal is replaced by `set.import_names`) |
+| Gate invocation is real, not a mention | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "llm_gate" -q` | exit code 0 |
+| Held set is skipped and legible | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "held_set" -q` | exit code 0 |
+| Verify runs the check unconditionally | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -k "verify_runs_compat" -q` | exit code 0 |
+| Startup is degraded, not fatal; alert independence; marker clear leg | `./scripts/pytest-clean.sh tests/unit/test_llm_stack_degraded_start.py -q` | exit code 0 |
 | Typed exception preserves existing fail-safes | `.venv/bin/python -c "from agent.llm.wrapper import LLMCallError, LLMStackIncompatible; assert issubclass(LLMStackIncompatible, LLMCallError)"` | exit code 0 |
-| `openai` has an exact pin | `grep -cE '"openai==' pyproject.toml` | output > 0 |
 | Pin comment keeps the constraint and adds the pointer | `grep -c "AUTO_BUMP_SETS" pyproject.toml` | output > 0 |
 | Update-system tests pass | `./scripts/pytest-clean.sh tests/integration/test_remote_update.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Anti-criterion: no dependency upgrade smuggled in | `grep -cE '"pydantic-ai-slim\[anthropic\]==2\.9\.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: `anthropic` pin unchanged by this lane | `grep -c '"anthropic==0.125.0"' pyproject.toml` | output > 0 |
+| Anti-criterion: `openai` floor unchanged | `grep -c '"openai>=1.0.0"' pyproject.toml` | output > 0 |
 | Anti-criterion: Work Item 2 files untouched | `git diff --name-only origin/main...HEAD -- models/agent_session.py tests/unit/test_agent_session.py \| wc -l` | output is 0 |
 | Update skill doc corrected | `grep -c "import check" .claude/skills/update/SKILL.md` | match count == 0 |
 | Feature doc exists | `test -f docs/features/llm-stack-compat-gate.md` | exit code 0 |
 
 ## Critique Results
 
-Round 2 — FULL depth (force-FULL: the plan edits `.claude/skills/update/SKILL.md`, a doctrine path).
-Verdict: **NEEDS REVISION** — 7 blockers, 6 concerns, 3 nits.
-Round 1's 5 blockers, 5 concerns, and 3 nits were all addressed by the 2026-08-26 revision and are
-not re-listed; the findings below are new to the revised plan.
+Round 3 is a **reshape**, not a wording revision. Round 2 (7 blockers, 6
+concerns, 3 nits, verdict NEEDS REVISION) established that the plan's shape was
+wrong: a startup gate inside `main()` structurally cannot observe the
+ImportError failure class, because the bridge dies ~1070 lines earlier at
+`from bridge.routing import ...`. Six of round 2's findings collapse into one
+architectural decision — **`agent.llm` is import-safe by contract** — and the
+remaining four keep their round-2 prescribed fixes verbatim.
 
-**Independence barrier: MET on this round.** Round 1 ran all three roster lenses inside a single
-context (the forked critique agent has no Agent tool), so it did not read as an adversarial gate.
-Round 2 additionally dispatched three genuinely independent subagent lenses — run-boundary
-invariant, failure posture, and coupled-set scope — each with its own brief and no sight of the
-others' findings. The five blockers marked **[independent lens]** below were found by those lenses
-and were **missed by the single-context pass**; B-a was found *convergently and independently by
-two separate lenses*, which is the strongest signal in this round. Every claim below was
-re-verified against current `main` by the synthesizing agent before being recorded.
+### Round-2 finding dispositions
 
-### Owner hard-constraint dispositions (round 2)
+| Finding | Disposition in this reshape |
+|---|---|
+| B-a (bridge can never reach its gate on ImportError) | **Dissolved structurally.** The failure class no longer exists: `import agent.llm` cannot fail, so `main()` is always reached and the startup hook merely forces early flag resolution. Neither of B-a's two patch options (early guard / function-scope import in routing) was taken — both were consumer-side fixes covering one of five module-scope consumers, an invariant maintained by convention. The supplier-side contract has one enforcement test. |
+| B-b (lazy import deletes the test seam) | **Addressed.** The loader is the new seam; `tests/unit/test_llm_wrapper_local.py` is a named UPDATE with the docstring fix and a no-real-network assertion. |
+| B-c (option (a) was an escape hatch that auto-executes the openai major bump) | **Dissolved.** There is no option menu: the entire stack goes lazy, `OpenAIChatModel` included. |
+| B-d (hibernation `before_send` silently drops the Sentry channel) | **Adopted as prescribed:** sentinel exemption in `_sentry_before_send`, with a test. |
+| B-e (lazily-resolving flag degrades silently off the startup path) | **Adopted as prescribed, promoted to the design:** the alert is bound to flag resolution; startup hooks only force early resolution. Race 3 is designed away by the same move. |
+| Deviation (utils/ placement: accepted, rationale false) | **Superseded by a new named deviation:** the predicate moves into `agent/llm/compat.py`, per the single-authoritative-liveness doctrine; this also eliminates the B-f cycle and avoids creating the first `utils/` → `agent/` edge. `verify.py`/`deps.py` reach it by subprocess only, so no import edge is created in either direction. |
+| Dashboard channel has no cross-process transport | **Adopted as prescribed:** `data/llm-stack-degraded` marker written by the resolver, read fail-quiet by `ui/app.py`, with the clear-on-healthy leg and its own test. |
+| Re-adding `anthropic` auto-executes Step 2 on the next cron tick | **Adopted as prescribed:** `CoupledSet.hold`, set on the LLM set, skip-with-legible-reason; explicitly not a version bound. Step 2's lane removes it. |
+| B-f (utils ⇄ agent import cycle) | **Dissolved** by the compat module living inside `agent/llm/`. |
+| Hardcoded-params concern | **Adopted as prescribed:** introspection-derived set, guarded, with the fallback-subset test. |
+| verify.py in-process concern | **Adopted as prescribed:** subprocess `--json` → `ToolCheck`, versions in `detail`. |
+| openai exact-pin concern | **Adopted (the drop):** the floor stays; the fixture keeps the floor-plus-comment shape so the regression test targets the real defect. |
+| Task-6 bundling concern | **Adopted:** split into tasks 5 (helpers) and 6 (sets), with `verify_critical_versions` named as the helper rewrite's blast radius. |
+| "Import-only gate is gone" row contradiction | **Fixed:** the import phase is set-derived (`import_names`); the hardcoded literal genuinely disappears, so Flow and the Verification row now agree. |
+| NIT: five agents / twenty-two criteria | **Adopted:** validator role removed (the tester runs the Verification table); criteria consolidated. |
+| NIT: `test_agent_llm_wrapper.py` does not exist | **Fixed:** Test Impact names the real files (`test_llm_wrapper.py`, `test_llm_wrapper_local.py`). |
+| NIT: TCC hazard on the `~/Desktop/Valor/.env` fallback under launchd | **Carried as a caution** in spike-3's wording; the maintainer-machine `llm` phase reads `repo/.env` first via `utils/api_keys.py`. |
 
-| Constraint | Disposition | Basis |
-|---|---|---|
-| (a) Compatibility invariant at the run boundary, four call sites, not scoped inside `auto_bump_deps` | **UNSATISFIED** | Predicate is correctly standalone and correctly outside `auto_bump_deps`, but the bridge call site is unreachable for the ImportError failure class (B-a) and the verify call site names no insertion point (existing CONCERN) |
-| (b) Start degraded, alert loudly; no fail-closed on the runtime path; alert avoids `run_typed` and the drafter | **UNSATISFIED** | Policy text is correct and the fail-closed re-ask is genuinely *removed*, not softened (no Open Questions section survives). Alert path verified LLM-free. But degraded start is not delivered on the bridge (B-a) and the alert has two designed silent-miss paths (B-d, B-e) |
-| (c) Coupled set is `anthropic` + `pydantic-ai-slim` only; fix `openai` at the import | **UNSATISFIED** | The "`openai` in no set" half is clean and verified. The "fix AT THE IMPORT" half is only *preferred*, not mandated (B-c), and the preferred form breaks the test suite's isolation seam (B-b) |
-| Named deviation: predicate at `utils/llm_stack_compat.py`, not `scripts/update/compat_gate.py` | **placement ACCEPTED, rationale REJECTED** | See the deviation row below |
-
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | **[independent lens]** Run-boundary invariant + Failure posture (**found convergently by two independent lenses**) | **B-a — the bridge can never reach its own gate on the ImportError failure class.** `bridge/telegram_bridge.py:130` imports `bridge.routing` at module scope; `bridge/routing.py:21` imports `agent.llm` at module scope; `main()` — where the plan puts the startup check — is at `:1203`. spike-5's own ImportError mode therefore kills the bridge at import, roughly 1070 lines before the gate runs, producing exactly the launchd crash-loop the Failure Posture at `:317` calls "worse" than the incident. Plan `:561` claims that branch is handled; in the bridge process it is unreachable. The worker path is fine. This defeats constraint (a)'s bridge call site and constraint (b)'s degraded-start contract simultaneously. | pending | The check must run *before* the offending module-scope import chain, not inside `main()`. Either move the gate into an early guard executed at the top of `bridge/telegram_bridge.py` before the `bridge.routing` import block, or make `bridge/routing.py`'s `from agent.llm import run_typed` function-scope so the wrapper's import failure can no longer take the bridge process down at load. The second is the smaller, more honest change and composes with task 5's lazy-import direction. Add a test that the bridge module imports successfully with `agent.llm` raising `ImportError`. |
-| BLOCKER | **[independent lens]** Coupled-set scope | **B-b — task 5's lazy import deletes the test suite's network-isolation seam.** `tests/unit/test_llm_wrapper_local.py:52` does `monkeypatch.setattr(wrapper_mod, "OpenAIChatModel", fake_openai_chat_model)`, and the module docstring (`:9`) states this patch is what provides network isolation for *every* test in the file. Moving the import inside `run_typed_local` removes `wrapper_mod.OpenAIChatModel` as a module attribute, so the `setattr` seam disappears and the tests either error on a missing attribute or silently reach a real Ollama endpoint. Test Impact names no such update — a guaranteed red suite with no owner. | pending | Name `tests/unit/test_llm_wrapper_local.py` in Test Impact as an UPDATE, and pick the seam deliberately: either keep a module-level `OpenAIChatModel = None` rebound lazily, or move the patch target to the import site (`monkeypatch.setattr("pydantic_ai.models.openai.OpenAIChatModel", ...)`). Whichever is chosen, assert in a test that no real network call is reachable from that module. |
-| BLOCKER | **[independent lens]** Coupled-set scope | **B-c — constraint (c)'s "fix it at the import" is preferred, not mandated, and the alternative auto-executes the deferred major bump.** Task 5 and the Solution both leave option (a) — declare the `[openai]` extra — builder-selectable. Option (a) is not an at-the-import fix at all, and it is arithmetically incompatible with task 6's `openai==2.30.0` exact pin, because `pydantic-ai`'s `[openai]` extra declares `openai>=3.0.0`. Selecting it therefore forces the `openai` 2.x → 3.x major bump that this plan's own No-Gos defer to Step 2. The owner's constraint admits no menu. | pending | Delete option (a) entirely from the Solution's Key Elements and from task 5. Mandate the lazy/guarded import inside `run_typed_local`. Drop the "if option (a) is chosen instead, record the reason" sentence — a hard constraint with a documented escape hatch is not a hard constraint. |
-| BLOCKER | **[independent lens]** Failure posture | **B-d — the alert is not "fired unconditionally" on the bridge.** `bridge/telegram_bridge.py:70-77` installs a `before_send` hook that returns `None` — dropping every Sentry event — whenever `is_hibernating()` is true, and `bridge/hibernation.py:132-137` shows that is a persistent auth-required flag file, not a brief window. A degraded start during hibernation loses the Sentry channel silently. Plan `:341` asserts unconditional firing; the independence argument at `:348` reasons only about transport independence and never considers event suppression *inside our own process*. | pending | Either exempt the degraded-start alert from the hibernation drop (match on the sentinel token in `_sentry_before_send` and return the event rather than `None`), or stop counting Sentry as an unconditional channel and say so in the Failure Posture table. The first is preferable: hibernation means "we cannot reach Telegram", which is precisely when a broken LLM stack most needs to be visible elsewhere. |
-| BLOCKER | **[independent lens]** Failure posture | **B-e — the lazily-self-resolving flag degrades silently.** Race 3 (`:637`) makes the degraded flag resolve on first read if startup has not already set it — but the alert is bound *only* to the startup hook (`:341`, `:472`, task 3 at `:803`). Any process that reaches `run_typed` without having run the startup hook resolves degraded, raises `LLMStackIncompatible`, and fires **no alert at all**. That is the six-hour-silence failure mode the plan exists to prevent, reintroduced by the fix for Race 3. | pending | Bind the alert to the *flag resolution*, not to the startup hook: emit the three channels from inside the memoized resolver on the first transition to degraded, and have the startup hook simply force resolution early. That makes the alert fire exactly once per process regardless of entry path, and makes Race 3's ordering genuinely irrelevant. Add a test that calls `run_typed` with no startup hook having run and asserts all three channels fired. |
-| DEVIATION | **[independent lens]** Run-boundary invariant | **Named deviation reviewed: placement ACCEPTED, stated rationale REJECTED as factually false.** The plan justifies `utils/llm_stack_compat.py` over `scripts/update/compat_gate.py` on the ground that "bridge/ and worker/ importing from `scripts/update/` inverts the dependency direction". That direction **already exists in tracked code**: `bridge/update.py:219-221` imports `scripts.update.git`, `scripts.update.service`, and `scripts.update.verify`; `bridge/update.py:478` imports `scripts.update.warn_state`; `agent/worktree_manager.py:1249` and `worker/__main__.py:761` also import from `scripts/`. The direction the plan calls inverted is the established one. | pending | Keep the placement — it is correct for two *real* reasons the plan does not give. (1) `scripts/update/__init__.py:10` eagerly executes `from .run import UpdateConfig, run_update`, so **any** `scripts.update.*` submodule import drags the whole update system into the importing process; that is a genuine and severe objection to bridge/worker importing it at startup, and it is why the existing runtime→scripts imports are all function-scope rather than module-scope. (2) `tests/unit/test_architectural_constraints.py:200-201` explicitly nominates `utils/` as the home for shared helpers ("Move the shared helper into `utils/` instead"). Replace the Architectural Impact rationale with these two, since the current wording will be copied into the feature doc and will misinform the next reader. Note also that no `utils/` module imports from `agent/` today, so this is the first — which makes the B-f cycle discipline load-bearing rather than theoretical. |
-| BLOCKER | Risk & Robustness | The dashboard alert channel has no cross-process transport. The degraded state is a "process-wide degraded flag" set inside bridge/worker, but `/dashboard.json` is served by a separate `ui/app.py` uvicorn process, so as specified the channel cannot fire — reducing the three redundant transports the Failure Posture calls the entire safety property to two. | pending | Every existing health field in `ui/app.py` derives from a filesystem/Redis artifact, never an in-process flag: `_get_bridge_health` (`ui/app.py:373`) stats `data/last_connected`, `_get_worker_health` (`ui/app.py:511`) stats `data/last_worker_connected`. Write a marker on degraded start (e.g. `data/llm-stack-degraded` carrying the two versions + `exc_type`) and read it in `dashboard_json` (`ui/app.py:906`) with the siblings' fail-quiet `try/except OSError`. The marker MUST be cleared on a healthy start or a one-time bad pin leaves the dashboard permanently red; that clear leg needs its own test, since a stuck-red dashboard equals no dashboard channel. |
-| BLOCKER | History & Consistency | Task 6's "re-add `anthropic` to the auto-bump path in this same task" means the first `/update --cron` after merge bumps the coupled set to `anthropic 1.0.0` + `pydantic-ai-slim 2.35.0` — the Step 2 upgrade the No-Gos defer to a separate lane. The plan states that pair is compatible, so the gate passes and `run.py` Step 3.5 commits + pushes it fleet-wide, unattended, with no lane or review. This is the exact argument spike-5 used to keep `openai` out of the set, never applied to `anthropic` itself; task 5's lazy import removes the one `ImportError` that would have rolled it back. | pending | Add `hold: str \| None = None` to `CoupledSet`, set it on the LLM set with the blocking issue, and have `auto_bump_deps` skip a held set while still recording `BumpResult(bumped=False, error=f"held: {s.hold}")` so `run.py:1317`'s `b.error` log line stays legible. Do NOT implement the hold as an upper version bound — `get_pypi_latest` (`deps.py:359`) returns only `info.version`, and a bound needs the resolver the Rabbit Holes forbid. Add a Verification row that fails if the LLM set can advance unattended: the existing `grep -c '"anthropic==0.125.0"'` anti-criterion guards only the lane's branch and is blind to the next cron tick after merge. |
-| CONCERN | Risk & Robustness | **B-f —** Module-scope import cycle: the plan requires `utils/llm_stack_compat.py` to `import agent.llm` and `agent/llm/wrapper.py::run_typed` to read the degraded flag from `utils/llm_stack_compat`. Race 3's lazily-self-resolving flag makes the coupling bidirectional by design, and the cycle is never named. | pending | Keep `import agent.llm` **inside the body** of `check_llm_stack_compat()`, never at module scope, and import nothing from `agent/` at module level. `wrapper.py` may then safely `from utils.llm_stack_compat import is_llm_stack_degraded` at module scope — at call time `agent.llm` is already in `sys.modules`, so the in-function import is a cache hit. The direction matters: reversing it still works for `run_typed` but breaks `python -m utils.llm_stack_compat --json`, because the `ImportError` the predicate exists to report would kill the module load before `main()` runs. |
-| CONCERN | Risk & Robustness | The local signature check never says how the predicate learns which parameters `pydantic_ai` passes. The obvious implementation hardcodes `temperature`/`top_p`/`top_k`, making the run-boundary gate a regression test for the 2026-08-24 incident rather than a compat predicate — it would wave through the next renamed/added kwarg exactly as the import check waved through this one. | pending | Derive the set from the installed `pydantic_ai`: introspect `pydantic_ai.models.anthropic.AnthropicModelSettings.__annotations__` and bind those keys against `inspect.signature(anthropic.resources.messages.AsyncMessages.create).parameters`, flagging any key absent from the signature and not absorbed by `**kwargs`. Wrap the introspection so an `AttributeError` from a pydantic-ai internals rename returns `CompatResult(compatible=False, ...)` rather than raising — a silently-passing predicate whose introspection target moved is the same failure as no gate. A literal-tuple fallback must be module-level with the pydantic-ai version in the comment plus a test asserting it is a subset of the introspected keys. |
-| CONCERN | History & Consistency | Task 4 adds `check_llm_stack_compat()` to `scripts/update/verify.py` "as a `ToolCheck`", reading as an in-process call — but the update process imported its modules before the sync at `run.py:1229`, the exact hazard Technical Approach cites to justify the subprocess for auto-bump. In-process it also pulls `anthropic`, `pydantic_ai`, and `agent.llm` into the updater's own interpreter. | pending | Every import-touching check in `verify.py` already shells out: `check_python_import` (`verify.py:104`) and `check_venv_tool` (`verify.py:125`) both build `project_dir / ".venv" / "bin" / "python"` and run it via `run_cmd(..., timeout=10)`. Run `[str(python_path), "-m", "utils.llm_stack_compat", "--json"]` with `check=False`, parse the JSON, map onto `ToolCheck(name=..., available=result["compatible"], detail=result["reason"])`. Carry the two resolved versions in the existing `detail` field (`verify.py:44`, #2541 — printed even on a passing check); that is what makes a silently stale venv visible. |
-| CONCERN | Scope & Value | The `openai` exact pin is scope creep that also masks the defect its own regression test targets. spike-2 defect 1 is fixed by the declaration-aware reader regardless; once `openai` carries a real `"openai==2.30.0"` line, the live-file comment-collision case disappears. The pin also converts a floor to an exact pin — a resolution-semantics change the No-Gos defer to Step 2. | pending | Prefer dropping the pin and keeping `openai>=1.0.0`; then also drop the `grep -cE '"openai==' pyproject.toml` Verification row and Risk 5, which exists only to mitigate a risk this lane need not take. If the pin is kept, `test_openai_pin_not_read_from_comment` must run against a fixture that preserves the floor-plus-comment shape (`"openai>=1.0.0"` with `openai` inside the `pydantic-ai-slim` comment), not the repo's real file — otherwise it passes for the wrong reason and keeps passing against the pre-fix substring reader. |
-| CONCERN | Scope & Value | Task 6 bundles ~7 independent changes under one task and one `Validates:` — pin-reader rewrite, pin-writer rewrite, `openai` pin, `AUTO_BUMP_PACKAGES` → `AUTO_BUMP_SETS`, per-set gates, per-set rollback + `restore_failed` + the `run.py` commit guard, and re-adding `anthropic`. It is the highest-risk change in the plan (it rewrites the rollback path that already failed twice) delivered as one indivisible unit. | pending | Split: (6a) declaration-aware reader/writer + the three spike-2 regression tests; (6b) coupled sets, per-set gates, per-set rollback, `restore_failed`; 6b depends on 6a. The split is clean because the helpers take a bare `package: str` (`deps.py:250`, `:391`). 6a must also assert `verify_critical_versions` (`deps.py:277`, `critical_deps = ["telethon", "anthropic", "claude-agent-sdk"]`) still returns the same three `VersionInfo` results — that second caller is the silent blast radius of the helper rewrite and is unnamed in Test Impact. |
-| CONCERN | Structural check | Verification row "Import-only gate is gone" requires `grep -c "import anthropic; import claude_agent_sdk" scripts/update/deps.py` == 0, but the Solution and Flow both **retain** an `import` gate phase (`CoupledSet.gates` defaults to `("import", "pytest")`, and Flow spells the phase as `import → import anthropic; import claude_agent_sdk`). As written the row forces the builder to obfuscate a string the plan deliberately keeps. | pending | The row is testing the wrong thing. Replace it with an assertion that the import phase is no longer the *only* gate and is now set-derived rather than hardcoded — e.g. assert the LLM set's `gates` tuple contains `"llm"` and that the import phase imports the set's own members rather than a literal two-package string. If the hardcoded string genuinely goes away, say so in Technical Approach so Flow and Verification agree. |
-| NIT | Scope & Value | A Medium-appetite plan carries five named agents and twenty-two success criteria for one new module plus a `deps.py` refactor; the validator's role duplicates the Verification table row-for-row. | pending | — |
-| NIT | History & Consistency | spike-3 leans on the `~/Desktop/Valor/.env` fallback for the headless `/update --cron` path, but `worker/__main__.py` carries scar tissue that macOS TCC blocks `open()` on that iCloud-synced file under launchd and the process "hangs indefinitely". `utils/api_keys.py` reads `repo/.env` (a symlink to the same file) first. | pending | — |
-| NIT | Structural check | Test Impact names `tests/unit/test_agent_llm_wrapper.py`, which does not exist; the repo has `tests/unit/test_llm_wrapper.py` and `tests/unit/test_llm_wrapper_local.py`. The plan's "or the nearest existing wrapper test module ... if no such module exists, create it" hedge invites a third module. | pending | — |
-
-**Structural check results** (round 2, against `b121378f7`)
-
-| Check | Status | Detail |
-|-------|--------|--------|
-| Required sections | PASS | Documentation (with a `docs/features/` checkbox), Update System, Agent Integration, Test Impact all present and substantive |
-| Popoto migration check | N/A | No Popoto model touched |
-| Task numbering | PASS | Tasks 1-10, no gaps |
-| Dependencies valid | PASS | Every `Depends On` resolves; task 7 fans in from 3, 4, and 6; no cycles |
-| Task validation commands | PASS | All ten tasks carry `Validates:` |
-| File paths exist | CONCERN | All cited source paths verified present. `utils/llm_stack_compat.py`, `docs/features/llm-stack-compat-gate.md`, `tests/unit/test_llm_stack_compat.py`, `tests/unit/test_llm_stack_degraded_start.py` are intentionally new. `tests/unit/test_agent_llm_wrapper.py` is named without being flagged as new and does not exist (see NIT) |
-| Prerequisites met | PASS | `ANTHROPIC_API_KEY` resolves; `uv` on PATH; `get_pypi_latest('anthropic')` returns a version; Sentry initialized via `monitoring/sentry_config.py` |
-| Verification rows are failable | CONCERN | Each grep row was executed against unmodified `main`: `"import check"` in `update/SKILL.md` → 1, `"import anthropic; import claude_agent_sdk"` → 1, `'"openai=='` → 0, `AUTO_BUMP_SETS` in `pyproject.toml` → 0. All can fail, so round 1's grep-count defect is fixed. But the "Import-only gate is gone" row contradicts the retained import phase (see CONCERN) |
-| Cross-references | PASS | Every Success Criterion maps to at least one task; no Rabbit Hole appears as planned work |
-| No-Go vs. Solution | FAIL | Task 6 re-adds `anthropic` to auto-bump, which auto-executes the `[SEPARATE-SLUG]` Step 2 upgrade on the next cron tick (see BLOCKER) |
+Awaiting round-3 critique.
