@@ -364,9 +364,8 @@ fast-forward **before** launching any Python:
 So every machine reaching Step 5 is running an orchestrator that contains Step
 1.659. The migration is idempotent and runs every cycle.
 
-Step 4.65 then gates the restart, and it gates BOTH restart paths — which is
-not automatic, because they are two different restarts in two different
-processes. Step 4.65 runs `scripts/verify_registry_without_shim.py` (the
+Step 4.65 then gates the two restarts that this lane can reach, in two
+different processes. Step 4.65 runs `scripts/verify_registry_without_shim.py` (the
 positive check: every `callable:` in every existing registry copy imports with
 `agent.sustainability` banned, not merely "the rewriter did not error"),
 unconditionally, without regard to `config.do_service_restart`. On the `/update`
@@ -378,7 +377,29 @@ by the `data/registry-probe-failed` sentinel, which `remote-update.sh` checks
 before `launchctl kickstart -k`. A failed probe blocks that kickstart, logs
 `RESTART BLOCKED:`, and sets `RESTART_FAILED=1` for a non-zero terminal exit.
 The one restart deliberately left ungated is the recovery bootstrap of a worker
-that is already down: there is no working worker there to preserve.
+that is already down: there is no working worker there to preserve. The bridge
+kickstart is also ungated, on purpose — it neither reads the registry nor
+shares its config surface, and freezing chat I/O is the wrong response to a
+registry fault.
+
+**Known gap, tracked as #3029.** `service.install_reflection_worker` is the only
+site that restarts `com.valor.reflection-worker` — the process that actually
+loads the registry — and it sits under `config.do_service_restart`, which
+`UpdateConfig.cron()` sets `False`. `ReflectionScheduler.start()` calls `load()`
+once and never reloads in its tick loop. So on the routine cron path the
+registry is migrated and probed green while the live scheduler keeps whatever it
+read at process start; the migration reaches it on the next `--full` update or
+process restart, not on the cron cycle that performed it. Step 4.65's gate is
+correct about what it blocks — it simply has no reflection-worker restart to
+gate there. Closing that (a probe-gated `reflection-worker` kickstart in
+`remote-update.sh`, or moving `install_reflection_worker` out from under
+`do_service_restart`) is deferred: it changes when a live scheduler is cycled,
+which is broader than this lane's shim retirement.
+
+As a defence in depth for the path that *does* restart it,
+`scripts/install_reflection_worker.sh` runs the same probe under
+`VALOR_LAUNCHD=1` after its own `config/reflections.yaml` rewrite, so the bytes
+that were probed are the bytes that get loaded.
 Verified locally: both the vault and config registries on this machine are
 already migrated, so this machine is safe regardless. The residual exposure is a
 machine that takes the code by a bare `git pull` without `/update` — which is
@@ -440,16 +461,37 @@ it is a sequencing question, not a data race.
 
 ## Update System
 
-No new update-system work is required. The mechanism this change depends on —
-`/update` Step 1.659 (`scripts/update/reflections_callables.py` →
-`scripts/migrate_reflections_callables.py`) — already shipped in PR #2944 and
-runs on every cycle, before the Step 5 service restart. This plan deliberately
-adds nothing to `scripts/update/` and removes nothing from it.
+This lane's update-system deliverable is **Step 4.65, the registry acceptance
+probe** — the largest single part of the change. Deleting the shim removes the
+backstop that made a stale registry harmless, so `/update` needs a positive
+check that the registry can still import before it advances any service.
 
-One doc-level task only: the Step 1.659 comment at `scripts/update/run.py:1048`
-says the migration repoints callables "off the `agent.sustainability.*` shim."
-After this plan the shim does not exist, so the comment should say the registry
-must not *reacquire* those paths. Wording change, no behavior change.
+- **`scripts/verify_registry_without_shim.py`** (new). Installs a
+  `sys.meta_path` finder that raises for `agent.sustainability`, then imports
+  every `callable:` in every registry copy that exists, reporting per file and
+  accumulating failures across copies. Runs under `VALOR_LAUNCHD=1` so the
+  probed candidate set is exactly the one the reflection worker resolves.
+- **`scripts/update/reflections_callables.py`** gains `run_registry_probe()`
+  and the `data/registry-probe-failed` sentinel that carries the verdict across
+  the Python/shell process boundary. `remote-update.sh` reads that file with
+  `[ -f ]`, so **presence blocks and absence is green**; a failing probe whose
+  sentinel could not be written is therefore a false green, and is escalated to
+  a non-zero `run.py` exit so `set -e` stops the shell before its kickstart.
+- **`scripts/update/run.py`** gains Step 4.65 itself, which runs
+  unconditionally (not under `config.do_service_restart`, which
+  `UpdateConfig.cron()` sets `False` — gating the check on it would make it
+  inert on the one path this change deploys through) and sets
+  `do_service_restart=False` on failure.
+- **`scripts/remote-update.sh`** latches the verdict immediately after `run.py`
+  and gates its worker kickstart on it. See the Deployment Safety section for
+  the gate's exact reach and the #3029 gap.
+- **`scripts/install_reflection_worker.sh`** runs the same probe after its own
+  `config/reflections.yaml` rewrite, so the validated bytes are the loaded ones.
+
+Also a wording change with no behavior change: the Step 1.659 comment said the
+migration repoints callables "off the `agent.sustainability.*` shim." After this
+plan the shim does not exist, so it says the registry must not *reacquire* those
+paths.
 
 ## Agent Integration
 
@@ -653,11 +695,11 @@ first — see Task 3's final bullet.
 | No shim refs in production packages | `git grep -c "agent\.sustainability" -- agent/ reflections/ bridge/ worker/ tools/ config/` | exit code 1 |
 | No shim imports in tests | `git grep -n "^\s*from agent\.sustainability\|^\s*import agent\.sustainability" -- tests/` | exit code 1 |
 | No private helper survives under reflections/agents + stall_advisory | `git grep -c "^def get_redis\|^def _get_redis\|^def get_project_key\|^def _get_project_key" -- reflections/agents/ reflections/stall_advisory.py` | exit code 1 |
-| Canonical module defines both helpers | `grep -c "^def get_project_key\|^def get_redis" reflections/redis_access.py` | output contains 2 |
+| Canonical module defines both helpers | `grep -cE "^def get_project_key\|^def get_redis" reflections/redis_access.py` | output contains 2 |
 | All six consumers import the canonical pair | `git grep -lc "from reflections.redis_access import" -- reflections/agents/ reflections/stall_advisory.py \| wc -l` | output contains 6 |
 | Registry resolves with shim banned | `.venv/bin/python scripts/verify_registry_without_shim.py` | exit code 0 |
 | Queue file change is two locations only | `git diff origin/main -- agent/agent_session_queue.py \| grep -c '^[+-][^+-]'` | output contains 6 |
-| Migration self-heal still armed | `git grep -c "agent.sustainability.circuit_health_gate" -- scripts/migrate_reflections_callables.py` | output > 0 |
+| Migration self-heal still armed | `git grep -ch "agent.sustainability.circuit_health_gate" -- scripts/migrate_reflections_callables.py` | output > 0 |
 | Targeted tests pass | `scripts/pytest-clean.sh tests/unit/test_sustainability.py tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py tests/unit/test_reflection_scheduler.py tests/unit/test_migrate_reflections_callables.py tests/unit/test_update_reflections_callables.py tests/unit/test_agent_session_queue.py -q` | exit code 0 |
 | Stall advisory e2e passes | `scripts/pytest-clean.sh tests/integration/test_stall_advisory_e2e.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
