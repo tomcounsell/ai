@@ -411,7 +411,11 @@ def test_main_json_abort_reports_the_partial_write(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
 
     assert rc == 1
-    payload = json.loads(err.splitlines()[0])
+    # Select the JSON line by content, not position: coupling the payload
+    # assertions to ordering makes an ordering regression fail here with a
+    # JSONDecodeError instead of at the endswith() below, which is the
+    # assertion that actually owns the "must be LAST" claim.
+    payload = json.loads(next(ln for ln in err.splitlines() if ln.startswith("{")))
     assert payload["rewrote"] is True, "abort must not claim nothing was written"
     assert payload["partial"] is True
     assert payload["rewrites_count"] == 1
@@ -420,3 +424,26 @@ def test_main_json_abort_reports_the_partial_write(tmp_path, monkeypatch, capsys
     # The plain-text summary must be LAST: the Step 1.659 wrapper keeps only
     # stderr[-500:], which truncates the JSON's leading partial-write evidence.
     assert err.rstrip().endswith(f"ALREADY WRITTEN: {vault} (1 line(s))")
+
+
+def test_check_idempotent_rejects_dry_run():
+    """The safe-looking invocation must fail loudly, not verify nothing.
+
+    `--check-idempotent --dry-run` used to be a silent skip: exit 0, no
+    `idempotence OK` line, nothing checked. That made the only invocation that
+    does not touch a real registry also the one that proves nothing.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["--target", "/tmp/does-not-matter.yaml", "--check-idempotent", "--dry-run"])
+    assert exc.value.code == 2, "argparse.error() exits 2"
+
+
+def test_check_idempotent_verifies_against_a_target_copy(tmp_path):
+    """The sanctioned safe form: --target a copy, no --dry-run."""
+    target = _write_registry(
+        tmp_path / "refl.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+
+    assert main(["--target", str(target), "--check-idempotent"]) == 0
+    assert "agent.session_revival.cleanup_stale_branches_all_projects" in target.read_text()

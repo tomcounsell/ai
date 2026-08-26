@@ -341,6 +341,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.check_idempotent and args.dry_run:
+        # Idempotence is a property of the state AFTER a write, so it cannot be
+        # checked without writing. This used to be a silent skip, which made
+        # `--check-idempotent --dry-run` look like the safe way to run the check
+        # and instead produce a hollow green: exit 0, no `idempotence OK` line,
+        # nothing verified. Fail loudly; point at the actually-safe invocation.
+        parser.error(
+            "--check-idempotent cannot be combined with --dry-run: idempotence is a "
+            "property of the post-write state. To check without touching a real "
+            "registry, copy one and pass --target: "
+            "cp config/reflections.yaml /tmp/refl.yaml && "
+            f"{parser.prog} --target /tmp/refl.yaml --check-idempotent"
+        )
+
     targets = args.target or default_targets()
     if not args.json:
         print(f"[migrate-callables] targets: {[str(t) for t in targets]}")
@@ -395,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"[migrate-callables] rewrote={rewrote} rewrites_count={total}")
 
-    if args.check_idempotent and not args.dry_run:
+    if args.check_idempotent:
         second = migrate_targets(targets, dry_run=True)
         remaining = sum(r.rewrites_count for r in second)
         if remaining:
