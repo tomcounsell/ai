@@ -23,12 +23,14 @@ object graph cannot show — the **git index** and the **tracked source text**.
 
 ## What it pins
 
-Seven artifacts, in two tables.
+Two tables. Row counts and exemption-set sizes are deliberately absent from this
+document: they live in the tables themselves, they change whenever the guard is
+extended, and prose does not. Do not reintroduce them here — a count that a
+reader can get from the code is a count that will be wrong.
 
-**`BANNED_MODULES` — two rows.** The bridge-side session-log shim and the
-reflections model shim, both deleted by #2872. Each row carries the module's
-import path, its file path, and its own exemption set. Each row drives three
-independent checks:
+**`BANNED_MODULES`.** The bridge-side session-log shim and the reflections model
+shim, both deleted by #2872. Each row carries the module's import path, its file
+path, and its own exemption set. Each row drives three independent checks:
 
 1. **File absence.** The path is not present in `git ls-files`. This catches a
    reintroduced file that nothing imports yet.
@@ -46,10 +48,10 @@ independent checks:
 All three are needed. Dropping any one would pass on some reintroduction
 shape, or on a row that was miscopied in the first place.
 
-**`BANNED_SYMBOLS` — five rows.** Three `AgentSession` attributes removed by
-#2873, plus the retired session-type member and the retired settings helper
-from #2874. Each row carries the symbol name and its exemption set, and drives
-one check: no tracked `.py` outside that set names it.
+**`BANNED_SYMBOLS`.** A set of `AgentSession` attributes removed by #2873, plus
+the retired session-type member and the retired settings helper from #2874. Each
+row carries the symbol name and its exemption set, and drives one check: no
+tracked `.py` outside that set names it.
 
 Three further `AgentSession` attributes removed by the same batch are
 deliberately **not** in the symbol table. Two are ordinary English words that
@@ -107,12 +109,13 @@ table right.
 Every search is restricted to tracked `*.py`. This is the choice that makes the
 guard tractable rather than a churn machine.
 
-A whole-tree search for these strings also hits roughly fifteen documents
-under `docs/` that legitimately discuss the migration in prose — including a
-completed plan that quotes a literal import line inside a verification row.
-None of those can reintroduce a runtime dependency. Restricting to tracked
-Python drops the exemption list from unbounded and growing to four distinct
-files plus the guard's own unavoidable self-reference.
+A whole-tree search for these strings also hits a large and growing set of
+documents under `docs/` that legitimately discuss the migration in prose —
+including a completed plan that quotes a literal import line inside a
+verification row. None of those can reintroduce a runtime dependency.
+Restricting to tracked Python drops the exemption list from unbounded and
+growing to a short list of source files plus the guard's own unavoidable
+self-reference.
 
 A guard whose exemption list churns on every documentation edit is a guard
 people learn to ignore, and policing prose blocks writing honestly about the
