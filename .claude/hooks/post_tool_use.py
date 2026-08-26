@@ -499,7 +499,6 @@ def _update_agent_session(hook_input: dict) -> None:
                 return
             agent_session = matches[0]
 
-        agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
         # Liveness (issue #1843, Gap A): clear the in-flight tool name and
         # refresh the timestamp, mirroring record_tool_boundary's Post=clear

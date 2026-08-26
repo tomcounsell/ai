@@ -639,8 +639,6 @@ async def watchdog_hook(
     # tracking failure degrades to a legacy-only drain, never breaks the hook.
     steering_room_id: str | None = None
     try:
-        import time
-
         from models.agent_session import AgentSession
         from models.room import room_id_for_session
 
@@ -655,7 +653,6 @@ async def watchdog_hook(
             sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
             s = sessions[0]
             s.tool_call_count = count
-            s.updated_at = time.time()
             s.save()
             steering_room_id = room_id_for_session(s)
     except Exception as e:

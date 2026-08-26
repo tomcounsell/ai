@@ -202,7 +202,6 @@ def append_turn(
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
-            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog turn_count for {session_id}: {e}")
@@ -243,7 +242,6 @@ def append_tool_result(
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1
-            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
