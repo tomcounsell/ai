@@ -75,6 +75,11 @@
           },
           {
             "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_verification_section.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_gos_justification.py",
             "timeout": 15
           },
