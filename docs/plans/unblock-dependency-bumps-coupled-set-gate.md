@@ -5,7 +5,7 @@ appetite: Medium
 owner: valor
 created: 2026-08-26
 tracking: https://github.com/tomcounsell/ai/issues/3001
-last_comment_id: 5420111955
+last_comment_id: 5420202999
 ---
 
 # Coupled-set dependency bumping + a real `run_typed` gate
