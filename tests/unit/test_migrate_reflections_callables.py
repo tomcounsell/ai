@@ -19,6 +19,7 @@ import pytest
 from scripts.migrate_reflections_callables import (
     CALLABLE_MIGRATIONS,
     MigrationError,
+    PartialMigrationError,
     migrate_targets,
     migrate_yaml_callables,
     rewrite_callable_lines,
@@ -47,6 +48,11 @@ def test_mapping_covers_both_migration_families():
     }
 
 
+# Parametrized over the WHOLE table, so both migration families are covered by
+# construction -- including the two #2876 hub entries, whose presence is pinned
+# by test_mapping_covers_both_migration_families above. Those two matter
+# especially: `_resolve_callable` getattrs them off a module the registry names
+# by string, and the registry is untracked vault config no repo grep can see.
 @pytest.mark.parametrize(("old", "new"), sorted(CALLABLE_MIGRATIONS.items()))
 def test_every_migration_target_actually_resolves(old, new):
     """Each new dotted path imports to a real callable.
@@ -306,18 +312,75 @@ def test_rewrite_reports_only_the_keys_the_file_contained(tmp_path):
     assert matched == {"agent.agent_session_queue.cleanup_corrupted_agent_sessions"}
 
 
-def test_hub_migration_targets_resolve_on_their_owning_modules():
-    """The #2876 targets must actually exist where the table says they do.
+# --------------------------------------------------------------------------
+# Partial application across registry copies.
+#
+# Scoping the import check per-file (above) means two registry copies with
+# divergent content can take different code paths, so one can be written before
+# a later one aborts. The write is correct and self-heals on the next /update;
+# what must not happen is the abort claiming nothing was written.
+# --------------------------------------------------------------------------
 
-    `_resolve_callable` getattrs these off the named module at reflection time
-    and the failure is swallowed, so a wrong module path here would silently
-    disable a daily job.
-    """
-    for shim_path in (
-        "agent.agent_session_queue.cleanup_corrupted_agent_sessions",
+
+def test_abort_after_a_write_reports_what_reached_disk(tmp_path, monkeypatch):
+    vault = _write_registry(tmp_path / "vault.yaml", ["agent.sustainability.circuit_health_gate"])
+    config = _write_registry(
+        tmp_path / "config.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+    monkeypatch.setitem(
+        CALLABLE_MIGRATIONS,
         "agent.agent_session_queue.cleanup_stale_branches_all_projects",
-    ):
-        target = CALLABLE_MIGRATIONS[shim_path]
-        module_path, _, attr = target.rpartition(".")
-        module = importlib.import_module(module_path)
-        assert callable(getattr(module, attr, None)), f"{target} does not resolve"
+        "agent.no_such_module_xyz.nope",
+    )
+
+    with pytest.raises(PartialMigrationError) as exc:
+        migrate_targets([vault, config])
+
+    # The vault write really happened -- this is the state the old bare
+    # `rewrote: false` payload misreported.
+    assert "reflections.agents.circuit_health_gate.run" in vault.read_text()
+    assert "agent.agent_session_queue" in config.read_text(), "config must be untouched"
+
+    written = [r for r in exc.value.completed if r.rewrote]
+    assert [r.target for r in written] == [vault]
+    assert sum(r.rewrites_count for r in written) == 1
+
+
+def test_abort_before_any_write_is_not_a_partial(tmp_path, monkeypatch):
+    """First-target failure writes nothing, so it stays a plain MigrationError."""
+    config = _write_registry(
+        tmp_path / "config.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+    monkeypatch.setitem(
+        CALLABLE_MIGRATIONS,
+        "agent.agent_session_queue.cleanup_stale_branches_all_projects",
+        "agent.no_such_module_xyz.nope",
+    )
+
+    with pytest.raises(MigrationError) as exc:
+        migrate_targets([config])
+
+    assert not isinstance(exc.value, PartialMigrationError)
+    assert "agent.agent_session_queue" in config.read_text()
+
+
+def test_dry_run_abort_is_never_a_partial(tmp_path, monkeypatch):
+    """A dry run touches no disk, so it can never be partially applied."""
+    vault = _write_registry(tmp_path / "vault.yaml", ["agent.sustainability.circuit_health_gate"])
+    config = _write_registry(
+        tmp_path / "config.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+    monkeypatch.setitem(
+        CALLABLE_MIGRATIONS,
+        "agent.agent_session_queue.cleanup_stale_branches_all_projects",
+        "agent.no_such_module_xyz.nope",
+    )
+
+    with pytest.raises(MigrationError) as exc:
+        migrate_targets([vault, config], dry_run=True)
+
+    assert not isinstance(exc.value, PartialMigrationError)
+    assert "agent.sustainability" in vault.read_text(), "dry run must not write"

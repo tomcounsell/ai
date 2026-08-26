@@ -77,11 +77,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-#: Historical shim path -> canonical per-reflection module path.
+#: Non-owning dotted path -> the module that actually owns the callable.
 #:
-#: Mirrors the re-export table in ``agent/sustainability.py``'s docstring. Note
-#: that ``sustainability_digest`` maps to the ``system_health_digest`` module —
-#: the module name does NOT match the old callable name, and the naive
+#: Two families, one table — see the module docstring. The SOURCE-side keys must
+#: stay verbatim: they are what the rewrite matches against on a machine that has
+#: not yet run ``/update``.
+#:
+#: The sustainability half mirrors the re-export table in
+#: ``agent/sustainability.py``'s docstring. Note that ``sustainability_digest``
+#: maps to the ``system_health_digest`` module — the module name does NOT match
+#: the old callable name, and the naive
 #: ``reflections.agents.sustainability_digest.run`` would be a silent
 #: ImportError at execution time.
 CALLABLE_MIGRATIONS: dict[str, str] = {
@@ -261,24 +266,59 @@ def default_targets() -> list[Path]:
     return unique
 
 
+class PartialMigrationError(MigrationError):
+    """A target failed *after* an earlier target was already written to disk.
+
+    Carries the results accumulated before the failure so callers can report
+    what is actually on disk. Without this the abort path claims nothing was
+    written, which is false whenever the loop got past its first target.
+
+    See :func:`migrate_targets` for why partial application became reachable.
+    """
+
+    def __init__(self, cause: MigrationError, completed: list[CallableMigrationResult]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.completed = completed
+
+
 def migrate_targets(targets: list[Path], *, dry_run: bool = False) -> list[CallableMigrationResult]:
     """Migrate every target that exists, skipping the ones that do not.
 
     A missing registry copy is not an error: machines legitimately have one,
     both, or (on a fresh checkout) neither.
+
+    **Partial application is reachable and is not rolled back.** Each target is
+    written independently, and since the import check is scoped to the entries a
+    given file actually contains (see :func:`verify_targets_importable`), two
+    registry copies with divergent content can take different code paths —
+    exactly the divergence ``env_sync.sync_reflections_yaml``'s mtime guard
+    permits. So the vault can be rewritten and committed to disk before the
+    ``config/`` copy aborts on an unrelated broken table entry.
+
+    Rolling back is the wrong fix: the completed write is *correct*, and the
+    next ``/update`` re-migrates it as a no-op. What matters is that the failure
+    not lie about disk state, so a failure after any write raises
+    :class:`PartialMigrationError` carrying the completed results.
     """
     results: list[CallableMigrationResult] = []
     for target in targets:
         target = Path(target)
         if not target.exists():
             continue
-        results.append(migrate_yaml_callables(target, dry_run=dry_run))
+        try:
+            results.append(migrate_yaml_callables(target, dry_run=dry_run))
+        except MigrationError as e:
+            written = [r for r in results if r.rewrote]
+            if written and not dry_run:
+                raise PartialMigrationError(e, results) from e
+            raise
     return results
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Migrate reflections.yaml callables off the agent.sustainability shim."
+        description="Migrate reflections.yaml callables onto the modules that own them."
     )
     parser.add_argument(
         "--target",
@@ -307,13 +347,35 @@ def main(argv: list[str] | None = None) -> int:
     try:
         results = migrate_targets(targets, dry_run=args.dry_run)
     except MigrationError as e:
+        # Report what actually reached disk before the abort. A bare
+        # `rewrote: false` would be factually wrong about a partial run, and
+        # Step 1.659 forwards this payload verbatim as its only record.
+        completed = getattr(e, "completed", [])
+        written = [r for r in completed if r.rewrote]
         if args.json:
             print(
-                _json.dumps({"rewrote": False, "rewrites_count": 0, "error": str(e)}),
+                _json.dumps(
+                    {
+                        "rewrote": bool(written),
+                        "rewrites_count": sum(r.rewrites_count for r in written),
+                        "targets": [str(r.target) for r in written],
+                        "partial": bool(written),
+                        "error": str(e),
+                    }
+                ),
                 file=sys.stderr,
             )
         else:
             print(f"[migrate-callables] ABORT: {e}", file=sys.stderr)
+        # Trailing plain-text summary, emitted on BOTH paths and always last.
+        # Step 1.659's wrapper keeps only `stderr[-500:]` for its WARN, so the
+        # partial-write evidence has to sit at the tail to survive truncation --
+        # the JSON above leads with it, which is exactly the part that gets cut.
+        for r in written:
+            print(
+                f"[migrate-callables] ALREADY WRITTEN: {r.target} ({r.rewrites_count} line(s))",
+                file=sys.stderr,
+            )
         return 1
 
     total = sum(r.rewrites_count for r in results)
