@@ -3,7 +3,8 @@
 Triage date: 2026-08-26. Scope: all issues carrying the `bug` label.
 
 Starting set: 71 open. Closed at triage: 6 (#2970, #2825, #2810, #2806 fixed; #2824, #2808 duplicates).
-Remaining: **65**, sequenced below into 9 waves.
+Four more (#3004, #3006, #3016, #3017) were filed during the triage pass itself and are slotted in
+below. Remaining: **69**, sequenced into 9 waves.
 
 Every remaining issue was verified live — grepped against current `main` or checked for a merged
 PR — not inferred from the issue text. No issue in the set was stale-by-architecture.
@@ -31,6 +32,8 @@ plan is written once and the critique round reasons about the seam as a whole ra
 | 2780 | Stale `~/Library/Python/3.12/bin` shims shadow 63 venv executables | SDLC |
 | 2749 | Gates conflate exit 127 (missing entry point) with a real non-zero verdict | SDLC |
 | 2852 | Umbrella: main's unit suite to zero failures — **narrowed to 3 residual nodes** (#2846/#2822 closed) | hotfix |
+| 3006 | 6 pre-existing failures in `tests/integration/test_stall_advisory_e2e.py` | fold under 2852 |
+| 3016 | Nightly regression: `test_promise_gate_real_api.py::test_forward_deferral_blocks_real_api` | SDLC |
 | 2854 | Nightly unit tests leak fixture ERROR lines into production `logs/bridge.log` | SDLC |
 | 2799 | `tests/conftest.py` Redis client ignores `REDIS_PORT`; private-redis isolation hits prod 6379 | hotfix |
 | 2707 | Steering tests collide across concurrent runs via hardcoded session ids | SDLC |
@@ -116,8 +119,14 @@ it will be re-filed. This is exactly the failure mode #2658 (Wave 4) exists to p
 | 2868 | `_gh_pr_search_issue_ref` candidate ordering rests on unguaranteed `gh` ranking |
 | 2762 | Lease-helper AST sweep walks `tree.body` only, missing try/if-wrapped and relative imports |
 | 2777 | `/do-sdlc` step 3d.4 halts REVIEW_VERDICT_MISSING in repos declaring no verdict substrate |
+| 3017 | `current_stage` can never return PATCH: `SDLC_STAGES` omits it, so slugged PATCH sessions resolve to main with no worktree |
 | 2812 | **Investigation:** ledger stage history for #2675 went empty after AgentSession recreation |
 | 2760 | **Investigation:** PR #2728 merged while `merge_predicate` should have refused, no override recorded |
+
+**#3017 should lead this wave.** A slugged PATCH session that resolves to `main` with no worktree
+means patch work lands in the shared primary checkout — the isolation failure that produces the
+"whose dirty state is this?" confusion behind several other issues here. It is a one-line symptom
+(`SDLC_STAGES` omits PATCH) with a large blast radius.
 
 **Handle the two investigations separately.** #2812 and #2760 have no confirmed root cause — two and
 three competing hypotheses respectively. Don't route them into a fix lane; route them into a
@@ -190,14 +199,22 @@ Anchored by the **#2494 umbrella** (`docs/plans/durability-room-job-agentrun.md`
 | 2691 | Reconciler per-chat scan is load-bearing for the wedge verdict but has no health monitoring | |
 | 2677 | Schedule the sdlc-local ledger orphan reaper (nothing invokes `--kill-orphans`) | copy PR #2681 pattern |
 | 2650 | Plan-doc writes in the shared main checkout have no single-writer protocol | git half shipped (PR #2669) |
-| 2661 | Rotate production `REDIS_URL` to the valor-app ACL credential | human-gated, per machine |
+| 2661 | Rotate production `REDIS_URL` to the valor-app ACL credential | **contradicted by #3004** |
+| 3004 | Delete the Redis ACL layer — the stack must work safely from a connection string alone | **contradicts #2661** |
 
 **Finish-the-remainder subgroup:** 2678 (Wave 1), 2677, 2661, 2650, 2699 are all cases where a
 sibling PR already shipped part of the original scope. Brief each lane with what already landed
 (#2643, #2681, #2680, #2669, #2671 respectively) so it doesn't re-derive or re-do it.
 
-**#2661 cannot be closed by an agent** — it needs a vault `.env` secret write and a per-machine
-manual ACL apply. Track it as human-owned.
+**#2661 vs #3004 is a live contradiction and needs a decision before either is routed.** #2661 asks
+to rotate production `REDIS_URL` onto the valor-app ACL credential; #3004, filed 2026-08-25, asks to
+delete the ACL layer entirely so the stack works from a connection string alone. They cannot both
+ship. Deciding #3004 first is the cheaper order — if the ACL layer goes away, #2661 closes as moot
+along with its human-gated per-machine provisioning work. Routing #2661 first risks provisioning a
+credential on every machine and then deleting the mechanism that uses it.
+
+**#2661, if it survives that decision, cannot be closed by an agent** — it needs a vault `.env`
+secret write and a per-machine manual ACL apply. Track it as human-owned.
 
 ---
 
@@ -225,6 +242,12 @@ remainder rather than treating it whole.
 - #2791 → sequenced behind #2783
 - #2837, #2661 → require a human at the keyboard
 - #2770 → lands in the `popoto` checkout, not this one
+- #2661 → blocked on the #3004 decision (see Wave 7)
+
+**Backlog refill rate.** Four new bug issues (#3004, #3006, #3016, #3017) were filed in the ~14
+hours spanning this triage. At that rate the backlog regrows faster than a single sequential lane
+clears it, which is the argument for running Waves 4-7 in parallel and for prioritizing Wave 0 and
+Wave 6 (#2937's issue fan-out) — both reduce the filing rate rather than the backlog depth.
 
 **Parallelism.** Waves 2 and 3 both touch `agent/sdlc_router.py` and the lease/identity helpers.
 Running them concurrently invites the collision this backlog is full of. Run 2 → 3 sequentially, or
