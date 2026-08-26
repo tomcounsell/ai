@@ -311,7 +311,22 @@ def check_dep_files_changed(changed_files: list[str]) -> bool:
 # PyPI version checking and auto-bump
 # ---------------------------------------------------------------------------
 
-AUTO_BUMP_PACKAGES = ["anthropic", "claude-agent-sdk"]
+# `anthropic` is deliberately NOT here. It is one member of a coupled set
+# (anthropic + pydantic-ai-slim + openai) that must move together or not at all:
+# anthropic 1.0.0 dropped temperature/top_p/top_k from the Messages API, which
+# pydantic-ai passes through, so a partial bump kills every LLM call at argument
+# binding with no network I/O. Auto-bumping one member on a schedule while the
+# others stay pinned GUARANTEES that drift — it broke the whole LLM layer twice
+# on 2026-08-24 alone.
+#
+# The smoke gate below cannot currently catch it either: it is an import check,
+# and `import anthropic` succeeds fine on a version whose call signature we
+# cannot satisfy.
+#
+# This exclusion is a STOPGAP holding the line until #3001 lands coupled-set
+# bumping plus a gate that makes a real call through agent/llm/wrapper.py.
+# Re-add `anthropic` only together with that work.
+AUTO_BUMP_PACKAGES = ["claude-agent-sdk"]
 
 
 @dataclass

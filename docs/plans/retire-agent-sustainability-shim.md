@@ -349,10 +349,36 @@ removes the shim.
 a broad `except`, records `last_error`, and keeps ticking — so the loss is
 **silent**. Circuit-breaker recovery and session-count throttling stop working
 with no alert.
-**Mitigation:** This is the exact hazard PR #2944 was ordered to prevent. `/update`
-Step 1 (git pull) → Step 1.659 (migration) → Step 5 (service restart) means any
-machine that receives this code via the sanctioned path migrates its registry
-before the worker reloads. The migration is idempotent and runs every cycle.
+**Mitigation:** This is the exact hazard PR #2944 was ordered to prevent, and the
+guarantee is **pre-merge, not in-orchestrator**. `run.py`'s own Step 1 pull is not
+what saves a stale checkout: the orchestrator module is already imported by the
+time it pulls, so a checkout behind `c9a91bdad` invoking `run.py --full` directly
+would run an orchestrator that has *no* Step 1.659, then pull the shim deletion,
+then restart. What actually holds is that both sanctioned entry points
+fast-forward **before** launching any Python:
+`.claude/skills/update/SKILL.md:16` (`git checkout main && git fetch origin main
+&& git merge --ff-only origin/main`, run as a prerequisite) and
+`scripts/remote-update.sh:114-121`, whose comment states the reason outright —
+"Git pull FIRST — before invoking any Python ... Without this, a Telegram
+/update or cron run always executes the pre-pull version of the orchestrator."
+So every machine reaching Step 5 is running an orchestrator that contains Step
+1.659. The migration is idempotent and runs every cycle.
+
+Step 4.65 then gates the restart, and it gates BOTH restart paths — which is
+not automatic, because they are two different restarts in two different
+processes. Step 4.65 runs `scripts/verify_registry_without_shim.py` (the
+positive check: every `callable:` in every existing registry copy imports with
+`agent.sustainability` banned, not merely "the rewriter did not error"),
+unconditionally, without regard to `config.do_service_restart`. On the `/update`
+path it suppresses `run.py`'s own Step 5 restart. On the `remote-update.sh`
+path — where `run.py --cron` sets `do_service_restart=False` and the worker
+kickstart happens in the shell *after* `run.py` exits, gated only on the diff
+touching `agent/` — the probe's verdict is carried across the process boundary
+by the `data/registry-probe-failed` sentinel, which `remote-update.sh` checks
+before `launchctl kickstart -k`. A failed probe blocks that kickstart, logs
+`RESTART BLOCKED:`, and sets `RESTART_FAILED=1` for a non-zero terminal exit.
+The one restart deliberately left ungated is the recovery bootstrap of a worker
+that is already down: there is no working worker there to preserve.
 Verified locally: both the vault and config registries on this machine are
 already migrated, so this machine is safe regardless. The residual exposure is a
 machine that takes the code by a bare `git pull` without `/update` — which is

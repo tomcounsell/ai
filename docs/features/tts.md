@@ -154,4 +154,4 @@ The agent invokes this skill when the user asks for a spoken update.
 - `bridge/telegram_relay.py` — `_send_queued_message` voice-note branch + `_safe_unlink` + DLQ cleanup
 - `tools/valor_telegram.py` — `--voice-note` and `--cleanup-after-send` flags on `send`
 - `.claude/skills/do-debrief/SKILL.md` — the only user-invocable composite
-- Tests: `tools/tts/tests/`, `tests/unit/test_telegram_relay_voice_note.py`, `tests/unit/test_valor_telegram_voice_flag.py`
+- Tests: `tools/tts/tests/`, `tests/unit/test_telegram_relay_voice_note.py`, `tests/unit/valor_telegram/test_valor_telegram_voice_flag.py`

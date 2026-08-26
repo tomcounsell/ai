@@ -587,7 +587,7 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_sdlc_router.py tests/unit/test_sdlc_router_decision.py tests/unit/test_sdlc_skill_md_parity.py tests/unit/test_sdlc_next_skill.py -q` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_sdlc_router.py tests/unit/sdlc_router_decision/ tests/unit/test_sdlc_skill_md_parity.py tests/unit/test_sdlc_next_skill.py -q` | exit code 0 |
 | Parity rows present | `python -c "from agent.sdlc_router import DISPATCH_RULES; ids={r.row_id for r in DISPATCH_RULES}; assert {'9s-docs-only','9s-lockfile-only'} <= ids"` | exit code 0 |
 | 9s rules dispatch merge | `python -c "from agent.sdlc_router import DISPATCH_RULES; rs=[x for x in DISPATCH_RULES if x.row_id.startswith('9s')]; assert len(rs)==2 and all(r.skill=='/do-merge' for r in rs)"` | exit code 0 |
 | Skip reasons carry shape | `python -c "from agent.sdlc_router import DISPATCH_RULES; rs={x.row_id:x.reason for x in DISPATCH_RULES if x.row_id.startswith('9s')}; assert 'shape=docs-only' in rs['9s-docs-only'] and 'shape=lockfile-only' in rs['9s-lockfile-only']"` | exit code 0 |

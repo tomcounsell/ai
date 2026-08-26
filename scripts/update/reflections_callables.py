@@ -1,9 +1,12 @@
-"""Update-system hook that keeps reflections.yaml from reacquiring the deleted sustainability shim.
+"""Update-system hook that repoints reflections.yaml onto owning modules.
 
 Wraps ``scripts/migrate_reflections_callables.py`` so ``scripts/update/run.py``
 Step 1.659 can render machine-readable status, and
 ``scripts/verify_registry_without_shim.py`` so Step 4.65 can gate the service
-restart on the property that actually matters. Issue #2875.
+restart on the property that actually matters — that the registry has not
+reacquired the deleted ``agent.sustainability`` shim. Issues #2875 (that shim)
+and #2876 (the ``agent.agent_session_queue`` re-export hub); see that script's
+docstring for why both families share a table.
 
 Runs at Step 1.659 — BEFORE Step 1.66's vault->config copy — so a vault rewrite
 also propagates into ``config/reflections.yaml`` on the same cycle. The

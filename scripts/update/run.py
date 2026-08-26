@@ -1046,30 +1046,36 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
         _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
 
-    # Step 1.659: Keep the five self-healing reflections pinned to their
-    # `reflections.agents.*` callable paths (#2875). The `agent.sustainability`
-    # shim they used to name no longer exists, so the registry must never
-    # reacquire those paths; this step rewrites any that it still carries.
+    # Step 1.659: Repoint reflection callables onto the modules that own them.
+    # Two migration families share one table: the `agent.sustainability.*` shim
+    # -> `reflections.agents.*` (#2875), and the `agent.agent_session_queue.*`
+    # re-export hub -> `agent.session_health` / `agent.session_revival` (#2876).
+    # `agent/sustainability.py` is deleted, so the registry must never reacquire
+    # those paths; this step rewrites any that it still carries, which is what
+    # keeps it alive after its own migration is done.
+    # Keep these strings family-agnostic: naming one family makes the log false
+    # on a machine where the other fires, and an operator verifying #2876's
+    # propagation gate reads exactly this output.
     # config/reflections.yaml is gitignored, so this registry edit can only
     # reach machines as tracked code that rewrites the file. Runs BEFORE Step
     # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
     # so a vault rewrite propagates on this same cycle; the migration also
     # rewrites the config copy directly, because Step 1.66 skips the copy when
     # the config copy is not older than the vault. Idempotent no-op once done.
-    log("Ensuring reflection callables have not reacquired the deleted sustainability shim...", v)
+    log("Ensuring reflection callables name their owning modules...", v)
     result.reflections_callables_result = reflections_callables.run_reflections_callables_migration(
         project_dir
     )
     rcr = result.reflections_callables_result
     if rcr.action == "rewrote":
         log(
-            f"reflection callables repointed to reflections.agents.* "
+            f"reflection callables repointed onto their owning modules "
             f"({rcr.rewrites_count} line(s) across {len(rcr.targets or [])} file(s))",
             v,
             always=True,
         )
     elif rcr.action == "noop":
-        log("reflection callables already clear of the deleted sustainability shim", v)
+        log("reflection callables already name their owning modules", v)
     if not rcr.success:
         log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
         _append_warning(result, f"reflection callable migration: {rcr.error}")

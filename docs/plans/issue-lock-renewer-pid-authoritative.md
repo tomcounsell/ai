@@ -1571,7 +1571,7 @@ most one TTL window".
 
 ### 8. Final Validation
 
-- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_lease_heartbeat.py tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q`
+- `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py tests/unit/sdlc_session_ensure/ tests/unit/test_sdlc_lease_heartbeat.py tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q`
 - `python -m ruff check .` and `python -m ruff format --check .`
 - Run every row in **## Verification**.
 - Paste the full demonstrated-red PAIR into the PR body: half (a) red on `main`
@@ -1617,7 +1617,7 @@ belongs in this plan and the PR body, neither of which the row greps.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Lock-liveness tests pass | `scripts/pytest-clean.sh tests/unit/test_session_lifecycle.py -q` | exit code 0 |
-| Orphan-reaper tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_session_ensure.py -q` | exit code 0 |
+| Orphan-reaper tests pass | `scripts/pytest-clean.sh tests/unit/sdlc_session_ensure/ -q` | exit code 0 |
 | Heartbeat tests pass | `scripts/pytest-clean.sh tests/unit/test_sdlc_lease_heartbeat.py -q` | exit code 0 |
 | Reflection-layer tests pass | `scripts/pytest-clean.sh tests/unit/reflections/test_utilities_lock_says_live.py tests/unit/reflections/test_sdlc_upvote_lanes.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check models/ tools/ agent/ tests/ reflections/` | exit code 0 |
@@ -1642,7 +1642,7 @@ belongs in this plan and the PR body, neither of which the row greps.
 | **Anti-criterion:** no ephemeral CLI renewer stamps | `grep -l 'stamp_renewer_identity' tools/_sdlc_utils.py tools/sdlc_stage_marker.py tools/sdlc_next_skill.py tools/sdlc_session_ensure.py` | **no output** (`-l` prints only filenames that match, so a clean build prints nothing; `-c` prints a `file:0` line per file and invites a builder to read the exit code as failure) |
 | **Anti-criterion:** the #2620 short-circuit still exists for identity-less payloads | `grep -c 'test_peek_dead_pid_with_fresh_renewal_is_not_orphaned' tests/unit/test_session_lifecycle.py` | output contains 1 |
 | Demonstrated-red test exists | `grep -c 'class TestRenewerIdentityLiveness' tests/unit/test_session_lifecycle.py` | output contains 1 |
-| Reaper-layer test exists (SC7) | `grep -c 'renewer_pid' tests/unit/test_sdlc_session_ensure.py` | output > 1 |
+| Reaper-layer test exists (SC7) | `grep -rc 'renewer_pid' tests/unit/sdlc_session_ensure/test_sdlc_session_ensure_adoption.py` | output > 1 |
 | Feature doc updated | `grep -c 'renewer_pid' docs/features/sdlc-issue-ownership-lock.md` | output > 1 |
 | SDLC skill contract updated | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS' .claude/skills/sdlc/SKILL.md` | output contains 1 |
 | Timeout catalog updated (NIT 3) | `grep -c 'ISSUE_LOCK_RENEWER_GRACE_SECONDS' docs/features/config-timeout-catalog.md` | output contains 1 |

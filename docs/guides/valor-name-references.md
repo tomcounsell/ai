@@ -153,7 +153,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 | File | References |
 |------|-----------|
 | `tests/unit/test_bridge_logic.py` | Routing assertions with "valor" usernames |
-| `tests/unit/test_valor_telegram.py` | CLI tool tests |
+| `tests/unit/valor_telegram/` | CLI tool tests |
 | `tests/unit/test_sdk_client.py` | Persona name assertions |
 | `tests/unit/test_sdk_client_sdlc.py` | SDLC mode tests |
 | `tests/unit/test_summarizer.py` | Summarizer tests |
