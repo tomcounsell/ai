@@ -81,9 +81,9 @@ class TestActive:
 
     def test_active_returns_currently_suppressed_map(self, project_dir: Path) -> None:
         warn_state.should_emit("gws-auth", "needs_auth:none", project_dir)
-        warn_state.should_emit("redis-acl-drift", "drift:abc123", project_dir)
+        warn_state.should_emit("env-completeness", "missing:1", project_dir)
         result = warn_state.active(project_dir)
-        assert result == {"gws-auth": "needs_auth:none", "redis-acl-drift": "drift:abc123"}
+        assert result == {"gws-auth": "needs_auth:none", "env-completeness": "missing:1"}
 
     def test_active_fails_soft_on_corrupt_state_file(self, project_dir: Path) -> None:
         (project_dir / "data" / "update_warn_state.json").write_text("not json{{{")

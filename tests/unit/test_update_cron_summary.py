@@ -157,8 +157,8 @@ def test_suppressed_trailer_names_only_non_emitted_keys(tmp_path, capsys):
     (tmp_path / "data").mkdir()
     # gws-auth emits THIS run (first warn).
     warn_state.should_emit("gws-auth", "needs_auth:none", tmp_path)
-    # redis-acl-drift was already suppressed from an earlier run.
-    warn_state.should_emit("redis-acl-drift", "drift:abc", tmp_path)
+    # env-completeness was already suppressed from an earlier run.
+    warn_state.should_emit("env-completeness", "missing:1", tmp_path)
 
     result = UpdateResult(
         success=True,
@@ -170,12 +170,36 @@ def test_suppressed_trailer_names_only_non_emitted_keys(tmp_path, capsys):
 
     assert rc == 0
     assert warn_state.SUPPRESSED_PREFIX in out
-    assert "redis-acl-drift" in out
+    assert "env-completeness" in out
     # gws-auth emitted this run — must NOT also appear in the trailer.
     trailer_line = next(
         line for line in out.splitlines() if line.strip().startswith(warn_state.SUPPRESSED_PREFIX)
     )
     assert "gws-auth" not in trailer_line
+
+
+def test_suppressed_trailer_lists_exactly_the_live_keys_when_none_emitted(tmp_path, capsys):
+    """Operator-visible-surface guard for issue #3004: a warn_state map
+    holding only keys live callers can still produce, with a run that
+    emitted none of them, must list exactly those keys in the trailer —
+    positively, not by asserting the absence of the retired ACL key."""
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    warn_state.should_emit("calendar-config", "misconfigured:1", tmp_path)
+    warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+    warn_state.should_emit("google-token", "expired:1", tmp_path)
+
+    result = UpdateResult(success=True, warnings=[], warn_keys_emitted=set())
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    trailer_line = next(
+        line for line in out.splitlines() if line.strip().startswith(warn_state.SUPPRESSED_PREFIX)
+    )
+    for key in ("calendar-config", "env-completeness", "google-token"):
+        assert key in trailer_line
 
 
 def test_no_trailer_when_all_active_keys_emitted_this_run(tmp_path, capsys):
