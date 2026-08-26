@@ -1721,8 +1721,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             # process keeps running on the previously validated config.
             config = replace(config, do_service_restart=False)
 
-    # Step 4.65: Reflections-registry import probe — green-light gate for
-    # service restart, on BOTH restart paths.
+    # Step 4.65: Reflections-registry import probe — green-light gate for the
+    # in-process service restart below and, via the sentinel, for
+    # `remote-update.sh`'s worker kickstart. See the #3029 note further down for
+    # the restart it does NOT reach.
     #
     # Why a gate at all: while `agent/sustainability.py` existed it was the
     # backstop, so a registry still naming the shim imported anyway. #2875
@@ -1786,21 +1788,27 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             f"{probe_gate.detail}",
         )
         config = replace(config, do_service_restart=False)
-        # One fault, one terminal signal. Through `remote-update.sh` this
-        # failure already exits 1 (REGISTRY_PROBE_OK=false -> RESTART_FAILED=1);
-        # without this line `run.py --full` reported the identical fault and
-        # exited 0, so whether a caller could detect it depended on the entry
-        # point. Set directly rather than relying on the `if v:` summary block,
-        # which is skipped under --quiet/--json.
-        result.success = False
+        # Deliberately a warning, NOT `result.success = False`. Escalating the
+        # ordinary probe failure here would destroy the mechanism it looks like
+        # it duplicates: `remote-update.sh` is `set -euo pipefail` and invokes
+        # this file bare, so a non-zero exit aborts the shell at that line and
+        # everything after it becomes unreachable — the sentinel latch, the
+        # `RESTART BLOCKED` operator line, the `RESTART_FAILED` accounting, and
+        # the bridge's deliberate exemption from a registry fault. The shell
+        # already turns this fault into a non-zero terminal exit by the designed
+        # route. The one failure that has no such route is handled below.
 
-    # A failing probe whose sentinel did not reach disk is the one shape that
-    # cannot be handled with a warning. `remote-update.sh` reads `[ -f ]`, so an
-    # absent sentinel is its green light, and it restarts the worker after this
-    # process has already exited. Escalating to `result.errors` makes `main()`
-    # return 1, and the shell's `set -e` aborts before the kickstart. A failing
-    # *clear* on the pass path is the harmless direction (a stale sentinel only
-    # over-blocks), so it stays a warning.
+    # A failing probe whose sentinel did not reach disk is the ONE shape that
+    # cannot be handled with a warning, and therefore the only in-process
+    # escalation in this step. `remote-update.sh` reads `[ -f ]`, so an absent
+    # sentinel is its green light, and it restarts the worker after this process
+    # has already exited — there is no other channel left to say "do not".
+    # Escalating to `result.errors` makes `main()` return 1 and the shell's
+    # `set -e` aborts before the kickstart. Losing the shell's own
+    # `RESTART BLOCKED` line is the accepted cost here: an abort with no
+    # kickstart beats a green gate. A failing *clear* on the pass path is the
+    # harmless direction (a stale sentinel only over-blocks), so it stays a
+    # warning.
     if not probe_gate.sentinel_recorded:
         sentinel = project_dir / reflections_callables.PROBE_SENTINEL
         if probe_gate.success:

@@ -38,8 +38,14 @@ resolve cleanly, reporting per file.
 Exits 0 when every `callable:` entry in every existing copy imports. Every copy
 is examined even after one fails, so a single run reports the whole verdict;
 the exit is non-zero if any copy failed, naming each offending file and entry —
-and a copy that declares no `callable:` entries at all counts as a failure,
-since an empty check is a silent pass that proves nothing.
+and a copy that EXISTS but declares no `callable:` entries counts as a failure,
+since an empty check of a real registry is a silent pass that proves nothing.
+
+"No registry copy exists at all" is a different thing and exits 0 with a
+warning. A machine that has not been installed yet has no callable that could
+contradict the claim, and failing there would block `/update`'s restart on a
+condition this probe has no evidence for — with no self-clearing path, which is
+the permanent-wedge shape this gate exists to avoid causing.
 
 Why this is committed rather than run ad hoc:
 `tests/unit/test_reflection_scheduler.py::test_all_callables_resolve` resolves
@@ -210,12 +216,22 @@ def main() -> int:
     copies = _registry_copies(_owning_checkout_root())
     existing = [p for p in copies if p.exists()]
     if not existing:
+        # Not a failure. This probe answers one question — "does every
+        # `callable:` still import?" — and with no registry there is no
+        # callable to contradict it. Failing here would gate `/update`'s
+        # service restart on a condition the probe has no evidence for, and
+        # since the sentinel has no self-clearing path that wedges the cycle
+        # every 30 minutes on a checkout that simply has not been installed
+        # yet: `config/reflections.yaml` is gitignored, `env_sync` has no
+        # in-repo fallback, and the vault is not a candidate under
+        # VALOR_LAUNCHD. Warn loudly and let the caller decide.
         print(
-            "FAIL: no reflections registry found; candidates were "
+            "WARN: no reflections registry found, so nothing was probed; candidates were "
             + ", ".join(str(p) for p in copies),
             file=sys.stderr,
         )
-        return 1
+        print(f"OK: no registry present; {BANNED_MODULE} import ban vacuously holds")
+        return 0
 
     # Every copy is examined even after one fails. An operator fixing a
     # multi-machine registry drift needs the whole verdict in one run, and it is

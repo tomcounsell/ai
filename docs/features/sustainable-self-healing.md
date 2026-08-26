@@ -116,7 +116,7 @@ In `config/reflections.yaml`, one-file-each under `reflections/agents/`:
   interval: 30
 
 - name: system-health-digest
-  execution_type: agent
+  callable: reflections.agents.system_health_digest.run
   interval: 86400
 ```
 

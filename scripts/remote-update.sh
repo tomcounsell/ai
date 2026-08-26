@@ -194,6 +194,12 @@ UPDATE_RUN_STARTED_AT=$(date +%s)
 # some other run, not a verdict about the code we just pulled. An unreadable
 # stat() on a file `[ -f ]` just proved exists is itself anomalous, so it fails
 # CLOSED (far-future mtime => treated as fresh => blocking) rather than open.
+#
+# The markers below are load-bearing: tests/unit/test_update_reflections_callables.py
+# slices this exact fragment out and executes it against fabricated sentinels to
+# prove the gate's DIRECTION, which no source-substring assertion can. Keep the
+# fragment self-contained — it may read only PROJECT_DIR and UPDATE_RUN_STARTED_AT.
+# >>> registry-probe-latch
 REGISTRY_PROBE_OK=true
 REGISTRY_PROBE_SENTINEL="$PROJECT_DIR/data/registry-probe-failed"
 if [ -f "$REGISTRY_PROBE_SENTINEL" ]; then
@@ -204,6 +210,7 @@ if [ -f "$REGISTRY_PROBE_SENTINEL" ]; then
         echo "[update] Ignoring registry-probe sentinel from before this cycle's run.py (stale)"
     fi
 fi
+# <<< registry-probe-latch
 
 # ── Unload legacy reflections launchd service (issue #748) ───────────
 # The com.valor.reflections launchd service has been deleted (scripts/reflections.py
@@ -258,19 +265,24 @@ WORKER_STATE="worker current"
 VERIFY_SINCE=0
 
 # REGISTRY_PROBE_OK (issue #2875) was latched right after run.py, above. Its
-# exact reach, since the obvious reading is wrong: it gates the WORKER_LABEL
-# kickstart below and nothing else. It does NOT gate the bridge kickstart later
-# in this script, and the process that actually loads the reflections registry
-# is neither of those — it is com.valor.reflection-worker, whose only
-# (re)install is run.py Step 5's service.install_reflection_worker, suppressed
-# in-process by Step 4.65's own do_service_restart=False.
+# exact reach, since the obvious reading is wrong. There are three kickstarts
+# in this script and it gates exactly one:
+#   - the normal WORKER_LABEL kickstart (the NEED_RESTART branch below) — GATED;
+#   - the WORKER_LABEL recovery kickstart in the label-absent branch — ungated
+#     by design, because nothing is running there to preserve, and a worker up
+#     with broken reflections beats a worker that is down;
+#   - the BRIDGE_LABEL kickstart near the end — ungated by design: the bridge
+#     neither reads the registry nor shares its config surface, and freezing
+#     chat I/O is the wrong response to a registry fault.
+# The process that actually loads the reflections registry is none of the
+# three — it is com.valor.reflection-worker, whose only (re)install is run.py
+# Step 5's service.install_reflection_worker, suppressed in-process by Step
+# 4.65's own do_service_restart=False. See #3029 for the cron-path gap.
 #
 # So this particular gate buys one narrow thing: a machine whose registry does
 # not import is in an unknown config state, so we decline to advance the worker
 # onto newly pulled code and instead give the failure a loud line and a
-# non-zero terminal exit, same posture as RESTART_FAILED above. The bridge is
-# deliberately exempt — it neither reads the registry nor shares the config
-# surface, and freezing chat I/O is the wrong response to a registry fault.
+# non-zero terminal exit, same posture as RESTART_FAILED above.
 
 # ── Reload worker plist if present ───────────────────────────────────
 # Only restart the worker when the pull actually landed new commits that touch

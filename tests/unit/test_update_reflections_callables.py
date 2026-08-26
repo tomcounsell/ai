@@ -271,17 +271,95 @@ def test_probe_subprocess_forces_launchd_candidate_set(tmp_path, monkeypatch):
     assert "PATH" in env, "the override must extend os.environ, not replace it"
 
 
-def test_remote_update_shell_ignores_a_sentinel_older_than_this_cycle():
-    """Pin the freshness backstop: the shell must not honor an out-of-band stamp.
+_LATCH_START = "# >>> registry-probe-latch"
+_LATCH_END = "# <<< registry-probe-latch"
 
-    `run.py --verify` also runs Step 4.65 and is outside remote-update.sh's
-    lockfile, so a bare `[ -f ]` read would let a stamp from an unrelated run
-    block a later cycle indefinitely.
+
+def _latch_fragment() -> str:
+    """Slice the live `REGISTRY_PROBE_OK` latch out of `remote-update.sh`.
+
+    Executing the real fragment is the point. A substring assertion over the
+    shell source passes just as happily when the comparison is inverted and the
+    `stat` fallback is flipped open, which is precisely the direction that
+    matters and precisely what this file's other guards are held to.
     """
     shell = (_REPO_ROOT / "scripts" / "remote-update.sh").read_text()
+    assert _LATCH_START in shell and _LATCH_END in shell, (
+        "the registry-probe latch markers are load-bearing; tests slice the fragment "
+        "between them out of remote-update.sh"
+    )
+    return shell.split(_LATCH_START, 1)[1].split(_LATCH_END, 1)[0]
 
-    assert "UPDATE_RUN_STARTED_AT" in shell
-    assert "REGISTRY_PROBE_MTIME" in shell, "the sentinel read must be mtime-bounded"
+
+def _run_latch(project_dir: Path, started_at: int, *, break_stat: bool = False) -> bool:
+    """Execute the latch fragment and return the resulting REGISTRY_PROBE_OK."""
+    import subprocess
+
+    preamble = "stat() { return 1; }\n" if break_stat else ""
+    script = (
+        "set -euo pipefail\n"
+        f'PROJECT_DIR="{project_dir}"\n'
+        f"UPDATE_RUN_STARTED_AT={started_at}\n"
+        f"{preamble}"
+        f"{_latch_fragment()}\n"
+        # Last line only: the stale branch legitimately echoes an operator line
+        # to stdout before this one.
+        'printf "VERDICT=%s\\n" "$REGISTRY_PROBE_OK"\n'
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    verdicts = [ln for ln in proc.stdout.splitlines() if ln.startswith("VERDICT=")]
+    assert len(verdicts) == 1, proc.stdout
+    return verdicts[0] == "VERDICT=true"
+
+
+def _stamp_sentinel(project_dir: Path, mtime: int) -> Path:
+    import os
+
+    path = project_dir / PROBE_SENTINEL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("registry callables did not import\n")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_shell_latch_blocks_on_a_sentinel_from_this_cycle(tmp_path):
+    """The gate's whole purpose: a fresh failing verdict must block the restart."""
+    started = 1_700_000_000
+    _stamp_sentinel(tmp_path, started + 5)
+
+    assert _run_latch(tmp_path, started) is False
+
+
+def test_shell_latch_ignores_a_sentinel_older_than_this_cycle(tmp_path):
+    """`run.py --verify` also runs Step 4.65 and ignores remote-update.sh's lock.
+
+    Without the mtime bound, a stamp it left behind would block every later
+    cycle indefinitely, since nothing clears the sentinel except a passing probe.
+    """
+    started = 1_700_000_000
+    _stamp_sentinel(tmp_path, started - 3600)
+
+    assert _run_latch(tmp_path, started) is True
+
+
+def test_shell_latch_greenlights_when_no_sentinel_exists(tmp_path):
+    """Absence is the pass signal — the direction that makes the write path risky."""
+    (tmp_path / "data").mkdir()
+
+    assert _run_latch(tmp_path, 1_700_000_000) is True
+
+
+def test_shell_latch_fails_closed_when_stat_is_unreadable(tmp_path):
+    """An unreadable mtime on a file `[ -f ]` just proved exists must block.
+
+    The earlier `|| echo 0` fell back to a value that can never satisfy `-ge`,
+    so an anomalous `stat` silently discarded a real failing verdict as stale.
+    """
+    started = 1_700_000_000
+    _stamp_sentinel(tmp_path, started + 5)
+
+    assert _run_latch(tmp_path, started, break_stat=True) is False
 
 
 def test_remote_update_shell_consults_the_same_sentinel():
