@@ -23,10 +23,13 @@ object graph cannot show — the **git index** and the **tracked source text**.
 
 ## What it pins
 
-Two tables. Row counts and exemption-set sizes are deliberately absent from this
-document: they live in the tables themselves, they change whenever the guard is
-extended, and prose does not. Do not reintroduce them here — a count that a
-reader can get from the code is a count that will be wrong.
+Two tables. Row counts and exemption-set sizes are deliberately absent from
+every prose surface that describes this guard — this document, the
+`docs/features/README.md` index row, and the pull-request body that ships a
+change to it. They live in the tables themselves, they change whenever the
+guard is extended, and prose does not. Do not reintroduce them anywhere: a
+count a reader can get from the code is a count that will eventually be wrong,
+and the wrong copy is the one people trust.
 
 **`BANNED_MODULES`.** The bridge-side session-log shim and the reflections model
 shim, both deleted by #2872. Each row carries the module's import path, its file
@@ -173,9 +176,9 @@ the qualifier matters: this repo has **no pytest CI workflow**
 `/do-test` is a pipeline convention rather than a mechanical gate. A commit
 landed through the sanctioned hotfix path — direct to `main`, no pull request —
 runs `.githooks/pre-commit`, `.githooks/commit-msg` and `.githooks/pre-push`,
-none of which invokes pytest, so it never runs this guard. Closing that residual gap requires a
-GitHub Actions workflow with a Redis service container, which is out of scope
-for the guard itself.
+none of which invokes pytest, so it never runs this guard. Closing that
+residual gap requires a GitHub Actions workflow with a Redis service
+container, which is out of scope for the guard itself.
 
 ## Related
 
