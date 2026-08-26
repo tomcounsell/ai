@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -164,12 +163,10 @@ class UpdateResult:
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
     # Untyped (`object`, not the concrete dataclass) so `run.py` never needs
-    # a module-level import of `scripts.update.redis_flush_guard_pth` or
-    # `scripts.update.redis_acl` -- both steps below import lazily so a
-    # missing module degrades to a warning, never an ImportError at
-    # `/update` start (#2645).
+    # a module-level import of `scripts.update.redis_flush_guard_pth` --
+    # this step imports lazily so a missing module degrades to a warning,
+    # never an ImportError at `/update` start (#2645).
     redis_flush_guard_install_results: object | None = None
-    redis_acl_result: object | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
@@ -1574,67 +1571,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
         _append_warning(result, f"Redis durability: unexpected error: {_rp_exc}")
-
-    # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
-    # Immediately after Step 3.13 durability, before Step 3.14 replication.
-    # The planner is called with NO ARGUMENTS -- never with the apply flag
-    # set, never a forwarded params.apply, never any global arming flag.
-    # (Spelled in prose deliberately: the plan's anti-criterion greps this
-    # file's source for the armed spelling, so quoting the token here would
-    # turn that gate red on correct code.) `/update` must
-    # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
-    # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
-    # mutation landing silently in an unrelated PR is exactly the failure
-    # Risk 8 exists to prevent. A regression test asserts this call site
-    # passes no `apply` argument, so keep the call literally
-    # `apply_redis_acl()`. Imported lazily so a missing module (this file
-    # can land before scripts/update/redis_acl.py does) degrades to a
-    # logged skip, never an ImportError at `/update` start. Same non-fatal
-    # contract as 3.13/3.14: log, warn, continue.
-    log("Checking Redis ACL drift (report-only)...", v)
-    try:
-        from scripts.update import redis_acl
-
-        result.redis_acl_result = redis_acl.apply_redis_acl()
-        ra = result.redis_acl_result
-        if ra.success:
-            if ra.drift:
-                log(
-                    "Redis ACL: drift detected — planned commands: "
-                    + "; ".join(ra.planned_commands),
-                    v,
-                    always=True,
-                )
-                # Human-gated (double-gated apply, #2645 Risk 8): one
-                # emission per state transition. The signature is a digest
-                # of the planned commands (which already carry the
-                # <REDIS_APP_PASSWORD> placeholder, never a real secret),
-                # so any change in the drift's content re-warns (#2845).
-                digest = hashlib.sha256("; ".join(ra.planned_commands).encode()).hexdigest()[:16]
-                if warn_state.should_emit("redis-acl-drift", f"drift:{digest}", project_dir):
-                    _append_warning(
-                        result,
-                        "Redis ACL drift detected — see "
-                        "docs/features/redis-flush-hardening.md for the apply runbook",
-                    )
-                    result.warn_keys_emitted.add("redis-acl-drift")
-            else:
-                log("Redis ACL: no drift", v)
-                # Resolution: clear stored state and emit one resolved note
-                # so a later regression to a *different* drift warns again.
-                if warn_state.should_emit("redis-acl-drift", "", project_dir):
-                    log("Redis ACL: resolved", v, always=True)
-            if ra.warning:
-                log(f"WARN: Redis ACL: {ra.warning}", v, always=True)
-                _append_warning(result, f"Redis ACL: {ra.warning}")
-        else:
-            log(f"WARN: Redis ACL check: {ra.error}", v, always=True)
-            _append_warning(result, f"Redis ACL check: {ra.error}")
-    except ImportError:
-        log("Redis ACL: module not present yet, skipping", v)
-    except Exception as _acl_exc:
-        log(f"WARN: Redis ACL step failed unexpectedly: {_acl_exc}", v, always=True)
-        _append_warning(result, f"Redis ACL: unexpected error: {_acl_exc}")
 
     # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
     # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this

@@ -552,20 +552,6 @@ class RedisSettings(BaseModel):
         description="Redis connection URL (env: REDIS_URL)",
     )
 
-    # Layer 2 ACL credential (issue #2645, D8/D8a). Defaults to "" so
-    # Settings() never fails on a machine without the secret -- the report
-    # path of scripts/update/redis_acl.py plans against a literal
-    # <REDIS_APP_PASSWORD> placeholder regardless of whether this is set,
-    # and only the human-gated apply path (scripts.update.redis_acl --apply)
-    # reads it. Not in .env.example on purpose (Finding 4, round-3 critique):
-    # a placeholder there would trip scripts/update/verify.py's
-    # check_env_completeness on every machine for a credential this PR never
-    # reads. Ships in the follow-up #2661 rotation PR instead.
-    app_password: str = Field(
-        default="",
-        description="Password for the valor-app Redis ACL user (env: REDIS_APP_PASSWORD)",
-    )
-
     @field_validator("url")
     @classmethod
     def validate_url(cls, v):

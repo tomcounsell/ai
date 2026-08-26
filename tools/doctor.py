@@ -1258,77 +1258,18 @@ def _check_redis_flush_guard() -> CheckResult:
         )
 
 
-def _check_redis_acl() -> CheckResult:
-    """Report Redis ACL drift against the target ``valor-app`` rule set (#2645, D8).
-
-    Report-only, mirroring ``/update`` Step 3.135. ``/update`` cannot fix ACL
-    drift by design -- the apply is a human-signed runbook step -- so the
-    remediation here is the runbook, never ``/update``. Imports
-    ``scripts.update.redis_acl`` lazily: a missing module (this check can
-    land before that planner does) or an unreachable Redis is a non-fatal
-    skip, never a crash.
-    """
-    name = "redis_acl"
-    category = "Services"
-    try:
-        from scripts.update.redis_acl import apply_redis_acl
-    except Exception as e:
-        return CheckResult(
-            name=name,
-            category=category,
-            passed=True,
-            message=f"redis_acl planner not available yet: {e}",
-        )
-
-    try:
-        acl_result = apply_redis_acl()
-    except Exception as e:
-        return CheckResult(
-            name=name,
-            category=category,
-            passed=True,
-            message=f"redis_acl check could not run: {e}",
-        )
-
-    if not acl_result.success:
-        return CheckResult(
-            name=name,
-            category=category,
-            passed=True,
-            message=f"redis_acl check skipped: {acl_result.error}",
-        )
-
-    if acl_result.drift:
-        return CheckResult(
-            name=name,
-            category=category,
-            passed=False,
-            message=(
-                f"Redis ACL drift detected ({len(acl_result.planned_commands)} command(s) planned)"
-            ),
-            fix="See the apply runbook: docs/features/redis-flush-hardening.md",
-        )
-
-    return CheckResult(
-        name=name,
-        category=category,
-        passed=True,
-        message="Redis ACL matches target rule set (no drift)",
-    )
-
-
 def _check_gws_auth() -> CheckResult:
     """Report Google Workspace CLI (`gws`) auth state (#2845).
 
     This is the retrieval half of the `gws-auth` warn_state suppression: an
     unauthenticated `gws` warns once via `/update`'s `warn_state` routing
     and then goes silent (Risk 4). `python -m tools.doctor` (full run) is
-    the on-demand answer for "is it still unauthenticated?". Mirrors
-    ``_check_redis_acl`` shape for shape. Imports
+    the on-demand answer for "is it still unauthenticated?". Imports
     ``scripts.update.gws_auth`` lazily: a machine without the module
-    degrades to a passing skip, never a crash. ``configure_gws_auth`` is
-    already cron-safe -- it runs `gws auth status` and reports, never
-    initiating OAuth.
+    degrades to a passing skip, never a crash -- the same lazy-import-and-
+    degrade pattern this file uses for every optional-module check.
+    ``configure_gws_auth`` is already cron-safe -- it runs `gws auth status`
+    and reports, never initiating OAuth.
     """
     name = "gws"
     category = "Services"
@@ -2183,7 +2124,6 @@ def get_checks(
         _check_redis_durability,
         _check_redis_replication_health,
         _check_redis_flush_guard,
-        _check_redis_acl,
         _check_session_archive_freshness,
         _check_agentsession_index_drift,
         _check_knowledge_zero_chunk_documents,
@@ -2215,11 +2155,11 @@ def get_checks(
         # backs the opt-in pre-push hook, and gws's condition clears only
         # through a human completing browser OAuth consent -- registering it
         # unconditionally would give an unauthenticated machine a
-        # permanently blocked `git push`. Anchor on `_check_redis_acl`
+        # permanently blocked `git push`. Anchor on `_check_redis_flush_guard`
         # (a member of the unconditional list above), never on
         # `_check_catchup_kill_switch` (itself inserted by this same block,
         # which would make the insert order-dependent).
-        checks.insert(checks.index(_check_redis_acl) + 1, _check_gws_auth)
+        checks.insert(checks.index(_check_redis_flush_guard) + 1, _check_gws_auth)
 
     if quality:
         checks.extend(
