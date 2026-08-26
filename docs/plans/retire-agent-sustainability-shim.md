@@ -530,8 +530,11 @@ Four files carry live references. Counts verified at plan time
 
 ### Inline Documentation
 - [ ] `reflections/redis_access.py` module docstring states why the pair is
-      centralized: seven copies existed and `tests/unit/test_default_project_key_consistency.py`
-      was the guardrail against their drift.
+      centralized: six byte-identical copies existed (the shim plus the five
+      `reflections/agents/*.py` modules), alongside a pair of shim-delegating
+      wrappers in `reflections/stall_advisory.py`, and
+      `tests/unit/test_default_project_key_consistency.py` was the guardrail
+      against their drift.
 - [ ] `agent/agent_session_queue.py:948` docstring stops naming the deleted file.
 - [ ] `scripts/update/run.py:1048` Step 1.659 comment reworded (see Update System).
 
