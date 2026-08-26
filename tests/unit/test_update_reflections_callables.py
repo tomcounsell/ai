@@ -129,7 +129,16 @@ def test_probe_catches_the_false_green_the_migration_reports_as_noop(tmp_path, m
     # The probe is not.
     monkeypatch.setenv("REFLECTIONS_YAML", str(broken))
     monkeypatch.setenv("VALOR_LAUNCHD", "1")  # skip the vault: keeps this hermetic
-    probe = run_registry_probe(_REPO_ROOT)
+
+    # project_dir is a tmp dir, never _REPO_ROOT: a failing probe stamps
+    # data/registry-probe-failed, and that is the live control-plane file
+    # scripts/remote-update.sh reads to decide whether to block the worker
+    # restart. Pointing this at the real checkout makes a *passing* test run
+    # leave a stray blocking sentinel behind on the developer's machine. The
+    # probe script itself is still found via the helper's own repo root.
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    probe = run_registry_probe(fake_repo)
 
     assert probe.success is False
     assert "agent.sustainability" in probe.detail
@@ -182,6 +191,64 @@ def test_missing_probe_script_fails_closed(tmp_path, monkeypatch):
 
     assert result.success is False
     assert "probe script missing" in result.detail
+
+
+def test_unstampable_failure_sentinel_is_reported_not_swallowed(tmp_path, monkeypatch):
+    """The false-green hazard: probe fails, sentinel cannot be written.
+
+    `remote-update.sh` reads `[ -f ]`, so an ABSENT sentinel is its green light.
+    A swallowed write error on the failure path therefore produces exactly the
+    pass the gate exists to prevent. `sentinel_recorded=False` is how that
+    crosses back to `run.py`, which escalates it to a non-zero exit.
+    """
+    broken = _write_flow_style_registry(
+        tmp_path / "reflections.yaml", "agent.sustainability.session_count_throttle"
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(broken))
+    monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+    fake_repo = tmp_path / "repo"
+    data_dir = fake_repo / "data"
+    data_dir.mkdir(parents=True)
+    data_dir.chmod(0o500)  # readable + traversable, not writable
+    try:
+        result = run_registry_probe(fake_repo)
+    finally:
+        data_dir.chmod(0o700)
+
+    assert result.success is False
+    assert result.sentinel_recorded is False
+    assert not (fake_repo / PROBE_SENTINEL).exists()
+
+
+def test_writable_failure_sentinel_reports_recorded(tmp_path, monkeypatch):
+    """Green control for the case above: same failure, writable data/ dir."""
+    broken = _write_flow_style_registry(
+        tmp_path / "reflections.yaml", "agent.sustainability.session_count_throttle"
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(broken))
+    monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    result = run_registry_probe(fake_repo)
+
+    assert result.success is False
+    assert result.sentinel_recorded is True
+    assert (fake_repo / PROBE_SENTINEL).exists()
+
+
+def test_remote_update_shell_ignores_a_sentinel_older_than_this_cycle():
+    """Pin the freshness backstop: the shell must not honor an out-of-band stamp.
+
+    `run.py --verify` also runs Step 4.65 and is outside remote-update.sh's
+    lockfile, so a bare `[ -f ]` read would let a stamp from an unrelated run
+    block a later cycle indefinitely.
+    """
+    shell = (_REPO_ROOT / "scripts" / "remote-update.sh").read_text()
+
+    assert "UPDATE_RUN_STARTED_AT" in shell
+    assert "REGISTRY_PROBE_MTIME" in shell, "the sentinel read must be mtime-bounded"
 
 
 def test_remote_update_shell_consults_the_same_sentinel():

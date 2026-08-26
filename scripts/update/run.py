@@ -1813,8 +1813,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # probe always runs; `run_registry_probe` stamps `data/registry-probe-
     # failed`, which `remote-update.sh` consults before its own kickstart, and
     # a failure additionally suppresses the in-process restart below (same
-    # posture as Steps 4.6/4.7: leave the running worker on the registry it
-    # already resolved).
+    # posture as Steps 4.6/4.7).
+    #
+    # What `do_service_restart=False` does and does not buy: it skips the
+    # in-process `service.install_*` calls, including
+    # `install_reflection_worker`, which is the one that reloads the registry.
+    # It does NOT universally mean "nothing restarts" — on `--full` with commits
+    # pulled, Step 8's `git.set_restart_requested()` still fires and the worker
+    # self-exits into a launchd relaunch, ungated. That is harmless here because
+    # `com.valor.worker` never loads the reflections registry; the process that
+    # does is `com.valor.reflection-worker`, and its (re)install is exactly what
+    # this flag suppresses. Steps 4.6/4.7 share the shape.
     log("Probing reflections-registry callables for importability...", v)
     result.registry_probe_result = reflections_callables.run_registry_probe(project_dir)
     probe_gate = result.registry_probe_result
@@ -1833,6 +1842,35 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             f"{probe_gate.detail}",
         )
         config = replace(config, do_service_restart=False)
+
+    # A failing probe whose sentinel did not reach disk is the one shape that
+    # cannot be handled with a warning. `remote-update.sh` reads `[ -f ]`, so an
+    # absent sentinel is its green light, and it restarts the worker after this
+    # process has already exited. Escalating to `result.errors` makes `main()`
+    # return 1, and the shell's `set -e` aborts before the kickstart. A failing
+    # *clear* on the pass path is the harmless direction (a stale sentinel only
+    # over-blocks), so it stays a warning.
+    if not probe_gate.sentinel_recorded:
+        sentinel = project_dir / reflections_callables.PROBE_SENTINEL
+        if probe_gate.success:
+            _append_warning(
+                result,
+                f"registry probe passed but could not clear {sentinel}; "
+                f"the next update's restart will be blocked until it is removed",
+            )
+        else:
+            _append_error(
+                result,
+                f"registry probe FAILED and could not stamp {sentinel} — "
+                f"the shell half of /update would read the absent sentinel as a pass "
+                f"and restart the worker onto an unresolvable registry. "
+                f"Aborting instead: {probe_gate.detail}",
+            )
+            # Set directly, not via the `if v:` summary block at the end of
+            # `run_update`: that block is skipped under --quiet/--json, and
+            # this failure must produce a non-zero exit on every invocation
+            # shape. Matches the other hard-error sites in this file.
+            result.success = False
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or

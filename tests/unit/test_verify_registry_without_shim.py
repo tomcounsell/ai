@@ -87,6 +87,64 @@ class TestRegistryCopiesMirrorsDefaultTargets:
         assert with_owner == base + [tmp_path / "config" / "reflections.yaml"]
 
 
+class TestRegistryCopiesCoversTheScheduler:
+    """The probe's set must contain whatever the *scheduler* would actually read.
+
+    `default_targets()` is the set the migration REWRITES;
+    `_resolve_registry_path()` is the single path the running scheduler LOADS.
+    Pinning only against the former leaves the probe free to drift away from the
+    latter — a future level 5 would be silently unprobed with every mirror test
+    still green, which is the exact failure this file's docstring names.
+
+    These assert the containment directly, by asking the real resolver what it
+    picks on this machine and requiring the probe to have enumerated it. That
+    also covers the resolver's exhausted-candidates fallback, which returns the
+    level-3 path unchanged.
+    """
+
+    @staticmethod
+    def _assert_covered(probe):
+        from agent.reflection_scheduler import _owning_checkout_root, _resolve_registry_path
+
+        resolved = _resolve_registry_path()
+        copies = probe._registry_copies(_owning_checkout_root())
+        assert resolved.expanduser() in copies, (
+            f"the scheduler would load {resolved}, which the probe does not check; "
+            f"probed set was {copies}"
+        )
+
+    def test_clean_env(self, probe):
+        self._assert_covered(probe)
+
+    def test_launchd(self, probe, monkeypatch):
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        self._assert_covered(probe)
+
+    def test_explicit_override(self, probe, monkeypatch, tmp_path):
+        override = _write(tmp_path / "r.yaml", "reflections: []\n")
+        monkeypatch.setenv("REFLECTIONS_YAML", str(override))
+        self._assert_covered(probe)
+
+    def test_level_count_is_pinned(self, probe):
+        """A level added to the resolver must be added to the probe too.
+
+        The behavioral checks above only exercise whichever level wins on THIS
+        machine. This one is structural: it counts the numbered levels in the
+        resolver's own priority list, which is what a maintainer edits when
+        adding one, and fails if the probe's documented count no longer matches.
+        """
+        import re
+
+        from agent.reflection_scheduler import _resolve_registry_path
+
+        levels = re.findall(r"^\s*(\d+)\. ", _resolve_registry_path.__doc__ or "", re.MULTILINE)
+        assert levels == ["1", "2", "3", "4"], (
+            "agent.reflection_scheduler._resolve_registry_path grew or lost a level; "
+            "scripts/verify_registry_without_shim.py::_registry_copies mirrors levels 1-4 "
+            "and must be updated in lockstep"
+        )
+
+
 def _write(path: Path, text: str) -> Path:
     path.write_text(text)
     return path

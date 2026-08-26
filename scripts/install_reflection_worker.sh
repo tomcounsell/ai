@@ -142,6 +142,26 @@ if ! VALOR_LAUNCHD=1 "$PROJECT_DIR/.venv/bin/python" -m reflections --dry-run 2>
     exit 1
 fi
 
+# ── Registry callables must resolve, against the bytes we just wrote ──────
+# --dry-run above is NOT sufficient: scheduler.load() parses the registry but
+# never calls _resolve_callable (that happens at execution time inside
+# run_reflection's broad except, where an ImportError becomes a silent
+# state.last_error). Only this probe imports every `callable:` entry.
+#
+# Why it must run HERE and not only at run.py Step 4.65: Step 4.65 validates,
+# and then the _copy_config_file + tools.reflection_machine_filter block above
+# REWRITES config/reflections.yaml during Step 5. Probed bytes were not the
+# loaded bytes. Running the probe after the last write closes that ordering,
+# and VALOR_LAUNCHD=1 makes the probed candidate set identical to the one the
+# launchd subprocess resolves (vault skipped, config/ copy used) — the
+# dependency the round-3 review found was incidental rather than stated.
+echo "Verifying reflection registry callables resolve..."
+if ! VALOR_LAUNCHD=1 "$PROJECT_DIR/.venv/bin/python" \
+    "$PROJECT_DIR/scripts/verify_registry_without_shim.py"; then
+    echo "ERROR: reflection registry callables did not resolve. Fix the registry before installing."
+    exit 1
+fi
+
 # Unload current version if present
 if launchctl list | grep -q "$LABEL"; then
     echo "Unloading existing $LABEL..."

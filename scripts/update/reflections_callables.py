@@ -170,20 +170,38 @@ class RegistryProbeResult:
             registry copy imported with ``agent.sustainability`` banned.
         detail: The probe's own summary line on success, or its stderr /
             an invocation error on failure. Rendered verbatim by ``run.py``.
+        sentinel_recorded: ``True`` iff the on-disk sentinel now matches
+            ``success``. False means the shell half of ``/update`` will read a
+            verdict this one does not agree with; see
+            :func:`_write_probe_sentinel` for why only one direction is safe.
     """
 
     success: bool
     detail: str
+    sentinel_recorded: bool = True
 
 
-def _write_probe_sentinel(project_dir: Path, failed: bool) -> None:
+def _write_probe_sentinel(project_dir: Path, failed: bool) -> bool:
     """Record the probe verdict where ``scripts/remote-update.sh`` can read it.
 
-    Never raises: a sentinel we could not write must not abort ``/update``.
-    The shell's own read is `[ -f ]`, so an unwritable sentinel degrades to
-    "no signal" rather than to a false pass — the write happens on the failure
-    path, and the removal (the pass path) is what a failure to write would
-    turn into a spurious block, never a spurious green.
+    Returns ``True`` iff the sentinel on disk now matches ``failed``.
+
+    The shell's read is ``[ -f "$PROJECT_DIR/data/registry-probe-failed"]``, so
+    **presence is the blocking state and absence is the green one**. That single
+    fact fixes which write direction is dangerous:
+
+    - Failure path (``failed=True``, create). A write that does not land leaves
+      the file absent, which the shell reads as green — a **false pass**, and
+      the worker gets restarted onto a registry that cannot import. Caller must
+      escalate; ``run.py`` Step 4.65 turns a ``False`` return into a
+      ``result.errors`` entry, which makes ``run.py`` exit non-zero and
+      ``set -e`` abort ``remote-update.sh`` before its kickstart.
+    - Pass path (``failed=False``, unlink). A removal that does not land leaves
+      the file present, which the shell reads as blocked — a spurious block.
+      Safe, so it is reported but not escalated.
+
+    Never raises: an OSError here must not abort ``/update`` with a traceback.
+    The return value, not an exception, is how the caller learns about it.
     """
     path = Path(project_dir) / PROBE_SENTINEL
     try:
@@ -194,6 +212,10 @@ def _write_probe_sentinel(project_dir: Path, failed: bool) -> None:
             path.unlink(missing_ok=True)
     except OSError:
         pass
+    # Confirm against the filesystem rather than trusting the absence of an
+    # exception: the directory could be read-only, the write could have been
+    # made to a path the shell does not read, or an unlink could have raced.
+    return path.exists() is failed
 
 
 def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
@@ -214,7 +236,10 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
 
     Side effect: writes/clears the ``data/registry-probe-failed`` sentinel so
     the shell half of the update (``scripts/remote-update.sh``, which restarts
-    the worker after ``run.py`` exits) can consult the same verdict.
+    the worker after ``run.py`` exits) can consult the same verdict. Whether
+    that landed is reported as ``sentinel_recorded``; a failing probe whose
+    sentinel did not land is a false green for the shell and the caller must
+    escalate it.
 
     Never raises. An invocation failure (missing script, timeout) is reported
     as ``success=False`` — fail-closed, because the probe not running proves
@@ -253,14 +278,16 @@ def run_registry_probe(project_dir: Path) -> RegistryProbeResult:
         err = (proc.stderr or proc.stdout or "").strip()
         return _probe_failure(project_dir, err[-500:] or f"exit code {proc.returncode}")
 
-    _write_probe_sentinel(project_dir, failed=False)
+    recorded = _write_probe_sentinel(project_dir, failed=False)
     summary = (proc.stdout or "").strip().splitlines()
     return RegistryProbeResult(
-        success=True, detail=summary[-1].strip() if summary else "registry callables resolved"
+        success=True,
+        detail=summary[-1].strip() if summary else "registry callables resolved",
+        sentinel_recorded=recorded,
     )
 
 
 def _probe_failure(project_dir: Path, detail: str) -> RegistryProbeResult:
     """Stamp the sentinel and return the failing result — one place, one order."""
-    _write_probe_sentinel(project_dir, failed=True)
-    return RegistryProbeResult(success=False, detail=detail)
+    recorded = _write_probe_sentinel(project_dir, failed=True)
+    return RegistryProbeResult(success=False, detail=detail, sentinel_recorded=recorded)

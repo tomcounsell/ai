@@ -35,10 +35,11 @@ enumeration `scripts/migrate_reflections_callables.py::default_targets()`
 rewrites, plus the owning-checkout level) and requires every copy that EXISTS to
 resolve cleanly, reporting per file.
 
-Exits 0 when every `callable:` entry in every existing copy imports. Exits
-non-zero on the first failure, naming the offending file and entry — and also
-when a copy declares no `callable:` entries at all, since an empty check is a
-silent pass that proves nothing.
+Exits 0 when every `callable:` entry in every existing copy imports. Every copy
+is examined even after one fails, so a single run reports the whole verdict;
+the exit is non-zero if any copy failed, naming each offending file and entry —
+and a copy that declares no `callable:` entries at all counts as a failure,
+since an empty check is a silent pass that proves nothing.
 
 Why this is committed rather than run ad hoc:
 `tests/unit/test_reflection_scheduler.py::test_all_callables_resolve` resolves
@@ -216,13 +217,27 @@ def main() -> int:
         )
         return 1
 
+    # Every copy is examined even after one fails. An operator fixing a
+    # multi-machine registry drift needs the whole verdict in one run, and it is
+    # what makes `_check_copy`'s "would otherwise hide the verdict on every copy
+    # after this one" rationale for catching read errors actually true.
     total = 0
+    failed: list[Path] = []
     for registry_path in existing:
         checked = _check_copy(registry_path, yaml, _resolve_callable)
         if checked is None:
-            return 1
+            failed.append(registry_path)
+            continue
         print(f"  OK: {checked} callables resolved in {registry_path}")
         total += checked
+
+    if failed:
+        print(
+            f"FAIL: {len(failed)} of {len(existing)} registry copy(ies) did not resolve: "
+            + ", ".join(str(p) for p in failed),
+            file=sys.stderr,
+        )
+        return 1
 
     skipped = [p for p in copies if not p.exists()]
     if skipped:
