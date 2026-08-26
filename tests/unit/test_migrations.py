@@ -433,11 +433,13 @@ class TestBackfillJobLastActiveScores:
 
 
 class TestClearOrphanedWarnStateKey:
-    """One-shot cleanup of the ``redis-acl-drift`` warn_state key orphaned by
-    the deletion of the server-side Redis ACL layer (issue #3004).
+    """One-shot cleanup of the warn_state key (``_ORPHANED_WARN_KEY``) orphaned
+    by the deletion of the server-side access-control layer (issue #3004).
 
     Hermetic ``tmp_path`` cases only -- no Redis, no Popoto. The migration
     touches a single gitignored JSON file via ``scripts.update.warn_state``.
+    The literal key string is imported from ``scripts.update.migrations``
+    rather than repeated here, so this file carries no ACL-flavored token.
     """
 
     def test_pops_the_orphaned_key_and_leaves_live_keys_byte_for_byte(self, tmp_path):

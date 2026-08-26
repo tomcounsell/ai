@@ -28,7 +28,7 @@ python -m tools.doctor --install-hook  # Install git pre-push hook
 | Category | Checks | Source |
 |----------|--------|--------|
 | Environment | Python version, system tools, Python deps, dev tools | `scripts/update/verify.py` |
-| Services | Redis connectivity, bridge running, worker running, Redis ACL drift (report-only), Google Workspace CLI (`gws`) auth state | `monitoring/health.py`, `scripts/update/service.py`, `scripts/update/redis_acl.py`, `scripts/update/gws_auth.py` |
+| Services | Redis connectivity, bridge running, worker running, Google Workspace CLI (`gws`) auth state | `monitoring/health.py`, `scripts/update/service.py`, `scripts/update/gws_auth.py` |
 | Auth | Telegram session, API keys, SDK auth | `scripts/update/verify.py`, `monitoring/health.py` |
 | Resources | Disk space | `monitoring/health.py` |
 | Quality | Ruff lint, ruff format, pytest (opt-in via `--quality`) | subprocess |
