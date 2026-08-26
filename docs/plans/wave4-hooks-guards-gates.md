@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/2736
 last_comment_id: none
 covers: [2779, 2736, 3021, 2715]
 revision_applied: true
-revision_applied_at: 2026-08-26T13:21:48Z
+revision_applied_at: 2026-08-26T13:44:00Z
 ---
 
 # Wave 4 — Hooks, Guards, and Gate Authoring Discipline
@@ -185,9 +185,13 @@ The four spikes below were executed as code-reads and live predicate invocations
   validator with no shared home. `validate_no_uv_sync_in_worktree.py:64-124` is a third,
   near-verbatim copy of the splitting logic.
 - **Confidence**: high
-- **Impact on plan**: the seam task becomes **lift and unify**, not greenfield. Substantially
-  lower risk and smaller than the issues imply, but it makes preserving `validate_merge_guard`'s
-  existing tokenizer contract a hard requirement rather than a nice-to-have.
+- **Impact on plan**: **revised by round-2 critique.** The donors are references, not building
+  blocks. `_extract_executed_commands` answers "which byte ranges are executable text" and drops
+  quoted regions entirely, so it cannot supply simple-command boundaries; composing it with
+  `_split_simple_commands` reproduces the very fail-open it was meant to close (Decision 2a). The
+  seam is therefore a **purpose-built single-pass scanner informed by both donors**, not a lift.
+  Risk and size are higher than this spike first concluded — Task 3 is the wave's real work — and
+  preserving `validate_merge_guard`'s existing tokenizer contract remains a hard requirement.
 
 ### spike-2: Can the fix simply strip quoted string literals?
 - **Assumption**: "Quoted text is inert and can be removed before matching."
@@ -335,7 +339,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/wave4-hooks-guards-gat
   command substitutions — reporting for each text region whether it is **executable** (an
   interpreter's `-c` payload, a heredoc piped into an interpreter, a command word) or **inert**
   (a heredoc redirected to a file, a `--body`/`--body-file` argument, an `echo` argument).
-  Carries an explicit ambiguity posture, because the two implementations it consolidates disagree.
+  Fails closed on any parse ambiguity, uniformly for every consumer.
 - **`hook_utils/staged_diff.py`** (new): the single source of truth for commit-time diff scoping.
   Provides the staged file list and an added-lines map from `git diff --cached -U0 -M`. Lifted
   from `validate_no_module_scope_env.py`, rename-aware.
@@ -397,11 +401,39 @@ The splitter yields `redis-cli -n 0 --pattern "a` and `b" <flush>`; no fragment 
 `redis-cli` argv0 and the flush token, so a per-fragment check passes a real flush. **That is the
 exact regression class this wave exists to close**, manufactured by the fix.
 
-Therefore: run `_extract_executed_commands` (the quote/heredoc/substitution-aware scanner) **first**
-to obtain safe spans, and call `_split_simple_commands` **only on the substring of each span** —
-never on the raw command. The quote-aware pass always precedes the operator split. This ordering
-is a documented invariant in the module docstring, carries a named regression test, and has its
-own verification row.
+**The donors cannot be composed as black boxes — this was round 2's blocker.** The previous
+revision proposed running `_extract_executed_commands` first for "safe spans" and splitting only
+within each. That does not work, and it fails this plan's own regression row.
+`_extract_executed_commands` does not emit one span per simple command: it calls `flush()` on
+entering a quote and resets `cmd_start` only after the closing quote, so a quoted argument **drops
+out and leaves two disjoint spans** even when no control operator separates them. Reproduced
+against the live tree:
+
+```
+redis-cli -n 0 --pattern "a;b" <flush>
+  spans:     (0,25) 'redis-cli -n 0 --pattern '   (31,38) '<flush>'
+  fragments: ['redis-cli -n 0 --pattern', '<flush>']
+  => argv0 and the flush token land in different fragments: ALLOW  <-- still fail-open
+```
+
+The quoted region becomes a *gap*, when correctness requires it to be an *opaque token inside one
+simple command*. The scanner answers "which byte ranges are executable text," not "where are the
+simple-command boundaries." Those are different questions, and only the second one supports an
+argv0-to-argument relationship check.
+
+**Therefore: write a single-pass scanner in `bash_structure.py` that tracks quote, heredoc, and
+substitution state _while_ building simple-command boundaries.** Reuse the donors' *logic* —
+merge_guard's quote/heredoc/substitution state machine, and `destructive_git_shapes`'s
+env-assignment-skipping argv0 identification — but call neither as a black box.
+
+The invariant, stated in the module docstring and named in a verification row: **a quoted or
+heredoc region is a token within its simple command, never a boundary between simple commands;
+only an unquoted control operator starts a new simple command.**
+
+This is the plan's single largest correction, and it revises spike-1's conclusion: the seam is a
+purpose-built scanner *informed by* two donors, not a composition *of* them. Budget accordingly —
+Task 3 is the wave's real work. Both boundary classes (quoted-argument and control-operator) are
+named regression tests written **before** any consumer is wired.
 
 **Decision 3 — one ambiguity posture: fail closed, everywhere.** The two donors disagree today —
 `destructive_git_shapes._git_tokens` returns `None` on a `shlex` ValueError (fails **open**,
@@ -454,12 +486,29 @@ undefined in this repo and unverifiable from config. Copying its shape would re-
 cause of #2715 and would contradict this plan's own verification row. Borrow the *form* (a
 one-line agent-type pin in the skill body, citing its issue) and **not** the type list.
 
-One consequence to handle rather than ignore: `.claude/agents/builder.md:28` instructs the builder
-"Do NOT spawn other agents or coordinate work," while `/do-build` is an orchestrator. The pin must
-therefore name the type used for the **stage** dispatch, and Task 7 must confirm the resulting
-child can legitimately orchestrate — if `builder`'s instruction text forbids what the stage
-requires, the correct fix is a purpose-built Task-capable orchestrator type, not silently
-overriding a documented agent contract. Resolve this inside Task 7 and record which way it went.
+**Decision 8a — the pinned type is a new `build-orchestrator`, decided here rather than at build
+time.** Round 2 correctly refused the earlier `builder` answer. Two capability axes must both be
+satisfied, and no existing agent type satisfies both:
+
+| Axis | Requirement | `general-purpose` | `builder` |
+|---|---|---|---|
+| Task-tool presence | must have `Task`/`TaskCreate` | undefined in this repo, unverifiable | yes (`builder.md:11`, `tools: ['*']`) |
+| Orchestration permission | must be allowed to deploy subagents | n/a | **no** — `builder.md:28`: "Do NOT spawn other agents or coordinate work. You are a worker, not a manager." |
+
+Surveyed every definition in `.claude/agents/`: all Task-capable types either forbid orchestration
+(`builder`) or are role-scoped to something else. `dev` is the only all-tools type without an
+orchestration prohibition, but it is the session-level SDLC owner, not a stage subagent, and
+pinning a stage to it would confuse the two roles.
+
+So: **create `.claude/agents/build-orchestrator.md`** — `tools: ['*']`, explicitly permitted to
+deploy builder/validator subagents, and explicitly forbidden from editing files directly, mirroring
+`/do-build`'s own contract at `SKILL.md:10` and `:151`. This is one new file, it makes the skill's
+requirement and the agent's contract agree for the first time, and it avoids the alternative of
+silently overriding a documented agent contract. It carries its own verification row on the
+orchestration-permission axis, mirroring the existing row on the Task-tool axis.
+
+`builder.md:28` is left **unchanged** — it is correct for builders, and weakening it to make an
+orchestrator fit would erode the separation `/do-build` depends on.
 
 Do **not** introduce a "required tools" frontmatter field: `allowed-tools:` is a ceiling, not a
 floor, and a new field would need a checker, a schema, and adoption across ~28 skills — a
@@ -681,15 +730,23 @@ unreconciled would be indefensible, so it is scoped in with that evidence attach
 
 ## Update System
 
-No update system changes required. Everything in scope is repo-internal: hook validators, a new
+One update-system consequence, handled by existing machinery. Otherwise repo-internal: hook validators, a new
 `hook_utils` module, and skill bodies. No new dependencies, config files, secrets, or migration
 steps.
 
-Two propagation notes that are handled by existing machinery and need no new work:
+Three propagation notes, all handled by existing machinery and needing no new work:
 
 - `.claude/skills-global/do-build/SKILL.md` and `.claude/skills-global/do-sdlc/SKILL.md` are
   hardlinked to `~/.claude/skills/` by `/update` (`scripts/update/hardlinks.py`). Edits propagate
   on the next `/update` with no registration step, since no directory is added or renamed.
+- **`.claude/agents/build-orchestrator.md` (new, Decision 8a) is hardlinked to `~/.claude/agents/`
+  by `/update`** (`scripts/update/hardlinks.py:439`, `_sync_commands` over `.claude/agents`).
+  Dropping the file in is the entire registration step — no manifest entry, no code change. Two
+  consequences to honor: it is a **general-purpose subagent shared to every machine**, per that
+  file's :434-438 comment, so it must not carry anything repo-specific; and because it is a *new*
+  file rather than a rename, no `RENAMED_REMOVALS` entry is needed. A machine that has not yet run
+  `/update` will not have the type, so the `/do-build` fail-fast diagnostic (Task 7) must name the
+  missing agent type clearly rather than failing obscurely.
 - Hook registration is generated from `.claude/hooks/manifest.toml`. No new hook is registered —
   `bash_structure.py` and `staged_diff.py` are library modules under `hook_utils/`, not hooks —
   so the `hooks` blocks in `.claude/settings.json` and `~/.claude/settings.json` are untouched.
@@ -727,10 +784,12 @@ consumed by the SDLC router, which already reads stage outcomes; it introduces n
 - [ ] Update `docs/features/hook-manifest.md` if the timeout budget commentary changes.
 
 ### Inline Documentation
-- [ ] `bash_structure.py` module docstring: the executable-vs-inert rule table, the posture
-      parameter and each consumer's assignment with reasoning, and an explicit note that
-      quote-stripping is wrong and why (spike-2), so the trap is documented where the next author
-      will be standing.
+- [ ] `bash_structure.py` module docstring: the executable-vs-inert rule table; the
+      fail-closed-unconditionally policy and why it applies identically to every consumer; the
+      boundary invariant (a quoted or heredoc region is a token within its simple command, never a
+      boundary between them) stating that it always precedes any operator split and is never
+      applied to a raw command; and an explicit note that quote-stripping is wrong and why
+      (spike-2), so the trap is documented where the next author will be standing.
 - [ ] `staged_diff.py` module docstring: the CLI-whole-file vs hook-added-lines split, and the
       rename-gap fix.
 - [ ] Update `destructive_git_shapes.py`'s docstring (:7-11), whose "single place that logic
@@ -760,8 +819,15 @@ consumed by the SDLC router, which already reads stage outcomes; it introduces n
 - [ ] **No new fail-open is introduced by the seam.** Specifically: a real flush whose earlier
       quoted argument contains a control operator (`redis-cli -n 0 --pattern "a;b" <flush>`) still
       blocks, and `echo "<cmd>" | sh` stays in scope. Both are named regression tests.
-- [ ] The quote-aware pass provably precedes the operator split (Decision 2a invariant), and no
-      fail-open posture parameter exists on the helper.
+- [ ] **A quoted argument is a token inside its simple command, not a boundary between two.**
+      `redis-cli -n 0 --pattern "a;b" <flush>` still blocks — the round-2 blocker, and the case a
+      donor-composition approach silently fails. Both boundary classes (quoted-argument and
+      control-operator) are named regression tests.
+- [ ] No configurable fail-open ambiguity lever exists on the helper.
+- [ ] `.claude/agents/build-orchestrator.md` exists, is Task-capable, and carries no
+      "do not spawn / not a manager" prohibition; `builder.md:28` is unchanged.
+- [ ] Non-BUILD SDLC stages keep their existing dispatch agent type (no collateral change from the
+      #2715 fix).
 - [ ] `validate_merge_guard`'s Part 1 tokenizer suite passes with **zero assertion changes**.
 - [ ] A `/do-build` dispatch to a session lacking the Task tool fails on the first attempt with a
       diagnostic naming the missing capability.
@@ -884,10 +950,15 @@ idiom for issue/PR text until task 4 lands.
   Part 1 green with zero assertion changes before generalizing.
 - Fold in `destructive_git_shapes.py`'s `_split_simple_commands` (:38) and argv0 identification
   with env-assignment skipping (`_git_tokens` :47).
-- **Order the donors per Decision 2a**: `_extract_executed_commands` first for quote/heredoc-safe
-  spans, then `_split_simple_commands` only on each span's substring — never on the raw command.
-  Add a named regression test for `redis-cli -n 0 --pattern "a;b" <flush>` (assembled by
-  concatenation) asserting it still BLOCKS. Document the ordering as an invariant in the docstring.
+- **Write a single-pass scanner per Decision 2a.** Do not compose the two donors as black boxes —
+  round 2 proved that still fails open. Track quote/heredoc/substitution state *while* building
+  simple-command boundaries, so a quoted argument is an opaque token **inside** its simple command
+  rather than a gap between two. Reuse merge_guard's state machine and `destructive_git_shapes`'s
+  env-assignment-skipping argv0 logic as references, not as calls.
+- Add named regression tests for **both** boundary classes, written before any consumer is wired
+  and assembled by string concatenation so the test file does not trip the live hook:
+  `redis-cli -n 0 --pattern "a;b" <flush>` (quoted-argument boundary) and
+  `echo "hi" && redis-cli -n 0 <flush>` (control-operator boundary). Both must BLOCK.
 - Add argument-role classification: for each text region, report **executable** (command word,
   interpreter `-c` payload, heredoc piped to an interpreter) or **inert** (heredoc redirected to a
   file, `--body`/`--body-file` argument). Expose offsets, not a pre-stripped string, so callers
@@ -896,8 +967,9 @@ idiom for issue/PR text until task 4 lands.
   piped-vs-redirected rule used for heredocs: `echo "<cmd>"` is data, but `echo "<cmd>" | sh` and
   `printf '%s' "<cmd>" | bash` execute their argument and must stay in scope. An earlier draft
   treated `echo` arguments as unconditionally inert, which would have been a fail-open.
-- Fail closed unconditionally on any parse ambiguity (Decision 3). Do **not** add a posture
-  parameter; document in the docstring why the single posture is deliberate.
+- Fail closed unconditionally on any parse ambiguity (Decision 3). Do **not** add a
+  configurable ambiguity parameter; document in the docstring why ambiguity always resolves to
+  fail-closed and why that is uniform across consumers.
 - Do **not** strip quoted literals (spike-2). Document why in the docstring.
 - Write `tests/unit/test_bash_structure.py` covering every case in Empty/Invalid Input Handling.
 
@@ -959,18 +1031,24 @@ idiom for issue/PR text until task 4 lands.
 - **Assigned To**: dispatch-capability-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add an agent-type pin to `.claude/skills-global/do-build/SKILL.md` naming a **concrete
-  Task-capable type (`builder`)**. Borrow the *form* of `do-docs/SKILL.md:30` (a one-line pin
-  citing its issue) but **not** its type list — that line sanctions `general-purpose`, which is
-  the cause of #2715 (Decision 8).
-- Resolve the `builder.md:28` tension flagged in Decision 8 ("Do NOT spawn other agents") against
-  `/do-build`'s orchestrator role. If `builder`'s contract genuinely forbids orchestration, define
-  a Task-capable orchestrator type instead of silently overriding a documented agent contract.
-  **Record which way it went in the commit message** — this is a real fork, not a formality.
-- Correct `.claude/skills-global/do-sdlc/SKILL.md:372` so BUILD is not spawned as
-  `general-purpose`. **Surgical edit only** — no reflow, no reordering (Risk 4). This is the actual
-  root cause of #2715 and it has its own verification row, because Risk 4 makes this exactly the
-  kind of one-liner that gets dropped in a cross-lane conflict resolution.
+- Create `.claude/agents/build-orchestrator.md` per Decision 8a: `tools: ['*']`, explicitly
+  permitted to deploy builder/validator subagents, explicitly forbidden from editing files
+  directly. Do **not** modify `builder.md:28`.
+- Add an agent-type pin to `.claude/skills-global/do-build/SKILL.md` naming `build-orchestrator`.
+  Borrow the *form* of `do-docs/SKILL.md:30` (a one-line pin citing its issue) but **not** its type
+  list — that line sanctions `general-purpose`, which is the cause of #2715 (Decision 8).
+- **`do-sdlc/SKILL.md:372` is the shared dispatch template for all seven stages**, not a BUILD-only
+  line — it sits under "### 5c. Spawn the stage subagent" (`:363`). Diverting BUILD alone therefore
+  requires **stage-conditional logic**, analogous to the existing Stage→Model table: add a
+  Stage→AgentType mapping whose BUILD row is `build-orchestrator` and whose other six rows preserve
+  today's behavior. "Surgical" means *narrowly scoped*, not *one line* — do not reflow or reorder
+  surrounding sections (Risk 4), but do expect a small structural addition.
+- Leave `do-sdlc/SKILL.md:451` (the #2022 re-dispatch fallback) alone unless BUILD can reach it; if
+  it can, route BUILD's fallback to `build-orchestrator` too. Check this explicitly — the
+  verification rows do not cover `:451`.
+- Two verification rows guard this: one asserting BUILD no longer resolves to `general-purpose`,
+  and one **positive assertion** that non-BUILD stages still do — so stripping `general-purpose`
+  repo-wide (which would silently change six other stages) fails the gate.
 - Add a first-instruction self-check to `/do-build`: if the Task tool is absent, exit immediately
   with a specific, machine-readable diagnostic naming the missing capability. Fail-fast, no
   sequential fallback (Decision 9).
@@ -1045,10 +1123,13 @@ table above is prose-only and never appears in an executable row.
 | Anti-criterion — the 55 files were not mass-annotated | `git diff --name-only origin/main \| xargs -I{} sh -c 'git diff origin/main -- {} \| grep -c "^+.*timeout-guard: allow"' \| paste -sd+ \| bc` | output contains 0 |
 | BLOCKER regression — quoted control operator still blocks | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'DB';print('BLOCK' if f.find_violation('redis-cli -n 0 --pattern \"a;b\" '+w) else 'ALLOW')"` | output contains BLOCK |
 | BLOCKER regression — echo piped to a shell stays in scope | `python -c "import sys;sys.path.insert(0,'.claude/hooks/validators');import validate_no_redis_flush as f;w='FLUSH'+'ALL';print('BLOCK' if f.find_violation('echo \"redis-cli -n 0 '+w+'\" \| sh') else 'ALLOW')"` | output contains BLOCK |
-| Donor ordering invariant is documented | `grep -c "_extract_executed_commands" .claude/hooks/hook_utils/bash_structure.py` | output > 0 |
-| No fail-open posture lever was installed | `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` | match count == 0 |
+| Boundary invariant is documented, not just imported | `grep -ci "never a boundary\|always precedes\|never.*raw command" .claude/hooks/hook_utils/bash_structure.py` | output > 0 |
+| No fail-open ambiguity lever was installed | `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` | match count == 0 |
+| BLOCKER r2 regression — quoted arg is a token, not a boundary | `python -c "import sys;sys.path.insert(0,'.claude/hooks');from hook_utils import bash_structure as b;w='FLUSH'+'DB';cmds=b.simple_commands('redis-cli -n 0 --pattern \"a;b\" '+w);print('OK' if any(c.argv0=='redis-cli' and w in ' '.join(c.args).upper() for c in cmds) else 'SPLIT')"` | output contains OK |
 | #2715 — BUILD names a Task-capable agent type | `grep -c "general-purpose" .claude/skills-global/do-build/SKILL.md` | match count == 0 |
-| #2715 root cause — do-sdlc no longer pins BUILD to general-purpose | `python -c "import re,sys;t=open('.claude/skills-global/do-sdlc/SKILL.md').read();m=[l for l in t.splitlines() if 'general-purpose' in l and 'Agent tool' in l];print('FIXED' if not m else 'STILL PINNED')"` | output contains FIXED |
+| #2715 root cause — do-sdlc BUILD dispatch no longer resolves to general-purpose | `python -c "t=open('.claude/skills-global/do-sdlc/SKILL.md').read();m=[l for l in t.splitlines() if 'general-purpose' in l and 'Agent tool' in l];print('FIXED' if not m else 'STILL PINNED')"` | output contains FIXED |
+| #2715 — non-BUILD stages keep their existing dispatch type (no collateral change) | `python -c "t=open('.claude/skills-global/do-sdlc/SKILL.md').read();print('OK' if 'general-purpose' in t else 'OVERREACHED')"` | output contains OK |
+| #2715 — pinned agent type is permitted to orchestrate | `python -c "import glob,re;f=[p for p in glob.glob('.claude/agents/*.md') if 'build' in p and 'orchestrat' in open(p).read().lower()];print('OK' if f and not any(re.search(r'do NOT spawn\|not a manager',open(p).read(),re.I) for p in f) else 'MISSING')"` | output contains OK |
 | Feature doc exists and is indexed | `test -f docs/features/bash-command-position-matching.md && grep -c "bash-command-position-matching" docs/features/README.md` | output > 0 |
 | features README still sorted | `python .claude/hooks/validators/validate_features_readme_sort.py` | exit code 0 |
 | No co-author trailers | `git log origin/main..HEAD --format=%B \| grep -ci "co-authored-by"` | match count == 0 |
@@ -1087,11 +1168,11 @@ written with the `Write` tool — the same `--body-file` workaround #3004 needed
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Decision 2a does not close the round-1 fail-open; it relocates it. `_extract_executed_commands` (`validate_merge_guard.py:461-644`) does not emit one span per simple command -- it calls `flush()` on entering a quote and resets `cmd_start` only after the closing quote, so text before an opening quote and text after its closing quote become **disjoint spans with the quoted region dropped**, even when no control operator separates them. Reproduced live: `redis-cli -n 0 --pattern "a;b" <flush>` yields spans `redis-cli -n 0 --pattern` and `<flush>`; feeding each to `_split_simple_commands` independently, exactly as Decision 2a instructs, leaves no fragment carrying both the `redis-cli` argv0 and the flush token, so an argv0-relationship check ALLOWs. Same fail-open as round 1, reached via quote-boundary splitting instead of operator splitting -- and it fails this plan's own BLOCKER-regression Verification row (:1046). | pending | `_extract_executed_commands` returns bare `(start, end)` tuples with no record of **which** of its three `flush()` triggers (quote entry, heredoc `<<`, real `_COMMAND_SEPARATORS` match) closed each span, so spans cannot be composed with `_split_simple_commands` as black boxes. Either (a) fork the scanner to also return the trigger type per boundary, then rejoin quote-boundary-adjacent spans into one simple command (treating the quoted region as one opaque token rather than a gap) before argv0/positional classification, or (b) write a single-pass scanner in `bash_structure.py` that tracks quote/heredoc/substitution state **while** building simple-command boundaries and argv0 classification, so a quoted argument is a token *within* its simple command rather than a span excluded from all of them. Verify by running the `--pattern "a;b"` case against the real implementation -- the composition Decision 2a describes passes code review while still failing that row. |
-| CONCERN | Scope & Value | Decision 8 names `builder` as the concrete Task-capable type, satisfying round 1 on paper, but the same paragraph reopens it: `.claude/agents/builder.md:28` states "Do NOT spawn other agents or coordinate work. You are a worker, not a manager" -- exactly what `/do-build`'s orchestrator role requires (`do-build/SKILL.md:10`). Task 7 punts the conflict to build time, where the fallback is inventing a purpose-built orchestrator agent type that has no Key Element, no Team Orchestration entry, no task line, no verification row, and no PM check-in covering it. | pending | Decide at plan time, not build time. Either confirm `builder.md:28` is overridable prompt guidance rather than a capability restriction (and record that reasoning), or promote "define a Task-capable orchestrator agent type" to a named Key Element + task with its own `.claude/agents/<type>.md` file and test. Add a verification row that inspects whichever `.claude/agents/<type>.md` is ultimately pinned and asserts it carries no "do not spawn/coordinate" instruction -- the orchestration-permission axis, mirroring the existing `grep -c "general-purpose"` row on the Task-tool-presence axis. |
-| CONCERN | Scope & Value | `do-sdlc/SKILL.md:372` is the **single shared dispatch template for all seven SDLC stages** (it sits under "### 5c. Spawn the stage subagent", :363), not a BUILD-only line. Diverting BUILD alone therefore needs per-stage conditional logic, which Task 7's "**Surgical edit only**" and Risk 4's "the agent-type pin and nothing else" both understate, giving the builder no guidance for keeping PLAN/TEST/PATCH/REVIEW/DOCS/MERGE on their current type. | pending | The existing verification row (:1051) only asserts that no single line contains both `general-purpose` and `Agent tool`; it would still print FIXED if `general-purpose` were stripped for **every** stage, silently changing six other stages' dispatch. Name the mechanism in Task 7 (e.g. a stage-conditional branch analogous to the existing Stage->Model table) and add a second, **positive-assertion** row confirming a non-BUILD stage (e.g. PLAN) still resolves to its current type after the edit. Note `general-purpose` also appears at `do-sdlc/SKILL.md:451` (the re-dispatch fallback), which the current row does not match. |
-| CONCERN | History & Consistency | Decision 3 was rewritten this round to delete the posture parameter, and a new Verification row (:1049) asserts `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` == 0. But the Documentation > Inline Documentation bullet (:730) still instructs writing "the posture parameter and each consumer's assignment" into that file's docstring, and Task 3 (:900) says "document in the docstring why the single posture is deliberate". Both put the literal substring `posture` into the one file the row asserts contains zero occurrences -- following the doc instructions as written breaks the plan's own gate. | pending | Edit :730 to e.g. "the fail-closed-unconditionally policy and why it applies identically to every consumer", and :900 to "document why ambiguity always resolves to fail-closed, with no configurable parameter". Both replacement texts must avoid the literal substring `posture`. Alternatively loosen the row to `grep -c "posture=\\\|posture:" ` so it targets a parameter rather than the word -- but the wording fix is cheaper and keeps the gate strict. |
-| NIT | History & Consistency | The "Donor ordering invariant is documented" Verification row (:1048) greps only for the presence of the name `_extract_executed_commands`, which is trivially true the moment Task 3 imports and calls it -- regardless of whether any docstring states the ordering rule. The Check column's claim is not tested by its own command. | pending | Replace the row's command with a grep for the invariant's language, e.g. `grep -c "always precedes\\\|never.*raw command" .claude/hooks/hook_utils/bash_structure.py`, expected output > 0, so the row distinguishes "invariant documented" from "function merely imported". |
+| BLOCKER | Risk & Robustness | Decision 2a does not close the round-1 fail-open; it relocates it. `_extract_executed_commands` (`validate_merge_guard.py:461-644`) does not emit one span per simple command -- it calls `flush()` on entering a quote and resets `cmd_start` only after the closing quote, so text before an opening quote and text after its closing quote become **disjoint spans with the quoted region dropped**, even when no control operator separates them. Reproduced live: `redis-cli -n 0 --pattern "a;b" <flush>` yields spans `redis-cli -n 0 --pattern` and `<flush>`; feeding each to `_split_simple_commands` independently, exactly as Decision 2a instructs, leaves no fragment carrying both the `redis-cli` argv0 and the flush token, so an argv0-relationship check ALLOWs. Same fail-open as round 1, reached via quote-boundary splitting instead of operator splitting -- and it fails this plan's own BLOCKER-regression Verification row (:1046). | FIXED — Decision 2a rewritten | Reproduced independently before accepting: `_extract_executed_commands` yields spans `redis-cli -n 0 --pattern` and `<flush>`, dropping the quoted region, so the composition ALLOWs. Option (b) taken: a purpose-built single-pass scanner that tracks quote/heredoc/substitution state WHILE building simple-command boundaries, so a quoted region is a token inside its simple command, never a gap. spike-1's 'lift and unify' conclusion is revised accordingly. Both boundary classes are named regression tests plus a verification row. |
+| CONCERN | Scope & Value | Decision 8 names `builder` as the concrete Task-capable type, satisfying round 1 on paper, but the same paragraph reopens it: `.claude/agents/builder.md:28` states "Do NOT spawn other agents or coordinate work. You are a worker, not a manager" -- exactly what `/do-build`'s orchestrator role requires (`do-build/SKILL.md:10`). Task 7 punts the conflict to build time, where the fallback is inventing a purpose-built orchestrator agent type that has no Key Element, no Team Orchestration entry, no task line, no verification row, and no PM check-in covering it. | FIXED — Decision 8a + Task 7 | Decided at plan time, not build time. Surveyed all of .claude/agents/: no existing type satisfies both axes (Task-capable AND permitted to orchestrate). Creating `.claude/agents/build-orchestrator.md` as a named Task 7 deliverable, with a verification row on the orchestration-permission axis. builder.md:28 left unchanged — it is correct for builders. |
+| CONCERN | Scope & Value | `do-sdlc/SKILL.md:372` is the **single shared dispatch template for all seven SDLC stages** (it sits under "### 5c. Spawn the stage subagent", :363), not a BUILD-only line. Diverting BUILD alone therefore needs per-stage conditional logic, which Task 7's "**Surgical edit only**" and Risk 4's "the agent-type pin and nothing else" both understate, giving the builder no guidance for keeping PLAN/TEST/PATCH/REVIEW/DOCS/MERGE on their current type. | FIXED — Task 7 + 2 rows | Accepted that :372 is the shared template for all seven stages; 'surgical' now means narrowly scoped, not one line. Task 7 names the mechanism (a Stage->AgentType mapping analogous to Stage->Model) and calls out :451 explicitly. Added a positive-assertion row so stripping general-purpose repo-wide fails the gate. |
+| CONCERN | History & Consistency | Decision 3 was rewritten this round to delete the posture parameter, and a new Verification row (:1049) asserts `grep -rc "posture" .claude/hooks/hook_utils/bash_structure.py` == 0. But the Documentation > Inline Documentation bullet (:730) still instructs writing "the posture parameter and each consumer's assignment" into that file's docstring, and Task 3 (:900) says "document in the docstring why the single posture is deliberate". Both put the literal substring `posture` into the one file the row asserts contains zero occurrences -- following the doc instructions as written breaks the plan's own gate. | FIXED — 2 doc instructions | Both instructions that would have written the literal word into bash_structure.py are reworded (Documentation inline bullet and Task 3 bullet). The strict row is kept rather than loosened. |
+| NIT | History & Consistency | The "Donor ordering invariant is documented" Verification row (:1048) greps only for the presence of the name `_extract_executed_commands`, which is trivially true the moment Task 3 imports and calls it -- regardless of whether any docstring states the ordering rule. The Check column's claim is not tested by its own command. | FIXED — row rewritten | Row now greps the invariant's language rather than the imported symbol name, so it distinguishes 'invariant documented' from 'function merely imported'. |
 
 ---
 
