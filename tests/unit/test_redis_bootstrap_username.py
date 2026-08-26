@@ -1,13 +1,10 @@
-"""Unit tests for the D9 username plumbing in config.redis_bootstrap (#2645, BLOCKER fix).
+"""Unit tests for username plumbing in config.redis_bootstrap.
 
-After the separate #2661 REDIS_URL rotation, popoto must authenticate as the
-locked-down `valor-app` ACL user rather than `default` -- `default` is
-deliberately left `nopass`/`flushdb`-capable (D3), so a one-argument
-`AUTH <pw>` (no username forwarded) either errors outright against `default`
-(nopass rejects a password -- bridge/worker/dashboard down fleet-wide) or, in
-the counterfactual where it connected, would connect AS `default` and retain
-`flushdb` -- Layer 2 would then protect every client except the one that
-caused the 2026-08-07 incident.
+A managed Redis handed out as a credentialed URL (`redis://user:pw@host/0`)
+needs popoto to authenticate as that user, not `default` -- this is plain
+connection-string parsing, not access-control configuration. The stack needs
+nothing more than the URL: a bare `redis://host/0` carries no username, and
+`username=None` is redis-py's own default, so that case is unaffected.
 
 These tests patch `popoto.redis_db.set_REDIS_DB_settings` and never touch a
 real Redis connection -- `set_REDIS_DB_settings` is a pure kwargs-forwarder
@@ -60,22 +57,22 @@ class TestUsernamePlumbing:
     """config/redis_bootstrap.py:112 must forward parsed.username, not drop it."""
 
     def test_credentialed_url_forwards_username(self, monkeypatch):
-        """redis://valor-app:pw@h:6379/0 -> username='valor-app' in captured kwargs."""
-        captured = _run_and_capture(monkeypatch, "redis://valor-app:pw@myhost:6379/0")
+        """redis://appuser:pw@h:6379/0 -> username='appuser' in captured kwargs."""
+        captured = _run_and_capture(monkeypatch, "redis://appuser:pw@myhost:6379/0")
 
-        assert captured.get("username") == "valor-app", (
-            f"Expected username='valor-app' forwarded to set_REDIS_DB_settings. "
+        assert captured.get("username") == "appuser", (
+            f"Expected username='appuser' forwarded to set_REDIS_DB_settings. "
             f"Got keys: {list(captured)}, username={captured.get('username')!r}"
         )
-        # Password must still be forwarded too -- D9 adds username, it must
+        # Password must still be forwarded too -- username forwarding must
         # not regress the existing password plumbing.
         assert captured.get("password") == "pw"
 
     def test_bare_url_forwards_username_none(self, monkeypatch):
-        """A bare redis://h:6379/0 (pre-rotation, no username) -> username=None.
+        """A bare redis://h:6379/0 (no username in the URL) -> username=None.
 
-        This is the byte-identical-to-today case: username=None is redis-py's
-        own default, so a pre-rotation REDIS_URL produces unchanged behavior.
+        username=None is redis-py's own default, so a bare REDIS_URL produces
+        unchanged behavior.
         """
         captured = _run_and_capture(monkeypatch, "redis://myhost:6379/0")
 

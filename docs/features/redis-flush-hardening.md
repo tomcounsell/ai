@@ -1,13 +1,16 @@
 # Redis Flush Hardening
 
 Two production Redis flushes, six weeks apart, both from a script that believed it was targeting a
-test database. Issue #2645 closes the gap between "believed" and "was" with four independent layers,
-each guarding a different boundary the offending code has to cross.
+test database. Issue #2645 closed the gap between "believed" and "was" with three independent layers,
+each guarding a different boundary the offending code has to cross. The safety story is entirely
+client-side and works from a bare Redis connection string alone — no server-side access control, no
+provisioned credential, no `redis.conf` edit on any machine (issue #3004, operator decision
+2026-08-25: "our stack should simply need the redis connection string and be able to safely work with
+that").
 
-Two of them enforce as shipped. Layer 1 alone would have stopped both incidents, and Layer 3 would
-have stopped the command that started the second one. Layer 2 ships as a planner and a runbook, so it
-stops nothing until an operator applies it per machine; Layer 4 is a knowledge layer, not an
-enforcement one. The table below is precise about which is which.
+Two of the three layers enforce. Layer 1 alone would have stopped both incidents, and Layer 2 would
+have stopped the command that started the second one. Layer 3 is a knowledge layer, not an enforcement
+one. The table below is precise about which is which.
 
 ## The Two Incidents
 
@@ -29,14 +32,13 @@ The through-line across both incidents: every prior control sat at a boundary th
 not cross. This work moves the same rule to boundaries every caller has to cross, whether or not it
 ever imports the test suite.
 
-## The Four Layers
+## The Three Layers
 
 | Layer | Boundary | What it stops | What it doesn't |
 |---|---|---|---|
 | 1. Process-wide flush guard | Every Python process started inside a repo venv | Any `.flushdb()` on db 0, any `.flushall()`, from any first-party or ad-hoc script | Non-Python clients; a process outside every discovered venv; a flush issued as execute_command("FLUSHDB") or through redis.cluster.RedisCluster, neither of which the monkeypatch covers |
-| 2. Redis ACL | The Redis server itself | Non-Python clients (`redis-cli`, other languages, other checkouts) reaching db 0 | Nothing yet on its own. This PR ships the planner only; see below |
-| 3. PreToolUse hook validator | Agent-issued Bash commands | A flush written inline in a command Claude is about to run | A flush buried inside a file that's already been written; Bash is the only surface it sees; and it fails open: if the validator itself raises, the dispatcher logs and allows, matching every sibling validator except validate_merge_guard |
-| 4. This documentation and the `CLAUDE.md` note | The agent's read-before-testing surface | The reasoning error at its source, before either script or command exists | Nothing mechanical: it's a knowledge layer, not an enforcement layer |
+| 2. PreToolUse hook validator | Agent-issued Bash commands | A flush written inline in a command Claude is about to run | A flush buried inside a file that's already been written; Bash is the only surface it sees; and it fails open: if the validator itself raises, the dispatcher logs and allows, matching every sibling validator except validate_merge_guard |
+| 3. This documentation and the `CLAUDE.md` note | The agent's read-before-testing surface | The reasoning error at its source, before either script or command exists | Nothing mechanical: it's a knowledge layer, not an enforcement layer |
 
 ### Layer 1: process-wide flush guard
 
@@ -54,16 +56,7 @@ This is the load-bearing layer: it is what would have stopped the 2026-08-07 scr
 production `REDIS_URL` reached it, because the guard checks the resolved db number, not the intent
 behind the script.
 
-### Layer 2: Redis ACL (planner only in this PR)
-
-`scripts/update/redis_acl.py` computes the target ACL rule set and, on request, applies it. **This PR
-ships the planner, the target rule set, the staged `aclfile` directive, the doctor check, and the
-apply runbook below. It mutates nothing.** `/update` calls `apply_redis_acl()` with no arguments,
-every time, which is the report-only path: it reads `ACL LIST`, computes the commands that would
-converge the server, and returns them without issuing a single `ACL SETUSER`. The server-side rule set
-is effective only after an operator runs the runbook by hand.
-
-### Layer 3: PreToolUse hook validator
+### Layer 2: PreToolUse hook validator
 
 `.claude/hooks/validators/validate_no_redis_flush.py` blocks `.flushdb(...)` / `.flushall(...)` call
 shapes and `redis-cli ... FLUSHDB` / `FLUSHALL` invocations in any Bash command an agent is about to
@@ -74,22 +67,22 @@ only sees the command it's given, not the file's contents. That gap is exactly w
 why it is the layer that actually stopped the incident class: file contents at execution time reach
 the guard regardless of how the command that runs them was assembled.
 
-### Layer 4: documentation
+### Layer 3: documentation
 
-This document and the `CLAUDE.md` § Manual Testing Hygiene paragraph. Layers 1 through 3 are all
-enforcement; Layer 4 is the one that keeps an agent from writing the `setdefault` mistake in the first
+This document and the `CLAUDE.md` § Manual Testing Hygiene paragraph. Layers 1 and 2 are both
+enforcement; Layer 3 is the one that keeps an agent from writing the `setdefault` mistake in the first
 place.
 
 ## The override: `REDIS_PRODUCTION_FLUSH_OK`
 
-Both Layer 1 and Layer 3 share a single escape hatch: `REDIS_PRODUCTION_FLUSH_OK=1`. One name to
+Both Layer 1 and Layer 2 share a single escape hatch: `REDIS_PRODUCTION_FLUSH_OK=1`. One name to
 learn instead of two.
 
 - Only the exact string `"1"` disarms it. `""`, `"0"`, `"false"`, and `"no"` all leave the guard armed.
   The comparison is exact-equality, not `bool(...)`, because a truthiness bug here would be the one
   place this whole layer silently disables itself.
 - It is read at call time, never at import time, so setting it after a process starts still works.
-- On Layer 3 it works as a command prefix: `REDIS_PRODUCTION_FLUSH_OK=1 python -c "..."`.
+- On Layer 2 it works as a command prefix: `REDIS_PRODUCTION_FLUSH_OK=1 python -c "..."`.
 
 Using it is legitimate when you genuinely mean to flush a per-process claimed test db and the guard's
 own db-number check happens to be wrong for your setup, or when you're intentionally exercising flush
@@ -155,93 +148,33 @@ shim's own exception-swallowing means a broken install looks identical to a work
 filesystem alone. A failing check names the unguarded venv and its one-line remediation:
 `python -m scripts.update.redis_flush_guard_pth --venv <path>`.
 
-## The ACL user model: identity, not database number
-
-The obvious-looking design, "let dbs 1-15 flush, deny db 0", does not exist as a server-side
-mechanism. Two forms were tried and both failed:
-
-- `ACL SETUSER u db:1` returns `ERR Error in ACL SETUSER modifier 'db:1': Syntax error`. There is no
-  db-scoped ACL syntax at all.
-- ACL selectors accept a key pattern, but `FLUSHDB`/`FLUSHALL` take no key arguments, so a selector's
-  key pattern is vacuously satisfied no matter what it says. A user configured with
-  `-flushdb '(+flushdb ~onlythis:*)'` successfully flushed db 0 in testing. A selector here looks like
-  a solution and is a trap: it would silently reopen the incident this work exists to close.
-
-Plain command denial works and is deliberately db-blind: `NOPERM ... has no permissions to run the
-'flushdb' command`, in every database. So Layer 2 discriminates by **user identity** instead:
-
-- **`valor-app`**, the production application user, gets `on >... ~* &* +@all -flushdb -flushall`.
-  Full access to every command except the two that matter.
-- **`default`** keeps `flushdb` and loses `flushall`. The test suite's bare `redis.Redis(db=N)`
-  clients carry no credentials and authenticate as `default`, so they need zero test-side changes to
-  keep working: `#2628`'s test-db-ownership guard (see below) can keep issuing `flushdb()` against a
-  claimed test db exactly as before.
-
-`scripts/update/redis_acl.py`'s planner always issues the complete declarative rule set, never a
-delta, so re-running it twice converges to the same state regardless of interleaving.
-
-## Applying the Redis ACL — requires human sign-off, not performed by this PR
-
-`/update` never mutates the live Redis ACL. It calls `apply_redis_acl()` with no arguments, which is
-report-only: it reads `ACL LIST`, computes the four commands that would converge the server, and
-returns them. Applying those commands for real is a human-signed runbook, gated behind two independent
-operator actions that `/update` never supplies together: a marker file and an explicit environment
-opt-in.
-
-Operator checklist, on the machine being applied:
-
-1. Record the real `REDIS_APP_PASSWORD` in the vault `~/Desktop/Valor/.env`. Only on that machine.
-2. `touch data/redis-acl-enabled`
-3. `REDIS_ACL_APPLY=true python -m scripts.update.redis_acl --apply`
-4. Add the staged `aclfile` directive to `/opt/homebrew/etc/redis.conf` by hand. The planner prints
-   the exact line (`aclfile /opt/homebrew/etc/users.acl`) for the runbook; it never opens
-   `redis.conf` for writing itself.
-5. Restart Redis on your own schedule. `aclfile` is immutable at runtime (`CONFIG SET aclfile` errors
-   with "can't set immutable config"), so persistence across a restart needs one restart. The runtime
-   ACL rules from step 3 take effect immediately, with or without it.
-6. Verify: `redis-cli ACL GETUSER valor-app` and `redis-cli ACL LIST`.
-7. Rollback if needed: `redis-cli ACL SETUSER default ... +@all`, `redis-cli ACL DELUSER valor-app`,
-   and drop the `aclfile` line from `redis.conf`.
-
-There is no `.env.example` placeholder for `REDIS_APP_PASSWORD` and no blank-line pre-step in `.env`.
-An earlier draft of this plan had one; it was dropped deliberately, because a placeholder would trip
-`check_env_completeness` on every machine for a credential this PR never reads. `config/settings.py`'s
-`RedisSettings.app_password` defaults to `""` for exactly this reason, and the report path plans
-against a literal `<REDIS_APP_PASSWORD>` placeholder regardless of whether the setting is populated.
-
-## The `REDIS_URL` rotation (#2661) is a separate step
-
-`config/redis_bootstrap.py::configure_resilient_redis()` now forwards `parsed.username` into
-`popoto.redis_db.set_REDIS_DB_settings(...)`. Today `parsed.username` is always `None`, because the
-production `REDIS_URL` carries no username, so this line is byte-identical to prior behavior. It
-exists to close the one first-party site that hand-parses `REDIS_URL` instead of using
-`redis.Redis.from_url`, which is also the exact client the 2026-08-07 incident flushed.
-
-That forwarding stays inert until `REDIS_URL` itself is rotated to `redis://valor-app:<pw>@host/0`,
-tracked separately as **#2661**, gated on every machine in the fleet having the ACL from the runbook
-above already applied. Rotating `REDIS_URL` before every machine has the ACL applied would mean popoto
-tries to authenticate as `valor-app` against a server that doesn't recognize that user yet, taking the
-worker, bridge, and dashboard down fleet-wide. Rotating it after is what makes Layer 2 effective for
-the db-0 traffic that matters: popoto's client, once authenticated as `valor-app`, loses `flushdb` and
-`flushall` at the server, closing the last gap Layer 1 alone can't reach (a non-Python client, or a
-Python process outside every discovered venv).
-
 ## Doctor checks
 
-`python -m tools.doctor` runs two checks under the `Services` category:
+`python -m tools.doctor` runs one check under the `Services` category for this layer:
 
 - **`redis_flush_guard`**: spawns a fresh interpreter per discovered venv and asserts the guard is
   live in each. Never a filesystem check; the boot shim's exception-swallowing means the `.pth` and
   shim files can exist on disk while the guard is inert.
-- **`redis_acl`**: report-only, mirroring `/update` Step 3.135. Calls `apply_redis_acl()` with no
-  arguments and fails the check (with a pointer to this doc) when the current ACL state drifts from
-  the target rule set. It cannot fix drift; the runbook above is the only path to that.
 
-`/update`'s own drift warning emits once per state transition rather than every 30-minute cycle
-(`warn_state`, #2845): the signature is a digest of the planned commands, so a *changed* drift
-re-warns, and a resolution clears the suppression and emits one resolved note. `python -m
-tools.doctor` (a full run, not `--quick`) remains the unconditional on-demand check regardless of
-suppression state — see [`update-warning-channel.md`](update-warning-channel.md).
+## What these layers do not cover
+
+None of the three layers above can see a client outside a repo venv: a `redis-cli` typed in a bare
+shell, a GUI Redis client, a client written in another language, or a Python process running outside
+every discovered venv. Such a client can flush production db 0 today, and nothing in this repository
+will stop it. This is accepted, on the record, for two reasons and no others:
+
+1. **Nothing was switched off to accept this.** A fourth, server-side layer — an access-control rule
+   set denying the all-databases flush command to a dedicated application user — was designed (#2645)
+   but never applied on any machine, and was deleted rather than converged on (#3004). The
+   outside-the-venv gap is today's actual posture, not a new one; what was abandoned was a *plan* to
+   close it.
+2. **The accepted premise is that safety belongs in the stack, not in server configuration.** A defense
+   that requires provisioning a credential and editing `redis.conf` on every machine is not compatible
+   with the stack needing only a connection string.
+
+**Residual mitigation:** AOF is enabled ([`redis-durability.md`](redis-durability.md)), and the worker
+exports every `AgentSession` to `data/session_archive.db` (`session-archive-freshness` doctor check).
+Recovery, not prevention, is the answer for a flush issued from outside a repo venv.
 
 ## See also
 
@@ -251,5 +184,6 @@ suppression state — see [`update-warning-channel.md`](update-warning-channel.m
   test process from flushing an *unowned* test db; this work stops *any* process from flushing
   *production*.
 - [`docs/features/redis-durability.md`](redis-durability.md): the AOF floor that made the 2026-08-07
-  incident recoverable at all, and the structural precedent (idempotent, non-fatal, `/update`-driven,
-  doctor-checked) both Layer 1's propagation and Layer 2's planner reuse.
+  incident recoverable at all, and the residual mitigation for the outside-the-venv gap above; also the
+  structural precedent (idempotent, non-fatal, `/update`-driven, doctor-checked) Layer 1's propagation
+  reuses.

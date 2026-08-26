@@ -430,3 +430,64 @@ class TestBackfillJobLastActiveScores:
         fn, description = MIGRATIONS["backfill_job_last_active_scores"]
         assert fn is _migrate_backfill_job_last_active_scores
         assert description
+
+
+class TestClearOrphanedWarnStateKey:
+    """One-shot cleanup of the warn_state key (``_ORPHANED_WARN_KEY``) orphaned
+    by the deletion of the server-side access-control layer (issue #3004).
+
+    Hermetic ``tmp_path`` cases only -- no Redis, no Popoto. The migration
+    touches a single gitignored JSON file via ``scripts.update.warn_state``.
+    The literal key string is imported from ``scripts.update.migrations``
+    rather than repeated here, so this file carries no ACL-flavored token.
+    """
+
+    def test_pops_the_orphaned_key_and_leaves_live_keys_byte_for_byte(self, tmp_path):
+        from scripts.update import warn_state
+        from scripts.update.migrations import (
+            _ORPHANED_WARN_KEY,
+            _migrate_clear_orphaned_warn_state_key,
+        )
+
+        (tmp_path / "data").mkdir()
+        warn_state.should_emit(_ORPHANED_WARN_KEY, "drift:75d2c91d7d42deab", tmp_path)
+        warn_state.should_emit("calendar-config", "misconfigured:1", tmp_path)
+        warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+        warn_state.should_emit("google-token", "expired:1", tmp_path)
+        before = warn_state.active(tmp_path)
+
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+
+        after = warn_state.active(tmp_path)
+        assert _ORPHANED_WARN_KEY not in after
+        for key in ("calendar-config", "env-completeness", "google-token"):
+            assert after[key] == before[key]
+        assert set(after) == {"calendar-config", "env-completeness", "google-token"}
+
+    def test_no_op_when_the_key_is_already_absent(self, tmp_path):
+        from scripts.update import warn_state
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        (tmp_path / "data").mkdir()
+        warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+        before = warn_state.active(tmp_path)
+
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+
+        assert warn_state.active(tmp_path) == before
+
+    def test_no_op_when_there_is_no_data_directory_at_all(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        assert not (tmp_path / "data").exists()
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+        # Fail-soft: no data/ directory must not be created as a side effect
+        # of a no-op cleanup, and no exception propagates.
+
+    def test_registered_in_migrations_dict(self):
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        assert "clear_orphaned_warn_state_key" in MIGRATIONS
+        fn, description = MIGRATIONS["clear_orphaned_warn_state_key"]
+        assert fn is _migrate_clear_orphaned_warn_state_key
+        assert description

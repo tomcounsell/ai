@@ -199,22 +199,18 @@ Anchored by the **#2494 umbrella** (`docs/plans/durability-room-job-agentrun.md`
 | 2691 | Reconciler per-chat scan is load-bearing for the wedge verdict but has no health monitoring | |
 | 2677 | Schedule the sdlc-local ledger orphan reaper (nothing invokes `--kill-orphans`) | copy PR #2681 pattern |
 | 2650 | Plan-doc writes in the shared main checkout have no single-writer protocol | git half shipped (PR #2669) |
-| 2661 | Rotate production `REDIS_URL` to the valor-app ACL credential | **contradicted by #3004** |
-| 3004 | Delete the Redis ACL layer — the stack must work safely from a connection string alone | **contradicts #2661** |
+| 2661 | Rotate production `REDIS_URL` onto a dedicated ACL user credential | **CLOSED NOT_PLANNED 2026-08-26, citing #3004** |
+| 3004 | Delete the server-side Redis access-control layer — the stack must work safely from a connection string alone | resolves the #2661 contradiction by deletion |
 
 **Finish-the-remainder subgroup:** 2678 (Wave 1), 2677, 2661, 2650, 2699 are all cases where a
 sibling PR already shipped part of the original scope. Brief each lane with what already landed
 (#2643, #2681, #2680, #2669, #2671 respectively) so it doesn't re-derive or re-do it.
 
-**#2661 vs #3004 is a live contradiction and needs a decision before either is routed.** #2661 asks
-to rotate production `REDIS_URL` onto the valor-app ACL credential; #3004, filed 2026-08-25, asks to
-delete the ACL layer entirely so the stack works from a connection string alone. They cannot both
-ship. Deciding #3004 first is the cheaper order — if the ACL layer goes away, #2661 closes as moot
-along with its human-gated per-machine provisioning work. Routing #2661 first risks provisioning a
-credential on every machine and then deleting the mechanism that uses it.
-
-**#2661, if it survives that decision, cannot be closed by an agent** — it needs a vault `.env`
-secret write and a per-machine manual ACL apply. Track it as human-owned.
+**#2661 vs #3004 was a live contradiction, resolved.** #2661 asked to rotate production `REDIS_URL`
+onto an ACL user credential; #3004, filed 2026-08-25, deletes the ACL layer entirely so the stack
+works from a connection string alone. The operator decided #3004's direction on 2026-08-25:
+server-side Redis access control is declined. #2661 was closed NOT_PLANNED on 2026-08-26 citing that
+decision, and #3004 ships the deletion.
 
 ---
 

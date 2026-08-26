@@ -44,12 +44,12 @@ def test_cron_summary_warnings_trigger_fix_session():
     status_lines = [
         "up to date at abc1234 (2 warnings)",
         "  ⚠️ gws auth needed (or: gws auth setup && gws auth verify)",
-        "  ⚠️ Redis ACL drift detected",
+        "  ⚠️ env completeness: 1 key missing",
     ]
     result = extract_update_warnings(status_lines)
     assert result == [
         "gws auth needed (or: gws auth setup && gws auth verify)",
-        "Redis ACL drift detected",
+        "env completeness: 1 key missing",
     ]
 
 
