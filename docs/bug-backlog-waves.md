@@ -1,10 +1,12 @@
 # Bug Backlog: Wave Playbook
 
-Triage date: 2026-08-26. Scope: all issues carrying the `bug` label.
+Triage date: 2026-08-26. Last reconciled against `main` and the live issue tracker: 2026-08-26.
+Scope: all issues carrying the `bug` label.
 
 Starting set: 71 open. Closed at triage: 6 (#2970, #2825, #2810, #2806 fixed; #2824, #2808 duplicates).
 Four more (#3004, #3006, #3016, #3017) were filed during the triage pass itself and are slotted in
-below. Remaining: **69**, sequenced into 9 waves.
+below. Since triage, #3004 shipped and #2661 was closed NOT_PLANNED, while four further bugs
+(#3020, #3021, #3022, #3026) were filed. Current open set: **71**, sequenced into 9 waves.
 
 Every remaining issue was verified live — grepped against current `main` or checked for a merged
 PR — not inferred from the issue text. No issue in the set was stale-by-architecture.
@@ -16,7 +18,7 @@ for environmental reasons (stale off-pin `.pyc`, shadowed console scripts). Unti
 green or red gate from any later wave cannot be trusted, and every SDLC lane pays the tax of
 re-diagnosing the same environmental noise. Waves 1-8 are ordered by blast radius after that.
 
-Waves 1 is a **batched hotfix** — one branch, mechanical fixes, disjoint files. Waves 2-8 are
+Wave 1 is a **batched hotfix** — one branch, mechanical fixes, disjoint files. Waves 2-8 are
 **SDLC lanes**: each wave is one plan document covering a cluster that shares a code seam, so the
 plan is written once and the critique round reasons about the seam as a whole rather than N times.
 
@@ -67,6 +69,10 @@ Mechanical, low-risk, disjoint files. These need no plan document.
 | 2778 | `validate_verification_section.py` not registered in `manifest.toml` | one manifest entry + regen |
 | 2855 | Reflection registration lands in the clobbered config copy under `VALOR_LAUNCHD=1` | split write/read resolver |
 | 2898 | `--verify` mutates `warn_state`, consuming the next cron run's emission | make verify read-only |
+| 3026 | `run.py --verify` promises 'no changes' but hardlinks `~/.claude` and runs migrations | same seam as 2898 — fix together |
+
+**#3026 pairs with #2898.** Both are `--verify` claiming to be read-only while mutating state. Fix
+them as one change to the verify contract rather than two independent patches.
 
 **Two carve-outs — do NOT batch these:**
 - **#2896** (granite PTY residue, 2 code sites left after PR #2910 fixed 3 docs sites) is gated on a
@@ -144,6 +150,11 @@ bypassed silently is worse than no gate, because it is trusted.
 | 2736 | raw-Redis validator: prose quoting an interpreter still blocks (residual of #2638) |
 | 2715 | `/do-build` mandates the Task tool but nothing checks the session has it — 4 silent no-op builds |
 | 2658 | Gates that cannot fire: require demonstrated-red for verification rows, guards, and skill self-checks |
+| 3021 | Bash flush validator matches text, not command position — blocks docs and deny-modifiers |
+
+**#3021 is #2736's twin** — both are validators that match on text anywhere in a Bash command
+instead of on command position, so prose and deny-modifiers trip them. Fix the position-matching
+seam once and reconcile both against it.
 
 **Do #2658 last and treat it as the wave's capstone.** It is the general form of the other three
 (and of #2895, #2810, #2806): a guard nobody proved could fail. Its plan doc already exists at
@@ -160,9 +171,14 @@ first three regression cases rather than hypotheticals.
 | 2870 | `validate_build.py` carries two more private plan-document grammars |
 | 2791 | Runner false-FAILs every 'prints N' row (unrecognized form falls through to bare `return False`) |
 | 2905 | Nightly-tests installer: removal path descoped from #2823 — reintroduce with the 4 prior failures as required reading |
+| 3022 | Verification-table parser executes non-check tables and reads the wrong column as the command |
+| 3020 | Plan verification rows can write production state: a bare command that defaults to a real path |
 
-2901 / 2870 / 2791 are all one story: **N private grammars for one plan-document format.** Converge
-them on a single parser in one lane rather than patching each grammar. #2791 is sequenced behind
+2901 / 2870 / 2791 / 3022 are all one story: **N private grammars for one plan-document format.**
+Converge them on a single parser in one lane rather than patching each grammar. #3022 is direct
+evidence for that convergence — it is a parser reading the wrong column, which no amount of
+per-grammar patching prevents. **#3020 is the wave's severity outlier**: a verification row that
+writes production state is a data-loss path, not a parsing nit. Sequence it first. #2791 is sequenced behind
 #2783 per its own comments — check that dependency before starting.
 
 ---
@@ -199,18 +215,17 @@ Anchored by the **#2494 umbrella** (`docs/plans/durability-room-job-agentrun.md`
 | 2691 | Reconciler per-chat scan is load-bearing for the wedge verdict but has no health monitoring | |
 | 2677 | Schedule the sdlc-local ledger orphan reaper (nothing invokes `--kill-orphans`) | copy PR #2681 pattern |
 | 2650 | Plan-doc writes in the shared main checkout have no single-writer protocol | git half shipped (PR #2669) |
-| 2661 | Rotate production `REDIS_URL` onto a dedicated ACL user credential | **CLOSED NOT_PLANNED 2026-08-26, citing #3004** |
-| 3004 | Delete the server-side Redis access-control layer — the stack must work safely from a connection string alone | resolves the #2661 contradiction by deletion |
 
-**Finish-the-remainder subgroup:** 2678 (Wave 1), 2677, 2661, 2650, 2699 are all cases where a
-sibling PR already shipped part of the original scope. Brief each lane with what already landed
-(#2643, #2681, #2680, #2669, #2671 respectively) so it doesn't re-derive or re-do it.
+**Finish-the-remainder subgroup:** 2678 (Wave 1), 2677, 2650, 2699 are all cases where a sibling PR
+already shipped part of the original scope. Brief each lane with what already landed (#2643, #2681,
+#2669, #2671 respectively) so it doesn't re-derive or re-do it.
 
-**#2661 vs #3004 was a live contradiction, resolved.** #2661 asked to rotate production `REDIS_URL`
-onto an ACL user credential; #3004, filed 2026-08-25, deletes the ACL layer entirely so the stack
-works from a connection string alone. The operator decided #3004's direction on 2026-08-25:
-server-side Redis access control is declined. #2661 was closed NOT_PLANNED on 2026-08-26 citing that
-decision, and #3004 ships the deletion.
+**The Redis access-control question is settled and out of the backlog.** #2661 asked to rotate
+production `REDIS_URL` onto an ACL user credential; #3004 deleted the server-side ACL layer entirely
+so the stack works safely from a connection string alone. #3004 shipped in PR #3023 and #2661 was
+closed NOT_PLANNED citing that decision. Neither is open work. **#3003 is the live remainder here**
+— twenty production call sites still bypass the ORM with hand-built raw Redis clients, and with the
+ACL layer gone, the ORM is the only thing left enforcing safe access.
 
 ---
 
@@ -236,14 +251,16 @@ remainder rather than treating it whole.
 - #2739 → open PR #2887
 - #2896 → decision in #1633
 - #2791 → sequenced behind #2783
-- #2837, #2661 → require a human at the keyboard
+- #2837 → requires a human at the keyboard
 - #2770 → lands in the `popoto` checkout, not this one
-- #2661 → blocked on the #3004 decision (see Wave 7)
 
-**Backlog refill rate.** Four new bug issues (#3004, #3006, #3016, #3017) were filed in the ~14
-hours spanning this triage. At that rate the backlog regrows faster than a single sequential lane
-clears it, which is the argument for running Waves 4-7 in parallel and for prioritizing Wave 0 and
-Wave 6 (#2937's issue fan-out) — both reduce the filing rate rather than the backlog depth.
+**Backlog refill rate.** Eight new bug issues (#3004, #3006, #3016, #3017, then #3020, #3021,
+#3022, #3026) were filed within roughly a day of this triage, and the open count went 71 → 69 → 71:
+the backlog has not shrunk despite #3004 shipping. At that rate it regrows faster than a single
+sequential lane clears it, which is the argument for running Waves 4-7 in parallel and for
+prioritizing Wave 0 and Wave 6 (#2937's issue fan-out) — both reduce the filing rate rather than the
+backlog depth. Note that six of those eight new issues land in Waves 4 and 5 (guards and the
+verification runner), which is the meta-pattern below asserting itself in real time.
 
 **Parallelism.** Waves 2 and 3 both touch `agent/sdlc_router.py` and the lease/identity helpers.
 Running them concurrently invites the collision this backlog is full of. Run 2 → 3 sequentially, or
