@@ -76,11 +76,113 @@ loudly when the banned string is reintroduced into tracked source.
 
 ## Freshness Check
 
-**Baseline commit:** `054f0f0fa093efd21be272c83998103e83b02ee6`
+**Baseline commit:** `88f572d3a` (re-verified 2026-08-26; originally planned
+against `054f0f0fa093efd21be272c83998103e83b02ee6`)
 **Issues filed at:** #2807 2026-08-13T20:29:57Z, #2808 2026-08-13T20:31:12Z,
 #2809 2026-08-13T20:33:36Z
 **Disposition:** **Minor drift** — the defect still reproduces; two cited
 file:line references moved and one factual claim in #2808 is wrong.
+
+### Re-verification at `88f572d3a` (2026-08-26)
+
+The plan was authored and critiqued on 2026-08-19. Seven days of `main` landed
+before this stage resumed, so every premise was re-measured. **Disposition:
+minor drift — the root cause is unchanged and no disposition in the sweep table
+moves.** Three things did change and are propagated throughout this document:
+
+1. **A3's file moved.** `6dcbf17f3` ("test: split test_output_handler and
+   test_memory_extraction by theme", #2941) split `tests/unit/test_memory_extraction.py`
+   into a package. The guard is now
+   `tests/unit/memory_extraction/test_memory_extraction_event_loop_safety.py:213`
+   (class `TestEventLoopSafety` unchanged, `subprocess.run` at `:224`). It is
+   still `cwd=`-less, still asserts `returncode == 1`, still loops over the two
+   BRE patterns. Every reference in this plan — sweep table, Test Impact, task
+   2, the `Validates:` lists, and V-4/V-6/V-10/V-20 — now names the new path.
+2. **`docs/plans/` was partially emptied.** `659f1d0e4` (#2942) moved completed
+   plans to `docs/archive/plans-completed/`, which A7's `startswith("docs/plans/")`
+   exemption does not cover. A7 is **still green today** (0 tracked files under
+   `docs/archive/` contain `Desktop/claude_code`), so this is not a live failure,
+   but the conversion adds `:!docs/archive/plans-completed/` to the negative
+   pathspecs so the exemption tracks its own subject.
+3. **Every pinned corpus count was re-measured.** See the table below. No floor
+   leaves the 60-70% band, so no `min_files` value changes.
+
+**The defect still reproduces at `88f572d3a`**, unchanged in shape:
+
+```
+git grep -n "State NOT persisted" -- 'tools/*.py' 'agent/*.py'   → rc 1 (source clean)
+/usr/bin/grep -rn "State NOT persisted" tools/ agent/            → rc 0
+  tools/__pycache__/sdlc_stage_marker.cpython-312.pyc
+```
+
+The AC1 red-state prerequisite therefore still holds in this checkout and needs
+no planted substitute.
+
+**File:line references re-verified at `88f572d3a`:**
+
+| Site | Cited in plan | Now | Claim |
+|---|---|---|---|
+| A1 | `test_sdlc_review_finalize.py:1093` | `:1084` def, `:1093` `subprocess.run` | **unchanged** |
+| A2 | `test_anthropic_client_semaphore.py:164` | `:149` constant, `:164` call, `:181` line filter | **unchanged** (filter cited as `:180-181`, now a single line `:181`) |
+| A3 | `test_memory_extraction.py:2563` | **`memory_extraction/test_memory_extraction_event_loop_safety.py:213`**, call at `:224` | **moved** (#2941) |
+| A7 | `test_no_legacy_paths.py:25` | `:26` `subprocess.run`, `:31` `if rc == 0:`, `:35` filter | **drifted one line** |
+| B7 | `test_template_filter_registry.py:131` | `:131` | unchanged |
+| B8 | `test_sdlc_lease_helper_binding.py:89` | `:89` | unchanged |
+| B11 | `test_sdlc_tool_wrapper.py:54` | `_iter_include_paths` def at `:52` | drifted |
+| B12 | `test_dm_recovery.py:426` | `:426` | unchanged |
+| B13 | `test_no_positional_query_get.py:66-68` | `:65-69` (`if not root.exists(): continue` at `:67`) | drifted |
+| B14 | `test_harness_model_coverage.py:60` | `:56` guard, `:60` walk | unchanged |
+
+Neither `tests/tracked_content.py` nor `tests/unit/test_tracked_content_helper.py`
+exists yet, so no part of this plan has been built.
+
+**Corpus recount at `88f572d3a`** (previous figures measured at `dbb8baaf5`):
+
+| Corpus | Then | Now | Floor | Share now |
+|---|---|---|---|---|
+| A1 `'tools/*.py' 'agent/*.py'` | 266 | **265** | 170 | 64.2% |
+| A2 post-exclusion (6 paths) | 304 | **301** | 200 | 66.4% |
+| A3 single file | 1 | 1 | 1 | — |
+| A7 post-exclusion (3 files + 2 dir prefixes) | 2065 | **2113** | 1300 | 61.5% |
+| B7 `tests/**/*.py` walk | 784 | **827** | 500 | 60.5% |
+| B8 `_SEARCH_ROOTS` walk | 347 | **343** | 220 | 64.1% |
+| B11 `_iter_include_paths()` | 48 | **48** | 30 | 62.5% |
+| B12 `bridge/*.py` glob | 44 | **42** | 28 | 66.7% |
+| B13 `_iter_python_files()` | 1231 | **1272** | 780 | 61.3% |
+| B14 `_agent_py_files()` | 86 | **86** | 55 | 64.0% |
+
+A7's corpus grew despite three files being *added* to its exclusion set because
+#2942 emptied most of `docs/plans/`; excluding `docs/archive/plans-completed/`
+as well brings it to 2113 rather than the 2665 a plans-only exclusion now yields.
+
+**Per-root tracked `.py` at `88f572d3a`** (supersedes the `40c4fe0a9` table below;
+the argument it supports is unchanged and slightly stronger):
+
+| Root | Then | Now | Share now |
+|---|---|---|---|
+| `tests` | 784 | 827 | 65.0% |
+| `tools` | 180 | 179 | 14.1% |
+| `scripts` | 90 | 92 | 7.2% |
+| `agent` | 86 | 86 | 6.8% |
+| `bridge` | 44 | 42 | 3.3% |
+| `models` | 34 | 33 | 2.6% |
+| `ui` | 10 | 10 | 0.79% |
+| `worker` | **3** | **3** | **0.24%** |
+| total | 1231 | **1272** | |
+
+`worker/` and `ui/` are unchanged in absolute size, so B13's per-root argument
+holds verbatim: a lost `worker/` still costs 0.24% of the corpus and a lost `ui/`
+0.79%, both an order of magnitude inside any percentage floor.
+
+**Commits on main since `dbb8baaf5` touching referenced files:** `c1fc86014`
+(Redis ACL deletion, #3023), `659f1d0e4` (#2942, above), `6dcbf17f3` (#2941,
+above), `277053c96`, `cd8bb09f6` (both `tools/doctor.py` comment/console-script
+changes — neither adds a bytecode dimension, so the "nothing sweeps it" claim
+still holds and `grep -c "pycache\|\.pyc\|bytecode" tools/doctor.py` is still
+`0`), `12d815ccd` (`/update` warning channel). **None changes the root cause and
+none touches a guard's scan logic.**
+
+**Active plans overlapping this area:** still none.
 
 **File:line references re-verified:**
 
