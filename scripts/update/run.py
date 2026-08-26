@@ -2703,4 +2703,23 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Configure the root logger at the entry point (issue #2678).
+    #
+    # This module's three logging.getLogger(__name__).warning() calls were
+    # formatted only as an accidental import side effect: run.py imported
+    # log_cleanup, which imported scripts.log_rotate, which called
+    # basicConfig() at module scope. #2643 moved that call into log_rotate's
+    # own __main__ guard, so without this run.py's warnings would fall through
+    # to logging.lastResort and print bare, unprefixed, untimestamped.
+    #
+    # Mirrors scripts/log_rotate.py's format and stream deliberately: both are
+    # /update entry points and their output interleaves in logs/update.log.
+    # stderr keeps them off stdout, which --json mode reserves for its payload.
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     sys.exit(main())
