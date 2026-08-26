@@ -1,7 +1,9 @@
-"""Update-system hook that repoints reflections.yaml off the sustainability shim.
+"""Update-system hook that repoints reflections.yaml onto owning modules.
 
 Wraps ``scripts/migrate_reflections_callables.py`` so ``scripts/update/run.py``
-Step 1.659 can render machine-readable status. Issue #2875.
+Step 1.659 can render machine-readable status. Issues #2875 (the
+``agent.sustainability`` shim) and #2876 (the ``agent.agent_session_queue``
+re-export hub); see that script's docstring for why both families share a table.
 
 Runs at Step 1.659 — BEFORE Step 1.66's vault->config copy — so a vault rewrite
 also propagates into ``config/reflections.yaml`` on the same cycle. The
