@@ -426,7 +426,7 @@ def test_main_json_abort_reports_the_partial_write(tmp_path, monkeypatch, capsys
     assert err.rstrip().endswith(f"ALREADY WRITTEN: {vault} (1 line(s))")
 
 
-def test_check_idempotent_rejects_dry_run():
+def test_check_idempotent_rejects_dry_run(tmp_path):
     """The safe-looking invocation must fail loudly, not verify nothing.
 
     `--check-idempotent --dry-run` used to be a silent skip: exit 0, no
@@ -434,7 +434,11 @@ def test_check_idempotent_rejects_dry_run():
     does not touch a real registry also the one that proves nothing.
     """
     with pytest.raises(SystemExit) as exc:
-        main(["--target", "/tmp/does-not-matter.yaml", "--check-idempotent", "--dry-run"])
+        # tmp_path, not a literal /tmp path: the whole point of this test is to
+        # fail if the guard regresses, and in exactly that regression the target
+        # would start being resolved for real against a machine-global path
+        # shared with every other agent testing on this box.
+        main(["--target", str(tmp_path / "nope.yaml"), "--check-idempotent", "--dry-run"])
     assert exc.value.code == 2, "argparse.error() exits 2"
 
 
@@ -454,3 +458,45 @@ def test_check_idempotent_verifies_against_a_target_copy(tmp_path, capsys):
     assert main(["--target", str(target), "--check-idempotent"]) == 0
     assert "agent.session_revival.cleanup_stale_branches_all_projects" in target.read_text()
     assert "idempotence OK" in capsys.readouterr().out
+
+
+def test_non_import_error_during_target_import_is_still_a_partial(tmp_path, monkeypatch):
+    """A target module that raises something other than ImportError still honors the contract.
+
+    Importing a target module executes it, so it can raise anything — a pydantic
+    ValidationError out of `config/settings.py` on a machine with a malformed
+    `.env`, a RuntimeError, a SyntaxError. Those are just as much "this target is
+    unusable" as a missing module, but when the import check caught only
+    ImportError they escaped `migrate_targets`' and `main`'s `except
+    MigrationError` entirely: `main()` exited on an uncaught traceback, emitting
+    no JSON payload and no ALREADY WRITTEN line, while an earlier target was
+    already rewritten on disk. Step 1.659 would then WARN with a traceback tail
+    and no record of what it had changed.
+    """
+    vault = _write_registry(tmp_path / "vault.yaml", ["agent.sustainability.circuit_health_gate"])
+    config = _write_registry(
+        tmp_path / "config.yaml",
+        ["agent.agent_session_queue.cleanup_stale_branches_all_projects"],
+    )
+
+    real_import = importlib.import_module
+
+    def _boom(name, *a, **kw):
+        if name == "agent.session_revival":
+            raise RuntimeError("settings blew up while importing the target")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(importlib, "import_module", _boom)
+
+    with pytest.raises(PartialMigrationError) as exc:
+        migrate_targets([vault, config])
+
+    # The RuntimeError was converted, not propagated.
+    assert "does not import" in str(exc.value)
+    assert "settings blew up" in str(exc.value)
+
+    # And the contract still reports what reached disk.
+    written = [r for r in exc.value.completed if r.rewrote]
+    assert [r.target for r in written] == [vault]
+    assert "reflections.agents.circuit_health_gate.run" in vault.read_text()
+    assert "agent.agent_session_queue" in config.read_text(), "config must be untouched"

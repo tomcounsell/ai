@@ -188,7 +188,17 @@ def verify_targets_importable(matched: set[str]) -> None:
         module_path, _, attr = new.rpartition(".")
         try:
             module = importlib.import_module(module_path)
-        except ImportError as e:
+        except Exception as e:
+            # Deliberately broader than ImportError. Importing a target module
+            # executes it, and anything it raises on the way up — a pydantic
+            # ValidationError out of config/settings.py on a machine with a
+            # malformed .env, a RuntimeError, a SyntaxError — is just as much
+            # "this target is not usable" as a missing module. Narrowing to
+            # ImportError lets those escape `migrate_targets`' and `main`'s
+            # `except MigrationError`, so a per-file abort AFTER an earlier
+            # file was written would exit on an uncaught traceback instead of
+            # the PartialMigrationError contract, and Step 1.659 would surface
+            # a traceback tail as its WARN while the disk state went unreported.
             raise MigrationError(
                 f"migration target for {old!r} does not import: {new} ({e})"
             ) from e
@@ -380,7 +390,11 @@ def main(argv: list[str] | None = None) -> int:
                         "rewrote": bool(written),
                         "rewrites_count": sum(r.rewrites_count for r in written),
                         "targets": [str(r.target) for r in written],
-                        "partial": bool(written),
+                        # Distinct from `rewrote`: some targets reached disk and
+                        # some did not. `rewrote` alone cannot say that — an
+                        # abort on the very last target writes every other one
+                        # and is still an incomplete application.
+                        "partial": bool(written) and len(written) < len(targets),
                         "error": str(e),
                     }
                 ),
